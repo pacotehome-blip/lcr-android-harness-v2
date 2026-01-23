@@ -3,7 +3,7 @@ name: Android CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
 
 jobs:
@@ -22,29 +22,25 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # 3) Installer Gradle CLI (pour générer le wrapper)
-      - name: Install Gradle CLI
+      # 3) Télécharger Gradle 8.7 et générer le wrapper
+      - name: Bootstrap Gradle Wrapper (8.7)
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y gradle
-          gradle --version
-
-      # 4) Générer le wrapper s'il manque (gradle-wrapper.jar + scripts)
-      - name: Generate Gradle wrapper
-        run: |
-          gradle wrapper --gradle-version 8.7
+          curl -L -o gradle.zip https://services.gradle.org/distributions/gradle-8.7-bin.zip
+          unzip -q gradle.zip
+          ./gradle-8.7/bin/gradle --version
+          ./gradle-8.7/bin/gradle wrapper --gradle-version 8.7
           ls -la gradle/wrapper || true
-          sed -n '1,5p' gradlew || true
+          head -n 5 gradlew || true
 
-      # 5) Rendre le wrapper exécutable
+      # 4) Rendre le wrapper exécutable
       - name: Make gradlew executable
         run: chmod +x gradlew
 
-      # 6) Construire l’APK Debug via le wrapper
+      # 5) Build de l’APK Debug avec le wrapper
       - name: Build Debug APK
         run: ./gradlew assembleDebug --no-daemon --warning-mode all
 
-      # 7) Uploader l’APK comme artifact
+      # 6) Uploader l’APK comme artifact
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
