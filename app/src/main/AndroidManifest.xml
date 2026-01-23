@@ -1,0 +1,15 @@
+<manifest package="com.pa.lcrdemo" xmlns:android="http://schemas.android.com/apk/res/android">
+  <uses-feature android:name="android.hardware.usb.host" android:required="true"/>
+  <application android:allowBackup="true" android:label="LCR Harness V2" android:supportsRtl="true" android:theme="@style/Theme.Material3.DayNight.NoActionBar">
+    <activity android:name="com.pa.lcrdemo.MainActivity" android:exported="true">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN"/>
+        <category android:name="android.intent.category.LAUNCHER"/>
+      </intent-filter>
+      <intent-filter>
+        <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"/>
+      </intent-filter>
+      <meta-data android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" android:resource="@xml/device_filter"/>
+    </activity>
+  </application>
+</manifest>

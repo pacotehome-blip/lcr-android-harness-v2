@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent">
+  <LinearLayout android:orientation="vertical" android:padding="16dp"
+      android:layout_width="match_parent" android:layout_height="wrap_content">
+    <TextView android:text="TO (hex, ex: 0x01)"/>
+    <EditText android:id="@+id/edtTo" android:inputType="text" android:text="0x01"/>
+    <TextView android:text="FROM (hex, ex: 0xF0)"/>
+    <EditText android:id="@+id/edtFrom" android:inputType="text" android:text="0xF0"/>
+    <TextView android:text="Product (1..16)"/>
+    <EditText android:id="@+id/edtProduct" android:inputType="number" android:text="1"/>
+    <TextView android:text="Preset L (0 = mode ouvert)"/>
+    <EditText android:id="@+id/edtPreset" android:inputType="numberDecimal" android:text="0"/>
+    <Button android:id="@+id/btnStart" android:text="Start Delivery"/>
+    <TextView android:id="@+id/txtLog" android:layout_marginTop="12dp" android:textSize="12sp"/>
+  </LinearLayout>
+</ScrollView>
