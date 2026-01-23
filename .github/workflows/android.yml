@@ -1,25 +1,50 @@
+
 name: Android CI
-on: [push]
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      # 1) Récupérer le dépôt
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2) JDK 17 (requis par AGP 8.x)
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '17'
+
+      # 3) Installer Gradle CLI (pour générer le wrapper)
+      - name: Install Gradle CLI
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y gradle
+          gradle --version
+
+      # 4) Générer le wrapper s'il manque (gradle-wrapper.jar + scripts)
+      - name: Generate Gradle wrapper
+        run: |
+          gradle wrapper --gradle-version 8.7
+          ls -la gradle/wrapper || true
+          sed -n '1,5p' gradlew || true
+
+      # 5) Rendre le wrapper exécutable
       - name: Make gradlew executable
         run: chmod +x gradlew
-      - name: Generate wrapper jar (if missing)
-        run: |
-          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
-            echo 'Generating wrapper ...'
-            ./gradlew wrapper || true
-          fi
+
+      # 6) Construire l’APK Debug via le wrapper
       - name: Build Debug APK
-        run: ./gradlew assembleDebug --no-daemon
+        run: ./gradlew assembleDebug --no-daemon --warning-mode all
+
+      # 7) Uploader l’APK comme artifact
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
