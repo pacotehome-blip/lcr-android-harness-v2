@@ -1,2 +1,49 @@
-package com.pa.lcr.util; import java.util.*; public final class SimpleJson { private SimpleJson(){} public static String stringify(Object o){ StringBuilder sb=new StringBuilder(); write(o,sb); return sb.toString(); } private static void write(Object o,StringBuilder sb){ if(o==null){ sb.append("null"); } else if(o instanceof String){ sb.append('"').append(((String)o).replace("\","\\").replace(""","\"").replace("
-","\n")).append('"'); } else if(o instanceof Number || o instanceof Boolean){ sb.append(String.valueOf(o)); } else if(o instanceof Map){ sb.append('{'); boolean first=true; for(Object eObj: ((Map<?,?>)o).entrySet()){ Map.Entry<?,?> e=(Map.Entry<?,?>)eObj; if(!first) sb.append(','); first=false; sb.append('"').append(String.valueOf(e.getKey())).append('"').append(':'); write(e.getValue(), sb);} sb.append('}'); } else if(o instanceof Iterable){ sb.append('['); boolean first=true; for(Object v:(Iterable<?>)o){ if(!first) sb.append(','); first=false; write(v,sb);} sb.append(']'); } else { sb.append('"').append(String.valueOf(o)).append('"'); } } }
+
+package com.pa.lcr.util;
+
+import java.util.*;
+
+public final class SimpleJson {
+  private SimpleJson() {}
+
+  public static String stringify(Object o) {
+    StringBuilder sb = new StringBuilder();
+    write(o, sb);
+    return sb.toString();
+  }
+
+  private static void write(Object o, StringBuilder sb) {
+    if (o == null) {
+      sb.append("null");
+    } else if (o instanceof String) {
+      String s = (String) o;
+      // Échapper \, " et les sauts de ligne
+      s = s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
+      sb.append('\"').append(s).append('\"');
+    } else if (o instanceof Number || o instanceof Boolean) {
+      sb.append(String.valueOf(o));
+    } else if (o instanceof Map) {
+      sb.append('{');
+      boolean first = true;
+      for (Object entryObj : ((Map<?, ?>) o).entrySet()) {
+        Map.Entry<?, ?> e = (Map.Entry<?, ?>) entryObj;
+        if (!first) sb.append(',');
+        first = false;
+        sb.append('\"').append(String.valueOf(e.getKey())).append('\"').append(':');
+        write(e.getValue(), sb);
+      }
+      sb.append('}');
+    } else if (o instanceof Iterable) {
+      sb.append('[');
+      boolean first = true;
+      for (Object v : (Iterable<?>) o) {
+        if (!first) sb.append(',');
+        first = false;
+        write(v, sb);
+      }
+      sb.append(']');
+    } else {
+      sb.append('\"').append(String.valueOf(o)).append('\"');
+    }
+  }
+}
