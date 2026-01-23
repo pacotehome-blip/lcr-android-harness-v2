@@ -1,5 +1,12 @@
+
+// settings.gradle (remplacer tout le contenu par ceci)
+
 pluginManagement {
-  repositories { gradlePluginPortal(); google(); mavenCentral() }
+  repositories {
+    gradlePluginPortal()
+    google()
+    mavenCentral()
+  }
   plugins {
     id 'com.android.application' version '8.5.2'
   }
@@ -7,7 +14,14 @@ pluginManagement {
 
 dependencyResolutionManagement {
   repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-  repositories { google(); mavenCentral() }
+  repositories {
+    google()
+    mavenCentral()
+
+    // ➜ Dépôt JitPack requis pour usb-serial-for-android (mik3y)
+    //   (la lib n'est pas sur mavenCentral()/google())
+    maven { url "https://jitpack.io" }
+  }
 }
 
 rootProject.name = 'lcr_android_harness_v2'
