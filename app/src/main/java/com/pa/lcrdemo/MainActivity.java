@@ -1,3 +1,4 @@
+
 package com.pa.lcrdemo;
 
 import android.app.PendingIntent;
@@ -21,26 +22,36 @@ public class MainActivity extends AppCompatActivity {
   private final BroadcastReceiver usbReceiver = new BroadcastReceiver(){
     @Override public void onReceive(Context context, Intent intent){
       if (ACTION_USB_PERMISSION.equals(intent.getAction())){
-        synchronized(this){ UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+        synchronized(this){
+          UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
           if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) connectPort(device);
-          else append("Permission USB refusée
-");
+          else append("Permission USB refusée\n");
         }
       }
     }
   };
 
   @Override protected void onCreate(Bundle b){
-    super.onCreate(b); setContentView(R.layout.activity_main);
-    log=findViewById(R.id.txtLog); edtTo=findViewById(R.id.edtTo); edtFrom=findViewById(R.id.edtFrom); edtProduct=findViewById(R.id.edtProduct); edtPreset=findViewById(R.id.edtPreset);
+    super.onCreate(b);
+    setContentView(R.layout.activity_main);
+    log=findViewById(R.id.txtLog);
+    edtTo=findViewById(R.id.edtTo);
+    edtFrom=findViewById(R.id.edtFrom);
+    edtProduct=findViewById(R.id.edtProduct);
+    edtPreset=findViewById(R.id.edtPreset);
     registerReceiver(usbReceiver, new IntentFilter(ACTION_USB_PERMISSION));
 
     findViewById(R.id.btnStart).setOnClickListener(v -> startFlow());
   }
 
-  @Override protected void onDestroy(){ super.onDestroy(); unregisterReceiver(usbReceiver); try{ if(serialPort!=null){ serialPort.close(); } }catch(Exception ignored){} }
+  @Override protected void onDestroy(){
+    super.onDestroy();
+    unregisterReceiver(usbReceiver);
+    try{ if(serialPort!=null){ serialPort.close(); } }catch(Exception ignored){}
+  }
 
-  private void startFlow(){ try {
+  private void startFlow(){
+    try {
       if(serialPort==null){ requestAndOpenFirstPort(); return; }
       LcrSimpleDeliverV2.Params p = new LcrSimpleDeliverV2.Params();
       p.port = serialPort;
@@ -49,54 +60,52 @@ public class MainActivity extends AppCompatActivity {
       p.product = Integer.parseInt(edtProduct.getText().toString().trim());
       try{ p.preset = Double.parseDouble(edtPreset.getText().toString().trim()); }catch(Exception e){ p.preset = 0.0; }
       p.verbose = true; p.startAcceptFlow = true; p.ticketPost = "if-pending";
-      append("Connexion ouverte, lancement...
-");
+
+      append("Connexion ouverte, lancement...\n");
       new Thread(() -> {
         try {
           LcrSimpleDeliverV2 lcr = new LcrSimpleDeliverV2(p);
           lcr.unlock(); lcr.prestart(); lcr.start();
           Map<String,Object> live = lcr.liveLoop();
           Map<String,Object> fin = lcr.finish(live, null);
-          append("
-FINISH: " + com.pa.lcr.util.SimpleJson.stringify(fin) + "
-");
+          append("FINISH: " + com.pa.lcr.util.SimpleJson.stringify(fin) + "\n");
         } catch (Exception ex) {
-          append("ERREUR: "+ ex.getMessage()+"
-");
+          append("ERREUR: "+ ex.getMessage()+"\n");
         }
       }).start();
-    } catch (Exception e){ append("ERREUR: "+e.getMessage()+"
-"); }
+    } catch (Exception e){
+      append("ERREUR: "+e.getMessage()+"\n");
+    }
   }
 
-  private void requestAndOpenFirstPort(){ UsbManager mgr=(UsbManager)getSystemService(Context.USB_SERVICE);
+  private void requestAndOpenFirstPort(){
+    UsbManager mgr=(UsbManager)getSystemService(Context.USB_SERVICE);
     List<UsbSerialDriver> drivers = UsbSerialProber.getDefaultProber().findAllDrivers(mgr);
-    if(drivers.isEmpty()){ append("Aucun convertisseur USB-série détecté
-"); return; }
+    if(drivers.isEmpty()){ append("Aucun convertisseur USB-série détecté\n"); return; }
     UsbDevice dev = drivers.get(0).getDevice();
     if(!mgr.hasPermission(dev)){
       PendingIntent pi = PendingIntent.getBroadcast(this, 0, new Intent(ACTION_USB_PERMISSION), PendingIntent.FLAG_IMMUTABLE);
-      mgr.requestPermission(dev, pi); append("Demande de permission USB...
-");
+      mgr.requestPermission(dev, pi);
+      append("Demande de permission USB...\n");
       return;
     }
     connectPort(dev);
   }
 
-  private void connectPort(UsbDevice dev){ try{
+  private void connectPort(UsbDevice dev){
+    try{
       UsbManager mgr=(UsbManager)getSystemService(Context.USB_SERVICE);
       UsbSerialDriver driver = UsbSerialProber.getDefaultProber().probeDevice(dev);
-      if(driver==null){ append("Pas de driver pour ce device
-"); return; }
+      if(driver==null){ append("Pas de driver pour ce device\n"); return; }
       UsbDeviceConnection conn = mgr.openDevice(dev);
-      if(conn==null){ append("openDevice=null
-"); return; }
+      if(conn==null){ append("openDevice=null\n"); return; }
       serialPort = driver.getPorts().get(0);
-      serialPort.open(conn); serialPort.setParameters(19200,8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
-      append("Port ouvert 19200 8N1
-");
-    }catch(Exception e){ append("ERREUR ouverture: "+e.getMessage()+"
-"); }
+      serialPort.open(conn);
+      serialPort.setParameters(19200,8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
+      append("Port ouvert 19200 8N1\n");
+    }catch(Exception e){
+      append("ERREUR ouverture: "+e.getMessage()+"\n");
+    }
   }
 
   private int parseHex(String s){ try{ return Integer.decode(s); }catch(Exception e){ return 0; } }
