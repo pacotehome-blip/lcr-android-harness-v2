@@ -8,6 +8,9 @@ import java.util.function.Supplier;
 public class LcpLink {
   public static boolean DUMP_TX = false, DUMP_RX = false;
 
+  // Helper pour lire des octets "raw" (éventuellement [ESC, data]) et signaler l'état
+  private static class R { byte[] raw; boolean ok; }
+
   private final UsbSerialPort port;
   private final int to, from;
   private final boolean syncFirst;
@@ -83,7 +86,6 @@ public class LcpLink {
 
     // Helper: lire un octet logique (en tenant compte de l'échappement) ET
     // accumuler les octets "raw" (donc potentiellement 1 ou 2 bytes si ESC).
-    class R { byte[] raw; boolean ok; }
     Supplier<R> r1 = () -> {
       try {
         byte[] b = new byte[1];
@@ -101,6 +103,7 @@ public class LcpLink {
         return r(null, false);
       }
     };
+
     ByteArrayOutputStream rawHdr = new ByteArrayOutputStream();
     byte[] hdr = new byte[4];
     int hpos = 0;
