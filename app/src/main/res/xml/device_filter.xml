@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <!-- FTDI (LCR-II USB-RS232) -->
+    <!-- FTDI (LCR-II USB‑RS232) -->
     <usb-device vendor-id="1027" product-id="24577" />
 
     <!-- Prolific PL2303 -->
@@ -10,10 +10,10 @@
     <!-- Silicon Labs CP210x -->
     <usb-device vendor-id="4292" product-id="60000" />
 
-    <!-- QinHeng CH340 -->
+    <!-- CH340 / QinHeng -->
     <usb-device vendor-id="6790" product-id="29987" />
 
-    <!-- Arduino -->
+    <!-- Arduino (rare mais possible) -->
     <usb-device vendor-id="9025" product-id="67" />
 
 </resources>

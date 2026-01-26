@@ -5,27 +5,32 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <!-- USB Host -->
-    <uses-feature android:name="android.hardware.usb.host" android:required="true"/>
-
-    <!-- Permission USB -->
-               <!-- AUTO-LAUNCH when USB device is plugged -->
-            <intent-filter>
-                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"/>
+   application
+        android:allowBackup="true"
+        android:label="LCR Harness V2"
+       ER"/>
             </intent-filter>
 
-            <!-- Link device_filter.xml -->
+            <!-- Auto-launch when USB device is attached -->
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+
+            <!-- Link USB_ATTACHED to device_filter.xml -->
             <meta-data
                 android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
-                android:resource="@xml/device_filter"/>
+                android:resource="@xml/device_filter" />
         </activity>
 
-        <!-- USB PERMISSION RECEIVER -->
-        <receiver 
+
+        <!-- ************ USB PERMISSION RECEIVER ************ -->
+        <receiver
             android:name="com.pa.lcrdemo.UsbReceiver"
             android:exported="true">
 
             <intent-filter>
-                <action android:name="com.pa.lcrdemo.USB_PERMISSION"/>
+                <!-- MUST MATCH MainActivity.ACTION_USB_PERMISSION -->
+                <action android:name="com.pa.lcrdemo.USB_PERMISSION" />
             </intent-filter>
         </receiver>
 
