@@ -1,6 +1,4 @@
 
-// settings.gradle (remplacer tout le contenu par ceci)
-
 pluginManagement {
   repositories {
     gradlePluginPortal()
@@ -17,9 +15,7 @@ dependencyResolutionManagement {
   repositories {
     google()
     mavenCentral()
-
-    // ➜ Dépôt JitPack requis pour usb-serial-for-android (mik3y)
-    //   (la lib n'est pas sur mavenCentral()/google())
+    // JitPack pour usb-serial-for-android
     maven { url "https://jitpack.io" }
   }
 }

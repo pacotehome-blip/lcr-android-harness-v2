@@ -1,7 +1,10 @@
+
 plugins { id 'com.android.application' }
+
 android {
   namespace 'com.pa.lcrdemo'
   compileSdkVersion 34
+
   defaultConfig {
     applicationId 'com.pa.lcrdemo'
     minSdkVersion 26
@@ -9,14 +12,25 @@ android {
     versionCode 1
     versionName '1.0'
   }
+
   buildTypes {
-    release { minifyEnabled false }
+    release {
+      minifyEnabled false
+    }
   }
-  packagingOptions { resources { excludes += ['/META-INF/*'] } }
+
+  packagingOptions {
+    resources {
+      excludes += ['/META-INF/*']
+    }
+  }
 }
 
 dependencies {
   implementation 'androidx.appcompat:appcompat:1.7.0'
   implementation 'com.google.android.material:material:1.12.0'
-  implementation 'com.github.mik3y:usb-serial-for-android:3.10.0'
+
+  // usb-serial (JitPack) — choisir une des 2 lignes :
+  implementation 'com.github.mik3y:usb-serial-for-android:3.9.0'
+  // implementation 'com.github.mik3y:usb-serial-for-android:v3.10.0'
 }

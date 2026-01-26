@@ -1,3 +1,4 @@
+
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent">
@@ -56,17 +57,59 @@
         android:inputType="numberDecimal"
         android:text="0" />
 
+    <!-- Boutons Connexion / Diag / Start -->
+    <Button
+        android:id="@+id/btnConnect"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Connexion USB (demander permission)" />
+
+    <Button
+        android:id="@+id/btnDiag"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Diagnostic RX (0,5 s)"/>
+
     <Button
         android:id="@+id/btnStart"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="Start Delivery" />
 
+    <!-- Bandeau Log I/O -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginTop="12dp">
+
+      <CheckBox
+          android:id="@+id/switchIoLog"
+          android:layout_width="wrap_content"
+          android:layout_height="wrap_content"
+          android:text="Activer log I/O (TX/RX)"/>
+
+      <Button
+          android:id="@+id/btnCopyLog"
+          android:layout_width="wrap_content"
+          android:layout_height="wrap_content"
+          android:text="Copier"
+          android:layout_marginStart="16dp"/>
+
+      <Button
+          android:id="@+id/btnClearLog"
+          android:layout_width="wrap_content"
+          android:layout_height="wrap_content"
+          android:text="Effacer"
+          android:layout_marginStart="8dp"/>
+    </LinearLayout>
+
+    <!-- Zone de log -->
     <TextView
         android:id="@+id/txtLog"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
+        android:layout_marginTop="8dp"
         android:textSize="12sp" />
 
   </LinearLayout>

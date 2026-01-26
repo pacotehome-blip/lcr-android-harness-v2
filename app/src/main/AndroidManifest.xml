@@ -1,6 +1,9 @@
 
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+  <!-- USB Host -->
+  <uses-feature android:name="android.hardware.usb.host" android:required="true"/>
+
   <application
       android:allowBackup="true"
       android:label="LCR Harness V2"
@@ -15,6 +18,9 @@
         <category android:name="android.intent.category.LAUNCHER"/>
       </intent-filter>
 
+      <!--
+      # Si tu veux l’auto-ouverture au branchement USB, dé-commente ces lignes :
+
       <intent-filter>
         <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"/>
       </intent-filter>
@@ -22,6 +28,7 @@
       <meta-data
         android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
         android:resource="@xml/device_filter"/>
+      -->
     </activity>
 
   </application>

@@ -3,6 +3,8 @@ name: Android CI
 
 on:
   push:
+    branches: ["main", "feature/**", "bugfix/**"]
+  pull_request:
     branches: ["main"]
   workflow_dispatch:
 
@@ -22,7 +24,18 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # 3) Télécharger Gradle 8.7 et générer le wrapper
+      # 3) Cache Gradle (caches + wrapper)
+      - name: Gradle cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*','**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      # 4) Télécharger Gradle 8.7 et générer le wrapper (si absent/obsolète)
       - name: Bootstrap Gradle Wrapper (8.7)
         run: |
           curl -L -o gradle.zip https://services.gradle.org/distributions/gradle-8.7-bin.zip
@@ -32,16 +45,51 @@ jobs:
           ls -la gradle/wrapper || true
           head -n 5 gradlew || true
 
-      # 4) Rendre le wrapper exécutable
+      # 5) Rendre gradlew exécutable
       - name: Make gradlew executable
         run: chmod +x gradlew
 
-      # 5) Build de l’APK Debug avec le wrapper
+      # 6) Installer/valider les composants SDK Android requis
+      #    NOTE: sur les runners GitHub, le SDK Android est déjà présent sous /usr/local/lib/android/sdk
+      - name: Install Android SDK components
+        env:
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+        run: |
+          # 1) Fix ANDROID_SDK_ROOT si absent : valeur standard des runners GitHub
+          if [ -z "$ANDROID_SDK_ROOT" ]; then
+            export ANDROID_SDK_ROOT="/usr/local/lib/android/sdk"
+          fi
+
+          # 2) Résoudre sdkmanager
+          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            # Fallback (si la disposition change)
+            SDKMANAGER="/usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager"
+          fi
+
+          if [ ! -x "$SDKMANAGER" ]; then
+            echo "❌ Impossible de localiser sdkmanager sous $ANDROID_SDK_ROOT"
+            echo "Contenu de $ANDROID_SDK_ROOT :"
+            ls -R "$ANDROID_SDK_ROOT" || true
+            exit 1
+          fi
+
+          echo "✅ ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          echo "✅ sdkmanager=$SDKMANAGER"
+
+          # 3) Accepter licences et installer les composants
+          yes | "$SDKMANAGER" --licenses || true
+          yes | "$SDKMANAGER" --install \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0"
+
+      # 7) Compilation de l’APK Debug
       - name: Build Debug APK
         run: ./gradlew assembleDebug --no-daemon --warning-mode all
 
-      # 6) Uploader l’APK comme artifact
-      - name: Upload APK
+      # 8) Publication de l’APK Debug en artifact
+      - name: Upload APK (debug)
         uses: actions/upload-artifact@v4
         with:
           name: app-debug-apk

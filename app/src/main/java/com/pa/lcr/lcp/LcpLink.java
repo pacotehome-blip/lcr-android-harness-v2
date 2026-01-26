@@ -8,7 +8,21 @@ import java.util.function.Supplier;
 public class LcpLink {
   public static boolean DUMP_TX = false, DUMP_RX = false;
 
-  // Helper pour lire des octets "raw" (éventuellement [ESC, data]) et signaler l'état
+  public interface Logger { void log(String s); }
+  private static volatile Logger LOGGER;
+  public static void setLogger(Logger l) { LOGGER = l; }
+
+  private static void log(String s){
+    Logger l = LOGGER;
+    if (l != null) l.log(s);
+  }
+  private static String hex(byte[] b){
+    if (b == null) return "(null)";
+    StringBuilder sb = new StringBuilder(b.length*3);
+    for (byte x : b) sb.append(String.format("%02X ", x));
+    return sb.toString().trim();
+  }
+
   private static class R { byte[] raw; boolean ok; }
 
   private final UsbSerialPort port;
@@ -38,7 +52,6 @@ public class LcpLink {
     return r;
   }
 
-  /** Construit une trame LCP : ~~ + header(var) + payload + crc(var) (header/payload/CRC échappés) */
   public byte[] buildFrame(byte[] payload) {
     int st = nextStatus();
     byte[] header = new byte[] { (byte) to, (byte) from, (byte) st, (byte) (payload.length & 0xFF) };
@@ -54,22 +67,20 @@ public class LcpLink {
 
   public byte[] sendRecv(byte[] payload, int timeoutMs) throws Exception {
     byte[] frm = buildFrame(payload);
+    if (DUMP_TX) log("TX: " + hex(frm));
+
     synchronized (port) {
       port.purgeHwBuffers(true, true);
       port.write(frm, timeoutMs);
     }
-    return readFrame(timeoutMs);
+    byte[] rx = readFrame(timeoutMs);
+    if (DUMP_RX) log("RX: " + hex(rx));
+    return rx;
   }
 
-  /**
-   * Lit une trame sous la forme:
-   *   ~~ [header(4) échappé] [payload(n) échappé] [crc(2) échappé]
-   * Et vérifie le CRC sur les octets échappés header+payload.
-   */
   public byte[] readFrame(int timeoutMs) throws Exception {
     long t0 = System.currentTimeMillis();
 
-    // 1) Sync "~~"
     int sync = 0;
     byte[] one = new byte[1];
     while (System.currentTimeMillis() - t0 < timeoutMs) {
@@ -84,8 +95,6 @@ public class LcpLink {
     }
     if (sync < 2) throw new java.util.concurrent.TimeoutException("Sync ~~ timeout");
 
-    // Helper: lire un octet logique (en tenant compte de l'échappement) ET
-    // accumuler les octets "raw" (donc potentiellement 1 ou 2 bytes si ESC).
     Supplier<R> r1 = () -> {
       try {
         byte[] b = new byte[1];
@@ -137,12 +146,10 @@ public class LcpLink {
     }
     if (cpos < 2) throw new java.util.concurrent.TimeoutException("CRC timeout");
 
-    // Vérif CRC sur les bytes échappés header+payload
     int calc = CrcLcp.crcLcp(concat(rawHdr.toByteArray(), rawData.toByteArray()));
     int recv = (crcB[0] & 0xFF) | ((crcB[1] & 0xFF) << 8);
     if (calc != recv) throw new IllegalStateException("CRC mismatch");
 
-    // Retourne une frame simple (déjà utile au code appelant: extractStatus/extractPayload)
     return concat(new byte[] { (byte) CrcLcp.TILDE, (byte) CrcLcp.TILDE },
                   concat(hdr, concat(data, crcB)));
   }
