@@ -1,13 +1,20 @@
+
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-  <!-- FTDI -->
-  <usb-device vendor-id="1027" />
-  <!-- Silicon Labs CP210x -->
-  <usb-device vendor-id="4292" />
-  <!-- Prolific -->
-  <usb-device vendor-id="1659" />
-  <!-- QinHeng/CH340 -->
-  <usb-device vendor-id="6790" />
-  <!-- Arduino -->
-  <usb-device vendor-id="9025" />
+
+    <!-- FTDI (LCR-II USB-RS232) -->
+    <usb-device vendor-id="1027" product-id="24577" />
+
+    <!-- Silicon Labs CP210x -->
+    <usb-device vendor-id="4292" product-id="60000" /> 
+
+    <!-- Prolific PL2303 -->
+    <usb-device vendor-id="1659" product-id="8963" />
+
+    <!-- CH340 (QinHeng) -->
+    <usb-device vendor-id="6790" product-id="29987" />
+
+    <!-- Arduino (au cas où) -->
+    <usb-device vendor-id="9025" product-id="67" />
+
 </resources>
