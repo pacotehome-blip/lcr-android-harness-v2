@@ -13,7 +13,7 @@
     <!-- CH340 / QinHeng -->
     <usb-device vendor-id="6790" product-id="29987" />
 
-    <!-- Arduino (rare mais possible) -->
+    <!-- Arduino (optionnel, ne gêne pas) -->
     <usb-device vendor-id="9025" product-id="67" />
 
 </resources>
