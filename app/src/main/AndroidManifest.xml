@@ -1,37 +1,36 @@
-
 <?xml version="1.0" encoding="utf-8"?>
 <manifest 
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
     <!-- USB Host -->
-   application
-        android:allowBackup="true"
-        android:label="LCR Harness V2"
-       ER"/>
-            </intent-filter>
-
-            <!-- Auto-launch when USB device is attached -->
+    <!-- Launcher -->
             <intent-filter>
-                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
 
-            <!-- Link USB_ATTACHED to device_filter.xml -->
+            <!-- Auto-launch on USB attach -->
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"/>
+            </intent-filter>
+
+            <!-- Tie USB attach-event to device_filter.xml -->
             <meta-data
                 android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
-                android:resource="@xml/device_filter" />
+                android:resource="@xml/device_filter"/>
         </activity>
 
-
-        <!-- ************ USB PERMISSION RECEIVER ************ -->
+        <!-- USB Permission Receiver -->
         <receiver
             android:name="com.pa.lcrdemo.UsbReceiver"
             android:exported="true">
 
             <intent-filter>
-                <!-- MUST MATCH MainActivity.ACTION_USB_PERMISSION -->
-                <action android:name="com.pa.lcrdemo.USB_PERMISSION" />
+                <!-- MUST match ACTION_USB_PERMISSION in MainActivity -->
+                <action android:name="com.pa.lcrdemo.USB_PERMISSION"/>
             </intent-filter>
+
         </receiver>
 
     </application>
