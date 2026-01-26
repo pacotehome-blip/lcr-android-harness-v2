@@ -1,36 +1,24 @@
-<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-          xmlns:tools="http://schemas.android.com/tools">
-
-    <uses-feature android:name="android.hardware.usb.host"
-                  android:required="true"/>
-
-    <uses-permission
-        android:name="android.permission.MANAGE_USB"
-        tools:ignore="ProtectedPermissions"/>
-
-    <application
-        android:allowBackup="true"
-        android:supportsRtl="true"
-        android:label="LCR Harness V2"
-        android:theme="@style/Theme.Material3.DayNight.NoActionBar">
-
-        <activity
-            android:name="com.pa.lcrdemo.MainActivity"
-            android:exported="true">
-
-           ;/activity>
-
-        <receiver
-            android:name="com.pa.lcrdemo.UsbReceiver"
-            android:exported="true">
-
-            <intent-filter>
-                <action android:name="com.pa.lcrdemo.USB_PERMISSION"/>
-            </intent-filter>
-
-        </receiver>
-
-    </application>
-
-</manifest>
+PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0idXRmLTgiPz4KPG1hbmlmZXN0IHhtbG5z
+OmFuZHJvaWQ9Imh0dHA6Ly9zY2hlbWFzLmFuZHJvaWQuY29tL2Fway9yZXNvdXJjZXMvIiB4
+bWxuczp0b29scz0iaHR0cDovL3NjaGVtYXMubWFya2Rvd25hbmRyb2lkLmNvbS90b29scyI+
+CiAgPHVzZXMtZmVhdHVyZSBhbmRyb2lkOm5hbWU9ImFuZHJvaWQuaGFyZHdhcmUudXNiLmhv
+c3QiIGFuZHJvaWQ6cmVxdWlyZWQ9InRydWUiIC8+CiAgPHVzZXMtcGVybWlzc2lvbiBhbmRy
+b2lkOm5hbWU9ImFuZHJvaWQucGVybWlzc2lvbi5NQU5BR0VfVVNCIiB0b29sczppZ25vcmU9
+IlByb3RlY3RlZFBlcm1pc3Npb25zIiAvPgogIDxhcHBsaWNhdGlvbiBhbmRyb2lkOmFsbG93
+QmF ja3VwPSJ0cnVlIiBhbmRyb2lkOmxhYmVsPSJMQ1IgSGFy bmVzcyBWMjIiCiAgICAgYW5k
+cm9pZDpzdXBwb3J0c1J0bD0idHJ1ZSIKICAgICAgYW5kcm9pZDp0aGVtZT0iQHN0eWxlL1Ro
+ZW1lLk1hdGVyaWFsMy5EYXlOaWdodC5Ob0FjdGlvbkJhciI+CiAgICA8YWN0aXZpdHkgYW5k
+cm9pZDpuYW1lPSJjb20ucGEubGNyZGVtby5NYWluQWN0aXZpdHkiIGFuZHJvaWQ6ZXhwb3J0
+ZWQ9InRydWUiPgogICAgICA8aW50ZW50LWZpbHRlcj4KICAgICAgICA8YWN0aW9uIGFuZHJv
+aWQ6bmFtZT0iYW5kcm9pZC5pbnRlbnQuYWN0aW9uLk1BSU4iIC8+CiAgICAgICAgPGNhdGVn
+b3J5IGFuZHJvaWQ6bmFtZT0iYW5kcm9pZC5jYXRlZ29yeS5MQUlVTkNIUVIiIC8+CiAgICAg
+IDwvaW50ZW50LWZpbHRlcj4KICAgICAgPGludGVudC1maWx0ZXI+CiAgICAgICAgPGFjdGlv
+biBhbmRyb2lkOm5hbWU9ImFuZHJvaWQuaGFyZHdhcmUudXNiLmFjdGlvbi5VU0JfREVWSUNF
+X0FUVEFDSUVEIiAvPgogICAgICA8L2ludGVudC1maWx0ZXI+CiAgICAgIDxtZXRhLWRhdGEg
+YW5kcm9pZDpuYW1lPSJhbmRyb2lkLmhhcmR3YXJlLnVzYi5hY3Rpb24uVVNCX0RFVklDRV9B
+VFRBQ0hFRCIgYW5kcm9pZDpyZXNvdXJjZT0iQHhtbC9kZXZpY2VfZmlsdGVyIiAvPgogICAg
+PC9hY3Rpdml0eT4KICAgIDxyZWNlaXZlciBhbmRyb2lkOm5hbWU9ImNvbS5wYS5sY3JkZW1v
+LlVzYlJlY2VpdmVyIiBhbmRyb2lkOmV4cG9ydGVkPSJ0cnVlIj4KICAgICAgPGludGVudC1m
+aWx0ZXI+CiAgICAgICAgPGFjdGlvbiBhbmRyb2lkOm5hbWU9ImNvbS5wYS5sY3JkZW1vLlVT
+Ql9QRVJNSVNTSU9OIiAvPgogICAgICA8L2ludGVudC1maWx0ZXI+CiAgICA8L3JlY2VpdmVy
+PgogIDwvYXBwbGljYXRpb24+CjwvbWFuaWZlc3Q+
