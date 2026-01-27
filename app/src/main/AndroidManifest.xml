@@ -1,24 +1,45 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/resources/" xmlns:tools="http://schemas.markdownandroid.com/tools">
-  <uses-feature android:name="android.hardware.usb.host" android:required="true" />
-  <uses-permission android:name="android.permission.MANAGE_USB" tools:ignore="ProtectedPermissions" />
-  <application android:allowBackup="true" android:label="LCR Harness V22"
-     android:supportsRtl="true"
-      android:theme="@style/Theme.Material3.DayNight.NoActionBar">
-    <activity android:name="com.pa.lcrdemo.MainActivity" android:exported="true">
-      <intent-filter>
-        <action android:name="android.intent.action.MAIN" />
-        <category android:name="android.category.LAIUNCHQR" />
-      </intent-filter>
-      <intent-filter>
-        <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACIED" />
-      </intent-filter>
-      <meta-data android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" android:resource="@xml/device_filter" />
-    </activity>
-    <receiver android:name="com.pa.lcrdemo.UsbReceiver" android:exported="true">
-      <intent-filter>
-        <action android:name="com.pa.lcrdemo.USB_PERMISSION" />
-      </intent-filter>
-    </receiver>
-  </application>
+<manifest 
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <!-- USB Host -->
+    <uses-feature
+        android:name="android.hardware.usb.host"
+        android:required="true" />
+    <!-- Required for USB access on Android 12+ -->
+    <uses-permission
+        android:name="android.permission.MANAGE_USB"
+        tools:ignore="ProtectedPermissions" />
+    <application
+        android:allowBackup="true"
+        android:supportsRtl="true"
+        android:label="LCR Harness V2"
+        android:theme="@style/Theme.Material3.DayNight.NoActionBar">
+        <!-- MAIN ACTIVITY -->
+        <activity
+            android:name="com.pa.lcrdemo.MainActivity"
+            android:exported="true">
+            Launcher -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+            <!-- Auto-launch when USB device is plugged -->
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"/>
+            </intent-filter>
+            <!-- Link attach event to device_filter.xml -->
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/device_filter"/>
+        </activity>
+        <!-- USB PERMISSION RECEIVER -->
+        <receiver
+            android:name="com.pa.lcrdemo.UsbReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.pa.lcrdemo.USB_PERMISSION"/>
+            </intent-filter>
+        </receiver>
+    </application>
 </manifest>
