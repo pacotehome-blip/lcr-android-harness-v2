@@ -456,8 +456,8 @@ public class MainActivity extends AppCompatActivity {
         new Thread(() -> {
             try {
                 serialPort.purgeHwBuffers(true, true);
-                int written = serialPort.write(new byte[]{ (byte)0xAA }, 200);
-                appendAndBuffer("[I/O] Write 0xAA -> bytesWritten=" + written);
+                serialPort.write(new byte[]{ (byte)0xAA }, 200);
+                appendAndBuffer("[I/O] Write 0xAA -> requested=1 byte");
 
                 byte[] r = new byte[64];
                 int n = serialPort.read(r, 150);
@@ -479,8 +479,9 @@ public class MainActivity extends AppCompatActivity {
                 }
 
                 serialPort.purgeHwBuffers(true, true);
-                written = serialPort.write(new byte[]{ 0x00 }, 200);
-                appendAndBuffer("[I/O] Write 0x00 -> bytesWritten=" + written);
+                serialPort.write(new byte[]{ 0x00 }, 200);
+                appendAndBuffer("[I/O] Write 0x00 -> requested=1 byte");
+
                 n = serialPort.read(r, 150);
                 appendAndBuffer("[I/O] Read after 0x00 -> bytesRead=" + n);
 
