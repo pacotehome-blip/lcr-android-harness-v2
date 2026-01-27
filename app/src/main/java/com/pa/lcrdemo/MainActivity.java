@@ -28,9 +28,12 @@ import com.hoho.android.usbserial.driver.UsbSerialProber;
 
 import com.pa.lcr.LcrSimpleDeliverV2;
 import com.pa.lcr.lcp.LcpLink;
+import com.pa.lcr.lcp.LcpOps;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -42,8 +45,15 @@ public class MainActivity extends AppCompatActivity {
     private UsbSerialPort serialPort;
     private UsbDevice currentDevice;
 
-    // Buffer log (pour bouton Copier)
+    // Log buffer
     private final StringBuilder logBuf = new StringBuilder(4096);
+
+    // --- NOUVEAU : sérialisation des accès LCP ---
+    private final Object lcpLock = new Object();
+    private final ExecutorService lcpExec = Executors.newSingleThreadExecutor();
+
+    // Pour activer/désactiver les boutons pendant une macro
+    private Button btnA, btnB, btnC, btnScan, btnSendHex, btnTestUsb, btnConnect, btnDiag, btnStart;
 
     /* ================================================================
        BROADCAST RECEIVERS
@@ -90,7 +100,17 @@ public class MainActivity extends AppCompatActivity {
         edtProduct = findViewById(R.id.edtProduct);
         edtPreset  = findViewById(R.id.edtPreset);
 
-        // Par défaut : imposer To=0xFA, From=0xFF (clé du succès chez toi)
+        btnConnect = findViewById(R.id.btnConnect);
+        btnDiag    = findViewById(R.id.btnDiag);
+        btnStart   = findViewById(R.id.btnStart);
+        btnScan    = findViewById(R.id.btnScan);
+        btnSendHex = findViewById(R.id.btnSendHex);
+        btnTestUsb = findViewById(R.id.btnTestUsb);
+        btnA       = findViewById(R.id.btnA);
+        btnB       = findViewById(R.id.btnB);
+        btnC       = findViewById(R.id.btnC);
+
+        // Par défaut : imposer To=0xFA, From=0xFF
         ensureDefaultAddresses();
 
         // Receivers
@@ -100,7 +120,7 @@ public class MainActivity extends AppCompatActivity {
         f.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
         registerReceiver(usbAttachDetach, f);
 
-        // === I/O TX/RX Logging ===
+        // I/O TX/RX Logging
         CheckBox switchIoLog = findViewById(R.id.switchIoLog);
         LcpLink.setLogger(this::appendAndBuffer);
         switchIoLog.setOnCheckedChangeListener((btn, checked) -> {
@@ -109,7 +129,7 @@ public class MainActivity extends AppCompatActivity {
             append("I/O log " + (checked ? "activé" : "désactivé") + "\n");
         });
 
-        // === Bouton Copier ===
+        // Copier/Effacer log
         findViewById(R.id.btnCopyLog).setOnClickListener(v -> {
             ClipboardManager cb = (ClipboardManager)getSystemService(Context.CLIPBOARD_SERVICE);
             if (cb != null) {
@@ -117,62 +137,51 @@ public class MainActivity extends AppCompatActivity {
                 append("Log copié dans le presse-papiers\n");
             }
         });
-
-        // === Bouton Clear ===
         findViewById(R.id.btnClearLog).setOnClickListener(v -> {
             logBuf.setLength(0);
             runOnUiThread(() -> log.setText(""));
         });
 
-        // === Bouton Connexion ===
-        findViewById(R.id.btnConnect).setOnClickListener(v -> {
+        // Connexion
+        if (btnConnect != null) btnConnect.setOnClickListener(v -> {
             ensureDefaultAddresses();
             requestAndOpenFirstPort();
         });
 
-        // === Bouton DIAG (SEQ COMPLETE : dump USB + open + 0x28) ===
-        findViewById(R.id.btnDiag).setOnClickListener(v -> {
+        // DIAG complet : dump USB + open + 0x28 (sérialisé)
+        if (btnDiag != null) btnDiag.setOnClickListener(v -> {
             ensureDefaultAddresses();
-            diagConnectAndStatus28();
+            runLcpTask(() -> diagConnectAndStatus28_locked());
         });
 
-        // === Bouton START FLOW (prestart/start/live/finish) ===
-        findViewById(R.id.btnStart).setOnClickListener(v -> {
+        // START flow
+        if (btnStart != null) btnStart.setOnClickListener(v -> {
             ensureDefaultAddresses();
-            startFlow();
+            runLcpTask(() -> startFlow_locked());
         });
 
-        // === Console : Scan / SendHex / TestUSB ===
-        Button btnScan    = findViewById(R.id.btnScan);
-        Button btnSendHex = findViewById(R.id.btnSendHex);
-        Button btnTestUsb = findViewById(R.id.btnTestUsb);
-
-        if (btnScan != null)    btnScan.setOnClickListener(v -> scanNodes());
-        if (btnSendHex != null) btnSendHex.setOnClickListener(v -> promptAndSendHex());
+        // Console : Scan / SendHex / TestUSB
+        if (btnScan != null) btnScan.setOnClickListener(v -> runLcpTask(this::scanNodes_locked));
+        if (btnSendHex != null) btnSendHex.setOnClickListener(v -> promptAndSendHex()); // prompt UI, l'envoi est sérialisé ensuite
         if (btnTestUsb != null) btnTestUsb.setOnClickListener(v -> {
             appendAndBuffer("=== TEST PORT USB ===");
             dumpUsb();
             if (openOrVerifyPort()) {
-                testIoSuite();
-                testMiniPingLcp(); // ping 0x28
+                testIoSuite(); // tests I/O (peuvent rester hors lock, ce n’est pas du LCP)
+                runLcpTask(this::testMiniPingLcp_locked);
             }
         });
 
-        // === A/B/C : on pose AUSSI des listeners, en plus de android:onClick dans le XML ===
-        Button btnA = findViewById(R.id.btnA);
-        Button btnB = findViewById(R.id.btnB);
-        Button btnC = findViewById(R.id.btnC);
-
+        // A/B/C : via android:onClick (XML) ET on met aussi des listeners par sécurité
         if (btnA != null) btnA.setOnClickListener(this::onClickA);
         if (btnB != null) btnB.setOnClickListener(this::onClickB);
         if (btnC != null) btnC.setOnClickListener(this::onClickC);
 
-        // Log présence des vues (diagnostic)
+        // Log présence des vues
         appendAndBuffer(String.format(
                 "[UI] A=%s B=%s C=%s Scan=%s SendHex=%s TestUsb=%s",
-                (findViewById(R.id.btnA)!=null), (findViewById(R.id.btnB)!=null),
-                (findViewById(R.id.btnC)!=null), (findViewById(R.id.btnScan)!=null),
-                (findViewById(R.id.btnSendHex)!=null), (findViewById(R.id.btnTestUsb)!=null)
+                (btnA!=null), (btnB!=null), (btnC!=null), (btnScan!=null),
+                (btnSendHex!=null), (btnTestUsb!=null)
         ));
 
         append("Prêt. Branchez le LCR puis cliquez 'Connexion USB'.\n");
@@ -183,24 +192,39 @@ public class MainActivity extends AppCompatActivity {
         try { unregisterReceiver(usbPermissionReceiver); } catch(Exception ignored){}
         try { unregisterReceiver(usbAttachDetach); } catch(Exception ignored){}
         try { if(serialPort!=null) serialPort.close(); } catch(Exception ignored){}
+        lcpExec.shutdownNow();
     }
 
     /* ================================================================
        HANDLERS XML (android:onClick) pour A / B / C
        ================================================================ */
-    public void onClickA(View v) {
-        ensureDefaultAddresses();
-        macroResetEndClear();
+    public void onClickA(View v) { ensureDefaultAddresses(); runLcpTask(this::macroResetEndClear_locked); }
+    public void onClickB(View v) { ensureDefaultAddresses(); runLcpTask(this::macroPing28GetMachine23_locked); }
+    public void onClickC(View v) { ensureDefaultAddresses(); runLcpTask(this::macroStartDelivery_locked); }
+
+    /* ================================================================
+       Sérialisation LCP : queue + lock + disable/enable UI
+       ================================================================ */
+    private void runLcpTask(Runnable r) {
+        setButtonsEnabled(false);
+        lcpExec.execute(() -> {
+            try { r.run(); }
+            finally { setButtonsEnabled(true); }
+        });
     }
 
-    public void onClickB(View v) {
-        ensureDefaultAddresses();
-        macroPing28GetMachine23();
-    }
-
-    public void onClickC(View v) {
-        ensureDefaultAddresses();
-        macroStartDelivery();
+    private void setButtonsEnabled(final boolean enabled) {
+        runOnUiThread(() -> {
+            if (btnA!=null) btnA.setEnabled(enabled);
+            if (btnB!=null) btnB.setEnabled(enabled);
+            if (btnC!=null) btnC.setEnabled(enabled);
+            if (btnScan!=null) btnScan.setEnabled(enabled);
+            if (btnSendHex!=null) btnSendHex.setEnabled(enabled);
+            if (btnTestUsb!=null) btnTestUsb.setEnabled(enabled);
+            if (btnConnect!=null) btnConnect.setEnabled(enabled);
+            if (btnDiag!=null) btnDiag.setEnabled(enabled);
+            if (btnStart!=null) btnStart.setEnabled(enabled);
+        });
     }
 
     /* ================================================================
@@ -211,20 +235,14 @@ public class MainActivity extends AppCompatActivity {
             String to = edtTo.getText() != null ? edtTo.getText().toString().trim() : "";
             String from = edtFrom.getText() != null ? edtFrom.getText().toString().trim() : "";
             boolean changed = false;
-            if (!"0xFA".equalsIgnoreCase(to)) {
-                edtTo.setText("0xFA");
-                changed = true;
-            }
-            if (!"0xFF".equalsIgnoreCase(from)) {
-                edtFrom.setText("0xFF");
-                changed = true;
-            }
+            if (!"0xFA".equalsIgnoreCase(to))  { edtTo.setText("0xFA");  changed = true; }
+            if (!"0xFF".equalsIgnoreCase(from)){ edtFrom.setText("0xFF"); changed = true; }
             if (changed) append("Forçage adresses: To=0xFA, From=0xFF\n");
         });
     }
 
     /* ================================================================
-       USB : Demander permission
+       USB : Demander permission / Ouverture
        ================================================================ */
     private void requestAndOpenFirstPort() {
         UsbManager mgr = (UsbManager)getSystemService(Context.USB_SERVICE);
@@ -236,17 +254,13 @@ public class MainActivity extends AppCompatActivity {
 
         if (!mgr.hasPermission(dev)) {
             append("Demande de permission USB…\n");
-            PendingIntent pi = PendingIntent.getBroadcast(
-                    this, 0, new Intent(ACTION_USB_PERMISSION), PendingIntent.FLAG_IMMUTABLE);
+            PendingIntent pi = PendingIntent.getBroadcast(this, 0, new Intent(ACTION_USB_PERMISSION), PendingIntent.FLAG_IMMUTABLE);
             mgr.requestPermission(dev, pi);
             return;
         }
         connectPort(dev);
     }
 
-    /* ================================================================
-       USB : Connexion au port série
-       ================================================================ */
     private void connectPort(UsbDevice dev) {
         try {
             UsbManager mgr = (UsbManager)getSystemService(Context.USB_SERVICE);
@@ -275,150 +289,149 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /* ================================================================
-       DIAG — Séquence complète : dump USB + open + 0x28 + décodage
-       ================================================================ */
-    private void diagConnectAndStatus28() {
-        appendAndBuffer("=== DIAGNOSTIC COMPLET ===");
-        dumpUsb();
+    private boolean openOrVerifyPort() {
+        if (serialPort != null) { appendAndBuffer("[PORT] Port déjà ouvert (on réutilise)."); return true; }
+        try {
+            UsbManager mgr = (UsbManager)getSystemService(Context.USB_SERVICE);
+            List<UsbSerialDriver> drivers = UsbSerialProber.getDefaultProber().findAllDrivers(mgr);
+            if (drivers.isEmpty()) { appendAndBuffer("[PORT] Aucun driver trouvé (USB RS-232 absent ?)"); return false; }
+            UsbSerialDriver driver = drivers.get(0);
+            UsbDevice dev = driver.getDevice();
+            if (!mgr.hasPermission(dev)) { appendAndBuffer("[PORT] Permission USB absente. Clique 'Connexion USB' d’abord."); return false; }
+            UsbDeviceConnection conn = mgr.openDevice(dev);
+            if (conn == null) { appendAndBuffer("[PORT] openDevice=null (permission ?)"); return false; }
+            serialPort = driver.getPorts().get(0);
+            serialPort.open(conn);
+            serialPort.setParameters(19200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
 
-        if (!openOrVerifyPort()) {
-            appendAndBuffer("[DIAG] Ouverture échouée.");
-            return;
+            try { serialPort.setRTS(false); } catch(Exception ignore){}
+            try { serialPort.setDTR(false); } catch(Exception ignore){}
+            Thread.sleep(100);
+            try { serialPort.setRTS(true); } catch(Exception ignore){}
+            try { serialPort.setDTR(true); } catch(Exception ignore){}
+            serialPort.purgeHwBuffers(true, true);
+
+            appendAndBuffer("[PORT] Ouvert 19200 8N1 (DTR/RTS pulsed, purge OK).");
+            return true;
+        } catch (Exception e) {
+            appendAndBuffer("[PORT] ERREUR open: " + e.getMessage());
+            return false;
         }
-
-        new Thread(() -> {
-            try {
-                int to   = parseHex(edtTo.getText().toString().trim());
-                int from = parseHex(edtFrom.getText().toString().trim());
-                if (from == 0) from = 0xFF; // sécurité
-
-                LcpLink link = new LcpLink(serialPort, to, from, true);
-                LcpLink.setLogger(this::appendAndBuffer);
-                LcpLink.DUMP_TX = true;
-                LcpLink.DUMP_RX = true;
-
-                appendAndBuffer(String.format("[DIAG] Ping 0x28 -> to=0x%02X from=0x%02X", to, from));
-                byte[] frame = link.sendRecv(new byte[]{ (byte)0x28 }, 1500);
-                byte[] p = LcpLink.extractPayload(frame);
-                decode28("DIAG", p);
-
-            } catch (Exception e) {
-                appendAndBuffer("[DIAG] ERREUR: " + e.getMessage());
-            }
-        }).start();
     }
 
     /* ================================================================
-       START FLOW (bouton Start existant) — renforcé (adresses forcées)
+       DIAG — COMPLET (verrouillé)
        ================================================================ */
-    private void startFlow() {
-        try {
-            if (serialPort == null) {
-                append("Port non prêt — clique 'Connexion USB'.\n");
-                return;
-            }
+    private void diagConnectAndStatus28_locked() {
+        appendAndBuffer("=== DIAGNOSTIC COMPLET ===");
+        dumpUsb();
+        if (!openOrVerifyPort()) { appendAndBuffer("[DIAG] Ouverture échouée."); return; }
 
-            // Forcer les adresses FA/FF
-            edtTo.setText("0xFA");
-            edtFrom.setText("0xFF");
+        synchronized (lcpLock) {
+            try {
+                int to = 0xFA, from = 0xFF;
+                LcpLink link = new LcpLink(serialPort, to, from, true);
+                LcpOps ops = new LcpOps(link);
+                // QT/QP plus longs pour stabilité
+                int[] dsdc = ops.opDeliveryStatus(2500, 200);
+                appendAndBuffer(String.format("[DIAG] DS=0x%04X DC=0x%04X %s", dsdc[0], dsdc[1], dcBits(dsdc[1])));
+            } catch (Exception e) {
+                appendAndBuffer("[DIAG] ERREUR: " + e.getMessage());
+            }
+        }
+    }
+
+    /* ================================================================
+       START FLOW (verrouillé)
+       ================================================================ */
+    private void startFlow_locked() {
+        try {
+            if (serialPort == null) { append("Port non prêt — clique 'Connexion USB'.\n"); return; }
+
+            // Forcer adresses
+            runOnUiThread(() -> { edtTo.setText("0xFA"); edtFrom.setText("0xFF"); });
 
             LcrSimpleDeliverV2.Params p = new LcrSimpleDeliverV2.Params();
-            p.port    = serialPort;
-            p.toAddr  = 0xFA;  // imposé
-            p.fromAddr= 0xFF;  // imposé
+            p.port = serialPort; p.toAddr = 0xFA; p.fromAddr = 0xFF;
             p.product = safeParseInt(edtProduct.getText()!=null?edtProduct.getText().toString().trim():"1", 1);
             p.preset  = safeParseDouble(edtPreset.getText()!=null?edtPreset.getText().toString().trim():"0", 0.0);
             p.verbose = true; p.startAcceptFlow = true; p.ticketPost = "if-pending";
 
             append("Go → unlock/prestart/start...\n");
-
-            new Thread(() -> {
-                try {
-                    LcrSimpleDeliverV2 lcr = new LcrSimpleDeliverV2(p);
-                    lcr.unlock();
-                    lcr.prestart();
-                    lcr.start();
-                    Map<String,Object> live = lcr.liveLoop();
-                    Map<String,Object> fin  = lcr.finish(live, null);
-                    append("FINISH: " + com.pa.lcr.util.SimpleJson.stringify(fin) + "\n");
-                } catch (Exception ex) {
-                    append("ERREUR (startFlow thread): "+ ex.getMessage()+"\n");
-                }
-            }).start();
-
-        } catch(Exception e){
-            append("ERREUR (startFlow): " + e.getMessage() + "\n");
+            // Cette macro de livraison utilise aussi LcpOps en interne
+            LcrSimpleDeliverV2 lcr = new LcrSimpleDeliverV2(p);
+            lcr.unlock();
+            lcr.prestart();
+            lcr.start();
+            appendAndBuffer("[C] start() OK — surveillez LIVE dans l’app.");
+        } catch (Exception ex) {
+            append("ERREUR (startFlow thread): "+ ex.getMessage()+"\n");
         }
     }
 
     /* ================================================================
-       MACROS A / B / C
+       MACROS A / B / C (verrouillé) — utilisent LcpOps (gestion queued)
        ================================================================ */
-
-    // A — Reset : Issue #2 (End) -> petit délai -> Issue #6 (Clear ticket) -> 0x28 (statut)
-    private void macroResetEndClear() {
+    private void macroResetEndClear_locked() {
         if (!openOrVerifyPort()) return;
-        new Thread(() -> {
+        synchronized (lcpLock) {
             try {
                 int to=0xFA, from=0xFF;
                 LcpLink link = new LcpLink(serialPort, to, from, true);
+                LcpOps  ops  = new LcpOps(link);
                 LcpLink.setLogger(this::appendAndBuffer);
                 LcpLink.DUMP_TX = true; LcpLink.DUMP_RX = true;
 
                 appendAndBuffer("[A] ISSUE #2 (END/RESET)");
-                link.sendRecv(new byte[]{ (byte)0x24, (byte)0x02 }, 1500);
-                Thread.sleep(500);
+                ops.opIssueCommand(0x02, 2500, 200);
+                Thread.sleep(400);
 
                 appendAndBuffer("[A] ISSUE #6 (CLEAR TICKET)");
-                link.sendRecv(new byte[]{ (byte)0x24, (byte)0x06 }, 1500);
+                ops.opIssueCommand(0x06, 2500, 200);
 
                 appendAndBuffer("[A] GET_DEL_STATUS (0x28)");
-                byte[] fr = link.sendRecv(new byte[]{ (byte)0x28 }, 1500);
-                decode28("A", LcpLink.extractPayload(fr));
+                int[] dsdc = ops.opDeliveryStatus(2500, 200);
+                appendAndBuffer(String.format("[A] DS=0x%04X DC=0x%04X %s", dsdc[0], dsdc[1], dcBits(dsdc[1])));
 
             } catch (Exception e) {
                 appendAndBuffer("[A] ERREUR: " + e.getMessage());
             }
-        }).start();
+        }
     }
 
-    // B — 0x28 puis 0x23 avec décodage
-    private void macroPing28GetMachine23() {
+    private void macroPing28GetMachine23_locked() {
         if (!openOrVerifyPort()) return;
-        new Thread(() -> {
+        synchronized (lcpLock) {
             try {
                 int to=0xFA, from=0xFF;
                 LcpLink link = new LcpLink(serialPort, to, from, true);
+                LcpOps  ops  = new LcpOps(link);
                 LcpLink.setLogger(this::appendAndBuffer);
                 LcpLink.DUMP_TX = true; LcpLink.DUMP_RX = true;
 
                 appendAndBuffer("[B] GET_DEL_STATUS (0x28)");
-                byte[] fr1 = link.sendRecv(new byte[]{ (byte)0x28 }, 1500);
-                decode28("B", LcpLink.extractPayload(fr1));
+                int[] dsdc = ops.opDeliveryStatus(2500, 200);
+                appendAndBuffer(String.format("[B] DS=0x%04X DC=0x%04X %s", dsdc[0], dsdc[1], dcBits(dsdc[1])));
 
                 appendAndBuffer("[B] GET_MACHINE (0x23)");
-                byte[] fr2 = link.sendRecv(new byte[]{ (byte)0x23 }, 1500);
-                decode23("B", LcpLink.extractPayload(fr2));
+                int[] dev_ds_dc = ops.opMachineStatusFull(2500, 200);
+                appendAndBuffer(String.format("[B] DEV=0x%04X DS=0x%04X DC=0x%04X %s",
+                        dev_ds_dc[0], dev_ds_dc[1], dev_ds_dc[2], dcBits(dev_ds_dc[2])));
 
             } catch (Exception e) {
                 appendAndBuffer("[B] ERREUR: " + e.getMessage());
             }
-        }).start();
+        }
     }
 
-    // C — Start Delivery "macro" rapide (unlock -> prestart -> start)
-    private void macroStartDelivery() {
+    private void macroStartDelivery_locked() {
         if (!openOrVerifyPort()) return;
-        new Thread(() -> {
+        synchronized (lcpLock) {
             try {
-                // Forcer adresses FA/FF
                 runOnUiThread(() -> { edtTo.setText("0xFA"); edtFrom.setText("0xFF"); });
 
                 LcrSimpleDeliverV2.Params p = new LcrSimpleDeliverV2.Params();
-                p.port    = serialPort;
-                p.toAddr  = 0xFA;
-                p.fromAddr= 0xFF;
+                p.port = serialPort; p.toAddr = 0xFA; p.fromAddr = 0xFF;
                 p.product = safeParseInt(edtProduct.getText()!=null?edtProduct.getText().toString().trim():"1", 1);
                 p.preset  = safeParseDouble(edtPreset.getText()!=null?edtPreset.getText().toString().trim():"0", 0.0);
                 p.verbose = true; p.startAcceptFlow = true; p.ticketPost = "if-pending";
@@ -426,40 +439,18 @@ public class MainActivity extends AppCompatActivity {
                 appendAndBuffer("[C] unlock/prestart/start...");
                 LcrSimpleDeliverV2 lcr = new LcrSimpleDeliverV2(p);
                 lcr.unlock();
-                lcr.prestart();
+                lcr.prestart();   // inclut clear ticket si besoin (via LcpOps)
                 lcr.start();
                 appendAndBuffer("[C] start() OK — surveillez LIVE dans l’app.");
-
             } catch (Exception e) {
                 appendAndBuffer("[C] ERREUR: " + e.getMessage());
             }
-        }).start();
+        }
     }
 
     /* ================================================================
        OUTILS DE DÉCODAGE 0x28 / 0x23
        ================================================================ */
-    private void decode28(String tag, byte[] p) {
-        // p: [rc, sub, ds_hi, ds_lo, dc_hi, dc_lo]
-        if (p == null || p.length < 6) { appendAndBuffer("["+tag+"] 0x28 payload invalide"); return; }
-        int rc = p[0] & 0xFF;
-        int ds = ((p[2] & 0xFF) << 8) | (p[3] & 0xFF);
-        int dc = ((p[4] & 0xFF) << 8) | (p[5] & 0xFF);
-        appendAndBuffer(String.format("[%s] 0x28 rc=0x%02X DS=0x%04X DC=0x%04X %s",
-                tag, rc, ds, dc, dcBits(dc)));
-    }
-
-    private void decode23(String tag, byte[] p) {
-        // p: [rc, sub, dev_hi, dev_lo, ds_hi, ds_lo, dc_hi, dc_lo]
-        if (p == null || p.length < 8) { appendAndBuffer("["+tag+"] 0x23 payload invalide"); return; }
-        int rc = p[0] & 0xFF;
-        int dev= ((p[2] & 0xFF) << 8) | (p[3] & 0xFF);
-        int ds = ((p[4] & 0xFF) << 8) | (p[5] & 0xFF);
-        int dc = ((p[6] & 0xFF) << 8) | (p[7] & 0xFF);
-        appendAndBuffer(String.format("[%s] 0x23 rc=0x%02X DEV=0x%04X DS=0x%04X DC=0x%04X %s",
-                tag, rc, dev, ds, dc, dcBits(dc)));
-    }
-
     private String dcBits(int dc) {
         boolean ticket = (dc & 0x0001) != 0;
         boolean flow   = (dc & 0x0004) != 0;
@@ -470,15 +461,14 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       OUTILS : USB dump, open verify, tests I/O, mini ping LCP
+       OUTILS : USB dump, tests I/O (non LCP), mini ping LCP (lock)
        ================================================================ */
     private void dumpUsb() {
         UsbManager mgr = (UsbManager)getSystemService(Context.USB_SERVICE);
         java.util.Map<String, UsbDevice> devs = mgr.getDeviceList();
         appendAndBuffer("[USB] --- Topologie USB (Android) ---");
-        if (devs.isEmpty()) {
-            appendAndBuffer("[USB] Aucun device USB détecté.");
-        } else {
+        if (devs.isEmpty()) appendAndBuffer("[USB] Aucun device USB détecté.");
+        else {
             for (UsbDevice d : devs.values()) {
                 boolean perm = mgr.hasPermission(d);
                 appendAndBuffer(String.format(
@@ -502,59 +492,11 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private boolean openOrVerifyPort() {
-        if (serialPort != null) {
-            appendAndBuffer("[PORT] Port déjà ouvert (on réutilise).");
-            return true;
-        }
-        try {
-            UsbManager mgr = (UsbManager)getSystemService(Context.USB_SERVICE);
-            List<UsbSerialDriver> drivers = UsbSerialProber.getDefaultProber().findAllDrivers(mgr);
-            if (drivers.isEmpty()) {
-                appendAndBuffer("[PORT] Aucun driver trouvé (USB RS-232 absent ?)");
-                return false;
-            }
-            UsbSerialDriver driver = drivers.get(0);
-            UsbDevice dev = driver.getDevice();
-            if (!mgr.hasPermission(dev)) {
-                appendAndBuffer("[PORT] Permission USB absente. Clique 'Connexion USB' d’abord.");
-                return false;
-            }
-            UsbDeviceConnection conn = mgr.openDevice(dev);
-            if (conn == null) {
-                appendAndBuffer("[PORT] openDevice=null (permission ?)");
-                return false;
-            }
-            serialPort = driver.getPorts().get(0);
-            serialPort.open(conn);
-            serialPort.setParameters(19200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
-
-            // Pulse RTS/DTR
-            try { serialPort.setRTS(false); } catch(Exception ignore){}
-            try { serialPort.setDTR(false); } catch(Exception ignore){}
-            Thread.sleep(100);
-            try { serialPort.setRTS(true); } catch(Exception ignore){}
-            try { serialPort.setDTR(true); } catch(Exception ignore){}
-
-            serialPort.purgeHwBuffers(true, true);
-            appendAndBuffer("[PORT] Ouvert 19200 8N1 (DTR/RTS pulsed, purge OK).");
-            return true;
-        } catch (Exception e) {
-            appendAndBuffer("[PORT] ERREUR open: " + e.getMessage());
-            return false;
-        }
-    }
-
     private void testIoSuite() {
-        if (serialPort == null) {
-            appendAndBuffer("[I/O] Port non ouvert.");
-            return;
-        }
+        if (serialPort == null) { appendAndBuffer("[I/O] Port non ouvert."); return; }
         new Thread(() -> {
             try {
                 serialPort.purgeHwBuffers(true, true);
-
-                // Test 1: Loopback (si TX<->RX court-circuités côté DB9)
                 serialPort.write(new byte[]{ (byte)0xAA }, 200);
                 appendAndBuffer("[I/O] Write 0xAA -> requested=1 byte");
 
@@ -568,21 +510,12 @@ public class MainActivity extends AppCompatActivity {
                     appendAndBuffer("[I/O] Loopback RX: aucun octet (si court-circuit TX-RX absent, c’est normal)");
                 }
 
-                // Test 2: BREAK (si supporté)
-                try {
-                    serialPort.setBreak(true);
-                    Thread.sleep(50);
-                    serialPort.setBreak(false);
-                    appendAndBuffer("[I/O] BREAK toggled OK");
-                } catch (Exception e) {
-                    appendAndBuffer("[I/O] BREAK non supporté: " + e.getMessage());
-                }
+                try { serialPort.setBreak(true); Thread.sleep(50); serialPort.setBreak(false); appendAndBuffer("[I/O] BREAK toggled OK"); }
+                catch (Exception e) { appendAndBuffer("[I/O] BREAK non supporté: " + e.getMessage()); }
 
-                // Test 3: Écriture/lecture brute “0x00”
                 serialPort.purgeHwBuffers(true, true);
                 serialPort.write(new byte[]{ 0x00 }, 200);
                 appendAndBuffer("[I/O] Write 0x00 -> requested=1 byte");
-
                 n = serialPort.read(r, 150);
                 appendAndBuffer("[I/O] Read after 0x00 -> bytesRead=" + n);
 
@@ -592,73 +525,35 @@ public class MainActivity extends AppCompatActivity {
         }).start();
     }
 
-    private void testMiniPingLcp() {
-        if (serialPort == null) {
-            appendAndBuffer("[LCP] Port non ouvert.");
-            return;
-        }
-        new Thread(() -> {
+    private void testMiniPingLcp_locked() {
+        if (serialPort == null) { appendAndBuffer("[LCP] Port non ouvert."); return; }
+        synchronized (lcpLock) {
             try {
-                int to   = parseHex(edtTo.getText().toString().trim());
-                int from = parseHex(edtFrom.getText().toString().trim());
-                if (from == 0) from = 0xFF;
+                int to = 0xFA, from = 0xFF;
                 LcpLink link = new LcpLink(serialPort, to, from, true);
-                LcpLink.setLogger(this::appendAndBuffer);
-                LcpLink.DUMP_TX = true;
-                LcpLink.DUMP_RX = true;
-                appendAndBuffer(String.format("[LCP] MiniPing 0x28 -> to=0x%02X from=0x%02X", to, from));
-                byte[] rsp = link.sendRecv(new byte[]{ (byte)0x28 }, 1200);
-                appendAndBuffer("[LCP] MiniPing OK, RX len=" + (rsp != null ? rsp.length : -1));
+                LcpOps ops = new LcpOps(link);
+                int[] dsdc = ops.opDeliveryStatus(2500, 200);
+                appendAndBuffer("[LCP] MiniPing OK, DS=0x" + String.format("%04X", dsdc[0]) +
+                        " DC=0x" + String.format("%04X", dsdc[1]) + " " + dcBits(dsdc[1]));
             } catch (Exception e) {
                 appendAndBuffer("[LCP] MiniPing ERREUR: " + e.getMessage());
             }
-        }).start();
+        }
     }
 
     /* ================================================================
-       CONSOLE : Scan, Send HEX
+       CONSOLE : Send HEX (l’envoi est sérialisé à l’intérieur)
        ================================================================ */
-    private void scanNodes() {
-        if (serialPort == null) {
-            append("Scan: port non prêt — clique 'Connexion USB'.\n");
-            return;
-        }
-        new Thread(() -> {
-            try {
-                int from = parseHex(edtFrom.getText().toString().trim());
-                if (from == 0) from = 0xFF;
-                for (int node = 1; node <= 16; node++) {
-                    try {
-                        LcpLink link = new LcpLink(serialPort, node, from, true);
-                        LcpLink.setLogger(this::appendAndBuffer);
-                        byte[] rsp = link.sendRecv(new byte[]{ (byte)0x28 }, 800);
-                        appendAndBuffer(String.format("[SCAN] Node=0x%02X → OK (RX %d)", node,
-                                (rsp != null ? rsp.length : -1)));
-                        final int n = node;
-                        runOnUiThread(() -> edtTo.setText(String.format("0x%02X", n)));
-                        break;
-                    } catch (Exception ignore) {
-                        appendAndBuffer(String.format("[SCAN] Node=0x%02X → no reply", node));
-                    }
-                }
-            } catch (Exception e) {
-                appendAndBuffer("[SCAN] erreur: " + e.getMessage());
-            }
-        }).start();
-    }
-
     private void promptAndSendHex() {
-        if (serialPort == null) {
-            append("RAW: port non prêt — clique 'Connexion USB'.\n");
-            return;
-        }
+        if (serialPort == null) { append("RAW: port non prêt — clique 'Connexion USB'.\n"); return; }
+
         final EditText edt = new EditText(this);
         edt.setHint("ex.: 28 (GET_DEL_STATUS), 23 (GET_MACHINE), 20 00 (GET_FIELD#0)");
         edt.setSingleLine(false);
 
         final EditText edtTimeout = new EditText(this);
-        edtTimeout.setHint("timeout ms (ex.: 1500)");
-        edtTimeout.setText("1500");
+        edtTimeout.setHint("timeout ms (ex.: 2500)");
+        edtTimeout.setText("2500");
 
         LinearLayout layout = new LinearLayout(this);
         layout.setOrientation(LinearLayout.VERTICAL);
@@ -673,9 +568,9 @@ public class MainActivity extends AppCompatActivity {
                 .setPositiveButton("Envoyer", (d, w) -> {
                     try {
                         String hex = edt.getText().toString();
-                        int toMs =  Integer.parseInt(edtTimeout.getText().toString().trim());
+                        int toMs = Integer.parseInt(edtTimeout.getText().toString().trim());
                         byte[] payload = parseHexBytes(hex);
-                        sendRawPayload(payload, Math.max(200, toMs));
+                        runLcpTask(() -> sendRawPayload_locked(payload, Math.max(200, toMs)));
                     } catch (Exception e) {
                         appendAndBuffer("[RAW] invalide: " + e.getMessage());
                     }
@@ -684,29 +579,24 @@ public class MainActivity extends AppCompatActivity {
                 .show();
     }
 
-    private void sendRawPayload(byte[] payload, int timeoutMs) {
-        if (serialPort == null) {
-            append("Port non prêt — clique d’abord 'Connexion USB'.\n");
-            return;
-        }
-        try {
-            int to   = parseHex(edtTo.getText().toString().trim());
-            int from = parseHex(edtFrom.getText().toString().trim());
-            if (from == 0) from = 0xFF; // par défaut hôte FF
+    private void sendRawPayload_locked(byte[] payload, int timeoutMs) {
+        if (serialPort == null) { append("Port non prêt — clique d’abord 'Connexion USB'.\n"); return; }
+        synchronized (lcpLock) {
+            try {
+                int to=0xFA, from=0xFF;
+                LcpLink link = new LcpLink(serialPort, to, from, true);
+                LcpLink.setLogger(this::appendAndBuffer);
+                LcpLink.DUMP_TX = true; LcpLink.DUMP_RX = true;
 
-            LcpLink link = new LcpLink(serialPort, to, from, true);
-            LcpLink.setLogger(this::appendAndBuffer);
-            LcpLink.DUMP_TX = true;
-            LcpLink.DUMP_RX = true;
+                appendAndBuffer(String.format("[RAW] to=0x%02X from=0x%02X payload=%s",
+                        to, from, bytesToHex(payload)));
 
-            appendAndBuffer(String.format("[RAW] to=0x%02X from=0x%02X payload=%s",
-                    to, from, bytesToHex(payload)));
+                byte[] rsp = link.sendRecv(payload, timeoutMs);
+                appendAndBuffer("[RAW] OK, RX size=" + (rsp != null ? rsp.length : -1));
 
-            byte[] rsp = link.sendRecv(payload, timeoutMs);
-            appendAndBuffer("[RAW] OK, RX size=" + (rsp != null ? rsp.length : -1));
-
-        } catch (Exception e) {
-            appendAndBuffer("[RAW] ERREUR: " + e.getMessage());
+            } catch (Exception e) {
+                appendAndBuffer("[RAW] ERREUR: " + e.getMessage());
+            }
         }
     }
 
@@ -735,20 +625,16 @@ public class MainActivity extends AppCompatActivity {
 
     private byte[] parseHexBytes(String s) throws IllegalArgumentException {
         if (s == null) throw new IllegalArgumentException("vide");
-        // Enlever 0x, espaces, virgules, retours lignes, etc.
         String cleaned = s.replaceAll("(?i)0x", "").replaceAll("[^0-9A-Fa-f]", "");
         if (cleaned.length() == 0) throw new IllegalArgumentException("aucun hex");
-        if ((cleaned.length() % 2) != 0) cleaned = "0" + cleaned; // 5 -> 05
+        if ((cleaned.length() % 2) != 0) cleaned = "0" + cleaned;
         int len = cleaned.length() / 2;
         byte[] out = new byte[len];
-        for (int i = 0; i < len; i++)
-            out[i] = (byte) Integer.parseInt(cleaned.substring(2*i, 2*i+2), 16);
+        for (int i = 0; i < len; i++) out[i] = (byte) Integer.parseInt(cleaned.substring(2*i, 2*i+2), 16);
         return out;
     }
 
-    private void append(String s){
-        runOnUiThread(() -> log.append(s));
-    }
+    private void append(String s){ runOnUiThread(() -> log.append(s)); }
 
     private void appendAndBuffer(String s){
         if (s == null) return;
