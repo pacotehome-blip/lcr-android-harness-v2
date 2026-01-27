@@ -48,11 +48,11 @@ public class MainActivity extends AppCompatActivity {
     // Log buffer
     private final StringBuilder logBuf = new StringBuilder(4096);
 
-    // --- NOUVEAU : sérialisation des accès LCP ---
+    // --- Sérialisation des accès LCP ---
     private final Object lcpLock = new Object();
     private final ExecutorService lcpExec = Executors.newSingleThreadExecutor();
 
-    // Pour activer/désactiver les boutons pendant une macro
+    // Références UI pour (dés)activer pendant une macro
     private Button btnA, btnB, btnC, btnScan, btnSendHex, btnTestUsb, btnConnect, btnDiag, btnStart;
 
     /* ================================================================
@@ -151,28 +151,28 @@ public class MainActivity extends AppCompatActivity {
         // DIAG complet : dump USB + open + 0x28 (sérialisé)
         if (btnDiag != null) btnDiag.setOnClickListener(v -> {
             ensureDefaultAddresses();
-            runLcpTask(() -> diagConnectAndStatus28_locked());
+            runLcpTask(this::diagConnectAndStatus28_locked);
         });
 
         // START flow
         if (btnStart != null) btnStart.setOnClickListener(v -> {
             ensureDefaultAddresses();
-            runLcpTask(() -> startFlow_locked());
+            runLcpTask(this::startFlow_locked);
         });
 
         // Console : Scan / SendHex / TestUSB
-        if (btnScan != null) btnScan.setOnClickListener(v -> runLcpTask(this::scanNodes_locked));
-        if (btnSendHex != null) btnSendHex.setOnClickListener(v -> promptAndSendHex()); // prompt UI, l'envoi est sérialisé ensuite
+        if (btnScan != null)    btnScan.setOnClickListener(v -> runLcpTask(this::scanNodes_locked));
+        if (btnSendHex != null) btnSendHex.setOnClickListener(v -> promptAndSendHex()); // prompt UI -> envoi sérialisé
         if (btnTestUsb != null) btnTestUsb.setOnClickListener(v -> {
             appendAndBuffer("=== TEST PORT USB ===");
             dumpUsb();
             if (openOrVerifyPort()) {
-                testIoSuite(); // tests I/O (peuvent rester hors lock, ce n’est pas du LCP)
+                testIoSuite(); // tests I/O (brut, hors LCP)
                 runLcpTask(this::testMiniPingLcp_locked);
             }
         });
 
-        // A/B/C : via android:onClick (XML) ET on met aussi des listeners par sécurité
+        // A/B/C : listeners + (optionnellement android:onClick dans XML)
         if (btnA != null) btnA.setOnClickListener(this::onClickA);
         if (btnB != null) btnB.setOnClickListener(this::onClickB);
         if (btnC != null) btnC.setOnClickListener(this::onClickC);
@@ -439,7 +439,7 @@ public class MainActivity extends AppCompatActivity {
                 appendAndBuffer("[C] unlock/prestart/start...");
                 LcrSimpleDeliverV2 lcr = new LcrSimpleDeliverV2(p);
                 lcr.unlock();
-                lcr.prestart();   // inclut clear ticket si besoin (via LcpOps)
+                lcr.prestart();   // inclut gestion ticket si besoin
                 lcr.start();
                 appendAndBuffer("[C] start() OK — surveillez LIVE dans l’app.");
             } catch (Exception e) {
@@ -449,15 +449,39 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       OUTILS DE DÉCODAGE 0x28 / 0x23
+       OUTIL : Scan nodes (verrouillé)
        ================================================================ */
-    private String dcBits(int dc) {
-        boolean ticket = (dc & 0x0001) != 0;
-        boolean flow   = (dc & 0x0004) != 0;
-        boolean deliv  = (dc & 0x0008) != 0;
-        boolean begin  = (dc & 0x0400) != 0;
-        return String.format("[ticket=%s flow=%s delivery=%s beginDelivery=%s]",
-                ticket, flow, deliv, begin);
+    private void scanNodes_locked() {
+        if (!openOrVerifyPort()) return;
+
+        synchronized (lcpLock) {
+            try {
+                final int from = 0xFF; // hôte imposé
+                LcpLink.setLogger(this::appendAndBuffer);
+                LcpLink.DUMP_TX = true;
+                LcpLink.DUMP_RX = true;
+
+                for (int node = 1; node <= 16; node++) {
+                    try {
+                        LcpLink link = new LcpLink(serialPort, node, from, true);
+                        LcpOps  ops  = new LcpOps(link);
+
+                        int[] dsdc = ops.opDeliveryStatus(2500, 200); // ping robuste
+                        appendAndBuffer(String.format(
+                                "[SCAN] Node=0x%02X → OK DS=0x%04X DC=0x%04X %s",
+                                node, dsdc[0], dsdc[1], dcBits(dsdc[1])));
+
+                        final int n = node;
+                        runOnUiThread(() -> edtTo.setText(String.format("0x%02X", n)));
+                        break; // premier node qui répond
+                    } catch (Exception ex) {
+                        appendAndBuffer(String.format("[SCAN] Node=0x%02X → no reply (%s)", node, ex.getMessage()));
+                    }
+                }
+            } catch (Exception e) {
+                appendAndBuffer("[SCAN] erreur: " + e.getMessage());
+            }
+        }
     }
 
     /* ================================================================
@@ -542,7 +566,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       CONSOLE : Send HEX (l’envoi est sérialisé à l’intérieur)
+       CONSOLE : Send HEX (prompt UI) -> envoi LCP sérialisé
        ================================================================ */
     private void promptAndSendHex() {
         if (serialPort == null) { append("RAW: port non prêt — clique 'Connexion USB'.\n"); return; }
