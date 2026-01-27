@@ -3,18 +3,33 @@ package com.pa.lcrdemo;
 
 import android.app.AlertDialog;
 import android.app.PendingIntent;
-import android.content.*;
-import android.hardware.usb.*;
+import android.content.BroadcastReceiver;
+import android.content.ClipboardManager;
+import android.content.ClipData;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.hardware.usb.UsbDevice;
+import android.hardware.usb.UsbDeviceConnection;
+import android.hardware.usb.UsbManager;
 import android.os.Bundle;
-import android.widget.*;
+import android.widget.Button;
+import android.widget.CheckBox;
+import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.TextView;
 
 import androidx.appcompat.app.AppCompatActivity;
 
-import com.hoho.android.usbserial.driver.*;
+import com.hoho.android.usbserial.driver.UsbSerialDriver;
+import com.hoho.android.usbserial.driver.UsbSerialPort;
+import com.hoho.android.usbserial.driver.UsbSerialProber;
+
 import com.pa.lcr.LcrSimpleDeliverV2;
 import com.pa.lcr.lcp.LcpLink;
 
-import java.util.*;
+import java.util.List;
+import java.util.Map;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -32,7 +47,6 @@ public class MainActivity extends AppCompatActivity {
     /* ================================================================
        BROADCAST RECEIVERS
        ================================================================ */
-
     private final BroadcastReceiver usbPermissionReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
             if (!ACTION_USB_PERMISSION.equals(intent.getAction())) return;
@@ -65,7 +79,6 @@ public class MainActivity extends AppCompatActivity {
     /* ================================================================
        onCreate()
        ================================================================ */
-
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
         setContentView(R.layout.activity_main);
@@ -86,7 +99,6 @@ public class MainActivity extends AppCompatActivity {
         // === I/O TX/RX Logging ===
         CheckBox switchIoLog = findViewById(R.id.switchIoLog);
         LcpLink.setLogger(this::appendAndBuffer);
-
         switchIoLog.setOnCheckedChangeListener((btn, checked) -> {
             LcpLink.DUMP_TX = checked;
             LcpLink.DUMP_RX = checked;
@@ -118,10 +130,20 @@ public class MainActivity extends AppCompatActivity {
         findViewById(R.id.btnStart).setOnClickListener(v -> startFlow());
 
         // === NOUVEAUX BOUTONS DIAGNOSTIQUE ===
-        // Scanner 1..16 via 0x28
-        findViewById(R.id.btnScan).setOnClickListener(v -> scanNodes());
-        // Envoyer payload HEX (ex: "28" ou "23" ou "20 00")
-        findViewById(R.id.btnSendHex).setOnClickListener(v -> promptAndSendHex());
+        Button btnScan    = findViewById(R.id.btnScan);
+        Button btnSendHex = findViewById(R.id.btnSendHex);
+        Button btnTestUsb = findViewById(R.id.btnTestUsb);
+
+        if (btnScan != null)    btnScan.setOnClickListener(v -> scanNodes());
+        if (btnSendHex != null) btnSendHex.setOnClickListener(v -> promptAndSendHex());
+        if (btnTestUsb != null) btnTestUsb.setOnClickListener(v -> {
+            appendAndBuffer("=== TEST PORT USB ===");
+            dumpUsb();
+            if (openOrVerifyPort()) {
+                testIoSuite();
+                testMiniPingLcp(); // ping 0x28
+            }
+        });
 
         append("Prêt. Branchez le LCR puis cliquez 'Connexion USB'.\n");
     }
@@ -136,7 +158,6 @@ public class MainActivity extends AppCompatActivity {
     /* ================================================================
        USB : Demander permission
        ================================================================ */
-
     private void requestAndOpenFirstPort() {
         UsbManager mgr = (UsbManager)getSystemService(Context.USB_SERVICE);
         List<UsbSerialDriver> drivers = UsbSerialProber.getDefaultProber().findAllDrivers(mgr);
@@ -158,7 +179,6 @@ public class MainActivity extends AppCompatActivity {
     /* ================================================================
        USB : Connexion au port série
        ================================================================ */
-
     private void connectPort(UsbDevice dev) {
         try {
             UsbManager mgr = (UsbManager)getSystemService(Context.USB_SERVICE);
@@ -171,11 +191,17 @@ public class MainActivity extends AppCompatActivity {
             serialPort = driver.getPorts().get(0);
             serialPort.open(conn);
             serialPort.setParameters(19200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
-            try { serialPort.setDTR(true); } catch(Exception ignored){}
+
+            // Pulse RTS/DTR (certains adaptateurs "réveillent" ainsi la ligne RS‑232)
+            try { serialPort.setRTS(false); } catch(Exception ignored){}
+            try { serialPort.setDTR(false); } catch(Exception ignored){}
+            Thread.sleep(100);
             try { serialPort.setRTS(true); } catch(Exception ignored){}
+            try { serialPort.setDTR(true); } catch(Exception ignored){}
+
             serialPort.purgeHwBuffers(true, true);
 
-            append("Port ouvert 19200 8N1 (DTR/RTS=ON)\n");
+            append("Port ouvert 19200 8N1 (DTR/RTS pulsed, purge OK)\n");
         } catch(Exception e) {
             append("ERREUR ouverture: " + e.getMessage() + "\n");
         }
@@ -184,7 +210,6 @@ public class MainActivity extends AppCompatActivity {
     /* ================================================================
        DIAG RX
        ================================================================ */
-
     private void diagRx() {
         if (serialPort == null) {
             append("Diag: port non ouvert — clique 'Connexion USB'.\n");
@@ -212,7 +237,6 @@ public class MainActivity extends AppCompatActivity {
     /* ================================================================
        START FLOW
        ================================================================ */
-
     private void startFlow() {
         try {
             if (serialPort == null) {
@@ -251,7 +275,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       CONSOLE LCP — Scan, Envoi HEX
+       CONSOLE LCP — Scan, Envoi HEX, Tests port
        ================================================================ */
 
     // Scanner les nœuds 1..16 via 0x28 (GET_DEL_STATUS)
@@ -348,6 +372,164 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    // Dump USB : devices + drivers + nombre de ports
+    private void dumpUsb() {
+        UsbManager mgr = (UsbManager)getSystemService(Context.USB_SERVICE);
+        java.util.Map<String, UsbDevice> devs = mgr.getDeviceList();
+        appendAndBuffer("[USB] --- Topologie USB (Android) ---");
+        if (devs.isEmpty()) {
+            appendAndBuffer("[USB] Aucun device USB détecté.");
+        } else {
+            for (UsbDevice d : devs.values()) {
+                boolean perm = mgr.hasPermission(d);
+                appendAndBuffer(String.format(
+                        "[USB] Device name=%s vid=0x%04X pid=0x%04X hasPerm=%s",
+                        d.getDeviceName(), d.getVendorId(), d.getProductId(), perm));
+            }
+        }
+        try {
+            List<UsbSerialDriver> drivers = UsbSerialProber.getDefaultProber().findAllDrivers(mgr);
+            appendAndBuffer("[USB] Drivers trouvés: " + drivers.size());
+            for (UsbSerialDriver drv : drivers) {
+                UsbDevice dev = drv.getDevice();
+                appendAndBuffer(String.format(
+                        "[USB] Driver=%s dev=%s vid=0x%04X pid=0x%04X ports=%d",
+                        drv.getClass().getSimpleName(),
+                        dev.getDeviceName(), dev.getVendorId(), dev.getProductId(),
+                        drv.getPorts().size()));
+            }
+        } catch (Exception e) {
+            appendAndBuffer("[USB] Erreur listing drivers: " + e.getMessage());
+        }
+    }
+
+    // Ouvre le port si nécessaire, configure 19200 8N1 + pulse RTS/DTR
+    private boolean openOrVerifyPort() {
+        if (serialPort != null) {
+            appendAndBuffer("[PORT] Port déjà ouvert (on réutilise).");
+            return true;
+        }
+        try {
+            UsbManager mgr = (UsbManager)getSystemService(Context.USB_SERVICE);
+            List<UsbSerialDriver> drivers = UsbSerialProber.getDefaultProber().findAllDrivers(mgr);
+            if (drivers.isEmpty()) {
+                appendAndBuffer("[PORT] Aucun driver trouvé (USB RS-232 absent ?)");
+                return false;
+            }
+            UsbSerialDriver driver = drivers.get(0);
+            UsbDevice dev = driver.getDevice();
+            if (!mgr.hasPermission(dev)) {
+                appendAndBuffer("[PORT] Permission USB absente. Clique Connexion USB d’abord.");
+                return false;
+            }
+            UsbDeviceConnection conn = mgr.openDevice(dev);
+            if (conn == null) {
+                appendAndBuffer("[PORT] openDevice=null (permission ?)");
+                return false;
+            }
+            serialPort = driver.getPorts().get(0);
+            serialPort.open(conn);
+            serialPort.setParameters(19200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
+
+            // Pulse RTS/DTR
+            try { serialPort.setRTS(false); } catch(Exception ignore){}
+            try { serialPort.setDTR(false); } catch(Exception ignore){}
+            Thread.sleep(100);
+            try { serialPort.setRTS(true); } catch(Exception ignore){}
+            try { serialPort.setDTR(true); } catch(Exception ignore){}
+
+            serialPort.purgeHwBuffers(true, true);
+            appendAndBuffer("[PORT] Ouvert 19200 8N1 (DTR/RTS pulsed, purge OK).");
+            return true;
+        } catch (Exception e) {
+            appendAndBuffer("[PORT] ERREUR open: " + e.getMessage());
+            return false;
+        }
+    }
+
+    // Suite de tests I/O : loopback (si TX<->RX), break, write/read simple
+    private void testIoSuite() {
+        if (serialPort == null) {
+            appendAndBuffer("[I/O] Port non ouvert.");
+            return;
+        }
+        new Thread(() -> {
+            try {
+                serialPort.purgeHwBuffers(true, true);
+                int written = serialPort.write(new byte[]{ (byte)0xAA }, 200);
+                appendAndBuffer("[I/O] Write 0xAA -> bytesWritten=" + written);
+
+                byte[] r = new byte[64];
+                int n = serialPort.read(r, 150);
+                if (n > 0) {
+                    StringBuilder sb = new StringBuilder();
+                    for (int i=0;i<n;i++) sb.append(String.format("%02X ", r[i]));
+                    appendAndBuffer("[I/O] Loopback RX: " + sb);
+                } else {
+                    appendAndBuffer("[I/O] Loopback RX: aucun octet (si court-circuit TX-RX absent, c’est normal)");
+                }
+
+                try {
+                    serialPort.setBreak(true);
+                    Thread.sleep(50);
+                    serialPort.setBreak(false);
+                    appendAndBuffer("[I/O] BREAK toggled OK");
+                } catch (Exception e) {
+                    appendAndBuffer("[I/O] BREAK non supporté: " + e.getMessage());
+                }
+
+                serialPort.purgeHwBuffers(true, true);
+                written = serialPort.write(new byte[]{ 0x00 }, 200);
+                appendAndBuffer("[I/O] Write 0x00 -> bytesWritten=" + written);
+                n = serialPort.read(r, 150);
+                appendAndBuffer("[I/O] Read after 0x00 -> bytesRead=" + n);
+
+            } catch (Exception e) {
+                appendAndBuffer("[I/O] ERREUR tests: " + e.getMessage());
+            }
+        }).start();
+    }
+
+    // Mini ping LCP (0x28) avec DUMP TX/RX
+    private void testMiniPingLcp() {
+        if (serialPort == null) {
+            appendAndBuffer("[LCP] Port non ouvert.");
+            return;
+        }
+        new Thread(() -> {
+            try {
+                int to   = parseHex(edtTo.getText().toString().trim());
+                int from = parseHex(edtFrom.getText().toString().trim());
+                if (from == 0) from = 0xF8;
+                LcpLink link = new LcpLink(serialPort, to, from, true);
+                LcpLink.setLogger(this::appendAndBuffer);
+                LcpLink.DUMP_TX = true;
+                LcpLink.DUMP_RX = true;
+                appendAndBuffer(String.format("[LCP] MiniPing 0x28 -> to=0x%02X from=0x%02X", to, from));
+                byte[] rsp = link.sendRecv(new byte[]{ (byte)0x28 }, 1200);
+                appendAndBuffer("[LCP] MiniPing OK, RX len=" + (rsp != null ? rsp.length : -1));
+            } catch (Exception e) {
+                appendAndBuffer("[LCP] MiniPing ERREUR: " + e.getMessage());
+            }
+        }).start();
+    }
+
+    /* ================================================================
+       UTIL
+       ================================================================ */
+    private int parseHex(String s){
+        try { return Integer.decode(s); }
+        catch(Exception e){ return 0; }
+    }
+
+    // Convertit un tableau d’octets en chaîne hexadécimale (ex: "7E 7E 01 F8 ...")
+    private static String bytesToHex(byte[] b) {
+        if (b == null) return "(null)";
+        StringBuilder sb = new StringBuilder(b.length * 3);
+        for (byte x : b) sb.append(String.format("%02X ", x));
+        return sb.toString().trim();
+    }
+
     private byte[] parseHexBytes(String s) throws IllegalArgumentException {
         if (s == null) throw new IllegalArgumentException("vide");
         // Enlever 0x, espaces, virgules, retours lignes, etc.
@@ -361,15 +543,6 @@ public class MainActivity extends AppCompatActivity {
         return out;
     }
 
-    /* ================================================================
-       UTIL
-       ================================================================ */
-
-    private int parseHex(String s){
-        try { return Integer.decode(s); }
-        catch(Exception e){ return 0; }
-    }
-
     private void append(String s){
         runOnUiThread(() -> log.append(s));
     }
@@ -380,13 +553,4 @@ public class MainActivity extends AppCompatActivity {
         if (!s.endsWith("\n")) logBuf.append("\n");
         append(s.endsWith("\n") ? s : s + "\n");
     }
-
-    // Convertit un tableau d’octets en chaîne hexadécimale (ex: "7E 7E 01 F8 ...")
-    private static String bytesToHex(byte[] b) {
-     if (b == null) return "(null)";
-     StringBuilder sb = new StringBuilder(b.length * 3);
-     for (byte x : b) sb.append(String.format("%02X ", x));
-     return sb.toString().trim();
-    }
-
 }
