@@ -1,8 +1,7 @@
-
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   LCR Android Harness V2 - Écran principal (LinearLayout)
-  - Adresses To/From
+  - Adresses To/From (FA/FF)
   - Product / Preset
   - I/O log (TX/RX)
   - Boutons: Connexion / Diag / Start / Copier / Effacer
@@ -252,7 +251,7 @@
             android:layout_marginStart="8dp"/>
     </LinearLayout>
 
-    <!-- Zone de log déroulante -->
+    <!-- Zone de log -->
     <ScrollView
         android:id="@+id/scrollLog"
         android:layout_width="match_parent"
