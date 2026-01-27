@@ -227,28 +227,29 @@
         android:orientation="horizontal"
         android:paddingTop="8dp">
 
-        <Button
-            android:id="@+id/btnA"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:text="A — Reset (End+Clear)"
-            android:layout_weight="1"/>
+    <Button
+        android:id="@+id/btnA"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:text="A — Reset (End+Clear)"
+        android:onClick="onClickA" />
 
-        <Button
-            android:id="@+id/btnB"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:text="B — Ping(28)+GetMach(23)"
-            android:layout_weight="1"
-            android:layout_marginStart="8dp"/>
+    <Button
+        android:id="@+id/btnB"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:text="B — Ping(28)+GetMach(23)"
+        android:onClick="onClickB" />
 
-        <Button
-            android:id="@+id/btnC"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:text="C — Start Delivery"
-            android:layout_weight="1"
-            android:layout_marginStart="8dp"/>
+    <Button
+        android:id="@+id/btnC"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:text="C — Start Delivery"
+        android:onClick="onClickC" />
     </LinearLayout>
 
     <!-- Zone de log -->
