@@ -103,6 +103,30 @@
           android:text="Effacer"
           android:layout_marginStart="8dp"/>
     </LinearLayout>
+    
+    <!-- === DIAGNOSTIQUE LCP : nouveaux boutons === -->
+    <LinearLayout
+        android:id="@+id/layoutDiagConsole"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingTop="8dp">
+
+    <Button
+        android:id="@+id/btnScan"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:text="Scanner (0x28)" />
+
+    <Button
+         android:id="@+id/btnSendHex"
+         android:layout_width="0dp"
+         android:layout_height="wrap_content"
+         android:layout_weight="1"
+         android:text="Envoyer HEX" />
+    </LinearLayout>
+
 
     <!-- Zone de log -->
     <TextView
