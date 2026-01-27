@@ -380,4 +380,13 @@ public class MainActivity extends AppCompatActivity {
         if (!s.endsWith("\n")) logBuf.append("\n");
         append(s.endsWith("\n") ? s : s + "\n");
     }
+
+    // Convertit un tableau d’octets en chaîne hexadécimale (ex: "7E 7E 01 F8 ...")
+    private static String bytesToHex(byte[] b) {
+     if (b == null) return "(null)";
+     StringBuilder sb = new StringBuilder(b.length * 3);
+     for (byte x : b) sb.append(String.format("%02X ", x));
+     return sb.toString().trim();
+    }
+
 }
