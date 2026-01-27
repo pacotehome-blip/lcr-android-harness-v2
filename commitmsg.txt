@@ -1,0 +1,4 @@
+
+@'
+Fix: SimpleJson escaping (\\, ", \n)
+'@ | Set-Content -Encoding UTF8 commitmsg.txt
