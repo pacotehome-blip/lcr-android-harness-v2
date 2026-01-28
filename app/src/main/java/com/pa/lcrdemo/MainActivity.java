@@ -148,7 +148,7 @@ public class LcpLink {
                 byte[] b = new byte[1];
                 int n = port.read(b, perByte);
                 if (n <= 0) return r(null, false);
-                int v = b[0] & 0FF;
+                int v = [0] & 0xFF;
                 if (v == CrcLcp.ESC) {
                     byte[] y = new byte[1];
                     int m = port.read(y, perByte);
