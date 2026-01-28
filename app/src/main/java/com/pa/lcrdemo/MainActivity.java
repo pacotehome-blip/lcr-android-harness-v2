@@ -31,7 +31,6 @@ import com.pa.lcr.lcp.LcpLink;
 import com.pa.lcr.lcp.LcpOps;
 
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -95,6 +94,7 @@ public class MainActivity extends AppCompatActivity {
         edtProduct = findViewById(R.id.edtProduct);
         edtPreset  = findViewById(R.id.edtPreset);
 
+        // Adresses par défaut stables (FA/FF)
         ensureDefaultAddresses();
 
         // Receivers
@@ -104,7 +104,7 @@ public class MainActivity extends AppCompatActivity {
         f.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
         registerReceiver(usbAttachDetach, f);
 
-        // I/O log
+        // I/O log (TX/RX)
         CheckBox switchIoLog = findViewById(R.id.switchIoLog);
         LcpLink.setLogger(this::appendAndBuffer);
         if (switchIoLog != null) {
@@ -138,7 +138,7 @@ public class MainActivity extends AppCompatActivity {
         View vDiag = findViewById(R.id.btnDiag);
         if (vDiag != null) vDiag.setOnClickListener(v -> runLcpTask(this::diagPing28_locked));
 
-        // START flow (aligné Python)
+        // START flow (alias Start)
         View vStart = findViewById(R.id.btnStart);
         if (vStart != null) vStart.setOnClickListener(v -> runLcpTask(this::startFlow_locked));
 
@@ -352,22 +352,22 @@ public class MainActivity extends AppCompatActivity {
 
                 int to=0xFA, from=0xFF;
                 LcrSimpleDeliverV2.Params p = new LcrSimpleDeliverV2.Params();
-                p.port    = serialPort;
-                p.toAddr  = to;
-                p.fromAddr= from;
-                p.product = parseIntSafe(safeStr(edtProduct.getText()), 1);
-                p.preset  = parseDoubleSafe(safeStr(edtPreset.getText()), 50.0);
-                p.verbose = true;
+                p.port     = serialPort;
+                p.toAddr   = to;
+                p.fromAddr = from;
+                p.product  = parseIntSafe(safeStr(edtProduct.getText()), 1);
+                p.preset   = parseDoubleSafe(safeStr(edtPreset.getText()), 50.0);
+                p.verbose  = true;
                 p.startAcceptFlow = true;
-                p.ticketPost = "if-pending";
-                p.startCmd = 0x00;
-                p.startTimeoutSec = 20;
+                p.ticketPost      = "if-pending";
+                // NOTE: pas de p.startCmd / p.startTimeoutSec ici (non présents dans ta lib)
+                //       start() applique son comportement interne (RUN + attente DC=0x012D)
 
                 appendAndBuffer("[C] unlock/prestart/start...");
                 LcrSimpleDeliverV2 lcr = new LcrSimpleDeliverV2(p);
                 lcr.unlock();
                 lcr.prestart();   // sélection produit, preset net auto si permis, END/CLEAR si nécessaire
-                lcr.start();      // RUN 0x00 + attente DC=0x012D (queued géré)
+                lcr.start();      // RUN + attente DC=0x012D (queued géré)
                 appendAndBuffer("[C] start() OK — surveillez LIVE dans l’app.");
 
             } catch (Exception e) {
