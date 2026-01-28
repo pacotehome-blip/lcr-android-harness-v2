@@ -48,12 +48,12 @@ public class LcpLink {
        STATUS BIT MANAGEMENT
        ================================================================ */
     private int nextStatus() {
-        int st = msgId & 0x01;
+        int st = msgId & 0x01;          // bit0 = toggling message id
         if (syncFirst && !syncUsed) {
-            st |= 0x02;   // conserver le bit msgId, ajouter le flag sync 1x
+            st |= 0x02;                 // bit1 = SYNC (one-shot)
             syncUsed = true;
         }
-        msgId ^= 0x01;
+        msgId ^= 0x01;                  // toggle
         return st & 0xFF;
     }
 
@@ -77,11 +77,11 @@ public class LcpLink {
                 (byte) (payload.length & 0xFF)
         };
 
-        byte[] var    = concat(header, payload);     // header + payload
-        byte[] varEsc = CrcLcp.escape(var);          // ESC sur 0x1B/0x7E
+        byte[] var    = concat(header, payload);  // header + payload
+        byte[] varEsc = CrcLcp.escape(var);       // escape 0x1B/0x7E
 
-        int crc = CrcLcp.crcLcp(varEsc);             // CRC sur flux ESCAPÉ (seed 0x7E7E, poly 0x1021)
-        byte lo = (byte) (crc & 0xFF);               // ordre lo, hi
+        int crc = CrcLcp.crcLcp(varEsc);          // CRC sur flux ESCAPÉ (seed 0x7E7E, poly 0x1021)
+        byte lo = (byte) (crc & 0xFF);
         byte hi = (byte) ((crc >>> 8) & 0xFF);
 
         byte[] crcEsc = CrcLcp.escape(new byte[]{ lo, hi });
@@ -94,20 +94,21 @@ public class LcpLink {
     }
 
     /* ================================================================
-       SEND / RECEIVE (profil stable)
+       SEND / RECEIVE (profil STABLE: pas de sleep post-write)
        ================================================================ */
     public byte[] sendRecv(byte[] payload, int timeoutMs) throws Exception {
         byte[] frm = buildFrame(payload);
         if (DUMP_TX) log("TX: " + hex(frm));
 
         synchronized (port) {
-            // DTR/RTS hauts (sans purge agressive ici)
+            // Assurer les lignes de contrôle (inoffensif si déjà hautes)
             try { port.setRTS(true); } catch(Exception ignore){}
             try { port.setDTR(true); } catch(Exception ignore){}
+            // Pas de purge agressive ici (les macros purgent en entrée)
             port.write(frm, timeoutMs);
         }
 
-        // PAS de sleep artificiel ici (profil 16:09)
+        // Pas de Thread.sleep() ici → on lit tout de suite
         byte[] rx = readFrame(timeoutMs);
 
         if (DUMP_RX) log("RX: " + hex(rx));
@@ -115,19 +116,18 @@ public class LcpLink {
     }
 
     /* ================================================================
-       READ FRAME (ESC-aware “nerveux”)
+       READ FRAME (ESC-aware “nerveux” : perByte=180, grace=80)
        ================================================================ */
     public byte[] readFrame(int timeoutMs) throws Exception {
         final long t0 = System.currentTimeMillis();
 
-        // Timings “hier 16:09” (réactifs)
-        final int perByte = 180;       // ms / lecture d’un octet (esc ou non)
-        final int graceAfterSync = 80; // petite “grâce” après ~~ pour laisser pousser le header
+        final int perByte = 180;       // délai par octet (octet normal ou 2 octets d’escape)
+        final int graceAfterSync = 80; // petite “grâce” après avoir capté "~~"
 
         int sync = 0;
         byte[] one = new byte[1];
 
-        // 1) Chercher ~~ (respecter le budget global timeoutMs)
+        // 1) Chercher la sync "~~"
         while (System.currentTimeMillis() - t0 < timeoutMs) {
             int n = port.read(one, 80);
             if (n <= 0) continue;
@@ -140,10 +140,10 @@ public class LcpLink {
         }
         if (sync < 2) throw new java.util.concurrent.TimeoutException("Sync ~~ timeout");
 
-        // Petite “grâce” après la sync
+        // 2) Petite grâce pour laisser pousser l’entête
         try { Thread.sleep(graceAfterSync); } catch (InterruptedException ignored) {}
 
-        // 2) Lecteur 1 octet ESC-aware
+        // 3) Lecteur 1 octet ESC-aware
         java.util.function.Supplier<R> r1 = () -> {
             try {
                 byte[] b = new byte[1];
@@ -162,7 +162,7 @@ public class LcpLink {
             }
         };
 
-        // 3) Lire header (4 octets) — stocker ESCAPÉ pour CRC
+        // 4) Lire header (4 octets) — conserver ESCAPÉ pour le CRC
         ByteArrayOutputStream rawHdr = new ByteArrayOutputStream();
         byte[] hdr = new byte[4];
         int hpos = 0;
@@ -176,7 +176,7 @@ public class LcpLink {
 
         int plen = hdr[3] & 0xFF;
 
-        // 4) Lire payload (plen octets) — stocker ESCAPÉ pour CRC
+        // 5) Lire payload (plen octets) — conserver ESCAPÉ pour le CRC
         ByteArrayOutputStream rawData = new ByteArrayOutputStream();
         byte[] data = new byte[plen];
         int dpos = 0;
@@ -188,7 +188,7 @@ public class LcpLink {
         }
         if (dpos < plen) throw new java.util.concurrent.TimeoutException("Payload timeout");
 
-        // 5) Lire CRC (2 octets)
+        // 6) Lire CRC (2 octets)
         byte[] crcB = new byte[2];
         int cpos = 0;
         while (cpos < 2 && System.currentTimeMillis() - t0 < timeoutMs) {
@@ -198,12 +198,12 @@ public class LcpLink {
         }
         if (cpos < 2) throw new java.util.concurrent.TimeoutException("CRC timeout");
 
-        // 6) Vérifier CRC sur ESCAPÉ
+        // 7) Vérifier CRC sur flux ESCAPÉ
         int calc = CrcLcp.crcLcp(concat(rawHdr.toByteArray(), rawData.toByteArray()));
         int recv = (crcB[0] & 0xFF) | ((crcB[1] & 0xFF) << 8);
         if (calc != recv) throw new IllegalStateException("CRC mismatch");
 
-        // Recompose et retourne
+        // Recomposer la trame brute et retourner
         return concat(
                 new byte[]{ (byte) CrcLcp.TILDE, (byte) CrcLcp.TILDE },
                 concat(hdr, concat(data, crcB))

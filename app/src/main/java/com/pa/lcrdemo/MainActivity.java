@@ -152,9 +152,9 @@ public class MainActivity extends AppCompatActivity {
         View vC = findViewById(R.id.btnC);
         if (vC != null) vC.setOnClickListener(v -> runLcpTask(this::macroStartDelivery_locked));
 
-        // Console RAW
+        // Console RAW (⚠️ ligne corrigée : parenthèse superflue supprimée)
         View vRaw = findViewById(R.id.btnSendHex);
-        if (vRaw != null) vRaw.setOnClickListener(v -> promptAndSendHex()));
+        if (vRaw != null) vRaw.setOnClickListener(v -> promptAndSendHex());
 
         append("Prêt. Branchez le LCR puis cliquez 'Connexion USB'.\n");
     }
