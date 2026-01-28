@@ -154,7 +154,7 @@ public class MainActivity extends AppCompatActivity {
 
         // Console RAW
         View vRaw = findViewById(R.id.btnSendHex);
-        if (vRaw != null) vRaw.setOnClickListener(v -> promptAndSendHex());
+        if (vRaw != null) vRaw.setOnClickListener(v -> promptAndSendHex()));
 
         append("Prêt. Branchez le LCR puis cliquez 'Connexion USB'.\n");
     }
@@ -272,39 +272,44 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       MACRO A — Reset (END + CLEAR + 28)
+       A — LIBÉRATION TICKET (alignée Python)
        ================================================================ */
     private void macroResetEndClear_locked() {
         if (!openOrVerifyPort()) return;
         synchronized (lcpLock) {
             try {
+                // Purge d’entrée (profil stable)
                 serialPort.purgeHwBuffers(true, true);
 
-                int to=0xFA, from=0xFF;
+                final int to   = 0xFA;
+                final int from = 0xFF;
                 LcpLink link = new LcpLink(serialPort, to, from, true);
                 LcpOps  ops  = new LcpOps(link);
                 LcpLink.setLogger(this::appendAndBuffer);
                 LcpLink.DUMP_TX = true; LcpLink.DUMP_RX = true;
 
+                // 1) END (Issue #2)
                 appendAndBuffer("[A] ISSUE #2 (END/RESET)");
                 ops.opIssueCommand(0x02, 3000, 200);
-                Thread.sleep(400);
+                Thread.sleep(350);
 
+                // 2) CLEAR TICKET (Issue #6)
                 appendAndBuffer("[A] ISSUE #6 (CLEAR TICKET)");
                 ops.opIssueCommand(0x06, 3000, 200);
                 Thread.sleep(200);
 
-                // Poll 28 jusqu'à ticket=false, max ~8s
+                // 3) & 4) Boucle 28 jusqu’à ticket=false (queued géré par LcpOps)
                 long t0 = System.currentTimeMillis();
                 int[] dsdc;
-                while (true) {
+                do {
                     dsdc = ops.opDeliveryStatus(3000, 200);
                     appendAndBuffer(String.format("[A] POLL DS=0x%04X DC=0x%04X %s %s",
                             dsdc[0], dsdc[1], dsBits(dsdc[0]), dcBits(dsdc[1])));
-                    if ((dsdc[1] & 0x0001) == 0) break;
+                    if ((dsdc[1] & 0x0001) == 0) break; // ticket libéré
                     if (System.currentTimeMillis() - t0 > 8000) break;
                     Thread.sleep(300);
-                }
+                } while (true);
+
                 appendAndBuffer(String.format("[A] FINAL DS=0x%04X DC=0x%04X %s %s",
                         dsdc[0], dsdc[1], dsBits(dsdc[0]), dcBits(dsdc[1])));
 
@@ -315,7 +320,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       MACRO B — Ping (28)
+       B — Ping (28)
        ================================================================ */
     private void macroPing28_locked() {
         if (!openOrVerifyPort()) return;
@@ -342,7 +347,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       MACRO C — Start Delivery (aligné Python)
+       C — Start (aligné Python, avec libération ticket automatique)
        ================================================================ */
     private void macroStartDelivery_locked() {
         if (!openOrVerifyPort()) return;
@@ -350,24 +355,53 @@ public class MainActivity extends AppCompatActivity {
             try {
                 serialPort.purgeHwBuffers(true, true);
 
-                int to=0xFA, from=0xFF;
+                final int to   = 0xFA;
+                final int from = 0xFF;
+
+                // Étape 0 : si ticket présent → libération (END+CLEAR) avant de démarrer
+                {
+                    LcpLink link0 = new LcpLink(serialPort, to, from, true);
+                    LcpOps  ops0  = new LcpOps(link0);
+                    int[] dsdc0 = ops0.opDeliveryStatus(3000, 200);
+                    if ((dsdc0[1] & 0x0001) != 0) {  // ticket=true ?
+                        appendAndBuffer("[C] Ticket en suspend détecté → libération pré-START");
+                        try {
+                            ops0.opIssueCommand(0x02, 3000, 200); // END
+                            Thread.sleep(350);
+                            ops0.opIssueCommand(0x06, 3000, 200); // CLEAR TICKET
+                            Thread.sleep(200);
+                            long t0 = System.currentTimeMillis();
+                            int[] dsdc;
+                            do {
+                                dsdc = ops0.opDeliveryStatus(3000, 200);
+                                appendAndBuffer(String.format("[C] (pre) POLL DS=0x%04X DC=0x%04X %s %s",
+                                        dsdc[0], dsdc[1], dsBits(dsdc[0]), dcBits(dsdc[1])));
+                                if ((dsdc[1] & 0x0001) == 0) break;
+                                if (System.currentTimeMillis() - t0 > 8000) break;
+                                Thread.sleep(300);
+                            } while (true);
+                        } catch (Exception exA) {
+                            appendAndBuffer("[C] ERREUR libération pré-START: " + exA.getMessage());
+                        }
+                    }
+                }
+
+                // Flux Python via LcrSimpleDeliverV2 : unlock → prestart → start
                 LcrSimpleDeliverV2.Params p = new LcrSimpleDeliverV2.Params();
                 p.port     = serialPort;
                 p.toAddr   = to;
                 p.fromAddr = from;
-                p.product  = parseIntSafe(safeStr(edtProduct.getText()), 1);
-                p.preset   = parseDoubleSafe(safeStr(edtPreset.getText()), 50.0);
+                p.product  = parseIntSafe(safeStr(edtProduct.getText()), 1);      // --product 1
+                p.preset   = parseDoubleSafe(safeStr(edtPreset.getText()), 50.0); // --preset 50
                 p.verbose  = true;
-                p.startAcceptFlow = true;
-                p.ticketPost      = "if-pending";
-                // NOTE: pas de p.startCmd / p.startTimeoutSec ici (non présents dans ta lib)
-                //       start() applique son comportement interne (RUN + attente DC=0x012D)
+                p.startAcceptFlow = true;        // accepter quand flow démarre
+                p.ticketPost      = "if-pending";// impression si ticket pend.
 
-                appendAndBuffer("[C] unlock/prestart/start...");
+                appendAndBuffer("[C] unlock/prestart/start (profil Python)...");
                 LcrSimpleDeliverV2 lcr = new LcrSimpleDeliverV2(p);
                 lcr.unlock();
-                lcr.prestart();   // sélection produit, preset net auto si permis, END/CLEAR si nécessaire
-                lcr.start();      // RUN + attente DC=0x012D (queued géré)
+                lcr.prestart();   // produit + preset net (auto) + nettoyage si nécessaire
+                lcr.start();      // RUN 0x00 + attente DC=0x012D (queued géré)
                 appendAndBuffer("[C] start() OK — surveillez LIVE dans l’app.");
 
             } catch (Exception e) {
