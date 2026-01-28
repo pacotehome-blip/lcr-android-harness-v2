@@ -48,7 +48,7 @@ public class MainActivity extends AppCompatActivity {
     // Log buffer
     private final StringBuilder logBuf = new StringBuilder(4096);
 
-    // --- Sérialisation des accès LCP ---
+    // Sérialisation des accès LCP
     private final Object lcpLock = new Object();
     private final ExecutorService lcpExec = Executors.newSingleThreadExecutor();
 
@@ -329,10 +329,13 @@ public class MainActivity extends AppCompatActivity {
 
         synchronized (lcpLock) {
             try {
+                // Petite purge RX avant une lecture critique
+                try { serialPort.purgeHwBuffers(true, true); } catch(Exception ignored){}
                 int to = 0xFA, from = 0xFF;
                 LcpLink link = new LcpLink(serialPort, to, from, true);
                 LcpOps ops = new LcpOps(link);
-                int[] dsdc = ops.opDeliveryStatus(2500, 200);
+                int[] dsdc = ops.opDeliveryStatus(3500, 250);
+                Thread.sleep(120);
                 appendAndBuffer(String.format("[DIAG] DS=0x%04X DC=0x%04X %s", dsdc[0], dsdc[1], dcBits(dsdc[1])));
             } catch (Exception e) {
                 appendAndBuffer("[DIAG] ERREUR: " + e.getMessage());
@@ -358,9 +361,9 @@ public class MainActivity extends AppCompatActivity {
 
             append("Go → unlock/prestart/start...\n");
             LcrSimpleDeliverV2 lcr = new LcrSimpleDeliverV2(p);
-            lcr.unlock();
-            lcr.prestart();
-            lcr.start();
+            lcr.unlock();   Thread.sleep(120);
+            lcr.prestart(); Thread.sleep(200);
+            lcr.start();    Thread.sleep(120);
             appendAndBuffer("[C] start() OK — surveillez LIVE dans l’app.");
         } catch (Exception ex) {
             append("ERREUR (startFlow thread): "+ ex.getMessage()+"\n");
@@ -380,15 +383,20 @@ public class MainActivity extends AppCompatActivity {
                 LcpLink.setLogger(this::appendAndBuffer);
                 LcpLink.DUMP_TX = true; LcpLink.DUMP_RX = true;
 
+                try { serialPort.purgeHwBuffers(true, true); } catch(Exception ignored){}
                 appendAndBuffer("[A] ISSUE #2 (END/RESET)");
-                ops.opIssueCommand(0x02, 2500, 200);
-                Thread.sleep(400);
+                ops.opIssueCommand(0x02, 3500, 250);
+                Thread.sleep(500);
 
+                try { serialPort.purgeHwBuffers(true, true); } catch(Exception ignored){}
                 appendAndBuffer("[A] ISSUE #6 (CLEAR TICKET)");
-                ops.opIssueCommand(0x06, 2500, 200);
+                ops.opIssueCommand(0x06, 3500, 250);
+                Thread.sleep(200);
 
+                try { serialPort.purgeHwBuffers(true, true); } catch(Exception ignored){}
                 appendAndBuffer("[A] GET_DEL_STATUS (0x28)");
-                int[] dsdc = ops.opDeliveryStatus(2500, 200);
+                int[] dsdc = ops.opDeliveryStatus(3500, 250);
+                Thread.sleep(120);
                 appendAndBuffer(String.format("[A] DS=0x%04X DC=0x%04X %s", dsdc[0], dsdc[1], dcBits(dsdc[1])));
 
             } catch (Exception e) {
@@ -407,12 +415,16 @@ public class MainActivity extends AppCompatActivity {
                 LcpLink.setLogger(this::appendAndBuffer);
                 LcpLink.DUMP_TX = true; LcpLink.DUMP_RX = true;
 
+                try { serialPort.purgeHwBuffers(true, true); } catch(Exception ignored){}
                 appendAndBuffer("[B] GET_DEL_STATUS (0x28)");
-                int[] dsdc = ops.opDeliveryStatus(2500, 200);
+                int[] dsdc = ops.opDeliveryStatus(3500, 250);
+                Thread.sleep(120);
                 appendAndBuffer(String.format("[B] DS=0x%04X DC=0x%04X %s", dsdc[0], dsdc[1], dcBits(dsdc[1])));
 
+                try { serialPort.purgeHwBuffers(true, true); } catch(Exception ignored){}
                 appendAndBuffer("[B] GET_MACHINE (0x23)");
-                int[] dev_ds_dc = ops.opMachineStatusFull(2500, 200);
+                int[] dev_ds_dc = ops.opMachineStatusFull(3500, 250);
+                Thread.sleep(120);
                 appendAndBuffer(String.format("[B] DEV=0x%04X DS=0x%04X DC=0x%04X %s",
                         dev_ds_dc[0], dev_ds_dc[1], dev_ds_dc[2], dcBits(dev_ds_dc[2])));
 
@@ -436,9 +448,9 @@ public class MainActivity extends AppCompatActivity {
 
                 appendAndBuffer("[C] unlock/prestart/start...");
                 LcrSimpleDeliverV2 lcr = new LcrSimpleDeliverV2(p);
-                lcr.unlock();
-                lcr.prestart();   // inclut gestion ticket si besoin
-                lcr.start();
+                lcr.unlock();   Thread.sleep(120);
+                lcr.prestart(); Thread.sleep(200);
+                lcr.start();    Thread.sleep(120);
                 appendAndBuffer("[C] start() OK — surveillez LIVE dans l’app.");
             } catch (Exception e) {
                 appendAndBuffer("[C] ERREUR: " + e.getMessage());
@@ -461,10 +473,12 @@ public class MainActivity extends AppCompatActivity {
 
                 for (int node = 1; node <= 16; node++) {
                     try {
+                        try { serialPort.purgeHwBuffers(true, true); } catch(Exception ignored){}
                         LcpLink link = new LcpLink(serialPort, node, from, true);
                         LcpOps  ops  = new LcpOps(link);
 
-                        int[] dsdc = ops.opDeliveryStatus(2500, 200); // ping robuste
+                        int[] dsdc = ops.opDeliveryStatus(3500, 250); // ping robuste
+                        Thread.sleep(80);
                         appendAndBuffer(String.format(
                                 "[SCAN] Node=0x%02X → OK DS=0x%04X DC=0x%04X %s",
                                 node, dsdc[0], dsdc[1], dcBits(dsdc[1])));
@@ -484,7 +498,7 @@ public class MainActivity extends AppCompatActivity {
 
     /* ================================================================
        OUTILS : USB dump, tests I/O (non LCP), mini ping LCP (lock)
-        ================================================================ */
+       ================================================================ */
     private void dumpUsb() {
         UsbManager mgr = (UsbManager)getSystemService(Context.USB_SERVICE);
         java.util.Map<String, UsbDevice> devs = mgr.getDeviceList();
@@ -551,10 +565,12 @@ public class MainActivity extends AppCompatActivity {
         if (serialPort == null) { appendAndBuffer("[LCP] Port non ouvert."); return; }
         synchronized (lcpLock) {
             try {
+                try { serialPort.purgeHwBuffers(true, true); } catch(Exception ignored){}
                 int to = 0xFA, from = 0xFF;
                 LcpLink link = new LcpLink(serialPort, to, from, true);
                 LcpOps ops = new LcpOps(link);
-                int[] dsdc = ops.opDeliveryStatus(2500, 200);
+                int[] dsdc = ops.opDeliveryStatus(3500, 250);
+                Thread.sleep(120);
                 appendAndBuffer("[LCP] MiniPing OK, DS=0x" + String.format("%04X", dsdc[0]) +
                         " DC=0x" + String.format("%04X", dsdc[1]) + " " + dcBits(dsdc[1]));
             } catch (Exception e) {
@@ -605,6 +621,7 @@ public class MainActivity extends AppCompatActivity {
         if (serialPort == null) { append("Port non prêt — clique d’abord 'Connexion USB'.\n"); return; }
         synchronized (lcpLock) {
             try {
+                try { serialPort.purgeHwBuffers(true, true); } catch(Exception ignored){}
                 int to=0xFA, from=0xFF;
                 LcpLink link = new LcpLink(serialPort, to, from, true);
                 LcpLink.setLogger(this::appendAndBuffer);
@@ -614,6 +631,7 @@ public class MainActivity extends AppCompatActivity {
                         to, from, bytesToHex(payload)));
 
                 byte[] rsp = link.sendRecv(payload, timeoutMs);
+                Thread.sleep(120);
                 appendAndBuffer("[RAW] OK, RX size=" + (rsp != null ? rsp.length : -1));
 
             } catch (Exception e) {
@@ -630,7 +648,7 @@ public class MainActivity extends AppCompatActivity {
         boolean ticket = (dc & 0x0001) != 0;   // TICKET_PENDING
         boolean flow   = (dc & 0x0004) != 0;   // FLOW_ACTIVE
         boolean deliv  = (dc & 0x0008) != 0;   // DELIVERY_ACTIVE
-        boolean begin  = (dc & 0x0400) != 0;   // BEGIN_DELIVERY
+        boolean begin  = (dc & 0x0400) != 0;   // BEGIN_DELIVERY (dans DC si mappé)
         return String.format("[ticket=%s flow=%s delivery=%s beginDelivery=%s]",
                 ticket, flow, deliv, begin);
     }
