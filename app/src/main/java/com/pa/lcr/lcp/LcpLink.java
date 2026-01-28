@@ -50,7 +50,7 @@ public class LcpLink {
     private int nextStatus() {
         int st = msgId & 0x01;
         if (syncFirst && !syncUsed) {
-            st |= 0x02;   // garder le bit msgId, ajouter syncFirst 1x
+            st |= 0x02;   // conserver le bit msgId, ajouter le flag sync 1x
             syncUsed = true;
         }
         msgId ^= 0x01;
@@ -94,23 +94,20 @@ public class LcpLink {
     }
 
     /* ================================================================
-       SEND / RECEIVE
+       SEND / RECEIVE (profil stable)
        ================================================================ */
     public byte[] sendRecv(byte[] payload, int timeoutMs) throws Exception {
         byte[] frm = buildFrame(payload);
         if (DUMP_TX) log("TX: " + hex(frm));
 
         synchronized (port) {
-            // Réassurer DTR/RTS + purge avant écriture (évite les états "stale")
+            // DTR/RTS hauts (sans purge agressive ici)
             try { port.setRTS(true); } catch(Exception ignore){}
             try { port.setDTR(true); } catch(Exception ignore){}
-            port.purgeHwBuffers(true, true);
             port.write(frm, timeoutMs);
         }
 
-        // Très courte grâce pour laisser amorcer l’envoi côté device
-        try { Thread.sleep(40); } catch (InterruptedException ignored) {}
-
+        // PAS de sleep artificiel ici (profil 16:09)
         byte[] rx = readFrame(timeoutMs);
 
         if (DUMP_RX) log("RX: " + hex(rx));
@@ -118,14 +115,14 @@ public class LcpLink {
     }
 
     /* ================================================================
-       READ FRAME (ESC-aware + robustesse PL2303)
+       READ FRAME (ESC-aware “nerveux”)
        ================================================================ */
     public byte[] readFrame(int timeoutMs) throws Exception {
         final long t0 = System.currentTimeMillis();
 
-        // Tolérances (PL2303 peut pousser par petits bursts)
-        final int perByte = 240;         // ms / lecture d’un octet (esc ou non)
-        final int graceAfterSync = 120;  // "grâce" après ~~ pour laisser arriver le header
+        // Timings “hier 16:09” (réactifs)
+        final int perByte = 180;       // ms / lecture d’un octet (esc ou non)
+        final int graceAfterSync = 80; // petite “grâce” après ~~ pour laisser pousser le header
 
         int sync = 0;
         byte[] one = new byte[1];
@@ -143,7 +140,7 @@ public class LcpLink {
         }
         if (sync < 2) throw new java.util.concurrent.TimeoutException("Sync ~~ timeout");
 
-        // Petite "grâce" pour laisser pousser le header
+        // Petite “grâce” après la sync
         try { Thread.sleep(graceAfterSync); } catch (InterruptedException ignored) {}
 
         // 2) Lecteur 1 octet ESC-aware
