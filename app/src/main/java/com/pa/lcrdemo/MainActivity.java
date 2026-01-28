@@ -31,7 +31,6 @@ import com.pa.lcr.lcp.LcpLink;
 import com.pa.lcr.lcp.LcpOps;
 
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -148,28 +147,39 @@ public class MainActivity extends AppCompatActivity {
             requestAndOpenFirstPort();
         });
 
-        // DIAG (dump USB + open + 0x28) — sérialisé
+        // DIAG (dump USB + open + 0x28) — sérialisé + reopen
         if (btnDiag != null) btnDiag.setOnClickListener(v -> {
             ensureDefaultAddresses();
-            runLcpTask(this::diagConnectAndStatus28_locked);
+            runLcpTask(() -> {
+                if (!reopenPortIfNeeded()) return;
+                diagConnectAndStatus28_locked();
+            });
         });
 
-        // START flow — sérialisé
+        // START flow — sérialisé + reopen
         if (btnStart != null) btnStart.setOnClickListener(v -> {
             ensureDefaultAddresses();
-            runLcpTask(this::startFlow_locked);
+            runLcpTask(() -> {
+                if (!reopenPortIfNeeded()) return;
+                startFlow_locked();
+            });
         });
 
-        // Console : Scan / SendHex
-        if (btnScan != null)    btnScan.setOnClickListener(v -> runLcpTask(this::scanNodes_locked));
+        // Console : Scan / SendHex — sérialisé + reopen
+        if (btnScan != null) btnScan.setOnClickListener(v -> runLcpTask(() -> {
+            if (!reopenPortIfNeeded()) return;
+            scanNodes_locked();
+        }));
         if (btnSendHex != null) btnSendHex.setOnClickListener(v -> promptAndSendHex());
 
-        // *** IMPORTANT : Test USB séquentiel ET verrouillé (plus aucune interférence) ***
+        // Test USB séquentiel ET verrouillé — reopen avant séquence
         if (btnTestUsb != null) btnTestUsb.setOnClickListener(v -> {
             appendAndBuffer("=== TEST PORT USB ===");
             dumpUsb();
-            // Un seul “job” sérialisé : I/O brut PUIS ping LCP, sans thread concurrent
-            runLcpTask(this::testUsbSequence_locked);
+            runLcpTask(() -> {
+                if (!reopenPortIfNeeded()) return;
+                testUsbSequence_locked();
+            });
         });
 
         append("Prêt. Branchez le LCR puis cliquez 'Connexion USB'.\n");
@@ -181,6 +191,47 @@ public class MainActivity extends AppCompatActivity {
         try { unregisterReceiver(usbAttachDetach); } catch(Exception ignored){}
         try { if (serialPort!=null) serialPort.close(); } catch(Exception ignored){}
         lcpExec.shutdownNow();
+    }
+
+    /* ================================================================
+       REOPEN PORT (stabilisation PL2303)
+       ================================================================ */
+    private boolean reopenPortIfNeeded() {
+        try {
+            if (serialPort == null) return openOrVerifyPort();
+
+            // Fermer puis rouvrir proprement (évite l’état “stale”)
+            try { serialPort.close(); } catch(Exception ignore){}
+            serialPort = null;
+
+            UsbManager mgr = (UsbManager)getSystemService(Context.USB_SERVICE);
+            List<UsbSerialDriver> drivers = UsbSerialProber.getDefaultProber().findAllDrivers(mgr);
+            if (drivers.isEmpty()) { appendAndBuffer("[PORT] Aucun driver (reopen)"); return false; }
+
+            UsbSerialDriver driver = drivers.get(0);
+            UsbDevice dev = driver.getDevice();
+            if (!mgr.hasPermission(dev)) { appendAndBuffer("[PORT] Pas de permission (reopen)"); return false; }
+
+            UsbDeviceConnection conn = mgr.openDevice(dev);
+            if (conn == null) { appendAndBuffer("[PORT] openDevice=null (reopen)"); return false; }
+
+            serialPort = driver.getPorts().get(0);
+            serialPort.open(conn);
+            serialPort.setParameters(19200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
+
+            try { serialPort.setRTS(false); } catch(Exception ignore){}
+            try { serialPort.setDTR(false); } catch(Exception ignore){}
+            Thread.sleep(120);
+            try { serialPort.setRTS(true); } catch(Exception ignore){}
+            try { serialPort.setDTR(true); } catch(Exception ignore){}
+
+            serialPort.purgeHwBuffers(true, true);
+            appendAndBuffer("[PORT] Re-open OK (19200 8N1 + DTR/RTS pulsed).");
+            return true;
+        } catch (Exception e) {
+            appendAndBuffer("[PORT] Re-open ERREUR: " + e.getMessage());
+            return false;
+        }
     }
 
     /* ================================================================
@@ -353,8 +404,12 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       MACROS A / B / C
-       ================================================================ */
+      MACROS A / B / C
+      ================================================================ */
+    public void onClickA(View v) { ensureDefaultAddresses(); runLcpTask(() -> { if (!reopenPortIfNeeded()) return; macroResetEndClear_locked(); }); }
+    public void onClickB(View v) { ensureDefaultAddresses(); runLcpTask(() -> { if (!reopenPortIfNeeded()) return; macroPing28GetMachine23_locked(); }); }
+    public void onClickC(View v) { ensureDefaultAddresses(); runLcpTask(() -> { if (!reopenPortIfNeeded()) return; macroStartDelivery_locked(); }); }
+
     private void macroResetEndClear_locked() {
         if (!openOrVerifyPort()) return;
         synchronized (lcpLock) {
@@ -598,7 +653,10 @@ public class MainActivity extends AppCompatActivity {
                         String hex = edt.getText().toString();
                         int toMs = Integer.parseInt(edtTimeout.getText().toString().trim());
                         byte[] payload = parseHexBytes(hex);
-                        runLcpTask(() -> sendRawPayload_locked(payload, Math.max(200, toMs)));
+                        runLcpTask(() -> {
+                            if (!reopenPortIfNeeded()) return;
+                            sendRawPayload_locked(payload, Math.max(200, toMs));
+                        });
                     } catch (Exception e) {
                         appendAndBuffer("[RAW] invalide: " + e.getMessage());
                     }
@@ -608,7 +666,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void sendRawPayload_locked(byte[] payload, int timeoutMs) {
-        if (serialPort == null) { append("Port non prêt — clique d’abord 'Connexion USB'.\n"); return; }
+        if (!openOrVerifyPort()) { append("Port non prêt — clique d’abord 'Connexion USB'.\n"); return; }
         synchronized (lcpLock) {
             try {
                 try { serialPort.purgeHwBuffers(true, true); } catch(Exception ignored){}
@@ -688,9 +746,4 @@ public class MainActivity extends AppCompatActivity {
         if (!s.endsWith("\n")) logBuf.append("\n");
         append(s.endsWith("\n") ? s : s + "\n");
     }
-
-    /* === Handlers A/B/C (si layout utilise android:onClick) === */
-    public void onClickA(View v){ runLcpTask(this::macroResetEndClear_locked); }
-    public void onClickB(View v){ runLcpTask(this::macroPing28GetMachine23_locked); }
-    public void onClickC(View v){ runLcpTask(this::macroStartDelivery_locked); }
 }

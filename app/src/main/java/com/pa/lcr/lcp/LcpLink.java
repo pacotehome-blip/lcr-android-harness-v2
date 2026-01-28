@@ -50,7 +50,7 @@ public class LcpLink {
     private int nextStatus() {
         int st = msgId & 0x01;
         if (syncFirst && !syncUsed) {
-            st |= 0x02;   // OR (ne pas écraser le bit msgId)
+            st |= 0x02;   // garder le bit msgId, ajouter syncFirst 1x
             syncUsed = true;
         }
         msgId ^= 0x01;
@@ -101,12 +101,14 @@ public class LcpLink {
         if (DUMP_TX) log("TX: " + hex(frm));
 
         synchronized (port) {
-            // Purge avant écriture pour éviter un résidu RX précédent
+            // Réassurer DTR/RTS + purge avant écriture (évite les états "stale")
+            try { port.setRTS(true); } catch(Exception ignore){}
+            try { port.setDTR(true); } catch(Exception ignore){}
             port.purgeHwBuffers(true, true);
             port.write(frm, timeoutMs);
         }
 
-        // Très courte grâce pour laisser amorcer l’envoi device
+        // Très courte grâce pour laisser amorcer l’envoi côté device
         try { Thread.sleep(40); } catch (InterruptedException ignored) {}
 
         byte[] rx = readFrame(timeoutMs);
@@ -121,14 +123,14 @@ public class LcpLink {
     public byte[] readFrame(int timeoutMs) throws Exception {
         final long t0 = System.currentTimeMillis();
 
-        // Tolérance par octet (PL2303 peut être un peu "lent")
+        // Tolérances (PL2303 peut pousser par petits bursts)
         final int perByte = 240;         // ms / lecture d’un octet (esc ou non)
-        final int graceAfterSync = 120;  // petite "grâce" après ~~ pour header
+        final int graceAfterSync = 120;  // "grâce" après ~~ pour laisser arriver le header
 
         int sync = 0;
         byte[] one = new byte[1];
 
-        // 1) Chercher ~~ (budget global = timeoutMs)
+        // 1) Chercher ~~ (respecter le budget global timeoutMs)
         while (System.currentTimeMillis() - t0 < timeoutMs) {
             int n = port.read(one, 80);
             if (n <= 0) continue;
@@ -141,10 +143,10 @@ public class LcpLink {
         }
         if (sync < 2) throw new java.util.concurrent.TimeoutException("Sync ~~ timeout");
 
-        // Petite "grâce" pour laisser le device pousser le header
+        // Petite "grâce" pour laisser pousser le header
         try { Thread.sleep(graceAfterSync); } catch (InterruptedException ignored) {}
 
-        // 2) Reader 1 byte ESC-aware
+        // 2) Lecteur 1 octet ESC-aware
         java.util.function.Supplier<R> r1 = () -> {
             try {
                 byte[] b = new byte[1];
