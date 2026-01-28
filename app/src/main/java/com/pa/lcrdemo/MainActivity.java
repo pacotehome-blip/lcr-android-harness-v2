@@ -160,35 +160,17 @@ public class MainActivity extends AppCompatActivity {
             runLcpTask(this::startFlow_locked);
         });
 
-        // Console : Scan / SendHex / TestUSB
+        // Console : Scan / SendHex
         if (btnScan != null)    btnScan.setOnClickListener(v -> runLcpTask(this::scanNodes_locked));
         if (btnSendHex != null) btnSendHex.setOnClickListener(v -> promptAndSendHex());
 
-        // *** IMPORTANT : Test USB séquentiel ET verrouillé (finit les timeouts) ***
+        // *** IMPORTANT : Test USB séquentiel ET verrouillé (plus aucune interférence) ***
         if (btnTestUsb != null) btnTestUsb.setOnClickListener(v -> {
             appendAndBuffer("=== TEST PORT USB ===");
             dumpUsb();
             // Un seul “job” sérialisé : I/O brut PUIS ping LCP, sans thread concurrent
-            runLcpTask(() -> {
-                if (!openOrVerifyPort()) {
-                    appendAndBuffer("[TEST] Port non ouvert.");
-                    return;
-                }
-                testIoSuite_locked();      // I/O brut sous verrou
-                testMiniPingLcp_locked();  // LCP sous le même verrou
-            });
+            runLcpTask(this::testUsbSequence_locked);
         });
-
-        // A/B/C : listeners
-        if (btnA != null) btnA.setOnClickListener(this::onClickA);
-        if (btnB != null) btnB.setOnClickListener(this::onClickB);
-        if (btnC != null) btnC.setOnClickListener(this::onClickC);
-
-        appendAndBuffer(String.format(
-                "[UI] A=%s B=%s C=%s Scan=%s SendHex=%s TestUsb=%s",
-                (btnA!=null), (btnB!=null), (btnC!=null), (btnScan!=null),
-                (btnSendHex!=null), (btnTestUsb!=null)
-        ));
 
         append("Prêt. Branchez le LCR puis cliquez 'Connexion USB'.\n");
     }
@@ -197,16 +179,9 @@ public class MainActivity extends AppCompatActivity {
         super.onDestroy();
         try { unregisterReceiver(usbPermissionReceiver); } catch(Exception ignored){}
         try { unregisterReceiver(usbAttachDetach); } catch(Exception ignored){}
-        try { if(serialPort!=null) serialPort.close(); } catch(Exception ignored){}
+        try { if (serialPort!=null) serialPort.close(); } catch(Exception ignored){}
         lcpExec.shutdownNow();
     }
-
-    /* ================================================================
-       onClick A/B/C
-       ================================================================ */
-    public void onClickA(View v) { ensureDefaultAddresses(); runLcpTask(this::macroResetEndClear_locked); }
-    public void onClickB(View v) { ensureDefaultAddresses(); runLcpTask(this::macroPing28GetMachine23_locked); }
-    public void onClickC(View v) { ensureDefaultAddresses(); runLcpTask(this::macroStartDelivery_locked); }
 
     /* ================================================================
        Sérialisation LCP : queue + lock + disable/enable UI
@@ -221,15 +196,14 @@ public class MainActivity extends AppCompatActivity {
 
     private void setButtonsEnabled(final boolean enabled) {
         runOnUiThread(() -> {
-            if (btnA!=null) btnA.setEnabled(enabled);
-            if (btnB!=null) btnB.setEnabled(enabled);
-            if (btnC!=null) btnC.setEnabled(enabled);
-            if (btnScan!=null) btnScan.setEnabled(enabled);
-            if (btnSendHex!=null) btnSendHex.setEnabled(enabled);
-            if (btnTestUsb!=null) btnTestUsb.setEnabled(enabled);
-            if (btnConnect!=null) btnConnect.setEnabled(enabled);
-            if (btnDiag!=null) btnDiag.setEnabled(enabled);
-            if (btnStart!=null) btnStart.setEnabled(enabled);
+            for (int id : new int[]{
+                    R.id.btnA, R.id.btnB, R.id.btnC,
+                    R.id.btnScan, R.id.btnSendHex, R.id.btnTestUsb,
+                    R.id.btnConnect, R.id.btnDiag, R.id.btnStart
+            }) {
+                View v = findViewById(id);
+                if (v != null) v.setEnabled(enabled);
+            }
         });
     }
 
@@ -260,7 +234,8 @@ public class MainActivity extends AppCompatActivity {
 
         if (!mgr.hasPermission(dev)) {
             append("Demande de permission USB…\n");
-            PendingIntent pi = PendingIntent.getBroadcast(this, 0, new Intent(ACTION_USB_PERMISSION), PendingIntent.FLAG_IMMUTABLE);
+            PendingIntent pi = PendingIntent.getBroadcast(
+                    this, 0, new Intent(ACTION_USB_PERMISSION), PendingIntent.FLAG_IMMUTABLE);
             mgr.requestPermission(dev, pi);
             return;
         }
@@ -519,7 +494,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       OUTILS : USB dump, tests I/O, mini ping LCP
+       OUTILS : USB dump, test USB séquentiel (I/O brut + ping LCP)
        ================================================================ */
     private void dumpUsb() {
         UsbManager mgr = (UsbManager)getSystemService(Context.USB_SERVICE);
@@ -550,19 +525,18 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    // *** NOUVEAU : test I/O BRUT — VERROUILLÉ pour ne plus interférer avec LCP ***
-    private void testIoSuite_locked() {
-        if (serialPort == null) { appendAndBuffer("[I/O] Port non ouvert."); return; }
+    // Séquence complète et verrouillée : I/O brut puis ping LCP
+    private void testUsbSequence_locked() {
+        if (!openOrVerifyPort()) { appendAndBuffer("[TEST] Port non ouvert."); return; }
         synchronized (lcpLock) {
             try {
+                // --- I/O BRUT ---
                 serialPort.purgeHwBuffers(true, true);
-
-                // Test 1 : écrire 0xAA ; si TX/RX court-circuités côté DB9, on verra AA
                 serialPort.write(new byte[]{ (byte)0xAA }, 200);
                 appendAndBuffer("[I/O] Write 0xAA -> requested=1 byte");
 
                 byte[] r = new byte[64];
-                int n = serialPort.read(r, 150);  // lecture courte (hors LCP)
+                int n = serialPort.read(r, 150);  // lecture courte
                 if (n > 0) {
                     StringBuilder sb = new StringBuilder();
                     for (int i=0;i<n;i++) sb.append(String.format("%02X ", r[i]));
@@ -571,25 +545,15 @@ public class MainActivity extends AppCompatActivity {
                     appendAndBuffer("[I/O] RX: aucun octet (normal si pas de loopback matériel)");
                 }
 
-                // BREAK (si supporté)
                 try { serialPort.setBreak(true); Thread.sleep(50); serialPort.setBreak(false); appendAndBuffer("[I/O] BREAK toggled OK"); }
                 catch (Exception e) { appendAndBuffer("[I/O] BREAK non supporté: " + e.getMessage()); }
 
-                // Drainer le RX avant d’enchaîner avec LCP
+                // Drainer le RX avant de faire du LCP
                 serialPort.purgeHwBuffers(true, true);
                 appendAndBuffer("[I/O] Purge RX/TX OK");
+                Thread.sleep(120);
 
-            } catch (Exception e) {
-                appendAndBuffer("[I/O] ERREUR: " + e.getMessage());
-            }
-        }
-    }
-
-    private void testMiniPingLcp_locked() {
-        if (serialPort == null) { appendAndBuffer("[LCP] Port non ouvert."); return; }
-        synchronized (lcpLock) {
-            try {
-                try { serialPort.purgeHwBuffers(true, true); } catch(Exception ignored){}
+                // --- LCP PING (0x28) ---
                 int to = 0xFA, from = 0xFF;
                 LcpLink link = new LcpLink(serialPort, to, from, true);
                 LcpOps ops = new LcpOps(link);
@@ -597,9 +561,10 @@ public class MainActivity extends AppCompatActivity {
                 Thread.sleep(120);
                 appendAndBuffer("[LCP] MiniPing OK, DS=0x" + String.format("%04X", dsdc[0]) +
                         " DC=0x" + String.format("%04X", dsdc[1]) + " " + dsBits(dsdc[0]) + " " + dcBits(dsdc[1]));
-                try { Thread.sleep(300); } catch (InterruptedException ignored) {}
+                Thread.sleep(300);
+
             } catch (Exception e) {
-                appendAndBuffer("[LCP] MiniPing ERREUR: " + e.getMessage());
+                appendAndBuffer("[TEST] ERREUR: " + e.getMessage());
             }
         }
     }
@@ -723,4 +688,9 @@ public class MainActivity extends AppCompatActivity {
         if (!s.endsWith("\n")) logBuf.append("\n");
         append(s.endsWith("\n") ? s : s + "\n");
     }
+
+    /* === Handlers A/B/C (si layout utilise android:onClick) === */
+    public void onClickA(View v){ runLcpTask(this::macroResetEndClear_locked); }
+    public void onClickB(View v){ runLcpTask(this::macroPing28GetMachine23_locked); }
+    public void onClickC(View v){ runLcpTask(this::macroStartDelivery_locked); }
 }
