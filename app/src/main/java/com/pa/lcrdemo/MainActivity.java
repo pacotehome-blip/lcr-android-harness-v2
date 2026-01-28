@@ -130,7 +130,7 @@ public class LcpLink {
         while (System.currentTimeMillis() - t0 < timeoutMs) {
             int n = port.read(one, 80);
             if (n <= 0) continue;
-            int v = one[0] & 0xFF;
+            int v = one b[0] & 0xFF;
             if (v == CrcLcp.TILDE) {
                 if (++sync == 2) break;
             } else {
