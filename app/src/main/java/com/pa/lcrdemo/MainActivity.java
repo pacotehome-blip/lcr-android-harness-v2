@@ -251,7 +251,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       B — Ping 0x28 (RAW, comme Python) + retry unique ciblé
+       B — Ping 0x28 (RAW, comme Python) + resync (0x00) si nécessaire
        ================================================================ */
     private void macroPing28_raw_locked() {
         if (!openOrVerifyPort()) return;
@@ -261,27 +261,53 @@ public class MainActivity extends AppCompatActivity {
                 byte[] sniff = new byte[4]; try { serialPort.read(sniff, 50); } catch(Exception ignore){}
 
                 final int to=0xFA, from=0xFF;
-                LcpLink link = new LcpLink(serialPort, to, from, true);
+                LcpLink link1 = new LcpLink(serialPort, to, from, true /*syncFirst*/);
                 LcpLink.setLogger(this::appendAndBuffer);
                 LcpLink.DUMP_TX = true; LcpLink.DUMP_RX = true;
 
                 appendAndBuffer("[B] RAW GET_DEL_STATUS (0x28)");
-                byte[] frame;
+                byte[] frame = null;
+                Exception firstErr = null;
+
+                // 1) Tentative directe 0x28 (SYNC=1)
                 try {
-                    // première tentative
-                    frame = link.sendRecv(new byte[]{ (byte)0x28 }, 3000);
-                } catch (Exception first) {
-                    // petit délai ciblé puis retry unique (évite boucle infinie)
-                    try { Thread.sleep(120); } catch (InterruptedException ignored) {}
-                    frame = link.sendRecv(new byte[]{ (byte)0x28 }, 3200);
+                    frame = link1.sendRecv(new byte[]{ (byte)0x28 }, 3000);
+                } catch (Exception e1) {
+                    firstErr = e1;
                 }
 
-                byte[] pld = com.pa.lcr.lcp.LcpLink.extractPayload(frame);
-                // payload 0x28 attendu: [00 21  ds_lo ds_hi  dc_lo dc_hi]
+                // 2) Si échec : RESYNC 0x00 (SYNC=1) puis retry 0x28 (SYNC=0)
+                if (frame == null) {
+                    appendAndBuffer("[B] resync via 0x00 (Get Product ID) puis retry 0x28");
+                    try { serialPort.purgeHwBuffers(true, true); } catch(Exception ignore){}
+
+                    // 2a) RESYNC 0x00
+                    LcpLink linkSync = new LcpLink(serialPort, to, from, true /*syncFirst*/);
+                    try {
+                        try { Thread.sleep(120); } catch (InterruptedException ignored) {}
+                        linkSync.sendRecv(new byte[]{ (byte)0x00 }, 3200);
+                    } catch (Exception syncErr) {
+                        appendAndBuffer("[B] RESYNC échec: " + syncErr.getMessage());
+                    }
+
+                    // 2b) RETRY 0x28 (sans SYNC)
+                    try { serialPort.purgeHwBuffers(true, true); } catch(Exception ignore){}
+                    LcpLink link2 = new LcpLink(serialPort, to, from, false /*no sync now*/);
+                    try { Thread.sleep(120); } catch (InterruptedException ignored) {}
+                    frame = link2.sendRecv(new byte[]{ (byte)0x28 }, 3200);
+
+                    if (frame == null) {
+                        throw (firstErr != null ? firstErr : new RuntimeException("Ping 0x28 retry failed"));
+                    }
+                }
+
+                // 3) Décodage payload 0x28 : rc, devStatus, delStatus, delCode (6 octets)
+                byte[] pld = LcpLink.extractPayload(frame);
                 if (pld == null || pld.length < 6) throw new IllegalStateException("payload 0x28 invalide, len=" + (pld==null?-1:pld.length));
+                int rc = pld[0] & 0xFF;
                 int ds = (pld[3] & 0xFF) << 8 | (pld[2] & 0xFF);
                 int dc = (pld[5] & 0xFF) << 8 | (pld[4] & 0xFF);
-                appendAndBuffer(String.format("[B] DS=0x%04X DC=0x%04X %s %s", ds, dc, dsBits(ds), dcBits(dc)));
+                appendAndBuffer(String.format("[B] rc=%d DS=0x%04X DC=0x%04X %s %s", rc, ds, dc, dsBits(ds), dcBits(dc)));
 
             } catch (Exception e) {
                 appendAndBuffer("[B] ERREUR: " + e.getMessage());
@@ -481,7 +507,7 @@ public class MainActivity extends AppCompatActivity {
         boolean ticket = (dc & 0x0001) != 0;   // TICKET_PENDING
         boolean flow   = (dc & 0x0004) != 0;   // FLOW_ACTIVE
         boolean deliv  = (dc & 0x0008) != 0;   // DELIVERY_ACTIVE
-        boolean begin  = (dc & 0x0400) != 0;   // BEGIN_DELIVERY (si mappé)
+        boolean begin  = (dc & 0x0400) != 0;   // BEGIN_DELIVERY
         return String.format("[ticket=%s flow=%s delivery=%s beginDelivery=%s]",
                 ticket, flow, deliv, begin);
     }
