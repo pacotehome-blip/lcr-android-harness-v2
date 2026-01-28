@@ -101,14 +101,13 @@ public class LcpLink {
         if (DUMP_TX) log("TX: " + hex(frm));
 
         synchronized (port) {
-            // Assurer les lignes de contrôle (inoffensif si déjà hautes)
+            // Assurer DTR/RTS (inoffensif si déjà haut)
             try { port.setRTS(true); } catch(Exception ignore){}
             try { port.setDTR(true); } catch(Exception ignore){}
-            // Pas de purge agressive ici (les macros purgent en entrée)
             port.write(frm, timeoutMs);
         }
 
-        // Pas de Thread.sleep() ici → on lit tout de suite
+        // Pas de Thread.sleep ici → on lit tout de suite
         byte[] rx = readFrame(timeoutMs);
 
         if (DUMP_RX) log("RX: " + hex(rx));
@@ -218,7 +217,7 @@ public class LcpLink {
     }
 
     /* ================================================================
-       Helpers d’extraction (sur trame renvoyée par readFrame)
+       Helpers d’extraction
        ================================================================ */
     public static int extractStatus(byte[] frame) {
         // frame = ~~ + hdr(4) + payload + crc(2)

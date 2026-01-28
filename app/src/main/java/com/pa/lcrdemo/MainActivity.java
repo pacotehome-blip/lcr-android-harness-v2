@@ -134,9 +134,9 @@ public class MainActivity extends AppCompatActivity {
         View vConn = findViewById(R.id.btnConnect);
         if (vConn != null) vConn.setOnClickListener(v -> requestAndOpenFirstPort());
 
-        // DIAG : Ping 0x28 simple (profil stable)
+        // DIAG : Ping 0x28 simple (RAW)
         View vDiag = findViewById(R.id.btnDiag);
-        if (vDiag != null) vDiag.setOnClickListener(v -> runLcpTask(this::diagPing28_locked));
+        if (vDiag != null) vDiag.setOnClickListener(v -> runLcpTask(this::diagPing28_raw_locked));
 
         // START flow (alias Start)
         View vStart = findViewById(R.id.btnStart);
@@ -147,12 +147,12 @@ public class MainActivity extends AppCompatActivity {
         if (vA != null) vA.setOnClickListener(v -> runLcpTask(this::macroResetEndClear_locked));
 
         View vB = findViewById(R.id.btnB);
-        if (vB != null) vB.setOnClickListener(v -> runLcpTask(this::macroPing28_locked));
+        if (vB != null) vB.setOnClickListener(v -> runLcpTask(this::macroPing28_raw_locked));
 
         View vC = findViewById(R.id.btnC);
         if (vC != null) vC.setOnClickListener(v -> runLcpTask(this::macroStartDelivery_locked));
 
-        // Console RAW (⚠️ ligne corrigée : parenthèse superflue supprimée)
+        // Console RAW
         View vRaw = findViewById(R.id.btnSendHex);
         if (vRaw != null) vRaw.setOnClickListener(v -> promptAndSendHex());
 
@@ -251,24 +251,47 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       DIAG / PING (profil stable)
+       B — Ping 0x28 (RAW, comme Python) + retry unique ciblé
        ================================================================ */
-    private void diagPing28_locked() {
+    private void macroPing28_raw_locked() {
         if (!openOrVerifyPort()) return;
         synchronized (lcpLock) {
             try {
                 serialPort.purgeHwBuffers(true, true);
-                int to = 0xFA, from = 0xFF;
+                byte[] sniff = new byte[4]; try { serialPort.read(sniff, 50); } catch(Exception ignore){}
+
+                final int to=0xFA, from=0xFF;
                 LcpLink link = new LcpLink(serialPort, to, from, true);
-                LcpOps ops = new LcpOps(link);
-                int[] dsdc = ops.opDeliveryStatus(3000, 200);
-                Thread.sleep(120);
-                appendAndBuffer(String.format("[DIAG] DS=0x%04X DC=0x%04X %s %s",
-                        dsdc[0], dsdc[1], dsBits(dsdc[0]), dcBits(dsdc[1])));
+                LcpLink.setLogger(this::appendAndBuffer);
+                LcpLink.DUMP_TX = true; LcpLink.DUMP_RX = true;
+
+                appendAndBuffer("[B] RAW GET_DEL_STATUS (0x28)");
+                byte[] frame;
+                try {
+                    // première tentative
+                    frame = link.sendRecv(new byte[]{ (byte)0x28 }, 3000);
+                } catch (Exception first) {
+                    // petit délai ciblé puis retry unique (évite boucle infinie)
+                    try { Thread.sleep(120); } catch (InterruptedException ignored) {}
+                    frame = link.sendRecv(new byte[]{ (byte)0x28 }, 3200);
+                }
+
+                byte[] pld = com.pa.lcr.lcp.LcpLink.extractPayload(frame);
+                // payload 0x28 attendu: [00 21  ds_lo ds_hi  dc_lo dc_hi]
+                if (pld == null || pld.length < 6) throw new IllegalStateException("payload 0x28 invalide, len=" + (pld==null?-1:pld.length));
+                int ds = (pld[3] & 0xFF) << 8 | (pld[2] & 0xFF);
+                int dc = (pld[5] & 0xFF) << 8 | (pld[4] & 0xFF);
+                appendAndBuffer(String.format("[B] DS=0x%04X DC=0x%04X %s %s", ds, dc, dsBits(ds), dcBits(dc)));
+
             } catch (Exception e) {
-                appendAndBuffer("[DIAG] ERREUR: " + e.getMessage());
+                appendAndBuffer("[B] ERREUR: " + e.getMessage());
             }
         }
+    }
+
+    // DIAG (même ping RAW que B)
+    private void diagPing28_raw_locked() {
+        macroPing28_raw_locked();
     }
 
     /* ================================================================
@@ -315,33 +338,6 @@ public class MainActivity extends AppCompatActivity {
 
             } catch (Exception e) {
                 appendAndBuffer("[A] ERREUR: " + e.getMessage());
-            }
-        }
-    }
-
-    /* ================================================================
-       B — Ping (28)
-       ================================================================ */
-    private void macroPing28_locked() {
-        if (!openOrVerifyPort()) return;
-        synchronized (lcpLock) {
-            try {
-                serialPort.purgeHwBuffers(true, true);
-
-                int to=0xFA, from=0xFF;
-                LcpLink link = new LcpLink(serialPort, to, from, true);
-                LcpOps  ops  = new LcpOps(link);
-                LcpLink.setLogger(this::appendAndBuffer);
-                LcpLink.DUMP_TX = true; LcpLink.DUMP_RX = true;
-
-                appendAndBuffer("[B] GET_DEL_STATUS (0x28)");
-                int[] dsdc = ops.opDeliveryStatus(3000, 200);
-                Thread.sleep(120);
-                appendAndBuffer(String.format("[B] DS=0x%04X DC=0x%04X %s %s",
-                        dsdc[0], dsdc[1], dsBits(dsdc[0]), dcBits(dsdc[1])));
-
-            } catch (Exception e) {
-                appendAndBuffer("[B] ERREUR: " + e.getMessage());
             }
         }
     }
