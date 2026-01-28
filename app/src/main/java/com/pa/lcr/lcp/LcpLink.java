@@ -4,7 +4,6 @@ package com.pa.lcr.lcp;
 import com.hoho.android.usbserial.driver.UsbSerialPort;
 
 import java.io.ByteArrayOutputStream;
-import java.util.function.Supplier;
 
 public class LcpLink {
 
@@ -51,7 +50,7 @@ public class LcpLink {
     private int nextStatus() {
         int st = msgId & 0x01;
         if (syncFirst && !syncUsed) {
-            st |= 0x02;   // OR, pas affectation
+            st |= 0x02;   // OR (ne pas écraser le bit msgId)
             syncUsed = true;
         }
         msgId ^= 0x01;
@@ -102,6 +101,7 @@ public class LcpLink {
         if (DUMP_TX) log("TX: " + hex(frm));
 
         synchronized (port) {
+            // Purge avant écriture pour éviter un résidu RX précédent
             port.purgeHwBuffers(true, true);
             port.write(frm, timeoutMs);
         }
@@ -113,16 +113,21 @@ public class LcpLink {
     }
 
     /* ================================================================
-       READ FRAME (ESC-aware + CRC sur ESCAPÉ)
+       READ FRAME (ESC-aware + robustesse PL2303)
        ================================================================ */
     public byte[] readFrame(int timeoutMs) throws Exception {
-        long t0 = System.currentTimeMillis();
+        final long t0 = System.currentTimeMillis();
+
+        // Tolérance par octet (PL2303 peut être un peu "lent")
+        final int perByte = 180;         // ms / lecture d’un octet (esc ou non)
+        final int graceAfterSync = 80;   // petite "grâce" après avoir trouvé ~~ (ms)
+
         int sync = 0;
         byte[] one = new byte[1];
 
-        // Cherche ~~ (0x7E 0x7E)
+        // 1) Chercher ~~ (budget global = timeoutMs)
         while (System.currentTimeMillis() - t0 < timeoutMs) {
-            int n = port.read(one, 50);
+            int n = port.read(one, 80);
             if (n <= 0) continue;
             int v = one[0] & 0xFF;
             if (v == CrcLcp.TILDE) {
@@ -133,16 +138,19 @@ public class LcpLink {
         }
         if (sync < 2) throw new java.util.concurrent.TimeoutException("Sync ~~ timeout");
 
-        // Lecteur 1 byte avec gestion ESC
-        Supplier<R> r1 = () -> {
+        // Petite "grâce" pour laisser le device pousser le header
+        try { Thread.sleep(graceAfterSync); } catch (InterruptedException ignored) {}
+
+        // 2) Reader 1 byte ESC-aware
+        java.util.function.Supplier<R> r1 = () -> {
             try {
                 byte[] b = new byte[1];
-                int n = port.read(b, 100);
+                int n = port.read(b, perByte);
                 if (n <= 0) return r(null, false);
                 int v = b[0] & 0xFF;
                 if (v == CrcLcp.ESC) {
                     byte[] y = new byte[1];
-                    int m = port.read(y, 100);
+                    int m = port.read(y, perByte);
                     if (m <= 0) return r(null, false);
                     return r(new byte[]{ (byte) CrcLcp.ESC, y[0] }, true);
                 }
@@ -152,7 +160,7 @@ public class LcpLink {
             }
         };
 
-        // Header (4 octets) — stocke ESCAPÉ pour CRC
+        // 3) Lire header (4 octets) — stocker ESCAPÉ pour CRC
         ByteArrayOutputStream rawHdr = new ByteArrayOutputStream();
         byte[] hdr = new byte[4];
         int hpos = 0;
@@ -164,8 +172,9 @@ public class LcpLink {
         }
         if (hpos < 4) throw new java.util.concurrent.TimeoutException("Header timeout");
 
-        // Payload (len = hdr[3]) — stocke ESCAPÉ pour CRC
         int plen = hdr[3] & 0xFF;
+
+        // 4) Lire payload (plen octets) — stocker ESCAPÉ pour CRC
         ByteArrayOutputStream rawData = new ByteArrayOutputStream();
         byte[] data = new byte[plen];
         int dpos = 0;
@@ -177,7 +186,7 @@ public class LcpLink {
         }
         if (dpos < plen) throw new java.util.concurrent.TimeoutException("Payload timeout");
 
-        // CRC (2 octets)
+        // 5) Lire CRC (2 octets)
         byte[] crcB = new byte[2];
         int cpos = 0;
         while (cpos < 2 && System.currentTimeMillis() - t0 < timeoutMs) {
@@ -187,12 +196,12 @@ public class LcpLink {
         }
         if (cpos < 2) throw new java.util.concurrent.TimeoutException("CRC timeout");
 
-        // Recalcule CRC sur ESCAPÉ (rawHdr + rawData)
+        // 6) Vérifier CRC sur ESCAPÉ
         int calc = CrcLcp.crcLcp(concat(rawHdr.toByteArray(), rawData.toByteArray()));
         int recv = (crcB[0] & 0xFF) | ((crcB[1] & 0xFF) << 8);
         if (calc != recv) throw new IllegalStateException("CRC mismatch");
 
-        // Recompose trame pour extraction status/payload
+        // Recompose et retourne
         return concat(
                 new byte[]{ (byte) CrcLcp.TILDE, (byte) CrcLcp.TILDE },
                 concat(hdr, concat(data, crcB))
@@ -206,12 +215,17 @@ public class LcpLink {
         return o;
     }
 
+    /* ================================================================
+       Helpers d’extraction (sur trame renvoyée par readFrame)
+       ================================================================ */
     public static int extractStatus(byte[] frame) {
+        // frame = ~~ + hdr(4) + payload + crc(2)
+        // index 0..1 = ~~, 2..5 = hdr
         return frame[4] & 0xFF;
     }
 
     public static byte[] extractPayload(byte[] frame) {
-        int ln = frame[5] & 0xFF;
+        int ln = frame[5] & 0xFF;     // length depuis header
         byte[] p = new byte[ln];
         System.arraycopy(frame, 6, p, 0, ln);
         return p;
