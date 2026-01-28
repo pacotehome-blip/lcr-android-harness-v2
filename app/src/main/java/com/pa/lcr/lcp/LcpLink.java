@@ -106,6 +106,9 @@ public class LcpLink {
             port.write(frm, timeoutMs);
         }
 
+        // Laisser un très court temps au device pour amorcer l’envoi
+        try { Thread.sleep(40); } catch (InterruptedException ignored) {}
+
         byte[] rx = readFrame(timeoutMs);
 
         if (DUMP_RX) log("RX: " + hex(rx));
@@ -119,8 +122,8 @@ public class LcpLink {
         final long t0 = System.currentTimeMillis();
 
         // Tolérance par octet (PL2303 peut être un peu "lent")
-        final int perByte = 180;         // ms / lecture d’un octet (esc ou non)
-        final int graceAfterSync = 80;   // petite "grâce" après avoir trouvé ~~ (ms)
+        final int perByte = 240;         // ms / lecture d’un octet (esc ou non) — augmenté
+        final int graceAfterSync = 120;  // petite "grâce" après ~~ — augmenté
 
         int sync = 0;
         byte[] one = new byte[1];

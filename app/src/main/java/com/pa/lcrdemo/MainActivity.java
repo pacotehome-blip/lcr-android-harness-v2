@@ -52,7 +52,7 @@ public class MainActivity extends AppCompatActivity {
     private final Object lcpLock = new Object();
     private final ExecutorService lcpExec = Executors.newSingleThreadExecutor();
 
-    // Références UI pour (dés)activer pendant une macro
+    // Références UI
     private Button btnA, btnB, btnC, btnScan, btnSendHex, btnTestUsb, btnConnect, btnDiag, btnStart;
 
     /* ================================================================
@@ -110,7 +110,7 @@ public class MainActivity extends AppCompatActivity {
         btnB       = findViewById(R.id.btnB);
         btnC       = findViewById(R.id.btnC);
 
-        // Par défaut : imposer To=0xFA, From=0xFF
+        // Forcer To=0xFA, From=0xFF
         ensureDefaultAddresses();
 
         // Receivers
@@ -148,7 +148,7 @@ public class MainActivity extends AppCompatActivity {
             requestAndOpenFirstPort();
         });
 
-        // DIAG complet : dump USB + open + 0x28 (sérialisé)
+        // DIAG (dump USB + open + 0x28)
         if (btnDiag != null) btnDiag.setOnClickListener(v -> {
             ensureDefaultAddresses();
             runLcpTask(this::diagConnectAndStatus28_locked);
@@ -162,22 +162,21 @@ public class MainActivity extends AppCompatActivity {
 
         // Console : Scan / SendHex / TestUSB
         if (btnScan != null)    btnScan.setOnClickListener(v -> runLcpTask(this::scanNodes_locked));
-        if (btnSendHex != null) btnSendHex.setOnClickListener(v -> promptAndSendHex()); // prompt UI -> envoi sérialisé
+        if (btnSendHex != null) btnSendHex.setOnClickListener(v -> promptAndSendHex());
         if (btnTestUsb != null) btnTestUsb.setOnClickListener(v -> {
             appendAndBuffer("=== TEST PORT USB ===");
             dumpUsb();
             if (openOrVerifyPort()) {
-                testIoSuite(); // tests I/O (brut, hors LCP)
+                testIoSuite(); // brut hors LCP
                 runLcpTask(this::testMiniPingLcp_locked);
             }
         });
 
-        // A/B/C : listeners + (optionnellement android:onClick dans XML)
+        // A/B/C : listeners
         if (btnA != null) btnA.setOnClickListener(this::onClickA);
         if (btnB != null) btnB.setOnClickListener(this::onClickB);
         if (btnC != null) btnC.setOnClickListener(this::onClickC);
 
-        // Log présence des vues
         appendAndBuffer(String.format(
                 "[UI] A=%s B=%s C=%s Scan=%s SendHex=%s TestUsb=%s",
                 (btnA!=null), (btnB!=null), (btnC!=null), (btnScan!=null),
@@ -196,7 +195,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       HANDLERS XML (android:onClick) pour A / B / C
+       onClick A/B/C
        ================================================================ */
     public void onClickA(View v) { ensureDefaultAddresses(); runLcpTask(this::macroResetEndClear_locked); }
     public void onClickB(View v) { ensureDefaultAddresses(); runLcpTask(this::macroPing28GetMachine23_locked); }
@@ -320,7 +319,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       DIAG — COMPLET (verrouillé)
+       DIAG — COMPLET
        ================================================================ */
     private void diagConnectAndStatus28_locked() {
         appendAndBuffer("=== DIAGNOSTIC COMPLET ===");
@@ -337,6 +336,7 @@ public class MainActivity extends AppCompatActivity {
                 Thread.sleep(120);
                 appendAndBuffer(String.format("[DIAG] DS=0x%04X DC=0x%04X %s %s",
                         dsdc[0], dsdc[1], dsBits(dsdc[0]), dcBits(dsdc[1])));
+                try { Thread.sleep(300); } catch (InterruptedException ignored) {}
             } catch (Exception e) {
                 appendAndBuffer("[DIAG] ERREUR: " + e.getMessage());
             }
@@ -344,13 +344,12 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       START FLOW (verrouillé)
+       START FLOW
        ================================================================ */
     private void startFlow_locked() {
         try {
             if (serialPort == null) { append("Port non prêt — clique 'Connexion USB'.\n"); return; }
 
-            // Forcer adresses
             runOnUiThread(() -> { edtTo.setText("0xFA"); edtFrom.setText("0xFF"); });
 
             LcrSimpleDeliverV2.Params p = new LcrSimpleDeliverV2.Params();
@@ -365,13 +364,14 @@ public class MainActivity extends AppCompatActivity {
             lcr.prestart(); Thread.sleep(200);
             lcr.start();    Thread.sleep(120);
             appendAndBuffer("[C] start() OK — surveillez LIVE dans l’app.");
+            try { Thread.sleep(300); } catch (InterruptedException ignored) {}
         } catch (Exception ex) {
             append("ERREUR (startFlow thread): "+ ex.getMessage()+"\n");
         }
     }
 
     /* ================================================================
-       MACROS A / B / C (verrouillé) — via LcpOps (gestion queued)
+       MACROS A / B / C
        ================================================================ */
     private void macroResetEndClear_locked() {
         if (!openOrVerifyPort()) return;
@@ -408,6 +408,7 @@ public class MainActivity extends AppCompatActivity {
 
                 appendAndBuffer(String.format("[A] FINAL DS=0x%04X DC=0x%04X %s %s",
                         dsdc[0], dsdc[1], dsBits(dsdc[0]), dcBits(dsdc[1])));
+                try { Thread.sleep(300); } catch (InterruptedException ignored) {}
 
             } catch (Exception e) {
                 appendAndBuffer("[A] ERREUR: " + e.getMessage());
@@ -438,6 +439,7 @@ public class MainActivity extends AppCompatActivity {
                 Thread.sleep(120);
                 appendAndBuffer(String.format("[B] DEV=0x%04X DS=0x%04X DC=0x%04X %s %s",
                         dev_ds_dc[0], dev_ds_dc[1], dev_ds_dc[2], dsBits(dev_ds_dc[1]), dcBits(dev_ds_dc[2])));
+                try { Thread.sleep(300); } catch (InterruptedException ignored) {}
 
             } catch (Exception e) {
                 appendAndBuffer("[B] ERREUR: " + e.getMessage());
@@ -463,6 +465,8 @@ public class MainActivity extends AppCompatActivity {
                 lcr.prestart(); Thread.sleep(200);
                 lcr.start();    Thread.sleep(120);
                 appendAndBuffer("[C] start() OK — surveillez LIVE dans l’app.");
+                try { Thread.sleep(300); } catch (InterruptedException ignored) {}
+
             } catch (Exception e) {
                 appendAndBuffer("[C] ERREUR: " + e.getMessage());
             }
@@ -470,14 +474,14 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       OUTIL : Scan nodes (verrouillé)
+       SCAN nodes
        ================================================================ */
     private void scanNodes_locked() {
         if (!openOrVerifyPort()) return;
 
         synchronized (lcpLock) {
             try {
-                final int from = 0xFF; // hôte imposé
+                final int from = 0xFF;
                 LcpLink.setLogger(this::appendAndBuffer);
                 LcpLink.DUMP_TX = true;
                 LcpLink.DUMP_RX = true;
@@ -488,7 +492,7 @@ public class MainActivity extends AppCompatActivity {
                         LcpLink link = new LcpLink(serialPort, node, from, true);
                         LcpOps  ops  = new LcpOps(link);
 
-                        int[] dsdc = ops.opDeliveryStatus(3500, 250); // ping robuste
+                        int[] dsdc = ops.opDeliveryStatus(3500, 250);
                         Thread.sleep(80);
                         appendAndBuffer(String.format(
                                 "[SCAN] Node=0x%02X → OK DS=0x%04X DC=0x%04X %s %s",
@@ -496,7 +500,7 @@ public class MainActivity extends AppCompatActivity {
 
                         final int n = node;
                         runOnUiThread(() -> edtTo.setText(String.format("0x%02X", n)));
-                        break; // premier node qui répond
+                        break;
                     } catch (Exception ex) {
                         appendAndBuffer(String.format("[SCAN] Node=0x%02X → no reply (%s)", node, ex.getMessage()));
                     }
@@ -508,7 +512,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       OUTILS : USB dump, tests I/O (non LCP), mini ping LCP (lock)
+       OUTILS : USB dump, tests I/O, mini ping LCP
        ================================================================ */
     private void dumpUsb() {
         UsbManager mgr = (UsbManager)getSystemService(Context.USB_SERVICE);
@@ -584,6 +588,7 @@ public class MainActivity extends AppCompatActivity {
                 Thread.sleep(120);
                 appendAndBuffer("[LCP] MiniPing OK, DS=0x" + String.format("%04X", dsdc[0]) +
                         " DC=0x" + String.format("%04X", dsdc[1]) + " " + dsBits(dsdc[0]) + " " + dcBits(dsdc[1]));
+                try { Thread.sleep(300); } catch (InterruptedException ignored) {}
             } catch (Exception e) {
                 appendAndBuffer("[LCP] MiniPing ERREUR: " + e.getMessage());
             }
@@ -591,7 +596,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       CONSOLE : Send HEX (prompt UI) -> envoi LCP sérialisé
+       CONSOLE : Send HEX
        ================================================================ */
     private void promptAndSendHex() {
         if (serialPort == null) { append("RAW: port non prêt — clique 'Connexion USB'.\n"); return; }
