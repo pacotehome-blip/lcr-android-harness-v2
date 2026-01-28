@@ -148,13 +148,13 @@ public class MainActivity extends AppCompatActivity {
             requestAndOpenFirstPort();
         });
 
-        // DIAG (dump USB + open + 0x28)
+        // DIAG (dump USB + open + 0x28) — sérialisé
         if (btnDiag != null) btnDiag.setOnClickListener(v -> {
             ensureDefaultAddresses();
             runLcpTask(this::diagConnectAndStatus28_locked);
         });
 
-        // START flow
+        // START flow — sérialisé
         if (btnStart != null) btnStart.setOnClickListener(v -> {
             ensureDefaultAddresses();
             runLcpTask(this::startFlow_locked);
@@ -163,13 +163,20 @@ public class MainActivity extends AppCompatActivity {
         // Console : Scan / SendHex / TestUSB
         if (btnScan != null)    btnScan.setOnClickListener(v -> runLcpTask(this::scanNodes_locked));
         if (btnSendHex != null) btnSendHex.setOnClickListener(v -> promptAndSendHex());
+
+        // *** IMPORTANT : Test USB séquentiel ET verrouillé (finit les timeouts) ***
         if (btnTestUsb != null) btnTestUsb.setOnClickListener(v -> {
             appendAndBuffer("=== TEST PORT USB ===");
             dumpUsb();
-            if (openOrVerifyPort()) {
-                testIoSuite(); // brut hors LCP
-                runLcpTask(this::testMiniPingLcp_locked);
-            }
+            // Un seul “job” sérialisé : I/O brut PUIS ping LCP, sans thread concurrent
+            runLcpTask(() -> {
+                if (!openOrVerifyPort()) {
+                    appendAndBuffer("[TEST] Port non ouvert.");
+                    return;
+                }
+                testIoSuite_locked();      // I/O brut sous verrou
+                testMiniPingLcp_locked();  // LCP sous le même verrou
+            });
         });
 
         // A/B/C : listeners
@@ -543,37 +550,39 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void testIoSuite() {
+    // *** NOUVEAU : test I/O BRUT — VERROUILLÉ pour ne plus interférer avec LCP ***
+    private void testIoSuite_locked() {
         if (serialPort == null) { appendAndBuffer("[I/O] Port non ouvert."); return; }
-        new Thread(() -> {
+        synchronized (lcpLock) {
             try {
                 serialPort.purgeHwBuffers(true, true);
+
+                // Test 1 : écrire 0xAA ; si TX/RX court-circuités côté DB9, on verra AA
                 serialPort.write(new byte[]{ (byte)0xAA }, 200);
                 appendAndBuffer("[I/O] Write 0xAA -> requested=1 byte");
 
                 byte[] r = new byte[64];
-                int n = serialPort.read(r, 150);
+                int n = serialPort.read(r, 150);  // lecture courte (hors LCP)
                 if (n > 0) {
                     StringBuilder sb = new StringBuilder();
                     for (int i=0;i<n;i++) sb.append(String.format("%02X ", r[i]));
-                    appendAndBuffer("[I/O] Loopback RX: " + sb);
+                    appendAndBuffer("[I/O] RX: " + sb);
                 } else {
-                    appendAndBuffer("[I/O] Loopback RX: aucun octet (si court-circuit TX-RX absent, c’est normal)");
+                    appendAndBuffer("[I/O] RX: aucun octet (normal si pas de loopback matériel)");
                 }
 
+                // BREAK (si supporté)
                 try { serialPort.setBreak(true); Thread.sleep(50); serialPort.setBreak(false); appendAndBuffer("[I/O] BREAK toggled OK"); }
                 catch (Exception e) { appendAndBuffer("[I/O] BREAK non supporté: " + e.getMessage()); }
 
+                // Drainer le RX avant d’enchaîner avec LCP
                 serialPort.purgeHwBuffers(true, true);
-                serialPort.write(new byte[]{ 0x00 }, 200);
-                appendAndBuffer("[I/O] Write 0x00 -> requested=1 byte");
-                n = serialPort.read(r, 150);
-                appendAndBuffer("[I/O] Read after 0x00 -> bytesRead=" + n);
+                appendAndBuffer("[I/O] Purge RX/TX OK");
 
             } catch (Exception e) {
-                appendAndBuffer("[I/O] ERREUR tests: " + e.getMessage());
+                appendAndBuffer("[I/O] ERREUR: " + e.getMessage());
             }
-        }).start();
+        }
     }
 
     private void testMiniPingLcp_locked() {
