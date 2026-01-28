@@ -329,14 +329,14 @@ public class MainActivity extends AppCompatActivity {
 
         synchronized (lcpLock) {
             try {
-                // Petite purge RX avant une lecture critique
                 try { serialPort.purgeHwBuffers(true, true); } catch(Exception ignored){}
                 int to = 0xFA, from = 0xFF;
                 LcpLink link = new LcpLink(serialPort, to, from, true);
                 LcpOps ops = new LcpOps(link);
                 int[] dsdc = ops.opDeliveryStatus(3500, 250);
                 Thread.sleep(120);
-                appendAndBuffer(String.format("[DIAG] DS=0x%04X DC=0x%04X %s", dsdc[0], dsdc[1], dcBits(dsdc[1])));
+                appendAndBuffer(String.format("[DIAG] DS=0x%04X DC=0x%04X %s %s",
+                        dsdc[0], dsdc[1], dsBits(dsdc[0]), dcBits(dsdc[1])));
             } catch (Exception e) {
                 appendAndBuffer("[DIAG] ERREUR: " + e.getMessage());
             }
@@ -393,11 +393,21 @@ public class MainActivity extends AppCompatActivity {
                 ops.opIssueCommand(0x06, 3500, 250);
                 Thread.sleep(200);
 
-                try { serialPort.purgeHwBuffers(true, true); } catch(Exception ignored){}
-                appendAndBuffer("[A] GET_DEL_STATUS (0x28)");
-                int[] dsdc = ops.opDeliveryStatus(3500, 250);
-                Thread.sleep(120);
-                appendAndBuffer(String.format("[A] DS=0x%04X DC=0x%04X %s", dsdc[0], dsdc[1], dcBits(dsdc[1])));
+                // Attendre ticket=0 (DC & 0x0001), max ~8 s
+                long t0 = System.currentTimeMillis();
+                int[] dsdc;
+                while (true) {
+                    try { serialPort.purgeHwBuffers(true, true); } catch(Exception ignored){}
+                    dsdc = ops.opDeliveryStatus(3500, 250);
+                    appendAndBuffer(String.format("[A] POLL DS=0x%04X DC=0x%04X %s %s",
+                            dsdc[0], dsdc[1], dsBits(dsdc[0]), dcBits(dsdc[1])));
+                    if ((dsdc[1] & 0x0001) == 0) break;                 // ticket tombé
+                    if (System.currentTimeMillis() - t0 > 8000) break;  // délai max
+                    Thread.sleep(300);
+                }
+
+                appendAndBuffer(String.format("[A] FINAL DS=0x%04X DC=0x%04X %s %s",
+                        dsdc[0], dsdc[1], dsBits(dsdc[0]), dcBits(dsdc[1])));
 
             } catch (Exception e) {
                 appendAndBuffer("[A] ERREUR: " + e.getMessage());
@@ -419,14 +429,15 @@ public class MainActivity extends AppCompatActivity {
                 appendAndBuffer("[B] GET_DEL_STATUS (0x28)");
                 int[] dsdc = ops.opDeliveryStatus(3500, 250);
                 Thread.sleep(120);
-                appendAndBuffer(String.format("[B] DS=0x%04X DC=0x%04X %s", dsdc[0], dsdc[1], dcBits(dsdc[1])));
+                appendAndBuffer(String.format("[B] DS=0x%04X DC=0x%04X %s %s",
+                        dsdc[0], dsdc[1], dsBits(dsdc[0]), dcBits(dsdc[1])));
 
                 try { serialPort.purgeHwBuffers(true, true); } catch(Exception ignored){}
                 appendAndBuffer("[B] GET_MACHINE (0x23)");
                 int[] dev_ds_dc = ops.opMachineStatusFull(3500, 250);
                 Thread.sleep(120);
-                appendAndBuffer(String.format("[B] DEV=0x%04X DS=0x%04X DC=0x%04X %s",
-                        dev_ds_dc[0], dev_ds_dc[1], dev_ds_dc[2], dcBits(dev_ds_dc[2])));
+                appendAndBuffer(String.format("[B] DEV=0x%04X DS=0x%04X DC=0x%04X %s %s",
+                        dev_ds_dc[0], dev_ds_dc[1], dev_ds_dc[2], dsBits(dev_ds_dc[1]), dcBits(dev_ds_dc[2])));
 
             } catch (Exception e) {
                 appendAndBuffer("[B] ERREUR: " + e.getMessage());
@@ -480,8 +491,8 @@ public class MainActivity extends AppCompatActivity {
                         int[] dsdc = ops.opDeliveryStatus(3500, 250); // ping robuste
                         Thread.sleep(80);
                         appendAndBuffer(String.format(
-                                "[SCAN] Node=0x%02X → OK DS=0x%04X DC=0x%04X %s",
-                                node, dsdc[0], dsdc[1], dcBits(dsdc[1])));
+                                "[SCAN] Node=0x%02X → OK DS=0x%04X DC=0x%04X %s %s",
+                                node, dsdc[0], dsdc[1], dsBits(dsdc[0]), dcBits(dsdc[1])));
 
                         final int n = node;
                         runOnUiThread(() -> edtTo.setText(String.format("0x%02X", n)));
@@ -572,7 +583,7 @@ public class MainActivity extends AppCompatActivity {
                 int[] dsdc = ops.opDeliveryStatus(3500, 250);
                 Thread.sleep(120);
                 appendAndBuffer("[LCP] MiniPing OK, DS=0x" + String.format("%04X", dsdc[0]) +
-                        " DC=0x" + String.format("%04X", dsdc[1]) + " " + dcBits(dsdc[1]));
+                        " DC=0x" + String.format("%04X", dsdc[1]) + " " + dsBits(dsdc[0]) + " " + dcBits(dsdc[1]));
             } catch (Exception e) {
                 appendAndBuffer("[LCP] MiniPing ERREUR: " + e.getMessage());
             }
@@ -648,9 +659,15 @@ public class MainActivity extends AppCompatActivity {
         boolean ticket = (dc & 0x0001) != 0;   // TICKET_PENDING
         boolean flow   = (dc & 0x0004) != 0;   // FLOW_ACTIVE
         boolean deliv  = (dc & 0x0008) != 0;   // DELIVERY_ACTIVE
-        boolean begin  = (dc & 0x0400) != 0;   // BEGIN_DELIVERY (dans DC si mappé)
+        boolean begin  = (dc & 0x0400) != 0;   // BEGIN_DELIVERY (si mappé)
         return String.format("[ticket=%s flow=%s delivery=%s beginDelivery=%s]",
                 ticket, flow, deliv, begin);
+    }
+
+    // Décodage lisible des bits DS (Delivery Status)
+    private String dsBits(int ds) {
+        boolean begin = (ds & 0x0400) != 0;  // BEGIN_DELIVERY
+        return String.format("[beginDelivery=%s]", begin);
     }
 
     private int parseHex(String s){
