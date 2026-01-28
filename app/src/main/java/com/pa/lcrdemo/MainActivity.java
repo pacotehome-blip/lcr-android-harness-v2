@@ -332,7 +332,6 @@ public class MainActivity extends AppCompatActivity {
                 int to = 0xFA, from = 0xFF;
                 LcpLink link = new LcpLink(serialPort, to, from, true);
                 LcpOps ops = new LcpOps(link);
-                // QT/QP plus longs pour stabilité
                 int[] dsdc = ops.opDeliveryStatus(2500, 200);
                 appendAndBuffer(String.format("[DIAG] DS=0x%04X DC=0x%04X %s", dsdc[0], dsdc[1], dcBits(dsdc[1])));
             } catch (Exception e) {
@@ -358,7 +357,6 @@ public class MainActivity extends AppCompatActivity {
             p.verbose = true; p.startAcceptFlow = true; p.ticketPost = "if-pending";
 
             append("Go → unlock/prestart/start...\n");
-            // Cette macro de livraison utilise aussi LcpOps en interne
             LcrSimpleDeliverV2 lcr = new LcrSimpleDeliverV2(p);
             lcr.unlock();
             lcr.prestart();
@@ -370,7 +368,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       MACROS A / B / C (verrouillé) — utilisent LcpOps (gestion queued)
+       MACROS A / B / C (verrouillé) — via LcpOps (gestion queued)
        ================================================================ */
     private void macroResetEndClear_locked() {
         if (!openOrVerifyPort()) return;
@@ -486,7 +484,7 @@ public class MainActivity extends AppCompatActivity {
 
     /* ================================================================
        OUTILS : USB dump, tests I/O (non LCP), mini ping LCP (lock)
-       ================================================================ */
+        ================================================================ */
     private void dumpUsb() {
         UsbManager mgr = (UsbManager)getSystemService(Context.USB_SERVICE);
         java.util.Map<String, UsbDevice> devs = mgr.getDeviceList();
@@ -627,6 +625,16 @@ public class MainActivity extends AppCompatActivity {
     /* ================================================================
        UTIL
        ================================================================ */
+    // Décodage lisible des bits DC (Delivery Code)
+    private String dcBits(int dc) {
+        boolean ticket = (dc & 0x0001) != 0;   // TICKET_PENDING
+        boolean flow   = (dc & 0x0004) != 0;   // FLOW_ACTIVE
+        boolean deliv  = (dc & 0x0008) != 0;   // DELIVERY_ACTIVE
+        boolean begin  = (dc & 0x0400) != 0;   // BEGIN_DELIVERY
+        return String.format("[ticket=%s flow=%s delivery=%s beginDelivery=%s]",
+                ticket, flow, deliv, begin);
+    }
+
     private int parseHex(String s){
         try { return Integer.decode(s); }
         catch(Exception e){ return 0; }
