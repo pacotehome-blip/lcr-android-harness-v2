@@ -210,7 +210,7 @@ public class MainActivity extends AppCompatActivity {
             lcpLink = new LcpLink(serialPort, to, from, true);
             lcpOps  = new LcpOps(lcpLink);
 
-            // RESYNC 0x00 + respiration + premier poll 0x28 pour caler la session
+            // RESYNC 0x00 + respiration + premier poll 0x28
             append("[CONNECT] RESYNC 0x00\n");
             lcpLink.sendRecv(new byte[]{0x00}, 3200);
             try { Thread.sleep(200); } catch (InterruptedException ignored) {}
@@ -231,7 +231,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       Macro A — END + CLEAR (garde-fous + polls + wake + retry)
+       Macro A — END + CLEAR (garde-fous + polls + wake + retry + message imprimante)
        ================================================================ */
     private void macroReset_locked() {
         if (!checkReady()) return;
@@ -303,7 +303,10 @@ public class MainActivity extends AppCompatActivity {
                         }
 
                         if (!cleared) {
-                            append("[A] ATTENTION: Ticket toujours présent (vérifier imprimante locale: papier/couvercle/online)\n");
+                            // Message opérateur (imprimante probablement non prête)
+                            append("\n[ATTENTION] Ticket toujours en attente.\n" +
+                                   "Imprimante locale probablement NON PRÊTE (papier/couvercle/hors-ligne).\n" +
+                                   "Corriger la condition imprimante puis relancer CLEAR (bouton A).\n\n");
                         }
                     }
                 } else {
