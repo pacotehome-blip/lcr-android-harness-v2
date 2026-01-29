@@ -15,9 +15,8 @@ public class LcpOps {
     }
 
     /* ============================================================
-       CONSTANTES STATUTS DS / DC --
+       CONSTANTES STATUTS DS / DC
        ============================================================ */
-
     public static final int LCRSc_FLOW_ACTIVE        = 0x0004;
     public static final int LCRSc_DELIVERY_ACTIVE    = 0x0008;
     public static final int LCRSc_BEGIN_DELIVERY     = 0x0400;
@@ -27,17 +26,19 @@ public class LcpOps {
        UTIL i32 BE
        ============================================================ */
     public static byte[] i32be(int v) {
-        return new byte[]{
-                (byte)((v>>24)&0xFF),
-                (byte)((v>>16)&0xFF),
-                (byte)((v>>8)&0xFF),
-                (byte)(v&0xFF)
+        return new byte[] {
+                (byte)((v >> 24) & 0xFF),
+                (byte)((v >> 16) & 0xFF),
+                (byte)((v >> 8)  & 0xFF),
+                (byte)(v & 0xFF)
         };
-   ===========
+    }
+
+    /* ============================================================
        GET_MACHINE (0x23)
+       retourne [machineStatus, deviceStatus, deliveryCode]
        ============================================================ */
     public int[] opMachineStatusFull(int timeoutMs, int pauseMs) throws Exception {
-
         byte[] fr = link.sendRecv(new byte[]{ 0x23 }, timeoutMs);
         byte[] p  = LcpLink.extractPayload(fr);
 
@@ -61,7 +62,6 @@ public class LcpOps {
        ISSUE COMMAND (0x24)
        ============================================================ */
     public void opIssueCommand(int code, int timeoutMs, int pauseMs) throws Exception {
-
         byte[] pl = new byte[]{ 0x24, (byte)(code & 0xFF) };
         byte[] fr = link.sendRecv(pl, timeoutMs);
         byte[] p  = LcpLink.extractPayload(fr);
@@ -103,16 +103,13 @@ public class LcpOps {
        SET_FIELD (0x21)
        ============================================================ */
     public void opSetField(int fieldId, byte[] rawValue, int timeoutMs) throws Exception {
-
         int lo = fieldId & 0xFF;
         int hi = (fieldId >> 8) & 0xFF;
 
         byte[] pl = new byte[3 + rawValue.length];
-
         pl[0] = 0x21;
         pl[1] = (byte)lo;
         pl[2] = (byte)hi;
-
         System.arraycopy(rawValue, 0, pl, 3, rawValue.length);
 
         byte[] fr = link.sendRecv(pl, timeoutMs);
@@ -128,9 +125,9 @@ public class LcpOps {
 
     /* ============================================================
        GET_DEL_STATUS (0x28)
+       retourne [ds, dc]
        ============================================================ */
     public int[] opDeliveryStatus(int timeoutMs, int pauseMs) throws Exception {
-
         byte[] fr = link.sendRecv(new byte[]{ 0x28 }, timeoutMs);
         byte[] p  = LcpLink.extractPayload(fr);
 
@@ -153,11 +150,9 @@ public class LcpOps {
        WAIT DC
        ============================================================ */
     public int[] opWaitForStatus(int mask, int expected, int timeoutMs, int pollMs) throws Exception {
-
         long t0 = System.currentTimeMillis();
 
         while (true) {
-
             int[] dsdc = opDeliveryStatus(3000, pollMs);
             int dc = dsdc[1];
 
