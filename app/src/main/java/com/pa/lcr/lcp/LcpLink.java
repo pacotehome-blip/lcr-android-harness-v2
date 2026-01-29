@@ -2,21 +2,21 @@
 package com.pa.lcr.lcp;
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.function.Consumer;
 
 /**
  * LcpLink - couche de lien LCP pour LCR-II.
  *
- * Cette implémentation fournit :
+ * Fournit :
  *  - DUMP_TX / DUMP_RX pour tracer TX/RX
  *  - Logger configurable via setLogger
  *  - Constructeur (serialPort, to, from, sync)
+ *  - Méthodes sendRecv(byte[], [int timeoutMs]) attendues par LcpOps/MainActivity
  *  - Méthodes statiques extractStatus / extractPayload (utilisées par LcpOps)
  *  - Utilitaires CRC16/XMODEM et hexdump
  *
- * Remarque: la méthode transact(...) est un PLUG (à compléter avec ton I/O série réel).
- * Elle renvoie une trame de réponse minimale [status=0x00] pour éviter les NullPointer/IO
- * lors d'un simple build/launch. Adapte-la à ta stack (UsbSerialPort, jSerialComm, etc.).
+ * NOTE I/O : transact(...) contient un placeholder. Branche ton I/O série réelle (USB/RS-232, jSerialComm, etc.)
  */
 public class LcpLink {
 
@@ -27,30 +27,27 @@ public class LcpLink {
 
     private static Consumer<String> LOGGER = s -> {};
 
-    /** Définit le logger (par ex.: MainActivity::appendAndBuffer). */
+    /** Définit le logger (ex.: MainActivity::appendAndBuffer). */
     public static void setLogger(Consumer<String> logger) {
         LOGGER = (logger != null) ? logger : (s -> {});
     }
 
     private static void log(String msg) {
-        try {
-            LOGGER.accept(msg);
-        } catch (Exception ignored) {
-        }
+        try { LOGGER.accept(msg); } catch (Exception ignored) {}
     }
 
     // --- Contexte lien ---
-    private final Object serialPort; // Remplace 'Object' par le type réel de ton adaptateur série si besoin
+    private final Object serialPort; // Remplacer par le type réel de l’adaptateur série si souhaité
     private final int toAddr;        // 0..255
     private final int fromAddr;      // 0..255
     private final boolean syncMode;
     private int defaultTimeoutMs = 1000;
 
     /**
-     * @param serialPort  instance d'adaptateur série (USB/RS-232/JNI...). Peut rester 'Object' pour compiler.
+     * @param serialPort  adaptateur série (USB/RS-232/TCP...). Peut rester 'Object' pour compiler.
      * @param to          adresse 'to' (0..255)
      * @param from        adresse 'from' (0..255)
-     * @param sync        true = effectuer une séquence SYNC au démarrage (à implémenter dans transact si besoin)
+     * @param sync        true = effectuer une séquence SYNC au démarrage (si implémentée)
      */
     public LcpLink(Object serialPort, int to, int from, boolean sync) {
         this.serialPort = serialPort;
@@ -65,13 +62,36 @@ public class LcpLink {
     public int  getDefaultTimeoutMs()       { return defaultTimeoutMs; }
 
     // ------------------------------------------------------------------------
-    // API haute-niveau (exemples) - garde les signatures simples et stables
+    // API attendue par LcpOps / MainActivity
     // ------------------------------------------------------------------------
 
     /**
-     * Envoie une commande (cmd + payload) et retourne la réponse brute.
-     * Adapte buildCommandFrame(...) et transact(...) à ton protocole exact si nécessaire.
+     * Envoie un message LCP dont le premier octet est le code commande (MSG_*)
+     * et les suivants (éventuels) sont le payload pour cette commande.
+     *
+     * Exemple d’appel :
+     *   sendRecv(new byte[]{ (byte)MSG_GET_FIELD, (byte)(f & 0xFF) }, timeout)
+     *
+     * @param payload  [CMD][ARGS...]
+     * @param timeoutMs timeout en millisecondes
+     * @return trame de réponse brute (placeholder si I/O non branchée)
      */
+    public byte[] sendRecv(byte[] payload, int timeoutMs) throws IOException {
+        if (payload == null || payload.length == 0) {
+            throw new IOException("sendRecv: payload must contain at least the command byte");
+        }
+        byte cmd = payload[0];
+        byte[] args = (payload.length > 1) ? Arrays.copyOfRange(payload, 1, payload.length) : new byte[0];
+        byte[] frame = buildCommandFrame(toAddr, fromAddr, cmd, args);
+        return transact(frame, timeoutMs);
+    }
+
+    /** Surcharge utilisant le timeout par défaut. */
+    public byte[] sendRecv(byte[] payload) throws IOException {
+        return sendRecv(payload, defaultTimeoutMs);
+    }
+
+    // Gardé pour usage interne/alternatif si tu veux un formalisme cmd/payload séparé
     public byte[] command(byte cmd, byte[] payload) throws IOException {
         byte[] frame = buildCommandFrame(toAddr, fromAddr, cmd, payload);
         return transact(frame, defaultTimeoutMs);
@@ -79,51 +99,37 @@ public class LcpLink {
 
     /**
      * Point d'échange bas-niveau : écrit 'frame' sur le port série et lit la réponse.
-     * <p>
-     * ⚠️ Placeholder : à remplacer par ta vraie I/O série.
-     * Pour l’instant, retourne une réponse minimale [status=0x00] pour éviter les erreurs à l’exécution.
+     * ⚠️ Placeholder : à remplacer par ta vraie I/O série (USB/RS-232/TCP vers pont, etc.).
      */
     public byte[] transact(byte[] frame, int timeoutMs) throws IOException {
         if (frame == null) throw new IOException("Frame is null");
         if (DUMP_TX) log("TX " + hexdump(frame));
 
-        if (serialPort == null) {
-            // Aucun port attaché : on échoue de manière contrôlée
-            // (si tu préfères, renvoie plutôt une "fausse" réponse OK comme ci-dessous).
-            // throw new IOException("serialPort is null: bind a real serial adapter to LcpLink");
-        }
-
-        // TODO: Implémente ici l’écriture de 'frame' et la lecture d'une réponse encodée LCP.
+        // TODO: Implémente ici l’I/O réelle.
         //       Exemple (pseudo):
         //       serial.write(frame);
         //       byte[] rsp = serial.readUntilCrcOrTimeout(timeoutMs);
+        //       if (!verifyFrameCrc(rsp)) throw new IOException("Bad CRC");
         //       if (DUMP_RX) log("RX " + hexdump(rsp));
         //       return rsp;
 
-        // Réponse minimale: status=0x00, payload vide
+        // Réponse minimale de placeholder : [status=0x00] sans payload.
         byte[] rsp = new byte[] { (byte) 0x00 };
         if (DUMP_RX) log("RX " + hexdump(rsp));
         return rsp;
     }
 
     // ------------------------------------------------------------------------
-    // Helpers de parsing/assemblage (adapte au format exact si nécessaire)
+    // Helpers de parsing/assemblage
     // ------------------------------------------------------------------------
 
-    /**
-     * Extrait le status d'une réponse LCP.
-     * Convention minimale: premier octet = status.
-     * Adapte si ton protocole diffère (p.ex. status à un autre offset).
-     */
+    /** Extrait le status d'une réponse (convention: premier octet = status). */
     public static int extractStatus(byte[] frame) {
         if (frame == null || frame.length == 0) return 0;
         return frame[0] & 0xFF;
     }
 
-    /**
-     * Extrait le payload d'une réponse LCP (après le status).
-     * Adapte si ton protocole diffère.
-     */
+    /** Extrait le payload d'une réponse (après le status). */
     public static byte[] extractPayload(byte[] frame) {
         if (frame == null || frame.length <= 1) return new byte[0];
         byte[] out = new byte[frame.length - 1];
@@ -132,12 +138,12 @@ public class LcpLink {
     }
 
     /**
-     * Construit une trame "commande" LCP: [0x22][TO][FROM][CMD][PAYLOAD...][CRC16/XMODEM hi][CRC16 lo]
-     * ⚠️ Cette forme est un canevas courant. Ajuste si ton dialecte LCR-II diffère.
+     * Construit une trame "commande" LCP:
+     *   [0x22][TO][FROM][CMD][PAYLOAD...][CRC16/XMODEM hi][CRC16 lo]
+     * Ajuste si ton dialecte diffère.
      */
     public static byte[] buildCommandFrame(int to, int from, byte cmd, byte[] payload) {
         int plen = (payload == null) ? 0 : payload.length;
-        // 0x22 = SOH/prologue souvent observé; adapte si besoin.
         int headerLen = 4;
         byte[] frame = new byte[headerLen + plen + 2]; // +2 = CRC16
         frame[0] = 0x22;
@@ -153,7 +159,7 @@ public class LcpLink {
         return frame;
     }
 
-    /** Vérifie le CRC16/XMODEM d'une trame (les 2 derniers octets sont censés contenir le CRC). */
+    /** Vérifie le CRC16/XMODEM (les 2 derniers octets sont le CRC). */
     public static boolean verifyFrameCrc(byte[] frame) {
         if (frame == null || frame.length < 6) return false;
         int bodyLen = frame.length - 2;
@@ -162,7 +168,7 @@ public class LcpLink {
         return (crcCalc == crcGot);
     }
 
-    /** CRC16/XMODEM standard (poly 0x1021, init 0x0000, no refin/refout, xorout 0x0000). */
+    /** CRC16/XMODEM (poly 0x1021, init 0x0000). */
     public static int crc16Xmodem(byte[] data, int off, int len) {
         int crc = 0x0000;
         for (int i = 0; i < len; i++) {
@@ -179,7 +185,7 @@ public class LcpLink {
         return crc & 0xFFFF;
     }
 
-    /** Hexdump lisible (p.ex. "22 01 02 A0 00 9F"). */
+    /** Hexdump lisible (ex.: "22 01 02 A0 00 9F"). */
     public static String hexdump(byte[] a) {
         if (a == null) return "(null)";
         StringBuilder sb = new StringBuilder(a.length * 3);
