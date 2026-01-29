@@ -231,7 +231,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       Macro A — END + CLEAR (garde-fous + cadence 0x28, sans 0x7D UI)
+       Macro A — END + CLEAR (garde-fous + polls + wake + retry)
        ================================================================ */
     private void macroReset_locked() {
         if (!checkReady()) return;
@@ -264,6 +264,9 @@ public class MainActivity extends AppCompatActivity {
                     append("[A] CLEAR (0x06)\n");
                     lcpOps.opIssueCommand(0x06, 3000, 250); // queued-handling interne
 
+                    boolean cleared = false;
+
+                    // Polls 8s
                     long t0 = System.currentTimeMillis();
                     int polls = 0;
                     while (System.currentTimeMillis() - t0 < 8000) {
@@ -271,7 +274,37 @@ public class MainActivity extends AppCompatActivity {
                         polls++;
                         append(String.format("[A] POLL ticket #%d DS=0x%04X DC=0x%04X\n",
                                 polls, dsdc2[0], dsdc2[1]));
-                        if ((dsdc2[1] & LcpOps.LCRSc_DEL_TICKET_PENDING) == 0) break;
+                        if ((dsdc2[1] & LcpOps.LCRSc_DEL_TICKET_PENDING) == 0) { cleared = true; break; }
+                    }
+
+                    // Wake 0x23 si ça colle encore
+                    if (!cleared) {
+                        append("[A] Wake (GET_MACHINE 0x23)\n");
+                        try { lcpOps.opMachineStatusFull(5000, 150); } catch (Exception ignore) {}
+
+                        long tw = System.currentTimeMillis();
+                        while (!cleared && System.currentTimeMillis() - tw < 2000) {
+                            int[] dsdcW = lcpOps.opDeliveryStatus(3000, 250);
+                            append(String.format("[A] POLL wake DS=0x%04X DC=0x%04X\n", dsdcW[0], dsdcW[1]));
+                            if ((dsdcW[1] & LcpOps.LCRSc_DEL_TICKET_PENDING) == 0) cleared = true;
+                        }
+                    }
+
+                    // Retry CLEAR (1x) si nécessaire
+                    if (!cleared) {
+                        append("[A] CLEAR retry (0x06)\n");
+                        lcpOps.opIssueCommand(0x06, 3000, 250);
+
+                        long tR = System.currentTimeMillis();
+                        while (System.currentTimeMillis() - tR < 8000) {
+                            int[] dsdcR = lcpOps.opDeliveryStatus(3000, 250);
+                            append(String.format("[A] POLL retry DS=0x%04X DC=0x%04X\n", dsdcR[0], dsdcR[1]));
+                            if ((dsdcR[1] & LcpOps.LCRSc_DEL_TICKET_PENDING) == 0) { cleared = true; break; }
+                        }
+
+                        if (!cleared) {
+                            append("[A] ATTENTION: Ticket toujours présent (vérifier imprimante locale: papier/couvercle/online)\n");
+                        }
                     }
                 } else {
                     append("[A] CLEAR ignoré (pas de ticket)\n");
