@@ -2,124 +2,123 @@
 package com.pa.lcr.lcp;
 
 public class LcpOps {
-  public static final int MSG_GET_FIELD      = 0x20;
-  public static final int MSG_SET_FIELD      = 0x21;
-  public static final int MSG_PRINT_TEXT     = 0x22;
-  public static final int MSG_GET_MACHINE    = 0x23;
-  public static final int MSG_ISSUE_COMMAND  = 0x24;
-  public static final int MSG_GET_DEL_STATUS = 0x28;
-  public static final int MSG_CHECK_REQUEST  = 0x7D;
 
-  public static final int RC_OK                 = 0x00;
-  public static final int RC_REQUEST_QUEUED     = 0x26;
-  public static final int RC_NO_REQUEST_ACTIVE  = 0x27;
-  public static final int RC_REQUEST_ABORTED    = 0x28;
+    private final LcpLink link;
 
-  public static final int LCRSc_DEL_TICKET_PENDING = 0x0001;
-  public static final int LCRSc_FLOW_ACTIVE        = 0x0004;
-  public static final int LCRSc_DELIVERY_ACTIVE    = 0x0008;
-  public static final int LCRSc_BEGIN_DELIVERY     = 0x0400;
-
-  public static final int LCRSd_END_REQUEST = 0x0400;
-
-  private final LcpLink link;
-
-  public LcpOps(LcpLink link) { this.link = link; }
-
-  private byte[] waitQueued(long qt, long qp) throws Exception {
-    long t0 = System.currentTimeMillis();
-    byte[] last = new byte[0];
-    while (System.currentTimeMillis() - t0 < qt) {
-      byte[] rsp = link.sendRecv(new byte[]{ (byte)MSG_CHECK_REQUEST }, (int)(qp + 500));
-      byte[] p = LcpLink.extractPayload(rsp);
-      if (p != null && p.length > 0) last = p;
-      if (p == null || p.length == 0) { Thread.sleep(qp); continue; }
-
-      int rc = p[0] & 0xFF;
-      if (rc == RC_REQUEST_QUEUED || rc == RC_NO_REQUEST_ACTIVE) { Thread.sleep(qp); continue; }
-      if (rc == RC_REQUEST_ABORTED) throw new IllegalStateException("Queued aborted");
-      if (rc == RC_OK && p.length >= 3 && (p[1] & 0xFF) == RC_OK) {
-        byte[] r = new byte[p.length - 1];
-        System.arraycopy(p, 1, r, 0, r.length);
-        return r;
-      }
-      return p;
+    public LcpOps(LcpLink link) {
+        if (link == null) throw new IllegalArgumentException("link null");
+        this.link = link;
     }
-    throw new java.util.concurrent.TimeoutException("Queued timeout");
-  }
 
-  public byte[] opGetField(int f, long qt, long qp) throws Exception {
-    byte[] rsp = link.sendRecv(new byte[]{ (byte)MSG_GET_FIELD, (byte)(f & 0xFF) }, (int)qt);
-    int st = LcpLink.extractStatus(rsp);
-    byte[] p = LcpLink.extractPayload(rsp);
-    if ((st & 0x04) != 0 || (p != null && p.length > 0 && (p[0] & 0xFF) == RC_REQUEST_QUEUED))
-      p = waitQueued(qt, qp);
-    if (p == null || p.length == 0) throw new IllegalStateException("Empty GET field #" + f);
-    if ((p[0] & 0xFF) != RC_OK) throw new IllegalStateException("GET rc");
+    /* ================================================================
+       ISSUE COMMAND (0x24,X)
+       Identique Python : envoie 0x24 + code
+       ================================================================ */
+    public void opIssueCommand(int code, int timeoutMs, int pauseMs) throws Exception {
+        byte[] pl = new byte[]{ (byte)0x24, (byte)(code & 0xFF) };
+        byte[] fr = link.sendRecv(pl, timeoutMs);
+        byte[] rsp = LcpLink.extractPayload(fr);
 
-    byte[] out = new byte[Math.max(0, p.length - 2)];
-    if (out.length > 0) System.arraycopy(p, 2, out, 0, out.length);
-    return out;
-  }
+        if (rsp == null || rsp.length < 1)
+            throw new Exception("Réponse issue cmd invalide");
 
-  public boolean opSetField(int f, byte[] d, long qt, long qp) throws Exception {
-    byte[] payload = new byte[2 + d.length];
-    payload[0] = (byte)MSG_SET_FIELD;
-    payload[1] = (byte)(f & 0xFF);
-    System.arraycopy(d, 0, payload, 2, d.length);
+        int rc = rsp[0] & 0xFF;
+        if (rc != 0)
+            throw new Exception(String.format("rc=%d pour cmd=0x%02X", rc, code));
 
-    byte[] rsp = link.sendRecv(payload, (int)qt);
-    int st = LcpLink.extractStatus(rsp);
-    byte[] p = LcpLink.extractPayload(rsp);
-    if ((st & 0x04) != 0 || (p != null && p.length > 0 && (p[0] & 0xFF) == RC_REQUEST_QUEUED))
-      p = waitQueued(qt, qp);
-    if (p == null || p.length == 0) throw new IllegalStateException("Empty SET field #" + f);
-    if ((p[0] & 0xFF) != RC_OK) throw new IllegalStateException("SET rc");
-    return true;
-  }
-
-  public byte[] opIssueCommand(int cmd, long qt, long qp) throws Exception {
-    byte[] payload = new byte[]{ (byte)MSG_ISSUE_COMMAND, (byte)(cmd & 0xFF) };
-    byte[] rsp = link.sendRecv(payload, (int)qt);
-    int st = LcpLink.extractStatus(rsp);
-    byte[] p = LcpLink.extractPayload(rsp);
-    if ((st & 0x04) != 0 || (p != null && p.length > 0 && (p[0] & 0xFF) == RC_REQUEST_QUEUED))
-      p = waitQueued(qt, qp);
-    if (p == null || p.length == 0) throw new IllegalStateException("Issue empty");
-    if ((p[0] & 0xFF) != RC_OK) throw new IllegalStateException("Issue rc");
-    return p;
-  }
-
-  public int[] opDeliveryStatus(long qt, long qp) throws Exception {
-    byte[] rsp = link.sendRecv(new byte[]{ (byte)MSG_GET_DEL_STATUS }, (int)qt);
-    int st = LcpLink.extractStatus(rsp);
-    byte[] p = LcpLink.extractPayload(rsp);
-    if ((st & 0x04) != 0 || (p != null && p.length > 0 && (p[0] & 0xFF) == RC_REQUEST_QUEUED))
-      p = waitQueued(qt, qp);
-    if (p == null || p.length < 6 || (p[0] & 0xFF) != RC_OK) throw new IllegalStateException("DS invalid");
-
-    int ds = ((p[2] & 0xFF) << 8) | (p[3] & 0xFF);
-    int dc = ((p[4] & 0xFF) << 8) | (p[5] & 0xFF);
-    return new int[]{ ds, dc };
-  }
-
-  public int[] opMachineStatusFull(long qt, long qp) throws Exception {
-    byte[] rsp = link.sendRecv(new byte[]{ (byte)MSG_GET_MACHINE }, (int)qt);
-    int st = LcpLink.extractStatus(rsp);
-    byte[] p = LcpLink.extractPayload(rsp);
-    if ((st & 0x04) != 0 || (p != null && p.length > 0 && (p[0] & 0xFF) == RC_REQUEST_QUEUED))
-      p = waitQueued(qt, qp);
-    if (p == null || p.length < 8 || (p[0] & 0xFF) != RC_OK) {
-      int[] d = opDeliveryStatus(qt, qp);
-      return new int[]{ 0x0000, d[0], d[1] };
+        if (pauseMs > 0)
+            Thread.sleep(pauseMs);
     }
-    int dev = ((p[2] & 0xFF) << 8) | (p[3] & 0xFF);
-    int ds  = ((p[4] & 0xFF) << 8) | (p[5] & 0xFF);
-    int dc  = ((p[6] & 0xFF) << 8) | (p[7] & 0xFF);
-    return new int[]{ dev, ds, dc };
-  }
 
-  public static byte[] i32be(int v) {
-    return new byte[]{ (byte)(v >>> 24), (byte)(v >>> 16), (byte)(v >>> 8), (byte)v };
-  }
+    /* ================================================================
+       GET_FIELD / READ FIELD (0x20)
+       ================================================================ */
+    public byte[] opGetField(int fieldId, int timeoutMs) throws Exception {
+        int lo = fieldId & 0xFF;
+        int hi = (fieldId >> 8) & 0xFF;
+
+        byte[] pl = new byte[]{ 0x20, (byte)lo, (byte)hi };
+        byte[] fr = link.sendRecv(pl, timeoutMs);
+        byte[] rsp = LcpLink.extractPayload(fr);
+
+        if (rsp == null || rsp.length < 2)
+            throw new Exception("GET_FIELD: payload trop court");
+
+        int rc = rsp[0] & 0xFF;
+        if (rc != 0)
+            throw new Exception(String.format("GET_FIELD rc=%d", rc));
+
+        // reste = valeur brute du registre, variable
+        byte[] data = new byte[rsp.length - 1];
+        System.arraycopy(rsp, 1, data, 0, data.length);
+        return data;
+    }
+
+    /* ================================================================
+       SET_FIELD / WRITE FIELD (0x21)
+       ================================================================ */
+    public void opSetField(int fieldId, byte[] rawValue, int timeoutMs) throws Exception {
+        int lo = fieldId & 0xFF;
+        int hi = (fieldId >> 8) & 0xFF;
+
+        byte[] pl = new byte[3 + rawValue.length];
+        pl[0] = 0x21;
+        pl[1] = (byte)lo;
+        pl[2] = (byte)hi;
+        System.arraycopy(rawValue, 0, pl, 3, rawValue.length);
+
+        byte[] fr = link.sendRecv(pl, timeoutMs);
+        byte[] rsp = LcpLink.extractPayload(fr);
+
+        if (rsp == null || rsp.length < 1)
+            throw new Exception("SET_FIELD réponse invalide");
+
+        int rc = rsp[0] & 0xFF;
+        if (rc != 0)
+            throw new Exception(String.format("SET_FIELD rc=%d", rc));
+    }
+
+    /* ================================================================
+       DELIVERY STATUS (0x28)
+       Retourne [DS, DC]
+       ================================================================ */
+    public int[] opDeliveryStatus(int timeoutMs, int pauseMs) throws Exception {
+        byte[] fr = link.sendRecv(new byte[]{ 0x28 }, timeoutMs);
+        byte[] p = LcpLink.extractPayload(fr);
+
+        if (p == null || p.length < 6)
+            throw new Exception("DEL_STATUS: payload len invalide");
+
+        int rc = p[0] & 0xFF;
+        if (rc != 0)
+            throw new Exception("DEL_STATUS rc=" + rc);
+
+        int devStatus = (p[3] & 0xFF) << 8 | (p[2] & 0xFF);
+        int delStatus = (p[5] & 0xFF) << 8 | (p[4] & 0xFF);
+
+        if (pauseMs > 0)
+            Thread.sleep(pauseMs);
+
+        return new int[]{ devStatus, delStatus };
+    }
+
+    /* ================================================================
+       WAIT FOR A DELIVERY STATE (ex: delivery active, ticket clear…)
+       ================================================================ */
+    public int[] opWaitForStatus(int mask, int expected, int timeoutTotalMs, int pollDelayMs) throws Exception {
+        long t0 = System.currentTimeMillis();
+
+        while (true) {
+            int[] dsdc = opDeliveryStatus(3000, pollDelayMs);
+            int dc = dsdc[1];
+
+            if ((dc & mask) == expected)
+                return dsdc;
+
+            if (System.currentTimeMillis() - t0 > timeoutTotalMs)
+                throw new Exception("Timeout attente état DC");
+
+            Thread.sleep(pollDelayMs);
+        }
+    }
 }

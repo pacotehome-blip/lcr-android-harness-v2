@@ -13,16 +13,7 @@ import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbDeviceConnection;
 import android.hardware.usb.UsbManager;
 import android.os.Bundle;
-import android.view.View;
-import android.widget.CheckBox;
-import android.widget.EditText;
-import android.widget.LinearLayout;
-import android.widget.TextView;
-
-import androidx.appcompat.app.AppCompatActivity;
-
-import com.hoho.android.usbserial.driver.UsbSerialDriver;
-import com.hoho.android.usbserial.driver.UsbSerialPort;
+importPort;
 import com.hoho.android.usbserial.driver.UsbSerialProber;
 
 import com.pa.lcr.LcrSimpleDeliverV2;
@@ -42,40 +33,14 @@ public class MainActivity extends AppCompatActivity {
 
     private UsbSerialPort serialPort;
 
+    // *** AJOUT ***
+    private LcpLink lcpLink;   // INSTANCE UNIQUE
+    private LcpOps  lcpOps;    // API métier, liée à la même session
+
     private final StringBuilder logBuf = new StringBuilder(4096);
 
-    // Sérialisation des accès LCP
     private final Object lcpLock = new Object();
     private final ExecutorService lcpExec = Executors.newSingleThreadExecutor();
-
-    private final BroadcastReceiver usbPermissionReceiver = new BroadcastReceiver() {
-        @Override public void onReceive(Context context, Intent intent) {
-            if (!ACTION_USB_PERMISSION.equals(intent.getAction())) return;
-            synchronized (this) {
-                UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
-                boolean granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
-                if (granted) {
-                    append("Permission USB accordée, ouverture...\n");
-                    connectPort(device);
-                } else {
-                    append("Permission USB refusée\n");
-                }
-            }
-        }
-    };
-
-    private final BroadcastReceiver usbAttachDetach = new BroadcastReceiver() {
-        @Override public void onReceive(Context c, Intent i) {
-            String a = i.getAction();
-            if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(a)) {
-                append("USB attached — cliquez 'Connexion USB'\n");
-            } else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(a)) {
-                append("USB detached\n");
-                try { if (serialPort != null) serialPort.close(); } catch(Exception ignored){}
-                serialPort = null;
-            }
-        }
-    };
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
@@ -89,6 +54,7 @@ public class MainActivity extends AppCompatActivity {
 
         ensureDefaultAddresses();
 
+        // Receivers USB
         registerReceiver(usbPermissionReceiver, new IntentFilter(ACTION_USB_PERMISSION));
         IntentFilter f = new IntentFilter();
         f.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
@@ -97,6 +63,7 @@ public class MainActivity extends AppCompatActivity {
 
         CheckBox switchIoLog = findViewById(R.id.switchIoLog);
         LcpLink.setLogger(this::appendAndBuffer);
+
         if (switchIoLog != null) {
             switchIoLog.setOnCheckedChangeListener((btn, checked) -> {
                 LcpLink.DUMP_TX = checked;
@@ -105,342 +72,168 @@ public class MainActivity extends AppCompatActivity {
             });
         }
 
-        View vCopy = findViewById(R.id.btnCopyLog);
-        if (vCopy != null) vCopy.setOnClickListener(v -> {
+        findViewById(R.id.btnCopyLog).setOnClickListener(v -> {
             ClipboardManager cb = (ClipboardManager)getSystemService(Context.CLIPBOARD_SERVICE);
             if (cb != null) {
                 cb.setPrimaryClip(ClipData.newPlainText("lcr_log", logBuf.toString()));
-                append("Log copié dans le presse-papiers\n");
+                append("Log copié\n");
             }
         });
-        View vClear = findViewById(R.id.btnClearLog);
-        if (vClear != null) vClear.setOnClickListener(v -> {
+
+        findViewById(R.id.btnClearLog).setOnClickListener(v -> {
             logBuf.setLength(0);
             runOnUiThread(() -> log.setText(""));
         });
 
-        View vConn = findViewById(R.id.btnConnect);
-        if (vConn != null) vConn.setOnClickListener(v -> requestAndOpenFirstPort());
+        findViewById(R.id.btnConnect).setOnClickListener(v -> requestAndOpenFirstPort());
+        findViewById(R.id.btnDiag).setOnClickListener(v -> runLcpTask(this::diagPing28_locked));
+        findViewById(R.id.btnA).setOnClickListener(v -> runLcpTask(this::macroReset_locked));
+        findViewById(R.id.btnB).setOnClickListener(v -> runLcpTask(this::macroPing28_locked));
+        findViewById(R.id.btnC).setOnClickListener(v -> runLcpTask(this::macroStart_locked));
+        findViewById(R.id.btnSendHex).setOnClickListener(v -> promptAndSendHex());
 
-        View vDiag = findViewById(R.id.btnDiag);
-        if (vDiag != null) vDiag.setOnClickListener(v -> runLcpTask(this::diagPing28_raw_locked));
-
-        View vA = findViewById(R.id.btnA);
-        if (vA != null) vA.setOnClickListener(v -> runLcpTask(this::macroResetEndClear_locked));
-
-        View vB = findViewById(R.id.btnB);
-        if (vB != null) vB.setOnClickListener(v -> runLcpTask(this::macroPing28_raw_locked));
-
-        View vC = findViewById(R.id.btnC);
-        if (vC != null) vC.setOnClickListener(v -> runLcpTask(this::macroStartDelivery_locked));
-
-        View vRaw = findViewById(R.id.btnSendHex);
-        if (vRaw != null) vRaw.setOnClickListener(v -> promptAndSendHex());
-
-        append("Prêt. Branchez le LCR puis cliquez 'Connexion USB'.\n");
+        append("Prêt. Branchez le LCR puis 'Connexion USB'.\n");
     }
-
-    @Override protected void onDestroy() {
-        super.onDestroy();
-        try { unregisterReceiver(usbPermissionReceiver); } catch(Exception ignored){}
-        try { unregisterReceiver(usbAttachDetach); } catch(Exception ignored){}
-        try { if (serialPort!=null) serialPort.close(); } catch(Exception ignored){}
-        lcpExec.shutdownNow();
-    }
-
-    private void runLcpTask(Runnable r) {
-        setButtonsEnabled(false);
-        lcpExec.execute(() -> {
-            try { r.run(); }
-            finally { setButtonsEnabled(true); }
-        });
-    }
-
-    private void setButtonsEnabled(final boolean enabled) {
-        runOnUiThread(() -> {
-            int[] ids = new int[]{ R.id.btnA, R.id.btnB, R.id.btnC, R.id.btnScan, R.id.btnSendHex, R.id.btnTestUsb, R.id.btnConnect, R.id.btnDiag, R.id.btnStart };
-            for (int id : ids) {
-                View v = findViewById(id);
-                if (v != null) v.setEnabled(enabled);
-            }
-        });
-    }
-
-    private void ensureDefaultAddresses() {
-        runOnUiThread(() -> {
-            if (edtTo   != null && !"0xFA".equalsIgnoreCase(safeStr(edtTo.getText())))   edtTo.setText("0xFA");
-            if (edtFrom != null && !"0xFF".equalsIgnoreCase(safeStr(edtFrom.getText()))) edtFrom.setText("0xFF");
-        });
-    }
-
-    private String safeStr(CharSequence cs){ return cs == null ? "" : cs.toString().trim(); }
 
     /* ================================================================
-       USB OPEN (RTS/DTR désassertés) + RESYNC (0x00) 1x
+       OUVERTURE USB + SESSION LCP UNIQUE
        ================================================================ */
-    private void requestAndOpenFirstPort() {
-        UsbManager mgr = (UsbManager)getSystemService(Context.USB_SERVICE);
-        List<UsbSerialDriver> drivers = UsbSerialProber.getDefaultProber().findAllDrivers(mgr);
-        if (drivers.isEmpty()) { append("Aucun convertisseur USB‑Série détecté\n"); return; }
-
-        UsbDevice dev = drivers.get(0).getDevice();
-
-        if (!mgr.hasPermission(dev)) {
-            append("Demande de permission USB…\n");
-            PendingIntent pi = PendingIntent.getBroadcast(this, 0, new Intent(ACTION_USB_PERMISSION), PendingIntent.FLAG_IMMUTABLE);
-            mgr.requestPermission(dev, pi);
-            return;
-        }
-        connectPort(dev);
-    }
-
     private void connectPort(UsbDevice dev) {
         try {
             UsbManager mgr = (UsbManager)getSystemService(Context.USB_SERVICE);
             UsbSerialDriver driver = UsbSerialProber.getDefaultProber().probeDevice(dev);
-            if (driver == null) { append("Pas de driver compatible\n"); return; }
 
             UsbDeviceConnection conn = mgr.openDevice(dev);
-            if (conn == null) { append("Impossible d’ouvrir le device USB\n"); return; }
-
             serialPort = driver.getPorts().get(0);
             serialPort.open(conn);
             serialPort.setParameters(19200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
 
-            // Désassertion et NE PLUS les réactiver
-            try { serialPort.setRTS(false); } catch(Exception ignore){}
-            try { serialPort.setDTR(false); } catch(Exception ignore){}
-
+            serialPort.setRTS(false);
+            serialPort.setDTR(false);
             serialPort.purgeHwBuffers(true, true);
-            append("Port ouvert 19200 8N1 (RTS/DTR désassertés, purge OK)\n");
 
-            // RESYNC LCP 1x: 0x00 (Get Product ID) avec SYNC=1
-            try {
-                int to=0xFA, from=0xFF;
-                LcpLink linkSync = new LcpLink(serialPort, to, from, true /* SYNC=1 */);
-                LcpLink.setLogger(this::appendAndBuffer);
-                LcpLink.DUMP_TX = true; LcpLink.DUMP_RX = true;
-                appendAndBuffer("[CONNECT] RESYNC 0x00 (Get Product ID)");
-                byte[] fr = linkSync.sendRecv(new byte[]{ (byte)0x00 }, 3200);
-                byte[] p  = LcpLink.extractPayload(fr); // rc, productID (=0x02), name...
-                appendAndBuffer("[CONNECT] RESYNC OK (Product ID), session SYNC initialisée");
-            } catch (Exception e) {
-                appendAndBuffer("[CONNECT] RESYNC 0x00 échec: " + e.getMessage());
-            }
-        } catch(Exception e) {
+            append("Port ouvert OK\n");
+
+            int to   = parseIntSafe(safeStr(edtTo.getText()),   0xFA);
+            int from = parseIntSafe(safeStr(edtFrom.getText()), 0xFF);
+
+            // *** INSTANCES UNIQUES !! ***
+            lcpLink = new LcpLink(serialPort, to, from, true);
+            lcpOps  = new LcpOps(lcpLink);
+
+            append("[CONNECT] RESYNC 0x00 (ProductID)\n");
+            byte[] fr = lcpLink.sendRecv(new byte[]{0x00}, 3200);
+
+            append("[CONNECT] RESYNC OK — session initialisée\n");
+
+        } catch (Exception e) {
             append("ERREUR ouverture: " + e.getMessage() + "\n");
         }
     }
 
-    private boolean openOrVerifyPort() {
-        if (serialPort != null) { appendAndBuffer("[PORT] Port déjà ouvert (on réutilise)."); return true; }
-        requestAndOpenFirstPort();
-        return serialPort != null;
-    }
-
     /* ================================================================
-       B — Ping 0x28 (RAW, session déjà sync → SYNC=0)
+       MACRO A — END + CLEAR + POLL
        ================================================================ */
-    private void macroPing28_raw_locked() {
-        if (!openOrVerifyPort()) return;
+    private void macroReset_locked() {
+        if (!checkReady()) return;
         synchronized (lcpLock) {
             try {
-                serialPort.purgeHwBuffers(true, true);
-                byte[] sniff = new byte[4]; try { serialPort.read(sniff, 30); } catch(Exception ignore){}
+                append("[A] END (02)\n");
+                lcpOps.opIssueCommand(0x02, 3000, 300);
 
-                final int to=0xFA, from=0xFF;
-                LcpLink link = new LcpLink(serialPort, to, from, false /* no SYNC now */);
-                LcpLink.setLogger(this::appendAndBuffer);
-                LcpLink.DUMP_TX = true; LcpLink.DUMP_RX = true;
-
-                appendAndBuffer("[B] RAW GET_DEL_STATUS (0x28)");
-                byte[] frame = link.sendRecv(new byte[]{ (byte)0x28 }, 3200);
-
-                // 0x28 → rc, devStatus, delStatus(2), delCode(2)
-                byte[] pld = LcpLink.extractPayload(frame);
-                if (pld == null || pld.length < 6) throw new IllegalStateException("payload 0x28 invalide, len=" + (pld==null?-1:pld.length));
-                int rc = pld[0] & 0xFF;
-                int ds = (pld[3] & 0xFF) << 8 | (pld[2] & 0xFF);
-                int dc = (pld[5] & 0xFF) << 8 | (pld[4] & 0xFF);
-                appendAndBuffer(String.format("[B] rc=%d DS=0x%04X DC=0x%04X %s %s", rc, ds, dc, dsBits(ds), dcBits(dc)));
-            } catch (Exception e) {
-                appendAndBuffer("[B] ERREUR: " + e.getMessage());
-            }
-        }
-    }
-
-    private void diagPing28_raw_locked() {
-        macroPing28_raw_locked();
-    }
-
-    /* ================================================================
-       A — Libération ticket (END 0x02 + CLEAR 0x06 + poll 0x28)
-       ================================================================ */
-    private void macroResetEndClear_locked() {
-        if (!openOrVerifyPort()) return;
-        synchronized (lcpLock) {
-            try {
-                serialPort.purgeHwBuffers(true, true);
-
-                final int to   = 0xFA;
-                final int from = 0xFF;
-                LcpLink link = new LcpLink(serialPort, to, from, false);
-                LcpOps  ops  = new LcpOps(link);
-                LcpLink.setLogger(this::appendAndBuffer);
-                LcpLink.DUMP_TX = true; LcpLink.DUMP_RX = true;
-
-                appendAndBuffer("[A] ISSUE #2 (END/RESET)");
-                ops.opIssueCommand(0x02, 3000, 200);
-                Thread.sleep(350);
-
-                appendAndBuffer("[A] ISSUE #6 (CLEAR TICKET)");
-                ops.opIssueCommand(0x06, 3000, 200);
-                Thread.sleep(200);
+                append("[A] CLEAR (06)\n");
+                lcpOps.opIssueCommand(0x06, 3000, 200);
 
                 long t0 = System.currentTimeMillis();
-                int[] dsdc;
-                do {
-                    dsdc = ops.opDeliveryStatus(3000, 200);
-                    appendAndBuffer(String.format("[A] POLL DS=0x%04X DC=0x%04X %s %s",
-                            dsdc[0], dsdc[1], dsBits(dsdc[0]), dcBits(dsdc[1])));
-                    if ((dsdc[1] & 0x0001) == 0) break; // ticket libéré
+                while (true) {
+                    int[] dsdc = lcpOps.opDeliveryStatus(3000, 200);
+                    append(String.format("[A] DS=0x%04X DC=0x%04X\n", dsdc[0], dsdc[1]));
+                    if ((dsdc[1] & 0x0001) == 0) break;  // ticket cleared
                     if (System.currentTimeMillis() - t0 > 8000) break;
-                    Thread.sleep(300);
-                } while (true);
-
-                appendAndBuffer(String.format("[A] FINAL DS=0x%04X DC=0x%04X %s %s",
-                        dsdc[0], dsdc[1], dsBits(dsdc[0]), dcBits(dsdc[1])));
-
-            } catch (Exception e) {
-                appendAndBuffer("[A] ERREUR: " + e.getMessage());
-            }
-        }
-    }
-
-    /* ================================================================
-       C — Start (Python-like) avec libération pré-START si ticket
-       ================================================================ */
-    private void macroStartDelivery_locked() {
-        if (!openOrVerifyPort()) return;
-        synchronized (lcpLock) {
-            try {
-                serialPort.purgeHwBuffers(true, true);
-
-                final int to   = 0xFA;
-                final int from = 0xFF;
-
-                // Pré-START : libérer ticket si présent
-                {
-                    LcpLink link0 = new LcpLink(serialPort, to, from, false);
-                    LcpOps  ops0  = new LcpOps(link0);
-                    int[] dsdc0 = ops0.opDeliveryStatus(3000, 200);
-                    if ((dsdc0[1] & 0x0001) != 0) {  // ticket=true
-                        appendAndBuffer("[C] Ticket en suspend → libération pré-START");
-                        try {
-                            ops0.opIssueCommand(0x02, 3000, 200); // END
-                            Thread.sleep(350);
-                            ops0.opIssueCommand(0x06, 3000, 200); // CLEAR TICKET
-                            Thread.sleep(200);
-                            long t0 = System.currentTimeMillis();
-                            int[] dsdc;
-                            do {
-                                dsdc = ops0.opDeliveryStatus(3000, 200);
-                                appendAndBuffer(String.format("[C] (pre) POLL DS=0x%04X DC=0x%04X %s %s",
-                                        dsdc[0], dsdc[1], dsBits(dsdc[0]), dcBits(dsdc[1])));
-                                if ((dsdc[1] & 0x0001) == 0) break;
-                                if (System.currentTimeMillis() - t0 > 8000) break;
-                                Thread.sleep(300);
-                            } while (true);
-                        } catch (Exception exA) {
-                            appendAndBuffer("[C] ERREUR libération pré-START: " + exA.getMessage());
-                        }
-                    }
                 }
 
-                // Flux Python via LcrSimpleDeliverV2
-                LcrSimpleDeliverV2.Params p = new LcrSimpleDeliverV2.Params();
-                p.port     = serialPort;
-                p.toAddr   = to;
-                p.fromAddr = from;
-                p.product  = parseIntSafe(safeStr(edtProduct.getText()), 1);
-                p.preset   = parseDoubleSafe(safeStr(edtPreset.getText()), 50.0);
-                p.verbose  = true;
-                p.startAcceptFlow = true;
-                p.ticketPost      = "if-pending";
-
-                appendAndBuffer("[C] unlock/prestart/start (profil Python)...");
-                LcrSimpleDeliverV2 lcr = new LcrSimpleDeliverV2(p);
-                lcr.unlock();
-                lcr.prestart();   // sélection produit + preset net (auto) + clean si besoin
-                lcr.start();      // RUN 0x00 + attente DC=0x012D
-                appendAndBuffer("[C] start() OK — surveillez LIVE dans l’app.");
-
             } catch (Exception e) {
-                appendAndBuffer("[C] ERREUR: " + e.getMessage());
+                append("[A] ERREUR: " + e.getMessage() + "\n");
             }
         }
     }
 
-    private void startFlow_locked() {
-        macroStartDelivery_locked();
+    /* ================================================================
+       MACRO B — PING 0x28
+       ================================================================ */
+    private void macroPing28_locked() {
+        if (!checkReady()) return;
+        synchronized (lcpLock) {
+            try {
+                append("[B] GET_DEL_STATUS\n");
+                int[] dsdc = lcpOps.opDeliveryStatus(3000, 100);
+                append(String.format("[B] DS=0x%04X DC=0x%04X\n", dsdc[0], dsdc[1]));
+            } catch(Exception e){
+                append("[B] ERREUR: " + e.getMessage() + "\n");
+            }
+        }
+    }
+
+    private void diagPing28_locked() {
+        macroPing28_locked();
     }
 
     /* ================================================================
-       CONSOLE RAW
+       MACRO C — START (simple flux Python)
        ================================================================ */
-    private void promptAndSendHex() {
-        if (!openOrVerifyPort()) { append("RAW: port non prêt — clique 'Connexion USB'.\n"); return; }
-
-        final EditText edt = new EditText(this);
-        edt.setHint("ex.: 28 (GET_DEL_STATUS), 23 (GET_MACHINE), 20 00 (GET_FIELD#0)");
-        edt.setSingleLine(false);
-
-        final EditText edtTimeout = new EditText(this);
-        edtTimeout.setHint("timeout ms (ex.: 3000)");
-        edtTimeout.setText("3000");
-
-        LinearLayout layout = new LinearLayout(this);
-        layout.setOrientation(LinearLayout.VERTICAL);
-        int pad = (int)(8 * getResources().getDisplayMetrics().density);
-        layout.setPadding(pad, pad, pad, pad);
-        layout.addView(edt);
-        layout.addView(edtTimeout);
-
-        new AlertDialog.Builder(this)
-                .setTitle("Envoyer payload LCP (hex)")
-                .setView(layout)
-                .setPositiveButton("Envoyer", (d, w) -> {
-                    try {
-                        String hex = edt.getText().toString();
-                        int toMs = Integer.parseInt(edtTimeout.getText().toString().trim());
-                        byte[] payload = parseHexBytes(hex);
-                        runLcpTask(() -> sendRawPayload_locked(payload, Math.max(200, toMs)));
-                    } catch (Exception e) {
-                        appendAndBuffer("[RAW] invalide: " + e.getMessage());
-                    }
-                })
-                .setNegativeButton("Annuler", null)
-                .show();
-    }
-
-    private void sendRawPayload_locked(byte[] payload, int timeoutMs) {
-        if (!openOrVerifyPort()) { append("Port non prêt — clique d’abord 'Connexion USB'.\n"); return; }
+    private void macroStart_locked() {
+        if (!checkReady()) return;
         synchronized (lcpLock) {
             try {
-                serialPort.purgeHwBuffers(true, true);
-                int to=0xFA, from=0xFF;
-                LcpLink link = new LcpLink(serialPort, to, from, false);
-                LcpLink.setLogger(this::appendAndBuffer);
-                LcpLink.DUMP_TX = true; LcpLink.DUMP_RX = true;
 
-                appendAndBuffer(String.format("[RAW] to=0x%02X from=0x%02X payload=%s",
-                        to, from, bytesToHex(payload)));
+                // UNLOCK : si ticket
+                int[] dsdc = lcpOps.opDeliveryStatus(3000, 200);
+                if ((dsdc[1] & 0x0001) != 0) {
+                    append("[C] Ticket présent → END + CLEAR\n");
 
-                byte[] rsp = link.sendRecv(payload, timeoutMs);
-                appendAndBuffer("[RAW] OK, RX size=" + (rsp != null ? rsp.length : -1));
+                    lcpOps.opIssueCommand(0x02, 3000, 300);
+                    lcpOps.opIssueCommand(0x06, 3000, 300);
 
-            } catch (Exception e) {
-                appendAndBuffer("[RAW] ERREUR: " + e.getMessage());
+                    // attendre ticket = clear
+                    lcpOps.opWaitForStatus(0x0001, 0x0000, 8000, 300);
+                }
+
+                // DÉBUT DÉLIVRANCE
+                append("[C] Start (commande 0x00 via LcrSimpleDeliverV2)\n");
+
+                LcrSimpleDeliverV2.Params p = new LcrSimpleDeliverV2.Params();
+                p.port     = serialPort;
+                p.toAddr   = parseIntSafe(edtTo.getText().toString(),   0xFA);
+                p.fromAddr = parseIntSafe(edtFrom.getText().toString(), 0xFF);
+                p.product  = parseIntSafe(edtProduct.getText().toString(), 1);
+                p.preset   = parseDoubleSafe(edtPreset.getText().toString(), 50.0);
+                p.verbose  = true;
+
+                LcrSimpleDeliverV2 deliver = new LcrSimpleDeliverV2(p);
+                deliver.unlock();
+                deliver.prestart();
+                deliver.start();
+
+                append("[C] START OK\n");
+
+            } catch(Exception e){
+                append("[C] ERREUR: " + e.getMessage() + "\n");
+            }
+        }
+    }
+
+    /* ================================================================
+       RAW (texte)
+       ================================================================ */
+    private void sendRawPayload_locked(byte[] payload, int timeoutMs) {
+        if (!checkReady()) return;
+        synchronized (lcpLock) {
+            try {
+                append("[RAW] Envoi...\n");
+                byte[] rsp = lcpLink.sendRecv(payload, timeoutMs);
+                append("[RAW] OK, RX=" + rsp.length + "\n");
+            } catch(Exception e){
+                append("[RAW] ERREUR: " + e.getMessage() + "\n");
             }
         }
     }
@@ -448,47 +241,12 @@ public class MainActivity extends AppCompatActivity {
     /* ================================================================
        UTIL
        ================================================================ */
-    private int parseIntSafe(String s, int def){ try { return Integer.parseInt(s); } catch(Exception e){ return def; } }
-    private double parseDoubleSafe(String s, double def){ try { return Double.parseDouble(s); } catch(Exception e){ return def; } }
 
-    private String dcBits(int dc) {
-        boolean ticket = (dc & 0x0001) != 0;   // TICKET_PENDING
-        boolean flow   = (dc & 0x0004) != 0;   // FLOW_ACTIVE
-        boolean deliv  = (dc & 0x0008) != 0;   // DELIVERY_ACTIVE
-        boolean begin  = (dc & 0x0400) != 0;   // BEGIN_DELIVERY
-        return String.format("[ticket=%s flow=%s delivery=%s beginDelivery=%s]",
-                ticket, flow, deliv, begin);
-    }
-
-    private String dsBits(int ds) {
-        boolean begin = (ds & 0x0400) != 0;  // BEGIN_DELIVERY dans DS
-        return String.format("[beginDelivery=%s]", begin);
-    }
-
-    private static String bytesToHex(byte[] b) {
-        if (b == null) return "(null)";
-        StringBuilder sb = new StringBuilder(b.length * 3);
-        for (byte x : b) sb.append(String.format("%02X ", x));
-        return sb.toString().trim();
-    }
-
-    private byte[] parseHexBytes(String s) throws IllegalArgumentException {
-        if (s == null) throw new IllegalArgumentException("vide");
-        String cleaned = s.replaceAll("(?i)0x", "").replaceAll("[^0-9A-Fa-f]", "");
-        if (cleaned.length() == 0) throw new IllegalArgumentException("aucun hex");
-        if ((cleaned.length() % 2) != 0) cleaned = "0" + cleaned;
-        int len = cleaned.length() / 2;
-        byte[] out = new byte[len];
-        for (int i = 0; i < len; i++) out[i] = (byte) Integer.parseInt(cleaned.substring(2*i, 2*i+2), 16);
-        return out;
-    }
-
-    private void append(String s){ runOnUiThread(() -> log.append(s)); }
-
-    private void appendAndBuffer(String s){
-        if (s == null) return;
-        logBuf.append(s);
-        if (!s.endsWith("\n")) logBuf.append("\n");
-        append(s.endsWith("\n") ? s : s + "\n");
+    private boolean checkReady() {
+        if (serialPort == null || lcpLink == null || lcpOps == null) {
+            append("Port/LCP non prêt — cliquez 'Connexion USB'.\n");
+            return false;
+        }
+        return true;
     }
 }
