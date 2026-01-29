@@ -210,12 +210,12 @@ public class MainActivity extends AppCompatActivity {
             lcpLink = new LcpLink(serialPort, to, from, true);
             lcpOps  = new LcpOps(lcpLink);
 
-            // RESYNC 0x00 + respiration + premier poll 0x28 pour caler la session
+            // RESYNC 0x00 + respiration + premier poll 0x28
             append("[CONNECT] RESYNC 0x00\n");
             lcpLink.sendRecv(new byte[]{0x00}, 3200);
             try { Thread.sleep(200); } catch (InterruptedException ignored) {}
             try {
-                int[] dsdc = lcpOps.opDeliveryStatus(3000, 150); // premier poll espacé
+                int[] dsdc = lcpOps.opDeliveryStatus(3000, 150);
                 append(String.format("[CONNECT] First poll DS=0x%04X DC=0x%04X\n", dsdc[0], dsdc[1]));
             } catch(Exception ignore) {
                 append("[CONNECT] First poll (ignorable) sans réponse\n");
@@ -239,7 +239,7 @@ public class MainActivity extends AppCompatActivity {
             try {
                 // 1) END
                 append("[A] END (0x02)\n");
-                lcpOps.opIssueCommand(0x02, 3000, 300); // pause 300ms incluse (queued-handling interne)
+                lcpOps.opIssueCommand(0x02, 3000, 300); // queued-handling interne
 
                 // 2) Premier poll : si ticket, on enchaîne CLEAR
                 int[] dsdc = lcpOps.opDeliveryStatus(3000, 250); // queued-handling interne
@@ -288,8 +288,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-      Macro B — GET_DEL_STATUS
-      ================================================================ */
+       Macro B — GET_DEL_STATUS
+       ================================================================ */
     private void macroPing28_locked() {
         if (!checkReady()) return;
         synchronized (lcpLock) {
@@ -344,7 +344,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       RAW (avec blocage de 0x7D depuis l'UI)
+       RAW (blocage de 0x7D depuis l'UI)
        ================================================================ */
     private void promptAndSendHex() {
         if (!checkReady()) return;
@@ -372,7 +372,7 @@ public class MainActivity extends AppCompatActivity {
                         int to = Integer.parseInt(edtTimeout.getText().toString());
                         byte[] pl = parseHexBytes(hex);
 
-                        // Blocage explicite de 0x7D (CHECK_REQUEST) côté UI
+                        // Interdit : 0x7D (CHECK_REQUEST) — géré automatiquement par LcpOps
                         if (pl != null && pl.length > 0 && (pl[0] & 0xFF) == 0x7D) {
                             append("[RAW] 0x7D (CHECK_REQUEST) est géré automatiquement par LcpOps — envoi UI bloqué.\n");
                             return;

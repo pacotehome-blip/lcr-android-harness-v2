@@ -47,21 +47,19 @@ public class LcpOps {
        ============================================================ */
     public byte[] opCheckRequest(int timeoutMs, int pollMs) throws Exception {
         long t0 = System.currentTimeMillis();
+        int wait = Math.max(100, pollMs);
 
         while (System.currentTimeMillis() - t0 < timeoutMs) {
             byte[] fr = link.sendRecv(new byte[]{ (byte)0x7D }, timeoutMs);
             byte[] rep = LcpLink.extractPayload(fr);
-            if (rep == null || rep.length == 0) { Thread.sleep(Math.max(50, pollMs)); continue; }
+            if (rep == null || rep.length == 0) { Thread.sleep(wait); continue; }
 
             int rc0 = rep[0] & 0xFF;
-            if (rc0 == RC_REQUEST_QUEUED) {
-                Thread.sleep(Math.max(50, pollMs));
-                continue;
-            }
+            if (rc0 == RC_REQUEST_QUEUED) { Thread.sleep(wait); continue; }
             if (rc0 == RC_NO_REQUEST_ACTIVE) throw new Exception("CheckRequest: 0x27 NO_REQUEST_ACTIVE");
             if (rc0 == RC_REQUEST_ABORTED)   throw new Exception("CheckRequest: 0x28 REQUEST_ABORTED");
 
-            // Normalisations analogues au script Python
+            // Normalisations (comme dans le script Python):
             if (rep.length == 2 && rc0 == RC_OK) {
                 return rep; // [0x00, ...]
             }
@@ -180,8 +178,7 @@ public class LcpOps {
 
         int rc = p[0] & 0xFF;
         if (rc == RC_REQUEST_QUEUED) {
-            byte[] rep = opCheckRequest(timeoutMs, Math.max(100, pauseMs));
-            p = rep;
+            p = opCheckRequest(timeoutMs, Math.max(100, pauseMs));
             rc = p[0] & 0xFF;
         }
         if (rc != RC_OK)
