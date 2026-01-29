@@ -11,7 +11,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbDeviceConnection;
-import android.hardware.usb.UsbManager;
+importandroid.hardware.usb.UsbManager;
 import android.os.Bundle;
 import android.view.View;
 import android.widget.CheckBox;
@@ -31,9 +31,7 @@ import com.pa.lcr.lcp.LcpOps;
 
 import java.util.List;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-
-public class MainActivity extends AppCompatActivity {
+importpublic class MainActivity extends AppCompatActivity {
 
     private static final String ACTION_USB_PERMISSION = "com.pa.lcrdemo.USB_PERMISSION";
 
@@ -42,26 +40,27 @@ public class MainActivity extends AppCompatActivity {
 
     private UsbSerialPort serialPort;
 
-    // ---- AJOUT IMPORTANT : une seule session LCP ----
+    // ---- SESSION UNIQUE LCP ----
     private LcpLink lcpLink;
     private LcpOps  lcpOps;
 
     private final StringBuilder logBuf = new StringBuilder(4096);
-    private final Object lcpLock = new Object();
+   Lock = new Object();
     private final ExecutorService lcpExec = Executors.newSingleThreadExecutor();
 
+    /* ================================================================
+       USB RECEIVERS
+       ================================================================ */
     private final BroadcastReceiver usbPermissionReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
             if (!ACTION_USB_PERMISSION.equals(intent.getAction())) return;
-            synchronized (this) {
-                UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
-                boolean granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
-                if (granted) {
-                    append("Permission USB accordée, ouverture...\n");
-                    connectPort(device);
-                } else {
-                    append("Permission USB refusée\n");
-                }
+            UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+            boolean granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
+            if (granted) {
+                append("Permission USB accordée, ouverture...\n");
+                connectPort(device);
+            } else {
+                append("Permission USB refusée\n");
             }
         }
     };
@@ -81,6 +80,9 @@ public class MainActivity extends AppCompatActivity {
         }
     };
 
+    /* ================================================================
+       onCreate
+       ================================================================ */
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
         setContentView(R.layout.activity_main);
@@ -94,13 +96,16 @@ public class MainActivity extends AppCompatActivity {
         ensureDefaultAddresses();
 
         registerReceiver(usbPermissionReceiver, new IntentFilter(ACTION_USB_PERMISSION));
+
         IntentFilter f = new IntentFilter();
         f.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
         f.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
         registerReceiver(usbAttachDetach, f);
 
+        // I/O Logs
         CheckBox switchIoLog = findViewById(R.id.switchIoLog);
         LcpLink.setLogger(this::appendAndBuffer);
+
         if (switchIoLog != null) {
             switchIoLog.setOnCheckedChangeListener((btn, checked) -> {
                 LcpLink.DUMP_TX = checked;
@@ -109,6 +114,7 @@ public class MainActivity extends AppCompatActivity {
             });
         }
 
+        // Copy log
         findViewById(R.id.btnCopyLog).setOnClickListener(v -> {
             ClipboardManager cb = (ClipboardManager)getSystemService(Context.CLIPBOARD_SERVICE);
             if (cb != null) {
@@ -117,16 +123,20 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
+        // Clear log
         findViewById(R.id.btnClearLog).setOnClickListener(v -> {
             logBuf.setLength(0);
             runOnUiThread(() -> log.setText(""));
         });
 
+        // Buttons
         findViewById(R.id.btnConnect).setOnClickListener(v -> requestAndOpenFirstPort());
         findViewById(R.id.btnDiag).setOnClickListener(v -> runLcpTask(this::diagPing28_locked));
         findViewById(R.id.btnA).setOnClickListener(v -> runLcpTask(this::macroReset_locked));
         findViewById(R.id.btnB).setOnClickListener(v -> runLcpTask(this::macroPing28_locked));
         findViewById(R.id.btnC).setOnClickListener(v -> runLcpTask(this::macroStart_locked));
+
+        // RAW hex sender
         findViewById(R.id.btnSendHex).setOnClickListener(v -> promptAndSendHex());
 
         append("Prêt. Branchez le LCR puis cliquez 'Connexion USB'.\n");
@@ -141,7 +151,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       CONNEXION USB + SESSION LCP UNIQUE
+       USB CONNECT
        ================================================================ */
 
     private void requestAndOpenFirstPort() {
@@ -153,8 +163,10 @@ public class MainActivity extends AppCompatActivity {
 
         if (!mgr.hasPermission(dev)) {
             append("Demande de permission USB…\n");
-            PendingIntent pi = PendingIntent.getBroadcast(this, 0,
-                    new Intent(ACTION_USB_PERMISSION), PendingIntent.FLAG_IMMUTABLE);
+            PendingIntent pi = PendingIntent.getBroadcast(
+                    this, 0,
+                    new Intent(ACTION_USB_PERMISSION),
+                    PendingIntent.FLAG_IMMUTABLE);
             mgr.requestPermission(dev, pi);
             return;
         }
@@ -177,19 +189,18 @@ public class MainActivity extends AppCompatActivity {
             serialPort.setRTS(false);
             serialPort.setDTR(false);
             serialPort.purgeHwBuffers(true, true);
-            append("Port ouvert 19200 8N1\n");
+
+            append("Port ouvert 19200 8N1 (RTS/DTR off)\n");
 
             int to   = parseIntSafe(safeStr(edtTo.getText()),   0xFA);
             int from = parseIntSafe(safeStr(edtFrom.getText()), 0xFF);
 
-            // ----------------------
-            // SESSION LCP UNIQUE
-            // ----------------------
+            // ---- SESSION UNIQUE LCP ----
             lcpLink = new LcpLink(serialPort, to, from, true);
             lcpOps  = new LcpOps(lcpLink);
 
             append("[CONNECT] RESYNC 0x00\n");
-            byte[] frame = lcpLink.sendRecv(new byte[]{0x00}, 3200);
+            lcpLink.sendRecv(new byte[]{0x00}, 3200);
             append("[CONNECT] RESYNC OK\n");
 
         } catch(Exception e) {
@@ -198,7 +209,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       MACRO : RESET (END + CLEAR)
+       MACRO A : END + CLEAR
        ================================================================ */
     private void macroReset_locked() {
         if (!checkReady()) return;
@@ -214,8 +225,8 @@ public class MainActivity extends AppCompatActivity {
                 while (true) {
                     int[] dsdc = lcpOps.opDeliveryStatus(3000, 200);
                     append(String.format("[A] DS=0x%04X DC=0x%04X\n", dsdc[0], dsdc[1]));
-                    if ((dsdc[1] & 0x0001) == 0) break;
-                    if (System.currentTimeMillis() - t0 > 8000) break;
+                    if ((dsdc[1] & 0x0001)==0) break;
+                    if (System.currentTimeMillis()-t0 > 8000) break;
                 }
 
             } catch(Exception e) {
@@ -225,7 +236,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       MACRO : PING 0x28
+       MACRO B : RAW GET_DEL_STATUS
        ================================================================ */
     private void macroPing28_locked() {
         if (!checkReady()) return;
@@ -245,21 +256,21 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       MACRO : START
+       MACRO C : START (Python-like flow)
        ================================================================ */
     private void macroStart_locked() {
         if (!checkReady()) return;
         synchronized (lcpLock) {
             try {
-                // Ticket ?
-                int[] dsdc = lcpOps.opDeliveryStatus(3000, 200);
-                if ((dsdc[1] & 0x0001) != 0) {
-                    append("[C] Ticket présent → END + CLEAR\n");
 
-                    lcpOps.opIssueCommand(0x02, 3000, 300);
-                    lcpOps.opIssueCommand(0x06, 3000, 300);
+                int[] dsdc = lcpOps.opDeliveryStatus(3000,200);
+                if ((dsdc[1] & 0x0001)!=0) {
+                    append("[C] Ticket → END + CLEAR\n");
 
-                    lcpOps.opWaitForStatus(0x0001, 0x0000, 8000, 300);
+                    lcpOps.opIssueCommand(0x02,3000,300);
+                    lcpOps.opIssueCommand(0x06,3000,300);
+
+                    lcpOps.opWaitForStatus(0x0001,0x0000,8000,300);
                 }
 
                 append("[C] START via LcrSimpleDeliverV2\n");
@@ -272,7 +283,7 @@ public class MainActivity extends AppCompatActivity {
                 p.preset   = parseDoubleSafe(edtPreset.getText().toString(), 50.0);
                 p.verbose  = true;
 
-                LcrSimpleDeliverV2 deliver = new LcrSimpleDeliverV2(p);
+                LcrSimpleDeliverV2 deliver = new LcrSimpleDeliverV2(p, lcpOps);
                 deliver.unlock();
                 deliver.prestart();
                 deliver.start();
@@ -286,72 +297,126 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       RAW
+       RAW SENDER
        ================================================================ */
-    private void sendRawPayload_locked(byte[] payload, int timeoutMs) {
-        if (!checkReady()) return;
-        synchronized (lcpLock) {
-            try {
-                append("[RAW] Envoi…\n");
-                byte[] rsp = lcpLink.sendRecv(payload, timeoutMs);
-                append("[RAW] OK, RX size=" + rsp.length + "\n");
-            } catch(Exception e){
-                append("[RAW] ERREUR: " + e.getMessage() + "\n");
+    private void promptAndSendHex() {
+        if (!checkReady()) { append("Port non prêt\n"); return; }
+
+        final EditText edt = new EditText(this);
+        edt.setHint("payload hex (ex: 28, 20 00, etc.)");
+
+        final EditText edtTimeout = new EditText(this);
+        edtTimeout.setHint("timeout ms");
+        edtTimeout.setText("3000");
+
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        int pad = (int)(8 * getResources().getDisplayMetrics().density);
+        layout.setPadding(pad,pad,pad,pad);
+        layout.addView(edt);
+        layout.addView(edtTimeout);
+
+        new AlertDialog.Builder(this)
+                .setTitle("Envoyer payload LCP")
+                .setView(layout)
+                .setPositiveButton("Envoyer",(d,w)->{
+                    try{
+                        String hex = edt.getText().toString();
+                        int toMs = Integer.parseInt(edtTimeout.getText().toString().trim());
+                        byte[] payload = parseHexBytes(hex);
+                        runLcpTask(() -> sendRawPayload_locked(payload,toMs));
+                    }catch(Exception e){
+                        append("[RAW] invalide: "+e.getMessage()+"\n");
+                    }
+                })
+                .setNegativeButton("Annuler",null)
+                .show();
+    }
+
+    private void sendRawPayload_locked(byte[] payload,int timeoutMs){
+        if (!checkReady()) { append("Port non prêt\n"); return; }
+        synchronized(lcpLock){
+            try{
+                append("[RAW] Envoi: "+bytesToHex(payload)+"\n");
+                byte[] rsp=lcpLink.sendRecv(payload,timeoutMs);
+                append("[RAW] RX size="+rsp.length+"\n");
+            }catch(Exception e){
+                append("[RAW] ERREUR: "+e.getMessage()+"\n");
             }
         }
     }
 
     /* ================================================================
-       UTIL
+       UTILITAIRES
        ================================================================ */
     private boolean checkReady() {
-        if (serialPort == null || lcpLink == null || lcpOps == null) {
+        if (serialPort==null || lcpLink==null || lcpOps==null) {
             append("Port/LCP non prêt — clique 'Connexion USB'.\n");
             return false;
         }
         return true;
     }
 
-    private void runLcpTask(Runnable r) {
+    private void runLcpTask(Runnable r){
         setButtonsEnabled(false);
         lcpExec.execute(() -> {
-            try { r.run(); }
-            finally { setButtonsEnabled(true); }
+            try {
+                r.run();
+            } finally {
+                setButtonsEnabled(true);
+            }
         });
     }
 
-    private void setButtonsEnabled(final boolean enabled) {
+    private void setButtonsEnabled(final boolean enabled){
         runOnUiThread(() -> {
-            int[] ids = new int[]{
-                    R.id.btnA, R.id.btnB, R.id.btnC, R.id.btnScan, R.id.btnSendHex,
-                    R.id.btnTestUsb, R.id.btnConnect, R.id.btnDiag, R.id.btnStart
+            int[] ids = {
+                    R.id.btnA, R.id.btnB, R.id.btnC,
+                    R.id.btnScan, R.id.btnSendHex, R.id.btnTestUsb,
+                    R.id.btnConnect, R.id.btnDiag, R.id.btnStart
             };
-            for (int id : ids) {
-                View v = findViewById(id);
-                if (v != null) v.setEnabled(enabled);
+            for(int id: ids){
+                View v=findViewById(id);
+                if(v!=null) v.setEnabled(enabled);
             }
         });
     }
 
     private void ensureDefaultAddresses() {
         runOnUiThread(() -> {
-            if (edtTo   != null && !"0xFA".equalsIgnoreCase(safeStr(edtTo.getText())))
-                edtTo.setText("0xFA");
-            if (edtFrom != null && !"0xFF".equalsIgnoreCase(safeStr(edtFrom.getText())))
-                edtFrom.setText("0xFF");
+            if (edtTo!=null && !"0xFA".equalsIgnoreCase(safeStr(edtTo.getText()))) edtTo.setText("0xFA");
+            if (edtFrom!=null && !"0xFF".equalsIgnoreCase(safeStr(edtFrom.getText()))) edtFrom.setText("0xFF");
         });
     }
 
-    private String safeStr(CharSequence cs){ return cs == null ? "" : cs.toString().trim(); }
+    private String safeStr(CharSequence cs){ return cs==null? "" : cs.toString().trim(); }
 
-    private int parseIntSafe(String s, int def){
-        try { return Integer.parseInt(s.replace("0x",""), 16); }
+    private int parseIntSafe(String s,int def){
+        try{ return Integer.parseInt(s.replace("0x",""),16); }
         catch(Exception e){ return def; }
     }
 
-    private double parseDoubleSafe(String s, double def){
-        try { return Double.parseDouble(s); }
+    private double parseDoubleSafe(String s,double def){
+        try{ return Double.parseDouble(s); }
         catch(Exception e){ return def; }
+    }
+
+    private byte[] parseHexBytes(String s){
+        if(s==null) throw new IllegalArgumentException("vide");
+        String cleaned=s.replaceAll("(?i)0x","").replaceAll("[^0-9A-Fa-f]","");
+        if(cleaned.length()==0) throw new IllegalArgumentException("aucun hex");
+        if((cleaned.length()%2)!=0) cleaned="0"+cleaned;
+        int len=cleaned.length()/2;
+        byte[] out=new byte[len];
+        for(int i=0;i<len;i++) out[i]=(byte)Integer.parseInt(cleaned.substring(2*i,2*i+2),16);
+        return out;
+    }
+
+    private static String bytesToHex(byte[] b){
+        if(b==null) return "(null)";
+        StringBuilder sb=new StringBuilder();
+        for(byte x:b) sb.append(String.format("%02X ",x));
+        return sb.toString().trim();
     }
 
     private void append(String s){
@@ -359,9 +424,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void appendAndBuffer(String s){
-        if (s == null) return;
         logBuf.append(s);
-        if (!s.endsWith("\n")) logBuf.append("\n");
-        append(s.endsWith("\n") ? s : s + "\n");
+        if(!s.endsWith("\n")) logBuf.append("\n");
+        append(s+"\n");
     }
 }
