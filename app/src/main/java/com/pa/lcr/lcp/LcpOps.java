@@ -61,7 +61,7 @@ public class LcpOps {
             if (rc0 == RC_NO_REQUEST_ACTIVE) throw new Exception("CheckRequest: 0x27 NO_REQUEST_ACTIVE");
             if (rc0 == RC_REQUEST_ABORTED)   throw new Exception("CheckRequest: 0x28 REQUEST_ABORTED");
 
-            // Normalisations (certaines FW renvoient [0x00, 0x00, ...])
+            // Normalisations : certains FW renvoient [0x00, 0x00, ...]
             if (rep.length == 2 && rc0 == RC_OK) {
                 return rep; // [0x00, ...]
             }
@@ -76,7 +76,7 @@ public class LcpOps {
     }
 
     /* ============================================================
-       GET_MACHINE (0x23) → [ms, ds, dc] avec queued-handling
+       GET_MACHINE (0x23) → [ms, ds, dc] — queued-handling + big-endian
        ============================================================ */
     public int[] opMachineStatusFull(int timeoutMs, int pauseMs) throws Exception {
         byte[] fr = link.sendRecv(new byte[]{ 0x23 }, timeoutMs);
@@ -96,9 +96,10 @@ public class LcpOps {
         if (p.length < 8)
             throw new Exception("GET_MACHINE: payload invalide (<8)");
 
-        int ms = (p[2] & 0xFF) | ((p[3] & 0xFF) << 8);
-        int ds = (p[4] & 0xFF) | ((p[5] & 0xFF) << 8);
-        int dc = (p[6] & 0xFF) | ((p[7] & 0xFF) << 8);
+        // Big-endian: [rc, dev(1), MS(2), DS(2), DC(2)] → MS/DS/DC en BE
+        int ms = ((p[2] & 0xFF) << 8) | (p[3] & 0xFF);
+        int ds = ((p[4] & 0xFF) << 8) | (p[5] & 0xFF);
+        int dc = ((p[6] & 0xFF) << 8) | (p[7] & 0xFF);
 
         if (pauseMs > 0) Thread.sleep(pauseMs);
         return new int[]{ ms, ds, dc };
@@ -175,7 +176,7 @@ public class LcpOps {
     }
 
     /* ============================================================
-       GET_DEL_STATUS (0x28) → [ds, dc] — gère rc=0x26 via CHECK_REQUEST
+       GET_DEL_STATUS (0x28) → [ds, dc] — queued-handling + big-endian
        ============================================================ */
     public int[] opDeliveryStatus(int timeoutMs, int pauseMs) throws Exception {
         byte[] fr = link.sendRecv(new byte[]{ 0x28 }, timeoutMs);
@@ -195,8 +196,9 @@ public class LcpOps {
         if (p.length < 6)
             throw new Exception("DEL_STATUS: payload trop court (<6)");
 
-        int ds = ((p[3] & 0xFF) << 8) | (p[2] & 0xFF);
-        int dc = ((p[5] & 0xFF) << 8) | (p[4] & 0xFF);
+        // Big-endian: DS=(p[2]<<8)|p[3], DC=(p[4]<<8)|p[5]
+        int ds = ((p[2] & 0xFF) << 8) | (p[3] & 0xFF);
+        int dc = ((p[4] & 0xFF) << 8) | (p[5] & 0xFF);
 
         if (pauseMs > 0) Thread.sleep(pauseMs);
         return new int[]{ ds, dc };
