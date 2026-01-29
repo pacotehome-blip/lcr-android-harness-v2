@@ -231,91 +231,188 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       Macro A — END + CLEAR (garde-fous + polls + wake + retry + message imprimante)
+       Helpers : log, parse, retry+RESYNC
+       ================================================================ */
+    private static String bytesToHex(byte[] b){
+        if(b==null) return "(null)";
+        StringBuilder sb=new StringBuilder();
+        for(byte x:b) sb.append(String.format("%02X ",x));
+        return sb.toString().trim();
+    }
+    private void logTxPayload(String label, byte[] payload){
+        append(String.format("[TX] %s payload: %s\n", label, bytesToHex(payload)));
+    }
+    private String flagsFromDC(int dc){
+        boolean t = (dc & 0x0001) != 0; // ticket
+        boolean f = (dc & 0x0004) != 0; // flow
+        boolean a = (dc & 0x0008) != 0; // delivery
+        return String.format("[ACTIVE=%s FLOW=%s TICKET=%s]", a, f, t);
+    }
+    private void logStatusHuman(String label, int ds, int dc){
+        append(String.format("%s DS=0x%04X DC=0x%04X %s\n", label, ds, dc, flagsFromDC(dc)));
+        if ((dc & 0x0001) != 0) append("[INFO] Ticket en cours (TICKET_PENDING=1)\n");
+    }
+
+    // --- Wrappers avec retry + RESYNC 0x00 en cas de timeout/sync ---
+    private void issueCommandWithRetry(String label, int code, int timeoutMs, int pauseMs){
+        try {
+            logTxPayload(label, new byte[]{0x24, (byte)code});
+            lcpOps.opIssueCommand(code, timeoutMs, pauseMs);
+        } catch (Exception e1) {
+            if (needResync(e1)) {
+                append("[WARN] " + label + " timeout/sync → RESYNC puis retry\n");
+                try { lcpLink.sendRecv(new byte[]{0x00}, 3200); Thread.sleep(200); } catch(Exception ignored){}
+                try {
+                    lcpOps.opIssueCommand(code, timeoutMs, pauseMs);
+                } catch (Exception e2) {
+                    append("[ERREUR] " + label + " après RESYNC : " + e2.getMessage() + "\n");
+                }
+            } else {
+                append("[ERREUR] " + label + " : " + e1.getMessage() + "\n");
+            }
+        }
+    }
+    private int[] deliveryStatusWithRetry(String label, int timeoutMs, int pauseMs){
+        try {
+            logTxPayload(label, new byte[]{0x28});
+            int[] dsdc = lcpOps.opDeliveryStatus(timeoutMs, pauseMs);
+            logStatusHuman("[RX] " + label, dsdc[0], dsdc[1]);
+            return dsdc;
+        } catch (Exception e1) {
+            if (needResync(e1)) {
+                append("[WARN] " + label + " timeout/sync → RESYNC puis retry\n");
+                try { lcpLink.sendRecv(new byte[]{0x00}, 3200); Thread.sleep(200); } catch(Exception ignored){}
+                try {
+                    int[] dsdc = lcpOps.opDeliveryStatus(timeoutMs, pauseMs);
+                    logStatusHuman("[RX] " + label, dsdc[0], dsdc[1]);
+                    return dsdc;
+                } catch (Exception e2) {
+                    append("[ERREUR] " + label + " après RESYNC : " + e2.getMessage() + "\n");
+                }
+            } else {
+                append("[ERREUR] " + label + " : " + e1.getMessage() + "\n");
+            }
+        }
+        return new int[]{0,0}; // fallback neutre
+    }
+    private int[] machineStatusWithRetry(String label, int timeoutMs, int pauseMs){
+        try {
+            logTxPayload(label, new byte[]{0x23});
+            int[] msd = lcpOps.opMachineStatusFull(timeoutMs, pauseMs);
+            append(String.format("[RX] %s MS=0x%04X\n", label, msd[0]));
+            logStatusHuman("[RX] " + label, msd[1], msd[2]);
+            return msd;
+        } catch (Exception e1) {
+            if (needResync(e1)) {
+                append("[WARN] " + label + " timeout/sync → RESYNC puis retry\n");
+                try { lcpLink.sendRecv(new byte[]{0x00}, 3200); Thread.sleep(200); } catch(Exception ignored){}
+                try {
+                    int[] msd = lcpOps.opMachineStatusFull(timeoutMs, pauseMs);
+                    append(String.format("[RX] %s MS=0x%04X\n", label, msd[0]));
+                    logStatusHuman("[RX] " + label, msd[1], msd[2]);
+                    return msd;
+                } catch (Exception e2) {
+                    append("[ERREUR] " + label + " après RESYNC : " + e2.getMessage() + "\n");
+                }
+            } else {
+                append("[ERREUR] " + label + " : " + e1.getMessage() + "\n");
+            }
+        }
+        return new int[]{0,0,0};
+    }
+    private boolean needResync(Exception e){
+        String s = (e==null? "" : e.getMessage()==null? "" : e.getMessage().toLowerCase());
+        // détections simples : "timeout", "sync"
+        return s.contains("timeout") || s.contains("sync");
+    }
+
+    /* ================================================================
+       Macro A — Send / Clear avec payloads visibles + résultat humain + retry
        ================================================================ */
     private void macroReset_locked() {
         if (!checkReady()) return;
         synchronized (lcpLock) {
             try {
-                // Etat initial
-                int[] dsdc0 = lcpOps.opDeliveryStatus(3000, 150);
-                int ds0 = dsdc0[0], dc0 = dsdc0[1];
+                // Forcer I/O dump pour aider au diag si l'opérateur l’a coché
+                // (les payloads sont de toute façon loggés ci-dessous)
+                append("[A] --- SEND / CLEAR ---\n");
 
-                boolean flow   = (dc0 & LcpOps.LCRSc_FLOW_ACTIVE) != 0;
-                boolean active = (dc0 & LcpOps.LCRSc_DELIVERY_ACTIVE) != 0;
-                boolean ticket = (dc0 & LcpOps.LCRSc_DEL_TICKET_PENDING) != 0;
+                // 0) STATUT initial
+                int[] dsdc0 = deliveryStatusWithRetry("GET_DEL_STATUS", 3000, 150);
+                boolean flow   = (dsdc0[1] & LcpOps.LCRSc_FLOW_ACTIVE) != 0;
+                boolean active = (dsdc0[1] & LcpOps.LCRSc_DELIVERY_ACTIVE) != 0;
+                boolean ticket = (dsdc0[1] & LcpOps.LCRSc_DEL_TICKET_PENDING) != 0;
 
-                append(String.format("[A] Etat initial DS=0x%04X DC=0x%04X (flow=%s active=%s ticket=%s)\n",
-                        ds0, dc0, flow, active, ticket));
-
-                // 1) END uniquement si flow/delivery actifs
+                // 1) END si nécessaire
                 if (flow || active) {
-                    append("[A] END (0x02)\n");
-                    lcpOps.opIssueCommand(0x02, 3000, 300); // queued-handling interne
+                    issueCommandWithRetry("END (#2)", 0x02, 3000, 300);
+                    deliveryStatusWithRetry("POLL après END (0x28)", 3000, 250);
                 } else {
-                    append("[A] END ignoré (pas de FLOW/DELIVERY)\n");
+                    append("[A] END ignoré (FLOW=0, DELIVERY=0)\n");
                 }
 
-                // 2) Relecture + CLEAR uniquement si ticket présent
-                int[] dsdc1 = lcpOps.opDeliveryStatus(3000, 250);
+                // 2) CLEAR si ticket
+                //    (payload visible + résultat humain + boucle courte de polls)
+                int[] dsdc1 = deliveryStatusWithRetry("GET_DEL_STATUS", 3000, 250);
                 boolean hasTicket = (dsdc1[1] & LcpOps.LCRSc_DEL_TICKET_PENDING) != 0;
-
                 if (hasTicket) {
-                    append("[A] CLEAR (0x06)\n");
-                    lcpOps.opIssueCommand(0x06, 3000, 250); // queued-handling interne
+                    issueCommandWithRetry("CLEAR (#6)", 0x06, 3000, 250);
 
                     boolean cleared = false;
-
-                    // Polls 8s
                     long t0 = System.currentTimeMillis();
-                    int polls = 0;
                     while (System.currentTimeMillis() - t0 < 8000) {
-                        int[] dsdc2 = lcpOps.opDeliveryStatus(3000, 250);
-                        polls++;
-                        append(String.format("[A] POLL ticket #%d DS=0x%04X DC=0x%04X\n",
-                                polls, dsdc2[0], dsdc2[1]));
-                        if ((dsdc2[1] & LcpOps.LCRSc_DEL_TICKET_PENDING) == 0) { cleared = true; break; }
+                        int[] dsdc2 = deliveryStatusWithRetry("POLL ticket (0x28)", 3000, 250);
+                        if ( (dsdc2[1] & LcpOps.LCRSc_DEL_TICKET_PENDING) == 0 ) { cleared = true; break; }
                     }
 
-                    // Wake 0x23 si ça colle encore
                     if (!cleared) {
-                        append("[A] Wake (GET_MACHINE 0x23)\n");
-                        try { lcpOps.opMachineStatusFull(5000, 150); } catch (Exception ignore) {}
-
+                        // Wake 0x23
+                        machineStatusWithRetry("WAKE (GET_MACHINE 0x23)", 5000, 150);
                         long tw = System.currentTimeMillis();
                         while (!cleared && System.currentTimeMillis() - tw < 2000) {
-                            int[] dsdcW = lcpOps.opDeliveryStatus(3000, 250);
-                            append(String.format("[A] POLL wake DS=0x%04X DC=0x%04X\n", dsdcW[0], dsdcW[1]));
-                            if ((dsdcW[1] & LcpOps.LCRSc_DEL_TICKET_PENDING) == 0) cleared = true;
+                            int[] dsdcW = deliveryStatusWithRetry("POLL wake (0x28)", 3000, 250);
+                            if ( (dsdcW[1] & LcpOps.LCRSc_DEL_TICKET_PENDING) == 0 ) cleared = true;
                         }
                     }
 
-                    // Retry CLEAR (1x) si nécessaire
                     if (!cleared) {
-                        append("[A] CLEAR retry (0x06)\n");
-                        lcpOps.opIssueCommand(0x06, 3000, 250);
-
+                        // Retry CLEAR (1x)
+                        issueCommandWithRetry("CLEAR retry (#6)", 0x06, 3000, 250);
                         long tR = System.currentTimeMillis();
                         while (System.currentTimeMillis() - tR < 8000) {
-                            int[] dsdcR = lcpOps.opDeliveryStatus(3000, 250);
-                            append(String.format("[A] POLL retry DS=0x%04X DC=0x%04X\n", dsdcR[0], dsdcR[1]));
-                            if ((dsdcR[1] & LcpOps.LCRSc_DEL_TICKET_PENDING) == 0) { cleared = true; break; }
+                            int[] dsdcR = deliveryStatusWithRetry("POLL retry (0x28)", 3000, 250);
+                            if ( (dsdcR[1] & LcpOps.LCRSc_DEL_TICKET_PENDING) == 0 ) { cleared = true; break; }
                         }
-
                         if (!cleared) {
-                            // Message opérateur (imprimante probablement non prête)
                             append("\n[ATTENTION] Ticket toujours en attente.\n" +
-                                   "Imprimante locale probablement NON PRÊTE (papier/couvercle/hors-ligne).\n" +
-                                   "Corriger la condition imprimante puis relancer CLEAR (bouton A).\n\n");
+                                   "Imprimante locale possiblement NON PRÊTE (papier/couvercle/online).\n" +
+                                   "Corriger la condition puis relancer CLEAR (A).\n\n");
                         }
                     }
                 } else {
                     append("[A] CLEAR ignoré (pas de ticket)\n");
                 }
 
-                // 3) Etat final
-                int[] dsdcf = lcpOps.opDeliveryStatus(3000, 150);
-                append(String.format("[A] FINAL DS=0x%04X DC=0x%04X\n", dsdcf[0], dsdcf[1]));
+                // 3) Stabilisation courte (stopper le spam si état propre)
+                final int MASK_ANY = LcpOps.LCRSc_FLOW_ACTIVE
+                                   | LcpOps.LCRSc_DELIVERY_ACTIVE
+                                   | LcpOps.LCRSc_DEL_TICKET_PENDING;
+                int stableOk = 0;
+                long tS = System.currentTimeMillis();
+                while (System.currentTimeMillis() - tS < 3000) { // max 3 s
+                    int[] s = deliveryStatusWithRetry("STABILIZE (0x28)", 3000, 250);
+                    boolean clean = ( (s[1] & MASK_ANY) == 0 );
+                    if (clean) { stableOk++; if (stableOk >= 3) break; }
+                    else stableOk = 0;
+                }
+
+                // 4) Statut final lisible + READY
+                int[] fin = deliveryStatusWithRetry("FINAL (0x28)", 3000, 150);
+                boolean ready = ( (fin[1] & (LcpOps.LCRSc_FLOW_ACTIVE |
+                                             LcpOps.LCRSc_DELIVERY_ACTIVE |
+                                             LcpOps.LCRSc_DEL_TICKET_PENDING)) == 0 );
+                append(ready ? "[A] READY: FLOW=0, DELIVERY=0, TICKET=0\n"
+                             : "[A] NOT READY: voir DS/DC ci-dessus\n");
 
             } catch(Exception e){
                 append("[A] ERREUR: " + e.getMessage() + "\n");
@@ -324,15 +421,13 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       Macro B — GET_DEL_STATUS
+       Macro B — GET_DEL_STATUS (payload visible + humain)
        ================================================================ */
     private void macroPing28_locked() {
         if (!checkReady()) return;
         synchronized (lcpLock) {
             try {
-                append("[B] GET_DEL_STATUS\n");
-                int[] dsdc = lcpOps.opDeliveryStatus(3000, 100); // queued-handling interne
-                append(String.format("[B] DS=0x%04X DC=0x%04X\n", dsdc[0], dsdc[1]));
+                deliveryStatusWithRetry("GET_DEL_STATUS (B)", 3000, 100);
             } catch(Exception e){
                 append("[B] ERREUR: " + e.getMessage() + "\n");
             }
@@ -340,21 +435,24 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       Macro C — START
+       Macro C — START (inchangé, mais bénéficie du retry interne)
        ================================================================ */
     private void macroStart_locked() {
         if (!checkReady()) return;
         synchronized (lcpLock) {
             try {
                 // Ticket en attente ? -> END + CLEAR + attente ticket=0
-                int[] dsdc = lcpOps.opDeliveryStatus(3000, 200);
+                int[] dsdc = deliveryStatusWithRetry("GET_DEL_STATUS (pré-START)", 3000, 200);
                 if ((dsdc[1] & 0x0001) != 0) {
                     append("[C] Ticket → END+CLEAR\n");
-
-                    lcpOps.opIssueCommand(0x02, 3000, 300);
-                    lcpOps.opIssueCommand(0x06, 3000, 300);
-
-                    lcpOps.opWaitForStatus(0x0001, 0x0000, 8000, 300);
+                    issueCommandWithRetry("END (#2)", 0x02, 3000, 300);
+                    issueCommandWithRetry("CLEAR (#6)", 0x06, 3000, 300);
+                    // petite attente jusqu’au ticket=0
+                    long t0 = System.currentTimeMillis();
+                    while (System.currentTimeMillis() - t0 < 8000) {
+                        int[] dsdc2 = deliveryStatusWithRetry("POLL ticket avant START", 3000, 300);
+                        if ((dsdc2[1] & 0x0001) == 0) break;
+                    }
                 }
 
                 append("[C] START…\n");
@@ -380,13 +478,13 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       RAW (blocage de 0x7D depuis l'UI)
+       RAW (blocage de 0x7D depuis l'UI — 7D géré automatiquement par LcpOps)
        ================================================================ */
     private void promptAndSendHex() {
         if (!checkReady()) return;
 
         EditText edt = new EditText(this);
-        edt.setHint("payload hex (ex: 28, 20 00)");
+        edt.setHint("payload hex (ex: 28, 24 06, 23)");
 
         EditText edtTimeout = new EditText(this);
         edtTimeout.setHint("timeout ms");
@@ -400,7 +498,7 @@ public class MainActivity extends AppCompatActivity {
         layout.addView(edtTimeout);
 
         new AlertDialog.Builder(this)
-                .setTitle("Envoyer payload LCP")
+                .setTitle("Envoyer payload LCP (RAW)")
                 .setView(layout)
                 .setPositiveButton("Envoyer",(d,w)->{
                     try{
@@ -427,11 +525,21 @@ public class MainActivity extends AppCompatActivity {
         if (!checkReady()) return;
         synchronized(lcpLock){
             try{
-                append("[RAW] Envoi " + bytesToHex(payload) + "\n");
+                append("[RAW] Envoi payload: " + bytesToHex(payload) + "\n");
                 byte[] rsp = lcpLink.sendRecv(payload, timeout);
                 append("[RAW] RX size=" + rsp.length + "\n");
             }catch(Exception e){
                 append("[RAW] ERREUR: " + e.getMessage() + "\n");
+                // tentative RESYNC + retry 1x
+                try {
+                    append("[RAW] RESYNC 0x00 puis retry\n");
+                    lcpLink.sendRecv(new byte[]{0x00}, 3200);
+                    Thread.sleep(200);
+                    byte[] rsp = lcpLink.sendRecv(payload, timeout);
+                    append("[RAW] RX size=" + rsp.length + " (après RESYNC)\n");
+                } catch(Exception e2){
+                    append("[RAW] ERREUR après RESYNC: " + e2.getMessage() + "\n");
+                }
             }
         }
     }
@@ -499,13 +607,6 @@ public class MainActivity extends AppCompatActivity {
         byte[] b = new byte[n];
         for (int i=0;i<n;i++) b[i] = (byte)Integer.parseInt(c.substring(2*i,2*i+2),16);
         return b;
-    }
-
-    private static String bytesToHex(byte[] b){
-        if(b==null) return "(null)";
-        StringBuilder sb=new StringBuilder();
-        for(byte x:b) sb.append(String.format("%02X ",x));
-        return sb.toString().trim();
     }
 
     private void append(String s){
