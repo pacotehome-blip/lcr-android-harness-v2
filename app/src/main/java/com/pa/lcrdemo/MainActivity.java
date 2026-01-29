@@ -11,24 +11,21 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbDeviceConnection;
-io.usb.UsbManager;
-import android.os.Bundle;
-import android.view.View;
-import android.widget.CheckBox;
-import android.widget.EditText;
-import android.widget.LinearLayout;
-import android.widget.TextView;
+importimport android.widget.TextView;
 
 import androidx.appcompat.app.AppCompatActivity;
 
-import com.hoho.android.usbserial.driver.*;
+import com.hoho.android.usbserial.driver.UsbSerialDriver;
+import com.hoho.android.usbserial.driver.UsbSerialPort;
+import com.hoho.android.usbserial.driver.UsbSerialProber;
+
 import com.pa.lcr.LcrSimpleDeliverV2;
 import com.pa.lcr.lcp.LcpLink;
 import com.pa.lcr.lcp.LcpOps;
 
 import java.util.List;
+importExecutors;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -40,14 +37,14 @@ public class MainActivity extends AppCompatActivity {
     private UsbSerialPort serialPort;
 
     private LcpLink lcpLink;
-    private LcpOps  lcpOps;
+    private LcpOps lcpOps;
 
     private final StringBuilder logBuf = new StringBuilder(4096);
     private final Object lcpLock = new Object();
     private final ExecutorService lcpExec = Executors.newSingleThreadExecutor();
 
     /* ================================================================
-       USB RECEIVERS
+       Receivers USB
        ================================================================ */
 
     private final BroadcastReceiver usbPermissionReceiver = new BroadcastReceiver() {
@@ -67,13 +64,13 @@ public class MainActivity extends AppCompatActivity {
     private final BroadcastReceiver usbAttachDetach = new BroadcastReceiver() {
         @Override public void onReceive(Context c, Intent i) {
             if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(i.getAction())) {
-                append("USB attached — cliquez 'Connexion USB'\n");
+                append("USB attaché — cliquez 'Connexion USB'\n");
             } else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(i.getAction())) {
-                append("USB detached\n");
+                append("USB détaché\n");
                 try { if (serialPort != null) serialPort.close(); } catch(Exception ignored){}
                 serialPort = null;
                 lcpLink = null;
-                lcpOps = null;
+                lcpOps  = null;
             }
         }
     };
@@ -103,11 +100,12 @@ public class MainActivity extends AppCompatActivity {
 
         CheckBox switchIoLog = findViewById(R.id.switchIoLog);
         LcpLink.setLogger(this::appendAndBuffer);
+
         if (switchIoLog != null) {
             switchIoLog.setOnCheckedChangeListener((btn, checked) -> {
                 LcpLink.DUMP_TX = checked;
                 LcpLink.DUMP_RX = checked;
-ate.");
+                append("I/O log " + (checked ? "activé" : "désactivé") + "\n");
             });
         }
 
@@ -143,7 +141,7 @@ ate.");
     }
 
     /* ================================================================
-       USB CONNECT
+       Connexion USB
        ================================================================ */
 
     private void requestAndOpenFirstPort() {
@@ -155,8 +153,12 @@ ate.");
 
         if (!mgr.hasPermission(dev)) {
             append("Demande de permission USB…\n");
-            PendingIntent pi = PendingIntent.getBroadcast(this,0,new Intent(ACTION_USB_PERMISSION),PendingIntent.FLAG_IMMUTABLE);
-            mgr.requestPermission(dev,pi);
+            PendingIntent pi = PendingIntent.getBroadcast(
+                this, 0,
+                new Intent(ACTION_USB_PERMISSION),
+                PendingIntent.FLAG_IMMUTABLE
+            );
+            mgr.requestPermission(dev, pi);
             return;
         }
 
@@ -170,20 +172,20 @@ ate.");
             if (driver == null) { append("Pas de driver compatible\n"); return; }
 
             UsbDeviceConnection conn = mgr.openDevice(dev);
-            if (conn == null) { append("Impossible d’ouvrir le device USB\n"); return; }
+            if (conn == null) { append("Impossible d’ouvrir le périphérique USB\n"); return; }
 
             serialPort = driver.getPorts().get(0);
+            serialPort.setParameters(19200,8,UsbSerialPort.STOPBITS_1,UsbSerialPort.PARITY_NONE);
             serialPort.open(conn);
 
-            serialPort.setParameters(19200,8,UsbSerialPort.STOPBITS_1,UsbSerialPort.PARITY_NONE);
             serialPort.setRTS(false);
             serialPort.setDTR(false);
             serialPort.purgeHwBuffers(true,true);
 
             append("Port ouvert 19200 8N1\n");
 
-            int to = parseIntSafe(safeStr(edtTo.getText()),0xFA);
-            int from = parseIntSafe(safeStr(edtFrom.getText()),0xFF);
+            int to   = parseIntSafe(safeStr(edtTo.getText()),   0xFA);
+            int from = parseIntSafe(safeStr(edtFrom.getText()), 0xFF);
 
             lcpLink = new LcpLink(serialPort,to,from,true);
             lcpOps  = new LcpOps(lcpLink);
@@ -193,12 +195,12 @@ ate.");
             append("[CONNECT] RESYNC OK\n");
 
         } catch(Exception e){
-            append("ERREUR: "+e.getMessage()+"\n");
+            append("ERREUR ouverture USB: "+e.getMessage()+"\n");
         }
     }
 
     /* ================================================================
-       MACRO A — END + CLEAR
+       Macro A — END + CLEAR
        ================================================================ */
 
     private void macroReset_locked() {
@@ -220,13 +222,13 @@ ate.");
                 }
 
             } catch(Exception e){
-                append("[A] ERR : "+e.getMessage()+"\n");
+                append("[A] ERREUR: "+e.getMessage()+"\n");
             }
         }
     }
 
     /* ================================================================
-       MACRO B — GET_DEL_STATUS
+       Macro B — GET_DEL_STATUS
        ================================================================ */
 
     private void macroPing28_locked() {
@@ -237,13 +239,13 @@ ate.");
                 int[] dsdc=lcpOps.opDeliveryStatus(3000,100);
                 append(String.format("[B] DS=0x%04X DC=0x%04X\n",dsdc[0],dsdc[1]));
             } catch(Exception e){
-                append("[B] ERR : "+e.getMessage()+"\n");
+                append("[B] ERREUR: "+e.getMessage()+"\n");
             }
         }
     }
 
     /* ================================================================
-       MACRO C — START
+       Macro C — START
        ================================================================ */
 
     private void macroStart_locked() {
@@ -268,7 +270,6 @@ ate.");
                 p.fromAddr=parseIntSafe(edtFrom.getText().toString(),0xFF);
                 p.product=parseIntSafe(edtProduct.getText().toString(),1);
                 p.preset=parseDoubleSafe(edtPreset.getText().toString(),50.0);
-                p.verbose=true;
 
                 LcrSimpleDeliverV2 d=new LcrSimpleDeliverV2(p,lcpOps);
                 d.unlock();
@@ -278,7 +279,7 @@ ate.");
                 append("[C] START OK\n");
 
             } catch(Exception e){
-                append("[C] ERR: "+e.getMessage()+"\n");
+                append("[C] ERREUR: "+e.getMessage()+"\n");
             }
         }
     }
@@ -291,7 +292,7 @@ ate.");
         if(!checkReady()) return;
 
         EditText edt=new EditText(this);
-        edt.setHint("payload hex, ex: 28, 20 00, …");
+        edt.setHint("payload hex (ex: 28, 20 00)");
 
         EditText edtTimeout=new EditText(this);
         edtTimeout.setHint("timeout ms");
@@ -305,31 +306,31 @@ ate.");
         layout.addView(edtTimeout);
 
         new AlertDialog.Builder(this)
-            .setTitle("Envoyer payload LCP")
-            .setView(layout)
-            .setPositiveButton("Envoyer",(dlg,which)->{
-                try{
-                    String hex=edt.getText().toString();
-                    int to=Integer.parseInt(edtTimeout.getText().toString());
-                    byte[] payload=parseHexBytes(hex);
-                    runLcpTask(() -> sendRawPayload_locked(payload,to));
-                }catch(Exception e){
-                    append("[RAW] invalide: "+e.getMessage()+"\n");
-                }
-            })
-            .setNegativeButton("Annuler",null)
-            .show();
+                .setTitle("Envoyer payload LCP")
+                .setView(layout)
+                .setPositiveButton("Envoyer",(d,w)->{
+                    try{
+                        String hex=edt.getText().toString();
+                        int to=Integer.parseInt(edtTimeout.getText().toString());
+                        byte[] pl=parseHexBytes(hex);
+                        runLcpTask(() -> sendRawPayload_locked(pl,to));
+                    }catch(Exception e){
+                        append("[RAW] invalide: "+e.getMessage()+"\n");
+                    }
+                })
+                .setNegativeButton("Annuler",null)
+                .show();
     }
 
-    private void sendRawPayload_locked(byte[] pl,int timeout){
+    private void sendRawPayload_locked(byte[] payload,int timeout){
         if(!checkReady()) return;
         synchronized(lcpLock){
             try{
-                append("[RAW] Envoi "+bytesToHex(pl)+"\n");
-                byte[] rsp=lcpLink.sendRecv(pl,timeout);
+                append("[RAW] Envoi "+bytesToHex(payload)+"\n");
+                byte[] rsp=lcpLink.sendRecv(payload,timeout);
                 append("[RAW] RX size="+rsp.length+"\n");
             }catch(Exception e){
-                append("[RAW] ERR: "+e.getMessage()+"\n");
+                append("[RAW] ERREUR: "+e.getMessage()+"\n");
             }
         }
     }
@@ -346,31 +347,9 @@ ate.");
         return true;
     }
 
-    private void runLcpTask(Runnable r){
-        setButtonsEnabled(false);
-        lcpExec.execute(() -> {
-            try{ r.run(); }
-            finally{ setButtonsEnabled(true); }
-        });
-    }
-
-    private void setButtonsEnabled(boolean enabled){
-        runOnUiThread(() -> {
-            int[] ids={
-                R.id.btnA,R.id.btnB,R.id.btnC,R.id.btnScan,R.id.btnSendHex,
-                R.id.btnTestUsb,R.id.btnConnect,R.id.btnDiag,R.id.btnStart
-            };
-            for(int id:ids){
-                View v=findViewById(id);
-                if(v!=null) v.setEnabled(enabled);
-            }
-        });
-    }
-
     private int parseIntSafe(String s,int def){
-        try{
-            return Integer.parseInt(s.replace("0x",""),16);
-        }catch(Exception e){ return def; }
+        try { return Integer.parseInt(s.replace("0x",""),16); }
+        catch(Exception e){ return def; }
     }
 
     private double parseDoubleSafe(String s,double def){
@@ -383,15 +362,20 @@ ate.");
     }
 
     private byte[] parseHexBytes(String s){
-        if(s==null) throw new IllegalArgumentException("vide");
-        String cleaned=s.replaceAll("(?i)0x","").replaceAll("[^0-9A-Fa-f]","");
-        if(cleaned.length()==0) throw new IllegalArgumentException("aucun hex");
-        if(cleaned.length()%2!=0) cleaned="0"+cleaned;
-        int len=cleaned.length()/2;
-        byte[] out=new byte[len];
-        for(int i=0;i<len;i++)
-            out[i]=(byte)Integer.parseInt(cleaned.substring(2*i,2*i+2),16);
-        return out;
+        String c=s.replaceAll("(?i)0x","").replaceAll("[^0-9A-Fa-f]","");
+        if(c.length()==0) throw new IllegalArgumentException("aucun hex");
+        if(c.length()%2!=0) c="0"+c;
+        int n=c.length()/2;
+        byte[] b=new byte[n];
+        for(int i=0;i<n;i++) b[i]=(byte)Integer.parseInt(c.substring(2*i,2*i+2),16);
+        return b;
+    }
+
+    private static String bytesToHex(byte[] b){
+        if(b==null) return "(null)";
+        StringBuilder sb=new StringBuilder();
+        for(byte x:b) sb.append(String.format("%02X ",x));
+        return sb.toString().trim();
     }
 
     private void append(String s){
