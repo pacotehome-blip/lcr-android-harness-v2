@@ -231,7 +231,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       Macro A — END + CLEAR (cadence 0x28)
+       Macro A — END + CLEAR (cadence 0x28, sans 0x7D UI)
        ================================================================ */
     private void macroReset_locked() {
         if (!checkReady()) return;
@@ -239,17 +239,17 @@ public class MainActivity extends AppCompatActivity {
             try {
                 // 1) END
                 append("[A] END (0x02)\n");
-                lcpOps.opIssueCommand(0x02, 3000, 300); // pause 300ms incluse
+                lcpOps.opIssueCommand(0x02, 3000, 300); // pause 300ms incluse (queued-handling interne)
 
                 // 2) Premier poll : si ticket, on enchaîne CLEAR
-                int[] dsdc = lcpOps.opDeliveryStatus(3000, 250);
+                int[] dsdc = lcpOps.opDeliveryStatus(3000, 250); // queued-handling interne
                 append(String.format("[A] POLL #1 DS=0x%04X DC=0x%04X\n", dsdc[0], dsdc[1]));
                 boolean ticketCleared = ((dsdc[1] & 0x0001) == 0);
 
                 // 3) CLEAR si le ticket est encore présent
                 if (!ticketCleared) {
                     append("[A] CLEAR (0x06)\n");
-                    lcpOps.opIssueCommand(0x06, 3000, 250);
+                    lcpOps.opIssueCommand(0x06, 3000, 250); // queued-handling interne
 
                     long t0 = System.currentTimeMillis();
                     int polls = 0;
@@ -295,7 +295,7 @@ public class MainActivity extends AppCompatActivity {
         synchronized (lcpLock) {
             try {
                 append("[B] GET_DEL_STATUS\n");
-                int[] dsdc = lcpOps.opDeliveryStatus(3000, 100);
+                int[] dsdc = lcpOps.opDeliveryStatus(3000, 100); // queued-handling interne
                 append(String.format("[B] DS=0x%04X DC=0x%04X\n", dsdc[0], dsdc[1]));
             } catch(Exception e){
                 append("[B] ERREUR: " + e.getMessage() + "\n");
@@ -344,7 +344,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       RAW
+       RAW (avec blocage de 0x7D depuis l'UI)
        ================================================================ */
     private void promptAndSendHex() {
         if (!checkReady()) return;
@@ -371,6 +371,13 @@ public class MainActivity extends AppCompatActivity {
                         String hex = edt.getText().toString();
                         int to = Integer.parseInt(edtTimeout.getText().toString());
                         byte[] pl = parseHexBytes(hex);
+
+                        // Blocage explicite de 0x7D (CHECK_REQUEST) côté UI
+                        if (pl != null && pl.length > 0 && (pl[0] & 0xFF) == 0x7D) {
+                            append("[RAW] 0x7D (CHECK_REQUEST) est géré automatiquement par LcpOps — envoi UI bloqué.\n");
+                            return;
+                        }
+
                         runLcpTask(() -> sendRawPayload_locked(pl, to));
                     }catch(Exception e){
                         append("[RAW] invalide: " + e.getMessage() + "\n");
