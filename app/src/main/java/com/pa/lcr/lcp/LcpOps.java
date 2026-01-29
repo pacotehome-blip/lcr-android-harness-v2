@@ -15,7 +15,7 @@ public class LcpOps {
     }
 
     /* ============================================================
-       CONSTANTES STATUTS DS / DC
+       CONSTANTES STATUTS DS / DC --
        ============================================================ */
 
     public static final int LCRSc_FLOW_ACTIVE        = 0x0004;
