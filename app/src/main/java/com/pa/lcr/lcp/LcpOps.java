@@ -15,7 +15,7 @@ public class LcpOps {
     }
 
     /* ============================================================
-       CONSTANTES STATUTS DS / DC
+       CONSTANTES STATUTS DS / DC (Delivery Status/Code)
        ============================================================ */
     public static final int LCRSc_FLOW_ACTIVE        = 0x0004;
     public static final int LCRSc_DELIVERY_ACTIVE    = 0x0008;
@@ -31,7 +31,7 @@ public class LcpOps {
     public static final int RC_REQUEST_ABORTED   = 0x28; // 40
 
     /* ============================================================
-       UTIL i32 BE
+       UTIL i32 BE (signed big-endian)
        ============================================================ */
     public static byte[] i32be(int v) {
         return new byte[] {
@@ -44,6 +44,8 @@ public class LcpOps {
 
     /* ============================================================
        CHECK_REQUEST (0x7D) — gestion des requêtes différées (rc=0x26)
+       - Boucle jusqu'à obtenir la réponse réelle (rc=0x00) ou erreur.
+       - Normalisation "double 0x00" (ex.: [0x00, 0x00, ...] → [0x00, ...]).
        ============================================================ */
     public byte[] opCheckRequest(int timeoutMs, int pollMs) throws Exception {
         long t0 = System.currentTimeMillis();
@@ -59,7 +61,7 @@ public class LcpOps {
             if (rc0 == RC_NO_REQUEST_ACTIVE) throw new Exception("CheckRequest: 0x27 NO_REQUEST_ACTIVE");
             if (rc0 == RC_REQUEST_ABORTED)   throw new Exception("CheckRequest: 0x28 REQUEST_ABORTED");
 
-            // Normalisations (comme dans le script Python):
+            // Normalisations (certaines FW renvoient [0x00, 0x00, ...])
             if (rep.length == 2 && rc0 == RC_OK) {
                 return rep; // [0x00, ...]
             }
@@ -74,25 +76,31 @@ public class LcpOps {
     }
 
     /* ============================================================
-       GET_MACHINE (0x23) → [ms, ds, dc]
+       GET_MACHINE (0x23) → [ms, ds, dc] avec queued-handling
        ============================================================ */
     public int[] opMachineStatusFull(int timeoutMs, int pauseMs) throws Exception {
         byte[] fr = link.sendRecv(new byte[]{ 0x23 }, timeoutMs);
         byte[] p  = LcpLink.extractPayload(fr);
 
-        if (p == null || p.length < 8)
-            throw new Exception("GET_MACHINE: payload invalide");
+        if (p == null || p.length < 1)
+            throw new Exception("GET_MACHINE: réponse invalide");
 
         int rc = p[0] & 0xFF;
+        if (rc == RC_REQUEST_QUEUED) {
+            p = opCheckRequest(timeoutMs, Math.max(100, pauseMs));
+            rc = p[0] & 0xFF;
+        }
         if (rc != RC_OK)
             throw new Exception("GET_MACHINE rc=" + rc);
+
+        if (p.length < 8)
+            throw new Exception("GET_MACHINE: payload invalide (<8)");
 
         int ms = (p[2] & 0xFF) | ((p[3] & 0xFF) << 8);
         int ds = (p[4] & 0xFF) | ((p[5] & 0xFF) << 8);
         int dc = (p[6] & 0xFF) | ((p[7] & 0xFF) << 8);
 
         if (pauseMs > 0) Thread.sleep(pauseMs);
-
         return new int[]{ ms, ds, dc };
     }
 
@@ -174,7 +182,7 @@ public class LcpOps {
         byte[] p  = LcpLink.extractPayload(fr);
 
         if (p == null || p.length < 1)
-            throw new Exception("DEL_STATUS: payload invalide");
+            throw new Exception("DEL_STATUS: réponse invalide");
 
         int rc = p[0] & 0xFF;
         if (rc == RC_REQUEST_QUEUED) {
@@ -185,18 +193,17 @@ public class LcpOps {
             throw new Exception("DEL_STATUS rc=" + rc);
 
         if (p.length < 6)
-            throw new Exception("DEL_STATUS: payload trop court");
+            throw new Exception("DEL_STATUS: payload trop court (<6)");
 
         int ds = ((p[3] & 0xFF) << 8) | (p[2] & 0xFF);
         int dc = ((p[5] & 0xFF) << 8) | (p[4] & 0xFF);
 
         if (pauseMs > 0) Thread.sleep(pauseMs);
-
         return new int[]{ ds, dc };
     }
 
     /* ============================================================
-       WAIT DC
+       WAIT DC (mask/expected) avec polling 0x28
        ============================================================ */
     public int[] opWaitForStatus(int mask, int expected, int timeoutMs, int pollMs) throws Exception {
         long t0 = System.currentTimeMillis();
