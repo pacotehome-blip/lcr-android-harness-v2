@@ -49,6 +49,9 @@ public class MainActivity extends AppCompatActivity {
     private final Object lcpLock = new Object();
     private final ExecutorService lcpExec = Executors.newSingleThreadExecutor();
 
+    // Anti double-connexion / double-RESYNC
+    private volatile boolean isConnecting = false;
+
     /* ================================================================
        Receivers USB
        ================================================================ */
@@ -62,6 +65,8 @@ public class MainActivity extends AppCompatActivity {
                 connectPort(device);
             } else {
                 append("Permission USB refusée\n");
+                isConnecting = false;
+                setButtonsEnabled(true);
             }
         }
     };
@@ -82,7 +87,7 @@ public class MainActivity extends AppCompatActivity {
 
     /* ================================================================
        onCreate
-        ================================================================ */
+       ================================================================ */
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
         setContentView(R.layout.activity_main);
@@ -145,31 +150,43 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       Connexion USB
+       Connexion USB — anti double-RESYNC
        ================================================================ */
     private void requestAndOpenFirstPort() {
-        UsbManager mgr = (UsbManager)getSystemService(Context.USB_SERVICE);
-        List<UsbSerialDriver> drivers = UsbSerialProber.getDefaultProber().findAllDrivers(mgr);
-        if (drivers.isEmpty()) { append("Aucun convertisseur USB‑Série détecté\n"); return; }
+        if (isConnecting) { append("Connexion déjà en cours...\n"); return; }
+        isConnecting = true;
+        setButtonsEnabled(false);
 
-        UsbDevice dev = drivers.get(0).getDevice();
+        try {
+            UsbManager mgr = (UsbManager)getSystemService(Context.USB_SERVICE);
+            List<UsbSerialDriver> drivers = UsbSerialProber.getDefaultProber().findAllDrivers(mgr);
+            if (drivers.isEmpty()) { append("Aucun convertisseur USB‑Série détecté\n"); return; }
 
-        if (!mgr.hasPermission(dev)) {
-            append("Demande de permission USB…\n");
-            PendingIntent pi = PendingIntent.getBroadcast(
-                this, 0,
-                new Intent(ACTION_USB_PERMISSION),
-                PendingIntent.FLAG_IMMUTABLE
-            );
-            mgr.requestPermission(dev, pi);
-            return;
+            UsbDevice dev = drivers.get(0).getDevice();
+
+            if (!mgr.hasPermission(dev)) {
+                append("Demande de permission USB…\n");
+                PendingIntent pi = PendingIntent.getBroadcast(
+                        this, 0,
+                        new Intent(ACTION_USB_PERMISSION),
+                        PendingIntent.FLAG_IMMUTABLE
+                );
+                mgr.requestPermission(dev, pi);
+                return;
+            }
+
+            connectPort(dev);
+        } catch (Exception e) {
+            append("ERREUR: " + e.getMessage() + "\n");
+            isConnecting = false;
+            setButtonsEnabled(true);
         }
-
-        connectPort(dev);
     }
 
     private void connectPort(UsbDevice dev) {
         try {
+            if (lcpLink != null) { append("Déjà connecté.\n"); return; }
+
             UsbManager mgr = (UsbManager)getSystemService(Context.USB_SERVICE);
             UsbSerialDriver driver = UsbSerialProber.getDefaultProber().probeDevice(dev);
             if (driver == null) { append("Pas de driver compatible\n"); return; }
@@ -198,7 +215,7 @@ public class MainActivity extends AppCompatActivity {
             lcpLink.sendRecv(new byte[]{0x00}, 3200);
             try { Thread.sleep(200); } catch (InterruptedException ignored) {}
             try {
-                int[] dsdc = lcpOps.opDeliveryStatus(3000, 100);
+                int[] dsdc = lcpOps.opDeliveryStatus(3000, 150); // premier poll espacé
                 append(String.format("[CONNECT] First poll DS=0x%04X DC=0x%04X\n", dsdc[0], dsdc[1]));
             } catch(Exception ignore) {
                 append("[CONNECT] First poll (ignorable) sans réponse\n");
@@ -207,11 +224,14 @@ public class MainActivity extends AppCompatActivity {
 
         } catch(Exception e){
             append("ERREUR ouverture USB: " + e.getMessage() + "\n");
+        } finally {
+            isConnecting = false;
+            setButtonsEnabled(true);
         }
     }
 
     /* ================================================================
-       Macro A — END + CLEAR (avec reprise si DC=0x2001)
+       Macro A — END + CLEAR (avec cadence de polls 0x28)
        ================================================================ */
     private void macroReset_locked() {
         if (!checkReady()) return;
@@ -219,40 +239,49 @@ public class MainActivity extends AppCompatActivity {
             try {
                 // 1) END
                 append("[A] END (0x02)\n");
-                lcpOps.opIssueCommand(0x02, 3000, 300); // rc=0 attendu
+                lcpOps.opIssueCommand(0x02, 3000, 300); // pause 300ms incluse
 
-                // 2) Poll 0x28 pendant ~2s
+                // 2) Poll 0x28 pendant ~2.2s (cadence 250ms)
                 long tPoll = System.currentTimeMillis();
                 boolean ticketCleared = false;
                 int[] dsdc = new int[]{0,0};
-                while (System.currentTimeMillis() - tPoll < 2000) {
-                    dsdc = lcpOps.opDeliveryStatus(3000, 200);
-                    append(String.format("[A] POLL #1 DS=0x%04X DC=0x%04X\n", dsdc[0], dsdc[1]));
+                int polls = 0;
+                while (System.currentTimeMillis() - tPoll < 2200) {
+                    dsdc = lcpOps.opDeliveryStatus(3000, 250);
+                    polls++;
+                    append(String.format("[A] POLL #1.%d DS=0x%04X DC=0x%04X\n",
+                            polls, dsdc[0], dsdc[1]));
                     if ((dsdc[1] & 0x0001) == 0) { ticketCleared = true; break; }
                 }
 
-                // 3) Si ticket encore présent → CLEAR
+                // 3) Si ticket encore présent → CLEAR + polls (jusqu'à 8s)
                 if (!ticketCleared) {
                     append("[A] CLEAR (0x06)\n");
-                    lcpOps.opIssueCommand(0x06, 3000, 200); // rc=0 attendu
+                    lcpOps.opIssueCommand(0x06, 3000, 250);
 
                     long t0 = System.currentTimeMillis();
+                    int polls2 = 0;
                     while (System.currentTimeMillis() - t0 < 8000) {
-                        dsdc = lcpOps.opDeliveryStatus(3000, 200);
-                        append(String.format("[A] POLL #2 DS=0x%04X DC=0x%04X\n", dsdc[0], dsdc[1]));
+                        dsdc = lcpOps.opDeliveryStatus(3000, 250);
+                        polls2++;
+                        append(String.format("[A] POLL #2.%d DS=0x%04X DC=0x%04X\n",
+                                polls2, dsdc[0], dsdc[1]));
                         if ((dsdc[1] & 0x0001) == 0) { ticketCleared = true; break; }
                     }
                 }
 
-                // 4) Si toujours pas libéré → END encore 1x, puis quelques polls courts
+                // 4) Si toujours pas libéré → END encore 1x + quelques polls courts
                 if (!ticketCleared) {
                     append("[A] (retry) END (0x02)\n");
                     lcpOps.opIssueCommand(0x02, 3000, 300);
 
                     long t1 = System.currentTimeMillis();
+                    int polls3 = 0;
                     while (System.currentTimeMillis() - t1 < 3000) {
-                        dsdc = lcpOps.opDeliveryStatus(3000, 200);
-                        append(String.format("[A] POLL #3 DS=0x%04X DC=0x%04X\n", dsdc[0], dsdc[1]));
+                        dsdc = lcpOps.opDeliveryStatus(3000, 250);
+                        polls3++;
+                        append(String.format("[A] POLL #3.%d DS=0x%04X DC=0x%04X\n",
+                                polls3, dsdc[0], dsdc[1]));
                         if ((dsdc[1] & 0x0001) == 0) { ticketCleared = true; break; }
                     }
                 }
@@ -267,8 +296,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       Macro B — GET_DEL_STATUS
-       ================================================================ */
+      Macro B — GET_DEL_STATUS
+      ================================================================ */
     private void macroPing28_locked() {
         if (!checkReady()) return;
         synchronized (lcpLock) {
