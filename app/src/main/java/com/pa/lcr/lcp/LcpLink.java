@@ -16,7 +16,8 @@ import java.util.function.Consumer;
  *  - Méthodes statiques extractStatus / extractPayload (utilisées par LcpOps)
  *  - Utilitaires CRC16/XMODEM et hexdump
  *
- * NOTE I/O : transact(...) contient une SIMULATION. Branche ton I/O série réelle quand prêt.
+ * NOTE I/O : transact(...) contient une SIMULATION étatful pour débloquer l'app sans matériel.
+ *            Remplace la section SIMULATION par ton I/O série réelle quand tu seras prêt.
  */
 public class LcpLink {
 
@@ -42,6 +43,20 @@ public class LcpLink {
     private final int fromAddr;      // 0..255
     private final boolean syncMode;
     private int defaultTimeoutMs = 1000;
+
+    // --- Simulation d'état (stateful) ---
+    private boolean unlocked = false;
+    private boolean prestart = false;
+    private boolean started  = false;
+    private int dsFlags = 0x0000; // Delivery Status flags
+    private int dcFlags = 0x0000; // Delivery Conditions flags
+    private long tStartBeginMark = 0L; // timestamp quand BEGIN_DELIVERY est posé
+
+    // Flags d'état (doivent correspondre à LcpOps)
+    private static final int LCRSc_DEL_TICKET_PENDING = 0x0001;
+    private static final int LCRSc_FLOW_ACTIVE        = 0x0004;
+    private static final int LCRSc_DELIVERY_ACTIVE    = 0x0008;
+    private static final int LCRSc_BEGIN_DELIVERY     = 0x0400;
 
     /**
      * @param serialPort  adaptateur série (USB/RS-232/TCP...). Peut rester 'Object' pour compiler.
@@ -72,7 +87,7 @@ public class LcpLink {
      * Exemple d’appel :
      *   sendRecv(new byte[]{ (byte)MSG_GET_FIELD, (byte)(f & 0xFF) }, timeout)
      *
-     * @param payload  [CMD][ARGS...]
+     * @param payload   [CMD][ARGS...]
      * @param timeoutMs timeout en millisecondes
      * @return trame de réponse "logique": [status][payload...] (sans CRC)
      */
@@ -99,11 +114,11 @@ public class LcpLink {
 
     /**
      * Point d'échange bas-niveau : écrit 'frame' sur le port série et lit la réponse.
-     * ⚠️ SIMULATION ACTUELLE : si tu n'as pas encore d'I/O réelle, on génère une réponse plausible
-     * conformément aux attentes de LcpOps.
-     *
      * Convention de retour: [status][payload...] (sans CRC),
      * car LcpOps utilise extractStatus/extractPayload sur ce format.
+     *
+     * ⚠️ SIMULATION ACTUELLE : si tu n'as pas encore d'I/O réelle, on génère une réponse plausible
+     * et étatful, conforme aux attentes de LcpOps/MainActivity.
      */
     public byte[] transact(byte[] frame, int timeoutMs) throws IOException {
         if (frame == null) throw new IOException("Frame is null");
@@ -124,6 +139,29 @@ public class LcpLink {
         return rsp;
     }
 
+    // ------------------------------------------------------------------------
+    // Simulation étatful
+    // ------------------------------------------------------------------------
+
+    private void resetAllStatuses() {
+        unlocked = false; prestart = false; started = false;
+        dsFlags = 0x0000; dcFlags = 0x0000;
+        tStartBeginMark = 0L;
+    }
+
+    // Simuler une progression temporelle: BEGIN_DELIVERY -> DELIVERY_ACTIVE + FLOW_ACTIVE
+    private void progressBeginToActive() {
+        if ((dsFlags & LCRSc_BEGIN_DELIVERY) != 0) {
+            long now = System.currentTimeMillis();
+            if (tStartBeginMark == 0L) tStartBeginMark = now;
+            // Au bout de ~1.5 s, passer en DELIVERY_ACTIVE + FLOW_ACTIVE
+            if (now - tStartBeginMark >= 1500) {
+                dsFlags &= ~LCRSc_BEGIN_DELIVERY;
+                dsFlags |= LCRSc_DELIVERY_ACTIVE | LCRSc_FLOW_ACTIVE;
+            }
+        }
+    }
+
     /**
      * Simule des réponses plausibles pour débloquer l’app.
      * Convention: on retourne [status][payload...] (sans CRC).
@@ -138,32 +176,48 @@ public class LcpLink {
                 byte[] name = "PROPANE".getBytes();
                 byte[] payload = new byte[2 + name.length + 1];
                 int i = 0;
-                payload[i++] = 0x00;         // rc
+                payload[i++] = 0x00;         // rc OK
                 payload[i++] = 0x02;         // productId
                 System.arraycopy(name, 0, payload, i, name.length); i += name.length;
                 payload[i] = 0x00;           // zero-terminated
                 return concat(new byte[]{ ST_OK }, payload);
             }
 
-            // 0x20 - GET_FIELD: LcpOps attend p[0]==RC_OK, et renvoie p[2..] comme data (optionnelle).
+            // 0x20 - GET_FIELD: rc OK, meta 0x00, data optionnelle (OK vide)
             case 0x20: {
-                // Renvoie minimal: rc=OK, meta=0x00 => out (p[2..]) sera vide et valide.
                 byte[] payload = new byte[] { 0x00, 0x00 };
                 return concat(new byte[]{ ST_OK }, payload);
             }
 
-            // 0x21 - SET_FIELD: LcpOps attend p non-vide et p[0]==RC_OK.
+            // 0x21 - SET_FIELD: activer flags "unlocked", "prestart" selon fieldId
             case 0x21: {
-                byte[] payload = new byte[] { 0x00 }; // rc=OK
-                return concat(new byte[]{ ST_OK }, payload);
+                // txFrame structure: [22][TO][FROM][0x21][fieldId][data...][CRC]
+                int headerLen = 4;
+                int bodyLen = Math.max(0, txFrame.length - headerLen - 2);
+                byte[] args = (bodyLen > 0) ? Arrays.copyOfRange(txFrame, headerLen, headerLen + bodyLen) : new byte[0];
+
+                int fieldId = (args.length >= 1) ? (args[0] & 0xFF) : 0x00;
+                // Heuristiques (à ajuster selon ton protocole exact):
+                // 0x00 -> "unlock"
+                // 0x05 -> "prestart param 1"
+                // 0x06 -> "prestart param 2"
+                if (fieldId == 0x00) {
+                    unlocked = true;
+                } else if (fieldId == 0x05 || fieldId == 0x06) {
+                    prestart = true;
+                }
+                // Retourner rc=OK
+                return concat(new byte[]{ ST_OK }, new byte[]{ 0x00 });
             }
 
-            // 0x23 - GET_MACHINE: LcpOps attend p.length>=8, p[0]==RC_OK.
-            // dev = p[2..3], ds = p[4..5], dc = p[6..7]
+            // 0x23 - GET_MACHINE: répondre dev, ds, dc
             case 0x23: {
-                int dev = 0x0000; // device flags (exemple)
-                int ds  = 0x0000; // delivery status flags (idle)
-                int dc  = 0x0000; // delivery conditions flags
+                // Progression temporelle: BEGIN -> ACTIVE si applicable
+                progressBeginToActive();
+
+                int dev = 0x0000; // device flags fictifs
+                int ds  = dsFlags;
+                int dc  = dcFlags;
                 byte[] payload = new byte[] {
                         0x00, 0x00,
                         (byte)((dev >> 8) & 0xFF), (byte)(dev & 0xFF),
@@ -173,17 +227,49 @@ public class LcpLink {
                 return concat(new byte[]{ ST_OK }, payload);
             }
 
-            // 0x24 - ISSUE_COMMAND: LcpOps attend p non-vide et p[0]==RC_OK. (ex.: END/RESET #2)
+            // 0x24 - ISSUE_COMMAND: sous-commande dans payload[1]
             case 0x24: {
-                byte[] payload = new byte[] { 0x00 }; // rc=OK
-                return concat(new byte[]{ ST_OK }, payload);
+                // txFrame: [22][TO][FROM][0x24][subCmd]...[CRC]
+                int headerLen = 4;
+                int bodyLen = Math.max(0, txFrame.length - headerLen - 2);
+                byte[] args = (bodyLen > 0) ? Arrays.copyOfRange(txFrame, headerLen, headerLen + bodyLen) : new byte[0];
+                int sub = (args.length >= 1) ? (args[0] & 0xFF) : 0x00;
+
+                switch (sub) {
+                    case 0x00: // START (hypothèse)
+                        if (unlocked && prestart) {
+                            started = true;
+                            // Transition: poser BEGIN_DELIVERY d'abord
+                            dsFlags &= ~(LCRSc_DELIVERY_ACTIVE | LCRSc_FLOW_ACTIVE);
+                            dsFlags |= LCRSc_BEGIN_DELIVERY;
+                            tStartBeginMark = 0L; // sera fixé au premier poll
+                            return concat(new byte[]{ ST_OK }, new byte[]{ 0x00 }); // rc OK
+                        } else {
+                            // conditions non remplies -> simulateur: rc OK mais pas d'effet
+                            return concat(new byte[]{ ST_OK }, new byte[]{ 0x00 });
+                        }
+
+                    case 0x02: // END / RESET
+                        resetAllStatuses();
+                        return concat(new byte[]{ ST_OK }, new byte[]{ 0x00 });
+
+                    case 0x06: // CLEAR TICKET
+                        dsFlags &= ~LCRSc_DEL_TICKET_PENDING;
+                        return concat(new byte[]{ ST_OK }, new byte[]{ 0x00 });
+
+                    default:
+                        // Par défaut, OK sans effet
+                        return concat(new byte[]{ ST_OK }, new byte[]{ 0x00 });
+                }
             }
 
-            // 0x28 - GET_DEL_STATUS: LcpOps attend p.length>=6 et p[0]==RC_OK.
-            // ds=p[2..3], dc=p[4..5]
+            // 0x28 - GET_DEL_STATUS
             case 0x28: {
-                int ds = 0x0000; // idle
-                int dc = 0x0000;
+                // Progression temporelle si BEGIN_DELIVERY actif
+                progressBeginToActive();
+
+                int ds = dsFlags;
+                int dc = dcFlags;
                 byte[] payload = new byte[] {
                         0x00, 0x00,
                         (byte)((ds >> 8) & 0xFF), (byte)(ds & 0xFF),
@@ -192,11 +278,10 @@ public class LcpLink {
                 return concat(new byte[]{ ST_OK }, payload);
             }
 
-            // 0x7D - CHECK_REQUEST: utilisé par waitQueued.
-            // On répond "pas de requête active" pour ne pas perturber, mais comme on ne queue jamais nos réponses
-            // (on renvoie RC_OK immédiatement ailleurs), waitQueued ne devrait pas être sollicité.
+            // 0x7D - CHECK_REQUEST
             case 0x7D: {
-                // RC_NO_REQUEST_ACTIVE (0x27)
+                // Notre simulateur répond "pas de requête en file" (0x27),
+                // car on renvoie déjà des rc=OK immédiats ailleurs.
                 return new byte[] { ST_OK, 0x27 };
             }
 
