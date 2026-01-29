@@ -1,384 +1,311 @@
 
 package com.pa.lcr.lcp;
 
+import com.hoho.android.usbserial.driver.UsbSerialPort;
 import java.io.IOException;
 import java.util.Arrays;
-import java.util.function.Consumer;
 
-/**
- * LcpLink - couche de lien LCP pour LCR-II.
- *
- * Fournit :
- *  - DUMP_TX / DUMP_RX pour tracer TX/RX
- *  - Logger configurable via setLogger
- *  - Constructeur (serialPort, to, from, sync)
- *  - Méthodes sendRecv(byte[], [int timeoutMs]) attendues par LcpOps/MainActivity
- *  - Méthodes statiques extractStatus / extractPayload (utilisées par LcpOps)
- *  - Utilitaires CRC16/XMODEM et hexdump
- *
- * NOTE I/O : transact(...) contient une SIMULATION étatful pour débloquer l'app sans matériel.
- *            Remplace la section SIMULATION par ton I/O série réelle quand tu seras prêt.
- */
 public class LcpLink {
 
-    /** Active l'affichage du TX via le logger. */
+    /* ================================================================
+       CONSTANTES PROTOCOLE (spécification LCP officielle)
+       ================================================================ */
+
+    public static final int TILDE = 0x7E;
+    public static final int ESC   = 0x1B;
+
+    private static final int SEED = 0x7E7E;   // CRC initial seed (doc LC)
+    private static final int POLY = 0x1021;   // CRC polynomial
+
     public static boolean DUMP_TX = false;
-    /** Active l'affichage du RX via le logger. */
     public static boolean DUMP_RX = false;
 
-    private static Consumer<String> LOGGER = s -> {};
+    private static Logger logger = null;
 
-    /** Définit le logger (ex.: MainActivity::appendAndBuffer). */
-    public static void setLogger(Consumer<String> logger) {
-        LOGGER = (logger != null) ? logger : (s -> {});
+    public static void setLogger(Logger log) {
+        logger = log;
     }
 
-    private static void log(String msg) {
-        try { LOGGER.accept(msg); } catch (Exception ignored) {}
+    private static void log(String s) {
+        if (logger != null) logger.log(s);
     }
 
-    // --- Contexte lien ---
-    private final Object serialPort; // Remplacer par le type réel de l’adaptateur série si souhaité
-    private final int toAddr;        // 0..255
-    private final int fromAddr;      // 0..255
-    private final boolean syncMode;
-    private int defaultTimeoutMs = 1000;
+    /* ================================================================
+       ATTRIBUTS
+       ================================================================ */
 
-    // --- Simulation d'état (stateful) ---
-    private boolean unlocked = false;
-    private boolean prestart = false;
-    private boolean started  = false;
-    private int dsFlags = 0x0000; // Delivery Status flags
-    private int dcFlags = 0x0000; // Delivery Conditions flags
-    private long tStartBeginMark = 0L; // timestamp quand BEGIN_DELIVERY est posé
+    private final UsbSerialPort port;
+    private final int toAddr;
+    private final int fromAddr;
+    private final boolean syncFirst;
 
-    // Flags d'état (doivent correspondre à LcpOps)
-    private static final int LCRSc_DEL_TICKET_PENDING = 0x0001;
-    private static final int LCRSc_FLOW_ACTIVE        = 0x0004;
-    private static final int LCRSc_DELIVERY_ACTIVE    = 0x0008;
-    private static final int LCRSc_BEGIN_DELIVERY     = 0x0400;
+    // État du status byte (bit ID toggle)
+    private int msgId = 0;
+    private boolean syncUsed = false;
 
-    /**
-     * @param serialPort  adaptateur série (USB/RS-232/TCP...). Peut rester 'Object' pour compiler.
-     * @param to          adresse 'to' (0..255)
-     * @param from        adresse 'from' (0..255)
-     * @param sync        true = effectuer une séquence SYNC au démarrage (si implémentée)
-     */
-    public LcpLink(Object serialPort, int to, int from, boolean sync) {
-        this.serialPort = serialPort;
-        this.toAddr     = to & 0xFF;
-        this.fromAddr   = from & 0xFF;
-        this.syncMode   = sync;
-        log("LcpLink: to=" + this.toAddr + ", from=" + this.fromAddr + ", sync=" + this.syncMode);
+    public LcpLink(UsbSerialPort port, int to, int from, boolean syncFirst) {
+        this.port = port;
+        this.toAddr = to & 0xFF;
+        this.fromAddr = from & 0xFF;
+        this.syncFirst = syncFirst;
     }
 
-    /** Timeout par défaut pour transact (ms). */
-    public void setDefaultTimeoutMs(int ms) { this.defaultTimeoutMs = Math.max(1, ms); }
-    public int  getDefaultTimeoutMs()       { return defaultTimeoutMs; }
+    /* ================================================================
+       CRC LCP — identique Python + documentation LC
+       ================================================================ */
 
-    // ------------------------------------------------------------------------
-    // API attendue par LcpOps / MainActivity
-    // ------------------------------------------------------------------------
-
-    /**
-     * Envoie un message LCP dont le premier octet est le code commande (MSG_*)
-     * et les suivants (éventuels) sont le payload pour cette commande.
-     *
-     * Exemple d’appel :
-     *   sendRecv(new byte[]{ (byte)MSG_GET_FIELD, (byte)(f & 0xFF) }, timeout)
-     *
-     * @param payload   [CMD][ARGS...]
-     * @param timeoutMs timeout en millisecondes
-     * @return trame de réponse "logique": [status][payload...] (sans CRC)
-     */
-    public byte[] sendRecv(byte[] payload, int timeoutMs) throws IOException {
-        if (payload == null || payload.length == 0) {
-            throw new IOException("sendRecv: payload must contain at least the command byte");
+    private int crcUpdate(int crc, int b) {
+        for (int i = 7; i >= 0; i--) {
+            boolean fb = (crc & 0x8000) != 0;
+            crc = ((crc << 1) & 0xFFFF) | ((b >> i) & 0x01);
+            if (fb) crc ^= POLY;
         }
-        byte cmd = payload[0];
-        byte[] args = (payload.length > 1) ? Arrays.copyOfRange(payload, 1, payload.length) : new byte[0];
-        byte[] frame = buildCommandFrame(toAddr, fromAddr, cmd, args);
-        return transact(frame, timeoutMs);
+        return crc;
     }
 
-    /** Surcharge utilisant le timeout par défaut. */
-    public byte[] sendRecv(byte[] payload) throws IOException {
-        return sendRecv(payload, defaultTimeoutMs);
-    }
-
-    // API alternative (cmd/payload séparés) si tu veux l'utiliser
-    public byte[] command(byte cmd, byte[] payload) throws IOException {
-        byte[] frame = buildCommandFrame(toAddr, fromAddr, cmd, payload);
-        return transact(frame, defaultTimeoutMs);
-    }
-
-    /**
-     * Point d'échange bas-niveau : écrit 'frame' sur le port série et lit la réponse.
-     * Convention de retour: [status][payload...] (sans CRC),
-     * car LcpOps utilise extractStatus/extractPayload sur ce format.
-     *
-     * ⚠️ SIMULATION ACTUELLE : si tu n'as pas encore d'I/O réelle, on génère une réponse plausible
-     * et étatful, conforme aux attentes de LcpOps/MainActivity.
-     */
-    public byte[] transact(byte[] frame, int timeoutMs) throws IOException {
-        if (frame == null) throw new IOException("Frame is null");
-        if (DUMP_TX) log("TX " + hexdump(frame));
-
-        // --- I/O réelle à brancher ici ---
-        // Exemple (pseudo):
-        // serial.write(frame);
-        // byte[] rsp = serial.readUntilComplete(timeoutMs);
-        // if (DUMP_RX) log("RX " + hexdump(rsp));
-        // return rsp;
-
-        // --- SIMULATION par commande ---
-        byte cmd = (frame.length >= 4) ? frame[3] : (byte)0x00;
-        byte[] rsp = simulateResponseFor(cmd, frame);
-
-        if (DUMP_RX) log("RX " + hexdump(rsp));
-        return rsp;
-    }
-
-    // ------------------------------------------------------------------------
-    // Simulation étatful
-    // ------------------------------------------------------------------------
-
-    private void resetAllStatuses() {
-        unlocked = false; prestart = false; started = false;
-        dsFlags = 0x0000; dcFlags = 0x0000;
-        tStartBeginMark = 0L;
-    }
-
-    // Simuler une progression temporelle: BEGIN_DELIVERY -> DELIVERY_ACTIVE + FLOW_ACTIVE
-    private void progressBeginToActive() {
-        if ((dsFlags & LCRSc_BEGIN_DELIVERY) != 0) {
-            long now = System.currentTimeMillis();
-            if (tStartBeginMark == 0L) tStartBeginMark = now;
-            // Au bout de ~1.5 s, passer en DELIVERY_ACTIVE + FLOW_ACTIVE
-            if (now - tStartBeginMark >= 1500) {
-                dsFlags &= ~LCRSc_BEGIN_DELIVERY;
-                dsFlags |= LCRSc_DELIVERY_ACTIVE | LCRSc_FLOW_ACTIVE;
-            }
+    private int crcLCP(byte[] data) {
+        int crc = SEED;
+        for (byte x : data) {
+            crc = crcUpdate(crc, x & 0xFF);
         }
+        return crc;
     }
 
-    /**
-     * Simule des réponses plausibles pour débloquer l’app.
-     * Convention: on retourne [status][payload...] (sans CRC).
-     */
-    private byte[] simulateResponseFor(byte cmd, byte[] txFrame) {
-        final byte ST_OK = 0x00;
+    /* ================================================================
+       Escape / Unescape (identique Python + spec LC)
+       ================================================================ */
 
-        switch (u8(cmd)) {
-            // 0x00 - RESYNC / GET PRODUCT ID (d’après tes logs)
-            case 0x00: {
-                // payload exemple: [rc=0x00, productId=0x02, 'PROPANE', 0x00]
-                byte[] name = "PROPANE".getBytes();
-                byte[] payload = new byte[2 + name.length + 1];
-                int i = 0;
-                payload[i++] = 0x00;         // rc OK
-                payload[i++] = 0x02;         // productId
-                System.arraycopy(name, 0, payload, i, name.length); i += name.length;
-                payload[i] = 0x00;           // zero-terminated
-                return concat(new byte[]{ ST_OK }, payload);
+    private byte[] escapeStream(byte[] in) {
+        ByteArrayBuilder out = new ByteArrayBuilder(in.length * 2);
+        for (byte x : in) {
+            if ((x & 0xFF) == ESC || (x & 0xFF) == TILDE) {
+                out.add((byte) ESC);
             }
-
-            // 0x20 - GET_FIELD: rc OK, meta 0x00, data optionnelle (OK vide)
-            case 0x20: {
-                byte[] payload = new byte[] { 0x00, 0x00 };
-                return concat(new byte[]{ ST_OK }, payload);
-            }
-
-            // 0x21 - SET_FIELD: activer flags "unlocked", "prestart" selon fieldId
-            case 0x21: {
-                // txFrame structure: [22][TO][FROM][0x21][fieldId][data...][CRC]
-                int headerLen = 4;
-                int bodyLen = Math.max(0, txFrame.length - headerLen - 2);
-                byte[] args = (bodyLen > 0) ? Arrays.copyOfRange(txFrame, headerLen, headerLen + bodyLen) : new byte[0];
-
-                int fieldId = (args.length >= 1) ? (args[0] & 0xFF) : 0x00;
-                // Heuristiques (à ajuster selon ton protocole exact):
-                // 0x00 -> "unlock"
-                // 0x05 -> "prestart param 1"
-                // 0x06 -> "prestart param 2"
-                if (fieldId == 0x00) {
-                    unlocked = true;
-                } else if (fieldId == 0x05 || fieldId == 0x06) {
-                    prestart = true;
-                }
-                // Retourner rc=OK
-                return concat(new byte[]{ ST_OK }, new byte[]{ 0x00 });
-            }
-
-            // 0x23 - GET_MACHINE: répondre dev, ds, dc
-            case 0x23: {
-                // Progression temporelle: BEGIN -> ACTIVE si applicable
-                progressBeginToActive();
-
-                int dev = 0x0000; // device flags fictifs
-                int ds  = dsFlags;
-                int dc  = dcFlags;
-                byte[] payload = new byte[] {
-                        0x00, 0x00,
-                        (byte)((dev >> 8) & 0xFF), (byte)(dev & 0xFF),
-                        (byte)((ds  >> 8) & 0xFF), (byte)(ds  & 0xFF),
-                        (byte)((dc  >> 8) & 0xFF), (byte)(dc  & 0xFF)
-                };
-                return concat(new byte[]{ ST_OK }, payload);
-            }
-
-            // 0x24 - ISSUE_COMMAND: sous-commande dans payload[1]
-            case 0x24: {
-                // txFrame: [22][TO][FROM][0x24][subCmd]...[CRC]
-                int headerLen = 4;
-                int bodyLen = Math.max(0, txFrame.length - headerLen - 2);
-                byte[] args = (bodyLen > 0) ? Arrays.copyOfRange(txFrame, headerLen, headerLen + bodyLen) : new byte[0];
-                int sub = (args.length >= 1) ? (args[0] & 0xFF) : 0x00;
-
-                switch (sub) {
-                    case 0x00: // START (hypothèse)
-                        if (unlocked && prestart) {
-                            started = true;
-                            // Transition: poser BEGIN_DELIVERY d'abord
-                            dsFlags &= ~(LCRSc_DELIVERY_ACTIVE | LCRSc_FLOW_ACTIVE);
-                            dsFlags |= LCRSc_BEGIN_DELIVERY;
-                            tStartBeginMark = 0L; // sera fixé au premier poll
-                            return concat(new byte[]{ ST_OK }, new byte[]{ 0x00 }); // rc OK
-                        } else {
-                            // conditions non remplies -> simulateur: rc OK mais pas d'effet
-                            return concat(new byte[]{ ST_OK }, new byte[]{ 0x00 });
-                        }
-
-                    case 0x02: // END / RESET
-                        resetAllStatuses();
-                        return concat(new byte[]{ ST_OK }, new byte[]{ 0x00 });
-
-                    case 0x06: // CLEAR TICKET
-                        dsFlags &= ~LCRSc_DEL_TICKET_PENDING;
-                        return concat(new byte[]{ ST_OK }, new byte[]{ 0x00 });
-
-                    default:
-                        // Par défaut, OK sans effet
-                        return concat(new byte[]{ ST_OK }, new byte[]{ 0x00 });
-                }
-            }
-
-            // 0x28 - GET_DEL_STATUS
-            case 0x28: {
-                // Progression temporelle si BEGIN_DELIVERY actif
-                progressBeginToActive();
-
-                int ds = dsFlags;
-                int dc = dcFlags;
-                byte[] payload = new byte[] {
-                        0x00, 0x00,
-                        (byte)((ds >> 8) & 0xFF), (byte)(ds & 0xFF),
-                        (byte)((dc >> 8) & 0xFF), (byte)(dc & 0xFF)
-                };
-                return concat(new byte[]{ ST_OK }, payload);
-            }
-
-            // 0x7D - CHECK_REQUEST
-            case 0x7D: {
-                // Notre simulateur répond "pas de requête en file" (0x27),
-                // car on renvoie déjà des rc=OK immédiats ailleurs.
-                return new byte[] { ST_OK, 0x27 };
-            }
-
-            default: {
-                // Par défaut : status OK, payload vide (safe).
-                return new byte[] { ST_OK };
-            }
+            out.add(x);
         }
+        return out.toByteArray();
     }
 
-    // ------------------------------------------------------------------------
-    // Helpers de parsing/assemblage
-    // ------------------------------------------------------------------------
+    /* ================================================================
+       Construction d’un frame (identique Python build_frame)
+       ================================================================ */
 
-    /** Extrait le status d'une réponse (convention: premier octet = status). */
-    public static int extractStatus(byte[] frame) {
-        if (frame == null || frame.length == 0) return 0;
-        return frame[0] & 0xFF;
-    }
+    private byte[] buildFrame(byte[] payload) {
+        int status = msgId & 0x01;
+        if (syncFirst && !syncUsed) {
+            status |= 0x02;     // bit SYNC
+            syncUsed = true;
+        }
+        msgId ^= 0x01;         // toggle ID
 
-    /** Extrait le payload d'une réponse (après le status). */
-    public static byte[] extractPayload(byte[] frame) {
-        if (frame == null || frame.length <= 1) return new byte[0];
-        byte[] out = new byte[frame.length - 1];
-        System.arraycopy(frame, 1, out, 0, out.length);
-        return out;
-    }
+        byte[] header = {
+            (byte) toAddr,
+            (byte) fromAddr,
+            (byte) status,
+            (byte) payload.length
+        };
 
-    /**
-     * Construit une trame "commande" LCP:
-     *   [0x22][TO][FROM][CMD][PAYLOAD...][CRC16/XMODEM hi][CRC16 lo]
-     * Ajuste si ton dialecte diffère.
-     */
-    public static byte[] buildCommandFrame(int to, int from, byte cmd, byte[] payload) {
-        int plen = (payload == null) ? 0 : payload.length;
-        int headerLen = 4;
-        byte[] frame = new byte[headerLen + plen + 2]; // +2 = CRC16
-        frame[0] = 0x22;
-        frame[1] = (byte) (to & 0xFF);
-        frame[2] = (byte) (from & 0xFF);
-        frame[3] = cmd;
-        if (plen > 0) System.arraycopy(payload, 0, frame, headerLen, plen);
+        byte[] var = ByteArrayBuilder.concat(header, payload);
+        byte[] varEsc = escapeStream(var);
 
-        int crc = crc16Xmodem(frame, 0, headerLen + plen);
-        int idx = headerLen + plen;
-        frame[idx]     = (byte) ((crc >> 8) & 0xFF);
-        frame[idx + 1] = (byte) (crc & 0xFF);
+        int crcV = crcLCP(varEsc);
+        byte crc0 = (byte) (crcV & 0xFF);
+        byte crc1 = (byte) ((crcV >> 8) & 0xFF);
+        byte[] crcRaw = { crc0, crc1 };
+        byte[] crcEsc = escapeStream(crcRaw);
+
+        ByteArrayBuilder out = new ByteArrayBuilder(varEsc.length + crcEsc.length + 2);
+        out.add((byte) TILDE);
+        out.add((byte) TILDE);
+        out.add(varEsc);
+        out.add(crcEsc);
+
+        byte[] frame = out.toByteArray();
+        if (DUMP_TX) log("TX: " + hex(frame));
         return frame;
     }
 
-    /** Vérifie le CRC16/XMODEM (les 2 derniers octets sont le CRC). */
-    public static boolean verifyFrameCrc(byte[] frame) {
-        if (frame == null || frame.length < 6) return false;
-        int bodyLen = frame.length - 2;
-        int crcCalc = crc16Xmodem(frame, 0, bodyLen);
-        int crcGot  = ((frame[bodyLen] & 0xFF) << 8) | (frame[bodyLen + 1] & 0xFF);
-        return (crcCalc == crcGot);
-    }
+    /* ================================================================
+       Lecture d’un frame (identique Python read_frame)
+       ================================================================ */
 
-    /** CRC16/XMODEM (poly 0x1021, init 0x0000). */
-    public static int crc16Xmodem(byte[] data, int off, int len) {
-        int crc = 0x0000;
-        for (int i = 0; i < len; i++) {
-            crc ^= (data[off + i] & 0xFF) << 8;
-            for (int b = 0; b < 8; b++) {
-                if ((crc & 0x8000) != 0) {
-                    crc = (crc << 1) ^ 0x1021;
-                } else {
-                    crc <<= 1;
-                }
-                crc &= 0xFFFF;
+    public byte[] readFrame(int timeoutMs) throws IOException {
+        long tEnd = System.currentTimeMillis() + timeoutMs;
+
+        // 1) Sync ~~ 
+        int syncCount = 0;
+        while (System.currentTimeMillis() < tEnd) {
+            int b = readByte(timeoutMs);
+            if (b < 0) continue;
+            if (b == TILDE) {
+                syncCount++;
+                if (syncCount == 2) break;
+            } else {
+                syncCount = 0;
             }
         }
-        return crc & 0xFFFF;
-    }
+        if (syncCount < 2) throw new IOException("Sync ~~ timeout");
 
-    /** Hexdump lisible (ex.: "22 FA FF 28 58 20"). */
-    public static String hexdump(byte[] a) {
-        if (a == null) return "(null)";
-        StringBuilder sb = new StringBuilder(a.length * 3);
-        for (int i = 0; i < a.length; i++) {
-            sb.append(String.format("%02X", a[i] & 0xFF));
-            if (i + 1 < a.length) sb.append(' ');
+        // 2) read header (4 unescaped bytes)
+        byte[] rawHdr = new byte[0];
+        int[] hdr = new int[4];
+        for (int i = 0; i < 4; i++) {
+            int[] vRaw = readEscapedByte(timeoutMs);
+            if (vRaw[0] < 0) throw new IOException("Header timeout");
+            hdr[i] = vRaw[0];
+            rawHdr = ByteArrayBuilder.concat(rawHdr, vRaw[1]);
         }
-        return sb.toString();
+
+        int plen = hdr[3];
+        byte[] rawData = new byte[0];
+        byte[] data = new byte[plen];
+        for (int i = 0; i < plen; i++) {
+            int[] vRaw = readEscapedByte(timeoutMs);
+            if (vRaw[0] < 0) throw new IOException("Payload timeout");
+            data[i] = (byte) vRaw[0];
+            rawData = ByteArrayBuilder.concat(rawData, vRaw[1]);
+        }
+
+        // 3) read CRC (2 bytes, ESC-processed)
+        byte[] crcRaw = new byte[0];
+        int[] c0 = readEscapedByte(timeoutMs);
+        int[] c1 = readEscapedByte(timeoutMs);
+        if (c0[0] < 0 || c1[0] < 0) throw new IOException("CRC timeout");
+
+        crcRaw = ByteArrayBuilder.concat(crcRaw, c0[1]);
+        crcRaw = ByteArrayBuilder.concat(crcRaw, c1[1]);
+
+        int crcR = (c0[0] & 0xFF) | ((c1[0] & 0xFF) << 8);
+
+        // 4) validate CRC
+        byte[] fullEsc = ByteArrayBuilder.concat(rawHdr, rawData);
+        int crcCalc = crcLCP(fullEsc);
+        if (crcCalc != crcR) {
+            throw new IOException(String.format("CRC mismatch recv=%04X calc=%04X", crcR, crcCalc));
+        }
+
+        ByteArrayBuilder frame = new ByteArrayBuilder(2 + rawHdr.length + rawData.length + 2);
+        frame.add((byte) TILDE);
+        frame.add((byte) TILDE);
+        frame.add(rawHdr);
+        frame.add(rawData);
+        frame.add((byte) c0[0]);
+        frame.add((byte) c1[0]);
+
+        byte[] rsp = frame.toByteArray();
+        if (DUMP_RX) log("RX: " + hex(rsp));
+        return rsp;
     }
 
-    // Utils
-    private static byte[] concat(byte[] a, byte[] b) {
-        if (a == null || a.length == 0) return (b == null ? new byte[0] : b.clone());
-        if (b == null || b.length == 0) return a.clone();
-        byte[] out = new byte[a.length + b.length];
-        System.arraycopy(a, 0, out, 0, a.length);
-        System.arraycopy(b, 0, out, a.length, b.length);
-        return out;
+    /* ================================================================
+       readEscapedByte : lecture 1 byte en tenant compte ESC
+       ================================================================ */
+
+    private int[] readEscapedByte(int timeout) throws IOException {
+        int b = readByte(timeout);
+        if (b < 0) return new int[]{ -1, nullBytes() };
+
+        if (b == ESC) {
+            int y = readByte(timeout);
+            if (y < 0) return new int[]{ -1, new byte[]{ (byte) ESC } };
+            return new int[]{ y, new byte[]{ (byte) ESC, (byte) y } };
+        } else {
+            return new int[]{ b, new byte[]{ (byte) b } };
+        }
     }
 
-    // Helpers "unsigned"
-    public static int u8(byte v) { return v & 0xFF; }
+    /* ================================================================
+       Lecture 1 byte avec timeout (UsbSerialPort)
+       ================================================================ */
+
+    private int readByte(int timeoutMs) throws IOException {
+        byte[] buf = new byte[1];
+        try {
+            int n = port.read(buf, timeoutMs);
+            if (n <= 0) return -1;
+            return buf[0] & 0xFF;
+        } catch (Exception e) {
+            return -1;
+        }
+    }
+
+    /* ================================================================
+       sendRecv — identique Python
+       ================================================================ */
+
+    public byte[] sendRecv(byte[] payload, int timeoutMs) throws IOException {
+        byte[] frame = buildFrame(payload);
+
+        // Purge input
+        try { port.purgeHwBuffers(true, true); } catch(Exception ignored){}
+
+        // Write
+        port.write(frame, timeoutMs);
+
+        return readFrame(timeoutMs);
+    }
+
+    /* ================================================================
+       extractStatus / extractPayload — identique Python
+       ================================================================ */
+
+    public static int extractStatus(byte[] frame) {
+        return frame[4] & 0xFF;
+    }
+
+    public static byte[] extractPayload(byte[] frame) {
+        int ln = frame[5] & 0xFF;
+        return Arrays.copyOfRange(frame, 6, 6 + ln);
+    }
+
+    /* ================================================================
+       UTIL
+       ================================================================ */
+
+    private static byte[] nullBytes() { return new byte[0]; }
+
+    private static String hex(byte[] b) {
+        if (b == null) return "(null)";
+        StringBuilder sb = new StringBuilder();
+        for (byte x : b) sb.append(String.format("%02X ", x));
+        return sb.toString().trim();
+    }
+
+    /* Builder simple */
+    private static class ByteArrayBuilder {
+        private byte[] buf; private int len=0;
+
+        ByteArrayBuilder(int cap) { buf = new byte[cap]; }
+        ByteArrayBuilder()       { this(64); }
+
+        void add(byte x) {
+            ensure(1);
+            buf[len++] = x;
+        }
+        void add(byte[] bb) {
+            if (bb == null) return;
+            ensure(bb.length);
+            System.arraycopy(bb, 0, buf, len, bb.length);
+            len += bb.length;
+        }
+        byte[] toByteArray() {
+            return Arrays.copyOf(buf, len);
+        }
+        private void ensure(int n) {
+            if (len + n > buf.length) {
+                int newCap = Math.max(buf.length*2, len+n);
+                buf = Arrays.copyOf(buf, newCap);
+            }
+        }
+        static byte[] concat(byte[] a, byte[] b) {
+            if (a == null) return b;
+            if (b == null) return a;
+            byte[] out = Arrays.copyOf(a, a.length + b.length);
+            System.arraycopy(b, 0, out, a.length, b.length);
+            return out;
+        }
+    }
+
+    /* Logger */
+    public interface Logger { void log(String s); }
 }
