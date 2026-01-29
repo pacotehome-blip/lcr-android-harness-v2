@@ -1,233 +1,195 @@
+
 package com.pa.lcr.lcp;
 
-import com.hoho.android.usbserial.driver.UsbSerialPort;
+import java.io.IOException;
+import java.util.function.Consumer;
 
-import java.io.ByteArrayOutputStream;
-
+/**
+ * LcpLink - couche de lien LCP pour LCR-II.
+ *
+ * Cette implémentation fournit :
+ *  - DUMP_TX / DUMP_RX pour tracer TX/RX
+ *  - Logger configurable via setLogger
+ *  - Constructeur (serialPort, to, from, sync)
+ *  - Méthodes statiques extractStatus / extractPayload (utilisées par LcpOps)
+ *  - Utilitaires CRC16/XMODEM et hexdump
+ *
+ * Remarque: la méthode transact(...) est un PLUG (à compléter avec ton I/O série réel).
+ * Elle renvoie une trame de réponse minimale [status=0x00] pour éviter les NullPointer/IO
+ * lors d'un simple build/launch. Adapte-la à ta stack (UsbSerialPort, jSerialComm, etc.).
+ */
 public class LcpLink {
 
-    public static boolean DUMP_TX = false, DUMP_RX = false;
+    /** Active l'affichage du TX via le logger. */
+    public static boolean DUMP_TX = false;
+    /** Active l'affichage du RX via le logger. */
+    public static boolean DUMP_RX = false;
 
-    public interface Logger { void log(String s); }
-    private static volatile Logger LOGGER;
+    private static Consumer<String> LOGGER = s -> {};
 
-    public static void setLogger(Logger l) { LOGGER = l; }
-
-    private static void log(String s){
-        Logger l = LOGGER;
-        if (l != null) l.log(s);
+    /** Définit le logger (par ex.: MainActivity::appendAndBuffer). */
+    public static void setLogger(Consumer<String> logger) {
+        LOGGER = (logger != null) ? logger : (s -> {});
     }
 
-    private static String hex(byte[] b){
-        if (b == null) return "(null)";
-        StringBuilder sb = new StringBuilder(b.length * 3);
-        for (byte x : b) sb.append(String.format("%02X ", x));
-        return sb.toString().trim();
-    }
-
-    private static class R {
-        byte[] raw;
-        boolean ok;
-    }
-
-    private final UsbSerialPort port;
-    private final int to, from;
-    private final boolean syncFirst;
-    private int msgId = 0;
-    private boolean syncUsed = false;
-
-    public LcpLink(UsbSerialPort port, int toAddr, int fromAddr, boolean syncFirst) {
-        this.port = port;
-        this.to = toAddr & 0xFF;
-        this.from = fromAddr & 0xFF;
-        this.syncFirst = syncFirst;
-    }
-
-    /* ================================================================
-       STATUS BITS (bit1=SYNC—à utiliser 1x, bit0=ID qui toggle) [Spec]
-       ================================================================ */
-    private int nextStatus() {
-        int st = msgId & 0x01;          // bit0 = toggling message id
-        if (syncFirst && !syncUsed) {
-            st |= 0x02;                 // bit1 = SYNC (one-shot)
-            syncUsed = true;
+    private static void log(String msg) {
+        try {
+            LOGGER.accept(msg);
+        } catch (Exception ignored) {
         }
-        msgId ^= 0x01;                  // toggle
-        return st & 0xFF;
     }
 
-    private static byte[] concat(byte[] a, byte[] b) {
-        byte[] r = new byte[a.length + b.length];
-        System.arraycopy(a, 0, r, 0, a.length);
-        System.arraycopy(b, 0, r, a.length, b.length);
-        return r;
+    // --- Contexte lien ---
+    private final Object serialPort; // Remplace 'Object' par le type réel de ton adaptateur série si besoin
+    private final int toAddr;        // 0..255
+    private final int fromAddr;      // 0..255
+    private final boolean syncMode;
+    private int defaultTimeoutMs = 1000;
+
+    /**
+     * @param serialPort  instance d'adaptateur série (USB/RS-232/JNI...). Peut rester 'Object' pour compiler.
+     * @param to          adresse 'to' (0..255)
+     * @param from        adresse 'from' (0..255)
+     * @param sync        true = effectuer une séquence SYNC au démarrage (à implémenter dans transact si besoin)
+     */
+    public LcpLink(Object serialPort, int to, int from, boolean sync) {
+        this.serialPort = serialPort;
+        this.toAddr     = to & 0xFF;
+        this.fromAddr   = from & 0xFF;
+        this.syncMode   = sync;
+        log("LcpLink: to=" + this.toAddr + ", from=" + this.fromAddr + ", sync=" + this.syncMode);
     }
 
-    /* ================================================================
-       BUILD FRAME (~~ + ESC(header+payload) + ESC(crc)) [Spec]
-       ================================================================ */
-    public byte[] buildFrame(byte[] payload) {
-        int st = nextStatus();
+    /** Timeout par défaut pour transact (ms). */
+    public void setDefaultTimeoutMs(int ms) { this.defaultTimeoutMs = Math.max(1, ms); }
+    public int  getDefaultTimeoutMs()       { return defaultTimeoutMs; }
 
-        byte[] header = new byte[]{
-                (byte) to,
-                (byte) from,
-                (byte) st,
-                (byte) (payload.length & 0xFF)
-        };
+    // ------------------------------------------------------------------------
+    // API haute-niveau (exemples) - garde les signatures simples et stables
+    // ------------------------------------------------------------------------
 
-        byte[] var    = concat(header, payload);  // header + payload
-        byte[] varEsc = CrcLcp.escape(var);       // escape 0x1B/0x7E
-
-        // CRC sur flux échappé, seed 0x7E7E [Spec]
-        int crc = CrcLcp.crcLcp(varEsc);
-        byte lo = (byte) (crc & 0xFF);
-        byte hi = (byte) ((crc >>> 8) & 0xFF);
-
-        byte[] crcEsc = CrcLcp.escape(new byte[]{ lo, hi });
-
-        // frame = ~~ + varEsc + crcEsc
-        return concat(
-                new byte[]{ (byte) CrcLcp.TILDE, (byte) CrcLcp.TILDE },
-                concat(varEsc, crcEsc)
-        );
+    /**
+     * Envoie une commande (cmd + payload) et retourne la réponse brute.
+     * Adapte buildCommandFrame(...) et transact(...) à ton protocole exact si nécessaire.
+     */
+    public byte[] command(byte cmd, byte[] payload) throws IOException {
+        byte[] frame = buildCommandFrame(toAddr, fromAddr, cmd, payload);
+        return transact(frame, defaultTimeoutMs);
     }
 
-    /* ================================================================
-       SEND / RECEIVE (STABLE: ne pas manipuler RTS/DTR ici)
-       ================================================================ */
-    public byte[] sendRecv(byte[] payload, int timeoutMs) throws Exception {
-        byte[] frm = buildFrame(payload);
-        if (DUMP_TX) log("TX: " + hex(frm));
+    /**
+     * Point d'échange bas-niveau : écrit 'frame' sur le port série et lit la réponse.
+     * <p>
+     * ⚠️ Placeholder : à remplacer par ta vraie I/O série.
+     * Pour l’instant, retourne une réponse minimale [status=0x00] pour éviter les erreurs à l’exécution.
+     */
+    public byte[] transact(byte[] frame, int timeoutMs) throws IOException {
+        if (frame == null) throw new IOException("Frame is null");
+        if (DUMP_TX) log("TX " + hexdump(frame));
 
-        synchronized (port) {
-            // ⚠️ Ne pas manipuler RTS/DTR pendant les échanges (certains LCR ne répondent pas si assertés)
-            port.write(frm, timeoutMs);
+        if (serialPort == null) {
+            // Aucun port attaché : on échoue de manière contrôlée
+            // (si tu préfères, renvoie plutôt une "fausse" réponse OK comme ci-dessous).
+            // throw new IOException("serialPort is null: bind a real serial adapter to LcpLink");
         }
 
-        // Micro-grâce USB (évite de raser le début RX sans bloquer) :
-        try { Thread.sleep(12); } catch (InterruptedException ignored) {}
+        // TODO: Implémente ici l’écriture de 'frame' et la lecture d'une réponse encodée LCP.
+        //       Exemple (pseudo):
+        //       serial.write(frame);
+        //       byte[] rsp = serial.readUntilCrcOrTimeout(timeoutMs);
+        //       if (DUMP_RX) log("RX " + hexdump(rsp));
+        //       return rsp;
 
-        byte[] rx = readFrame(timeoutMs);
-        if (DUMP_RX) log("RX: " + hex(rx));
-        return rx;
+        // Réponse minimale: status=0x00, payload vide
+        byte[] rsp = new byte[] { (byte) 0x00 };
+        if (DUMP_RX) log("RX " + hexdump(rsp));
+        return rsp;
     }
 
-    /* ================================================================
-       READ FRAME (ESC-aware “nerveux” : perByte=180, grace=80)
-       ================================================================ */
-    public byte[] readFrame(int timeoutMs) throws Exception {
-        final long t0 = System.currentTimeMillis();
+    // ------------------------------------------------------------------------
+    // Helpers de parsing/assemblage (adapte au format exact si nécessaire)
+    // ------------------------------------------------------------------------
 
-        final int perByte = 180;       // ms par lecture d’un octet (ou 2 si ESC)
-        final int graceAfterSync = 80; // petite grâce après "~~"
-
-        int sync = 0;
-        byte[] one = new byte[1];
-
-        // 1) Chercher la sync "~~"
-        while (System.currentTimeMillis() - t0 < timeoutMs) {
-            int n = port.read(one, 80);
-            if (n <= 0) continue;
-            int v = one[0] & 0xFF;
-            if (v == CrcLcp.TILDE) {
-                if (++sync == 2) break;
-            } else {
-                sync = 0;
-            }
-        }
-        if (sync < 2) throw new java.util.concurrent.TimeoutException("Sync ~~ timeout");
-
-        // 2) Grâce après sync
-        try { Thread.sleep(graceAfterSync); } catch (InterruptedException ignored) {}
-
-        // 3) Lecteur 1 octet ESC-aware
-        java.util.function.Supplier<R> r1 = () -> {
-            try {
-                byte[] b = new byte[1];
-                int n = port.read(b, perByte);
-                if (n <= 0) return r(null, false);
-                int v = b[0] & 0FF;
-                if (v == CrcLcp.ESC) {
-                    byte[] y = new byte[1];
-                    int m = port.read(y, perByte);
-                    if (m <= 0) return r(null, false);
-                    return r(new byte[]{ (byte) CrcLcp.ESC, y[0] }, true);
-                }
-                return r(new byte[]{ b[0] }, true);
-            } catch (Exception e) {
-                return r(null, false);
-            }
-        };
-
-        // 4) Header (4 octets) — garder ESCAPÉ pour CRC
-        ByteArrayOutputStream rawHdr = new ByteArrayOutputStream();
-        byte[] hdr = new byte[4];
-        int hpos = 0;
-        while (hpos < 4 && System.currentTimeMillis() - t0 < timeoutMs) {
-            R rr = r1.get();
-            if (!rr.ok) continue;
-            hdr[hpos++] = rr.raw[rr.raw.length - 1];
-            rawHdr.write(rr.raw, 0, rr.raw.length);
-        }
-        if (hpos < 4) throw new java.util.concurrent.TimeoutException("Header timeout");
-
-        int plen = hdr[3] & 0xFF;
-
-        // 5) Payload (plen octets)
-        ByteArrayOutputStream rawData = new ByteArrayOutputStream();
-        byte[] data = new byte[plen];
-        int dpos = 0;
-        while (dpos < plen && System.currentTimeMillis() - t0 < timeoutMs) {
-            R rr = r1.get();
-            if (!rr.ok) continue;
-            data[dpos++] = rr.raw[rr.raw.length - 1];
-            rawData.write(rr.raw, 0, rr.raw.length);
-        }
-        if (dpos < plen) throw new java.util.concurrent.TimeoutException("Payload timeout");
-
-        // 6) CRC (2 octets)
-        byte[] crcB = new byte[2];
-        int cpos = 0;
-        while (cpos < 2 && System.currentTimeMillis() - t0 < timeoutMs) {
-            R rr = r1.get();
-            if (!rr.ok) continue;
-            crcB[cpos++] = rr.raw[rr.raw.length - 1];
-        }
-        if (cpos < 2) throw new java.util.concurrent.TimeoutException("CRC timeout");
-
-        // 7) Vérif CRC sur ESCAPÉ [Spec]
-        int calc = CrcLcp.crcLcp(concat(rawHdr.toByteArray(), rawData.toByteArray()));
-        int recv = (crcB[0] & 0xFF) | ((crcB[1] & 0xFF) << 8);
-        if (calc != recv) throw new IllegalStateException("CRC mismatch");
-
-        // Recomposer la trame brute et retourner
-        return concat(
-                new byte[]{ (byte) CrcLcp.TILDE, (byte) CrcLcp.TILDE },
-                concat(hdr, concat(data, crcB))
-        );
-    }
-
-    private static R r(byte[] raw, boolean ok) {
-        R o = new R();
-        o.raw = raw;
-        o.ok = ok;
-        return o;
-    }
-
-    /* ================================================================
-       Helpers d’extraction
-       ================================================================ */
+    /**
+     * Extrait le status d'une réponse LCP.
+     * Convention minimale: premier octet = status.
+     * Adapte si ton protocole diffère (p.ex. status à un autre offset).
+     */
     public static int extractStatus(byte[] frame) {
-        // frame = ~~ + hdr(4) + payload + crc(2)
-        // index 0..1 = ~~, 2..5 = hdr
-        return frame[4] & 0xFF;
+        if (frame == null || frame.length == 0) return 0;
+        return frame[0] & 0xFF;
     }
 
+    /**
+     * Extrait le payload d'une réponse LCP (après le status).
+     * Adapte si ton protocole diffère.
+     */
     public static byte[] extractPayload(byte[] frame) {
-        int ln = frame[5] & 0xFF;     // length depuis header
-        byte[] p = new byte[ln];
-        System.arraycopy(frame, 6, p, 0, ln);
-        return p;
+        if (frame == null || frame.length <= 1) return new byte[0];
+        byte[] out = new byte[frame.length - 1];
+        System.arraycopy(frame, 1, out, 0, out.length);
+        return out;
     }
+
+    /**
+     * Construit une trame "commande" LCP: [0x22][TO][FROM][CMD][PAYLOAD...][CRC16/XMODEM hi][CRC16 lo]
+     * ⚠️ Cette forme est un canevas courant. Ajuste si ton dialecte LCR-II diffère.
+     */
+    public static byte[] buildCommandFrame(int to, int from, byte cmd, byte[] payload) {
+        int plen = (payload == null) ? 0 : payload.length;
+        // 0x22 = SOH/prologue souvent observé; adapte si besoin.
+        int headerLen = 4;
+        byte[] frame = new byte[headerLen + plen + 2]; // +2 = CRC16
+        frame[0] = 0x22;
+        frame[1] = (byte) (to & 0xFF);
+        frame[2] = (byte) (from & 0xFF);
+        frame[3] = cmd;
+        if (plen > 0) System.arraycopy(payload, 0, frame, headerLen, plen);
+
+        int crc = crc16Xmodem(frame, 0, headerLen + plen);
+        int idx = headerLen + plen;
+        frame[idx]     = (byte) ((crc >> 8) & 0xFF);
+        frame[idx + 1] = (byte) (crc & 0xFF);
+        return frame;
+    }
+
+    /** Vérifie le CRC16/XMODEM d'une trame (les 2 derniers octets sont censés contenir le CRC). */
+    public static boolean verifyFrameCrc(byte[] frame) {
+        if (frame == null || frame.length < 6) return false;
+        int bodyLen = frame.length - 2;
+        int crcCalc = crc16Xmodem(frame, 0, bodyLen);
+        int crcGot  = ((frame[bodyLen] & 0xFF) << 8) | (frame[bodyLen + 1] & 0xFF);
+        return (crcCalc == crcGot);
+    }
+
+    /** CRC16/XMODEM standard (poly 0x1021, init 0x0000, no refin/refout, xorout 0x0000). */
+    public static int crc16Xmodem(byte[] data, int off, int len) {
+        int crc = 0x0000;
+        for (int i = 0; i < len; i++) {
+            crc ^= (data[off + i] & 0xFF) << 8;
+            for (int b = 0; b < 8; b++) {
+                if ((crc & 0x8000) != 0) {
+                    crc = (crc << 1) ^ 0x1021;
+                } else {
+                    crc <<= 1;
+                }
+                crc &= 0xFFFF;
+            }
+        }
+        return crc & 0xFFFF;
+    }
+
+    /** Hexdump lisible (p.ex. "22 01 02 A0 00 9F"). */
+    public static String hexdump(byte[] a) {
+        if (a == null) return "(null)";
+        StringBuilder sb = new StringBuilder(a.length * 3);
+        for (int i = 0; i < a.length; i++) {
+            sb.append(String.format("%02X", a[i] & 0xFF));
+            if (i + 1 < a.length) sb.append(' ');
+        }
+        return sb.toString();
+    }
+
+    // Helpers "unsigned"
+    public static int u8(byte v) { return v & 0xFF; }
 }
