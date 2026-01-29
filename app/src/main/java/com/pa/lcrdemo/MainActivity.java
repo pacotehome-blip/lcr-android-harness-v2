@@ -48,9 +48,6 @@ public class MainActivity extends AppCompatActivity {
     private final Object lcpLock = new Object();
     private final ExecutorService lcpExec = Executors.newSingleThreadExecutor();
 
-    /* ================================================================
-       RECEIVERS USB
-       ================================================================ */
     private final BroadcastReceiver usbPermissionReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
             if (!ACTION_USB_PERMISSION.equals(intent.getAction())) return;
@@ -80,9 +77,6 @@ public class MainActivity extends AppCompatActivity {
         }
     };
 
-    /* ================================================================
-       onCreate()
-       ================================================================ */
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
         setContentView(R.layout.activity_main);
@@ -95,14 +89,12 @@ public class MainActivity extends AppCompatActivity {
 
         ensureDefaultAddresses();
 
-        // Receivers
         registerReceiver(usbPermissionReceiver, new IntentFilter(ACTION_USB_PERMISSION));
         IntentFilter f = new IntentFilter();
         f.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
         f.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
         registerReceiver(usbAttachDetach, f);
 
-        // I/O log (TX/RX) — via LcpLink logger
         CheckBox switchIoLog = findViewById(R.id.switchIoLog);
         LcpLink.setLogger(this::appendAndBuffer);
         if (switchIoLog != null) {
@@ -113,7 +105,6 @@ public class MainActivity extends AppCompatActivity {
             });
         }
 
-        // Copier / Effacer log
         View vCopy = findViewById(R.id.btnCopyLog);
         if (vCopy != null) vCopy.setOnClickListener(v -> {
             ClipboardManager cb = (ClipboardManager)getSystemService(Context.CLIPBOARD_SERVICE);
@@ -128,15 +119,12 @@ public class MainActivity extends AppCompatActivity {
             runOnUiThread(() -> log.setText(""));
         });
 
-        // Connexion USB
         View vConn = findViewById(R.id.btnConnect);
         if (vConn != null) vConn.setOnClickListener(v -> requestAndOpenFirstPort());
 
-        // DIAG (Ping 0x28 RAW)
         View vDiag = findViewById(R.id.btnDiag);
         if (vDiag != null) vDiag.setOnClickListener(v -> runLcpTask(this::diagPing28_raw_locked));
 
-        // A / B / C
         View vA = findViewById(R.id.btnA);
         if (vA != null) vA.setOnClickListener(v -> runLcpTask(this::macroResetEndClear_locked));
 
@@ -146,7 +134,6 @@ public class MainActivity extends AppCompatActivity {
         View vC = findViewById(R.id.btnC);
         if (vC != null) vC.setOnClickListener(v -> runLcpTask(this::macroStartDelivery_locked));
 
-        // Console RAW
         View vRaw = findViewById(R.id.btnSendHex);
         if (vRaw != null) vRaw.setOnClickListener(v -> promptAndSendHex());
 
@@ -161,9 +148,6 @@ public class MainActivity extends AppCompatActivity {
         lcpExec.shutdownNow();
     }
 
-    /* ================================================================
-       OUTILS UI (threading, états boutons)
-       ================================================================ */
     private void runLcpTask(Runnable r) {
         setButtonsEnabled(false);
         lcpExec.execute(() -> {
@@ -223,14 +207,14 @@ public class MainActivity extends AppCompatActivity {
             serialPort.open(conn);
             serialPort.setParameters(19200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
 
-            // ⚠️ Désassertion et NE PLUS les réactiver
+            // Désassertion et NE PLUS les réactiver
             try { serialPort.setRTS(false); } catch(Exception ignore){}
             try { serialPort.setDTR(false); } catch(Exception ignore){}
 
             serialPort.purgeHwBuffers(true, true);
             append("Port ouvert 19200 8N1 (RTS/DTR désassertés, purge OK)\n");
 
-            // ✅ RESYNC LCP 1x: 0x00 (Get Product ID) avec SYNC=1
+            // RESYNC LCP 1x: 0x00 (Get Product ID) avec SYNC=1
             try {
                 int to=0xFA, from=0xFF;
                 LcpLink linkSync = new LcpLink(serialPort, to, from, true /* SYNC=1 */);
@@ -238,7 +222,7 @@ public class MainActivity extends AppCompatActivity {
                 LcpLink.DUMP_TX = true; LcpLink.DUMP_RX = true;
                 appendAndBuffer("[CONNECT] RESYNC 0x00 (Get Product ID)");
                 byte[] fr = linkSync.sendRecv(new byte[]{ (byte)0x00 }, 3200);
-                // Pas d'analyse détaillée ici : l’objectif est de caler la session.
+                byte[] p  = LcpLink.extractPayload(fr); // rc, productID (=0x02), name...
                 appendAndBuffer("[CONNECT] RESYNC OK (Product ID), session SYNC initialisée");
             } catch (Exception e) {
                 appendAndBuffer("[CONNECT] RESYNC 0x00 échec: " + e.getMessage());
@@ -262,7 +246,6 @@ public class MainActivity extends AppCompatActivity {
         synchronized (lcpLock) {
             try {
                 serialPort.purgeHwBuffers(true, true);
-                // Drain court, non bloquant
                 byte[] sniff = new byte[4]; try { serialPort.read(sniff, 30); } catch(Exception ignore){}
 
                 final int to=0xFA, from=0xFF;
@@ -286,7 +269,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    // DIAG (même ping RAW que B)
     private void diagPing28_raw_locked() {
         macroPing28_raw_locked();
     }
@@ -302,7 +284,6 @@ public class MainActivity extends AppCompatActivity {
 
                 final int to   = 0xFA;
                 final int from = 0xFF;
-                // Session déjà sync → SYNC=0 ici
                 LcpLink link = new LcpLink(serialPort, to, from, false);
                 LcpOps  ops  = new LcpOps(link);
                 LcpLink.setLogger(this::appendAndBuffer);
@@ -316,7 +297,6 @@ public class MainActivity extends AppCompatActivity {
                 ops.opIssueCommand(0x06, 3000, 200);
                 Thread.sleep(200);
 
-                // Poll 0x28 jusqu’à ticket=false (bit0 du Delivery Code)
                 long t0 = System.currentTimeMillis();
                 int[] dsdc;
                 do {
