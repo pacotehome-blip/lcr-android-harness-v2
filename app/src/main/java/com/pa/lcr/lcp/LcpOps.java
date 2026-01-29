@@ -23,6 +23,14 @@ public class LcpOps {
     public static final int LCRSc_DEL_TICKET_PENDING = 0x0001;
 
     /* ============================================================
+       RETURN CODES (queued handling)
+       ============================================================ */
+    public static final int RC_OK                = 0x00;
+    public static final int RC_REQUEST_QUEUED    = 0x26; // 38
+    public static final int RC_NO_REQUEST_ACTIVE = 0x27; // 39
+    public static final int RC_REQUEST_ABORTED   = 0x28; // 40
+
+    /* ============================================================
        UTIL i32 BE
        ============================================================ */
     public static byte[] i32be(int v) {
@@ -35,8 +43,40 @@ public class LcpOps {
     }
 
     /* ============================================================
-       GET_MACHINE (0x23)
-       retourne [machineStatus, deviceStatus, deliveryCode]
+       CHECK_REQUEST (0x7D) — gestion des requêtes différées (rc=0x26)
+       ============================================================ */
+    public byte[] opCheckRequest(int timeoutMs, int pollMs) throws Exception {
+        long t0 = System.currentTimeMillis();
+
+        while (System.currentTimeMillis() - t0 < timeoutMs) {
+            byte[] fr = link.sendRecv(new byte[]{ (byte)0x7D }, timeoutMs);
+            byte[] rep = LcpLink.extractPayload(fr);
+            if (rep == null || rep.length == 0) { Thread.sleep(Math.max(50, pollMs)); continue; }
+
+            int rc0 = rep[0] & 0xFF;
+            if (rc0 == RC_REQUEST_QUEUED) {
+                Thread.sleep(Math.max(50, pollMs));
+                continue;
+            }
+            if (rc0 == RC_NO_REQUEST_ACTIVE) throw new Exception("CheckRequest: 0x27 NO_REQUEST_ACTIVE");
+            if (rc0 == RC_REQUEST_ABORTED)   throw new Exception("CheckRequest: 0x28 REQUEST_ABORTED");
+
+            // Normalisations analogues au script Python
+            if (rep.length == 2 && rc0 == RC_OK) {
+                return rep; // [0x00, ...]
+            }
+            if (rc0 == RC_OK && rep.length >= 3 && (rep[1] & 0xFF) == RC_OK) {
+                byte[] norm = new byte[rep.length - 1];
+                System.arraycopy(rep, 1, norm, 0, norm.length);
+                return norm;
+            }
+            return rep;
+        }
+        throw new Exception("Timeout CHECK_REQUEST (queued handling).");
+    }
+
+    /* ============================================================
+       GET_MACHINE (0x23) → [ms, ds, dc]
        ============================================================ */
     public int[] opMachineStatusFull(int timeoutMs, int pauseMs) throws Exception {
         byte[] fr = link.sendRecv(new byte[]{ 0x23 }, timeoutMs);
@@ -46,7 +86,7 @@ public class LcpOps {
             throw new Exception("GET_MACHINE: payload invalide");
 
         int rc = p[0] & 0xFF;
-        if (rc != 0)
+        if (rc != RC_OK)
             throw new Exception("GET_MACHINE rc=" + rc);
 
         int ms = (p[2] & 0xFF) | ((p[3] & 0xFF) << 8);
@@ -59,7 +99,7 @@ public class LcpOps {
     }
 
     /* ============================================================
-       ISSUE COMMAND (0x24)
+       ISSUE COMMAND (0x24, cmd) — gère rc=0x26 via CHECK_REQUEST
        ============================================================ */
     public void opIssueCommand(int code, int timeoutMs, int pauseMs) throws Exception {
         byte[] pl = new byte[]{ 0x24, (byte)(code & 0xFF) };
@@ -70,8 +110,13 @@ public class LcpOps {
             throw new Exception("IssueCommand: réponse invalide");
 
         int rc = p[0] & 0xFF;
-        if (rc != 0)
-            throw new Exception("IssueCommand rc=" + rc);
+        if (rc == RC_REQUEST_QUEUED) {
+            byte[] rep = opCheckRequest(timeoutMs, Math.max(100, pauseMs));
+            rc = rep[0] & 0xFF;
+        }
+
+        if (rc != RC_OK)
+            throw new Exception(String.format("IssueCommand rc=0x%02X (cmd 0x%02X)", rc, code));
 
         if (pauseMs > 0) Thread.sleep(pauseMs);
     }
@@ -91,7 +136,7 @@ public class LcpOps {
             throw new Exception("GET_FIELD: réponse invalide");
 
         int rc = p[0] & 0xFF;
-        if (rc != 0)
+        if (rc != RC_OK)
             throw new Exception("GET_FIELD rc=" + rc);
 
         byte[] val = new byte[p.length - 1];
@@ -119,24 +164,31 @@ public class LcpOps {
             throw new Exception("SET_FIELD: réponse invalide");
 
         int rc = p[0] & 0xFF;
-        if (rc != 0)
+        if (rc != RC_OK)
             throw new Exception("SET_FIELD rc=" + rc);
     }
 
     /* ============================================================
-       GET_DEL_STATUS (0x28)
-       retourne [ds, dc]
+       GET_DEL_STATUS (0x28) → [ds, dc] — gère rc=0x26 via CHECK_REQUEST
        ============================================================ */
     public int[] opDeliveryStatus(int timeoutMs, int pauseMs) throws Exception {
         byte[] fr = link.sendRecv(new byte[]{ 0x28 }, timeoutMs);
         byte[] p  = LcpLink.extractPayload(fr);
 
-        if (p == null || p.length < 6)
+        if (p == null || p.length < 1)
             throw new Exception("DEL_STATUS: payload invalide");
 
         int rc = p[0] & 0xFF;
-        if (rc != 0)
+        if (rc == RC_REQUEST_QUEUED) {
+            byte[] rep = opCheckRequest(timeoutMs, Math.max(100, pauseMs));
+            p = rep;
+            rc = p[0] & 0xFF;
+        }
+        if (rc != RC_OK)
             throw new Exception("DEL_STATUS rc=" + rc);
+
+        if (p.length < 6)
+            throw new Exception("DEL_STATUS: payload trop court");
 
         int ds = ((p[3] & 0xFF) << 8) | (p[2] & 0xFF);
         int dc = ((p[5] & 0xFF) << 8) | (p[4] & 0xFF);

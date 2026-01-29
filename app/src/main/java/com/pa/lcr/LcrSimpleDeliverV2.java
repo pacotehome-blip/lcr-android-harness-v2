@@ -46,9 +46,6 @@ public class LcrSimpleDeliverV2 {
         this.link = ops.getLink();
     }
 
-    /* ============================================================
-       DECIMAL DIGIT MAP
-       ============================================================ */
     private static int dd(int idx){
         switch(idx){
             case 0: return 2;
@@ -59,9 +56,6 @@ public class LcrSimpleDeliverV2 {
         }
     }
 
-    /* ============================================================
-       UNLOCK (security key)
-       ============================================================ */
     public void unlock() throws Exception {
         if (p.unlockUserKey == null && !p.unlockUserKeyEmpty && p.unlockUserKeyHex == null)
             return;
@@ -87,16 +81,10 @@ public class LcrSimpleDeliverV2 {
             ops.opSetField(73, new byte[]{ 1 }, 5000);
     }
 
-    /* ============================================================
-       PRESTART (produit, preset, security)
-       ============================================================ */
     public void prestart() throws Exception {
-
-        // Machine status
         int[] ms = ops.opMachineStatusFull(5000, 200);
         int dc = ms[2];
 
-        // If delivery/flow active → unlock if recoverActive != off
         if ((dc & (LcpOps.LCRSc_DELIVERY_ACTIVE | LcpOps.LCRSc_FLOW_ACTIVE)) != 0) {
             if (!"off".equals(p.recoverActive)) {
                 ops.opIssueCommand(0x02, 5000, 200); // END
@@ -112,7 +100,6 @@ public class LcrSimpleDeliverV2 {
             }
         }
 
-        // Ticket pending ?
         dc = ops.opMachineStatusFull(5000, 200)[2];
         if ((dc & LcpOps.LCRSc_DEL_TICKET_PENDING) != 0) {
             long t0 = System.currentTimeMillis();
@@ -125,7 +112,6 @@ public class LcrSimpleDeliverV2 {
             }
         }
 
-        // Product selection
         if (p.product != null)
             ops.opSetField(0, new byte[]{ (byte)(p.product - 1) }, 5000);
 
@@ -135,7 +121,6 @@ public class LcrSimpleDeliverV2 {
         if (p.productCode != null)
             ops.opSetField(22, filterDigits(p.productCode, 8).getBytes("US-ASCII"), 5000);
 
-        // Preset
         if (p.preset == null || p.preset == 0.0) {
             ops.opSetField(5, LcpOps.i32be(0), 5000);
             ops.opSetField(6, LcpOps.i32be(0), 5000);
@@ -161,9 +146,6 @@ public class LcrSimpleDeliverV2 {
         }
     }
 
-    /* ============================================================
-       START (0x00 ou 0x01)
-       ============================================================ */
     public void start() throws Exception {
         if (!p.noStart) {
             if ("0x00".equals(p.startCmd))
@@ -197,11 +179,7 @@ public class LcrSimpleDeliverV2 {
         throw new java.util.concurrent.TimeoutException("START_TIMEOUT");
     }
 
-    /* ============================================================
-       LIVE LOOP — attend fin de flow/delivery
-       ============================================================ */
     public Map<String,Object> liveLoop() throws Exception {
-
         int decIdx = getU8(39, 0);
         int digits = dd(decIdx);
 
@@ -241,9 +219,6 @@ public class LcrSimpleDeliverV2 {
         return out;
     }
 
-    /* ============================================================
-       FINISH
-       ============================================================ */
     public Map<String,Object> finish(Map<String,Object> liveData, String ticket) {
         int gt = safeI32(17);
         int nt = safeI32(18);
@@ -256,9 +231,6 @@ public class LcrSimpleDeliverV2 {
         return out;
     }
 
-    /* ============================================================
-       UTIL : fields
-       ============================================================ */
     private int getU8(int f, int d){
         try{
             byte[] b = ops.opGetField(f, 5000);

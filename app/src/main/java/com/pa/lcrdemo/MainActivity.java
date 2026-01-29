@@ -231,7 +231,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       Macro A — END + CLEAR (avec cadence de polls 0x28)
+       Macro A — END + CLEAR (cadence 0x28)
        ================================================================ */
     private void macroReset_locked() {
         if (!checkReady()) return;
@@ -241,31 +241,23 @@ public class MainActivity extends AppCompatActivity {
                 append("[A] END (0x02)\n");
                 lcpOps.opIssueCommand(0x02, 3000, 300); // pause 300ms incluse
 
-                // 2) Poll 0x28 pendant ~2.2s (cadence 250ms)
-                long tPoll = System.currentTimeMillis();
-                boolean ticketCleared = false;
-                int[] dsdc = new int[]{0,0};
-                int polls = 0;
-                while (System.currentTimeMillis() - tPoll < 2200) {
-                    dsdc = lcpOps.opDeliveryStatus(3000, 250);
-                    polls++;
-                    append(String.format("[A] POLL #1.%d DS=0x%04X DC=0x%04X\n",
-                            polls, dsdc[0], dsdc[1]));
-                    if ((dsdc[1] & 0x0001) == 0) { ticketCleared = true; break; }
-                }
+                // 2) Premier poll : si ticket, on enchaîne CLEAR
+                int[] dsdc = lcpOps.opDeliveryStatus(3000, 250);
+                append(String.format("[A] POLL #1 DS=0x%04X DC=0x%04X\n", dsdc[0], dsdc[1]));
+                boolean ticketCleared = ((dsdc[1] & 0x0001) == 0);
 
-                // 3) Si ticket encore présent → CLEAR + polls (jusqu'à 8s)
+                // 3) CLEAR si le ticket est encore présent
                 if (!ticketCleared) {
                     append("[A] CLEAR (0x06)\n");
                     lcpOps.opIssueCommand(0x06, 3000, 250);
 
                     long t0 = System.currentTimeMillis();
-                    int polls2 = 0;
+                    int polls = 0;
                     while (System.currentTimeMillis() - t0 < 8000) {
                         dsdc = lcpOps.opDeliveryStatus(3000, 250);
-                        polls2++;
+                        polls++;
                         append(String.format("[A] POLL #2.%d DS=0x%04X DC=0x%04X\n",
-                                polls2, dsdc[0], dsdc[1]));
+                                polls, dsdc[0], dsdc[1]));
                         if ((dsdc[1] & 0x0001) == 0) { ticketCleared = true; break; }
                     }
                 }
