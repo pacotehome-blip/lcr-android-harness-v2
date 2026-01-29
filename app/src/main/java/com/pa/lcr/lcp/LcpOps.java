@@ -129,13 +129,13 @@ public class LcpOps {
     }
 
     /* ============================================================
-       GET_FIELD (0x20)
+       GET_FIELD (0x20) — ID 1 octet (format SR260/LCR-II)
        ============================================================ */
     public byte[] opGetField(int fieldId, int timeoutMs) throws Exception {
-        int lo = fieldId & 0xFF;
-        int hi = (fieldId >> 8) & 0xFF;
+        if (fieldId < 0 || fieldId > 0xFF)
+            throw new IllegalArgumentException("fieldId must be 0..255 for SR260/LCR-II");
 
-        byte[] pl = new byte[]{ 0x20, (byte)lo, (byte)hi };
+        byte[] pl = new byte[]{ 0x20, (byte)(fieldId & 0xFF) }; // 1 OCTET d'ID
         byte[] fr = link.sendRecv(pl, timeoutMs);
         byte[] p  = LcpLink.extractPayload(fr);
 
@@ -152,17 +152,18 @@ public class LcpOps {
     }
 
     /* ============================================================
-       SET_FIELD (0x21)
+       SET_FIELD (0x21) — ID 1 octet (format SR260/LCR-II)
        ============================================================ */
     public void opSetField(int fieldId, byte[] rawValue, int timeoutMs) throws Exception {
-        int lo = fieldId & 0xFF;
-        int hi = (fieldId >> 8) & 0xFF;
+        if (fieldId < 0 || fieldId > 0xFF)
+            throw new IllegalArgumentException("fieldId must be 0..255 for SR260/LCR-II");
 
-        byte[] pl = new byte[3 + rawValue.length];
+        if (rawValue == null) rawValue = new byte[0];
+
+        byte[] pl = new byte[2 + rawValue.length];
         pl[0] = 0x21;
-        pl[1] = (byte)lo;
-        pl[2] = (byte)hi;
-        System.arraycopy(rawValue, 0, pl, 3, rawValue.length);
+        pl[1] = (byte)(fieldId & 0xFF); // 1 OCTET d'ID
+        System.arraycopy(rawValue, 0, pl, 2, rawValue.length);
 
         byte[] fr = link.sendRecv(pl, timeoutMs);
         byte[] p  = LcpLink.extractPayload(fr);
