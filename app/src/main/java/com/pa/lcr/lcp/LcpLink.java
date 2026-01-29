@@ -16,7 +16,7 @@ import java.util.function.Consumer;
  *  - Méthodes statiques extractStatus / extractPayload (utilisées par LcpOps)
  *  - Utilitaires CRC16/XMODEM et hexdump
  *
- * NOTE I/O : transact(...) contient un placeholder. Branche ton I/O série réelle (USB/RS-232, jSerialComm, etc.)
+ * NOTE I/O : transact(...) contient une SIMULATION. Branche ton I/O série réelle quand prêt.
  */
 public class LcpLink {
 
@@ -74,7 +74,7 @@ public class LcpLink {
      *
      * @param payload  [CMD][ARGS...]
      * @param timeoutMs timeout en millisecondes
-     * @return trame de réponse brute (placeholder si I/O non branchée)
+     * @return trame de réponse "logique": [status][payload...] (sans CRC)
      */
     public byte[] sendRecv(byte[] payload, int timeoutMs) throws IOException {
         if (payload == null || payload.length == 0) {
@@ -91,7 +91,7 @@ public class LcpLink {
         return sendRecv(payload, defaultTimeoutMs);
     }
 
-    // Gardé pour usage interne/alternatif si tu veux un formalisme cmd/payload séparé
+    // API alternative (cmd/payload séparés) si tu veux l'utiliser
     public byte[] command(byte cmd, byte[] payload) throws IOException {
         byte[] frame = buildCommandFrame(toAddr, fromAddr, cmd, payload);
         return transact(frame, defaultTimeoutMs);
@@ -99,24 +99,112 @@ public class LcpLink {
 
     /**
      * Point d'échange bas-niveau : écrit 'frame' sur le port série et lit la réponse.
-     * ⚠️ Placeholder : à remplacer par ta vraie I/O série (USB/RS-232/TCP vers pont, etc.).
+     * ⚠️ SIMULATION ACTUELLE : si tu n'as pas encore d'I/O réelle, on génère une réponse plausible
+     * conformément aux attentes de LcpOps.
+     *
+     * Convention de retour: [status][payload...] (sans CRC),
+     * car LcpOps utilise extractStatus/extractPayload sur ce format.
      */
     public byte[] transact(byte[] frame, int timeoutMs) throws IOException {
         if (frame == null) throw new IOException("Frame is null");
         if (DUMP_TX) log("TX " + hexdump(frame));
 
-        // TODO: Implémente ici l’I/O réelle.
-        //       Exemple (pseudo):
-        //       serial.write(frame);
-        //       byte[] rsp = serial.readUntilCrcOrTimeout(timeoutMs);
-        //       if (!verifyFrameCrc(rsp)) throw new IOException("Bad CRC");
-        //       if (DUMP_RX) log("RX " + hexdump(rsp));
-        //       return rsp;
+        // --- I/O réelle à brancher ici ---
+        // Exemple (pseudo):
+        // serial.write(frame);
+        // byte[] rsp = serial.readUntilComplete(timeoutMs);
+        // if (DUMP_RX) log("RX " + hexdump(rsp));
+        // return rsp;
 
-        // Réponse minimale de placeholder : [status=0x00] sans payload.
-        byte[] rsp = new byte[] { (byte) 0x00 };
+        // --- SIMULATION par commande ---
+        byte cmd = (frame.length >= 4) ? frame[3] : (byte)0x00;
+        byte[] rsp = simulateResponseFor(cmd, frame);
+
         if (DUMP_RX) log("RX " + hexdump(rsp));
         return rsp;
+    }
+
+    /**
+     * Simule des réponses plausibles pour débloquer l’app.
+     * Convention: on retourne [status][payload...] (sans CRC).
+     */
+    private byte[] simulateResponseFor(byte cmd, byte[] txFrame) {
+        final byte ST_OK = 0x00;
+
+        switch (u8(cmd)) {
+            // 0x00 - RESYNC / GET PRODUCT ID (d’après tes logs)
+            case 0x00: {
+                // payload exemple: [rc=0x00, productId=0x02, 'PROPANE', 0x00]
+                byte[] name = "PROPANE".getBytes();
+                byte[] payload = new byte[2 + name.length + 1];
+                int i = 0;
+                payload[i++] = 0x00;         // rc
+                payload[i++] = 0x02;         // productId
+                System.arraycopy(name, 0, payload, i, name.length); i += name.length;
+                payload[i] = 0x00;           // zero-terminated
+                return concat(new byte[]{ ST_OK }, payload);
+            }
+
+            // 0x20 - GET_FIELD: LcpOps attend p[0]==RC_OK, et renvoie p[2..] comme data (optionnelle).
+            case 0x20: {
+                // Renvoie minimal: rc=OK, meta=0x00 => out (p[2..]) sera vide et valide.
+                byte[] payload = new byte[] { 0x00, 0x00 };
+                return concat(new byte[]{ ST_OK }, payload);
+            }
+
+            // 0x21 - SET_FIELD: LcpOps attend p non-vide et p[0]==RC_OK.
+            case 0x21: {
+                byte[] payload = new byte[] { 0x00 }; // rc=OK
+                return concat(new byte[]{ ST_OK }, payload);
+            }
+
+            // 0x23 - GET_MACHINE: LcpOps attend p.length>=8, p[0]==RC_OK.
+            // dev = p[2..3], ds = p[4..5], dc = p[6..7]
+            case 0x23: {
+                int dev = 0x0000; // device flags (exemple)
+                int ds  = 0x0000; // delivery status flags (idle)
+                int dc  = 0x0000; // delivery conditions flags
+                byte[] payload = new byte[] {
+                        0x00, 0x00,
+                        (byte)((dev >> 8) & 0xFF), (byte)(dev & 0xFF),
+                        (byte)((ds  >> 8) & 0xFF), (byte)(ds  & 0xFF),
+                        (byte)((dc  >> 8) & 0xFF), (byte)(dc  & 0xFF)
+                };
+                return concat(new byte[]{ ST_OK }, payload);
+            }
+
+            // 0x24 - ISSUE_COMMAND: LcpOps attend p non-vide et p[0]==RC_OK. (ex.: END/RESET #2)
+            case 0x24: {
+                byte[] payload = new byte[] { 0x00 }; // rc=OK
+                return concat(new byte[]{ ST_OK }, payload);
+            }
+
+            // 0x28 - GET_DEL_STATUS: LcpOps attend p.length>=6 et p[0]==RC_OK.
+            // ds=p[2..3], dc=p[4..5]
+            case 0x28: {
+                int ds = 0x0000; // idle
+                int dc = 0x0000;
+                byte[] payload = new byte[] {
+                        0x00, 0x00,
+                        (byte)((ds >> 8) & 0xFF), (byte)(ds & 0xFF),
+                        (byte)((dc >> 8) & 0xFF), (byte)(dc & 0xFF)
+                };
+                return concat(new byte[]{ ST_OK }, payload);
+            }
+
+            // 0x7D - CHECK_REQUEST: utilisé par waitQueued.
+            // On répond "pas de requête active" pour ne pas perturber, mais comme on ne queue jamais nos réponses
+            // (on renvoie RC_OK immédiatement ailleurs), waitQueued ne devrait pas être sollicité.
+            case 0x7D: {
+                // RC_NO_REQUEST_ACTIVE (0x27)
+                return new byte[] { ST_OK, 0x27 };
+            }
+
+            default: {
+                // Par défaut : status OK, payload vide (safe).
+                return new byte[] { ST_OK };
+            }
+        }
     }
 
     // ------------------------------------------------------------------------
@@ -185,7 +273,7 @@ public class LcpLink {
         return crc & 0xFFFF;
     }
 
-    /** Hexdump lisible (ex.: "22 01 02 A0 00 9F"). */
+    /** Hexdump lisible (ex.: "22 FA FF 28 58 20"). */
     public static String hexdump(byte[] a) {
         if (a == null) return "(null)";
         StringBuilder sb = new StringBuilder(a.length * 3);
@@ -194,6 +282,16 @@ public class LcpLink {
             if (i + 1 < a.length) sb.append(' ');
         }
         return sb.toString();
+    }
+
+    // Utils
+    private static byte[] concat(byte[] a, byte[] b) {
+        if (a == null || a.length == 0) return (b == null ? new byte[0] : b.clone());
+        if (b == null || b.length == 0) return a.clone();
+        byte[] out = new byte[a.length + b.length];
+        System.arraycopy(a, 0, out, 0, a.length);
+        System.arraycopy(b, 0, out, a.length, b.length);
+        return out;
     }
 
     // Helpers "unsigned"
