@@ -210,7 +210,7 @@ public class MainActivity extends AppCompatActivity {
             lcpLink = new LcpLink(serialPort, to, from, true);
             lcpOps  = new LcpOps(lcpLink);
 
-            // RESYNC 0x00 + respiration + premier poll 0x28
+            // RESYNC 0x00 + respiration + premier poll 0x28 pour caler la session
             append("[CONNECT] RESYNC 0x00\n");
             lcpLink.sendRecv(new byte[]{0x00}, 3200);
             try { Thread.sleep(200); } catch (InterruptedException ignored) {}
@@ -231,55 +231,55 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       Macro A — END + CLEAR (cadence 0x28, sans 0x7D UI)
+       Macro A — END + CLEAR (garde-fous + cadence 0x28, sans 0x7D UI)
        ================================================================ */
     private void macroReset_locked() {
         if (!checkReady()) return;
         synchronized (lcpLock) {
             try {
-                // 1) END
-                append("[A] END (0x02)\n");
-                lcpOps.opIssueCommand(0x02, 3000, 300); // queued-handling interne
+                // Etat initial
+                int[] dsdc0 = lcpOps.opDeliveryStatus(3000, 150);
+                int ds0 = dsdc0[0], dc0 = dsdc0[1];
 
-                // 2) Premier poll : si ticket, on enchaîne CLEAR
-                int[] dsdc = lcpOps.opDeliveryStatus(3000, 250); // queued-handling interne
-                append(String.format("[A] POLL #1 DS=0x%04X DC=0x%04X\n", dsdc[0], dsdc[1]));
-                boolean ticketCleared = ((dsdc[1] & 0x0001) == 0);
+                boolean flow   = (dc0 & LcpOps.LCRSc_FLOW_ACTIVE) != 0;
+                boolean active = (dc0 & LcpOps.LCRSc_DELIVERY_ACTIVE) != 0;
+                boolean ticket = (dc0 & LcpOps.LCRSc_DEL_TICKET_PENDING) != 0;
 
-                // 3) CLEAR si le ticket est encore présent
-                if (!ticketCleared) {
+                append(String.format("[A] Etat initial DS=0x%04X DC=0x%04X (flow=%s active=%s ticket=%s)\n",
+                        ds0, dc0, flow, active, ticket));
+
+                // 1) END uniquement si flow/delivery actifs
+                if (flow || active) {
+                    append("[A] END (0x02)\n");
+                    lcpOps.opIssueCommand(0x02, 3000, 300); // queued-handling interne
+                } else {
+                    append("[A] END ignoré (pas de FLOW/DELIVERY)\n");
+                }
+
+                // 2) Relecture + CLEAR uniquement si ticket présent
+                int[] dsdc1 = lcpOps.opDeliveryStatus(3000, 250);
+                boolean hasTicket = (dsdc1[1] & LcpOps.LCRSc_DEL_TICKET_PENDING) != 0;
+
+                if (hasTicket) {
                     append("[A] CLEAR (0x06)\n");
                     lcpOps.opIssueCommand(0x06, 3000, 250); // queued-handling interne
 
                     long t0 = System.currentTimeMillis();
                     int polls = 0;
                     while (System.currentTimeMillis() - t0 < 8000) {
-                        dsdc = lcpOps.opDeliveryStatus(3000, 250);
+                        int[] dsdc2 = lcpOps.opDeliveryStatus(3000, 250);
                         polls++;
-                        append(String.format("[A] POLL #2.%d DS=0x%04X DC=0x%04X\n",
-                                polls, dsdc[0], dsdc[1]));
-                        if ((dsdc[1] & 0x0001) == 0) { ticketCleared = true; break; }
+                        append(String.format("[A] POLL ticket #%d DS=0x%04X DC=0x%04X\n",
+                                polls, dsdc2[0], dsdc2[1]));
+                        if ((dsdc2[1] & LcpOps.LCRSc_DEL_TICKET_PENDING) == 0) break;
                     }
+                } else {
+                    append("[A] CLEAR ignoré (pas de ticket)\n");
                 }
 
-                // 4) Si toujours pas libéré → END encore 1x + quelques polls courts
-                if (!ticketCleared) {
-                    append("[A] (retry) END (0x02)\n");
-                    lcpOps.opIssueCommand(0x02, 3000, 300);
-
-                    long t1 = System.currentTimeMillis();
-                    int polls3 = 0;
-                    while (System.currentTimeMillis() - t1 < 3000) {
-                        dsdc = lcpOps.opDeliveryStatus(3000, 250);
-                        polls3++;
-                        append(String.format("[A] POLL #3.%d DS=0x%04X DC=0x%04X\n",
-                                polls3, dsdc[0], dsdc[1]));
-                        if ((dsdc[1] & 0x0001) == 0) { ticketCleared = true; break; }
-                    }
-                }
-
-                append(String.format("[A] FINAL DS=0x%04X DC=0x%04X (ticketCleared=%s)\n",
-                        dsdc[0], dsdc[1], ticketCleared));
+                // 3) Etat final
+                int[] dsdcf = lcpOps.opDeliveryStatus(3000, 150);
+                append(String.format("[A] FINAL DS=0x%04X DC=0x%04X\n", dsdcf[0], dsdcf[1]));
 
             } catch(Exception e){
                 append("[A] ERREUR: " + e.getMessage() + "\n");
