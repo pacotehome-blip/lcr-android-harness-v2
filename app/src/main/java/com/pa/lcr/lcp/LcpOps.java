@@ -145,6 +145,7 @@ public class LcpOps {
 
     /* ============================================================
        GET_FIELD (0x20) — ID 1 octet (format SR260/LCR-II)
+       + queued-handling
        ============================================================ */
     public byte[] opGetField(int fieldId, int timeoutMs) throws Exception {
         if (fieldId < 0 || fieldId > 0xFF)
@@ -158,8 +159,12 @@ public class LcpOps {
             throw new Exception("GET_FIELD: réponse invalide");
 
         int rc = p[0] & 0xFF;
+        if (rc == RC_REQUEST_QUEUED) {
+            p = opCheckRequest(timeoutMs, 200);
+            rc = p[0] & 0xFF;
+        }
         if (rc != RC_OK)
-            throw new Exception("GET_FIELD rc=" + rc);
+            throw new Exception("GET_FIELD rc=" + String.format("0x%02X", rc));
 
         byte[] val = new byte[p.length - 1];
         System.arraycopy(p, 1, val, 0, val.length);
@@ -168,6 +173,7 @@ public class LcpOps {
 
     /* ============================================================
        SET_FIELD (0x21) — ID 1 octet (format SR260/LCR-II)
+       + queued-handling
        ============================================================ */
     public void opSetField(int fieldId, byte[] rawValue, int timeoutMs) throws Exception {
         if (fieldId < 0 || fieldId > 0xFF)
@@ -187,12 +193,16 @@ public class LcpOps {
             throw new Exception("SET_FIELD: réponse invalide");
 
         int rc = p[0] & 0xFF;
+        if (rc == RC_REQUEST_QUEUED) {
+            p = opCheckRequest(timeoutMs, 200);
+            rc = p[0] & 0xFF;
+        }
         if (rc != RC_OK)
-            throw new Exception("SET_FIELD rc=" + rc);
+            throw new Exception("SET_FIELD rc=" + String.format("0x%02X", rc));
     }
 
     /* ============================================================
-       GET_DEL_STATUS (0x28) → [ds, dc] — queued-handling + BE
+       GET_DEL_STATUS (0x28) → [ds, dc] — queued-handling + big-endian
        ============================================================ */
     public int[] opDeliveryStatus(int timeoutMs, int pauseMs) throws Exception {
         byte[] fr = link.sendRecv(new byte[]{ 0x28 }, timeoutMs);
@@ -222,7 +232,6 @@ public class LcpOps {
 
     /* ============================================================
        WAIT DC (mask/expected) avec polling 0x28
-        - attend jusqu'à ce que (dc & mask) == expected
        ============================================================ */
     public int[] opWaitForStatus(int mask, int expected, int timeoutMs, int pollMs) throws Exception {
         long t0 = System.currentTimeMillis();
