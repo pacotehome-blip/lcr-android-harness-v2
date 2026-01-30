@@ -402,17 +402,53 @@ public class MainActivity extends AppCompatActivity {
                             logStatusHuman("[RX] " + label, msd[1], msd[2]);
                             return msd;
                         } catch(Exception e4) {
-                            // --- GRACIEUX : on n'interrompt pas le flux, on laisse la macro trancher via 0x28 ---
-                            append("[WARN] " + label + " indisponible (" + e4.getMessage() + ") — fallback via 0x28\n");
-                            return new int[]{0, 0, 0}; // fallback neutre
+                            // GRACIEUX : on laisse la macro trancher via 0x28/compteurs
+                            append("[WARN] " + label + " indisponible (" + e4.getMessage() + ") — fallback via 0x28/compteurs\n");
+                            return new int[]{0, 0, 0};
                         }
                     }
                 } else {
-                    append("[WARN] " + label + " indisponible (" + e2.getMessage() + ") — fallback via 0x28\n");
+                    append("[WARN] " + label + " indisponible (" + e2.getMessage() + ") — fallback via 0x28/compteurs\n");
                     return new int[]{0, 0, 0};
                 }
             }
         }
+    }
+
+    // --- Helpers GET_FIELD pour compteurs #44 / #45 (u32 BE signé) ---
+    private Integer getFieldI32WithRetry(String label, int fieldId, int timeoutMs){
+        // payload visible
+        logTxPayload(label, new byte[]{0x20, (byte)(fieldId & 0xFF)});
+        try {
+            preSendThrottle(200);
+            byte[] val = lcpOps.opGetField(fieldId, timeoutMs);  // ID sur 1 octet côté LcpOps
+            if (val == null || val.length < 4) throw new Exception("valeur <4");
+            int v = ((val[0] & 0xFF) << 24) | ((val[1] & 0xFF) << 16) | ((val[2] & 0xFF) << 8) | (val[3] & 0xFF);
+            return v;
+        } catch(Exception e1){
+            try { Thread.sleep(150); preSendThrottle(200);
+                byte[] val = lcpOps.opGetField(fieldId, timeoutMs);
+                if (val == null || val.length < 4) throw new Exception("valeur <4");
+                int v = ((val[0] & 0xFF) << 24) | ((val[1] & 0xFF) << 16) | ((val[2] & 0xFF) << 8) | (val[3] & 0xFF);
+                return v;
+            } catch(Exception e2){
+                if (needResync(e2) || needResync(e1)) {
+                    append("[WARN] " + label + " → PURGE+RESYNC puis retry\n");
+                    purgeAndResync();
+                    try { preSendThrottle(200);
+                        byte[] val = lcpOps.opGetField(fieldId, timeoutMs);
+                        if (val == null || val.length < 4) throw new Exception("valeur <4");
+                        int v = ((val[0] & 0xFF) << 24) | ((val[1] & 0xFF) << 16) | ((val[2] & 0xFF) << 8) | (val[3] & 0xFF);
+                        return v;
+                    } catch(Exception e3){
+                        append("[ERREUR] " + label + " : " + e3.getMessage() + "\n");
+                    }
+                } else {
+                    append("[ERREUR] " + label + " : " + e2.getMessage() + "\n");
+                }
+            }
+        }
+        return null;
     }
 
     /* ================================================================
@@ -520,7 +556,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       Macro C — START (durcie : RUN 0x00 + respiration + 0x23 gracieux + fallback 0x28)
+       Macro C — START robuste SANS 0x23 :
+       RUN 0x00 → attente via 0x28 (FLOW/ACTIVE) OU via #44/#45 (compteurs)
        ================================================================ */
     private void macroStart_locked() {
         if (!checkReady()) return;
@@ -542,7 +579,7 @@ public class MainActivity extends AppCompatActivity {
 
                 append("[C] START…\n");
 
-                // 1) Paramètres livraison
+                // 1) Paramétrage et PRE-START
                 LcrSimpleDeliverV2.Params p = new LcrSimpleDeliverV2.Params();
                 p.port     = serialPort;
                 p.toAddr   = parseIntSafe(edtTo.getText().toString(),   0xFA);
@@ -554,34 +591,32 @@ public class MainActivity extends AppCompatActivity {
                 d.unlock();
                 d.prestart();
 
-                // 2) RUN 0x00 (retry robuste)
-                issueCommandWithRetry("RUN (#0)", 0x00, 3000, 200);
+                // 2) Références compteurs (si dispo)
+                Integer g0 = getFieldI32WithRetry("GET_FIELD #44 (GrossCount0)", 44, 3000);
+                Integer n0 = getFieldI32WithRetry("GET_FIELD #45 (NetCount0)",   45, 3000);
 
-                // 3) micro-respiration
+                // 3) RUN 0x00
+                issueCommandWithRetry("RUN (#0)", 0x00, 3000, 200);
                 try { Thread.sleep(250); } catch(Exception ignore){}
 
-                // 4) Attente démarrage : chemin A (0x23) gracieux, puis chemin B (0x28)
+                // 4) Attente du démarrage (5 s max) : 0x28 ou compteurs
                 long tStart = System.currentTimeMillis();
-                boolean ok = false;
+                boolean started = false;
                 while (System.currentTimeMillis() - tStart < 5000) {
-                    // Chemin A — GET_MACHINE (gracieux, peut fallback via 0x28 plus loin)
-                    int[] msd = machineStatusWithRetry("CHECK (0x23)", 3000, 150);
-                    int ds = msd[1], dc2 = msd[2];
-                    boolean flow   = (dc2 & LcpOps.LCRSc_FLOW_ACTIVE) != 0;
-                    boolean active = (dc2 & LcpOps.LCRSc_DELIVERY_ACTIVE) != 0;
-                    boolean begin  = (ds  & LcpOps.LCRSc_BEGIN_DELIVERY) != 0;
-                    if (flow || active || begin) { ok = true; break; }
+                    int[] s = deliveryStatusWithRetry("CHECK (0x28)", 3000, 150);
+                    boolean flow   = (s[1] & LcpOps.LCRSc_FLOW_ACTIVE) != 0;
+                    boolean active = (s[1] & LcpOps.LCRSc_DELIVERY_ACTIVE) != 0;
+                    if (flow || active) { started = true; break; }
 
-                    // Chemin B — fallback GET_DEL_STATUS (0x28)
-                    int[] dsdc3 = deliveryStatusWithRetry("CHECK (0x28)", 3000, 150);
-                    boolean flow2   = (dsdc3[1] & LcpOps.LCRSc_FLOW_ACTIVE) != 0;
-                    boolean active2 = (dsdc3[1] & LcpOps.LCRSc_DELIVERY_ACTIVE) != 0;
-                    if (flow2 || active2) { ok = true; break; }
+                    Integer g = getFieldI32WithRetry("GET_FIELD #44 (GrossCount)", 44, 3000);
+                    Integer n = getFieldI32WithRetry("GET_FIELD #45 (NetCount)",   45, 3000);
+                    if (g != null && g0 != null && g > g0) { started = true; break; }
+                    if (n != null && n0 != null && n > n0) { started = true; break; }
 
                     try { Thread.sleep(200); } catch(Exception ignore){}
                 }
 
-                if (!ok) throw new Exception("START_TIMEOUT: aucun indicateur (FLOW/ACTIVE/BEGIN) dans la fenêtre.");
+                if (!started) throw new Exception("START_TIMEOUT: aucun indicateur (FLOW/ACTIVE/COUNTS)");
 
                 append("[C] START OK\n");
 
@@ -598,7 +633,7 @@ public class MainActivity extends AppCompatActivity {
         if (!checkReady()) return;
 
         EditText edt = new EditText(this);
-        edt.setHint("payload hex (ex: 28, 24 06, 23)");
+        edt.setHint("payload hex (ex: 28, 24 06, 24 02, 23, 20 2C)");
 
         EditText edtTimeout = new EditText(this);
         edtTimeout.setHint("timeout ms");
