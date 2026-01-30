@@ -43,9 +43,7 @@ public class LcpOps {
     }
 
     /* ============================================================
-       CHECK_REQUEST (0x7D) — gestion des requêtes différées (rc=0x26)
-       - Boucle jusqu'à obtenir la réponse réelle (rc=0x00) ou erreur.
-       - Normalisation "double 0x00" (ex.: [0x00, 0x00, ...] → [0x00, ...]).
+       CHECK_REQUEST (0x7D) — gestion rc=0x26 (queued)
        ============================================================ */
     public byte[] opCheckRequest(int timeoutMs, int pollMs) throws Exception {
         long t0 = System.currentTimeMillis();
@@ -62,9 +60,7 @@ public class LcpOps {
             if (rc0 == RC_REQUEST_ABORTED)   throw new Exception("CheckRequest: 0x28 REQUEST_ABORTED");
 
             // Normalisations : certains FW renvoient [0x00, 0x00, ...]
-            if (rep.length == 2 && rc0 == RC_OK) {
-                return rep; // [0x00, ...]
-            }
+            if (rep.length == 2 && rc0 == RC_OK) return rep;
             if (rc0 == RC_OK && rep.length >= 3 && (rep[1] & 0xFF) == RC_OK) {
                 byte[] norm = new byte[rep.length - 1];
                 System.arraycopy(rep, 1, norm, 0, norm.length);
@@ -76,29 +72,22 @@ public class LcpOps {
     }
 
     /* ============================================================
-       GET_MACHINE (0x23) → [ms, ds, dc] — queued-handling + BE
-       Tolérance: 8, 7 ou 6 octets utiles.
-        - 8: [rc, dev, MS.hi, MS.lo, DS.hi, DS.lo, DC.hi, DC.lo]
-        - 7: [rc, dev, 0x00,      DS.hi, DS.lo, DC.hi, DC.lo] (MS absent/align)
-        - 6: [rc, dev,            DS.hi, DS.lo, DC.hi, DC.lo] (MS absent)
+       GET_MACHINE (0x23) → [ms, ds, dc] — tolère 8/7/6 octets
        ============================================================ */
     public int[] opMachineStatusFull(int timeoutMs, int pauseMs) throws Exception {
         byte[] fr = link.sendRecv(new byte[]{ 0x23 }, timeoutMs);
         byte[] p  = LcpLink.extractPayload(fr);
 
-        if (p == null || p.length < 1)
-            throw new Exception("GET_MACHINE: réponse invalide");
+        if (p == null || p.length < 1) throw new Exception("GET_MACHINE: réponse invalide");
 
         int rc = p[0] & 0xFF;
         if (rc == RC_REQUEST_QUEUED) {
             p = opCheckRequest(timeoutMs, Math.max(100, pauseMs));
             rc = p[0] & 0xFF;
         }
-        if (rc != RC_OK)
-            throw new Exception("GET_MACHINE rc=" + rc);
+        if (rc != RC_OK) throw new Exception("GET_MACHINE rc=" + rc);
 
-        if (p.length < 6)
-            throw new Exception("GET_MACHINE: payload invalide (<6)");
+        if (p.length < 6) throw new Exception("GET_MACHINE: payload invalide (<6)");
 
         int ms, ds, dc;
         if (p.length >= 8) {
@@ -120,50 +109,46 @@ public class LcpOps {
     }
 
     /* ============================================================
-       ISSUE COMMAND (0x24, cmd) — version stricte (attend fin de queue)
+       ISSUE COMMAND strict (attend fin de queue)
        ============================================================ */
     public void opIssueCommand(int code, int timeoutMs, int pauseMs) throws Exception {
         byte[] pl = new byte[]{ 0x24, (byte)(code & 0xFF) };
         byte[] fr = link.sendRecv(pl, timeoutMs);
         byte[] p  = LcpLink.extractPayload(fr);
 
-        if (p == null || p.length < 1)
-            throw new Exception("IssueCommand: réponse invalide");
+        if (p == null || p.length < 1) throw new Exception("IssueCommand: réponse invalide");
 
         int rc = p[0] & 0xFF;
         if (rc == RC_REQUEST_QUEUED) {
             byte[] rep = opCheckRequest(timeoutMs, Math.max(100, pauseMs));
             rc = rep[0] & 0xFF;
         }
-        if (rc != RC_OK)
-            throw new Exception(String.format("IssueCommand rc=0x%02X (cmd 0x%02X)", rc, code));
+        if (rc != RC_OK) throw new Exception(String.format("IssueCommand rc=0x%02X (cmd 0x%02X)", rc, code));
 
         if (pauseMs > 0) Thread.sleep(pauseMs);
     }
 
     /* ============================================================
-       ISSUE COMMAND "RELAXED" (0x24, cmd) — n'attend PAS la complétion
-       - Accepte rc=0x00 ou rc=0x26, NE déclenche PAS 0x7D
-       - Idéal pour RUN (#0) avant d'attendre FLOW via 0x28
+       ISSUE COMMAND "RELAXED" (RUN) — n'attend PAS la complétion
        ============================================================ */
     public int opIssueCommandRelaxed(int code, int timeoutMs, int pauseMs) throws Exception {
         byte[] pl = new byte[]{ 0x24, (byte)(code & 0xFF) };
         byte[] fr = link.sendRecv(pl, timeoutMs);
         byte[] p  = LcpLink.extractPayload(fr);
 
-        if (p == null || p.length < 1)
-            throw new Exception("IssueCommandRelaxed: réponse invalide");
+        if (p == null || p.length < 1) throw new Exception("IssueCommandRelaxed: réponse invalide");
 
         int rc = p[0] & 0xFF;
         if (rc != RC_OK && rc != RC_REQUEST_QUEUED)
             throw new Exception(String.format("IssueCommandRelaxed rc=0x%02X (cmd 0x%02X)", rc, code));
-
         if (pauseMs > 0) Thread.sleep(pauseMs);
-        return rc; // 0x00 ou 0x26
+        return rc;
     }
 
     /* ============================================================
-       GET_FIELD (0x20) — ID 1 octet (SR260/LCR-II) + queued-handling
+       GET_FIELD (0x20) — DEVICE-BYTE TOLÉRANT
+         - SR260 renvoie souvent [rc, dev, data...]
+         - On accepte aussi [rc, data...]
        ============================================================ */
     public byte[] opGetField(int fieldId, int timeoutMs) throws Exception {
         if (fieldId < 0 || fieldId > 0xFF)
@@ -184,13 +169,19 @@ public class LcpOps {
         if (rc != RC_OK)
             throw new Exception("GET_FIELD rc=" + String.format("0x%02X", rc));
 
-        byte[] val = new byte[p.length - 1];
-        System.arraycopy(p, 1, val, 0, val.length);
+        // --- TOLÉRANCE device-byte ---
+        // LV (4 octets): p ~ [rc, dev, d0, d1, d2, d3]
+        // LL (1 octet) : p ~ [rc, dev, d0]
+        // Ancien format  : p ~ [rc, data...]
+        int offset = (p.length >= 3) ? 2 : 1;
+
+        byte[] val = new byte[Math.max(0, p.length - offset)];
+        if (val.length > 0) System.arraycopy(p, offset, val, 0, val.length);
         return val;
     }
 
     /* ============================================================
-       SET_FIELD (0x21) — ID 1 octet (SR260/LCR-II) + queued-handling
+       SET_FIELD (0x21) — queued-handling
        ============================================================ */
     public void opSetField(int fieldId, byte[] rawValue, int timeoutMs) throws Exception {
         if (fieldId < 0 || fieldId > 0xFF)
@@ -219,7 +210,7 @@ public class LcpOps {
     }
 
     /* ============================================================
-       GET_DEL_STATUS (0x28) → [ds, dc] — queued-handling + BE
+       GET_DEL_STATUS (0x28) → [ds, dc] — BE
        ============================================================ */
     public int[] opDeliveryStatus(int timeoutMs, int pauseMs) throws Exception {
         byte[] fr = link.sendRecv(new byte[]{ 0x28 }, timeoutMs);
@@ -239,7 +230,6 @@ public class LcpOps {
         if (p.length < 6)
             throw new Exception("DEL_STATUS: payload trop court (<6)");
 
-        // Big-endian: DS=(p[2]<<8)|p[3], DC=(p[4]<<8)|p[5]
         int ds = ((p[2] & 0xFF) << 8) | (p[3] & 0xFF);
         int dc = ((p[4] & 0xFF) << 8) | (p[5] & 0xFF);
 

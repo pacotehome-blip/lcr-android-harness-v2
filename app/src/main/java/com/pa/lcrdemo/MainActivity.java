@@ -59,7 +59,7 @@ public class MainActivity extends AppCompatActivity {
     private void freezeResyncFor(long ms){ resyncFreezeUntil = System.currentTimeMillis() + ms; }
     private boolean canResyncNow(){ return System.currentTimeMillis() > resyncFreezeUntil; }
 
-    // ==== IDs Confirmés par la table des champs ====
+    // === IDs confirmés (cf. table) ===
     private static final int FIELD_PRODUCT      = 0x00; // #0 ProductNumber
     private static final int FIELD_NET_PRESET   = 0x06; // #6 NetPreset
     private static final int FIELD_GROSS_PRESET = 0x05; // #5 GrossPreset
@@ -68,14 +68,19 @@ public class MainActivity extends AppCompatActivity {
     private static final int FIELD_GROSS_TOTAL  = 0x11; // #17 GrossTotal
     private static final int FIELD_NET_TOTAL    = 0x12; // #18 NetTotal
     private static final int FIELD_DECIMALS     = 0x27; // #39 Decimals
+    // (cf. LCR Registers’ Fields.xlsx) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
 
-    // ==== Mise à l’échelle LV (implied decimal via #39) ====
+    // === Mise à l’échelle LV (implied decimals #39) ===
     private volatile int    qtyDecimals = 1;  // 0..3 → 2/1/0/3 décimales effectives
     private volatile double qtyDivisor  = 10.0;
 
-    // ==== Snap au départ pour totalizers ====
+    // Snap de totalizers au départ
     private Integer grossTot0 = null;
     private Integer netTot0   = null;
+
+    // Flags opérateur pour le mode AUTO (preset=0)
+    private volatile boolean operatorEndRequested = false;
+    private volatile boolean autoPromptVisible   = false;
 
     /* ================================================================
        Receivers USB
@@ -90,7 +95,7 @@ public class MainActivity extends AppCompatActivity {
                 connectPort(device);
             } else {
                 append("Permission USB refusée\n");
-                try { if (serialPort != null) { serialPort.close(); } } catch(Exception ignored){}
+                try { if (serialPort != null) serialPort.close(); } catch(Exception ignored){}
                 serialPort = null;
                 lcpLink = null;
                 lcpOps  = null;
@@ -165,7 +170,7 @@ public class MainActivity extends AppCompatActivity {
         findViewById(R.id.btnA).setOnClickListener(v -> runLcpTask(this::macroReset_locked));
         findViewById(R.id.btnB).setOnClickListener(v -> runLcpTask(this::macroPing28_locked));
         findViewById(R.id.btnC).setOnClickListener(v -> runLcpTask(this::macroStart_locked));
-        findViewById(R.id.btnSendHex).setOnClickListener(v -> promptAndSendHex());
+        findViewById(R.id.btnSendHex).setOnClickListener(v -> promptAndSendHex()));
 
         append("Prêt. Branchez le LCR puis cliquez 'Connexion USB'.\n");
     }
@@ -254,21 +259,20 @@ public class MainActivity extends AppCompatActivity {
                 append("[CONNECT] RESYNC best-effort: " + e.getMessage() + "\n");
             }
 
-            // === Lire DECIMALS (#39) pour la mise à l’échelle des LV ===
+            // Lire DECIMALS (#39) pour l’échelle LV
             try {
                 byte[] v = lcpOps.opGetField(FIELD_DECIMALS, 3000);
-                int code = (v != null && v.length > 0) ? (v[0] & 0xFF) : 1; // défaut=dixièmes
-                // 0=Hundredths(2), 1=Tenths(1), 2=Whole(0), 3=Thousandths(3)
+                int code = (v != null && v.length > 0) ? (v[0] & 0xFF) : 1; // défaut = Tenths
                 switch (code) {
-                    case 0: qtyDecimals = 2; break;
-                    case 1: qtyDecimals = 1; break;
-                    case 2: qtyDecimals = 0; break;
-                    case 3: qtyDecimals = 3; break;
+                    case 0: qtyDecimals = 2; break; // Hundredths
+                    case 1: qtyDecimals = 1; break; // Tenths
+                    case 2: qtyDecimals = 0; break; // Whole
+                    case 3: qtyDecimals = 3; break; // Thousandths
                     default: qtyDecimals = 1;
                 }
                 qtyDivisor = Math.pow(10.0, qtyDecimals);
-                append(String.format("[CONNECT] DECIMALS (#39)=%d → %d décimales (div=%s)\n",
-                        code, qtyDecimals, String.format("%.0f", qtyDivisor)));
+                append(String.format("[CONNECT] DECIMALS (#39)=%d → %d décimales (div=%.0f)\n",
+                        code, qtyDecimals, qtyDivisor));
             } catch(Exception e) {
                 qtyDecimals = 1; qtyDivisor = 10.0;
                 append("[CONNECT] DECIMALS (#39) indisponible → défaut=1 décimale\n");
@@ -433,7 +437,7 @@ public class MainActivity extends AppCompatActivity {
         return null;
     }
 
-    // === Helpers LV avec échelle (#39) ===
+    // === Helpers LV selon #39 ===
     private String fmtLV(Integer raw){
         if (raw == null) return "—";
         return String.format("%,." + qtyDecimals + "f", raw / qtyDivisor);
@@ -537,7 +541,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-      Macro C — START orienté FLOW (RUN relaxé) + Totaux (départ & live)
+      Macro C — START orienté FLOW (RUN relaxé) + Totaux + AUTO C/T
       ================================================================ */
     private void macroStart_locked() {
         if (!checkReady()) return;
@@ -561,18 +565,17 @@ public class MainActivity extends AppCompatActivity {
 
                 int product = parseIntSafe(safeStr(edtProduct.getText()), 1);
                 double preset = parseDoubleSafe(safeStr(edtPreset.getText()), 50.0);
-                int preset_i32 = (int)Math.round(preset * qtyDivisor); // LV→i32 selon decimals
-                final boolean presetEnabled = (preset_i32 > 0);
 
-                // (Re)lire DECIMALS avant
+                // (Re)lire DECIMALS (#39)
                 try {
                     byte[] v = lcpOps.opGetField(FIELD_DECIMALS, 3000);
                     int code = (v != null && v.length > 0) ? (v[0] & 0xFF) : 1;
                     switch (code) { case 0: qtyDecimals=2; break; case 1: qtyDecimals=1; break; case 2: qtyDecimals=0; break; case 3: qtyDecimals=3; break; default: qtyDecimals=1; }
                     qtyDivisor = Math.pow(10.0, qtyDecimals);
-                    // recalcul preset_i32 si l’utilisateur a changé la config
-                    preset_i32 = (int)Math.round(preset * qtyDivisor);
                 } catch(Exception ignore){}
+
+                int preset_i32 = (int)Math.round(preset * qtyDivisor);
+                final boolean presetEnabled = (preset_i32 > 0);
 
                 try {
                     lcpOps.opSetField(FIELD_PRODUCT, new byte[]{ (byte)(product & 0xFF) }, 3000);
@@ -590,13 +593,13 @@ public class MainActivity extends AppCompatActivity {
                     append("[C] PRÉSET = 0 → Mode AUTO : aucun arrêt logiciel ne sera imposé.\n");
                 }
 
-                issueRunWithGrace();  // <-- version relaxée (pas de 0x7D)
+                issueRunWithGrace();  // RUN relaxé (pas de 0x7D)
 
                 // Références COUNT
                 Integer g0 = getFieldI32WithRetry("GET_FIELD #44 (GrossCount0)", FIELD_GROSS_COUNT, 3000);
                 Integer n0 = getFieldI32WithRetry("GET_FIELD #45 (NetCount0)",   FIELD_NET_COUNT,   3000);
 
-                // Snap TOTALIZERS départ
+                // Totaux départ
                 grossTot0 = getFieldI32WithRetry("GET_FIELD GrossTotal0 (#17)",  FIELD_GROSS_TOTAL, 3000);
                 netTot0   = getFieldI32WithRetry("GET_FIELD NetTotal0 (#18)",    FIELD_NET_TOTAL,   3000);
                 append(String.format("[C] Totaux départ: Gross=%s  Net=%s\n", fmtLV(grossTot0), fmtLV(netTot0)));
@@ -612,7 +615,7 @@ public class MainActivity extends AppCompatActivity {
                     boolean active = (dc2 & LcpOps.LCRSc_DELIVERY_ACTIVE) != 0;
                     if (flow || active) { flowSeen = true; break; }
 
-                    // Fallback via compteurs (commentable si besoin)
+                    // Fallback compteurs (commenter si souhait de silence total)
                     Integer n = readNetCountI32Safe();
                     if (safeDelta(n, n0) > 0) { flowSeen = true; break; }
 
@@ -654,8 +657,9 @@ public class MainActivity extends AppCompatActivity {
                         try { Thread.sleep(250); } catch(Exception ignore){}
                     }
                 } else {
-                    // Mode AUTO : afficher les totalizers tant que FLOW=1
-                    while (true) {
+                    // Mode AUTO : afficher les totalizers tant que FLOW=1, et proposer C/T quand FLOW=0
+                    boolean finished = false;
+                    while (!finished) {
                         int[] s = deliveryStatusWithRetry("CHECK (0x28)", 3000, 250);
                         int dc2 = s[1];
                         boolean flow = (dc2 & LcpOps.LCRSc_FLOW_ACTIVE) != 0;
@@ -666,10 +670,73 @@ public class MainActivity extends AppCompatActivity {
                                 fmtLV(gTot), fmtLVDiff(gTot, grossTot0),
                                 fmtLV(nTot), fmtLVDiff(nTot, netTot0)));
 
-                        if (!flow) { append("[C] FLOW retombé → fin de livraison (mode AUTO)\n"); break; }
+                        if (!flow) {
+                            // Débit coupé : demander C/T
+                            promptAutoContinueOrTerminate();
+
+                            long t0 = System.currentTimeMillis();
+                            while (autoPromptVisible && (System.currentTimeMillis() - t0) < 60000) {
+                                try { Thread.sleep(100); } catch(Exception ignore){}
+                            }
+
+                            if (operatorEndRequested) {
+                                append("[C] Choix opérateur: Terminer → END (#2)\n");
+                                issueCommandWithRetry("END (#2)", 0x02, 3000, 300);
+
+                                long tend = System.currentTimeMillis();
+                                while (System.currentTimeMillis() - tend < 5000) {
+                                    int[] s2 = deliveryStatusWithRetry("CONFIRM END (0x28)", 3000, 250);
+                                    boolean flow2 = (s2[1] & LcpOps.LCRSc_FLOW_ACTIVE) != 0;
+                                    if (!flow2) break;
+                                    try { Thread.sleep(200); } catch(Exception ignore){}
+                                }
+
+                                long tprint = System.currentTimeMillis();
+                                boolean printed = false;
+                                while (System.currentTimeMillis() - tprint < 10000) {
+                                    int[] s3 = deliveryStatusWithRetry("PRINT CHECK (0x28)", 3000, 300);
+                                    boolean ticketPending = (s3[1] & LcpOps.LCRSc_DEL_TICKET_PENDING) != 0;
+                                    if (!ticketPending) { printed = true; break; }
+                                    try { Thread.sleep(300); } catch(Exception ignore){}
+                                }
+                                if (!printed) {
+                                    append("[FIN] Ticket possiblement en attente (imprimante locale). Vérifier et relancer CLEAR (A) si requis.\n");
+                                } else {
+                                    append("[FIN] Ticket device OK\n");
+                                }
+                                finished = true;
+                                break;
+                            } else {
+                                append("[C] Choix opérateur: Continuer — réouvrez le pistolet pour reprendre le débit.\n");
+                                long tw = System.currentTimeMillis();
+                                boolean resumed = false;
+                                while (System.currentTimeMillis() - tw < 20000) {
+                                    int[] s4 = deliveryStatusWithRetry("WAIT RESUME (0x28)", 3000, 250);
+                                    boolean flow4 = (s4[1] & LcpOps.LCRSc_FLOW_ACTIVE) != 0;
+                                    if (flow4) { resumed = true; break; }
+                                    try { Thread.sleep(200); } catch(Exception ignore){}
+                                }
+                                if (!resumed) append("[C] Toujours aucun débit. Vous pouvez Terminer (A/C via UI) ou réessayer.\n");
+                            }
+                        }
+
                         try { Thread.sleep(300); } catch(Exception ignore){}
                     }
                 }
+
+                // FINISH résumé (totaux finaux)
+                Integer grossTotF = getFieldI32WithRetry("GET_FIELD GrossTotal (#17)", FIELD_GROSS_TOTAL, 3000);
+                Integer netTotF   = getFieldI32WithRetry("GET_FIELD NetTotal (#18)",   FIELD_NET_TOTAL,   3000);
+                int grossDelta = (grossTot0 != null && grossTotF != null) ? Math.max(0, grossTotF - grossTot0) : 0;
+                int netDelta   = (netTot0   != null && netTotF   != null) ? Math.max(0, netTotF   - netTot0)   : 0;
+
+                append(String.format(
+                    "[FIN] GrossTotal=%d NetTotal=%d\n[FIN] gross_delta=%d net_delta=%d gross_total_l=%s net_total_l=%s\n",
+                    (grossTotF==null? -1 : grossTotF),
+                    (netTotF==null? -1 : netTotF),
+                    grossDelta, netDelta,
+                    fmtLV(grossTotF), fmtLV(netTotF)
+                ));
 
                 append("[C] START OK\n");
 
@@ -679,7 +746,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    // ---- i32 BE util (évite d’importer depuis LcpOps) ----
+    // ---- i32 BE util ----
     private static byte[] i32be(int v) {
         return new byte[] {
                 (byte)((v >> 24) & 0xFF),
@@ -699,6 +766,30 @@ public class MainActivity extends AppCompatActivity {
         }
         freezeResyncFor(1500);
         try { Thread.sleep(750); } catch(Exception ignore) {}
+    }
+
+    /* ================================================================
+       Prompt AUTO (C/T)
+       ================================================================ */
+    private void promptAutoContinueOrTerminate() {
+        if (autoPromptVisible) return;
+        autoPromptVisible = true;
+        operatorEndRequested = false;
+
+        runOnUiThread(() -> new AlertDialog.Builder(this)
+            .setTitle("Livraison (AUTO)")
+            .setMessage("Le débit est arrêté.\n\nContinuer la même livraison (C) ou Terminer (T) ?")
+            .setCancelable(false)
+            .setPositiveButton("Continuer (C)", (d,w)-> {
+                operatorEndRequested = false;
+                autoPromptVisible = false;
+            })
+            .setNegativeButton("Terminer (T)", (d,w)-> {
+                operatorEndRequested = true;
+                autoPromptVisible = false;
+            })
+            .show()
+        );
     }
 
     /* ================================================================
