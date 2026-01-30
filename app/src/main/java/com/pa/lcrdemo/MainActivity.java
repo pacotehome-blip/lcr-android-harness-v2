@@ -72,8 +72,7 @@ public class MainActivity extends AppCompatActivity {
                 connectPort(device);
             } else {
                 append("Permission USB refusée\n");
-                // Purge état et réactive l’UI
-                try { if (serialPort != null) { serialPort.close(); } } catch(Exception ignored){}
+                try { if (serialPort != null) serialPort.close(); } catch(Exception ignored){}
                 serialPort = null;
                 lcpLink = null;
                 lcpOps  = null;
@@ -162,7 +161,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       Connexion USB — anti double-RESYNC
+       Connexion USB
        ================================================================ */
     private void requestAndOpenFirstPort() {
         if (isConnecting) { append("Connexion déjà en cours...\n"); return; }
@@ -172,7 +171,7 @@ public class MainActivity extends AppCompatActivity {
         try {
             UsbManager mgr = (UsbManager)getSystemService(Context.USB_SERVICE);
             List<UsbSerialDriver> drivers = UsbSerialProber.getDefaultProber().findAllDrivers(mgr);
-            if (drivers.isEmpty()) { append("Aucun convertisseur USB‑Série détecté\n"); return; }
+            if (drivers.isEmpty()) { append("Aucun convertisseur USB‑Série détecté\n"); isConnecting=false; setButtonsEnabled(true); return; }
 
             UsbDevice dev = drivers.get(0).getDevice();
 
@@ -190,6 +189,8 @@ public class MainActivity extends AppCompatActivity {
             connectPort(dev);
         } catch (Exception e) {
             append("ERREUR: " + e.getMessage() + "\n");
+            isConnecting = false;
+            setButtonsEnabled(true);
         }
     }
 
@@ -223,7 +224,7 @@ public class MainActivity extends AppCompatActivity {
             lcpLink = new LcpLink(serialPort, to, from, true);
             lcpOps  = new LcpOps(lcpLink);
 
-            // RESYNC 0x00 + respiration + premier poll 0x28 (best-effort)
+            // RESYNC 0x00 + premier poll 0x28 (best-effort)
             append("[CONNECT] RESYNC 0x00\n");
             try {
                 lcpLink.sendRecv(new byte[]{0x00}, 2000);
@@ -244,7 +245,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       Helpers : log, parse, throttle, purge+resync, retries robustes
+       Helpers : log, parse, throttle, resync best-effort
        ================================================================ */
     private static String bytesToHex(byte[] b){
         if(b==null) return "(null)";
@@ -266,7 +267,6 @@ public class MainActivity extends AppCompatActivity {
         if ((dc & 0x0001) != 0) append("[INFO] Ticket en cours (TICKET_PENDING=1)\n");
     }
 
-    // Throttle TX : ≥200 ms entre deux envois
     private long lastTxAt = 0;
     private void preSendThrottle(int minMs){
         long now = System.currentTimeMillis();
@@ -277,13 +277,9 @@ public class MainActivity extends AppCompatActivity {
         lastTxAt = System.currentTimeMillis();
     }
 
-    // RESYNC best-effort (n’attend pas une réponse “parfaite”)
     private void purgeAndResyncBestEffort(){
         try { if (serialPort != null) serialPort.purgeHwBuffers(true, true); } catch(Exception ignored){}
-        try {
-            preSendThrottle(150);
-            lcpLink.sendRecv(new byte[]{0x00}, 1200); // timeout court
-        } catch(Exception ignored){}
+        try { preSendThrottle(150); lcpLink.sendRecv(new byte[]{0x00}, 1200); } catch(Exception ignored){}
         try { Thread.sleep(150); } catch(Exception ignored){}
     }
 
@@ -302,33 +298,18 @@ public class MainActivity extends AppCompatActivity {
             lcpOps.opIssueCommand(code, timeoutMs, pauseMs);
             return;
         } catch (Exception e1) {
-            try {
-                Thread.sleep(150);
-                preSendThrottle(200);
-                lcpOps.opIssueCommand(code, timeoutMs, pauseMs);
-                return;
-            } catch(Exception e2) {
+            try { Thread.sleep(150); preSendThrottle(200); lcpOps.opIssueCommand(code, timeoutMs, pauseMs); return; }
+            catch(Exception e2) {
                 if ((needResync(e2) || needResync(e1)) && resyncBudget > 0 && canResyncNow()) {
                     append("[WARN] " + label + " timeout/sync → PURGE+RESYNC (unique) puis retry\n");
                     resyncBudget--;
                     purgeAndResyncBestEffort();
-                    try {
-                        preSendThrottle(200);
-                        lcpOps.opIssueCommand(code, timeoutMs, pauseMs);
-                        return;
-                    } catch(Exception e3) {
-                        try {
-                            Thread.sleep(250);
-                            preSendThrottle(200);
-                            lcpOps.opIssueCommand(code, timeoutMs, pauseMs);
-                            return;
-                        } catch(Exception e4) {
-                            append("[ERREUR] " + label + " : " + e4.getMessage() + "\n");
-                        }
+                    try { preSendThrottle(200); lcpOps.opIssueCommand(code, timeoutMs, pauseMs); return; }
+                    catch(Exception e3) {
+                        try { Thread.sleep(250); preSendThrottle(200); lcpOps.opIssueCommand(code, timeoutMs, pauseMs); return; }
+                        catch(Exception e4) { append("[ERREUR] " + label + " : " + e4.getMessage() + "\n"); }
                     }
-                } else {
-                    append("[ERREUR] " + label + " : " + e2.getMessage() + "\n");
-                }
+                } else append("[ERREUR] " + label + " : " + e2.getMessage() + "\n");
             }
         }
     }
@@ -342,42 +323,24 @@ public class MainActivity extends AppCompatActivity {
             logStatusHuman("[RX] " + label, dsdc[0], dsdc[1]);
             return dsdc;
         } catch (Exception e1) {
-            try {
-                Thread.sleep(150);
-                preSendThrottle(200);
-                int[] dsdc = lcpOps.opDeliveryStatus(timeoutMs, pauseMs);
-                logStatusHuman("[RX] " + label, dsdc[0], dsdc[1]);
-                return dsdc;
-            } catch(Exception e2) {
+            try { Thread.sleep(150); preSendThrottle(200); int[] dsdc = lcpOps.opDeliveryStatus(timeoutMs, pauseMs); logStatusHuman("[RX] " + label, dsdc[0], dsdc[1]); return dsdc; }
+            catch(Exception e2) {
                 if ((needResync(e2) || needResync(e1)) && resyncBudget > 0 && canResyncNow()) {
                     append("[WARN] " + label + " timeout/sync → PURGE+RESYNC (unique) puis retry\n");
                     resyncBudget--;
                     purgeAndResyncBestEffort();
-                    try {
-                        preSendThrottle(200);
-                        int[] dsdc = lcpOps.opDeliveryStatus(timeoutMs, pauseMs);
-                        logStatusHuman("[RX] " + label, dsdc[0], dsdc[1]);
-                        return dsdc;
-                    } catch(Exception e3) {
-                        try {
-                            Thread.sleep(250);
-                            preSendThrottle(200);
-                            int[] dsdc = lcpOps.opDeliveryStatus(timeoutMs, pauseMs);
-                            logStatusHuman("[RX] " + label, dsdc[0], dsdc[1]);
-                            return dsdc;
-                        } catch(Exception e4) {
-                            append("[ERREUR] " + label + " : " + e4.getMessage() + "\n");
-                        }
+                    try { preSendThrottle(200); int[] dsdc = lcpOps.opDeliveryStatus(timeoutMs, pauseMs); logStatusHuman("[RX] " + label, dsdc[0], dsdc[1]); return dsdc; }
+                    catch(Exception e3) {
+                        try { Thread.sleep(250); preSendThrottle(200); int[] dsdc = lcpOps.opDeliveryStatus(timeoutMs, pauseMs); logStatusHuman("[RX] " + label, dsdc[0], dsdc[1]); return dsdc; }
+                        catch(Exception e4) { append("[ERREUR] " + label + " : " + e4.getMessage() + "\n"); }
                     }
-                } else {
-                    append("[ERREUR] " + label + " : " + e2.getMessage() + "\n");
-                }
+                } else append("[ERREUR] " + label + " : " + e2.getMessage() + "\n");
             }
         }
         return new int[]{0,0};
     }
 
-    // Conservée pour wake best-effort si besoin (non utilisée dans START orienté FLOW)
+    // Wake best-effort (peu utilisé avec le flow)
     private int[] machineStatusWithRetry(String label, int timeoutMs, int pauseMs){
         byte[] payload = new byte[]{0x23};
         try {
@@ -388,37 +351,19 @@ public class MainActivity extends AppCompatActivity {
             logStatusHuman("[RX] " + label, msd[1], msd[2]);
             return msd;
         } catch (Exception e1) {
-            try {
-                Thread.sleep(150);
-                preSendThrottle(200);
-                int[] msd = lcpOps.opMachineStatusFull(timeoutMs, pauseMs);
-                append(String.format("[RX] %s MS=0x%04X\n", label, msd[0]));
-                logStatusHuman("[RX] " + label, msd[1], msd[2]);
-                return msd;
-            } catch(Exception e2) {
+            try { Thread.sleep(150); preSendThrottle(200); int[] msd = lcpOps.opMachineStatusFull(timeoutMs, pauseMs); append(String.format("[RX] %s MS=0x%04X\n", label, msd[0])); logStatusHuman("[RX] " + label, msd[1], msd[2]); return msd; }
+            catch(Exception e2) {
                 if ((needResync(e2) || needResync(e1)) && resyncBudget > 0 && canResyncNow()) {
                     append("[WARN] " + label + " timeout/sync → PURGE+RESYNC (unique) puis retry\n");
                     resyncBudget--;
                     purgeAndResyncBestEffort();
-                    try {
-                        preSendThrottle(200);
-                        int[] msd = lcpOps.opMachineStatusFull(timeoutMs, pauseMs);
-                        append(String.format("[RX] %s MS=0x%04X\n", label, msd[0]));
-                        logStatusHuman("[RX] " + label, msd[1], msd[2]);
-                        return msd;
-                    } catch(Exception e3) {
-                        append("[WARN] " + label + " indisponible: " + e3.getMessage() + "\n");
-                        return new int[]{0,0,0};
-                    }
-                } else {
-                    append("[WARN] " + label + " indisponible: " + e2.getMessage() + "\n");
-                    return new int[]{0,0,0};
-                }
+                    try { preSendThrottle(200); int[] msd = lcpOps.opMachineStatusFull(timeoutMs, pauseMs); append(String.format("[RX] %s MS=0x%04X\n", label, msd[0])); logStatusHuman("[RX] " + label, msd[1], msd[2]); return msd; }
+                    catch(Exception e3) { append("[WARN] " + label + " indisponible: " + e3.getMessage() + "\n"); return new int[]{0,0,0}; }
+                } else { append("[WARN] " + label + " indisponible: " + e2.getMessage() + "\n"); return new int[]{0,0,0}; }
             }
         }
     }
 
-    // GET_FIELD u32 pour #44/#45
     private Integer getFieldI32WithRetry(String label, int fieldId, int timeoutMs){
         logTxPayload(label, new byte[]{0x20, (byte)(fieldId & 0xFF)});
         try {
@@ -443,27 +388,19 @@ public class MainActivity extends AppCompatActivity {
                         if (val == null || val.length < 4) throw new Exception("valeur <4");
                         int v = ((val[0] & 0xFF) << 24) | ((val[1] & 0xFF) << 16) | ((val[2] & 0xFF) << 8) | (val[3] & 0xFF);
                         return v;
-                    } catch(Exception e3){
-                        append("[ERREUR] " + label + " : " + e3.getMessage() + "\n");
-                    }
-                } else {
-                    append("[ERREUR] " + label + " : " + e2.getMessage() + "\n");
-                }
+                    } catch(Exception e3){ append("[ERREUR] " + label + " : " + e3.getMessage() + "\n"); }
+                } else append("[ERREUR] " + label + " : " + e2.getMessage() + "\n");
             }
         }
         return null;
     }
 
     // --- Helpers preset/compteurs ---
-    private Integer readNetCountI32Safe() {
-        try { return getFieldI32WithRetry("GET_FIELD #45 (NetCount)", 45, 3000); }
-        catch(Exception e){ return null; }
-    }
+    private Integer readNetCountI32Safe() { try { return getFieldI32WithRetry("GET_FIELD #45 (NetCount)", 45, 3000); } catch(Exception e){ return null; } }
     private int safeDelta(Integer curr, Integer base) {
         if (curr == null || base == null) return 0;
         long d = (long)curr - (long)base;
-        if (d < 0) d = 0;
-        if (d > Integer.MAX_VALUE) d = Integer.MAX_VALUE;
+        if (d < 0) d = 0; if (d > Integer.MAX_VALUE) d = Integer.MAX_VALUE;
         return (int)d;
     }
 
@@ -474,38 +411,30 @@ public class MainActivity extends AppCompatActivity {
         if (!checkReady()) return;
         synchronized (lcpLock) {
             try {
-                resyncBudget = 1; // au plus 1 resync dans cette macro
+                resyncBudget = 1;
                 append("[A] --- SEND / CLEAR ---\n");
 
-                // 0) STATUT initial
                 int[] dsdc0 = deliveryStatusWithRetry("GET_DEL_STATUS", 5000, 150);
                 boolean flow   = (dsdc0[1] & LcpOps.LCRSc_FLOW_ACTIVE) != 0;
                 boolean active = (dsdc0[1] & LcpOps.LCRSc_DELIVERY_ACTIVE) != 0;
                 boolean ticket = (dsdc0[1] & LcpOps.LCRSc_DEL_TICKET_PENDING) != 0;
 
-                // 1) END si nécessaire
                 if (flow || active) {
                     issueCommandWithRetry("END (#2)", 0x02, 3000, 300);
                     deliveryStatusWithRetry("POLL après END (0x28)", 5000, 250);
-                } else {
-                    append("[A] END ignoré (FLOW=0, DELIVERY=0)\n");
-                }
+                } else append("[A] END ignoré (FLOW=0, DELIVERY=0)\n");
 
-                // 2) CLEAR si ticket
                 int[] dsdc1 = deliveryStatusWithRetry("GET_DEL_STATUS", 5000, 250);
                 boolean hasTicket = (dsdc1[1] & LcpOps.LCRSc_DEL_TICKET_PENDING) != 0;
                 if (hasTicket) {
                     issueCommandWithRetry("CLEAR (#6)", 0x06, 3000, 250);
-
-                    boolean cleared = false;
                     long t0 = System.currentTimeMillis();
+                    boolean cleared = false;
                     while (System.currentTimeMillis() - t0 < 8000) {
                         int[] dsdc2 = deliveryStatusWithRetry("POLL ticket (0x28)", 3000, 250);
                         if ( (dsdc2[1] & LcpOps.LCRSc_DEL_TICKET_PENDING) == 0 ) { cleared = true; break; }
                     }
-
                     if (!cleared) {
-                        // Wake best-effort
                         machineStatusWithRetry("WAKE (GET_MACHINE 0x23)", 5000, 150);
                         long tw = System.currentTimeMillis();
                         while (!cleared && System.currentTimeMillis() - tw < 2000) {
@@ -513,45 +442,28 @@ public class MainActivity extends AppCompatActivity {
                             if ( (dsdcW[1] & LcpOps.LCRSc_DEL_TICKET_PENDING) == 0 ) cleared = true;
                         }
                     }
-
                     if (!cleared) {
                         issueCommandWithRetry("CLEAR retry (#6)", 0x06, 3000, 250);
                         long tR = System.currentTimeMillis();
                         while (System.currentTimeMillis() - tR < 8000) {
                             int[] dsdcR = deliveryStatusWithRetry("POLL retry (0x28)", 3000, 250);
-                            if ( (dsdcR[1] & LcpOps.LCRSc_DEL_TICKET_PENDING) == 0 ) { cleared = true; break; }
+                            if ( (dsdcR[1] & LcpOps.LCRSc_DEL_TICKET_PENDING) == 0 ) { /* ok */ break; }
                         }
-
-                        if (!cleared) {
-                            append("\n[ATTENTION] Ticket toujours en attente.\n" +
-                                   "Imprimante locale possiblement NON PRÊTE (papier/couvercle/online).\n" +
-                                   "Corriger la condition puis relancer CLEAR (A).\n\n");
-                        }
+                        append("\n[ATTENTION] Ticket toujours en attente — vérifier imprimante locale.\n\n");
                     }
-                } else {
-                    append("[A] CLEAR ignoré (pas de ticket)\n");
-                }
+                } else append("[A] CLEAR ignoré (pas de ticket)\n");
 
-                // 3) Stabilisation (stopper le spam si état propre)
-                final int MASK_ANY = LcpOps.LCRSc_FLOW_ACTIVE
-                                   | LcpOps.LCRSc_DELIVERY_ACTIVE
-                                   | LcpOps.LCRSc_DEL_TICKET_PENDING;
-                int stableOk = 0;
-                long tS = System.currentTimeMillis();
+                final int MASK_ANY = LcpOps.LCRSc_FLOW_ACTIVE | LcpOps.LCRSc_DELIVERY_ACTIVE | LcpOps.LCRSc_DEL_TICKET_PENDING;
+                int stableOk = 0; long tS = System.currentTimeMillis();
                 while (System.currentTimeMillis() - tS < 3000) {
                     int[] s = deliveryStatusWithRetry("STABILIZE (0x28)", 3000, 250);
-                    boolean clean = ( (s[1] & MASK_ANY) == 0 );
-                    if (clean) { stableOk++; if (stableOk >= 3) break; }
-                    else stableOk = 0;
+                    boolean clean = ((s[1] & MASK_ANY) == 0);
+                    if (clean) { stableOk++; if (stableOk >= 3) break; } else stableOk = 0;
                 }
 
-                // 4) Statut final lisible + READY
                 int[] fin = deliveryStatusWithRetry("FINAL (0x28)", 3000, 150);
-                boolean ready = ( (fin[1] & (LcpOps.LCRSc_FLOW_ACTIVE |
-                                             LcpOps.LCRSc_DELIVERY_ACTIVE |
-                                             LcpOps.LCRSc_DEL_TICKET_PENDING)) == 0 );
-                append(ready ? "[A] READY: FLOW=0, DELIVERY=0, TICKET=0\n"
-                             : "[A] NOT READY: voir DS/DC ci-dessus\n");
+                boolean ready = (((fin[1] & MASK_ANY) == 0));
+                append(ready ? "[A] READY: FLOW=0, DELIVERY=0, TICKET=0\n" : "[A] NOT READY: voir DS/DC ci-dessus\n");
 
             } catch(Exception e){
                 append("[A] ERREUR: " + e.getMessage() + "\n");
@@ -560,8 +472,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       Macro B — GET_DEL_STATUS
-       ================================================================ */
+      Macro B — GET_DEL_STATUS
+      ================================================================ */
     private void macroPing28_locked() {
         if (!checkReady()) return;
         synchronized (lcpLock) {
@@ -575,18 +487,14 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       Macro C — START orienté FLOW
-       - Preset=0 → AUTO (pas d’arrêt logiciel)
-       - Preset>0 → PRÉSET (surveillance #45, END au seuil, message overshoot)
-       - RUN gracieux (fenêtre calme & gel RESYNC)
-       ================================================================ */
+      Macro C — START orienté FLOW (RUN relaxé)
+      ================================================================ */
     private void macroStart_locked() {
         if (!checkReady()) return;
         synchronized (lcpLock) {
             try {
                 resyncBudget = 1;
 
-                // 0) ticket en attente ? ménage minimal
                 int[] dsdc = deliveryStatusWithRetry("GET_DEL_STATUS (pré-START)", 3000, 200);
                 if ((dsdc[1] & 0x0001) != 0) {
                     append("[C] Ticket → END+CLEAR\n");
@@ -601,13 +509,11 @@ public class MainActivity extends AppCompatActivity {
 
                 append("[C] START…\n");
 
-                // 1) Lecture inputs
                 int product = parseIntSafe(safeStr(edtProduct.getText()), 1);
                 double preset = parseDoubleSafe(safeStr(edtPreset.getText()), 50.0);
-                int preset_i32 = (int)Math.round(preset * 10.0); // digits=1
+                int preset_i32 = (int)Math.round(preset * 10.0);
                 final boolean presetEnabled = (preset_i32 > 0);
 
-                // 2) SET_FIELD produit (si supporté)
                 try {
                     lcpOps.opSetField(0, new byte[]{ (byte)(product & 0xFF) }, 3000);
                     append(String.format("[C] SET_FIELD #0 (product) = %d\n", product));
@@ -615,62 +521,48 @@ public class MainActivity extends AppCompatActivity {
                     append("[C] WARN: SET_FIELD #0 (product) ignoré: " + e.getMessage() + "\n");
                 }
 
-                // 3) SET_FIELD preset selon le mode
                 if (presetEnabled) {
-                    lcpOps.opSetField(6, LcpOps.i32be(preset_i32), 3000); // net
-                    lcpOps.opSetField(5, LcpOps.i32be(0),          3000); // gross=0
+                    lcpOps.opSetField(6, LcpOps.i32be(preset_i32), 3000);
+                    lcpOps.opSetField(5, LcpOps.i32be(0),          3000);
                     append(String.format("[C] PRÉSET actif : %,.1f (arrêt demandé au seuil). Le gun peut créer un léger dépassement.\n", preset));
                 } else {
                     append("[C] PRÉSET = 0 → Mode AUTO : aucun arrêt logiciel ne sera imposé.\n");
                 }
 
-                // 4) RUN (#0) gracieux : utilise opIssueCommandRelaxed (accepte rc=0x26 sans 0x7D)
-                issueRunWithGrace();
+                issueRunWithGrace();  // <-- version relaxée
 
-                // 5) Références compteurs (optionnel)
                 Integer g0 = getFieldI32WithRetry("GET_FIELD #44 (GrossCount0)", 44, 3000);
                 Integer n0 = getFieldI32WithRetry("GET_FIELD #45 (NetCount0)",   45, 3000);
 
-                // 6) Attente FLOW=1 (ou compteurs qui montent) — 8 s max
                 append("[C] En attente FLOW (ouvrir le gun) …\n");
                 long tStart = System.currentTimeMillis();
                 boolean flowSeen = false;
-
                 while (System.currentTimeMillis() - tStart < 8000) {
                     int[] s = deliveryStatusWithRetry("WAIT_FLOW (0x28)", 5000, 200);
                     int dc2 = s[1];
-
                     boolean flow   = (dc2 & LcpOps.LCRSc_FLOW_ACTIVE) != 0;
                     boolean active = (dc2 & LcpOps.LCRSc_DELIVERY_ACTIVE) != 0;
-
                     if (flow || active) { flowSeen = true; break; }
 
-                    // Fallback via compteurs
+                    // Fallback via compteurs (peut être commenté si l'install "queue" trop)
                     Integer n = readNetCountI32Safe();
                     if (safeDelta(n, n0) > 0) { flowSeen = true; break; }
 
                     try { Thread.sleep(200); } catch(Exception ignore){}
                 }
 
-                if (!flowSeen) {
-                    append("[C] ERREUR: START_TIMEOUT: FLOW jamais activé (gun non ouvert/interlock?)\n");
-                    return;
-                }
-
+                if (!flowSeen) { append("[C] ERREUR: START_TIMEOUT: FLOW jamais activé (gun non ouvert/interlock?)\n"); return; }
                 append("[C] FLOW détecté → livraison en cours.\n");
 
-                // 7) Si PRÉSET actif : surveiller le delta et envoyer END au seuil
                 if (presetEnabled) {
                     boolean endSent = false;
                     while (true) {
-                        // Lire état & delta
                         int[] s = deliveryStatusWithRetry("CHECK (0x28)", 3000, 250);
                         int dc2 = s[1];
                         boolean flow = (dc2 & LcpOps.LCRSc_FLOW_ACTIVE) != 0;
 
                         Integer n = readNetCountI32Safe();
                         int delta = safeDelta(n, n0);
-
                         append(String.format("[C] Livré (net) = %,.1f / %,.1f\n", delta / 10.0, preset_i32 / 10.0));
 
                         if (!endSent && delta >= preset_i32) {
@@ -679,23 +571,13 @@ public class MainActivity extends AppCompatActivity {
                             endSent = true;
                         }
 
-                        // Sortie quand flow tombe (vanne/gun fermé) ou si opérateur arrête
-                        if (endSent && !flow) {
-                            append("[C] FLOW retombé → arrêt confirmé par la vanne/gun.\n");
-                            break;
-                        }
-
-                        // Sécurité : si opérateur coupe avant le seuil
-                        if (!flow && delta < preset_i32) {
-                            append("[C] Arrêt précoce par opérateur (avant le seuil).\n");
-                            break;
-                        }
+                        if (endSent && !flow) { append("[C] FLOW retombé → arrêt confirmé par la vanne/gun.\n"); break; }
+                        if (!flow && delta < preset_i32) { append("[C] Arrêt précoce par opérateur (avant le seuil).\n"); break; }
 
                         try { Thread.sleep(250); } catch(Exception ignore){}
                     }
                 }
 
-                // 8) Terminé
                 append("[C] START OK\n");
 
             } catch(Exception e){
@@ -707,16 +589,13 @@ public class MainActivity extends AppCompatActivity {
     // RUN (#0) gracieux — utilise la version "relaxée" (pas de 0x7D après rc=0x26)
     private void issueRunWithGrace() {
         try {
-            // Accepte rc=0x00 ou rc=0x26 sans CHECK_REQUEST
             int rc = lcpOps.opIssueCommandRelaxed(0x00, 5000, 250);
-            if (rc == 0x26) {
-                append("[INFO] RUN (#0) queue=1 (rc=0x26) — attente FLOW côté opérateur/vanne\n");
-            }
+            if (rc == 0x26) append("[INFO] RUN (#0) queue=1 (rc=0x26) — attente FLOW côté opérateur/vanne\n");
         } catch(Exception e) {
             append("[WARN] RUN (#0) sans ACK exploitable — vérif via 0x28/compteurs\n");
         }
-        freezeResyncFor(1500);                 // pas de RESYNC pendant 1,5 s
-        try { Thread.sleep(750); } catch(Exception ignore) {} // silence initial
+        freezeResyncFor(1500);
+        try { Thread.sleep(750); } catch(Exception ignore) {}
     }
 
     /* ================================================================
@@ -777,13 +656,8 @@ public class MainActivity extends AppCompatActivity {
                     append("[RAW] PURGE+RESYNC (unique) puis retry\n");
                     resyncBudget--;
                     purgeAndResyncBestEffort();
-                    try {
-                        preSendThrottle(200);
-                        byte[] rsp = lcpLink.sendRecv(payload, timeout);
-                        append("[RAW] RX size=" + rsp.length + " (après RESYNC)\n");
-                    } catch(Exception e2){
-                        append("[RAW] ERREUR après RESYNC: " + e2.getMessage() + "\n");
-                    }
+                    try { preSendThrottle(200); byte[] rsp = lcpLink.sendRecv(payload, timeout); append("[RAW] RX size=" + rsp.length + " (après RESYNC)\n"); }
+                    catch(Exception e2){ append("[RAW] ERREUR après RESYNC: " + e2.getMessage() + "\n"); }
                 }
             }
         }
@@ -802,10 +676,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void runLcpTask(Runnable r){
         setButtonsEnabled(false);
-        lcpExec.execute(() -> {
-            try { r.run(); }
-            finally { setButtonsEnabled(true); }
-        });
+        lcpExec.execute(() -> { try { r.run(); } finally { setButtonsEnabled(true); } });
     }
 
     private void setButtonsEnabled(boolean enabled){
