@@ -364,6 +364,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private int[] machineStatusWithRetry(String label, int timeoutMs, int pauseMs){
+        // Conservée au besoin (ex. wake best-effort), mais non utilisée en routine (A/B/C).
         byte[] payload = new byte[]{0x23};
         try {
             preSendThrottle(200);
@@ -373,7 +374,7 @@ public class MainActivity extends AppCompatActivity {
             logStatusHuman("[RX] " + label, msd[1], msd[2]);
             return msd;
         } catch (Exception e1) {
-            // 1) petit retry direct
+            // Petit retry direct
             try {
                 Thread.sleep(150);
                 preSendThrottle(200);
@@ -382,7 +383,7 @@ public class MainActivity extends AppCompatActivity {
                 logStatusHuman("[RX] " + label, msd[1], msd[2]);
                 return msd;
             } catch(Exception e2) {
-                // 2) purge + resync + retry
+                // Purge + resync + dernier essai
                 if (needResync(e2) || needResync(e1)) {
                     append("[WARN] " + label + " timeout/sync → PURGE+RESYNC puis retry\n");
                     purgeAndResync();
@@ -393,22 +394,11 @@ public class MainActivity extends AppCompatActivity {
                         logStatusHuman("[RX] " + label, msd[1], msd[2]);
                         return msd;
                     } catch(Exception e3) {
-                        // 3) dernier essai
-                        try {
-                            Thread.sleep(250);
-                            preSendThrottle(200);
-                            int[] msd = lcpOps.opMachineStatusFull(timeoutMs, pauseMs);
-                            append(String.format("[RX] %s MS=0x%04X\n", label, msd[0]));
-                            logStatusHuman("[RX] " + label, msd[1], msd[2]);
-                            return msd;
-                        } catch(Exception e4) {
-                            // GRACIEUX : on laisse la macro trancher via 0x28/compteurs
-                            append("[WARN] " + label + " indisponible (" + e4.getMessage() + ") — fallback via 0x28/compteurs\n");
-                            return new int[]{0, 0, 0};
-                        }
+                        append("[WARN] " + label + " indisponible (" + e3.getMessage() + ") — on ignore\n");
+                        return new int[]{0, 0, 0}; // On n’en fait pas un blocage
                     }
                 } else {
-                    append("[WARN] " + label + " indisponible (" + e2.getMessage() + ") — fallback via 0x28/compteurs\n");
+                    append("[WARN] " + label + " indisponible (" + e2.getMessage() + ") — on ignore\n");
                     return new int[]{0, 0, 0};
                 }
             }
@@ -417,7 +407,6 @@ public class MainActivity extends AppCompatActivity {
 
     // --- Helpers GET_FIELD pour compteurs #44 / #45 (u32 BE signé) ---
     private Integer getFieldI32WithRetry(String label, int fieldId, int timeoutMs){
-        // payload visible
         logTxPayload(label, new byte[]{0x20, (byte)(fieldId & 0xFF)});
         try {
             preSendThrottle(200);
@@ -488,6 +477,7 @@ public class MainActivity extends AppCompatActivity {
                     }
 
                     if (!cleared) {
+                        // Wake 0x23 optionnel — on ignore toute erreur
                         machineStatusWithRetry("WAKE (GET_MACHINE 0x23)", 5000, 150);
                         long tw = System.currentTimeMillis();
                         while (!cleared && System.currentTimeMillis() - tw < 2000) {
