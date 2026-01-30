@@ -68,7 +68,6 @@ public class MainActivity extends AppCompatActivity {
     private static final int FIELD_GROSS_TOTAL  = 0x11; // #17 GrossTotal
     private static final int FIELD_NET_TOTAL    = 0x12; // #18 NetTotal
     private static final int FIELD_DECIMALS     = 0x27; // #39 Decimals
-    // (cf. LCR Registers’ Fields.xlsx) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
 
     // === Mise à l’échelle LV (implied decimals #39) ===
     private volatile int    qtyDecimals = 1;  // 0..3 → 2/1/0/3 décimales effectives
@@ -170,7 +169,8 @@ public class MainActivity extends AppCompatActivity {
         findViewById(R.id.btnA).setOnClickListener(v -> runLcpTask(this::macroReset_locked));
         findViewById(R.id.btnB).setOnClickListener(v -> runLcpTask(this::macroPing28_locked));
         findViewById(R.id.btnC).setOnClickListener(v -> runLcpTask(this::macroStart_locked));
-        findViewById(R.id.btnSendHex).setOnClickListener(v -> promptAndSendHex()));
+        // ✅ correction: pas de parenthèse en trop
+        findViewById(R.id.btnSendHex).setOnClickListener(v -> promptAndSendHex());
 
         append("Prêt. Branchez le LCR puis cliquez 'Connexion USB'.\n");
     }
@@ -482,12 +482,14 @@ public class MainActivity extends AppCompatActivity {
                 boolean hasTicket = (dsdc1[1] & LcpOps.LCRSc_DEL_TICKET_PENDING) != 0;
                 if (hasTicket) {
                     issueCommandWithRetry("CLEAR (#6)", 0x06, 3000, 250);
-                    long t0 = System.currentTimeMillis();
+
                     boolean cleared = false;
+                    long t0 = System.currentTimeMillis();
                     while (System.currentTimeMillis() - t0 < 8000) {
                         int[] dsdc2 = deliveryStatusWithRetry("POLL ticket (0x28)", 3000, 250);
                         if ( (dsdc2[1] & LcpOps.LCRSc_DEL_TICKET_PENDING) == 0 ) { cleared = true; break; }
                     }
+
                     if (!cleared) {
                         machineStatusWithRetry("WAKE (GET_MACHINE 0x23)", 5000, 150);
                         long tw = System.currentTimeMillis();
@@ -496,6 +498,7 @@ public class MainActivity extends AppCompatActivity {
                             if ( (dsdcW[1] & LcpOps.LCRSc_DEL_TICKET_PENDING) == 0 ) cleared = true;
                         }
                     }
+
                     if (!cleared) {
                         issueCommandWithRetry("CLEAR retry (#6)", 0x06, 3000, 250);
                         long tR = System.currentTimeMillis();
@@ -503,6 +506,7 @@ public class MainActivity extends AppCompatActivity {
                             int[] dsdcR = deliveryStatusWithRetry("POLL retry (0x28)", 3000, 250);
                             if ( (dsdcR[1] & LcpOps.LCRSc_DEL_TICKET_PENDING) == 0 ) { /* ok */ break; }
                         }
+
                         append("\n[ATTENTION] Ticket toujours en attente — vérifier imprimante locale.\n\n");
                     }
                 } else append("[A] CLEAR ignoré (pas de ticket)\n");
