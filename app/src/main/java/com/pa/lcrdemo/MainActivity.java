@@ -454,6 +454,19 @@ public class MainActivity extends AppCompatActivity {
         return null;
     }
 
+    // --- Helpers preset/compteurs ---
+    private Integer readNetCountI32Safe() {
+        try { return getFieldI32WithRetry("GET_FIELD #45 (NetCount)", 45, 3000); }
+        catch(Exception e){ return null; }
+    }
+    private int safeDelta(Integer curr, Integer base) {
+        if (curr == null || base == null) return 0;
+        long d = (long)curr - (long)base;
+        if (d < 0) d = 0;
+        if (d > Integer.MAX_VALUE) d = Integer.MAX_VALUE;
+        return (int)d;
+    }
+
     /* ================================================================
        Macro A — Send / Clear
        ================================================================ */
@@ -563,10 +576,9 @@ public class MainActivity extends AppCompatActivity {
 
     /* ================================================================
        Macro C — START orienté FLOW
-       - Valide preset (>0)
-       - SET_FIELD product (#0) si supporté + preset net (#6) & gross=0 (#5)
-       - RUN (#0) gracieux (fenêtre calme & gel RESYNC)
-       - Attente FLOW=1 (0→1) ou compteurs #44/#45 qui montent
+       - Preset=0 → AUTO (pas d’arrêt logiciel)
+       - Preset>0 → PRÉSET (surveillance #45, END au seuil, message overshoot)
+       - RUN gracieux (fenêtre calme & gel RESYNC)
        ================================================================ */
     private void macroStart_locked() {
         if (!checkReady()) return;
@@ -593,11 +605,7 @@ public class MainActivity extends AppCompatActivity {
                 int product = parseIntSafe(safeStr(edtProduct.getText()), 1);
                 double preset = parseDoubleSafe(safeStr(edtPreset.getText()), 50.0);
                 int preset_i32 = (int)Math.round(preset * 10.0); // digits=1
-
-                if (preset_i32 <= 0) {
-                    append("[C] ERREUR: preset invalide (<=0). Entrez une valeur > 0 (ex.: 50.0)\n");
-                    return;
-                }
+                final boolean presetEnabled = (preset_i32 > 0);
 
                 // 2) SET_FIELD produit (si supporté)
                 try {
@@ -607,10 +615,14 @@ public class MainActivity extends AppCompatActivity {
                     append("[C] WARN: SET_FIELD #0 (product) ignoré: " + e.getMessage() + "\n");
                 }
 
-                // 3) SET_FIELD preset net & gross=0
-                lcpOps.opSetField(6, LcpOps.i32be(preset_i32), 3000); // net
-                lcpOps.opSetField(5, LcpOps.i32be(0),          3000); // gross=0
-                append(String.format("[C] SET_FIELD #6 (preset net) = %d  (#5=0)\n", preset_i32));
+                // 3) SET_FIELD preset selon le mode
+                if (presetEnabled) {
+                    lcpOps.opSetField(6, LcpOps.i32be(preset_i32), 3000); // net
+                    lcpOps.opSetField(5, LcpOps.i32be(0),          3000); // gross=0
+                    append(String.format("[C] PRÉSET actif : %,.1f (arrêt demandé au seuil). Le gun peut créer un léger dépassement.\n", preset));
+                } else {
+                    append("[C] PRÉSET = 0 → Mode AUTO : aucun arrêt logiciel ne sera imposé.\n");
+                }
 
                 // 4) RUN (#0) gracieux : ne casse pas sur ACK manquant, gèle RESYNC 1.5s & silence 750ms
                 issueRunWithGrace();
@@ -622,32 +634,68 @@ public class MainActivity extends AppCompatActivity {
                 // 6) Attente FLOW=1 (ou compteurs qui montent) — 8 s max
                 append("[C] En attente FLOW (ouvrir le gun) …\n");
                 long tStart = System.currentTimeMillis();
-                boolean started = false;
+                boolean flowSeen = false;
 
                 while (System.currentTimeMillis() - tStart < 8000) {
                     int[] s = deliveryStatusWithRetry("WAIT_FLOW (0x28)", 5000, 200);
-                    int dc = s[1];
+                    int dc2 = s[1];
 
-                    boolean flow   = (dc & LcpOps.LCRSc_FLOW_ACTIVE) != 0;
-                    boolean active = (dc & LcpOps.LCRSc_DELIVERY_ACTIVE) != 0;
+                    boolean flow   = (dc2 & LcpOps.LCRSc_FLOW_ACTIVE) != 0;
+                    boolean active = (dc2 & LcpOps.LCRSc_DELIVERY_ACTIVE) != 0;
 
-                    if (flow || active) { started = true; break; }
+                    if (flow || active) { flowSeen = true; break; }
 
                     // Fallback via compteurs
-                    Integer g = getFieldI32WithRetry("GET_FIELD #44 (GrossCount)", 44, 3000);
-                    Integer n = getFieldI32WithRetry("GET_FIELD #45 (NetCount)",   45, 3000);
-                    if (g != null && g0 != null && g > g0) { started = true; break; }
-                    if (n != null && n0 != null && n > n0) { started = true; break; }
+                    Integer n = readNetCountI32Safe();
+                    if (safeDelta(n, n0) > 0) { flowSeen = true; break; }
 
                     try { Thread.sleep(200); } catch(Exception ignore){}
                 }
 
-                if (!started) {
+                if (!flowSeen) {
                     append("[C] ERREUR: START_TIMEOUT: FLOW jamais activé (gun non ouvert/interlock?)\n");
                     return;
                 }
 
-                append("[C] FLOW détecté → livraison active.\n");
+                append("[C] FLOW détecté → livraison en cours.\n");
+
+                // 7) Si PRÉSET actif : surveiller le delta et envoyer END au seuil
+                if (presetEnabled) {
+                    boolean endSent = false;
+                    while (true) {
+                        // Lire état & delta
+                        int[] s = deliveryStatusWithRetry("CHECK (0x28)", 3000, 250);
+                        int dc2 = s[1];
+                        boolean flow = (dc2 & LcpOps.LCRSc_FLOW_ACTIVE) != 0;
+
+                        Integer n = readNetCountI32Safe();
+                        int delta = safeDelta(n, n0);
+
+                        append(String.format("[C] Livré (net) = %,.1f / %,.1f\n", delta / 10.0, preset_i32 / 10.0));
+
+                        if (!endSent && delta >= preset_i32) {
+                            append("[C] Seuil atteint → demande d’arrêt (END #2)\n");
+                            issueCommandWithRetry("END (#2)", 0x02, 3000, 300);
+                            endSent = true;
+                        }
+
+                        // Sortie quand flow tombe (vanne/gun fermé) ou si opérateur arrête
+                        if (endSent && !flow) {
+                            append("[C] FLOW retombé → arrêt confirmé par la vanne/gun.\n");
+                            break;
+                        }
+
+                        // Sécurité : si opérateur coupe avant le seuil
+                        if (!flow && delta < preset_i32) {
+                            append("[C] Arrêt précoce par opérateur (avant le seuil).\n");
+                            break;
+                        }
+
+                        try { Thread.sleep(250); } catch(Exception ignore){}
+                    }
+                }
+
+                // 8) Terminé
                 append("[C] START OK\n");
 
             } catch(Exception e){
