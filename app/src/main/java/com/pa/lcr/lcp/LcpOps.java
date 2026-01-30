@@ -76,7 +76,8 @@ public class LcpOps {
     }
 
     /* ============================================================
-       GET_MACHINE (0x23) → [ms, ds, dc] — queued-handling + big-endian
+       GET_MACHINE (0x23) → [ms, ds, dc] — queued-handling + BE
+       Tolérance de longueur: accepte 8, 7 ou 6 octets utiles.
        ============================================================ */
     public int[] opMachineStatusFull(int timeoutMs, int pauseMs) throws Exception {
         byte[] fr = link.sendRecv(new byte[]{ 0x23 }, timeoutMs);
@@ -93,13 +94,27 @@ public class LcpOps {
         if (rc != RC_OK)
             throw new Exception("GET_MACHINE rc=" + rc);
 
-        if (p.length < 8)
-            throw new Exception("GET_MACHINE: payload invalide (<8)");
+        // Formats observés :
+        // A) 8 octets : [rc, dev, MS.hi, MS.lo, DS.hi, DS.lo, DC.hi, DC.lo]
+        // B) 7 octets : [rc, dev, 0x00,      DS.hi, DS.lo, DC.hi, DC.lo] (MS absent/align)
+        // C) 6 octets : [rc, dev,            DS.hi, DS.lo, DC.hi, DC.lo] (MS absent)
+        if (p.length < 6)
+            throw new Exception("GET_MACHINE: payload invalide (<6)");
 
-        // Big-endian: [rc, dev(1), MS(2), DS(2), DC(2)] → MS/DS/DC en BE
-        int ms = ((p[2] & 0xFF) << 8) | (p[3] & 0xFF);
-        int ds = ((p[4] & 0xFF) << 8) | (p[5] & 0xFF);
-        int dc = ((p[6] & 0xFF) << 8) | (p[7] & 0xFF);
+        int ms, ds, dc;
+        if (p.length >= 8) {
+            ms = ((p[2] & 0xFF) << 8) | (p[3] & 0xFF);
+            ds = ((p[4] & 0xFF) << 8) | (p[5] & 0xFF);
+            dc = ((p[6] & 0xFF) << 8) | (p[7] & 0xFF);
+        } else if (p.length == 7) {
+            ds = ((p[3] & 0xFF) << 8) | (p[4] & 0xFF);
+            dc = ((p[5] & 0xFF) << 8) | (p[6] & 0xFF);
+            ms = 0x0000;
+        } else { // 6
+            ds = ((p[2] & 0xFF) << 8) | (p[3] & 0xFF);
+            dc = ((p[4] & 0xFF) << 8) | (p[5] & 0xFF);
+            ms = 0x0000;
+        }
 
         if (pauseMs > 0) Thread.sleep(pauseMs);
         return new int[]{ ms, ds, dc };
@@ -177,7 +192,7 @@ public class LcpOps {
     }
 
     /* ============================================================
-       GET_DEL_STATUS (0x28) → [ds, dc] — queued-handling + big-endian
+       GET_DEL_STATUS (0x28) → [ds, dc] — queued-handling + BE
        ============================================================ */
     public int[] opDeliveryStatus(int timeoutMs, int pauseMs) throws Exception {
         byte[] fr = link.sendRecv(new byte[]{ 0x28 }, timeoutMs);
@@ -207,6 +222,7 @@ public class LcpOps {
 
     /* ============================================================
        WAIT DC (mask/expected) avec polling 0x28
+        - attend jusqu'à ce que (dc & mask) == expected
        ============================================================ */
     public int[] opWaitForStatus(int mask, int expected, int timeoutMs, int pollMs) throws Exception {
         long t0 = System.currentTimeMillis();

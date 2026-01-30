@@ -363,8 +363,8 @@ public class MainActivity extends AppCompatActivity {
         return new int[]{0,0};
     }
 
+    // Conservée pour wake best-effort (non utilisée en routine)
     private int[] machineStatusWithRetry(String label, int timeoutMs, int pauseMs){
-        // Conservée au besoin (ex. wake best-effort), mais non utilisée en routine (A/B/C).
         byte[] payload = new byte[]{0x23};
         try {
             preSendThrottle(200);
@@ -374,7 +374,6 @@ public class MainActivity extends AppCompatActivity {
             logStatusHuman("[RX] " + label, msd[1], msd[2]);
             return msd;
         } catch (Exception e1) {
-            // Petit retry direct
             try {
                 Thread.sleep(150);
                 preSendThrottle(200);
@@ -383,7 +382,6 @@ public class MainActivity extends AppCompatActivity {
                 logStatusHuman("[RX] " + label, msd[1], msd[2]);
                 return msd;
             } catch(Exception e2) {
-                // Purge + resync + dernier essai
                 if (needResync(e2) || needResync(e1)) {
                     append("[WARN] " + label + " timeout/sync → PURGE+RESYNC puis retry\n");
                     purgeAndResync();
@@ -395,7 +393,7 @@ public class MainActivity extends AppCompatActivity {
                         return msd;
                     } catch(Exception e3) {
                         append("[WARN] " + label + " indisponible (" + e3.getMessage() + ") — on ignore\n");
-                        return new int[]{0, 0, 0}; // On n’en fait pas un blocage
+                        return new int[]{0, 0, 0};
                     }
                 } else {
                     append("[WARN] " + label + " indisponible (" + e2.getMessage() + ") — on ignore\n");
