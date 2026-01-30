@@ -54,6 +54,11 @@ public class MainActivity extends AppCompatActivity {
     // Budget RESYNC par macro (au plus 1)
     private volatile int resyncBudget = 0;
 
+    // Fenêtre qui interdit le RESYNC pendant X ms (post-RUN)
+    private volatile long resyncFreezeUntil = 0;
+    private void freezeResyncFor(long ms){ resyncFreezeUntil = System.currentTimeMillis() + ms; }
+    private boolean canResyncNow(){ return System.currentTimeMillis() > resyncFreezeUntil; }
+
     /* ================================================================
        Receivers USB
        ================================================================ */
@@ -218,10 +223,9 @@ public class MainActivity extends AppCompatActivity {
             lcpLink = new LcpLink(serialPort, to, from, true);
             lcpOps  = new LcpOps(lcpLink);
 
-            // RESYNC 0x00 + respiration + premier poll 0x28
+            // RESYNC 0x00 + respiration + premier poll 0x28 (best-effort)
             append("[CONNECT] RESYNC 0x00\n");
             try {
-                // best-effort : on ignore les erreurs de resync à la connexion
                 lcpLink.sendRecv(new byte[]{0x00}, 2000);
                 Thread.sleep(200);
                 int[] dsdc = lcpOps.opDeliveryStatus(3000, 150);
@@ -304,7 +308,7 @@ public class MainActivity extends AppCompatActivity {
                 lcpOps.opIssueCommand(code, timeoutMs, pauseMs);
                 return;
             } catch(Exception e2) {
-                if ((needResync(e2) || needResync(e1)) && resyncBudget > 0) {
+                if ((needResync(e2) || needResync(e1)) && resyncBudget > 0 && canResyncNow()) {
                     append("[WARN] " + label + " timeout/sync → PURGE+RESYNC (unique) puis retry\n");
                     resyncBudget--;
                     purgeAndResyncBestEffort();
@@ -345,7 +349,7 @@ public class MainActivity extends AppCompatActivity {
                 logStatusHuman("[RX] " + label, dsdc[0], dsdc[1]);
                 return dsdc;
             } catch(Exception e2) {
-                if ((needResync(e2) || needResync(e1)) && resyncBudget > 0) {
+                if ((needResync(e2) || needResync(e1)) && resyncBudget > 0 && canResyncNow()) {
                     append("[WARN] " + label + " timeout/sync → PURGE+RESYNC (unique) puis retry\n");
                     resyncBudget--;
                     purgeAndResyncBestEffort();
@@ -373,7 +377,7 @@ public class MainActivity extends AppCompatActivity {
         return new int[]{0,0};
     }
 
-    // Conservée pour wake best-effort si besoin, mais non utilisée en routine
+    // Conservée pour wake best-effort si besoin (non utilisée dans START orienté FLOW)
     private int[] machineStatusWithRetry(String label, int timeoutMs, int pauseMs){
         byte[] payload = new byte[]{0x23};
         try {
@@ -392,7 +396,7 @@ public class MainActivity extends AppCompatActivity {
                 logStatusHuman("[RX] " + label, msd[1], msd[2]);
                 return msd;
             } catch(Exception e2) {
-                if ((needResync(e2) || needResync(e1)) && resyncBudget > 0) {
+                if ((needResync(e2) || needResync(e1)) && resyncBudget > 0 && canResyncNow()) {
                     append("[WARN] " + label + " timeout/sync → PURGE+RESYNC (unique) puis retry\n");
                     resyncBudget--;
                     purgeAndResyncBestEffort();
@@ -430,7 +434,7 @@ public class MainActivity extends AppCompatActivity {
                 int v = ((val[0] & 0xFF) << 24) | ((val[1] & 0xFF) << 16) | ((val[2] & 0xFF) << 8) | (val[3] & 0xFF);
                 return v;
             } catch(Exception e2){
-                if ((needResync(e2) || needResync(e1)) && resyncBudget > 0) {
+                if ((needResync(e2) || needResync(e1)) && resyncBudget > 0 && canResyncNow()) {
                     append("[WARN] " + label + " → PURGE+RESYNC (unique) puis retry\n");
                     resyncBudget--;
                     purgeAndResyncBestEffort();
@@ -558,7 +562,11 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       Macro C — START (sans 0x23, sans d.start())
+       Macro C — START orienté FLOW
+       - Valide preset (>0)
+       - SET_FIELD product (#0) si supporté + preset net (#6) & gross=0 (#5)
+       - RUN (#0) gracieux (fenêtre calme & gel RESYNC)
+       - Attente FLOW=1 (0→1) ou compteurs #44/#45 qui montent
        ================================================================ */
     private void macroStart_locked() {
         if (!checkReady()) return;
@@ -581,11 +589,17 @@ public class MainActivity extends AppCompatActivity {
 
                 append("[C] START…\n");
 
-                // 1) Sélection produit + preset net
+                // 1) Lecture inputs
                 int product = parseIntSafe(safeStr(edtProduct.getText()), 1);
                 double preset = parseDoubleSafe(safeStr(edtPreset.getText()), 50.0);
+                int preset_i32 = (int)Math.round(preset * 10.0); // digits=1
 
-                // Product (#0) si pris en charge
+                if (preset_i32 <= 0) {
+                    append("[C] ERREUR: preset invalide (<=0). Entrez une valeur > 0 (ex.: 50.0)\n");
+                    return;
+                }
+
+                // 2) SET_FIELD produit (si supporté)
                 try {
                     lcpOps.opSetField(0, new byte[]{ (byte)(product & 0xFF) }, 3000);
                     append(String.format("[C] SET_FIELD #0 (product) = %d\n", product));
@@ -593,28 +607,33 @@ public class MainActivity extends AppCompatActivity {
                     append("[C] WARN: SET_FIELD #0 (product) ignoré: " + e.getMessage() + "\n");
                 }
 
-                int preset_i32 = (int)Math.round(preset * 10.0); // digits=1
+                // 3) SET_FIELD preset net & gross=0
                 lcpOps.opSetField(6, LcpOps.i32be(preset_i32), 3000); // net
                 lcpOps.opSetField(5, LcpOps.i32be(0),          3000); // gross=0
                 append(String.format("[C] SET_FIELD #6 (preset net) = %d  (#5=0)\n", preset_i32));
 
-                // 2) RUN 0x00
-                issueCommandWithRetry("RUN (#0)", 0x00, 3000, 200);
-                try { Thread.sleep(250); } catch(Exception ignore){}
+                // 4) RUN (#0) gracieux : ne casse pas sur ACK manquant, gèle RESYNC 1.5s & silence 750ms
+                issueRunWithGrace();
 
-                // 3) Références compteurs (optionnel)
+                // 5) Références compteurs (optionnel)
                 Integer g0 = getFieldI32WithRetry("GET_FIELD #44 (GrossCount0)", 44, 3000);
                 Integer n0 = getFieldI32WithRetry("GET_FIELD #45 (NetCount0)",   45, 3000);
 
-                // 4) Attente démarrage 5s : 0x28 (FLOW/ACTIVE) OU compteurs
+                // 6) Attente FLOW=1 (ou compteurs qui montent) — 8 s max
+                append("[C] En attente FLOW (ouvrir le gun) …\n");
                 long tStart = System.currentTimeMillis();
                 boolean started = false;
-                while (System.currentTimeMillis() - tStart < 5000) {
-                    int[] s = deliveryStatusWithRetry("CHECK (0x28)", 3000, 150);
-                    boolean flow   = (s[1] & LcpOps.LCRSc_FLOW_ACTIVE) != 0;
-                    boolean active = (s[1] & LcpOps.LCRSc_DELIVERY_ACTIVE) != 0;
+
+                while (System.currentTimeMillis() - tStart < 8000) {
+                    int[] s = deliveryStatusWithRetry("WAIT_FLOW (0x28)", 5000, 200);
+                    int dc = s[1];
+
+                    boolean flow   = (dc & LcpOps.LCRSc_FLOW_ACTIVE) != 0;
+                    boolean active = (dc & LcpOps.LCRSc_DELIVERY_ACTIVE) != 0;
+
                     if (flow || active) { started = true; break; }
 
+                    // Fallback via compteurs
                     Integer g = getFieldI32WithRetry("GET_FIELD #44 (GrossCount)", 44, 3000);
                     Integer n = getFieldI32WithRetry("GET_FIELD #45 (NetCount)",   45, 3000);
                     if (g != null && g0 != null && g > g0) { started = true; break; }
@@ -623,13 +642,29 @@ public class MainActivity extends AppCompatActivity {
                     try { Thread.sleep(200); } catch(Exception ignore){}
                 }
 
-                if (!started) throw new Exception("START_TIMEOUT: aucun indicateur (FLOW/ACTIVE/COUNTS)");
+                if (!started) {
+                    append("[C] ERREUR: START_TIMEOUT: FLOW jamais activé (gun non ouvert/interlock?)\n");
+                    return;
+                }
+
+                append("[C] FLOW détecté → livraison active.\n");
                 append("[C] START OK\n");
 
             } catch(Exception e){
                 append("[C] ERREUR: " + e.getMessage() + "\n");
             }
         }
+    }
+
+    // RUN (#0) gracieux — n’échoue pas la macro si l’ACK manque
+    private void issueRunWithGrace() {
+        try {
+            issueCommandWithRetry("RUN (#0)", 0x00, 5000, 250);
+        } catch(Exception e) {
+            append("[WARN] RUN (#0) sans ACK exploitable — vérif via 0x28/compteurs\n");
+        }
+        freezeResyncFor(1500);                 // pas de RESYNC pendant 1,5 s
+        try { Thread.sleep(750); } catch(Exception ignore) {} // silence initial
     }
 
     /* ================================================================
@@ -686,7 +721,7 @@ public class MainActivity extends AppCompatActivity {
                 append("[RAW] RX size=" + rsp.length + "\n");
             }catch(Exception e){
                 append("[RAW] ERREUR: " + e.getMessage() + "\n");
-                if (resyncBudget > 0) {
+                if (resyncBudget > 0 && canResyncNow()) {
                     append("[RAW] PURGE+RESYNC (unique) puis retry\n");
                     resyncBudget--;
                     purgeAndResyncBestEffort();
