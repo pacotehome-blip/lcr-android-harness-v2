@@ -624,7 +624,7 @@ public class MainActivity extends AppCompatActivity {
                     append("[C] PRÉSET = 0 → Mode AUTO : aucun arrêt logiciel ne sera imposé.\n");
                 }
 
-                // 4) RUN (#0) gracieux : ne casse pas sur ACK manquant, gèle RESYNC 1.5s & silence 750ms
+                // 4) RUN (#0) gracieux : utilise opIssueCommandRelaxed (accepte rc=0x26 sans 0x7D)
                 issueRunWithGrace();
 
                 // 5) Références compteurs (optionnel)
@@ -704,10 +704,14 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    // RUN (#0) gracieux — n’échoue pas la macro si l’ACK manque
+    // RUN (#0) gracieux — utilise la version "relaxée" (pas de 0x7D après rc=0x26)
     private void issueRunWithGrace() {
         try {
-            issueCommandWithRetry("RUN (#0)", 0x00, 5000, 250);
+            // Accepte rc=0x00 ou rc=0x26 sans CHECK_REQUEST
+            int rc = lcpOps.opIssueCommandRelaxed(0x00, 5000, 250);
+            if (rc == 0x26) {
+                append("[INFO] RUN (#0) queue=1 (rc=0x26) — attente FLOW côté opérateur/vanne\n");
+            }
         } catch(Exception e) {
             append("[WARN] RUN (#0) sans ACK exploitable — vérif via 0x28/compteurs\n");
         }

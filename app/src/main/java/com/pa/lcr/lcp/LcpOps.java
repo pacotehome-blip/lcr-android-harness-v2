@@ -44,6 +44,8 @@ public class LcpOps {
 
     /* ============================================================
        CHECK_REQUEST (0x7D) — gestion des requêtes différées (rc=0x26)
+       - Boucle jusqu'à obtenir la réponse réelle (rc=0x00) ou erreur.
+       - Normalisation "double 0x00" (ex.: [0x00, 0x00, ...] → [0x00, ...]).
        ============================================================ */
     public byte[] opCheckRequest(int timeoutMs, int pollMs) throws Exception {
         long t0 = System.currentTimeMillis();
@@ -76,6 +78,9 @@ public class LcpOps {
     /* ============================================================
        GET_MACHINE (0x23) → [ms, ds, dc] — queued-handling + BE
        Tolérance: 8, 7 ou 6 octets utiles.
+        - 8: [rc, dev, MS.hi, MS.lo, DS.hi, DS.lo, DC.hi, DC.lo]
+        - 7: [rc, dev, 0x00,      DS.hi, DS.lo, DC.hi, DC.lo] (MS absent/align)
+        - 6: [rc, dev,            DS.hi, DS.lo, DC.hi, DC.lo] (MS absent)
        ============================================================ */
     public int[] opMachineStatusFull(int timeoutMs, int pauseMs) throws Exception {
         byte[] fr = link.sendRecv(new byte[]{ 0x23 }, timeoutMs);
@@ -92,10 +97,6 @@ public class LcpOps {
         if (rc != RC_OK)
             throw new Exception("GET_MACHINE rc=" + rc);
 
-        // Formats observés :
-        // A) 8 octets : [rc, dev, MS.hi, MS.lo, DS.hi, DS.lo, DC.hi, DC.lo]
-        // B) 7 octets : [rc, dev, 0x00,      DS.hi, DS.lo, DC.hi, DC.lo] (MS absent/align)
-        // C) 6 octets : [rc, dev,            DS.hi, DS.lo, DC.hi, DC.lo] (MS absent)
         if (p.length < 6)
             throw new Exception("GET_MACHINE: payload invalide (<6)");
 
@@ -119,7 +120,7 @@ public class LcpOps {
     }
 
     /* ============================================================
-       ISSUE COMMAND (0x24, cmd) — gère rc=0x26 via CHECK_REQUEST
+       ISSUE COMMAND (0x24, cmd) — version stricte (attend fin de queue)
        ============================================================ */
     public void opIssueCommand(int code, int timeoutMs, int pauseMs) throws Exception {
         byte[] pl = new byte[]{ 0x24, (byte)(code & 0xFF) };
@@ -141,7 +142,28 @@ public class LcpOps {
     }
 
     /* ============================================================
-       GET_FIELD (0x20) — ID 1 octet (format SR260/LCR-II) + queued
+       ISSUE COMMAND "RELAXED" (0x24, cmd) — n'attend PAS la complétion
+       - Accepte rc=0x00 ou rc=0x26, NE déclenche PAS 0x7D
+       - Idéal pour RUN (#0) avant d'attendre FLOW via 0x28
+       ============================================================ */
+    public int opIssueCommandRelaxed(int code, int timeoutMs, int pauseMs) throws Exception {
+        byte[] pl = new byte[]{ 0x24, (byte)(code & 0xFF) };
+        byte[] fr = link.sendRecv(pl, timeoutMs);
+        byte[] p  = LcpLink.extractPayload(fr);
+
+        if (p == null || p.length < 1)
+            throw new Exception("IssueCommandRelaxed: réponse invalide");
+
+        int rc = p[0] & 0xFF;
+        if (rc != RC_OK && rc != RC_REQUEST_QUEUED)
+            throw new Exception(String.format("IssueCommandRelaxed rc=0x%02X (cmd 0x%02X)", rc, code));
+
+        if (pauseMs > 0) Thread.sleep(pauseMs);
+        return rc; // 0x00 ou 0x26
+    }
+
+    /* ============================================================
+       GET_FIELD (0x20) — ID 1 octet (SR260/LCR-II) + queued-handling
        ============================================================ */
     public byte[] opGetField(int fieldId, int timeoutMs) throws Exception {
         if (fieldId < 0 || fieldId > 0xFF)
@@ -168,7 +190,7 @@ public class LcpOps {
     }
 
     /* ============================================================
-       SET_FIELD (0x21) — ID 1 octet (format SR260/LCR-II) + queued
+       SET_FIELD (0x21) — ID 1 octet (SR260/LCR-II) + queued-handling
        ============================================================ */
     public void opSetField(int fieldId, byte[] rawValue, int timeoutMs) throws Exception {
         if (fieldId < 0 || fieldId > 0xFF)
@@ -217,6 +239,7 @@ public class LcpOps {
         if (p.length < 6)
             throw new Exception("DEL_STATUS: payload trop court (<6)");
 
+        // Big-endian: DS=(p[2]<<8)|p[3], DC=(p[4]<<8)|p[5]
         int ds = ((p[2] & 0xFF) << 8) | (p[3] & 0xFF);
         int dc = ((p[4] & 0xFF) << 8) | (p[5] & 0xFF);
 
