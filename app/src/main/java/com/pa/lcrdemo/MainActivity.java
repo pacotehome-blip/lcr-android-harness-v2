@@ -373,6 +373,7 @@ public class MainActivity extends AppCompatActivity {
             logStatusHuman("[RX] " + label, msd[1], msd[2]);
             return msd;
         } catch (Exception e1) {
+            // 1) petit retry direct
             try {
                 Thread.sleep(150);
                 preSendThrottle(200);
@@ -381,6 +382,7 @@ public class MainActivity extends AppCompatActivity {
                 logStatusHuman("[RX] " + label, msd[1], msd[2]);
                 return msd;
             } catch(Exception e2) {
+                // 2) purge + resync + retry
                 if (needResync(e2) || needResync(e1)) {
                     append("[WARN] " + label + " timeout/sync → PURGE+RESYNC puis retry\n");
                     purgeAndResync();
@@ -391,6 +393,7 @@ public class MainActivity extends AppCompatActivity {
                         logStatusHuman("[RX] " + label, msd[1], msd[2]);
                         return msd;
                     } catch(Exception e3) {
+                        // 3) dernier essai
                         try {
                             Thread.sleep(250);
                             preSendThrottle(200);
@@ -399,15 +402,17 @@ public class MainActivity extends AppCompatActivity {
                             logStatusHuman("[RX] " + label, msd[1], msd[2]);
                             return msd;
                         } catch(Exception e4) {
-                            append("[ERREUR] " + label + " : " + e4.getMessage() + "\n");
+                            // --- GRACIEUX : on n'interrompt pas le flux, on laisse la macro trancher via 0x28 ---
+                            append("[WARN] " + label + " indisponible (" + e4.getMessage() + ") — fallback via 0x28\n");
+                            return new int[]{0, 0, 0}; // fallback neutre
                         }
                     }
                 } else {
-                    append("[ERREUR] " + label + " : " + e2.getMessage() + "\n");
+                    append("[WARN] " + label + " indisponible (" + e2.getMessage() + ") — fallback via 0x28\n");
+                    return new int[]{0, 0, 0};
                 }
             }
         }
-        return new int[]{0,0,0};
     }
 
     /* ================================================================
@@ -515,12 +520,13 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-       Macro C — START
+       Macro C — START (durcie : RUN 0x00 + respiration + 0x23 gracieux + fallback 0x28)
        ================================================================ */
     private void macroStart_locked() {
         if (!checkReady()) return;
         synchronized (lcpLock) {
             try {
+                // 0) ticket en attente ? ménage minimal
                 int[] dsdc = deliveryStatusWithRetry("GET_DEL_STATUS (pré-START)", 3000, 200);
                 if ((dsdc[1] & 0x0001) != 0) {
                     append("[C] Ticket → END+CLEAR\n");
@@ -536,6 +542,7 @@ public class MainActivity extends AppCompatActivity {
 
                 append("[C] START…\n");
 
+                // 1) Paramètres livraison
                 LcrSimpleDeliverV2.Params p = new LcrSimpleDeliverV2.Params();
                 p.port     = serialPort;
                 p.toAddr   = parseIntSafe(edtTo.getText().toString(),   0xFA);
@@ -546,7 +553,35 @@ public class MainActivity extends AppCompatActivity {
                 LcrSimpleDeliverV2 d = new LcrSimpleDeliverV2(p, lcpOps);
                 d.unlock();
                 d.prestart();
-                d.start();
+
+                // 2) RUN 0x00 (retry robuste)
+                issueCommandWithRetry("RUN (#0)", 0x00, 3000, 200);
+
+                // 3) micro-respiration
+                try { Thread.sleep(250); } catch(Exception ignore){}
+
+                // 4) Attente démarrage : chemin A (0x23) gracieux, puis chemin B (0x28)
+                long tStart = System.currentTimeMillis();
+                boolean ok = false;
+                while (System.currentTimeMillis() - tStart < 5000) {
+                    // Chemin A — GET_MACHINE (gracieux, peut fallback via 0x28 plus loin)
+                    int[] msd = machineStatusWithRetry("CHECK (0x23)", 3000, 150);
+                    int ds = msd[1], dc2 = msd[2];
+                    boolean flow   = (dc2 & LcpOps.LCRSc_FLOW_ACTIVE) != 0;
+                    boolean active = (dc2 & LcpOps.LCRSc_DELIVERY_ACTIVE) != 0;
+                    boolean begin  = (ds  & LcpOps.LCRSc_BEGIN_DELIVERY) != 0;
+                    if (flow || active || begin) { ok = true; break; }
+
+                    // Chemin B — fallback GET_DEL_STATUS (0x28)
+                    int[] dsdc3 = deliveryStatusWithRetry("CHECK (0x28)", 3000, 150);
+                    boolean flow2   = (dsdc3[1] & LcpOps.LCRSc_FLOW_ACTIVE) != 0;
+                    boolean active2 = (dsdc3[1] & LcpOps.LCRSc_DELIVERY_ACTIVE) != 0;
+                    if (flow2 || active2) { ok = true; break; }
+
+                    try { Thread.sleep(200); } catch(Exception ignore){}
+                }
+
+                if (!ok) throw new Exception("START_TIMEOUT: aucun indicateur (FLOW/ACTIVE/BEGIN) dans la fenêtre.");
 
                 append("[C] START OK\n");
 
