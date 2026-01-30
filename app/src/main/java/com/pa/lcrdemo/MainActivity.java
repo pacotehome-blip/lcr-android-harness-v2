@@ -59,6 +59,24 @@ public class MainActivity extends AppCompatActivity {
     private void freezeResyncFor(long ms){ resyncFreezeUntil = System.currentTimeMillis() + ms; }
     private boolean canResyncNow(){ return System.currentTimeMillis() > resyncFreezeUntil; }
 
+    // ==== IDs Confirmés par la table des champs ====
+    private static final int FIELD_PRODUCT      = 0x00; // #0 ProductNumber
+    private static final int FIELD_NET_PRESET   = 0x06; // #6 NetPreset
+    private static final int FIELD_GROSS_PRESET = 0x05; // #5 GrossPreset
+    private static final int FIELD_GROSS_COUNT  = 0x2C; // #44 GrossCount
+    private static final int FIELD_NET_COUNT    = 0x2D; // #45 NetCount
+    private static final int FIELD_GROSS_TOTAL  = 0x11; // #17 GrossTotal
+    private static final int FIELD_NET_TOTAL    = 0x12; // #18 NetTotal
+    private static final int FIELD_DECIMALS     = 0x27; // #39 Decimals
+
+    // ==== Mise à l’échelle LV (implied decimal via #39) ====
+    private volatile int    qtyDecimals = 1;  // 0..3 → 2/1/0/3 décimales effectives
+    private volatile double qtyDivisor  = 10.0;
+
+    // ==== Snap au départ pour totalizers ====
+    private Integer grossTot0 = null;
+    private Integer netTot0   = null;
+
     /* ================================================================
        Receivers USB
        ================================================================ */
@@ -72,7 +90,7 @@ public class MainActivity extends AppCompatActivity {
                 connectPort(device);
             } else {
                 append("Permission USB refusée\n");
-                try { if (serialPort != null) serialPort.close(); } catch(Exception ignored){}
+                try { if (serialPort != null) { serialPort.close(); } } catch(Exception ignored){}
                 serialPort = null;
                 lcpLink = null;
                 lcpOps  = null;
@@ -236,6 +254,26 @@ public class MainActivity extends AppCompatActivity {
                 append("[CONNECT] RESYNC best-effort: " + e.getMessage() + "\n");
             }
 
+            // === Lire DECIMALS (#39) pour la mise à l’échelle des LV ===
+            try {
+                byte[] v = lcpOps.opGetField(FIELD_DECIMALS, 3000);
+                int code = (v != null && v.length > 0) ? (v[0] & 0xFF) : 1; // défaut=dixièmes
+                // 0=Hundredths(2), 1=Tenths(1), 2=Whole(0), 3=Thousandths(3)
+                switch (code) {
+                    case 0: qtyDecimals = 2; break;
+                    case 1: qtyDecimals = 1; break;
+                    case 2: qtyDecimals = 0; break;
+                    case 3: qtyDecimals = 3; break;
+                    default: qtyDecimals = 1;
+                }
+                qtyDivisor = Math.pow(10.0, qtyDecimals);
+                append(String.format("[CONNECT] DECIMALS (#39)=%d → %d décimales (div=%s)\n",
+                        code, qtyDecimals, String.format("%.0f", qtyDivisor)));
+            } catch(Exception e) {
+                qtyDecimals = 1; qtyDivisor = 10.0;
+                append("[CONNECT] DECIMALS (#39) indisponible → défaut=1 décimale\n");
+            }
+
         } catch(Exception e){
             append("ERREUR ouverture USB: " + e.getMessage() + "\n");
         } finally {
@@ -340,7 +378,7 @@ public class MainActivity extends AppCompatActivity {
         return new int[]{0,0};
     }
 
-    // Wake best-effort (peu utilisé avec le flow)
+    // Wake best-effort (rarement utile en FLOW)
     private int[] machineStatusWithRetry(String label, int timeoutMs, int pauseMs){
         byte[] payload = new byte[]{0x23};
         try {
@@ -395,8 +433,20 @@ public class MainActivity extends AppCompatActivity {
         return null;
     }
 
-    // --- Helpers preset/compteurs ---
-    private Integer readNetCountI32Safe() { try { return getFieldI32WithRetry("GET_FIELD #45 (NetCount)", 45, 3000); } catch(Exception e){ return null; } }
+    // === Helpers LV avec échelle (#39) ===
+    private String fmtLV(Integer raw){
+        if (raw == null) return "—";
+        return String.format("%,." + qtyDecimals + "f", raw / qtyDivisor);
+    }
+    private String fmtLVDiff(Integer curr, Integer base){
+        if (curr==null || base==null) return "(+—)";
+        long d = (long)curr - (long)base;
+        if (d < 0) d = 0;
+        return String.format("(+%," + qtyDecimals + "." + qtyDecimals + "f)", d / qtyDivisor);
+    }
+
+    // --- Helpers COUNT/NETCOUNT ---
+    private Integer readNetCountI32Safe() { try { return getFieldI32WithRetry("GET_FIELD #45 (NetCount)", FIELD_NET_COUNT, 3000); } catch(Exception e){ return null; } }
     private int safeDelta(Integer curr, Integer base) {
         if (curr == null || base == null) return 0;
         long d = (long)curr - (long)base;
@@ -487,7 +537,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /* ================================================================
-      Macro C — START orienté FLOW (RUN relaxé)
+      Macro C — START orienté FLOW (RUN relaxé) + Totaux (départ & live)
       ================================================================ */
     private void macroStart_locked() {
         if (!checkReady()) return;
@@ -511,29 +561,47 @@ public class MainActivity extends AppCompatActivity {
 
                 int product = parseIntSafe(safeStr(edtProduct.getText()), 1);
                 double preset = parseDoubleSafe(safeStr(edtPreset.getText()), 50.0);
-                int preset_i32 = (int)Math.round(preset * 10.0);
+                int preset_i32 = (int)Math.round(preset * qtyDivisor); // LV→i32 selon decimals
                 final boolean presetEnabled = (preset_i32 > 0);
 
+                // (Re)lire DECIMALS avant
                 try {
-                    lcpOps.opSetField(0, new byte[]{ (byte)(product & 0xFF) }, 3000);
+                    byte[] v = lcpOps.opGetField(FIELD_DECIMALS, 3000);
+                    int code = (v != null && v.length > 0) ? (v[0] & 0xFF) : 1;
+                    switch (code) { case 0: qtyDecimals=2; break; case 1: qtyDecimals=1; break; case 2: qtyDecimals=0; break; case 3: qtyDecimals=3; break; default: qtyDecimals=1; }
+                    qtyDivisor = Math.pow(10.0, qtyDecimals);
+                    // recalcul preset_i32 si l’utilisateur a changé la config
+                    preset_i32 = (int)Math.round(preset * qtyDivisor);
+                } catch(Exception ignore){}
+
+                try {
+                    lcpOps.opSetField(FIELD_PRODUCT, new byte[]{ (byte)(product & 0xFF) }, 3000);
                     append(String.format("[C] SET_FIELD #0 (product) = %d\n", product));
                 } catch(Exception e) {
                     append("[C] WARN: SET_FIELD #0 (product) ignoré: " + e.getMessage() + "\n");
                 }
 
                 if (presetEnabled) {
-                    lcpOps.opSetField(6, LcpOps.i32be(preset_i32), 3000);
-                    lcpOps.opSetField(5, LcpOps.i32be(0),          3000);
-                    append(String.format("[C] PRÉSET actif : %,.1f (arrêt demandé au seuil). Le gun peut créer un léger dépassement.\n", preset));
+                    lcpOps.opSetField(FIELD_NET_PRESET,   i32be(preset_i32), 3000);
+                    lcpOps.opSetField(FIELD_GROSS_PRESET, i32be(0),           3000);
+                    append(String.format("[C] PRÉSET actif : %s (arrêt demandé au seuil). Le gun peut créer un léger dépassement.\n",
+                            String.format("%,."+qtyDecimals+"f", preset)));
                 } else {
                     append("[C] PRÉSET = 0 → Mode AUTO : aucun arrêt logiciel ne sera imposé.\n");
                 }
 
-                issueRunWithGrace();  // <-- version relaxée
+                issueRunWithGrace();  // <-- version relaxée (pas de 0x7D)
 
-                Integer g0 = getFieldI32WithRetry("GET_FIELD #44 (GrossCount0)", 44, 3000);
-                Integer n0 = getFieldI32WithRetry("GET_FIELD #45 (NetCount0)",   45, 3000);
+                // Références COUNT
+                Integer g0 = getFieldI32WithRetry("GET_FIELD #44 (GrossCount0)", FIELD_GROSS_COUNT, 3000);
+                Integer n0 = getFieldI32WithRetry("GET_FIELD #45 (NetCount0)",   FIELD_NET_COUNT,   3000);
 
+                // Snap TOTALIZERS départ
+                grossTot0 = getFieldI32WithRetry("GET_FIELD GrossTotal0 (#17)",  FIELD_GROSS_TOTAL, 3000);
+                netTot0   = getFieldI32WithRetry("GET_FIELD NetTotal0 (#18)",    FIELD_NET_TOTAL,   3000);
+                append(String.format("[C] Totaux départ: Gross=%s  Net=%s\n", fmtLV(grossTot0), fmtLV(netTot0)));
+
+                // Attente FLOW
                 append("[C] En attente FLOW (ouvrir le gun) …\n");
                 long tStart = System.currentTimeMillis();
                 boolean flowSeen = false;
@@ -544,7 +612,7 @@ public class MainActivity extends AppCompatActivity {
                     boolean active = (dc2 & LcpOps.LCRSc_DELIVERY_ACTIVE) != 0;
                     if (flow || active) { flowSeen = true; break; }
 
-                    // Fallback via compteurs (peut être commenté si l'install "queue" trop)
+                    // Fallback via compteurs (commentable si besoin)
                     Integer n = readNetCountI32Safe();
                     if (safeDelta(n, n0) > 0) { flowSeen = true; break; }
 
@@ -563,7 +631,16 @@ public class MainActivity extends AppCompatActivity {
 
                         Integer n = readNetCountI32Safe();
                         int delta = safeDelta(n, n0);
-                        append(String.format("[C] Livré (net) = %,.1f / %,.1f\n", delta / 10.0, preset_i32 / 10.0));
+                        append(String.format("[C] Livré (net courante) = %s / %s\n",
+                                String.format("%,."+qtyDecimals+"f", delta / qtyDivisor),
+                                String.format("%,."+qtyDecimals+"f", preset)));
+
+                        // Totaux live
+                        Integer gTot = getFieldI32WithRetry("GET_FIELD GrossTotal (#17)", FIELD_GROSS_TOTAL, 3000);
+                        Integer nTot = getFieldI32WithRetry("GET_FIELD NetTotal (#18)",   FIELD_NET_TOTAL,   3000);
+                        append(String.format("[C] Totaux: Gross=%s %s  Net=%s %s\n",
+                                fmtLV(gTot), fmtLVDiff(gTot, grossTot0),
+                                fmtLV(nTot), fmtLVDiff(nTot, netTot0)));
 
                         if (!endSent && delta >= preset_i32) {
                             append("[C] Seuil atteint → demande d’arrêt (END #2)\n");
@@ -576,6 +653,22 @@ public class MainActivity extends AppCompatActivity {
 
                         try { Thread.sleep(250); } catch(Exception ignore){}
                     }
+                } else {
+                    // Mode AUTO : afficher les totalizers tant que FLOW=1
+                    while (true) {
+                        int[] s = deliveryStatusWithRetry("CHECK (0x28)", 3000, 250);
+                        int dc2 = s[1];
+                        boolean flow = (dc2 & LcpOps.LCRSc_FLOW_ACTIVE) != 0;
+
+                        Integer gTot = getFieldI32WithRetry("GET_FIELD GrossTotal (#17)", FIELD_GROSS_TOTAL, 3000);
+                        Integer nTot = getFieldI32WithRetry("GET_FIELD NetTotal (#18)",   FIELD_NET_TOTAL,   3000);
+                        append(String.format("[C] Totaux: Gross=%s %s  Net=%s %s\n",
+                                fmtLV(gTot), fmtLVDiff(gTot, grossTot0),
+                                fmtLV(nTot), fmtLVDiff(nTot, netTot0)));
+
+                        if (!flow) { append("[C] FLOW retombé → fin de livraison (mode AUTO)\n"); break; }
+                        try { Thread.sleep(300); } catch(Exception ignore){}
+                    }
                 }
 
                 append("[C] START OK\n");
@@ -584,6 +677,16 @@ public class MainActivity extends AppCompatActivity {
                 append("[C] ERREUR: " + e.getMessage() + "\n");
             }
         }
+    }
+
+    // ---- i32 BE util (évite d’importer depuis LcpOps) ----
+    private static byte[] i32be(int v) {
+        return new byte[] {
+                (byte)((v >> 24) & 0xFF),
+                (byte)((v >> 16) & 0xFF),
+                (byte)((v >> 8)  & 0xFF),
+                (byte)(v & 0xFF)
+        };
     }
 
     // RUN (#0) gracieux — utilise la version "relaxée" (pas de 0x7D après rc=0x26)
@@ -656,8 +759,12 @@ public class MainActivity extends AppCompatActivity {
                     append("[RAW] PURGE+RESYNC (unique) puis retry\n");
                     resyncBudget--;
                     purgeAndResyncBestEffort();
-                    try { preSendThrottle(200); byte[] rsp = lcpLink.sendRecv(payload, timeout); append("[RAW] RX size=" + rsp.length + " (après RESYNC)\n"); }
-                    catch(Exception e2){ append("[RAW] ERREUR après RESYNC: " + e2.getMessage() + "\n"); }
+                    try { preSendThrottle(200);
+                        byte[] rsp = lcpLink.sendRecv(payload, timeout);
+                        append("[RAW] RX size=" + rsp.length + " (après RESYNC)\n");
+                    } catch(Exception e2){
+                        append("[RAW] ERREUR après RESYNC: " + e2.getMessage() + "\n");
+                    }
                 }
             }
         }
