@@ -1,4 +1,3 @@
-
 package com.pa.lcrdemo;
 
 import android.app.AlertDialog;
@@ -28,6 +27,7 @@ import com.hoho.android.usbserial.driver.UsbSerialProber;
 import com.pa.lcr.lcp.LcpLink;
 import com.pa.lcr.lcp.LcpOps;
 
+import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -169,7 +169,6 @@ public class MainActivity extends AppCompatActivity {
         findViewById(R.id.btnA).setOnClickListener(v -> runLcpTask(this::macroReset_locked));
         findViewById(R.id.btnB).setOnClickListener(v -> runLcpTask(this::macroPing28_locked));
         findViewById(R.id.btnC).setOnClickListener(v -> runLcpTask(this::macroStart_locked));
-        // ✅ correction: pas de parenthèse en trop
         findViewById(R.id.btnSendHex).setOnClickListener(v -> promptAndSendHex());
 
         append("Prêt. Branchez le LCR puis cliquez 'Connexion USB'.\n");
@@ -608,26 +607,20 @@ public class MainActivity extends AppCompatActivity {
                 netTot0   = getFieldI32WithRetry("GET_FIELD NetTotal0 (#18)",    FIELD_NET_TOTAL,   3000);
                 append(String.format("[C] Totaux départ: Gross=%s  Net=%s\n", fmtLV(grossTot0), fmtLV(netTot0)));
 
-                // Attente FLOW
+                // === NOUVELLE ATTENTE FLOW (équivalente Python, via GET_MACHINE 0x23) ===
                 append("[C] En attente FLOW (ouvrir le gun) …\n");
-                long tStart = System.currentTimeMillis();
-                boolean flowSeen = false;
-                while (System.currentTimeMillis() - tStart < 8000) {
-                    int[] s = deliveryStatusWithRetry("WAIT_FLOW (0x28)", 5000, 200);
-                    int dc2 = s[1];
-                    boolean flow   = (dc2 & LcpOps.LCRSc_FLOW_ACTIVE) != 0;
-                    boolean active = (dc2 & LcpOps.LCRSc_DELIVERY_ACTIVE) != 0;
-                    if (flow || active) { flowSeen = true; break; }
-
-                    // Fallback compteurs (commenter si souhait de silence total)
-                    Integer n = readNetCountI32Safe();
-                    if (safeDelta(n, n0) > 0) { flowSeen = true; break; }
-
-                    try { Thread.sleep(200); } catch(Exception ignore){}
+                try {
+                    // IMPORTANT : RUN a été envoyé juste avant → on N'ENVOIE PAS à nouveau RUN
+                    boolean ok = lcpLink.startDeliveryAndWaitFlow(false, 20_000, 200, true, true);
+                    if (!ok) {
+                        append("[C] ERREUR: attente FLOW a échoué\n");
+                        return;
+                    }
+                    append("[C] FLOW détecté → livraison en cours.\n");
+                } catch (IOException e) {
+                    append("[C] ERREUR: START_TIMEOUT (attente FLOW) : " + e.getMessage() + "\n");
+                    return;
                 }
-
-                if (!flowSeen) { append("[C] ERREUR: START_TIMEOUT: FLOW jamais activé (gun non ouvert/interlock?)\n"); return; }
-                append("[C] FLOW détecté → livraison en cours.\n");
 
                 if (presetEnabled) {
                     boolean endSent = false;
@@ -760,7 +753,7 @@ public class MainActivity extends AppCompatActivity {
         };
     }
 
-    // RUN (#0) gracieux — utilise la version "relaxée" (pas de 0x7D après rc=0x26)
+    // RUN (#0) gracieux — version "relaxée" (pas de 0x7D après rc=0x26)
     private void issueRunWithGrace() {
         try {
             int rc = lcpOps.opIssueCommandRelaxed(0x00, 5000, 250);
@@ -829,111 +822,3 @@ public class MainActivity extends AppCompatActivity {
                             append("[RAW] 0x7D (CHECK_REQUEST) est géré automatiquement par LcpOps — envoi UI bloqué.\n");
                             return;
                         }
-
-                        runLcpTask(() -> sendRawPayload_locked(pl, to));
-                    }catch(Exception e){
-                        append("[RAW] invalide: " + e.getMessage() + "\n");
-                    }
-                })
-                .setNegativeButton("Annuler",null)
-                .show();
-    }
-
-    private void sendRawPayload_locked(byte[] payload, int timeout){
-        if (!checkReady()) return;
-        synchronized(lcpLock){
-            try{
-                resyncBudget = 1;
-                append("[RAW] Envoi payload: " + bytesToHex(payload) + "\n");
-                preSendThrottle(200);
-                byte[] rsp = lcpLink.sendRecv(payload, timeout);
-                append("[RAW] RX size=" + rsp.length + "\n");
-            }catch(Exception e){
-                append("[RAW] ERREUR: " + e.getMessage() + "\n");
-                if (resyncBudget > 0 && canResyncNow()) {
-                    append("[RAW] PURGE+RESYNC (unique) puis retry\n");
-                    resyncBudget--;
-                    purgeAndResyncBestEffort();
-                    try { preSendThrottle(200);
-                        byte[] rsp = lcpLink.sendRecv(payload, timeout);
-                        append("[RAW] RX size=" + rsp.length + " (après RESYNC)\n");
-                    } catch(Exception e2){
-                        append("[RAW] ERREUR après RESYNC: " + e2.getMessage() + "\n");
-                    }
-                }
-            }
-        }
-    }
-
-    /* ================================================================
-       UTIL
-       ================================================================ */
-    private boolean checkReady(){
-        if (serialPort == null || lcpLink == null || lcpOps == null) {
-            append("Port/LCP non prêt.\n");
-            return false;
-        }
-        return true;
-    }
-
-    private void runLcpTask(Runnable r){
-        setButtonsEnabled(false);
-        lcpExec.execute(() -> { try { r.run(); } finally { setButtonsEnabled(true); } });
-    }
-
-    private void setButtonsEnabled(boolean enabled){
-        runOnUiThread(() -> {
-            int[] ids = {
-                R.id.btnA, R.id.btnB, R.id.btnC, R.id.btnScan, R.id.btnSendHex,
-                R.id.btnTestUsb, R.id.btnConnect, R.id.btnDiag, R.id.btnStart
-            };
-            for (int id : ids) {
-                View v = findViewById(id);
-                if (v != null) v.setEnabled(enabled);
-            }
-        });
-    }
-
-    private void ensureDefaultAddresses() {
-        runOnUiThread(() -> {
-            if (edtTo != null && !"0xFA".equalsIgnoreCase(safeStr(edtTo.getText())))
-                edtTo.setText("0xFA");
-            if (edtFrom != null && !"0xFF".equalsIgnoreCase(safeStr(edtFrom.getText())))
-                edtFrom.setText("0xFF");
-        });
-    }
-
-    private int parseIntSafe(String s, int def){
-        try { return Integer.parseInt(s.replace("0x",""), 16); }
-        catch(Exception e){ return def; }
-    }
-
-    private double parseDoubleSafe(String s, double def){
-        try{ return Double.parseDouble(s); }
-        catch(Exception e){ return def; }
-    }
-
-    private String safeStr(CharSequence cs){
-        return cs==null? "" : cs.toString().trim();
-    }
-
-    private byte[] parseHexBytes(String s){
-        String c = s.replaceAll("(?i)0x","").replaceAll("[^0-9A-Fa-f]","");
-        if (c.length()==0) throw new IllegalArgumentException("aucun hex");
-        if (c.length()%2!=0) c = "0"+c;
-        int n = c.length()/2;
-        byte[] b = new byte[n];
-        for (int i=0;i<n;i++) b[i] = (byte)Integer.parseInt(c.substring(2*i,2*i+2),16);
-        return b;
-    }
-
-    private void append(String s){
-        runOnUiThread(() -> log.append(s));
-    }
-
-    private void appendAndBuffer(String s){
-        logBuf.append(s);
-        if(!s.endsWith("\n")) logBuf.append("\n");
-        append(s + "\n");
-    }
-}
