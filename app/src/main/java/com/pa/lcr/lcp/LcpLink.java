@@ -17,6 +17,26 @@ public class LcpLink {
     private static final int SEED = 0x7E7E;   // CRC initial seed
     private static final int POLY = 0x1021;   // CRC polynomial
 
+    // --- LCP opcodes & RC (parité avec Python lcr_simple_deliverV2.py) ---
+    public static final int MSG_GET_FIELD        = 0x20;
+    public static final int MSG_SET_FIELD        = 0x21;
+    public static final int MSG_PRINT_TEXT       = 0x22;
+    public static final int MSG_GET_MACHINE      = 0x23;
+    public static final int MSG_ISSUE_COMMAND    = 0x24;
+    public static final int MSG_GET_DEL_STATUS   = 0x28;
+    public static final int MSG_CHECK_REQUEST    = 0x7D;
+
+    public static final int RC_OK                = 0x00;
+    public static final int RC_REQUEST_QUEUED    = 0x26;
+    public static final int RC_NO_REQUEST_ACTIVE = 0x27;
+    public static final int RC_REQUEST_ABORTED   = 0x28;
+
+    // --- Masques LCR (delCode) ---
+    public static final int LCRSc_DEL_TICKET_PENDING = 0x0001;
+    public static final int LCRSc_FLOW_ACTIVE        = 0x0004;
+    public static final int LCRSc_DELIVERY_ACTIVE    = 0x0008;
+    public static final int LCRSc_BEGIN_DELIVERY     = 0x0400;
+
     public static boolean DUMP_TX = false;
     public static boolean DUMP_RX = false;
 
@@ -79,7 +99,6 @@ public class LcpLink {
         for (byte x : in) {
             if ((x & 0xFF) == ESC || (x & 0xFF) == TILDE)
                 out.add((byte) ESC);
-
             out.add(x);
         }
         return out.toByteArray();
@@ -272,63 +291,70 @@ public class LcpLink {
         return Arrays.copyOfRange(frame, 6, 6 + ln);
     }
 
+    // Aides endianness (parité Python)
+    private static int u16be(byte[] b, int off) {
+        return ((b[off] & 0xFF) << 8) | (b[off + 1] & 0xFF);
+    }
+    private static int i32be(byte[] b, int off) {
+        return ((b[off] & 0xFF) << 24)
+             | ((b[off + 1] & 0xFF) << 16)
+             | ((b[off + 2] & 0xFF) << 8)
+             |  (b[off + 3] & 0xFF);
+    }
+
+    // Alias conviviaux
+    public static int  status(byte[] frame)  { return extractStatus(frame); }
+    public static byte[] payload(byte[] fr)  { return extractPayload(fr); }
+
     /* ================================================================
-       UTIL
+       QUEUE 0x7D : attente des requêtes "queued"
+       (parité avec wait_queued() Python)
+       ================================================================ */
+    private byte[] waitQueued(double timeoutSec, double pollSec) throws IOException {
+        long tEnd = System.currentTimeMillis() + (long)(timeoutSec * 1000);
+        byte[] last = new byte[0];
+        while (System.currentTimeMillis() < tEnd) {
+            byte[] rsp = sendRecv(new byte[]{ (byte)MSG_CHECK_REQUEST }, 2000);
+            byte[] p = payload(rsp);
+            if (p != null && p.length > 0) last = p;
+
+            if (p == null || p.length == 0) {
+                sleepMs((int)(pollSec*1000));
+                continue;
+            }
+            int rc = p[0] & 0xFF;
+            if (rc == RC_REQUEST_ABORTED) throw new IOException("Queued aborted");
+            if (rc == RC_REQUEST_QUEUED || rc == RC_NO_REQUEST_ACTIVE) {
+                sleepMs((int)(pollSec*1000));
+                continue;
+            }
+            if (rc == RC_OK && p.length >= 3 && (p[1] & 0xFF) == RC_OK) {
+                return Arrays.copyOfRange(p, 1, p.length);
+            }
+            return p;
+        }
+        throw new IOException("Queued timeout, last=" + hex(last));
+    }
+
+    private static void sleepMs(int ms){
+        try { Thread.sleep(ms); } catch (InterruptedException ignored) {}
+    }
+
+    /* ================================================================
+       OPÉRATIONS HAUT NIVEAU (parité avec Python)
        ================================================================ */
 
-    private static String hex(byte[] b) {
-        if (b == null) return "(null)";
-        StringBuilder sb = new StringBuilder();
-        for (byte x : b) sb.append(String.format("%02X ", x));
-        return sb.toString().trim();
+    // GET_FIELD (#num)
+    public byte[] opGetField(int fieldNum) throws IOException {
+        byte[] rsp = sendRecv(new byte[]{ (byte)MSG_GET_FIELD, (byte)(fieldNum & 0xFF) }, 2000);
+        int st = status(rsp); byte[] p = payload(rsp);
+        if ( ((st & 0x04) != 0) || (p != null && p.length>0 && (p[0]&0xFF)==RC_REQUEST_QUEUED) )
+            p = waitQueued(5.0, 0.2);
+        if (p == null || p.length < 1) throw new IOException("Empty GET field #"+fieldNum);
+        if ((p[0] & 0xFF) != RC_OK) throw new IOException(String.format("GET field #%d rc=0x%02X", fieldNum, p[0]));
+        return Arrays.copyOfRange(p, 2, p.length); // p[2:]
     }
 
-    /* Petit builder */
-    private static class ByteArrayBuilder {
-        private byte[] buf;
-        private int len;
-
-        ByteArrayBuilder() {
-            this(64);
-        }
-
-        ByteArrayBuilder(int cap) {
-            buf = new byte[cap];
-            len = 0;
-        }
-
-        void add(byte b) {
-            ensure(1);
-            buf[len++] = b;
-        }
-
-        void add(byte[] bb) {
-            if (bb == null) return;
-            ensure(bb.length);
-            System.arraycopy(bb, 0, buf, len, bb.length);
-            len += bb.length;
-        }
-
-        byte[] toByteArray() {
-            return Arrays.copyOf(buf, len);
-        }
-
-        private void ensure(int n) {
-            if (len + n > buf.length) {
-                int nc = Math.max(buf.length * 2, len + n);
-                buf = Arrays.copyOf(buf, nc);
-            }
-        }
-
-        static byte[] concat(byte[] a, byte[] b) {
-            if (a == null || a.length == 0) return b;
-            if (b == null || b.length == 0) return a;
-            byte[] out = Arrays.copyOf(a, a.length + b.length);
-            System.arraycopy(b, 0, out, a.length, b.length);
-            return out;
-        }
-    }
-
-    /* Logger */
-    public interface Logger { void log(String s); }
-}
+    // SET_FIELD (#num, data)
+    public void opSetField(int fieldNum, byte[] data) throws IOException {
+        byte[] pl = new byte[2 + (data==null?0:data.length)];
