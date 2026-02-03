@@ -361,7 +361,7 @@ public class LcpLink {
     // SET_FIELD (#num, data)
     public void opSetField(int fieldNum, byte[] data) throws IOException {
         byte[] pl = new byte[2 + (data==null?0:data.length)];
-        pl[0] = (byte)MSG_SET_FIELD; 
+        pl[0] = (byte)MSG_SET_FIELD;
         pl[1] = (byte)(fieldNum & 0xFF);
         if (data != null && data.length > 0) {
             System.arraycopy(data, 0, pl, 2, data.length);
@@ -423,27 +423,20 @@ public class LcpLink {
     }
 
     /* ================================================================
-       START + ATTENTE FLOW (état WAIT_FOR_FLOW reproduit depuis Python)
-       - RUN 0x00 (ou 0x01)
-       - poll 200–300 ms
-       - front montant FLOW (anti-rebond 2 confirmations)
-       - filet : variation de GrossCount0 (#44)
+       WAIT_FOR_FLOW (équivalent Python) — NE PAS envoyer RUN
        ================================================================ */
-    public boolean startDeliveryAndWaitFlow(boolean useCmd00,
-                                            long timeoutMs,
-                                            long pollMs,
-                                            boolean acceptFlow,
-                                            boolean acceptCounts) throws IOException {
-        // 1) RUN
-        if (useCmd00) opIssueCommand(0x00); else opIssueCommand(0x01);
+    public boolean waitForFlowOnly(long timeoutMs,
+                                   long pollMs,
+                                   boolean acceptFlow,
+                                   boolean acceptCounts) throws IOException {
 
-        // 2) Référence compteur (#44) optionnelle
+        // 1) Référence compteur (#44) optionnelle
         int g0 = 0;
         try { g0 = i32be(opGetField(44), 0); } catch (Exception ignored){}
 
         long tEnd = System.currentTimeMillis() + timeoutMs;
         boolean prevFlow = false;
-        int flowTrueConsec = 0; // anti-rebond minimal (2 confirmations)
+        int flowTrueConsec = 0; // anti-rebond (2 confirmations)
 
         while (System.currentTimeMillis() < tEnd) {
             int[] ms = opMachineStatusFull(); // (dev, ds, dc)
@@ -452,7 +445,7 @@ public class LcpLink {
             boolean active = (dc & LCRSc_DELIVERY_ACTIVE) != 0;
             boolean begin  = (dc & LCRSc_BEGIN_DELIVERY) != 0;
 
-            log(String.format("[POLL] delCode=0x%04X flow=%s active=%s", dc, flow, active));
+            log(String.format("[WAIT_FLOW] delCode=0x%04X flow=%s active=%s", dc, flow, active));
 
             // Conditions de sortie
             if (active || begin) return true;
@@ -460,7 +453,7 @@ public class LcpLink {
             // Front montant FLOW avec anti-rebond
             if (acceptFlow) {
                 if (flow) { flowTrueConsec++; } else { flowTrueConsec = 0; }
-                if (!prevFlow && flowTrueConsec >= 2) return true; // 2 ticks consécutifs
+                if (!prevFlow && flowTrueConsec >= 2) return true;
                 prevFlow = flow;
             }
 
@@ -475,6 +468,38 @@ public class LcpLink {
             sleepMs((int)pollMs);
         }
         throw new IOException("START_TIMEOUT: FLOW non détecté dans le délai");
+    }
+
+    /* ================================================================
+       START + WAIT_FOR_FLOW — envoie RUN puis attend (surcharge CMD)
+       ================================================================ */
+    public boolean startDeliveryAndWaitFlow(int runCmd,
+                                            long timeoutMs,
+                                            long pollMs,
+                                            boolean acceptFlow,
+                                            boolean acceptCounts) throws IOException {
+        // 1) RUN explicite (0x00 ou 0x01)
+        opIssueCommand(runCmd & 0xFF);
+        // 2) Puis attente FLOW
+        return waitForFlowOnly(timeoutMs, pollMs, acceptFlow, acceptCounts);
+    }
+
+    /* ================================================================
+       START + WAIT_FOR_FLOW — compat booléen (legacy)
+       - true  => RUN 0x00 puis attente
+       - false => PAS de RUN, juste attente (pour usage "RUN déjà envoyé")
+       ================================================================ */
+    @Deprecated
+    public boolean startDeliveryAndWaitFlow(boolean useCmd00,
+                                            long timeoutMs,
+                                            long pollMs,
+                                            boolean acceptFlow,
+                                            boolean acceptCounts) throws IOException {
+        if (useCmd00) {
+            return startDeliveryAndWaitFlow(0x00, timeoutMs, pollMs, acceptFlow, acceptCounts);
+        } else {
+            return waitForFlowOnly(timeoutMs, pollMs, acceptFlow, acceptCounts);
+        }
     }
 
     /* ================================================================
