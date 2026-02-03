@@ -6,9 +6,9 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 
 /**
- * DeliveryController — Orchestration “SDK” d'une livraison LCR-II
- * - START (RUN) -> WAIT_FOR_FLOW (0x23 only + anti-rebond + filet #44)
- * - LIVE loop (états + compteurs) avec guard (END #2)
+ * DeliveryController — Orchestration SDK robuste pour LCR-II
+ * - Wake + SET_FIELD (retry soft) -> RUN (retry soft) -> WAIT_FOR_FLOW (0x23 only)
+ * - LIVE loop (états + compteurs) avec guard preset (END #2)
  * - END gracieux (clear FLOW/DEL)
  *
  * Toutes les I/O LCP sont sérialisées via un SingleThreadExecutor.
@@ -34,22 +34,27 @@ public final class DeliveryController {
     private void setState(State s){ state = s; try { events.onStateChanged(s); } catch(Exception ignored){} }
     private static void sleep(int ms){ try { Thread.sleep(ms); } catch (InterruptedException ignored) {} }
 
-    /* ------------------------------------------------------------
-       Méthodes "recipes" haut niveau
-       ------------------------------------------------------------ */
+    /* ================================================================
+       RECIPES HAUT NIVEAU
+       ================================================================ */
 
-    /** Mode ouvert (preset=0) : set product -> clear presets -> RUN 0x00 -> WAIT_FLOW */
+    /** Mode ouvert (preset=0) : wake -> set product -> clear presets -> RUN 0x00 -> WAIT_FLOW */
     public void startOpenMode(int productId, long waitFlowTimeoutMs, long pollMs) {
         exec.execute(() -> {
             try {
                 setState(State.STARTING);
-                setProduct(productId);
-                clearPresets();
 
-                // petite respiration avant RUN (évite chevauchement avec #5/#6)
+                // 0) Wake (stabilise la première écriture)
+                wake();
+
+                // 1) SET product + presets (safe)
+                setProductSafe(productId);
+                clearPresetsSafe();
+
+                // 2) Petite respiration avant RUN
                 sleep(200);
 
-                // RUN 0x00 + attente FLOW avec retry unique "soft resync" si timeout/sync~~
+                // 3) RUN + WAIT_FLOW avec retry soft
                 startWithRetry(waitFlowTimeoutMs, pollMs, true /*cmd00*/);
 
                 setState(State.FLOW_ACTIVE);
@@ -60,18 +65,27 @@ public final class DeliveryController {
         });
     }
 
-    /** Mode preset NET : set product -> write #6 -> #5=0 -> RUN 0x00 -> WAIT_FLOW */
+    /** Mode preset NET : wake -> set product -> write #6 -> #5=0 -> RUN 0x00 -> WAIT_FLOW */
     public void startPresetNet(int productId, double litres, long waitFlowTimeoutMs, long pollMs) {
         exec.execute(() -> {
             try {
                 setState(State.STARTING);
+
+                // 0) Wake
+                wake();
+
+                // 1) Décimales -> preset net (#6)
                 int digits = readDigits();
                 int p6 = (int)Math.round(litres * Math.pow(10, digits));
-                setProduct(productId);
-                writeNetPreset(p6);
 
+                // 2) SET product + #6 (safe)
+                setProductSafe(productId);
+                writeNetPresetSafe(p6);
+
+                // 3) Pause avant RUN
                 sleep(200);
 
+                // 4) RUN + WAIT_FLOW avec retry soft
                 startWithRetry(waitFlowTimeoutMs, pollMs, true /*cmd00*/);
 
                 setState(State.FLOW_ACTIVE);
@@ -82,7 +96,7 @@ public final class DeliveryController {
         });
     }
 
-    /** WAIT_FLOW seul (si RUN a déjà été envoyé ailleurs) */
+    /** WAIT_FLOW seul (si RUN envoyé ailleurs) */
     public void waitForFlowOnly(long timeoutMs, long pollMs) {
         exec.execute(() -> {
             try {
@@ -118,10 +132,9 @@ public final class DeliveryController {
         });
     }
 
-    /* ------------------------------------------------------------
-       LIVE loop (états + compteurs) avec guard optionnel
-       - Aucun Double nullable : targetLitres=NaN si pas de preset
-       ------------------------------------------------------------ */
+    /* ================================================================
+       LIVE loop (états + compteurs) avec guard (pas de Double nullable)
+       ================================================================ */
     public void runLiveLoop(long pollMs,
                             boolean guardEnabled,
                             double guardMarginLitres) {
@@ -131,7 +144,7 @@ public final class DeliveryController {
                 int digits = readDigits();
                 double scale = Math.pow(10, digits);
 
-                // Lire presets : guard sur NET (#6) prioritaire, sinon GROSS (#5)
+                // Lire presets : priorité NET (#6), sinon GROSS (#5)
                 int p5 = readI32OrZero(5);
                 int p6 = readI32OrZero(6);
                 final boolean guardUseNet = (p6 > 0);
@@ -165,7 +178,7 @@ public final class DeliveryController {
                         double deliveredL = guardUseNet ? ((n - n0) / scale) : ((g - g0) / scale);
                         if (deliveredL >= (targetLitres + guardMarginLitres)) {
                             try { events.onGuardReached(); } catch(Exception ignored){}
-                            try { link.opIssueCommand(0x02); } catch(Exception ignored){}
+                            try { link.opIssueCommand(0x02); } catch(Exception ignored) {}
                             guardFired = true;
                         }
                     }
@@ -183,14 +196,57 @@ public final class DeliveryController {
     public void stopLiveLoop() { liveRunning = false; }
 
     /* ================================================================
-       Helpers privés : robustesse START (RUN + retry soft resync)
+       ROBUSTESSE : Wake + SET_FIELD safe + RUN with retry
        ================================================================ */
+
+    private void wake() {
+        try { link.opMachineStatusFull(); } catch(Exception ignored){}
+        sleep(120);
+    }
+
+    private void setProductSafe(int productId) throws IOException {
+        if (productId < 1 || productId > 16)
+            throw new IllegalArgumentException("ProductNumber doit être 1..16");
+        byte v = (byte)((productId - 1) & 0xFF);
+        opSetFieldSafe(0, new byte[]{ v }, "SET_FIELD #0 (product)");
+    }
+
+    private void clearPresetsSafe() throws IOException {
+        opSetFieldSafe(5, i32be(0), "SET_FIELD #5 (gross preset=0)");
+        sleep(120);
+        opSetFieldSafe(6, i32be(0), "SET_FIELD #6 (net preset=0)");
+    }
+
+    private void writeNetPresetSafe(int raw) throws IOException {
+        opSetFieldSafe(6, i32be(raw), "SET_FIELD #6 (net preset)");
+        sleep(120);
+        opSetFieldSafe(5, i32be(0),   "SET_FIELD #5 (gross preset=0)");
+    }
+
+    /**
+     * Écriture résiliente : try -> (softResync + pause) -> retry unique
+     * Remonte IOException si les deux tentatives échouent.
+     */
+    private void opSetFieldSafe(int field, byte[] data, String label) throws IOException {
+        try {
+            link.opSetField(field, data);
+        } catch (IOException e1) {
+            // soft resync + petite pause
+            softResync();
+            sleep(150);
+            link.opSetField(field, data); // deuxième et dernière tentative
+        }
+        sleep(120); // évite collision avec la file 0x7D / latence locale
+    }
+
+    /**
+     * RUN + WAIT_FLOW : try -> (softResync + pause) -> retry unique
+     */
     private void startWithRetry(long waitFlowTimeoutMs, long pollMs, boolean cmd00) throws IOException {
         int runCmd = (cmd00 ? 0x00 : 0x01);
         try {
             link.startDeliveryAndWaitFlow(runCmd, waitFlowTimeoutMs, pollMs, true, true);
         } catch (IOException e1) {
-            // Si le périphérique vient de traiter des SET_FIELD/queue : petit resync+retry
             softResync();
             sleep(200);
             link.startDeliveryAndWaitFlow(runCmd, waitFlowTimeoutMs, pollMs, true, true);
@@ -199,7 +255,6 @@ public final class DeliveryController {
 
     private void softResync() {
         try { link.sendRecv(new byte[]{0x00}, 1200); } catch(Exception ignored){}
-        sleep(120);
     }
 
     /* ================================================================
@@ -221,22 +276,6 @@ public final class DeliveryController {
             int idx = (v != null && v.length > 0) ? (v[0] & 0xFF) : 1;
             return digitsFromIndex(idx);
         } catch (Exception e) { return 1; }
-    }
-
-    private void setProduct(int productId) throws IOException {
-        if (productId < 1 || productId > 16) throw new IllegalArgumentException("ProductNumber doit être 1..16");
-        link.opSetField(0, new byte[]{ (byte)((productId - 1) & 0xFF) }); // #0 = 0-based
-    }
-
-    private void clearPresets() throws IOException {
-        writeGrossPreset(0);
-        writeNetPreset(0);
-    }
-
-    private void writeGrossPreset(int raw) throws IOException { link.opSetField(5, i32be(raw)); }
-    private void writeNetPreset  (int raw) throws IOException {
-        link.opSetField(6, i32be(raw));
-        link.opSetField(5, i32be(0)); // sécurité : seul #6 actif en NET
     }
 
     private static byte[] i32be(int v) {
