@@ -39,8 +39,9 @@ public class MainActivity extends AppCompatActivity {
     // UI
     private TextView txtLog;
     private EditText edtTo, edtFrom, edtProduct, edtPreset;
-    private Button btnConnect, btnStartOpen, btnStartPreset, btnEnd, btnClear, btnCopy;
-    private CheckBox chkIoLog;
+    private Button btnConnect, btnStartOpen /*mapped->btnC*/, btnStartPreset /*mapped->btnStart*/,
+            btnEnd /*mapped->btnA*/, btnClear, btnCopy;
+    private CheckBox switchIoLog; // mapped to existing R.id.switchIoLog
 
     // USB & LCP
     private UsbSerialPort serialPort;
@@ -91,13 +92,18 @@ public class MainActivity extends AppCompatActivity {
         edtFrom      = findViewById(R.id.edtFrom);
         edtProduct   = findViewById(R.id.edtProduct);
         edtPreset    = findViewById(R.id.edtPreset);
+
         btnConnect   = findViewById(R.id.btnConnect);
-        btnStartOpen = findViewById(R.id.btnStartOpen);
-        btnStartPreset = findViewById(R.id.btnStartPreset);
-        btnEnd       = findViewById(R.id.btnEnd);
+        // ---- MAPPINGS SUR TES IDS EXISTANTS ----
+        btnStartOpen   = findViewById(R.id.btnC);      // Start OPEN (preset=0)
+        btnStartPreset = findViewById(R.id.btnStart);  // Start PRESET NET
+        btnEnd         = findViewById(R.id.btnA);      // END
+        // ----------------------------------------
         btnClear     = findViewById(R.id.btnClearLog);
         btnCopy      = findViewById(R.id.btnCopyLog);
-        chkIoLog     = findViewById(R.id.chkIoLog);
+
+        // Toggle I/O log : on réutilise ton ancien ID
+        switchIoLog  = findViewById(R.id.switchIoLog);
     }
 
     private void setDefaults() {
@@ -105,21 +111,32 @@ public class MainActivity extends AppCompatActivity {
         if (edtFrom != null && isEmpty(edtFrom.getText())) edtFrom.setText("0xFF");
         if (edtProduct != null && isEmpty(edtProduct.getText())) edtProduct.setText("1");
         if (edtPreset  != null && isEmpty(edtPreset.getText()))  edtPreset.setText("50.0");
-        if (chkIoLog != null) { chkIoLog.setChecked(true); LcpLink.DUMP_TX = true; LcpLink.DUMP_RX = true; }
+
+        if (switchIoLog != null) {
+            switchIoLog.setChecked(true);
+            LcpLink.DUMP_TX = true;
+            LcpLink.DUMP_RX = true;
+        }
     }
 
     private void wireEvents() {
-        if (btnConnect != null) btnConnect.setOnClickListener(v -> requestAndOpenFirstPort());
-        if (btnStartOpen != null) btnStartOpen.setOnClickListener(v -> startOpenMode());
-        if (btnStartPreset != null) btnStartPreset.setOnClickListener(v -> startPresetNet());
-        if (btnEnd != null) btnEnd.setOnClickListener(v -> endGracefully());
-        if (btnClear != null) btnClear.setOnClickListener(v -> { logBuf.setLength(0); runOnUiThread(() -> txtLog.setText("")); });
-        if (btnCopy  != null) btnCopy.setOnClickListener(v -> copyLog());
+        safeSetOnClick(btnConnect, v -> requestAndOpenFirstPort());
+        safeSetOnClick(btnStartOpen, v -> startOpenMode());
+        safeSetOnClick(btnStartPreset, v -> startPresetNet());
+        safeSetOnClick(btnEnd, v -> endGracefully());
+        safeSetOnClick(btnClear, v -> { logBuf.setLength(0); runOnUiThread(() -> txtLog.setText("")); });
+        safeSetOnClick(btnCopy, v -> copyLog());
 
-        if (chkIoLog != null) chkIoLog.setOnCheckedChangeListener((b, checked) -> {
-            LcpLink.DUMP_TX = checked; LcpLink.DUMP_RX = checked;
-            append("I/O log " + (checked ? "activé" : "désactivé") + "\n");
-        });
+        if (switchIoLog != null) {
+            switchIoLog.setOnCheckedChangeListener((b, checked) -> {
+                LcpLink.DUMP_TX = checked; LcpLink.DUMP_RX = checked;
+                append("I/O log " + (checked ? "activé" : "désactivé") + "\n");
+            });
+        }
+    }
+
+    private void safeSetOnClick(View v, View.OnClickListener l){
+        if (v != null) v.setOnClickListener(l);
     }
 
     /* ================================================================
@@ -211,13 +228,9 @@ public class MainActivity extends AppCompatActivity {
                 null // SingleThread executor par défaut
             );
 
-            // RESYNC best-effort (0x00) + mini banner (facultatif)
-            try {
-                lcpLink.sendRecv(new byte[]{0x00}, 2000);
-                append("[CONNECT] RESYNC 0x00 OK\n");
-            } catch (Exception e) {
-                append("[CONNECT] RESYNC best-effort: " + e.getMessage() + "\n");
-            }
+            // RESYNC best‑effort (0x00)
+            try { lcpLink.sendRecv(new byte[]{0x00}, 2000); append("[CONNECT] RESYNC 0x00 OK\n"); }
+            catch (Exception e) { append("[CONNECT] RESYNC best-effort: " + e.getMessage() + "\n"); }
 
         } catch (Exception e) {
             append("ERREUR ouverture USB: " + e.getMessage() + "\n");
