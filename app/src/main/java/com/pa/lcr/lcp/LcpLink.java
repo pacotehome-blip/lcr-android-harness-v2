@@ -97,8 +97,9 @@ public class LcpLink {
     private byte[] escapeStream(byte[] in) {
         ByteArrayBuilder out = new ByteArrayBuilder(in.length * 2);
         for (byte x : in) {
-            if ((x & 0xFF) == ESC || (x & 0xFF) == TILDE)
+            if ((x & 0xFF) == ESC || (x & 0xFF) == TILDE) {
                 out.add((byte) ESC);
+            }
             out.add(x);
         }
         return out.toByteArray();
@@ -106,6 +107,7 @@ public class LcpLink {
 
     /* ================================================================
        Construction d’un frame (identique Python)
+        - status: bit0 toggle, bit1 SYNC première trame si syncFirst
        ================================================================ */
 
     private byte[] buildFrame(byte[] payload) {
@@ -158,7 +160,7 @@ public class LcpLink {
     }
 
     /* ================================================================
-       readEscapedByte()
+       Lecture d’un octet, avec gestion ESC
        ================================================================ */
 
     private RawByte readEscapedByte(int timeout) throws IOException {
@@ -167,9 +169,9 @@ public class LcpLink {
 
         if (b == ESC) {
             int y = readByte(timeout);
-            if (y < 0)
+            if (y < 0) {
                 return new RawByte(-1, new byte[]{ (byte) ESC });
-
+            }
             return new RawByte(y, new byte[]{ (byte) ESC, (byte) y });
         }
 
@@ -348,8 +350,9 @@ public class LcpLink {
     public byte[] opGetField(int fieldNum) throws IOException {
         byte[] rsp = sendRecv(new byte[]{ (byte)MSG_GET_FIELD, (byte)(fieldNum & 0xFF) }, 2000);
         int st = status(rsp); byte[] p = payload(rsp);
-        if ( ((st & 0x04) != 0) || (p != null && p.length>0 && (p[0]&0xFF)==RC_REQUEST_QUEUED) )
+        if ( ((st & 0x04) != 0) || (p != null && p.length>0 && (p[0]&0xFF)==RC_REQUEST_QUEUED) ) {
             p = waitQueued(5.0, 0.2);
+        }
         if (p == null || p.length < 1) throw new IOException("Empty GET field #"+fieldNum);
         if ((p[0] & 0xFF) != RC_OK) throw new IOException(String.format("GET field #%d rc=0x%02X", fieldNum, p[0]));
         return Arrays.copyOfRange(p, 2, p.length); // p[2:]
@@ -358,3 +361,203 @@ public class LcpLink {
     // SET_FIELD (#num, data)
     public void opSetField(int fieldNum, byte[] data) throws IOException {
         byte[] pl = new byte[2 + (data==null?0:data.length)];
+        pl[0] = (byte)MSG_SET_FIELD; 
+        pl[1] = (byte)(fieldNum & 0xFF);
+        if (data != null && data.length > 0) {
+            System.arraycopy(data, 0, pl, 2, data.length);
+        }
+        byte[] rsp = sendRecv(pl, 2000);
+        int st = status(rsp); byte[] p = payload(rsp);
+        if ( ((st & 0x04) != 0) || (p != null && p.length>0 && (p[0]&0xFF)==RC_REQUEST_QUEUED) ) {
+            p = waitQueued(5.0, 0.2);
+        }
+        if (p == null || p.length < 1 || (p[0] & 0xFF) != RC_OK) {
+            throw new IOException(String.format("SET field #%d rc=%s", fieldNum, p==null?"null":String.format("0x%02X", p[0])));
+        }
+    }
+
+    // ISSUE_COMMAND (RUN/END/etc.)
+    public byte[] opIssueCommand(int cmd) throws IOException {
+        byte[] rsp = sendRecv(new byte[]{ (byte)MSG_ISSUE_COMMAND, (byte)(cmd & 0xFF) }, 2000);
+        int st = status(rsp); byte[] p = payload(rsp);
+        if ( ((st & 0x04) != 0) || (p != null && p.length>0 && (p[0]&0xFF)==RC_REQUEST_QUEUED) ) {
+            p = waitQueued(5.0, 0.2);
+        }
+        if (p == null || p.length < 1 || (p[0] & 0xFF) != RC_OK) {
+            throw new IOException(String.format("Issue cmd=0x%02X rc=%s", cmd, p==null?"null":String.format("0x%02X", p[0])));
+        }
+        return p; // [rcOK, ...]
+    }
+
+    // GET_DEL_STATUS (0x28) -> (ds, dc)
+    public int[] opDeliveryStatus() throws IOException {
+        byte[] rsp = sendRecv(new byte[]{ (byte)MSG_GET_DEL_STATUS }, 2000);
+        int st = status(rsp); byte[] p = payload(rsp);
+        if ( ((st & 0x04) != 0) || (p != null && p.length>0 && (p[0]&0xFF)==RC_REQUEST_QUEUED) ) {
+            p = waitQueued(5.0, 0.2);
+        }
+        if (p == null || p.length < 6 || (p[0] & 0xFF) != RC_OK) {
+            throw new IOException("Delivery status invalid");
+        }
+        int ds = u16be(p, 2);
+        int dc = u16be(p, 4);
+        return new int[]{ ds, dc };
+    }
+
+    // GET_MACHINE (0x23) -> (dev, ds, dc), fallback 0x28 si payload court
+    public int[] opMachineStatusFull() throws IOException {
+        byte[] rsp = sendRecv(new byte[]{ (byte)MSG_GET_MACHINE }, 2000);
+        int st = status(rsp); byte[] p = payload(rsp);
+        if ( ((st & 0x04) != 0) || (p != null && p.length>0 && (p[0]&0xFF)==RC_REQUEST_QUEUED) ) {
+            p = waitQueued(5.0, 0.2);
+        }
+
+        if (p == null || (p.length >= 1 && (p[0] & 0xFF) != RC_OK) || p.length < 8) {
+            int[] d = opDeliveryStatus();
+            return new int[]{ 0x0000, d[0], d[1] };
+        }
+        int dev = u16be(p, 2);
+        int ds  = u16be(p, 4);
+        int dc  = u16be(p, 6);
+        return new int[]{ dev, ds, dc };
+    }
+
+    /* ================================================================
+       START + ATTENTE FLOW (état WAIT_FOR_FLOW reproduit depuis Python)
+       - RUN 0x00 (ou 0x01)
+       - poll 200–300 ms
+       - front montant FLOW (anti-rebond 2 confirmations)
+       - filet : variation de GrossCount0 (#44)
+       ================================================================ */
+    public boolean startDeliveryAndWaitFlow(boolean useCmd00,
+                                            long timeoutMs,
+                                            long pollMs,
+                                            boolean acceptFlow,
+                                            boolean acceptCounts) throws IOException {
+        // 1) RUN
+        if (useCmd00) opIssueCommand(0x00); else opIssueCommand(0x01);
+
+        // 2) Référence compteur (#44) optionnelle
+        int g0 = 0;
+        try { g0 = i32be(opGetField(44), 0); } catch (Exception ignored){}
+
+        long tEnd = System.currentTimeMillis() + timeoutMs;
+        boolean prevFlow = false;
+        int flowTrueConsec = 0; // anti-rebond minimal (2 confirmations)
+
+        while (System.currentTimeMillis() < tEnd) {
+            int[] ms = opMachineStatusFull(); // (dev, ds, dc)
+            int dc = ms[2];
+            boolean flow   = (dc & LCRSc_FLOW_ACTIVE) != 0;
+            boolean active = (dc & LCRSc_DELIVERY_ACTIVE) != 0;
+            boolean begin  = (dc & LCRSc_BEGIN_DELIVERY) != 0;
+
+            log(String.format("[POLL] delCode=0x%04X flow=%s active=%s", dc, flow, active));
+
+            // Conditions de sortie
+            if (active || begin) return true;
+
+            // Front montant FLOW avec anti-rebond
+            if (acceptFlow) {
+                if (flow) { flowTrueConsec++; } else { flowTrueConsec = 0; }
+                if (!prevFlow && flowTrueConsec >= 2) return true; // 2 ticks consécutifs
+                prevFlow = flow;
+            }
+
+            // Filet de sécurité: variation des compteurs => débit
+            if (acceptCounts) {
+                try {
+                    int g = i32be(opGetField(44), 0);
+                    if (g > g0) return true;
+                } catch (Exception ignored){}
+            }
+
+            sleepMs((int)pollMs);
+        }
+        throw new IOException("START_TIMEOUT: FLOW non détecté dans le délai");
+    }
+
+    /* ================================================================
+       LIVE minimal : un échantillon lecture états + compteurs (#44/#45)
+       ================================================================ */
+    public static class LiveSample {
+        public int ds, dc;
+        public double grossL, netL;
+        public boolean flow, active;
+    }
+
+    public LiveSample readLiveOnce(int decimalsDigits) throws IOException {
+        int scale = (int)Math.pow(10, decimalsDigits);
+        int[] ms = opMachineStatusFull(); // dev, ds, dc
+        int g = 0, n = 0;
+        try { g = i32be(opGetField(44), 0); } catch (Exception ignored){}
+        try { n = i32be(opGetField(45), 0); } catch (Exception ignored){}
+        LiveSample s = new LiveSample();
+        s.ds = ms[1]; s.dc = ms[2];
+        s.flow   = (s.dc & LCRSc_FLOW_ACTIVE) != 0;
+        s.active = (s.dc & LCRSc_DELIVERY_ACTIVE) != 0;
+        s.grossL = g / (double)scale;
+        s.netL   = n / (double)scale;
+        return s;
+    }
+
+    /* ================================================================
+       UTIL
+       ================================================================ */
+
+    private static String hex(byte[] b) {
+        if (b == null) return "(null)";
+        StringBuilder sb = new StringBuilder();
+        for (byte x : b) sb.append(String.format("%02X ", x));
+        return sb.toString().trim();
+    }
+
+    /* Petit builder */
+    private static class ByteArrayBuilder {
+        private byte[] buf;
+        private int len;
+
+        ByteArrayBuilder() {
+            this(64);
+        }
+
+        ByteArrayBuilder(int cap) {
+            buf = new byte[cap];
+            len = 0;
+        }
+
+        void add(byte b) {
+            ensure(1);
+            buf[len++] = b;
+        }
+
+        void add(byte[] bb) {
+            if (bb == null) return;
+            ensure(bb.length);
+            System.arraycopy(bb, 0, buf, len, bb.length);
+            len += bb.length;
+        }
+
+        byte[] toByteArray() {
+            return Arrays.copyOf(buf, len);
+        }
+
+        private void ensure(int n) {
+            if (len + n > buf.length) {
+                int nc = Math.max(buf.length * 2, len + n);
+                buf = Arrays.copyOf(buf, nc);
+            }
+        }
+
+        static byte[] concat(byte[] a, byte[] b) {
+            if (a == null || a.length == 0) return b;
+            if (b == null || b.length == 0) return a;
+            byte[] out = Arrays.copyOf(a, a.length + b.length);
+            System.arraycopy(b, 0, out, a.length, b.length);
+            return out;
+        }
+    }
+
+    /* Logger */
+    public interface Logger { void log(String s); }
+}
