@@ -178,15 +178,16 @@ public final class DeliveryController {
 
     /* ================================================================
        Noyau STRICT (0x23 direct, aucun fallback 0x28)
+        - getMachineStrict(...)  -> [ds, dc]
+        - waitFlowStrict(...)
+        - runAndWaitFlowStrictWithRetry(...)
        ================================================================ */
 
     /** Lecture stricte (0x23) : retourne [ds, dc] — exceptions si invalide */
     private int[] getMachineStrict(int timeoutMs) throws IOException {
         byte[] rsp = link.sendRecv(new byte[]{ (byte) LcpLink.MSG_GET_MACHINE }, timeoutMs);
-        int st = LcpLink.extractStatus(rsp);
         byte[] p = LcpLink.extractPayload(rsp);
 
-        // p[0] = rc
         if (p == null || p.length < 1) throw new IOException("GET_MACHINE empty");
         int rc = p[0] & 0xFF;
         if (rc != LcpLink.RC_OK) throw new IOException(String.format("GET_MACHINE rc=0x%02X", rc));
@@ -269,7 +270,7 @@ public final class DeliveryController {
     }
 
     private void clearPresetsSafe() throws IOException {
-        opSetFieldSafe(5, i32be(0), "SET_FIELD #5 (gross=0)");
+        opSetFieldSafe(5, i32be(0), "SET_FIELD #5 (gross=0));
         sleep(120);
         opSetFieldSafe(6, i32be(0), "SET_FIELD #6 (net=0)");
     }
@@ -297,8 +298,28 @@ public final class DeliveryController {
     }
 
     /* ================================================================
-       Helpers : lectures champs & endianness
+       Helpers : décimales (#39), lectures champs & endianness
        ================================================================ */
+
+    private static int digitsFromIndex(int idx) {
+        switch (idx) {
+            case 0:  return 2; // Hundredths
+            case 1:  return 1; // Tenths
+            case 2:  return 0; // Whole
+            case 3:  return 3; // Thousandths
+            default: return 1;
+        }
+    }
+
+    /** Lit #39 et traduit en nombre de décimales (0..3). Par défaut: 1 (tenths). */
+    private int readDigits() {
+        try {
+            byte[] v = link.opGetField(39);
+            int idx = (v != null && v.length > 0) ? (v[0] & 0xFF) : 1;
+            return digitsFromIndex(idx);
+        } catch (Exception e) { return 1; }
+    }
+
     private static byte[] i32be(int v) {
         return new byte[]{
             (byte)((v >> 24) & 0xFF),
@@ -307,6 +328,7 @@ public final class DeliveryController {
             (byte)(v & 0xFF)
         };
     }
+
     private static int u16be(byte[] b, int off) {
         return ((b[off] & 0xFF) << 8) | (b[off + 1] & 0xFF);
     }
@@ -317,17 +339,24 @@ public final class DeliveryController {
             return ((d[0] & 0xFF) << 24) | ((d[1] & 0xFF) << 16) | ((d[2] & 0xFF) << 8) | (d[3] & 0xFF);
         } catch (Exception e) { return 0; }
     }
+
     private Integer readI32Nullable(int field) {
         try {
             byte[] d = link.opGetField(field);
             return ((d[0] & 0xFF) << 24) | ((d[1] & 0xFF) << 16) | ((d[2] & 0xFF) << 8) | (d[3] & 0xFF);
         } catch (Exception e) { return null; }
     }
+
     private int readI32OrFallback(int field, int fb) {
         try {
             byte[] d = link.opGetField(field);
             return ((d[0] & 0xFF) << 24) | ((d[1] & 0xFF) << 16) | ((d[2] & 0xFF) << 8) | (d[3] & 0xFF);
         } catch (Exception e) { return fb; }
+    }
+
+    private void fail(String msg, Throwable t) {
+        setState(State.ERROR);
+        try { events.onError(msg, t); } catch(Exception ignored){}
     }
 
     /* ================================================================
