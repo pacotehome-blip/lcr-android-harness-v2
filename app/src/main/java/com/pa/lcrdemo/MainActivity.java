@@ -1,7 +1,6 @@
 
 package com.pa.lcrdemo;
 
-import android.app.AlertDialog;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.ClipboardManager;
@@ -39,9 +38,9 @@ public class MainActivity extends AppCompatActivity {
     // UI
     private TextView txtLog;
     private EditText edtTo, edtFrom, edtProduct, edtPreset;
-    private Button btnConnect, btnStartOpen /*mapped->btnC*/, btnStartPreset /*mapped->btnStart*/,
-            btnEnd /*mapped->btnA*/, btnClear, btnCopy;
-    private CheckBox switchIoLog; // mapped to existing R.id.switchIoLog
+    private Button btnConnect, btnStartOpen /*btnC*/, btnStartPreset /*btnStart*/,
+            btnEnd /*btnA*/, btnClear, btnCopy;
+    private CheckBox switchIoLog;
 
     // USB & LCP
     private UsbSerialPort serialPort;
@@ -50,11 +49,8 @@ public class MainActivity extends AppCompatActivity {
 
     // Utils
     private final StringBuilder logBuf = new StringBuilder(16 * 1024);
-    private final ExecutorService ioExec = Executors.newSingleThreadExecutor();
+    private final ExecutorService uiExec = Executors.newSingleThreadExecutor();
 
-    /* ================================================================
-       Android lifecycle
-       ================================================================ */
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
@@ -80,12 +76,10 @@ public class MainActivity extends AppCompatActivity {
         try { unregisterReceiver(usbPermissionReceiver); } catch(Exception ignored){}
         try { unregisterReceiver(usbAttachDetach); } catch(Exception ignored){}
         try { if (serialPort != null) serialPort.close(); } catch(Exception ignored){}
-        ioExec.shutdownNow();
+        uiExec.shutdownNow();
     }
 
-    /* ================================================================
-       View wiring
-       ================================================================ */
+    /* ============================== Views ============================== */
     private void bindViews() {
         txtLog       = findViewById(R.id.txtLog);
         edtTo        = findViewById(R.id.edtTo);
@@ -94,15 +88,12 @@ public class MainActivity extends AppCompatActivity {
         edtPreset    = findViewById(R.id.edtPreset);
 
         btnConnect   = findViewById(R.id.btnConnect);
-        // ---- MAPPINGS SUR TES IDS EXISTANTS ----
-        btnStartOpen   = findViewById(R.id.btnC);      // Start OPEN (preset=0)
-        btnStartPreset = findViewById(R.id.btnStart);  // Start PRESET NET
-        btnEnd         = findViewById(R.id.btnA);      // END
-        // ----------------------------------------
+        btnStartOpen   = findViewById(R.id.btnC);     // Start OPEN (preset=0)
+        btnStartPreset = findViewById(R.id.btnStart); // Start PRESET NET
+        btnEnd         = findViewById(R.id.btnA);     // END
+
         btnClear     = findViewById(R.id.btnClearLog);
         btnCopy      = findViewById(R.id.btnCopyLog);
-
-        // Toggle I/O log : on réutilise ton ancien ID
         switchIoLog  = findViewById(R.id.switchIoLog);
     }
 
@@ -116,6 +107,7 @@ public class MainActivity extends AppCompatActivity {
             switchIoLog.setChecked(true);
             LcpLink.DUMP_TX = true;
             LcpLink.DUMP_RX = true;
+            append("I/O log activé\n");
         }
     }
 
@@ -135,22 +127,15 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void safeSetOnClick(View v, View.OnClickListener l){
-        if (v != null) v.setOnClickListener(l);
-    }
+    private void safeSetOnClick(View v, View.OnClickListener l){ if (v != null) v.setOnClickListener(l); }
 
-    /* ================================================================
-       USB: permission & connect
-       ================================================================ */
+    /* ============================== USB ============================== */
     private final BroadcastReceiver usbPermissionReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context ctx, Intent intent) {
             if (!ACTION_USB_PERMISSION.equals(intent.getAction())) return;
             UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
             boolean granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
-            if (!granted) {
-                append("Permission USB refusée\n");
-                return;
-            }
+            if (!granted) { append("Permission USB refusée\n"); return; }
             append("Permission USB accordée, ouverture...\n");
             connectPort(device);
         }
@@ -172,10 +157,7 @@ public class MainActivity extends AppCompatActivity {
         try {
             UsbManager mgr = (UsbManager)getSystemService(Context.USB_SERVICE);
             List<UsbSerialDriver> drivers = UsbSerialProber.getDefaultProber().findAllDrivers(mgr);
-            if (drivers == null || drivers.isEmpty()) {
-                append("Aucun convertisseur USB‑Série détecté\n");
-                return;
-            }
+            if (drivers == null || drivers.isEmpty()) { append("Aucun convertisseur USB‑Série détecté\n"); return; }
             UsbDevice dev = drivers.get(0).getDevice();
             if (!mgr.hasPermission(dev)) {
                 append("Demande de permission USB…\n");
@@ -213,17 +195,28 @@ public class MainActivity extends AppCompatActivity {
             int from = parseHexOrDefault(safe(edtFrom), 0xFF);
 
             lcpLink = new LcpLink(serialPort, to, from, true);
+
             controller = new DeliveryController(
                 lcpLink,
                 new DeliveryController.DeliveryEvents() {
-                    @Override public void onStateChanged(DeliveryController.State s) { append("[SDK] State=" + s + "\n"); }
-                    @Override public void onFlowStarted() { append("[SDK] FLOW détecté\n"); }
-                    @Override public void onFlowStopped() { append("[SDK] FLOW stoppé\n"); }
+                    @Override public void onStateChanged(DeliveryController.State s) {
+                        append("[SDK] State=" + s + "\n");
+                    }
+                    @Override public void onFlowStarted() {
+                        append("[SDK] FLOW détecté\n");
+                        // Démarre la live loop ici (seulement quand le FLOW est confirmé)
+                        uiExec.execute(() -> controller.runLiveLoop(250, false, 0.0)); // pas de guard en OPEN
+                    }
+                    @Override public void onFlowStopped() {
+                        append("[SDK] FLOW stoppé\n");
+                    }
                     @Override public void onLiveSample(int ds, int dc, double gL, double nL) {
                         append(String.format("[LIVE] DS=0x%04X DC=0x%04X G=%.1f N=%.1f\n", ds, dc, gL, nL));
                     }
                     @Override public void onGuardReached() { append("[SDK] Guard atteint -> END demandé\n"); }
-                    @Override public void onError(String m, Throwable t) { append("[SDK] ERREUR: " + m + (t!=null ? " / "+t.getMessage() : "") + "\n"); }
+                    @Override public void onError(String m, Throwable t) {
+                        append("[SDK] ERREUR: " + m + (t!=null ? " / "+t.getMessage() : "") + "\n");
+                    }
                 },
                 null // SingleThread executor par défaut
             );
@@ -239,22 +232,14 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /* ================================================================
-       Actions : Start Open / Start Preset / End
-       ================================================================ */
+    /* ============================== Actions ============================== */
     private void startOpenMode() {
         if (!checkReady()) return;
         int product = parseIntOrDefault(safe(edtProduct), 1);
         append(String.format("[UI] Start OPEN product=%d\n", product));
 
-        // Démarre : set product -> clear presets -> RUN 0x00 -> WAIT_FLOW
+        // Démarre : set product -> clear presets -> RUN 0x00 -> WAIT_FLOW (SDK)
         controller.startOpenMode(product, 20_000, 200);
-
-        // Live loop sans guard
-        ioExec.execute(() -> {
-            try { Thread.sleep(600); } catch(Exception ignored){}
-            controller.runLiveLoop(250, false, 0.0);
-        });
     }
 
     private void startPresetNet() {
@@ -263,14 +248,24 @@ public class MainActivity extends AppCompatActivity {
         double presetL = parseDoubleOrDefault(safe(edtPreset), 50.0);
         append(String.format("[UI] Start PRESET NET product=%d preset=%.1f L\n", product, presetL));
 
-        // Démarre : set product -> #6 -> RUN 0x00 -> WAIT_FLOW
+        controller = new DeliveryController(
+            lcpLink,
+            new DeliveryController.DeliveryEvents() {
+                @Override public void onStateChanged(DeliveryController.State s) { append("[SDK] State=" + s + "\n"); }
+                @Override public void onFlowStarted() {
+                    append("[SDK] FLOW détecté\n");
+                    uiExec.execute(() -> controller.runLiveLoop(250, true, 0.0)); // guard activé en preset
+                }
+                @Override public void onFlowStopped() { append("[SDK] FLOW stoppé\n"); }
+                @Override public void onLiveSample(int ds, int dc, double gL, double nL) {
+                    append(String.format("[LIVE] DS=0x%04X DC=0x%04X G=%.1f N=%.1f\n", ds, dc, gL, nL));
+                }
+                @Override public void onGuardReached() { append("[SDK] Guard atteint -> END demandé\n"); }
+                @Override public void onError(String m, Throwable t) { append("[SDK] ERREUR: " + m + (t!=null ? " / "+t.getMessage() : "") + "\n"); }
+            },
+            null
+        );
         controller.startPresetNet(product, presetL, 20_000, 200);
-
-        // Live loop avec guard (END auto au seuil)
-        ioExec.execute(() -> {
-            try { Thread.sleep(600); } catch(Exception ignored){}
-            controller.runLiveLoop(250, true, 0.0); // guardMargin=0.0 L (ajuste si besoin)
-        });
     }
 
     private void endGracefully() {
@@ -279,12 +274,14 @@ public class MainActivity extends AppCompatActivity {
         controller.endGracefully(15_000, 200);
     }
 
-    /* ================================================================
-       Utils & UI
-       ================================================================ */
+    /* ============================== Utils ============================== */
     private boolean checkReady() {
-        if (serialPort == null || lcpLink == null || controller == null) {
+        if (serialPort == null || lcpLink == null) {
             append("USB/LCP non prêt. Connectez d'abord.\n");
+            return false;
+        }
+        if (controller == null) {
+            append("SDK non prêt (reconnectez si besoin).\n");
             return false;
         }
         return true;
@@ -297,10 +294,7 @@ public class MainActivity extends AppCompatActivity {
         append("Log copié\n");
     }
 
-    private void append(String s) {
-        runOnUiThread(() -> txtLog.append(s));
-    }
-
+    private void append(String s) { runOnUiThread(() -> txtLog.append(s)); }
     private void appendAndBuffer(String s) {
         if (s == null) return;
         if (!s.endsWith("\n")) s = s + "\n";
