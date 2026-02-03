@@ -270,7 +270,7 @@ public final class DeliveryController {
     }
 
     private void clearPresetsSafe() throws IOException {
-        opSetFieldSafe(5, i32be(0), "SET_FIELD #5 (gross=0));
+        opSetFieldSafe(5, i32be(0), "SET_FIELD #5 (gross=0)");
         sleep(120);
         opSetFieldSafe(6, i32be(0), "SET_FIELD #6 (net=0)");
     }
