@@ -6,10 +6,10 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 
 /**
- * DeliveryController — Orchestration SDK robuste pour LCR-II
- * - Wake + SET_FIELD (retry soft) -> RUN (retry soft) -> WAIT_FOR_FLOW (0x23 only)
- * - LIVE loop (états + compteurs) avec guard preset (END #2)
- * - END gracieux (clear FLOW/DEL)
+ * DeliveryController — Orchestration SDK robuste (STRICT 0x23, sans fallback 0x28 en phases critiques)
+ * - Wake + SET_FIELD (retry soft) -> RUN (retry soft) -> WAIT_FOR_FLOW (0x23 strict + anti-rebond + filet #44)
+ * - LIVE loop (0x23 strict + #44/#45) -> guard optionnel (END #2)
+ * - END gracieux (0x23 strict jusqu’à clear FLOW/DEL)
  *
  * Toutes les I/O LCP sont sérialisées via un SingleThreadExecutor.
  */
@@ -38,24 +38,18 @@ public final class DeliveryController {
        RECIPES HAUT NIVEAU
        ================================================================ */
 
-    /** Mode ouvert (preset=0) : wake -> set product -> clear presets -> RUN 0x00 -> WAIT_FLOW */
+    /** Mode ouvert (preset=0) : wake -> set product -> clear presets -> RUN 0x00 -> WAIT_FLOW (strict) */
     public void startOpenMode(int productId, long waitFlowTimeoutMs, long pollMs) {
         exec.execute(() -> {
             try {
                 setState(State.STARTING);
-
-                // 0) Wake (stabilise la première écriture)
                 wake();
 
-                // 1) SET product + presets (safe)
                 setProductSafe(productId);
                 clearPresetsSafe();
-
-                // 2) Petite respiration avant RUN
                 sleep(200);
 
-                // 3) RUN + WAIT_FLOW avec retry soft
-                startWithRetry(waitFlowTimeoutMs, pollMs, true /*cmd00*/);
+                runAndWaitFlowStrictWithRetry(waitFlowTimeoutMs, pollMs, true /*cmd00*/);
 
                 setState(State.FLOW_ACTIVE);
                 events.onFlowStarted();
@@ -65,28 +59,20 @@ public final class DeliveryController {
         });
     }
 
-    /** Mode preset NET : wake -> set product -> write #6 -> #5=0 -> RUN 0x00 -> WAIT_FLOW */
+    /** Mode preset NET : wake -> set product -> write #6 -> #5=0 -> RUN 0x00 -> WAIT_FLOW (strict) */
     public void startPresetNet(int productId, double litres, long waitFlowTimeoutMs, long pollMs) {
         exec.execute(() -> {
             try {
                 setState(State.STARTING);
-
-                // 0) Wake
                 wake();
 
-                // 1) Décimales -> preset net (#6)
                 int digits = readDigits();
                 int p6 = (int)Math.round(litres * Math.pow(10, digits));
-
-                // 2) SET product + #6 (safe)
                 setProductSafe(productId);
                 writeNetPresetSafe(p6);
-
-                // 3) Pause avant RUN
                 sleep(200);
 
-                // 4) RUN + WAIT_FLOW avec retry soft
-                startWithRetry(waitFlowTimeoutMs, pollMs, true /*cmd00*/);
+                runAndWaitFlowStrictWithRetry(waitFlowTimeoutMs, pollMs, true /*cmd00*/);
 
                 setState(State.FLOW_ACTIVE);
                 events.onFlowStarted();
@@ -96,12 +82,12 @@ public final class DeliveryController {
         });
     }
 
-    /** WAIT_FLOW seul (si RUN envoyé ailleurs) */
+    /** WAIT_FLOW seul (strict) — si RUN a été envoyé ailleurs */
     public void waitForFlowOnly(long timeoutMs, long pollMs) {
         exec.execute(() -> {
             try {
                 setState(State.WAIT_FOR_FLOW);
-                link.waitForFlowOnly(timeoutMs, pollMs, true, true);
+                waitFlowStrict(timeoutMs, pollMs, true, true);
                 setState(State.FLOW_ACTIVE);
                 events.onFlowStarted();
             } catch (Exception e) {
@@ -110,7 +96,7 @@ public final class DeliveryController {
         });
     }
 
-    /** END (#2) puis attendre clear FLOW/DEL (gracieux) */
+    /** END (#2) puis attendre clear FLOW/DEL (STRICT 0x23) */
     public void endGracefully(long timeoutMs, long pollMs) {
         exec.execute(() -> {
             try {
@@ -118,8 +104,8 @@ public final class DeliveryController {
                 link.opIssueCommand(0x02); // END
                 long tEnd = System.currentTimeMillis() + timeoutMs;
                 while (System.currentTimeMillis() < tEnd) {
-                    int[] ms = link.opMachineStatusFull();
-                    int dc = ms[2];
+                    int[] dsdc = getMachineStrict(3000);
+                    int dc = dsdc[1];
                     boolean flow   = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
                     boolean active = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
                     if (!flow && !active) { setState(State.ENDED); return; }
@@ -133,35 +119,33 @@ public final class DeliveryController {
     }
 
     /* ================================================================
-       LIVE loop (états + compteurs) avec guard (pas de Double nullable)
+       LIVE loop (STRICT 0x23 + #44/#45) + guard optionnel (sans Double nullable)
        ================================================================ */
-    public void runLiveLoop(long pollMs,
-                            boolean guardEnabled,
-                            double guardMarginLitres) {
+    public void runLiveLoop(long pollMs, boolean guardEnabled, double guardMarginLitres) {
         exec.execute(() -> {
             liveRunning = true;
             try {
                 int digits = readDigits();
                 double scale = Math.pow(10, digits);
 
-                // Lire presets : priorité NET (#6), sinon GROSS (#5)
                 int p5 = readI32OrZero(5);
                 int p6 = readI32OrZero(6);
                 final boolean guardUseNet = (p6 > 0);
                 final double targetLitres = guardUseNet ? (p6 / scale) : (p5 > 0 ? (p5 / scale) : Double.NaN);
 
-                Integer g0 = readI32Nullable(44);
-                Integer n0 = readI32Nullable(45);
-                if (g0 == null) g0 = 0;
-                if (n0 == null) n0 = 0;
+                Integer g0 = readI32Nullable(44); if (g0 == null) g0 = 0;
+                Integer n0 = readI32Nullable(45); if (n0 == null) n0 = 0;
 
                 boolean guardFired = false;
 
                 while (liveRunning && state == State.FLOW_ACTIVE) {
-                    int[] ms = link.opMachineStatusFull();
-                    int ds = ms[1], dc = ms[2];
+                    int[] dsdc;
+                    try {
+                        dsdc = getMachineStrict(3000);
+                    } catch (Exception ex) { sleep(120); continue; }
+
+                    int ds = dsdc[0], dc = dsdc[1];
                     boolean flow   = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
-                    boolean active = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
 
                     int g = readI32OrFallback(44, g0);
                     int n = readI32OrFallback(45, n0);
@@ -169,10 +153,7 @@ public final class DeliveryController {
                     double gL = g / scale, nL = n / scale;
                     try { events.onLiveSample(ds, dc, gL, nL); } catch(Exception ignored){}
 
-                    if (!flow) {
-                        try { events.onFlowStopped(); } catch(Exception ignored){}
-                        break;
-                    }
+                    if (!flow) { try { events.onFlowStopped(); } catch(Exception ignored){} break; }
 
                     if (guardEnabled && !Double.isNaN(targetLitres) && !guardFired) {
                         double deliveredL = guardUseNet ? ((n - n0) / scale) : ((g - g0) / scale);
@@ -183,7 +164,7 @@ public final class DeliveryController {
                         }
                     }
 
-                    sleep((int)Math.max(100, pollMs));
+                    sleep((int)Math.max(120, pollMs));
                 }
             } catch (Exception e) {
                 fail("runLiveLoop: " + e.getMessage(), e);
@@ -196,11 +177,87 @@ public final class DeliveryController {
     public void stopLiveLoop() { liveRunning = false; }
 
     /* ================================================================
-       ROBUSTESSE : Wake + SET_FIELD safe + RUN with retry
+       Noyau STRICT (0x23 direct, aucun fallback 0x28)
+       ================================================================ */
+
+    /** Lecture stricte (0x23) : retourne [ds, dc] — exceptions si invalide */
+    private int[] getMachineStrict(int timeoutMs) throws IOException {
+        byte[] rsp = link.sendRecv(new byte[]{ (byte) LcpLink.MSG_GET_MACHINE }, timeoutMs);
+        int st = LcpLink.extractStatus(rsp);
+        byte[] p = LcpLink.extractPayload(rsp);
+
+        // p[0] = rc
+        if (p == null || p.length < 1) throw new IOException("GET_MACHINE empty");
+        int rc = p[0] & 0xFF;
+        if (rc != LcpLink.RC_OK) throw new IOException(String.format("GET_MACHINE rc=0x%02X", rc));
+        if (p.length < 8) throw new IOException("GET_MACHINE short");
+
+        int ds = u16be(p, 4);
+        int dc = u16be(p, 6);
+        return new int[]{ ds, dc };
+    }
+
+    /** Attente FLOW (0x23 strict) : anti‑rebond + filet via #44 */
+    private void waitFlowStrict(long timeoutMs, long pollMs, boolean acceptFlow, boolean acceptCounts) throws IOException {
+        long tEnd = System.currentTimeMillis() + timeoutMs;
+
+        int g0 = 0;
+        if (acceptCounts) { try { g0 = readI32OrZero(44); } catch(Exception ignored){} }
+
+        int confirm = 0;
+        boolean prevFlow = false;
+
+        while (System.currentTimeMillis() < tEnd) {
+            try {
+                int[] dsdc = getMachineStrict(3000);
+                int dc = dsdc[1];
+                boolean flow   = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
+                boolean active = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
+                boolean begin  = (dc & LcpLink.LCRSc_BEGIN_DELIVERY) != 0;
+
+                if (active || begin) return;
+
+                if (acceptFlow) {
+                    if (flow) confirm++; else confirm = 0;
+                    if (!prevFlow && confirm >= 2) return; // 2 ticks consécutifs
+                    prevFlow = flow;
+                }
+
+                if (acceptCounts) {
+                    try {
+                        int g = readI32OrFallback(44, g0);
+                        if (g > g0) return;
+                    } catch(Exception ignored){}
+                }
+
+            } catch (Exception ignored) {
+                // micro-glitch : on attend le tick suivant
+            }
+            sleep((int)pollMs);
+        }
+        throw new IOException("START_TIMEOUT: FLOW non détecté dans le délai");
+    }
+
+    /** RUN + WAIT_FLOW strict avec retry soft */
+    private void runAndWaitFlowStrictWithRetry(long waitFlowTimeoutMs, long pollMs, boolean cmd00) throws IOException {
+        int runCmd = (cmd00 ? 0x00 : 0x01);
+        try {
+            link.opIssueCommand(runCmd);
+            waitFlowStrict(waitFlowTimeoutMs, pollMs, true, true);
+        } catch (IOException e1) {
+            softResync();
+            sleep(200);
+            link.opIssueCommand(runCmd);
+            waitFlowStrict(waitFlowTimeoutMs, pollMs, true, true);
+        }
+    }
+
+    /* ================================================================
+       ROBUSTESSE : Wake + SET_FIELD safe
        ================================================================ */
 
     private void wake() {
-        try { link.opMachineStatusFull(); } catch(Exception ignored){}
+        try { getMachineStrict(1500); } catch(Exception ignored){}
         sleep(120);
     }
 
@@ -212,45 +269,27 @@ public final class DeliveryController {
     }
 
     private void clearPresetsSafe() throws IOException {
-        opSetFieldSafe(5, i32be(0), "SET_FIELD #5 (gross preset=0)");
+        opSetFieldSafe(5, i32be(0), "SET_FIELD #5 (gross=0)");
         sleep(120);
-        opSetFieldSafe(6, i32be(0), "SET_FIELD #6 (net preset=0)");
+        opSetFieldSafe(6, i32be(0), "SET_FIELD #6 (net=0)");
     }
 
     private void writeNetPresetSafe(int raw) throws IOException {
-        opSetFieldSafe(6, i32be(raw), "SET_FIELD #6 (net preset)");
+        opSetFieldSafe(6, i32be(raw), "SET_FIELD #6 (net)");
         sleep(120);
-        opSetFieldSafe(5, i32be(0),   "SET_FIELD #5 (gross preset=0)");
+        opSetFieldSafe(5, i32be(0),   "SET_FIELD #5 (gross=0)");
     }
 
-    /**
-     * Écriture résiliente : try -> (softResync + pause) -> retry unique
-     * Remonte IOException si les deux tentatives échouent.
-     */
+    /** Écriture résiliente : try -> (softResync + pause) -> retry unique */
     private void opSetFieldSafe(int field, byte[] data, String label) throws IOException {
         try {
             link.opSetField(field, data);
         } catch (IOException e1) {
-            // soft resync + petite pause
             softResync();
             sleep(150);
-            link.opSetField(field, data); // deuxième et dernière tentative
+            link.opSetField(field, data);
         }
-        sleep(120); // évite collision avec la file 0x7D / latence locale
-    }
-
-    /**
-     * RUN + WAIT_FLOW : try -> (softResync + pause) -> retry unique
-     */
-    private void startWithRetry(long waitFlowTimeoutMs, long pollMs, boolean cmd00) throws IOException {
-        int runCmd = (cmd00 ? 0x00 : 0x01);
-        try {
-            link.startDeliveryAndWaitFlow(runCmd, waitFlowTimeoutMs, pollMs, true, true);
-        } catch (IOException e1) {
-            softResync();
-            sleep(200);
-            link.startDeliveryAndWaitFlow(runCmd, waitFlowTimeoutMs, pollMs, true, true);
-        }
+        sleep(120);
     }
 
     private void softResync() {
@@ -258,26 +297,8 @@ public final class DeliveryController {
     }
 
     /* ================================================================
-       Helpers : #39, #0,#5,#6, #44,#45
+       Helpers : lectures champs & endianness
        ================================================================ */
-    private static int digitsFromIndex(int idx) {
-        switch (idx) {
-            case 0:  return 2; // Hundredths
-            case 1:  return 1; // Tenths
-            case 2:  return 0; // Whole
-            case 3:  return 3; // Thousandths
-            default: return 1;
-        }
-    }
-
-    private int readDigits() {
-        try {
-            byte[] v = link.opGetField(39);
-            int idx = (v != null && v.length > 0) ? (v[0] & 0xFF) : 1;
-            return digitsFromIndex(idx);
-        } catch (Exception e) { return 1; }
-    }
-
     private static byte[] i32be(int v) {
         return new byte[]{
             (byte)((v >> 24) & 0xFF),
@@ -285,6 +306,9 @@ public final class DeliveryController {
             (byte)((v >> 8)  & 0xFF),
             (byte)(v & 0xFF)
         };
+    }
+    private static int u16be(byte[] b, int off) {
+        return ((b[off] & 0xFF) << 8) | (b[off + 1] & 0xFF);
     }
 
     private int readI32OrZero(int field) {
@@ -304,11 +328,6 @@ public final class DeliveryController {
             byte[] d = link.opGetField(field);
             return ((d[0] & 0xFF) << 24) | ((d[1] & 0xFF) << 16) | ((d[2] & 0xFF) << 8) | (d[3] & 0xFF);
         } catch (Exception e) { return fb; }
-    }
-
-    private void fail(String msg, Throwable t) {
-        setState(State.ERROR);
-        try { events.onError(msg, t); } catch(Exception ignored){}
     }
 
     /* ================================================================
