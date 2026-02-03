@@ -96,19 +96,26 @@ public final class DeliveryController {
         });
     }
 
-    /** END (#2) puis attendre clear FLOW/DEL (STRICT 0x23) */
+    /** END (#2) puis attendre clear FLOW/DEL (STRICT 0x23, tolérant aux micro-timeouts) */
     public void endGracefully(long timeoutMs, long pollMs) {
         exec.execute(() -> {
             try {
                 setState(State.FINALIZING);
-                link.opIssueCommand(0x02); // END
+                // END avec retry soft léger
+                try { link.opIssueCommand(0x02); }
+                catch (IOException e1) { softResync(); sleep(150); link.opIssueCommand(0x02); }
+
                 long tEnd = System.currentTimeMillis() + timeoutMs;
                 while (System.currentTimeMillis() < tEnd) {
-                    int[] dsdc = getMachineStrict(3000);
-                    int dc = dsdc[1];
-                    boolean flow   = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
-                    boolean active = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
-                    if (!flow && !active) { setState(State.ENDED); return; }
+                    try {
+                        int[] dsdc = getMachineStrict(3000);
+                        int dc = dsdc[1];
+                        boolean flow   = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
+                        boolean active = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
+                        if (!flow && !active) { setState(State.ENDED); return; }
+                    } catch (Exception pollEx) {
+                        // tolérance: on continue à poller 0x23 jusqu'au timeout global
+                    }
                     sleep((int)Math.max(100, pollMs));
                 }
                 setState(State.ENDED);
@@ -139,13 +146,17 @@ public final class DeliveryController {
                 boolean guardFired = false;
 
                 while (liveRunning && state == State.FLOW_ACTIVE) {
-                    int[] dsdc;
+                    int ds = 0, dc = 0;
                     try {
-                        dsdc = getMachineStrict(3000);
-                    } catch (Exception ex) { sleep(120); continue; }
+                        int[] dsdc = getMachineStrict(3000);
+                        ds = dsdc[0]; dc = dsdc[1];
+                    } catch (Exception pollEx) {
+                        // tolérance: on saute ce tick
+                        sleep(80);
+                        continue;
+                    }
 
-                    int ds = dsdc[0], dc = dsdc[1];
-                    boolean flow   = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
+                    boolean flow = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
 
                     int g = readI32OrFallback(44, g0);
                     int n = readI32OrFallback(45, n0);
@@ -159,6 +170,7 @@ public final class DeliveryController {
                         double deliveredL = guardUseNet ? ((n - n0) / scale) : ((g - g0) / scale);
                         if (deliveredL >= (targetLitres + guardMarginLitres)) {
                             try { events.onGuardReached(); } catch(Exception ignored){}
+                            // END "opportuniste" (pas critique si rc transitoire)
                             try { link.opIssueCommand(0x02); } catch(Exception ignored) {}
                             guardFired = true;
                         }
@@ -177,19 +189,24 @@ public final class DeliveryController {
     public void stopLiveLoop() { liveRunning = false; }
 
     /* ================================================================
-       Noyau STRICT (0x23 direct, aucun fallback 0x28)
-        - getMachineStrict(...)  -> [ds, dc]
-        - waitFlowStrict(...)
-        - runAndWaitFlowStrictWithRetry(...)
+       Noyau STRICT (0x23 direct, aucun fallback 0x28) + queue 0x7D
        ================================================================ */
 
-    /** Lecture stricte (0x23) : retourne [ds, dc] — exceptions si invalide */
+    /** Lecture stricte (0x23) : retourne [ds, dc] — gère rc=0x26/0x27 via 0x7D */
     private int[] getMachineStrict(int timeoutMs) throws IOException {
         byte[] rsp = link.sendRecv(new byte[]{ (byte) LcpLink.MSG_GET_MACHINE }, timeoutMs);
         byte[] p = LcpLink.extractPayload(rsp);
 
         if (p == null || p.length < 1) throw new IOException("GET_MACHINE empty");
         int rc = p[0] & 0xFF;
+
+        if (rc == LcpLink.RC_REQUEST_QUEUED || rc == LcpLink.RC_NO_REQUEST_ACTIVE) {
+            // Aller chercher le résultat via 0x7D (STRICT)
+            p = waitQueuedStrict(3000, 150); // retourne payload "final"
+            if (p == null || p.length < 1) throw new IOException("0x7D empty");
+            rc = p[0] & 0xFF;
+        }
+
         if (rc != LcpLink.RC_OK) throw new IOException(String.format("GET_MACHINE rc=0x%02X", rc));
         if (p.length < 8) throw new IOException("GET_MACHINE short");
 
@@ -230,7 +247,6 @@ public final class DeliveryController {
                         if (g > g0) return;
                     } catch(Exception ignored){}
                 }
-
             } catch (Exception ignored) {
                 // micro-glitch : on attend le tick suivant
             }
@@ -251,6 +267,31 @@ public final class DeliveryController {
             link.opIssueCommand(runCmd);
             waitFlowStrict(waitFlowTimeoutMs, pollMs, true, true);
         }
+    }
+
+    /** Poll 0x7D jusqu’au résultat final (STRICT, sans 0x28) ; retourne le payload "final" */
+    private byte[] waitQueuedStrict(int timeoutMs, int pollMs) throws IOException {
+        long tEnd = System.currentTimeMillis() + timeoutMs;
+        byte[] last = null;
+        while (System.currentTimeMillis() < tEnd) {
+            byte[] rsp = link.sendRecv(new byte[]{ (byte) LcpLink.MSG_CHECK_REQUEST }, Math.max(1200, pollMs+800));
+            byte[] p = LcpLink.extractPayload(rsp);
+            if (p != null && p.length > 0) last = p;
+
+            if (p == null || p.length == 0) { sleep(pollMs); continue; }
+            int rc = p[0] & 0xFF;
+            if (rc == LcpLink.RC_REQUEST_ABORTED) throw new IOException("Queued aborted");
+            if (rc == LcpLink.RC_REQUEST_QUEUED || rc == LcpLink.RC_NO_REQUEST_ACTIVE) { sleep(pollMs); continue; }
+
+            // Cas "OK + OK + <payload_orig>" (convention LCP) : on retourne à partir du 2e OK
+            if (rc == LcpLink.RC_OK && p.length >= 2 && (p[1] & 0xFF) == LcpLink.RC_OK) {
+                byte[] out = new byte[p.length - 1];
+                System.arraycopy(p, 1, out, 0, out.length);
+                return out;
+            }
+            return p; // autre forme "finale"
+        }
+        throw new IOException("Queued timeout (0x7D), last=" + (last==null?"(null)":String.format("%02X", last[0])));
     }
 
     /* ================================================================
@@ -298,7 +339,7 @@ public final class DeliveryController {
     }
 
     /* ================================================================
-       Helpers : décimales (#39), lectures champs & endianness
+       Helpers : décimales (#39), lectures champs & endianness, fail()
        ================================================================ */
 
     private static int digitsFromIndex(int idx) {
