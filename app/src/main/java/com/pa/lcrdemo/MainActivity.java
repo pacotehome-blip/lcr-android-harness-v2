@@ -1,3 +1,4 @@
+
 package com.pa.lcrdemo;
 
 import android.app.AlertDialog;
@@ -27,7 +28,6 @@ import com.hoho.android.usbserial.driver.UsbSerialProber;
 import com.pa.lcr.lcp.LcpLink;
 import com.pa.lcr.lcp.LcpOps;
 
-import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -617,7 +617,7 @@ public class MainActivity extends AppCompatActivity {
                         return;
                     }
                     append("[C] FLOW détecté → livraison en cours.\n");
-                } catch (IOException e) {
+                } catch (Exception e) {
                     append("[C] ERREUR: START_TIMEOUT (attente FLOW) : " + e.getMessage() + "\n");
                     return;
                 }
@@ -810,15 +810,123 @@ public class MainActivity extends AppCompatActivity {
         layout.addView(edtTimeout);
 
         new AlertDialog.Builder(this)
-                .setTitle("Envoyer payload LCP (RAW)")
-                .setView(layout)
-                .setPositiveButton("Envoyer",(d,w)->{
-                    try{
-                        String hex = edt.getText().toString();
-                        int to = Integer.parseInt(edtTimeout.getText().toString());
-                        byte[] pl = parseHexBytes(hex);
+            .setTitle("Envoyer payload LCP (RAW)")
+            .setView(layout)
+            .setPositiveButton("Envoyer", (d, w) -> {
+                try {
+                    String hex = edt.getText().toString();
+                    int to = Integer.parseInt(edtTimeout.getText().toString());
+                    byte[] pl = parseHexBytes(hex);
 
-                        if (pl != null && pl.length > 0 && (pl[0] & 0xFF) == 0x7D) {
-                            append("[RAW] 0x7D (CHECK_REQUEST) est géré automatiquement par LcpOps — envoi UI bloqué.\n");
-                            return;
-                        }
+                    if (pl != null && pl.length > 0 && (pl[0] & 0xFF) == 0x7D) {
+                        append("[RAW] 0x7D (CHECK_REQUEST) est géré automatiquement par LcpOps — envoi UI bloqué.\n");
+                        return;
+                    }
+
+                    runLcpTask(() -> sendRawPayload_locked(pl, to));
+                } catch (Exception e) {
+                    append("[RAW] invalide: " + e.getMessage() + "\n");
+                }
+            })
+            .setNegativeButton("Annuler", null)
+            .show();
+    }
+
+    private void sendRawPayload_locked(byte[] payload, int timeout){
+        if (!checkReady()) return;
+        synchronized(lcpLock){
+            try{
+                resyncBudget = 1;
+                append("[RAW] Envoi payload: " + bytesToHex(payload) + "\n");
+                preSendThrottle(200);
+                byte[] rsp = lcpLink.sendRecv(payload, timeout);
+                append("[RAW] RX size=" + rsp.length + "\n");
+            }catch(Exception e){
+                append("[RAW] ERREUR: " + e.getMessage() + "\n");
+                if (resyncBudget > 0 && canResyncNow()) {
+                    append("[RAW] PURGE+RESYNC (unique) puis retry\n");
+                    resyncBudget--;
+                    purgeAndResyncBestEffort();
+                    try { preSendThrottle(200);
+                        byte[] rsp = lcpLink.sendRecv(payload, timeout);
+                        append("[RAW] RX size=" + rsp.length + " (après RESYNC)\n");
+                    } catch(Exception e2){
+                        append("[RAW] ERREUR après RESYNC: " + e2.getMessage() + "\n");
+                    }
+                }
+            }
+        }
+    }
+
+    /* ================================================================
+       UTIL
+       ================================================================ */
+    private boolean checkReady(){
+        if (serialPort == null || lcpLink == null || lcpOps == null) {
+            append("Port/LCP non prêt.\n");
+            return false;
+        }
+        return true;
+    }
+
+    private void runLcpTask(Runnable r){
+        setButtonsEnabled(false);
+        lcpExec.execute(() -> { try { r.run(); } finally { setButtonsEnabled(true); } });
+    }
+
+    private void setButtonsEnabled(boolean enabled){
+        runOnUiThread(() -> {
+            int[] ids = {
+                R.id.btnA, R.id.btnB, R.id.btnC, R.id.btnScan, R.id.btnSendHex,
+                R.id.btnTestUsb, R.id.btnConnect, R.id.btnDiag, R.id.btnStart
+            };
+            for (int id : ids) {
+                View v = findViewById(id);
+                if (v != null) v.setEnabled(enabled);
+            }
+        });
+    }
+
+    private void ensureDefaultAddresses() {
+        runOnUiThread(() -> {
+            if (edtTo != null && !"0xFA".equalsIgnoreCase(safeStr(edtTo.getText())))
+                edtTo.setText("0xFA");
+            if (edtFrom != null && !"0xFF".equalsIgnoreCase(safeStr(edtFrom.getText())))
+                edtFrom.setText("0xFF");
+        });
+    }
+
+    private int parseIntSafe(String s, int def){
+        try { return Integer.parseInt(s.replace("0x",""), 16); }
+        catch(Exception e){ return def; }
+    }
+
+    private double parseDoubleSafe(String s, double def){
+        try{ return Double.parseDouble(s); }
+        catch(Exception e){ return def; }
+    }
+
+    private String safeStr(CharSequence cs){
+        return cs==null? "" : cs.toString().trim();
+    }
+
+    private byte[] parseHexBytes(String s){
+        String c = s.replaceAll("(?i)0x","").replaceAll("[^0-9A-Fa-f]","");
+        if (c.length()==0) throw new IllegalArgumentException("aucun hex");
+        if (c.length()%2!=0) c = "0"+c;
+        int n = c.length()/2;
+        byte[] b = new byte[n];
+        for (int i=0;i<n;i++) b[i] = (byte)Integer.parseInt(c.substring(2*i,2*i+2),16);
+        return b;
+    }
+
+    private void append(String s){
+        runOnUiThread(() -> log.append(s));
+    }
+
+    private void appendAndBuffer(String s){
+        logBuf.append(s);
+        if(!s.endsWith("\n")) logBuf.append("\n");
+        append(s + "\n");
+    }
+}
