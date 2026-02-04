@@ -6,14 +6,16 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 
 /**
- * DeliveryController — version 100% conforme Python V2
- * ---------------------------------------------------
- * - Strict 0x23 for machine status
- * - Queue handling via 0x7D
- * - START → WAIT_FLOW (anti‑rebond + filet via #44)
- * - LIVE loop stable (0x23 seulement, puis #44/#45)
- * - END = cmd 0x02, puis clear ticket (cmd 0x06) si ds bit0 = 1
- * - RESYNC via GET_PRODUCT_ID (Message ID 0x00) — pas via {0x00} brut !
+ * DeliveryController — Version finale 100% conforme Python V2
+ * -----------------------------------------------------------
+ * - GET_MACHINE strict (0x23)
+ * - Gestion BUSY + queue strict via 0x7D
+ * - START : wake → ticket → recover → product → presets → RUN → WAIT_FLOW
+ * - WAIT_FLOW : double confirmation FLOW ou Δ#44>0
+ * - LIVE loop : 0x23 strict puis lectures #44/#45
+ * - Guard preset NET/GROSS
+ * - END : cmd 0x02 puis attente FLOW=0 & ACTIVE=0 puis CLEAR_TICKET
+ * - RESYNC : GET_PRODUCT_ID (msg 0x00), jamais {0x00} brut
  */
 public final class DeliveryController {
 
@@ -33,12 +35,15 @@ public final class DeliveryController {
     }
 
     public State getState() { return state; }
-    private void setState(State s){ state = s; try { events.onStateChanged(s); } catch(Exception ignored){} }
-    private static void sleep(int ms){ try { Thread.sleep(ms); } catch (InterruptedException ignored) {} }
+    private void setState(State s) {
+        state = s;
+        try { events.onStateChanged(s); } catch(Exception ignored){}
+    }
+    private static void sleep(int ms){ try { Thread.sleep(ms); } catch(Exception ignored){} }
 
-    /* ================================================================
+    /* =====================================================================
        API PUBLIC
-       ================================================================ */
+       ===================================================================== */
 
     public void startOpenMode(int productId, long waitFlowMs, long pollMs) {
         exec.execute(() -> {
@@ -86,13 +91,14 @@ public final class DeliveryController {
             try {
                 setState(State.FINALIZING);
 
-                issueCommandWithRetry(0x02);   // END
+                issueCommandWithRetry(0x02);     // END
 
-                waitEnd(timeoutMs, pollMs);    // FLOW=0 & ACTIVE=0
+                waitEnd(timeoutMs, pollMs);      // FLOW=0 & ACTIVE=0
 
-                clearTicketIfNeeded();         // comme Python
+                clearTicketIfNeeded();           // CLEAR_TICKET si bit0=1
 
                 setState(State.ENDED);
+
             } catch (Exception e) {
                 fail("endGracefully: " + e.getMessage(), e);
             }
@@ -114,14 +120,12 @@ public final class DeliveryController {
 
     public void stopLiveLoop() { liveRunning = false; }
 
-    /* ================================================================
-       PRÉ‑START — EXACTEMENT Python V2
-       ================================================================ */
+    /* =====================================================================
+       PRÉ-START (Python V2 exact)
+       ===================================================================== */
 
     private void preStartSequence(int productId, boolean presetMode) throws IOException {
-        getMachineStrict(1500);           // wake
-        sleep(120);
-
+        wake();
         clearTicketIfNeeded();
         recoverIfActive();
 
@@ -132,9 +136,7 @@ public final class DeliveryController {
     }
 
     private void preStartSequencePreset(int productId, double litres) throws IOException {
-        getMachineStrict(1500);           // wake
-        sleep(120);
-
+        wake();
         clearTicketIfNeeded();
         recoverIfActive();
 
@@ -147,22 +149,27 @@ public final class DeliveryController {
         wakeStable(2, 600, 80);
     }
 
-    /* ================================================================
-       RUN + WAIT_FLOW strict
-       ================================================================ */
+    /* =====================================================================
+       RUN + WAIT_FLOW STRICT
+       ===================================================================== */
 
     private void runAndWaitFlow(long timeoutMs, long pollMs) throws IOException {
         try {
-            link.opIssueCommand(0x00);    // RUN
+            link.opIssueCommand(0x00);      // RUN
             waitFlowStrict(timeoutMs, pollMs, true, true);
         } catch (IOException e) {
-            resync();
-            sleep(200);
+            resync(); sleep(200);
             link.opIssueCommand(0x00);
             waitFlowStrict(timeoutMs, pollMs, true, true);
         }
     }
 
+    /**
+     * WAIT_FLOW strict :
+     * - FLOW=1 pendant 2 ticks consécutifs OU
+     * - Δ#44 > 0
+     * - BEGIN_DELIVERY n'est jamais considéré comme FLOW (Python)
+     */
     private void waitFlowStrict(long timeoutMs, long pollMs,
                                 boolean acceptFlow, boolean acceptCounts) throws IOException {
 
@@ -179,7 +186,7 @@ public final class DeliveryController {
             try {
                 dsdc = getMachineStrict(3000);
             } catch (Exception e) {
-                sleep((int) pollMs);
+                sleep((int)pollMs);
                 continue;
             }
 
@@ -190,7 +197,7 @@ public final class DeliveryController {
             boolean active = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
             boolean begin  = (dc & LcpLink.LCRSc_BEGIN_DELIVERY) != 0;
 
-            // Python V2 : begin_delivery NE compte PAS comme flow
+            // BEGIN_DELIVERY n'est pas FLOW
             if (active && flow) return;
 
             if (acceptFlow) {
@@ -210,11 +217,12 @@ public final class DeliveryController {
         throw new IOException("START_TIMEOUT: FLOW non détecté");
     }
 
-    /* ================================================================
-       LIVE LOOP (strict 0x23 → puis #44/#45)
-       ================================================================ */
+    /* =====================================================================
+       LIVE LOOP (STRICT 0x23 → puis #44/#45)
+       ===================================================================== */
 
-    private void liveLoopCore(long pollMs, boolean guardEnabled, double guardMarginLitres) throws IOException {
+    private void liveLoopCore(long pollMs, boolean guardEnabled, double guardMarginLitres)
+            throws IOException {
 
         int digits = readDigits();
         double scale = Math.pow(10, digits);
@@ -262,7 +270,7 @@ public final class DeliveryController {
             if (guardEnabled && !Double.isNaN(targetL) && !guardFired) {
                 double delivered =
                         guardNet ? ((n - n0) / scale) :
-                                  ((g - g0) / scale);
+                                   ((g - g0) / scale);
 
                 if (delivered >= targetL + guardMarginLitres) {
                     try { events.onGuardReached(); } catch(Exception ignored){}
@@ -275,10 +283,9 @@ public final class DeliveryController {
         }
     }
 
-
-    /* ================================================================
-       END = attendre FLOW=0 & ACTIVE=0, puis CLEAR_TICKET
-       ================================================================ */
+    /* =====================================================================
+       END = FLOW=0 & ACTIVE=0 + CLEAR_TICKET
+       ===================================================================== */
 
     private void waitEnd(long timeoutMs, long pollMs) throws IOException {
         long tEnd = System.currentTimeMillis() + timeoutMs;
@@ -292,8 +299,7 @@ public final class DeliveryController {
                 boolean flow   = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
                 boolean active = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
 
-                if (!flow && !active)
-                    return;
+                if (!flow && !active) return;
 
             } catch (Exception ignored) {}
 
@@ -305,7 +311,6 @@ public final class DeliveryController {
         try {
             int[] dsdc = getMachineStrict(1500);
             int ds = dsdc[0];
-
             boolean pending = (ds & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
             if (pending) {
                 issueCommandWithRetry(0x06);  // CLEAR_TICKET
@@ -319,15 +324,15 @@ public final class DeliveryController {
             int dc = dsdc[1];
             boolean active = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
             if (active) {
-                issueCommandWithRetry(0x02);  // END RECOVER
+                issueCommandWithRetry(0x02);
                 waitEnd(3000, 120);
             }
         } catch (Exception ignored) {}
     }
 
-    /* ================================================================
-       CORE STRICT : 0x23 + queue 0x7D
-       ================================================================ */
+    /* =====================================================================
+       CORE STRICT : GET_MACHINE (0x23) + queue 0x7D
+       ===================================================================== */
 
     private int[] getMachineStrict(int timeoutMs) throws IOException {
 
@@ -339,7 +344,9 @@ public final class DeliveryController {
 
         int rc = p[0] & 0xFF;
 
-        if (rc == LcpLink.RC_REQUEST_QUEUED || rc == LcpLink.RC_NO_REQUEST_ACTIVE) {
+        if (rc == LcpLink.RC_REQUEST_QUEUED ||
+            rc == LcpLink.RC_NO_REQUEST_ACTIVE) {
+
             p = waitQueuedStrict(4000, 150);
             rc = p[0] & 0xFF;
         }
@@ -360,10 +367,13 @@ public final class DeliveryController {
         byte[] last = null;
 
         while (System.currentTimeMillis() < tEnd) {
-            byte[] rsp = link.sendRecv(new byte[]{ (byte)LcpLink.MSG_CHECK_REQUEST },
-                                       Math.max(1200, pollMs + 800));
-            byte[] p = LcpLink.extractPayload(rsp);
 
+            byte[] rsp = link.sendRecv(
+                    new byte[]{ (byte)LcpLink.MSG_CHECK_REQUEST },
+                    Math.max(1200, pollMs + 800)
+            );
+
+            byte[] p = LcpLink.extractPayload(rsp);
             if (p != null && p.length > 0) last = p;
 
             if (p == null || p.length == 0) {
@@ -396,14 +406,13 @@ public final class DeliveryController {
         throw new IOException("Queued timeout (0x7D)");
     }
 
-    /* ================================================================
-       SAFE FIELD OPS (SET_FIELD)
-       ================================================================ */
+    /* =====================================================================
+       SET_FIELD & ISSUE_COMMAND Safe
+       ===================================================================== */
 
     private void setProductSafe(int productId) throws IOException {
         if (productId < 1 || productId > 16)
             throw new IllegalArgumentException("product 1..16");
-
         byte v = (byte)((productId - 1) & 0xFF);
         opSetFieldSafe(0, new byte[]{v});
     }
@@ -422,8 +431,7 @@ public final class DeliveryController {
         try {
             link.opSetField(field, data);
         } catch (IOException e) {
-            resync();
-            sleep(150);
+            resync(); sleep(150);
             link.opSetField(field, data);
         }
         sleep(120);
@@ -433,15 +441,14 @@ public final class DeliveryController {
         try {
             link.opIssueCommand(cmd);
         } catch (IOException e) {
-            resync();
-            sleep(150);
+            resync(); sleep(150);
             link.opIssueCommand(cmd);
         }
     }
 
-    /* ================================================================
+    /* =====================================================================
        RAW FIELD READS
-       ================================================================ */
+       ===================================================================== */
 
     private int readDigits() {
         try {
@@ -462,17 +469,48 @@ public final class DeliveryController {
         }
     }
 
-    /* ================================================================
-       RESYNC — via GET_PRODUCT_ID (Message 0x00)
-       ================================================================ */
+    /* =====================================================================
+       RESYNC — GET_PRODUCT_ID (0x00)
+       ===================================================================== */
 
     private void resync() {
-        try { link.sendRecv(new byte[]{0x00}, 2000); } catch(Exception ignored){}
+        try {
+            link.sendRecv(new byte[]{0x00}, 2000);
+        } catch(Exception ignored){}
     }
 
-    /* ================================================================
+    /* =====================================================================
+       WAKE & WAKE_STABLE
+       ===================================================================== */
+
+    private void wake() {
+        try { getMachineStrict(1500); } catch (Exception ignored){}
+        sleep(120);
+    }
+
+    /**
+     * wakeStable :
+     *  - attend 'okNeeded' lectures GET_MACHINE successives sans erreur.
+     *  - Timeout total ~1500ms.
+     */
+    private void wakeStable(int okNeeded, int timeoutPerPollMs, int pauseMs) {
+        int ok = 0;
+        long tEnd = System.currentTimeMillis() + 1500;
+
+        while (System.currentTimeMillis() < tEnd && ok < okNeeded) {
+            try {
+                getMachineStrict(timeoutPerPollMs);
+                ok++;
+            } catch(Exception ignored) {
+                ok = 0;
+            }
+            sleep(pauseMs);
+        }
+    }
+
+    /* =====================================================================
        HELPERS
-       ================================================================ */
+       ===================================================================== */
 
     private static int digitsFromIndex(int idx) {
         switch (idx) {
@@ -488,7 +526,7 @@ public final class DeliveryController {
         return new byte[]{
                 (byte)((v >> 24) & 0xFF),
                 (byte)((v >> 16) & 0xFF),
-                (byte)((v >> 8) & 0xFF),
+                (byte)((v >> 8)  & 0xFF),
                 (byte)(v & 0xFF)
         };
     }
@@ -506,12 +544,12 @@ public final class DeliveryController {
 
     private void fail(String msg, Throwable t) {
         setState(State.ERROR);
-        try { events.onError(msg, t); } catch(Exception ignored){}
+        { events.onError(msg, t); } catch(Exception ignored){}
     }
 
-    /* ================================================================
-       Events
-       ================================================================ */
+    /* =====================================================================
+       EVENTS
+       ===================================================================== */
 
     public interface DeliveryEvents {
         default void onStateChanged(State s) {}
