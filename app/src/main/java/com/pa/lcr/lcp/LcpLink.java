@@ -8,12 +8,11 @@ import java.util.Arrays;
 /**
  * LcpLink — Version finale A2‑Enhanced (2026‑02‑04)
  * --------------------------------------------------
- * - API inchangée (readFrame → byte[], sendRecv → byte[])
- * - Parsing interne structuré via ParsedFrame (header/payload décodés)
- * - Stockage ThreadLocal pour extractPayload/extractStatus fiables
- * - Respect de CRC16/XMODEM (polynôme 0x1021) [1](https://mdfs.net/Info/Comp/Comms/CRC16.htm)
- * - Compatible protocole LCP02 (framing ~~ + ESC) [2](https://onlinedocs.microchip.com/oxy/GUID-B822915F-C375-4172-91BD-AB6F326EB783-en-US-1/GUID-A416A65D-1892-4807-8431-3C8F2EFBBEC1.html)
- * - Conformité totale Python V2
+ * - Parsing structuré via ParsedFrame (header+payload décodés)
+ * - API inchangée (sendRecv/readFrame → byte[])
+ * - ThreadLocal pour extractions sécurisées
+ * - CRC XMODEM 0x1021 (conforme LCP) 
+ * - Framing LCP ~~ + ESC correct
  */
 public class LcpLink {
 
@@ -24,7 +23,7 @@ public class LcpLink {
     public static final int ESC   = 0x1B;
 
     private static final int SEED = 0x7E7E;
-    private static final int POLY = 0x1021;
+    private static final int POLY = 0x1021;  // CRC16/XMODEM (confirmé) 
 
     public static final int MSG_GET_FIELD     = 0x20;
     public static final int MSG_SET_FIELD     = 0x21;
@@ -39,6 +38,12 @@ public class LcpLink {
     public static final int RC_REQUEST_QUEUED    = 0x26;
     public static final int RC_NO_REQUEST_ACTIVE = 0x27;
     public static final int RC_REQUEST_ABORTED   = 0x28;
+
+    /* === FLAGS MACHINE (ds/dc) === */
+    public static final int LCRSc_DEL_TICKET_PENDING = 0x0001;
+    public static final int LCRSc_FLOW_ACTIVE        = 0x0004;
+    public static final int LCRSc_DELIVERY_ACTIVE    = 0x0008;
+    public static final int LCRSc_BEGIN_DELIVERY     = 0x0400;
 
     public static boolean DUMP_TX = false;
     public static boolean DUMP_RX = false;
@@ -65,7 +70,7 @@ public class LcpLink {
         boolean crcOK;
     }
 
-    /** ThreadLocal contenant le dernier frame reçu */
+    /** Dernier frame lu, parsé (ThreadLocal) */
     private static final ThreadLocal<ParsedFrame> lastFrame = new ThreadLocal<>();
 
     /* =========================================================================
@@ -79,20 +84,20 @@ public class LcpLink {
     private int toggle;
 
     public LcpLink(UsbSerialPort p, int to, int from, boolean syncFirst) {
-        port = p;
-        toAddr = to & 0xFF;
-        fromAddr = from & 0xFF;
-        syncPending = syncFirst;
-        toggle = 0;
+        this.port = p;
+        this.toAddr = to & 0xFF;
+        this.fromAddr = from & 0xFF;
+        this.syncPending = syncFirst;
+        this.toggle = 0;
     }
 
     /* =========================================================================
-       CRC  XMODEM (polynôme 0x1021) [1](https://mdfs.net/Info/Comp/Comms/CRC16.htm)
+       CRC16/XMODEM
        ========================================================================= */
     private int crcUpdate(int crc, int b){
         for (int i=0; i<8; i++){
             boolean fb = (crc & 0x8000) != 0;
-            crc = ((crc << 1) & 0xFFFF) | ((b >> (7 - i)) & 1);
+            crc = ((crc << 1) & 0xFFFF) | ((b >> (7-i)) & 1);
             if (fb) crc ^= POLY;
         }
         return crc;
@@ -100,19 +105,19 @@ public class LcpLink {
 
     private int crcLCP(byte[] data){
         int c = SEED;
-        for (byte x : data)
+        for(byte x : data)
             c = crcUpdate(c, x & 0xFF);
         return c;
     }
 
     /* =========================================================================
-       ESCAPING
+       Escaping LCP
        ========================================================================= */
     private byte[] esc(byte[] in){
-        ByteArrayBuilder out = new ByteArrayBuilder(in.length * 2);
-        for (byte b : in){
+        ByteArrayBuilder out = new ByteArrayBuilder(in.length*2);
+        for(byte b : in){
             int x = b & 0xFF;
-            if (x == ESC || x == TILDE)
+            if(x == ESC || x == TILDE)
                 out.add((byte)ESC);
             out.add(b);
         }
@@ -120,28 +125,29 @@ public class LcpLink {
     }
 
     /* =========================================================================
-       LECTURE BRUTE
+       Lecture brute octet / ESC
        ========================================================================= */
     private int readByte(int timeout){
-        try {
+        try{
             byte[] b = new byte[1];
             int n = port.read(b, timeout);
-            if (n <= 0) return -1;
+            if(n <= 0) return -1;
             return b[0] & 0xFF;
-        } catch(Exception e){
+        }catch(Exception e){
             return -1;
         }
     }
 
     private RawByte readEscaped(int timeout){
         int b = readByte(timeout);
-        if (b < 0) return new RawByte(-1, new byte[0]);
+        if(b < 0) return new RawByte(-1, new byte[0]);
 
-        if (b == ESC){
+        if(b == ESC){
             int y = readByte(timeout);
-            if (y < 0) return new RawByte(-1, new byte[]{(byte)ESC});
+            if(y < 0) return new RawByte(-1, new byte[]{(byte)ESC});
             return new RawByte(y, new byte[]{(byte)ESC,(byte)y});
         }
+
         return new RawByte(b, new byte[]{(byte)b});
     }
 
@@ -152,7 +158,7 @@ public class LcpLink {
     }
 
     /* =========================================================================
-       ByteArrayBuilder
+       ByteArrayBuilder interne
        ========================================================================= */
     private static final class ByteArrayBuilder {
         private byte[] buf;
@@ -172,32 +178,42 @@ public class LcpLink {
             len += bb.length;
         }
 
-        byte[] toByteArray(){ return Arrays.copyOf(buf,len); }
+        byte[] toByteArray(){ return Arrays.copyOf(buf, len); }
 
         private void ensure(int n){
-            if (len+n > buf.length){
+            if(len+n > buf.length){
                 buf = Arrays.copyOf(buf, Math.max(buf.length*2, len+n));
             }
         }
 
         static byte[] concat(byte[] a, byte[] b){
-            if (a == null || a.length==0) return b;
-            if (b == null || b.length==0) return a;
-            byte[] out = Arrays.copyOf(a, a.length+b.length);
-            System.arraycopy(b,0,out,a.length,b.length);
-            return out;
+            if(a==null||a.length==0) return b;
+            if(b==null||b.length==0) return a;
+            byte[] o = Arrays.copyOf(a, a.length+b.length);
+            System.arraycopy(b,0,o,a.length,b.length);
+            return o;
         }
     }
 
     /* =========================================================================
-       CONSTRUCTION FRAME TX
+       hex() utilisé pour logs
+       ========================================================================= */
+    private static String hex(byte[] data){
+        if(data == null) return "(null)";
+        StringBuilder sb = new StringBuilder();
+        for(byte b : data) sb.append(String.format("%02X ",b));
+        return sb.toString().trim();
+    }
+
+    /* =========================================================================
+       Construction TX frame
        ========================================================================= */
     private byte[] buildFrame(byte[] payload){
 
         int status = toggle & 1;
 
-        if (syncPending){
-            status |= 0x02;  // SYNC bit one-time
+        if(syncPending){
+            status |= 0x02; // SYNC une seule fois
             syncPending = false;
         }
 
@@ -216,112 +232,103 @@ public class LcpLink {
         int crc = crcLCP(coreEsc);
         byte[] crcRaw = new byte[]{
                 (byte)(crc & 0xFF),
-                (byte)((crc >> 8) & 0xFF)
+                (byte)((crc>>8)&0xFF)
         };
         byte[] crcEsc = esc(crcRaw);
 
-        ByteArrayBuilder frame = new ByteArrayBuilder();
-        frame.add((byte)TILDE);
-        frame.add((byte)TILDE);
-        frame.add(coreEsc);
-        frame.add(crcEsc);
+        ByteArrayBuilder out = new ByteArrayBuilder();
+        out.add((byte)TILDE);
+        out.add((byte)TILDE);
+        out.add(coreEsc);
+        out.add(crcEsc);
 
-        byte[] out = frame.toByteArray();
+        byte[] fr = out.toByteArray();
 
-        if (DUMP_TX) log("TX: " + hex(out));
-        return out;
+        if(DUMP_TX) log("TX: " + hex(fr));
+        return fr;
     }
 
     /* =========================================================================
-       readFrame — PARSING STRUCTURÉ
+       readFrame (parser structuré complet)
        ========================================================================= */
     public byte[] readFrame(int timeout) throws IOException {
 
         long tEnd = System.currentTimeMillis() + timeout;
-
         int syncCount = 0;
 
-        while (System.currentTimeMillis() < tEnd){
+        while(System.currentTimeMillis() < tEnd){
             int b = readByte(timeout);
-            if (b < 0) continue;
-
-            if (b == TILDE){
+            if(b < 0) continue;
+            if(b == TILDE){
                 syncCount++;
-                if (syncCount == 2) break;
-            } else {
-                syncCount = 0;
-            }
+                if(syncCount==2) break;
+            }else syncCount=0;
         }
 
-        if (syncCount < 2)
+        if(syncCount < 2)
             throw new IOException("Timeout sync ~~");
 
-        ByteArrayBuilder rawFrame = new ByteArrayBuilder();
-        rawFrame.add((byte)TILDE);
-        rawFrame.add((byte)TILDE);
+        ByteArrayBuilder raw = new ByteArrayBuilder();
+        raw.add((byte)TILDE);
+        raw.add((byte)TILDE);
 
         ParsedFrame pf = new ParsedFrame();
         pf.headerRaw = new byte[0];
-        pf.payloadRaw = new byte[0];
-        pf.header = new byte[4];
+        pf.payloadRaw= new byte[0];
+        pf.header    = new byte[4];
 
-        for (int i=0; i<4; i++){
+        for(int i=0; i<4; i++){
             RawByte rb = readEscaped(timeout);
-            if (rb.decoded < 0)
-                throw new IOException("Header timeout");
+            if(rb.decoded < 0) throw new IOException("Header timeout");
 
             pf.header[i] = (byte)rb.decoded;
             pf.headerRaw = ByteArrayBuilder.concat(pf.headerRaw, rb.raw);
         }
 
-        rawFrame.add(pf.headerRaw);
+        raw.add(pf.headerRaw);
 
         int plen = pf.header[3] & 0xFF;
-
         pf.payload = new byte[plen];
 
-        for (int i=0; i<plen; i++){
+        for(int i=0; i<plen; i++){
             RawByte rb = readEscaped(timeout);
-            if (rb.decoded < 0)
-                throw new IOException("Payload timeout");
+            if(rb.decoded < 0) throw new IOException("Payload timeout");
 
             pf.payload[i] = (byte)rb.decoded;
             pf.payloadRaw = ByteArrayBuilder.concat(pf.payloadRaw, rb.raw);
         }
 
-        rawFrame.add(pf.payloadRaw);
+        raw.add(pf.payloadRaw);
 
         RawByte c0 = readEscaped(timeout);
         RawByte c1 = readEscaped(timeout);
-
-        if (c0.decoded < 0 || c1.decoded < 0)
+        if(c0.decoded<0 || c1.decoded<0)
             throw new IOException("CRC timeout");
 
-        rawFrame.add(c0.raw);
-        rawFrame.add(c1.raw);
+        raw.add(c0.raw);
+        raw.add(c1.raw);
 
-        pf.rawFrame = rawFrame.toByteArray();
+        pf.rawFrame = raw.toByteArray();
+        pf.crcRx = (c0.decoded & 0xFF) | ((c1.decoded & 0xFF)<<8);
 
-        pf.crcRx = (c0.decoded & 0xFF) | ((c1.decoded & 0xFF) << 8);
+        byte[] coreEsc = ByteArrayBuilder.concat(pf.headerRaw, pf.payloadRaw);
+        pf.crcCalc = crcLCP(coreEsc);
+        pf.crcOK   = (pf.crcCalc == pf.crcRx);
 
-        byte[] coreRawEsc = ByteArrayBuilder.concat(pf.headerRaw, pf.payloadRaw);
-        pf.crcCalc = crcLCP(coreRawEsc);
-        pf.crcOK = (pf.crcCalc == pf.crcRx);
+        if(!pf.crcOK)
+            throw new IOException(
+                    String.format("CRC mismatch recv=%04X calc=%04X",
+                            pf.crcRx, pf.crcCalc)
+            );
 
-        if (!pf.crcOK)
-            throw new IOException(String.format(
-                    "CRC mismatch recv=%04X calc=%04X",
-                    pf.crcRx, pf.crcCalc));
-
-        if (DUMP_RX) log("RX: " + hex(pf.rawFrame));
+        if(DUMP_RX) log("RX: "+hex(pf.rawFrame));
 
         lastFrame.set(pf);
-
         return pf.rawFrame;
     }
 
     /* =========================================================================
-       STATUS EXTRACTION
+       ExtractStatus / ExtractPayload
        ========================================================================= */
     public static final class LcpStatus {
         public boolean toggle;
@@ -330,49 +337,43 @@ public class LcpLink {
 
         public static LcpStatus fromByte(int b){
             LcpStatus s = new LcpStatus();
-            s.toggle = (b & 1) != 0;
-            s.sync   = (b & 2) != 0;
-            s.busy   = (b & 4) != 0;
+            s.toggle = (b & 1)!=0;
+            s.sync   = (b & 2)!=0;
+            s.busy   = (b & 4)!=0;
             return s;
         }
     }
 
     public static LcpStatus extractStatus(byte[] frameRaw){
         ParsedFrame pf = lastFrame.get();
-        if (pf == null || pf.rawFrame != frameRaw){
+        if(pf==null || pf.rawFrame!=frameRaw)
             throw new IllegalStateException("extractStatus on unknown frame");
-        }
         return LcpStatus.fromByte(pf.header[2] & 0xFF);
     }
 
-    /* =========================================================================
-       PAYLOAD EXTRACTION (Décodé)
-       ========================================================================= */
     public static byte[] extractPayload(byte[] frameRaw){
         ParsedFrame pf = lastFrame.get();
-        if(pf == null || pf.rawFrame != frameRaw){
+        if(pf==null || pf.rawFrame!=frameRaw)
             throw new IllegalStateException("extractPayload on unknown frame");
-        }
         return pf.payload;
     }
 
     /* =========================================================================
-       sendRecv — BUSY + 0x7D queue
+       sendRecv  (BUSY → queued → 0x7D)
        ========================================================================= */
     public byte[] sendRecv(byte[] payload, int timeoutMs) throws IOException {
 
-        byte[] frame = buildFrame(payload);
+        byte[] fr = buildFrame(payload);
 
-        try { port.purgeHwBuffers(true, true); } catch(Exception ignored){}
+        try { port.purgeHwBuffers(true,true); }catch(Exception ignored){}
 
-        port.write(frame, timeoutMs);
+        port.write(fr, timeoutMs);
 
         byte[] rsp = readFrame(timeoutMs);
         LcpStatus st = extractStatus(rsp);
 
-        if (st.busy){
-            return waitQueued(5000, 150);
-        }
+        if(st.busy)
+            return waitQueued(5000,150);
 
         return rsp;
     }
@@ -383,33 +384,32 @@ public class LcpLink {
     private byte[] waitQueued(int timeoutMs, int pollMs) throws IOException {
 
         long tEnd = System.currentTimeMillis() + timeoutMs;
-        byte[] last = null;
+        byte[] last=null;
 
-        while (System.currentTimeMillis() < tEnd) {
+        while(System.currentTimeMillis() < tEnd){
 
-            byte[] rsp = readFrame(Math.max(1200, pollMs + 800));
+            byte[] rsp = readFrame(Math.max(1200,pollMs+800));
             byte[] p = extractPayload(rsp);
             LcpStatus st = extractStatus(rsp);
 
-            if (p != null && p.length > 0)
-                last = p;
+            if(p!=null && p.length>0) last=p;
 
-            if (st.busy) {
+            if(st.busy){
                 sleep(pollMs);
                 continue;
             }
 
-            if (p == null || p.length == 0) {
+            if(p==null || p.length==0){
                 sleep(pollMs);
                 continue;
             }
 
             int rc = p[0] & 0xFF;
 
-            if (rc == RC_REQUEST_ABORTED)
+            if(rc==RC_REQUEST_ABORTED)
                 throw new IOException("Queue aborted");
 
-            if (rc == RC_REQUEST_QUEUED || rc == RC_NO_REQUEST_ACTIVE) {
+            if(rc==RC_REQUEST_QUEUED || rc==RC_NO_REQUEST_ACTIVE){
                 sleep(pollMs);
                 continue;
             }
@@ -426,19 +426,18 @@ public class LcpLink {
     public byte[] opGetField(int field) throws IOException {
 
         byte[] req = new byte[]{ (byte)MSG_GET_FIELD, (byte)field };
+        byte[] rsp = sendRecv(req,2000);
+        byte[] p   = extractPayload(rsp);
 
-        byte[] rsp = sendRecv(req, 2000);
-        byte[] p = extractPayload(rsp);
-
-        if (p != null && p.length > 0 &&
+        if(p!=null && p.length>0 &&
            (p[0]==RC_REQUEST_QUEUED || p[0]==RC_NO_REQUEST_ACTIVE)){
             p = waitQueued(5000,150);
         }
 
-        if (p == null || p.length < 2 || p[0] != RC_OK)
+        if(p==null || p.length<2 || p[0]!=RC_OK)
             throw new IOException("GET_FIELD #"+field);
 
-        return Arrays.copyOfRange(p, 2, p.length);
+        return Arrays.copyOfRange(p,2,p.length);
     }
 
     /* =========================================================================
@@ -446,20 +445,20 @@ public class LcpLink {
        ========================================================================= */
     public void opSetField(int field, byte[] data) throws IOException {
 
-        byte[] pl = new byte[2 + data.length];
+        byte[] pl = new byte[2+data.length];
         pl[0] = (byte)MSG_SET_FIELD;
         pl[1] = (byte)field;
-        System.arraycopy(data, 0, pl, 2, data.length);
+        System.arraycopy(data,0,pl,2,data.length);
 
         byte[] rsp = sendRecv(pl,2000);
-        byte[] p = extractPayload(rsp);
+        byte[] p   = extractPayload(rsp);
 
-        if (p != null && p.length > 0 &&
+        if(p!=null && p.length>0 &&
            (p[0]==RC_REQUEST_QUEUED || p[0]==RC_NO_REQUEST_ACTIVE)){
             p = waitQueued(5000,150);
         }
 
-        if (p == null || p.length < 1 || p[0] != RC_OK)
+        if(p==null || p.length<1 || p[0]!=RC_OK)
             throw new IOException("SET_FIELD #"+field);
     }
 
@@ -469,16 +468,15 @@ public class LcpLink {
     public byte[] opIssueCommand(int cmd) throws IOException {
 
         byte[] req = new byte[]{ (byte)MSG_ISSUE_COMMAND, (byte)cmd };
-
         byte[] rsp = sendRecv(req,2000);
-        byte[] p = extractPayload(rsp);
+        byte[] p   = extractPayload(rsp);
 
-        if (p != null && p.length > 0 &&
+        if(p!=null && p.length>0 &&
            (p[0]==RC_REQUEST_QUEUED || p[0]==RC_NO_REQUEST_ACTIVE)){
             p = waitQueued(5000,150);
         }
 
-        if (p == null || p.length < 1 || p[0] != RC_OK)
+        if(p==null || p.length<1 || p[0]!=RC_OK)
             throw new IOException("CMD 0x"+Integer.toHexString(cmd));
 
         return p;
@@ -490,14 +488,14 @@ public class LcpLink {
     public int[] opDeliveryStatus() throws IOException {
 
         byte[] rsp = sendRecv(new byte[]{ (byte)MSG_GET_DEL_STATUS },2000);
-        byte[] p = extractPayload(rsp);
+        byte[] p   = extractPayload(rsp);
 
-        if (p != null && p.length > 0 &&
+        if(p!=null && p.length>0 &&
            (p[0]==RC_REQUEST_QUEUED || p[0]==RC_NO_REQUEST_ACTIVE)){
             p = waitQueued(5000,150);
         }
 
-        if (p == null || p.length < 6 || p[0] != RC_OK)
+        if(p==null || p.length<6 || p[0]!=RC_OK)
             throw new IOException("Invalid 0x28");
 
         int ds = u16be(p,2);
@@ -506,19 +504,19 @@ public class LcpLink {
     }
 
     /* =========================================================================
-       GET_MACHINE (0x23)
+       GET_MACHINE
        ========================================================================= */
     public int[] opMachineStatusFull() throws IOException {
 
         byte[] rsp = sendRecv(new byte[]{ (byte)MSG_GET_MACHINE },2000);
-        byte[] p = extractPayload(rsp);
+        byte[] p   = extractPayload(rsp);
 
-        if (p != null && p.length > 0 &&
+        if(p!=null && p.length>0 &&
            (p[0]==RC_REQUEST_QUEUED || p[0]==RC_NO_REQUEST_ACTIVE)){
             p = waitQueued(5000,150);
         }
 
-        if (p == null || p.length < 8 || p[0] != RC_OK){
+        if(p==null || p.length<8 || p[0]!=RC_OK){
             int[] d = opDeliveryStatus();
             return new int[]{ 0x0000, d[0], d[1] };
         }
