@@ -43,14 +43,13 @@ public final class DeliveryController {
         exec.execute(() -> {
             try {
                 setState(State.STARTING);
-                wake();
-
-                setProductSafe(productId);
-                clearPresetsSafe();
-                sleep(200);
-
+                wake();                       // réveil léger
+                setProductSafe(productId);    // best-effort
+                clearPresetsSafe();           // #5=0 puis #6=0 (safe)
+                sleep(150);
+                wakeStable(2, 600, 80);       // bus calme : 2 ticks 0x23 OK
+                sleep(120);
                 runAndWaitFlowStrictWithRetry(waitFlowTimeoutMs, pollMs, true /*cmd00*/);
-
                 setState(State.FLOW_ACTIVE);
                 events.onFlowStarted();
             } catch (Exception e) {
@@ -65,15 +64,14 @@ public final class DeliveryController {
             try {
                 setState(State.STARTING);
                 wake();
-
                 int digits = readDigits();
                 int p6 = (int)Math.round(litres * Math.pow(10, digits));
-                setProductSafe(productId);
-                writeNetPresetSafe(p6);
-                sleep(200);
-
+                setProductSafe(productId);      // best-effort
+                writeNetPresetSafe(p6);         // #6=p6 + #5=0 (safe)
+                sleep(150);
+                wakeStable(2, 600, 80);
+                sleep(120);
                 runAndWaitFlowStrictWithRetry(waitFlowTimeoutMs, pollMs, true /*cmd00*/);
-
                 setState(State.FLOW_ACTIVE);
                 events.onFlowStarted();
             } catch (Exception e) {
@@ -82,7 +80,7 @@ public final class DeliveryController {
         });
     }
 
-    /** WAIT_FLOW seul (strict) — si RUN a été envoyé ailleurs */
+    /** WAIT_FLOW seul (strict) — si RUN a déjà été envoyé ailleurs */
     public void waitForFlowOnly(long timeoutMs, long pollMs) {
         exec.execute(() -> {
             try {
@@ -202,7 +200,7 @@ public final class DeliveryController {
 
         if (rc == LcpLink.RC_REQUEST_QUEUED || rc == LcpLink.RC_NO_REQUEST_ACTIVE) {
             // Aller chercher le résultat via 0x7D (STRICT)
-            p = waitQueuedStrict(3000, 150); // retourne payload "final"
+            p = waitQueuedStrict(4000, 150); // retourne payload "final"
             if (p == null || p.length < 1) throw new IOException("0x7D empty");
             rc = p[0] & 0xFF;
         }
@@ -273,15 +271,27 @@ public final class DeliveryController {
     private byte[] waitQueuedStrict(int timeoutMs, int pollMs) throws IOException {
         long tEnd = System.currentTimeMillis() + timeoutMs;
         byte[] last = null;
+        int tries = 0;
+
         while (System.currentTimeMillis() < tEnd) {
-            byte[] rsp = link.sendRecv(new byte[]{ (byte) LcpLink.MSG_CHECK_REQUEST }, Math.max(1200, pollMs+800));
+            byte[] rsp = link.sendRecv(new byte[]{ (byte) LcpLink.MSG_CHECK_REQUEST },
+                                       Math.max(1200, pollMs + 800));
             byte[] p = LcpLink.extractPayload(rsp);
             if (p != null && p.length > 0) last = p;
 
             if (p == null || p.length == 0) { sleep(pollMs); continue; }
             int rc = p[0] & 0xFF;
             if (rc == LcpLink.RC_REQUEST_ABORTED) throw new IOException("Queued aborted");
-            if (rc == LcpLink.RC_REQUEST_QUEUED || rc == LcpLink.RC_NO_REQUEST_ACTIVE) { sleep(pollMs); continue; }
+
+            if (rc == LcpLink.RC_REQUEST_QUEUED || rc == LcpLink.RC_NO_REQUEST_ACTIVE) {
+                tries++;
+                if (tries % 6 == 0) { // toutes ~6 itérations (~1s)
+                    softResync();
+                    sleep(80);
+                }
+                sleep(pollMs);
+                continue;
+            }
 
             // Cas "OK + OK + <payload_orig>" (convention LCP) : on retourne à partir du 2e OK
             if (rc == LcpLink.RC_OK && p.length >= 2 && (p[1] & 0xFF) == LcpLink.RC_OK) {
@@ -289,13 +299,13 @@ public final class DeliveryController {
                 System.arraycopy(p, 1, out, 0, out.length);
                 return out;
             }
-            return p; // autre forme "finale"
+            return p;
         }
         throw new IOException("Queued timeout (0x7D), last=" + (last==null?"(null)":String.format("%02X", last[0])));
     }
 
     /* ================================================================
-       ROBUSTESSE : Wake + SET_FIELD safe
+       ROBUSTESSE : Wake + SET_FIELD safe + WakeStable
        ================================================================ */
 
     private void wake() {
@@ -303,11 +313,38 @@ public final class DeliveryController {
         sleep(120);
     }
 
+    /** Garanti un bus "calme" : okNeeded lectures 0x23 consécutives OK avant de poursuivre */
+    private void wakeStable(int okNeeded, int timeoutPerPollMs, int pauseMs) {
+        int ok = 0;
+        long tEnd = System.currentTimeMillis() + 1500;
+        while (System.currentTimeMillis() < tEnd && ok < okNeeded) {
+            try { getMachineStrict(timeoutPerPollMs); ok++; } catch(Exception ignored){ ok = 0; }
+            sleep(pauseMs);
+        }
+    }
+
+    /** SET_FIELD #0 (product) — best‑effort : 2 tentatives puis continue si refus */
     private void setProductSafe(int productId) throws IOException {
         if (productId < 1 || productId > 16)
             throw new IllegalArgumentException("ProductNumber doit être 1..16");
         byte v = (byte)((productId - 1) & 0xFF);
-        opSetFieldSafe(0, new byte[]{ v }, "SET_FIELD #0 (product)");
+
+        try {
+            link.opSetField(0, new byte[]{ v });
+            sleep(120);
+            return;
+        } catch (IOException e1) {
+            softResync();
+            sleep(150);
+            try {
+                link.opSetField(0, new byte[]{ v });
+                sleep(120);
+                return;
+            } catch (IOException e2) {
+                // Best-effort : log et continue avec le produit courant
+                try { events.onError("SET_FIELD #0 ignoré (best-effort): " + e2.getMessage(), e2); } catch(Exception ignored){}
+            }
+        }
     }
 
     private void clearPresetsSafe() throws IOException {
