@@ -6,14 +6,21 @@ import java.io.IOException;
 import java.util.Arrays;
 
 /**
- * LcpLink — Version finale A2‑Enhanced (2026‑02‑04)
- * --------------------------------------------------
+ * LcpLink — Version finale A2‑Enhanced (2026‑02‑05, timing/queueing patch)
+ * ------------------------------------------------------------------------
  * - Parsing structuré via ParsedFrame (header+payload décodés)
  * - API inchangée (sendRecv/readFrame → byte[])
  * - ThreadLocal pour extractions sécurisées
- * - CRC XMODEM 0x1021 (conforme standard CRC16/XMODEM) [1](http://ee6115.mit.edu/amulet/xmodem.htm)
- * - Framing LCP ~~ + ESC, logique similaire au framing utilisé dans XMODEM [2](https://postmodern.github.io/docs/crc.cr/CRC/CRC16XModem.html)
+ * - CRC XMODEM 0x1021 (conforme standard CRC16/XMODEM)
+ * - Framing LCP ~~ + ESC
  * - Compatible DeliveryController V2
+ *
+ * Patch Timing/Queueing :
+ * - Mono‑trame stricte (verrou txRxLock)
+ * - Pause inter‑trames (~60 ms + jitter) avant chaque émission
+ * - Marqueur de fin d’échange (ACK + fin RX) pour cadencer le bus
+ * - Déduplication runtime de GET_MACHINE (verrou dédié)
+ * - Gap 80–120 ms après ISSUE_COMMAND (ex. RUN) pour laisser armer la session
  */
 public class LcpLink {
 
@@ -26,14 +33,14 @@ public class LcpLink {
     private static final int SEED = 0x7E7E;   // <-- CORRECTIF CRITIQUE
     private static final int POLY = 0x1021;   // polynomial CRC16/XMODEM
 
-    public static final int MSG_GET_FIELD     = 0x20;
-    public static final int MSG_SET_FIELD     = 0x21;
-    public static final int MSG_PRINT_TEXT    = 0x22;
-    public static final int MSG_GET_MACHINE   = 0x23;
-    public static final int MSG_ISSUE_COMMAND = 0x24;
-    public static final int MSG_GET_DEL_STATUS= 0x28;
-    public static final int MSG_CHECK_REQUEST = 0x7D;
-    public static final int MSG_GET_PRODUCTID = 0x00;
+    public static final int MSG_GET_FIELD      = 0x20;
+    public static final int MSG_SET_FIELD      = 0x21;
+    public static final int MSG_PRINT_TEXT     = 0x22;
+    public static final int MSG_GET_MACHINE    = 0x23;
+    public static final int MSG_ISSUE_COMMAND  = 0x24;
+    public static final int MSG_GET_DEL_STATUS = 0x28;
+    public static final int MSG_CHECK_REQUEST  = 0x7D;
+    public static final int MSG_GET_PRODUCTID  = 0x00;
 
     public static final int RC_OK                = 0x00;
     public static final int RC_REQUEST_QUEUED    = 0x26;
@@ -83,6 +90,20 @@ public class LcpLink {
 
     private boolean syncPending;
     private int toggle;
+
+    // === [TIMING & QUEUEING PATCH — CONSTS & VERROUS] ========================
+    // Cadence alignée sur le Python (bus « calmé »)
+    private static final int INTER_FRAME_PAUSE_MS  = 60; // pause minimale entre trames
+    private static final int INTER_FRAME_JITTER_MS = 8;  // légère gigue
+
+    // Mono‑trame stricte : un seul échange à la fois
+    private final Object txRxLock = new Object();
+
+    // Déduplication GET_MACHINE (évite doublons consécutifs)
+    private final Object machinePollLock = new Object();
+
+    // Marqueur de fin d’échange (pour cadencer l’émission suivante)
+    private volatile long lastExchangeFinishedAtMs = 0L;
 
     public LcpLink(UsbSerialPort p, int to, int from, boolean syncFirst) {
         this.port = p;
@@ -359,22 +380,33 @@ public class LcpLink {
     }
 
     /* =========================================================================
-       sendRecv — gestion BUSY → QUEUED → 0x7D
+       sendRecv — mono‑trame stricte + pause inter‑trames
        ========================================================================= */
     public byte[] sendRecv(byte[] payload, int timeoutMs) throws IOException {
+        synchronized (txRxLock) {
+            // Pause inter‑trames depuis la fin réelle du dernier échange
+            long now = System.currentTimeMillis();
+            long since = now - lastExchangeFinishedAtMs;
+            int pause = INTER_FRAME_PAUSE_MS + rnd(0, INTER_FRAME_JITTER_MS);
+            if (since < pause) {
+                sleepMs(pause - (int) since);
+            }
 
-        byte[] fr = buildFrame(payload);
+            byte[] fr = buildFrame(payload);
 
-        try { port.purgeHwBuffers(true,true); }catch(Exception ignored){}
-        port.write(fr, timeoutMs);
+            try { port.purgeHwBuffers(true,true); }catch(Exception ignored){}
+            port.write(fr, timeoutMs);
 
-        byte[] rsp = readFrame(timeoutMs);
-        LcpStatus st = extractStatus(rsp);
+            byte[] rsp = readFrame(timeoutMs);
 
-        if(st.busy)
-            return waitQueued(5000,150);
+            // Marque la fin d’échange (ACK + fin RX)
+            lastExchangeFinishedAtMs = System.currentTimeMillis();
 
-        return rsp;
+            // Important : on NE traite plus ici le "busy" pour ne jamais
+            // renvoyer un payload au lieu d'un frame. La gestion "queued"
+            // est faite au niveau des op* pour rester cohérent avec l'API.
+            return rsp;
+        }
     }
 
     /* =========================================================================
@@ -414,6 +446,8 @@ public class LcpLink {
                 continue;
             }
 
+            // Marquer la fin d’échange pour la cadence
+            lastExchangeFinishedAtMs = System.currentTimeMillis();
             return p;
         }
 
@@ -427,7 +461,12 @@ public class LcpLink {
 
         byte[] req = new byte[]{ (byte)MSG_GET_FIELD, (byte)field };
         byte[] rsp = sendRecv(req,2000);
-        byte[] p   = extractPayload(rsp);
+        LcpStatus st = extractStatus(rsp);
+
+        byte[] p = extractPayload(rsp);
+        if (st.busy || p==null || p.length==0) {
+            p = waitQueued(5000,150);
+        }
 
         if(p!=null && p.length>0 &&
            (p[0]==RC_REQUEST_QUEUED || p[0]==RC_NO_REQUEST_ACTIVE)){
@@ -451,7 +490,12 @@ public class LcpLink {
         System.arraycopy(data,0,pl,2,data.length);
 
         byte[] rsp = sendRecv(pl,2000);
-        byte[] p   = extractPayload(rsp);
+        LcpStatus st = extractStatus(rsp);
+
+        byte[] p = extractPayload(rsp);
+        if (st.busy || p==null || p.length==0) {
+            p = waitQueued(5000,150);
+        }
 
         if(p!=null && p.length>0 &&
            (p[0]==RC_REQUEST_QUEUED || p[0]==RC_NO_REQUEST_ACTIVE)){
@@ -469,7 +513,12 @@ public class LcpLink {
 
         byte[] req = new byte[]{ (byte)MSG_ISSUE_COMMAND, (byte)cmd };
         byte[] rsp = sendRecv(req,2000);
-        byte[] p   = extractPayload(rsp);
+        LcpStatus st = extractStatus(rsp);
+
+        byte[] p = extractPayload(rsp);
+        if (st.busy || p==null || p.length==0) {
+            p = waitQueued(5000,150);
+        }
 
         if(p!=null && p.length>0 &&
            (p[0]==RC_REQUEST_QUEUED || p[0]==RC_NO_REQUEST_ACTIVE)){
@@ -478,6 +527,10 @@ public class LcpLink {
 
         if(p==null || p.length<1 || p[0]!=RC_OK)
             throw new IOException("CMD 0x"+Integer.toHexString(cmd));
+
+        // === [TIMING & QUEUEING PATCH] ===
+        // Gap après un changement d'état (ex. RUN) pour laisser le LCR armer
+        sleepMs(80 + rnd(0, 40));
 
         return p;
     }
@@ -488,7 +541,12 @@ public class LcpLink {
     public int[] opDeliveryStatus() throws IOException {
 
         byte[] rsp = sendRecv(new byte[]{ (byte)MSG_GET_DEL_STATUS },2000);
-        byte[] p   = extractPayload(rsp);
+        LcpStatus st = extractStatus(rsp);
+
+        byte[] p = extractPayload(rsp);
+        if (st.busy || p==null || p.length==0) {
+            p = waitQueued(5000,150);
+        }
 
         if(p!=null && p.length>0 &&
            (p[0]==RC_REQUEST_QUEUED || p[0]==RC_NO_REQUEST_ACTIVE)){
@@ -505,28 +563,34 @@ public class LcpLink {
     }
 
     /* =========================================================================
-       GET_MACHINE (fallback vers 0x28)
+       GET_MACHINE (fallback vers 0x28) — sérialisé (déduplication runtime)
        ========================================================================= */
     public int[] opMachineStatusFull() throws IOException {
+        synchronized (machinePollLock) {
+            byte[] rsp = sendRecv(new byte[]{ (byte)MSG_GET_MACHINE },2000);
+            LcpStatus st = extractStatus(rsp);
 
-        byte[] rsp = sendRecv(new byte[]{ (byte)MSG_GET_MACHINE },2000);
-        byte[] p   = extractPayload(rsp);
+            byte[] p = extractPayload(rsp);
+            if (st.busy || p==null || p.length==0) {
+                p = waitQueued(5000,150);
+            }
 
-        if(p!=null && p.length>0 &&
-           (p[0]==RC_REQUEST_QUEUED || p[0]==RC_NO_REQUEST_ACTIVE)){
-            p=waitQueued(5000,150);
+            if(p!=null && p.length>0 &&
+               (p[0]==RC_REQUEST_QUEUED || p[0]==RC_NO_REQUEST_ACTIVE)){
+                p=waitQueued(5000,150);
+            }
+
+            if(p==null || p.length<8 || p[0]!=RC_OK){
+                int[] d = opDeliveryStatus();
+                return new int[]{ 0x0000, d[0], d[1] };
+            }
+
+            int dev = u16be(p,2);
+            int ds  = u16be(p,4);
+            int dc  = u16be(p,6);
+
+            return new int[]{ dev, ds, dc };
         }
-
-        if(p==null || p.length<8 || p[0]!=RC_OK){
-            int[] d = opDeliveryStatus();
-            return new int[]{ 0x0000, d[0], d[1] };
-        }
-
-        int dev = u16be(p,2);
-        int ds  = u16be(p,4);
-        int dc  = u16be(p,6);
-
-        return new int[]{ dev, ds, dc };
     }
 
     /* =========================================================================
@@ -538,5 +602,18 @@ public class LcpLink {
 
     private static void sleep(int ms){
         try { Thread.sleep(ms); } catch(Exception ignored){}
+    }
+
+    // === [TIMING & QUEUEING PATCH — HELPERS] =================================
+    private static int rnd(int min, int max) {
+        if (max <= 0) return min;
+        return min + (int) (Math.random() * (max + 1));
+    }
+
+    private static void sleepMs(int ms) {
+        if (ms <= 0) return;
+        try { Thread.sleep(ms); } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+        }
     }
 }
