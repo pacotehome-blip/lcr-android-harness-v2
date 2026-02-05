@@ -77,7 +77,7 @@ public class LcpLink {
 
     /* =========================================================================
        LOGGER
-        ========================================================================= */
+       ========================================================================= */
     public interface Logger { void log(String s); }
     private static Logger logger = null;
     public static void setLogger(Logger l){ logger = l; }
@@ -667,7 +667,7 @@ public class LcpLink {
     }
 
     /* =========================================================================
-       GET_DELIVERY_STATUS (0x28) — throttle 1000 ms
+       GET_DELIVERY_STATUS (0x28) — throttle 1000 ms (haut niveau + bas niveau)
        ========================================================================= */
     public int[] opDeliveryStatus() throws IOException {
         synchronized (delStatusPollLock) {
@@ -706,7 +706,7 @@ public class LcpLink {
     }
 
     /* =========================================================================
-       GET_MACHINE (0x23) — sérialisé + throttle 1000 ms
+       GET_MACHINE (0x23) — sérialisé + throttle 1000 ms (haut niveau + bas niveau)
        ========================================================================= */
     public int[] opMachineStatusFull() throws IOException {
         synchronized (machinePollLock) {

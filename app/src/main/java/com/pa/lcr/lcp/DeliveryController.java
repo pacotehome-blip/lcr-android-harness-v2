@@ -6,16 +6,21 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 
 /**
- * DeliveryController — Version finale 100% conforme Python V2
- * -----------------------------------------------------------
- * - Strict GET_MACHINE (0x23)
- * - BUSY + queue 0x7D correctement gérés
+ * DeliveryController — 2026-02-05 (LCP-safe, Python V2, no 0x7D TX)
+ * -----------------------------------------------------------------
+ * - Utilise les op* de LcpLink (opMachineStatusFull/opDeliveryStatus/opSetField/opGetField/opIssueCommand)
+ * - Ne fait PLUS aucun sendRecv direct sur 0x23/0x28
+ * - N'envoie JAMAIS 0x7D (CHECK_REQUEST) — file gérée côté LcpLink.waitQueued()
  * - START : wake → clear ticket → recover → set product → presets → RUN → WAIT_FLOW
- * - WAIT_FLOW : double FLOW ou Δ#44 > 0 (filet sécurité)
+ * - WAIT_FLOW : double FLOW ou Δ#44 > 0 (filet de sécurité)
  * - LIVE LOOP : 0x23 strict → #44/#45
  * - Guard preset (NET ou GROSS)
  * - END : cmd 0x02, attente FLOW=0 & ACTIVE=0, clear ticket
- * - RESYNC : message 0x00 (GET_PRODUCT_ID), jamais {0x00} illégal
+ * - RESYNC : GET_PRODUCT_ID (0x00) via sendRecv permis (fusible 0x7D uniquement)
+ *
+ * Remarque:
+ * - Les throttles 0x23/0x28 sont appliqués dans LcpLink (haut ET bas niveau)
+ * - Pour un terrain très exigeant, utiliser pollMs >= 1000 ms
  */
 public final class DeliveryController {
 
@@ -31,6 +36,7 @@ public final class DeliveryController {
     public DeliveryController(LcpLink link, DeliveryEvents events, Executor executor) {
         this.link   = link;
         this.events = (events != null ? events : new DeliveryEvents(){});
+        // Mono-thread => pas d'overlap d'appels DC
         this.exec   = (executor != null ? executor : Executors.newSingleThreadExecutor());
     }
 
@@ -116,7 +122,7 @@ public final class DeliveryController {
     public void stopLiveLoop() { liveRunning = false; }
 
     /* =====================================================================
-       PRÉ‑START — EXACT Python V2
+       PRÉ‑START — EXACT Python V2 (LCP-safe)
        ===================================================================== */
 
     private void preStartSequence(int productId, boolean presetMode) throws IOException {
@@ -150,7 +156,8 @@ public final class DeliveryController {
 
     private void runAndWaitFlow(long timeoutMs, long pollMs) throws IOException {
         try {
-            link.opIssueCommand(0x00);
+            link.opIssueCommand(0x00);     // RUN
+            // LcpLink applique un gap 80–120 ms après ISSUE_COMMAND
             waitFlowStrict(timeoutMs, pollMs, true, true);
         } catch(IOException e){
             resync(); sleep(200);
@@ -172,7 +179,7 @@ public final class DeliveryController {
 
             int[] dsdc;
             try {
-                dsdc = getMachineStrict(3000);
+                dsdc = getMachineStrict();   // LCP-safe : passe par opMachineStatusFull()
             } catch(Exception e){
                 sleep((int)pollMs);
                 continue;
@@ -231,7 +238,7 @@ public final class DeliveryController {
 
             int[] dsdc;
             try {
-                dsdc = getMachineStrict(3000);
+                dsdc = getMachineStrict();
             } catch(Exception e){
                 sleep(80);
                 continue;
@@ -280,7 +287,7 @@ public final class DeliveryController {
 
         while (System.currentTimeMillis() < tEnd) {
             try {
-                int[] dsdc = getMachineStrict(3000);
+                int[] dsdc = getMachineStrict();
                 int ds = dsdc[0];
                 int dc = dsdc[1];
 
@@ -297,7 +304,7 @@ public final class DeliveryController {
 
     private void clearTicketIfNeeded() throws IOException {
         try {
-            int[] dsdc = getMachineStrict(1500);
+            int[] dsdc = getMachineStrict();
             int ds = dsdc[0];
             boolean pending = (ds & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
             if (pending) issueCommandWithRetry(0x06); // CLEAR_TICKET
@@ -306,7 +313,7 @@ public final class DeliveryController {
 
     private void recoverIfActive() throws IOException {
         try {
-            int[] dsdc = getMachineStrict(1500);
+            int[] dsdc = getMachineStrict();
             int dc = dsdc[1];
             boolean active = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
             if (active) {
@@ -317,81 +324,15 @@ public final class DeliveryController {
     }
 
     /* =====================================================================
-       CORE STRICT : GET_MACHINE (0x23) + queue 0x7D
+       CORE STRICT : GET_MACHINE via op* (plus aucun 0x7D ni sendRecv direct)
        ===================================================================== */
 
-    private int[] getMachineStrict(int timeoutMs) throws IOException {
-
-        byte[] rsp = link.sendRecv(new byte[]{ (byte)LcpLink.MSG_GET_MACHINE }, timeoutMs);
-        byte[] p = LcpLink.extractPayload(rsp);
-
-        if (p == null || p.length < 1)
-            throw new IOException("GET_MACHINE empty");
-
-        int rc = p[0] & 0xFF;
-
-        if (rc == LcpLink.RC_REQUEST_QUEUED ||
-            rc == LcpLink.RC_NO_REQUEST_ACTIVE) {
-
-            p = waitQueuedStrict(4000, 150);
-            rc = p[0] & 0xFF;
-        }
-
-        if (rc != LcpLink.RC_OK)
-            throw new IOException(String.format("GET_MACHINE rc=0x%02X", rc));
-
-        if (p.length < 8)
-            throw new IOException("GET_MACHINE short");
-
-        int ds = u16be(p, 4);
-        int dc = u16be(p, 6);
+    private int[] getMachineStrict() throws IOException {
+        // opMachineStatusFull() gère 0x26/0x27 via waitQueued(), et throttle 1 Hz
+        int[] triple = link.opMachineStatusFull(); // { dev, ds, dc } ou {0, ds, dc} si fallback 0x28
+        int ds = triple[1];
+        int dc = triple[2];
         return new int[]{ ds, dc };
-    }
-
-    private byte[] waitQueuedStrict(int timeoutMs, int pollMs) throws IOException {
-
-        long tEnd = System.currentTimeMillis() + timeoutMs;
-        byte[] last = null;
-
-        while (System.currentTimeMillis() < tEnd) {
-
-            byte[] rsp = link.sendRecv(
-                    new byte[]{ (byte)LcpLink.MSG_CHECK_REQUEST },
-                    Math.max(1200, pollMs + 800)
-            );
-
-            byte[] p = LcpLink.extractPayload(rsp);
-            if (p != null && p.length > 0) last = p;
-
-            if (p == null || p.length == 0) {
-                sleep(pollMs);
-                continue;
-            }
-
-            int rc = p[0] & 0xFF;
-
-            if (rc == LcpLink.RC_REQUEST_ABORTED)
-                throw new IOException("Queued aborted");
-
-            if (rc == LcpLink.RC_REQUEST_QUEUED ||
-                rc == LcpLink.RC_NO_REQUEST_ACTIVE) {
-                sleep(pollMs);
-                continue;
-            }
-
-            if (rc == LcpLink.RC_OK &&
-                p.length >= 2 &&
-                (p[1] & 0xFF) == LcpLink.RC_OK) {
-
-                byte[] out = new byte[p.length - 1];
-                System.arraycopy(p, 1, out, 0, out.length);
-                return out;
-            }
-
-            return p;
-        }
-
-        throw new IOException("Queued timeout (0x7D)");
     }
 
     /* =====================================================================
@@ -460,7 +401,8 @@ public final class DeliveryController {
     /* =====================================================================
        RESYNC — GET_PRODUCT_ID (0x00)
        ===================================================================== */
-
+    // Note: le fusible de LcpLink bloque seulement 0x7D ; 0x00 est permis.
+    // Si tu veux, on peut ajouter un opGetProductId() plus “propre”.
     private void resync() {
         try {
             link.sendRecv(new byte[]{0x00}, 2000);
@@ -468,11 +410,11 @@ public final class DeliveryController {
     }
 
     /* =====================================================================
-       WAKE & WAKE_STABLE
+       WAKE & WAKE_STABLE (via opMachineStatusFull)
        ===================================================================== */
 
     private void wake() {
-        try { getMachineStrict(1500); } catch(Exception ignored){}
+        try { getMachineStrict(); } catch(Exception ignored){}
         sleep(120);
     }
 
@@ -482,7 +424,7 @@ public final class DeliveryController {
 
         while (System.currentTimeMillis() < tEnd && ok < okNeeded) {
             try {
-                getMachineStrict(timeoutPerPollMs);
+                getMachineStrict();
                 ok++;
             } catch(Exception ignored){
                 ok = 0;
