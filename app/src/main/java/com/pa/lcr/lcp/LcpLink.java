@@ -5,6 +5,8 @@ import com.hoho.android.usbserial.driver.UsbSerialPort;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * LcpLink — Version finale A2‑Enhanced (2026‑02‑05, timing/queueing + portLock + metrics + 0x7D fuse)
@@ -18,10 +20,11 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * Patch Timing/Queueing :
  * - Mono‑trame stricte (verrou txRxLock)
- * - Verrou par port (portLock) pour exclusivité multi‑instances
+ * - Verrou local par port (portLock) ET verrou global inter‑instances (PortRegistry)
  * - Pause inter‑trames (~60 ms + jitter) avant chaque émission
  * - Marqueur de fin d’échange (ACK + fin RX) pour cadencer le bus
  * - Déduplication runtime de GET_MACHINE (verrou dédié + throttle 1000 ms)
+ * - Throttle GET_DEL_STATUS (0x28) à 1000 ms
  * - Gap 80–120 ms après ISSUE_COMMAND (ex. RUN) pour laisser armer la session
  *
  * Metrics (léger et thread-safe) :
@@ -37,7 +40,7 @@ public class LcpLink {
     /* =========================================================================
        VERSION (pour tracer ce qui tourne réellement)
        ========================================================================= */
-    private static final String LCP_VERSION = "LcpLink v2026-02-05 fuse+throttle";
+    private static final String LCP_VERSION = "LcpLink v2026-02-05 fuse+throttle+portlock+delstatus";
 
     /* =========================================================================
        CONSTANTES PROTOCOLE
@@ -97,6 +100,16 @@ public class LcpLink {
     private static final ThreadLocal<ParsedFrame> lastFrame = new ThreadLocal<>();
 
     /* =========================================================================
+       PortRegistry : verrou global par port (évite overlaps inter‑instances)
+       ========================================================================= */
+    private static final class PortRegistry {
+        private static final ConcurrentHashMap<String, ReentrantLock> LOCKS = new ConcurrentHashMap<>();
+        static ReentrantLock acquire(String key) {
+            return LOCKS.computeIfAbsent(key, k -> new ReentrantLock(true));
+        }
+    }
+
+    /* =========================================================================
        ATTRIBUTS INSTANCE
        ========================================================================= */
     private final UsbSerialPort port;
@@ -106,26 +119,30 @@ public class LcpLink {
     private boolean syncPending;
     private int toggle;
 
-    // === [TIMING & QUEUEING PATCH — CONSTS & VERROUS] ========================
-    // Cadence alignée sur le Python (bus « calmé »)
+    // Cadence inter‑trames
     private static final int INTER_FRAME_PAUSE_MS  = 60; // pause minimale entre trames
     private static final int INTER_FRAME_JITTER_MS = 8;  // légère gigue
 
-    // Mono‑trame stricte : un seul échange à la fois
+    // Mono‑trame stricte
     private final Object txRxLock = new Object();
 
-    // Verrou partagé par port pour éviter l’overlap si multi‑instances
+    // Verrou local par port (moniteur Java) + verrou global (cross‑instances)
     private final Object portLock;
+    private final ReentrantLock globalPortLock;
 
-    // Déduplication GET_MACHINE (évite doublons consécutifs) + throttle
+    // Throttle pour 0x23 et 0x28
     private final Object machinePollLock = new Object();
-    private static final int MIN_POLL_GET_MACHINE_MS = 1000; // 1s pour les tests terrain
+    private static final int MIN_POLL_GET_MACHINE_MS = 1000; // 1s
     private volatile long lastGetMachineAt = 0L;
 
-    // Marqueur de fin d’échange (pour cadencer l’émission suivante)
+    private final Object delStatusPollLock = new Object();
+    private static final int MIN_POLL_GET_DEL_STATUS_MS = 1000; // 1s
+    private volatile long lastDelStatusAt = 0L;
+
+    // Marqueur de fin d’échange
     private volatile long lastExchangeFinishedAtMs = 0L;
 
-    // === [METRICS] ============================================================
+    // Metrics
     private final Metrics metrics = new Metrics();
 
     public LcpLink(UsbSerialPort p, int to, int from, boolean syncFirst) {
@@ -134,7 +151,15 @@ public class LcpLink {
         this.fromAddr = from & 0xFF;
         this.syncPending = syncFirst;
         this.toggle = 0;
-        this.portLock = p; // même objet port utilisé comme moniteur partagé
+
+        // Moniteur local (objet port) + verrou global cross‑instances par clé stable
+        this.portLock = p;
+        String key = "usb:" +
+            (p.getDriver()!=null && p.getDriver().getDevice()!=null
+                ? p.getDriver().getDevice().getDeviceId() : p.hashCode())
+            + "/port:" + p.getPortNumber();
+        this.globalPortLock = PortRegistry.acquire(key);
+
         log("[LCP] Loaded " + LCP_VERSION);
     }
 
@@ -372,7 +397,7 @@ public class LcpLink {
 
         lastFrame.set(pf);
 
-        // === [METRICS] === RX frame comptage
+        // Metrics RX++
         metrics.rxFrames.incrementAndGet();
 
         return pf.rawFrame;
@@ -409,17 +434,18 @@ public class LcpLink {
     }
 
     /* =========================================================================
-       sendRecv — mono‑trame stricte + pause inter‑trames + portLock + fuse 0x7D
+       sendRecv — mono‑trame stricte + pause inter‑trames + port locks + fuse 0x7D
        ========================================================================= */
     public byte[] sendRecv(byte[] payload, int timeoutMs) throws IOException {
-        synchronized (portLock) {              // exclusivité par port (anti multi‑instances)
+        globalPortLock.lock();                 // exclusivité par port (inter‑instances)
+        try {
+        synchronized (portLock) {              // garde locale
         synchronized (txRxLock) {              // séquence intra‑instance
             long now = System.currentTimeMillis();
-            // Baseline IFΔ : ignorer le premier delta (sinon ~epoch)
             if (lastExchangeFinishedAtMs == 0L) lastExchangeFinishedAtMs = now;
             long since = now - lastExchangeFinishedAtMs;
 
-            // === [METRICS] === mise à jour Δ inter‑trames
+            // Metrics Δ inter‑trames
             metrics.updateInterFrameDelta(since);
 
             int pause = INTER_FRAME_PAUSE_MS + rnd(0, INTER_FRAME_JITTER_MS);
@@ -437,12 +463,12 @@ public class LcpLink {
             try { port.purgeHwBuffers(true,true); }catch(Exception ignored){}
             port.write(fr, timeoutMs);
 
-            // === [METRICS] === TX frame comptage
+            // Metrics TX++
             metrics.txFrames.incrementAndGet();
 
             byte[] rsp = readFrame(timeoutMs);
 
-            // Marque la fin d’échange (ACK + fin RX)
+            // Fin d’échange
             lastExchangeFinishedAtMs = System.currentTimeMillis();
 
             if (DUMP_TX) {
@@ -450,15 +476,15 @@ public class LcpLink {
                         (since < 0 ? 0 : since), sleepApplied));
             }
 
-            // Important : on NE traite plus ici le "busy" pour ne jamais
-            // renvoyer un payload au lieu d'un frame. La gestion "queued"
-            // est faite au niveau des op* pour rester cohérent avec l'API.
+            // Retourne le frame (gestion queued/busy faite par op*)
             return rsp;
-        }}
+        }} } finally {
+            globalPortLock.unlock();
+        }
     }
 
     /* =========================================================================
-       waitQueued — patiente sur la file interne (lecture seule, pas de 0x7D TX)
+       waitQueued — patiente sur la file interne (lecture seule)
        ========================================================================= */
     private byte[] waitQueued(int timeoutMs, int pollMs) throws IOException {
 
@@ -466,7 +492,6 @@ public class LcpLink {
         long tEnd = tStart + timeoutMs;
         byte[] last=null;
 
-        // === [METRICS] === une attente de queue démarre
         metrics.queuedWaits.incrementAndGet();
 
         while(System.currentTimeMillis() < tEnd){
@@ -476,7 +501,6 @@ public class LcpLink {
             LcpStatus st = extractStatus(rsp);
 
             if (st.busy) {
-                // === [METRICS] === frame avec status.busy
                 metrics.busyStatusFrames.incrementAndGet();
             }
 
@@ -500,25 +524,18 @@ public class LcpLink {
 
             if(rc==RC_REQUEST_QUEUED || rc==RC_NO_REQUEST_ACTIVE){
                 if (rc == RC_REQUEST_QUEUED) {
-                    // === [METRICS] === occurrence RC=0x26
                     metrics.rc26.incrementAndGet();
                 }
                 sleep(pollMs);
                 continue;
             }
 
-            // Marquer la fin d’échange pour la cadence
             lastExchangeFinishedAtMs = System.currentTimeMillis();
-
-            // === [METRICS] === temps cumulé d'attente
             metrics.queuedWaitTimeMs.addAndGet(System.currentTimeMillis() - tStart);
-
             return p;
         }
 
-        // === [METRICS] === temps cumulé d'attente (timeout)
         metrics.queuedWaitTimeMs.addAndGet(System.currentTimeMillis() - tStart);
-
         throw new IOException("Queued timeout last="+hex(last));
     }
 
@@ -604,45 +621,53 @@ public class LcpLink {
         if(p==null || p.length<1 || p[0]!=RC_OK)
             throw new IOException("CMD 0x"+Integer.toHexString(cmd));
 
-        // Gap après un changement d'état (ex. RUN) pour laisser le LCR armer
+        // Gap post-commande (ex. RUN) pour laisser armer
         sleepMs(80 + rnd(0, 40));
 
         return p;
     }
 
     /* =========================================================================
-       GET_DELIVERY_STATUS
+       GET_DELIVERY_STATUS (0x28) — throttle 1000 ms
        ========================================================================= */
     public int[] opDeliveryStatus() throws IOException {
+        synchronized (delStatusPollLock) {
+            long now = System.currentTimeMillis();
+            if (lastDelStatusAt != 0L) {
+                long dt = now - lastDelStatusAt;
+                if (dt < MIN_POLL_GET_DEL_STATUS_MS)
+                    sleepMs((int)(MIN_POLL_GET_DEL_STATUS_MS - dt));
+            }
+            lastDelStatusAt = System.currentTimeMillis();
+            metrics.opDeliveryStatusCalls.incrementAndGet();
 
-        metrics.opDeliveryStatusCalls.incrementAndGet();
+            byte[] rsp = sendRecv(new byte[]{ (byte)MSG_GET_DEL_STATUS },2000);
+            LcpStatus st = extractStatus(rsp);
 
-        byte[] rsp = sendRecv(new byte[]{ (byte)MSG_GET_DEL_STATUS },2000);
-        LcpStatus st = extractStatus(rsp);
+            byte[] p = extractPayload(rsp);
+            if (st.busy || p==null || p.length==0) {
+                if (st.busy) metrics.busyStatusFrames.incrementAndGet();
+                p = waitQueued(5000,150);
+            }
 
-        byte[] p = extractPayload(rsp);
-        if (st.busy || p==null || p.length==0) {
-            if (st.busy) metrics.busyStatusFrames.incrementAndGet();
-            p = waitQueued(5000,150);
+            if(p!=null && p.length>0 &&
+               (p[0]==RC_REQUEST_QUEUED || p[0]==RC_NO_REQUEST_ACTIVE)){
+                if (p[0]==RC_REQUEST_QUEUED) metrics.rc26.incrementAndGet();
+                p=waitQueued(5000,150);
+            }
+
+            if(p==null || p.length<6 || p[0]!=RC_OK)
+                throw new IOException("Invalid 0x28");
+
+            int ds = u16be(p,2);
+            int dc = u16be(p,4);
+
+            return new int[]{ ds, dc };
         }
-
-        if(p!=null && p.length>0 &&
-           (p[0]==RC_REQUEST_QUEUED || p[0]==RC_NO_REQUEST_ACTIVE)){
-            if (p[0]==RC_REQUEST_QUEUED) metrics.rc26.incrementAndGet();
-            p=waitQueued(5000,150);
-        }
-
-        if(p==null || p.length<6 || p[0]!=RC_OK)
-            throw new IOException("Invalid 0x28");
-
-        int ds = u16be(p,2);
-        int dc = u16be(p,4);
-
-        return new int[]{ ds, dc };
     }
 
     /* =========================================================================
-       GET_MACHINE (fallback vers 0x28) — sérialisé + throttle
+       GET_MACHINE (0x23) — sérialisé + throttle 1000 ms
        ========================================================================= */
     public int[] opMachineStatusFull() throws IOException {
         synchronized (machinePollLock) {
@@ -654,7 +679,6 @@ public class LcpLink {
             }
             lastGetMachineAt = System.currentTimeMillis();
 
-            // === [METRICS] === comptage + EMA intervalle poll
             metrics.opGetMachineCalls.incrementAndGet();
             metrics.updatePollInterval();
 
