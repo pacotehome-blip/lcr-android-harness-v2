@@ -13,11 +13,11 @@ import java.util.concurrent.Executors;
  *  - "LCR Registers' Fields.xlsx" (#39 digits, #0 product, #5/#6 presets, #44/#45 counters)
  *
  * Comportement:
- *  - Active PythonCompat: 0x7D émis pour vider la file quand RC=0x26 (comme le script Python)
+ *  - Active PythonCompat: 0x7D émis par les op* pour vider la file quand RC=0x26 (comme le script Python)
  *  - Poll court (~200 ms) en alternant 0x23 / 0x28 pendant WAIT_FOR_FLOW
- *  - STARTING reste BLOQUANT tant que FLOW_ACTIVE != 1 (double confirmation ou delta #44)
- *  - AUCUN sendRecv(0x23/0x28) direct : seulement op* de LcpLink
- *  - AUCUN 0x7D direct ici : géré par op* lorsqu’en PythonCompat
+ *  - STARTING reste BLOQUANT tant que FLOW_ACTIVE != 1 (double confirmation); pas de 0x20 dans la boucle
+ *  - AUCUN sendRecv(0x23/0x28/0x7D) direct : seulement op* de LcpLink
+ *  - RESYNC (0x00) uniquement en cas d’IOException (en dehors de la boucle d’attente)
  */
 public final class DeliveryController {
 
@@ -41,6 +41,7 @@ public final class DeliveryController {
 
         // Mode PythonCompat: 0x7D actif + poll court ~200 ms
         this.link.setPythonCompat(true, 200);
+        android.util.Log.i("DC", "DeliveryController PYCOMPAT engaged (poll=200ms)");
     }
 
     public State getState() { return state; }
@@ -91,7 +92,7 @@ public final class DeliveryController {
         exec.execute(() -> {
             try {
                 setState(State.WAIT_FOR_FLOW);
-                waitFlowStrict(timeoutMs, pollMs, true, true);
+                waitFlowStrict(timeoutMs, pollMs);
                 setState(State.FLOW_ACTIVE);
                 events.onFlowStarted();
             } catch(Exception e) {
@@ -162,28 +163,28 @@ public final class DeliveryController {
         try {
             link.opIssueCommand(0x00);     // RUN
             setState(State.WAIT_FOR_FLOW);
-            waitFlowStrict(timeoutMs, pollMs, true, true);
+            waitFlowStrict(timeoutMs, pollMs);
         } catch(IOException e){
             resync(); sleep(200);
             link.opIssueCommand(0x00);
             setState(State.WAIT_FOR_FLOW);
-            waitFlowStrict(timeoutMs, pollMs, true, true);
+            waitFlowStrict(timeoutMs, pollMs);
         }
     }
 
     /**
      * Attente FLOW=1 façon Python: alterne 0x23/0x28 à poll court,
-     * double confirmation FLOW ou delta #44.
+     * double confirmation FLOW. AUCUN 0x20 dans la boucle.
      */
-    private void waitFlowStrict(long timeoutMs, long pollMs,
-                                boolean acceptFlow, boolean acceptCounts) throws IOException {
+    private void waitFlowStrict(long timeoutMs, long pollMs) throws IOException {
 
         long tEnd = System.currentTimeMillis() + timeoutMs;
 
-        int g0 = acceptCounts ? safeRead32(44) : 0;
         int confirm = 0;
         boolean prevFlow = false;
         boolean ask28 = false; // alterne 0x23/0x28
+
+        android.util.Log.i("DC", "WAIT_FOR_FLOW: blocking until FLOW_ACTIVE=1");
 
         while (System.currentTimeMillis() < tEnd) {
 
@@ -199,20 +200,13 @@ public final class DeliveryController {
 
             boolean flow   = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
             boolean active = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
-            boolean begin  = (dc & LcpLink.LCRSc_BEGIN_DELIVERY) != 0;
 
             if (active && flow) return; // FLOW confirmé + ACTIVE
 
-            if (acceptFlow) {
-                if (flow) confirm++; else confirm = 0;
-                if (!prevFlow && confirm >= FLOW_CONFIRM_REQUIRED) return;
-                prevFlow = flow;
-            }
-
-            if (acceptCounts) {
-                int g = safeRead32(44);
-                if (g > g0) return; // volume bouge → flow réel
-            }
+            // Double confirmation FLOW
+            if (flow) confirm++; else confirm = 0;
+            if (!prevFlow && confirm >= FLOW_CONFIRM_REQUIRED) return;
+            prevFlow = flow;
 
             sleep((int)Math.max(200, pollMs)); // poll court ~200ms
         }
@@ -327,7 +321,7 @@ public final class DeliveryController {
 
     // ============================== WAKE ================================
 
-    /** Petit "ping" LCR + tempo (identique à tes versions précédentes). */
+    /** Petit "ping" LCR + tempo. */
     private void wake() {
         try { getMachineStrict(); } catch(Exception ignored){}
         sleep(120);
