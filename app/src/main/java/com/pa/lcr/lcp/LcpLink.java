@@ -35,6 +35,11 @@ import java.util.concurrent.atomic.AtomicLong;
 public class LcpLink {
 
     /* =========================================================================
+       VERSION (pour tracer ce qui tourne réellement)
+       ========================================================================= */
+    private static final String LCP_VERSION = "LcpLink v2026-02-05 fuse+throttle";
+
+    /* =========================================================================
        CONSTANTES PROTOCOLE
        ========================================================================= */
     public static final int TILDE = 0x7E;
@@ -130,6 +135,7 @@ public class LcpLink {
         this.syncPending = syncFirst;
         this.toggle = 0;
         this.portLock = p; // même objet port utilisé comme moniteur partagé
+        log("[LCP] Loaded " + LCP_VERSION);
     }
 
     /* =========================================================================
