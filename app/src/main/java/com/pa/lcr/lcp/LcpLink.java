@@ -161,7 +161,7 @@ public class LcpLink {
         this.toAddr = to & 0xFF;
         this.fromAddr = from & 0xFF;
         this.syncPending = syncFirst;
-        this.toggle = 0;
+               this.toggle = 0;
 
         // Moniteur local (objet port) + verrou global cross‑instances par clé stable
         this.portLock = p;
