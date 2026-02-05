@@ -7,8 +7,8 @@ import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * LcpLink — Version finale A2‑Enhanced (2026‑02‑05, timing/queueing + portLock + metrics)
- * ---------------------------------------------------------------------------------------
+ * LcpLink — Version finale A2‑Enhanced (2026‑02‑05, timing/queueing + portLock + metrics + 0x7D fuse)
+ * ---------------------------------------------------------------------------------------------------
  * - Parsing structuré via ParsedFrame (header+payload décodés)
  * - API inchangée (sendRecv/readFrame → byte[])
  * - ThreadLocal pour extractions sécurisées
@@ -21,13 +21,16 @@ import java.util.concurrent.atomic.AtomicLong;
  * - Verrou par port (portLock) pour exclusivité multi‑instances
  * - Pause inter‑trames (~60 ms + jitter) avant chaque émission
  * - Marqueur de fin d’échange (ACK + fin RX) pour cadencer le bus
- * - Déduplication runtime de GET_MACHINE (verrou dédié + throttle)
+ * - Déduplication runtime de GET_MACHINE (verrou dédié + throttle 1000 ms)
  * - Gap 80–120 ms après ISSUE_COMMAND (ex. RUN) pour laisser armer la session
  *
  * Metrics (léger et thread-safe) :
  * - Compteurs TX/RX, RC=0x26, busy, waitQueued (nb & temps cumulé)
  * - Δ inter‑trames min/max + EMA
  * - Intervalle GET_MACHINE (EMA)
+ *
+ * Fuse:
+ * - Interdiction d’émettre MSG_CHECK_REQUEST (0x7D) via LcpLink (IOException)
  */
 public class LcpLink {
 
@@ -111,7 +114,7 @@ public class LcpLink {
 
     // Déduplication GET_MACHINE (évite doublons consécutifs) + throttle
     private final Object machinePollLock = new Object();
-    private static final int MIN_POLL_GET_MACHINE_MS = 500; // 500ms (ajuste à 1000ms si besoin)
+    private static final int MIN_POLL_GET_MACHINE_MS = 1000; // 1s pour les tests terrain
     private volatile long lastGetMachineAt = 0L;
 
     // Marqueur de fin d’échange (pour cadencer l’émission suivante)
@@ -400,7 +403,7 @@ public class LcpLink {
     }
 
     /* =========================================================================
-       sendRecv — mono‑trame stricte + pause inter‑trames + portLock
+       sendRecv — mono‑trame stricte + pause inter‑trames + portLock + fuse 0x7D
        ========================================================================= */
     public byte[] sendRecv(byte[] payload, int timeoutMs) throws IOException {
         synchronized (portLock) {              // exclusivité par port (anti multi‑instances)
@@ -417,10 +420,10 @@ public class LcpLink {
             int sleepApplied = (since < pause) ? (pause - (int)since) : 0;
             if (sleepApplied > 0) sleepMs(sleepApplied);
 
-            // Avertissement si on tente d’émettre 0x7D via LcpLink (à éviter)
+            // FUSE: Interdiction d'émettre 0x7D via LcpLink (perturbe le LCR)
             if (payload != null && payload.length > 0 && (payload[0] & 0xFF) == MSG_CHECK_REQUEST) {
-                log("[WARN] Émission MSG_CHECK_REQUEST (0x7D) détectée via LcpLink — à éviter. " +
-                    "La queue interne est gérée côté lecture par waitQueued().");
+                throw new IOException("MSG_CHECK_REQUEST (0x7D) interdit via LcpLink. " +
+                        "Ne jamais émettre 0x7D : la queue interne (RC=0x26) est gérée en lecture par waitQueued().");
             }
 
             byte[] fr = buildFrame(payload);
