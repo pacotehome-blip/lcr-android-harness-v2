@@ -4,10 +4,11 @@ package com.pa.lcr.lcp;
 import com.hoho.android.usbserial.driver.UsbSerialPort;
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * LcpLink — Version finale A2‑Enhanced (2026‑02‑05, timing/queueing patch)
- * ------------------------------------------------------------------------
+ * LcpLink — Version finale A2‑Enhanced (2026‑02‑05, timing/queueing + metrics)
+ * ----------------------------------------------------------------------------
  * - Parsing structuré via ParsedFrame (header+payload décodés)
  * - API inchangée (sendRecv/readFrame → byte[])
  * - ThreadLocal pour extractions sécurisées
@@ -21,6 +22,11 @@ import java.util.Arrays;
  * - Marqueur de fin d’échange (ACK + fin RX) pour cadencer le bus
  * - Déduplication runtime de GET_MACHINE (verrou dédié)
  * - Gap 80–120 ms après ISSUE_COMMAND (ex. RUN) pour laisser armer la session
+ *
+ * Metrics (léger et thread-safe) :
+ * - Compteurs TX/RX, RC=0x26, busy, waitQueued (nb & temps cumulé)
+ * - Δ inter‑trames min/max + EMA
+ * - Intervalle GET_MACHINE (EMA)
  */
 public class LcpLink {
 
@@ -104,6 +110,9 @@ public class LcpLink {
 
     // Marqueur de fin d’échange (pour cadencer l’émission suivante)
     private volatile long lastExchangeFinishedAtMs = 0L;
+
+    // === [METRICS] ============================================================
+    private final Metrics metrics = new Metrics();
 
     public LcpLink(UsbSerialPort p, int to, int from, boolean syncFirst) {
         this.port = p;
@@ -346,6 +355,10 @@ public class LcpLink {
         if(DUMP_RX) log("RX: "+hex(pf.rawFrame));
 
         lastFrame.set(pf);
+
+        // === [METRICS] === RX frame comptage
+        metrics.rxFrames.incrementAndGet();
+
         return pf.rawFrame;
     }
 
@@ -387,6 +400,10 @@ public class LcpLink {
             // Pause inter‑trames depuis la fin réelle du dernier échange
             long now = System.currentTimeMillis();
             long since = now - lastExchangeFinishedAtMs;
+
+            // === [METRICS] === mise à jour Δ inter-trames
+            metrics.updateInterFrameDelta(since);
+
             int pause = INTER_FRAME_PAUSE_MS + rnd(0, INTER_FRAME_JITTER_MS);
             if (since < pause) {
                 sleepMs(pause - (int) since);
@@ -397,10 +414,18 @@ public class LcpLink {
             try { port.purgeHwBuffers(true,true); }catch(Exception ignored){}
             port.write(fr, timeoutMs);
 
+            // === [METRICS] === TX frame comptage
+            metrics.txFrames.incrementAndGet();
+
             byte[] rsp = readFrame(timeoutMs);
 
             // Marque la fin d’échange (ACK + fin RX)
             lastExchangeFinishedAtMs = System.currentTimeMillis();
+
+            // (optionnel) log rapide du Δ inter‑trames
+            if (DUMP_TX) {
+                log(String.format("IFΔ=%dms", since < 0 ? 0 : since));
+            }
 
             // Important : on NE traite plus ici le "busy" pour ne jamais
             // renvoyer un payload au lieu d'un frame. La gestion "queued"
@@ -414,14 +439,23 @@ public class LcpLink {
        ========================================================================= */
     private byte[] waitQueued(int timeoutMs, int pollMs) throws IOException {
 
-        long tEnd = System.currentTimeMillis() + timeoutMs;
+        long tStart = System.currentTimeMillis();
+        long tEnd = tStart + timeoutMs;
         byte[] last=null;
+
+        // === [METRICS] === une attente de queue démarre
+        metrics.queuedWaits.incrementAndGet();
 
         while(System.currentTimeMillis() < tEnd){
 
             byte[] rsp = readFrame(Math.max(1200,pollMs+800));
             byte[] p   = extractPayload(rsp);
             LcpStatus st = extractStatus(rsp);
+
+            if (st.busy) {
+                // === [METRICS] === frame avec status.busy
+                metrics.busyStatusFrames.incrementAndGet();
+            }
 
             if(p!=null && p.length>0)
                 last = p;
@@ -442,14 +476,25 @@ public class LcpLink {
                 throw new IOException("Queue aborted");
 
             if(rc==RC_REQUEST_QUEUED || rc==RC_NO_REQUEST_ACTIVE){
+                if (rc == RC_REQUEST_QUEUED) {
+                    // === [METRICS] === occurrence RC=0x26
+                    metrics.rc26.incrementAndGet();
+                }
                 sleep(pollMs);
                 continue;
             }
 
             // Marquer la fin d’échange pour la cadence
             lastExchangeFinishedAtMs = System.currentTimeMillis();
+
+            // === [METRICS] === temps cumulé d'attente
+            metrics.queuedWaitTimeMs.addAndGet(System.currentTimeMillis() - tStart);
+
             return p;
         }
+
+        // === [METRICS] === temps cumulé d'attente (timeout)
+        metrics.queuedWaitTimeMs.addAndGet(System.currentTimeMillis() - tStart);
 
         throw new IOException("Queued timeout last="+hex(last));
     }
@@ -465,11 +510,14 @@ public class LcpLink {
 
         byte[] p = extractPayload(rsp);
         if (st.busy || p==null || p.length==0) {
+            // === [METRICS] === frame avec status.busy
+            if (st.busy) metrics.busyStatusFrames.incrementAndGet();
             p = waitQueued(5000,150);
         }
 
         if(p!=null && p.length>0 &&
            (p[0]==RC_REQUEST_QUEUED || p[0]==RC_NO_REQUEST_ACTIVE)){
+            if (p[0]==RC_REQUEST_QUEUED) metrics.rc26.incrementAndGet();
             p=waitQueued(5000,150);
         }
 
@@ -494,11 +542,13 @@ public class LcpLink {
 
         byte[] p = extractPayload(rsp);
         if (st.busy || p==null || p.length==0) {
+            if (st.busy) metrics.busyStatusFrames.incrementAndGet();
             p = waitQueued(5000,150);
         }
 
         if(p!=null && p.length>0 &&
            (p[0]==RC_REQUEST_QUEUED || p[0]==RC_NO_REQUEST_ACTIVE)){
+            if (p[0]==RC_REQUEST_QUEUED) metrics.rc26.incrementAndGet();
             p=waitQueued(5000,150);
         }
 
@@ -511,24 +561,27 @@ public class LcpLink {
        ========================================================================= */
     public byte[] opIssueCommand(int cmd) throws IOException {
 
+        metrics.opIssueCommandCalls.incrementAndGet();
+
         byte[] req = new byte[]{ (byte)MSG_ISSUE_COMMAND, (byte)cmd };
         byte[] rsp = sendRecv(req,2000);
         LcpStatus st = extractStatus(rsp);
 
         byte[] p = extractPayload(rsp);
         if (st.busy || p==null || p.length==0) {
+            if (st.busy) metrics.busyStatusFrames.incrementAndGet();
             p = waitQueued(5000,150);
         }
 
         if(p!=null && p.length>0 &&
            (p[0]==RC_REQUEST_QUEUED || p[0]==RC_NO_REQUEST_ACTIVE)){
+            if (p[0]==RC_REQUEST_QUEUED) metrics.rc26.incrementAndGet();
             p=waitQueued(5000,150);
         }
 
         if(p==null || p.length<1 || p[0]!=RC_OK)
             throw new IOException("CMD 0x"+Integer.toHexString(cmd));
 
-        // === [TIMING & QUEUEING PATCH] ===
         // Gap après un changement d'état (ex. RUN) pour laisser le LCR armer
         sleepMs(80 + rnd(0, 40));
 
@@ -540,16 +593,20 @@ public class LcpLink {
        ========================================================================= */
     public int[] opDeliveryStatus() throws IOException {
 
+        metrics.opDeliveryStatusCalls.incrementAndGet();
+
         byte[] rsp = sendRecv(new byte[]{ (byte)MSG_GET_DEL_STATUS },2000);
         LcpStatus st = extractStatus(rsp);
 
         byte[] p = extractPayload(rsp);
         if (st.busy || p==null || p.length==0) {
+            if (st.busy) metrics.busyStatusFrames.incrementAndGet();
             p = waitQueued(5000,150);
         }
 
         if(p!=null && p.length>0 &&
            (p[0]==RC_REQUEST_QUEUED || p[0]==RC_NO_REQUEST_ACTIVE)){
+            if (p[0]==RC_REQUEST_QUEUED) metrics.rc26.incrementAndGet();
             p=waitQueued(5000,150);
         }
 
@@ -567,16 +624,22 @@ public class LcpLink {
        ========================================================================= */
     public int[] opMachineStatusFull() throws IOException {
         synchronized (machinePollLock) {
+            // === [METRICS] === comptage + EMA intervalle poll
+            metrics.opGetMachineCalls.incrementAndGet();
+            metrics.updatePollInterval();
+
             byte[] rsp = sendRecv(new byte[]{ (byte)MSG_GET_MACHINE },2000);
             LcpStatus st = extractStatus(rsp);
 
             byte[] p = extractPayload(rsp);
             if (st.busy || p==null || p.length==0) {
+                if (st.busy) metrics.busyStatusFrames.incrementAndGet();
                 p = waitQueued(5000,150);
             }
 
             if(p!=null && p.length>0 &&
                (p[0]==RC_REQUEST_QUEUED || p[0]==RC_NO_REQUEST_ACTIVE)){
+                if (p[0]==RC_REQUEST_QUEUED) metrics.rc26.incrementAndGet();
                 p=waitQueued(5000,150);
             }
 
@@ -604,7 +667,6 @@ public class LcpLink {
         try { Thread.sleep(ms); } catch(Exception ignored){}
     }
 
-    // === [TIMING & QUEUEING PATCH — HELPERS] =================================
     private static int rnd(int min, int max) {
         if (max <= 0) return min;
         return min + (int) (Math.random() * (max + 1));
@@ -614,6 +676,157 @@ public class LcpLink {
         if (ms <= 0) return;
         try { Thread.sleep(ms); } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
+        }
+    }
+
+    // === [METRICS] ============================================================
+    public MetricsSnapshot getMetrics() {
+        return metrics.snapshot();
+    }
+
+    public void resetMetrics() {
+        metrics.reset();
+    }
+
+    /** Conteneur interne des métrics (thread-safe) */
+    private static final class Metrics {
+        private static final double EMA_ALPHA = 0.2;
+
+        // Compteurs simples
+        final AtomicLong txFrames = new AtomicLong();
+        final AtomicLong rxFrames = new AtomicLong();
+        final AtomicLong rc26 = new AtomicLong();
+        final AtomicLong busyStatusFrames = new AtomicLong();
+        final AtomicLong queuedWaits = new AtomicLong();
+        final AtomicLong queuedWaitTimeMs = new AtomicLong();
+
+        final AtomicLong opGetMachineCalls = new AtomicLong();
+        final AtomicLong opDeliveryStatusCalls = new AtomicLong();
+        final AtomicLong opIssueCommandCalls = new AtomicLong();
+
+        // Δ inter‑trames (ms)
+        private final Object lock = new Object();
+        private long interFrameDeltaMinMs = Long.MAX_VALUE;
+        private long interFrameDeltaMaxMs = 0L;
+        private double interFrameDeltaEmaMs = -1.0;
+
+        // Poll GET_MACHINE (ms)
+        private long lastPollTs = 0L;
+        private double pollIntervalEmaMs = -1.0;
+
+        void updateInterFrameDelta(long deltaMs) {
+            if (deltaMs < 0) deltaMs = 0;
+            synchronized (lock) {
+                if (deltaMs < interFrameDeltaMinMs) interFrameDeltaMinMs = deltaMs;
+                if (deltaMs > interFrameDeltaMaxMs) interFrameDeltaMaxMs = deltaMs;
+                interFrameDeltaEmaMs = ema(interFrameDeltaEmaMs, deltaMs, EMA_ALPHA);
+            }
+        }
+
+        void updatePollInterval() {
+            long now = System.currentTimeMillis();
+            synchronized (lock) {
+                if (lastPollTs != 0) {
+                    long d = now - lastPollTs;
+                    if (d < 0) d = 0;
+                    pollIntervalEmaMs = ema(pollIntervalEmaMs, d, EMA_ALPHA);
+                }
+                lastPollTs = now;
+            }
+        }
+
+        void reset() {
+            txFrames.set(0); rxFrames.set(0);
+            rc26.set(0); busyStatusFrames.set(0);
+            queuedWaits.set(0); queuedWaitTimeMs.set(0);
+            opGetMachineCalls.set(0);
+            opDeliveryStatusCalls.set(0);
+            opIssueCommandCalls.set(0);
+            synchronized (lock) {
+                interFrameDeltaMinMs = Long.MAX_VALUE;
+                interFrameDeltaMaxMs = 0L;
+                interFrameDeltaEmaMs = -1.0;
+                lastPollTs = 0L;
+                pollIntervalEmaMs = -1.0;
+            }
+        }
+
+        MetricsSnapshot snapshot() {
+            synchronized (lock) {
+                long min = (interFrameDeltaMinMs==Long.MAX_VALUE)? -1 : interFrameDeltaMinMs;
+                return new MetricsSnapshot(
+                        txFrames.get(),
+                        rxFrames.get(),
+                        rc26.get(),
+                        busyStatusFrames.get(),
+                        queuedWaits.get(),
+                        queuedWaitTimeMs.get(),
+                        opGetMachineCalls.get(),
+                        opDeliveryStatusCalls.get(),
+                        opIssueCommandCalls.get(),
+                        min,
+                        interFrameDeltaMaxMs,
+                        interFrameDeltaEmaMs,
+                        pollIntervalEmaMs
+                );
+            }
+        }
+
+        private static double ema(double prev, double value, double alpha) {
+            return (prev < 0) ? value : (alpha * value + (1 - alpha) * prev);
+        }
+    }
+
+    /** Snapshot immuable des métrics pour consultation externe */
+    public static final class MetricsSnapshot {
+        public final long txFrames;
+        public final long rxFrames;
+        public final long rc26;
+        public final long busyStatusFrames;
+        public final long queuedWaits;
+        public final long queuedWaitTimeMs;
+        public final long opGetMachineCalls;
+        public final long opDeliveryStatusCalls;
+        public final long opIssueCommandCalls;
+
+        public final long interFrameDeltaMinMs; // -1 si inconnu
+        public final long interFrameDeltaMaxMs;
+        public final double interFrameDeltaEmaMs; // -1 si inconnu
+
+        public final double pollIntervalEmaMs; // -1 si inconnu
+
+        private MetricsSnapshot(
+                long txFrames, long rxFrames, long rc26, long busyStatusFrames,
+                long queuedWaits, long queuedWaitTimeMs,
+                long opGetMachineCalls, long opDeliveryStatusCalls, long opIssueCommandCalls,
+                long interFrameDeltaMinMs, long interFrameDeltaMaxMs, double interFrameDeltaEmaMs,
+                double pollIntervalEmaMs
+        ) {
+            this.txFrames = txFrames;
+            this.rxFrames = rxFrames;
+            this.rc26 = rc26;
+            this.busyStatusFrames = busyStatusFrames;
+            this.queuedWaits = queuedWaits;
+            this.queuedWaitTimeMs = queuedWaitTimeMs;
+            this.opGetMachineCalls = opGetMachineCalls;
+            this.opDeliveryStatusCalls = opDeliveryStatusCalls;
+            this.opIssueCommandCalls = opIssueCommandCalls;
+            this.interFrameDeltaMinMs = interFrameDeltaMinMs;
+            this.interFrameDeltaMaxMs = interFrameDeltaMaxMs;
+            this.interFrameDeltaEmaMs = interFrameDeltaEmaMs;
+            this.pollIntervalEmaMs = pollIntervalEmaMs;
+        }
+
+        @Override public String toString() {
+            return String.format(
+                "LcpLinkMetrics{tx=%d, rx=%d, rc26=%d, busy=%d, queuedWaits=%d, queuedWaitTimeMs=%d, " +
+                "getMachine=%d, getDelStatus=%d, issueCmd=%d, " +
+                "IFΔ[min=%dms,max=%dms,ema=%.1fms], pollEMA=%.1fms}",
+                txFrames, rxFrames, rc26, busyStatusFrames, queuedWaits, queuedWaitTimeMs,
+                opGetMachineCalls, opDeliveryStatusCalls, opIssueCommandCalls,
+                interFrameDeltaMinMs, interFrameDeltaMaxMs, interFrameDeltaEmaMs,
+                pollIntervalEmaMs
+            );
         }
     }
 }
