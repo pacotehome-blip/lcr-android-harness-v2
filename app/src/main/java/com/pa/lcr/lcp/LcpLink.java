@@ -10,7 +10,7 @@ import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * LcpLink — Version finale A2‑Enhanced
- * (2026‑02‑05, timing/queueing + port locks + metrics + 0x7D fuse + low-level throttles)
+ * (2026‑02‑05, timing/queueing + port locks + metrics + 0x7D fuse + low-level throttles + any-poll coalesce)
  * ---------------------------------------------------------------------------------------------------
  * - Parsing structuré via ParsedFrame (header+payload décodés)
  * - API inchangée (sendRecv/readFrame → byte[])
@@ -25,7 +25,8 @@ import java.util.concurrent.locks.ReentrantLock;
  * - Pause inter‑trames (~60 ms + jitter) avant chaque émission
  * - Marqueur de fin d’échange (ACK + fin RX) pour cadencer le bus
  * - Throttles GET_MACHINE (0x23) et GET_DEL_STATUS (0x28) à 1000 ms
- *   • au niveau haut (op*) ET au niveau bas (sendRecv) partagé entre instances
+ *   • au niveau haut (op*) ET au niveau bas (sendRecv) partagés entre instances
+ * - Coalesce global 0x23/0x28 (MIN_POLL_ANY_MS) pour éviter l’alternance trop rapprochée
  * - Gap 80–120 ms après ISSUE_COMMAND (ex. RUN) pour laisser armer la session
  *
  * Metrics (léger et thread-safe) :
@@ -41,7 +42,7 @@ public class LcpLink {
     /* =========================================================================
        VERSION (pour tracer ce qui tourne réellement)
        ========================================================================= */
-    private static final String LCP_VERSION = "LcpLink v2026-02-05 fuse+throttle+portlock+delstatus+lowlvlthrottle";
+    private static final String LCP_VERSION = "LcpLink v2026-02-05 fuse+throttle+portlock+delstatus+lowlvlthrottle+anypoll";
 
     /* =========================================================================
        CONSTANTES PROTOCOLE
@@ -139,6 +140,10 @@ public class LcpLink {
     private final Object delStatusPollLock = new Object();
     private static final int MIN_POLL_GET_DEL_STATUS_MS = 1000; // 1s
     private volatile long lastDelStatusAt = 0L;
+
+    // Coalesce global 0x23/0x28 (évite alternance trop rapprochée)
+    private static final ConcurrentHashMap<String, AtomicLong> LAST_ANY_POLL = new ConcurrentHashMap<>();
+    private static final int MIN_POLL_ANY_MS = 500; // 500–700 ms recommandé
 
     // Marqueur de fin d’échange
     private volatile long lastExchangeFinishedAtMs = 0L;
@@ -442,7 +447,7 @@ public class LcpLink {
 
     /* =========================================================================
        sendRecv — mono‑trame stricte + pause inter‑trames + port locks + fuse 0x7D
-       + throttles (0x23/0x28) partagés bas‑niveau
+       + throttles (0x23/0x28) partagés bas‑niveau + coalesce global any-poll
        ========================================================================= */
     public byte[] sendRecv(byte[] payload, int timeoutMs) throws IOException {
         globalPortLock.lock();                 // exclusivité par port (inter‑instances)
@@ -462,9 +467,9 @@ public class LcpLink {
 
             // (Option) tracer l'appelant sous DUMP_TX
             if (DUMP_TX) {
-                int msg = (payload!=null && payload.length>0) ? (payload[0] & 0xFF) : -1;
+                int msg0 = (payload!=null && payload.length>0) ? (payload[0] & 0xFF) : -1;
                 log(String.format("sendRecv(msg=0x%02X) by [%s] thread=%s",
-                        msg, callerTop(), Thread.currentThread().getName()));
+                        msg0, callerTop(), Thread.currentThread().getName()));
             }
 
             // FUSE: Interdiction d'émettre 0x7D via LcpLink (perturbe le LCR)
@@ -480,8 +485,7 @@ public class LcpLink {
                     AtomicLong ts = LAST_GET_MACHINE.computeIfAbsent(portKey, k -> new AtomicLong(0));
                     long last = ts.get();
                     long now2 = System.currentTimeMillis();
-                    long dt = now2 - last;
-                    if (dt < 0) dt = 0; // clamp en cas de rollback horloge
+                    long dt = now2 - last; if (dt < 0) dt = 0;
                     if (last != 0 && dt < MIN_POLL_GET_MACHINE_MS) {
                         sleepMs((int)(MIN_POLL_GET_MACHINE_MS - dt));
                     }
@@ -490,15 +494,29 @@ public class LcpLink {
                     AtomicLong ts = LAST_GET_DELSTS.computeIfAbsent(portKey, k -> new AtomicLong(0));
                     long last = ts.get();
                     long now2 = System.currentTimeMillis();
-                    long dt = now2 - last;
-                    if (dt < 0) dt = 0; // clamp en cas de rollback horloge
+                    long dt = now2 - last; if (dt < 0) dt = 0;
                     if (last != 0 && dt < MIN_POLL_GET_DEL_STATUS_MS) {
                         sleepMs((int)(MIN_POLL_GET_DEL_STATUS_MS - dt));
                     }
                     ts.set(System.currentTimeMillis());
                 }
             }
-            // === Fin throttles bas-niveau ===
+
+            // === Coalesce global 0x23/0x28 (évite alternance trop rapprochée) ===
+            if (payload != null && payload.length > 0) {
+                int msg = payload[0] & 0xFF;
+                if (msg == MSG_GET_MACHINE || msg == MSG_GET_DEL_STATUS) {
+                    AtomicLong tsAny = LAST_ANY_POLL.computeIfAbsent(portKey, k -> new AtomicLong(0));
+                    long lastA = tsAny.get();
+                    long nowA  = System.currentTimeMillis();
+                    long dtA   = nowA - lastA; if (dtA < 0) dtA = 0;
+                    if (lastA != 0 && dtA < MIN_POLL_ANY_MS) {
+                        sleepMs((int)(MIN_POLL_ANY_MS - dtA));
+                    }
+                    tsAny.set(System.currentTimeMillis());
+                }
+            }
+            // === Fin throttles/coalesce ===
 
             byte[] fr = buildFrame(payload);
             try { port.purgeHwBuffers(true,true); }catch(Exception ignored){}
