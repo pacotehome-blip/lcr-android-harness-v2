@@ -9,7 +9,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * LcpLink — Version finale A2‑Enhanced (2026‑02‑05, timing/queueing + portLock + metrics + 0x7D fuse)
+ * LcpLink — Version finale A2‑Enhanced
+ * (2026‑02‑05, timing/queueing + port locks + metrics + 0x7D fuse + low-level throttles)
  * ---------------------------------------------------------------------------------------------------
  * - Parsing structuré via ParsedFrame (header+payload décodés)
  * - API inchangée (sendRecv/readFrame → byte[])
@@ -23,8 +24,8 @@ import java.util.concurrent.locks.ReentrantLock;
  * - Verrou local par port (portLock) ET verrou global inter‑instances (PortRegistry)
  * - Pause inter‑trames (~60 ms + jitter) avant chaque émission
  * - Marqueur de fin d’échange (ACK + fin RX) pour cadencer le bus
- * - Déduplication runtime de GET_MACHINE (verrou dédié + throttle 1000 ms)
- * - Throttle GET_DEL_STATUS (0x28) à 1000 ms
+ * - Throttles GET_MACHINE (0x23) et GET_DEL_STATUS (0x28) à 1000 ms
+ *   • au niveau haut (op*) ET au niveau bas (sendRecv) partagé entre instances
  * - Gap 80–120 ms après ISSUE_COMMAND (ex. RUN) pour laisser armer la session
  *
  * Metrics (léger et thread-safe) :
@@ -40,7 +41,7 @@ public class LcpLink {
     /* =========================================================================
        VERSION (pour tracer ce qui tourne réellement)
        ========================================================================= */
-    private static final String LCP_VERSION = "LcpLink v2026-02-05 fuse+throttle+portlock+delstatus";
+    private static final String LCP_VERSION = "LcpLink v2026-02-05 fuse+throttle+portlock+delstatus+lowlvlthrottle";
 
     /* =========================================================================
        CONSTANTES PROTOCOLE
@@ -76,7 +77,7 @@ public class LcpLink {
 
     /* =========================================================================
        LOGGER
-       ========================================================================= */
+        ========================================================================= */
     public interface Logger { void log(String s); }
     private static Logger logger = null;
     public static void setLogger(Logger l){ logger = l; }
@@ -130,7 +131,7 @@ public class LcpLink {
     private final Object portLock;
     private final ReentrantLock globalPortLock;
 
-    // Throttle pour 0x23 et 0x28
+    // Throttle pour 0x23 et 0x28 (haut + bas niveau)
     private final Object machinePollLock = new Object();
     private static final int MIN_POLL_GET_MACHINE_MS = 1000; // 1s
     private volatile long lastGetMachineAt = 0L;
@@ -144,6 +145,11 @@ public class LcpLink {
 
     // Metrics
     private final Metrics metrics = new Metrics();
+
+    // Clé de port pour throttles partagés bas‑niveau (cross‑instances)
+    private final String portKey;
+    private static final ConcurrentHashMap<String, AtomicLong> LAST_GET_MACHINE = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<String, AtomicLong> LAST_GET_DELSTS  = new ConcurrentHashMap<>();
 
     public LcpLink(UsbSerialPort p, int to, int from, boolean syncFirst) {
         this.port = p;
@@ -159,6 +165,7 @@ public class LcpLink {
                 ? p.getDriver().getDevice().getDeviceId() : p.hashCode())
             + "/port:" + p.getPortNumber();
         this.globalPortLock = PortRegistry.acquire(key);
+        this.portKey = key;
 
         log("[LCP] Loaded " + LCP_VERSION);
     }
@@ -435,6 +442,7 @@ public class LcpLink {
 
     /* =========================================================================
        sendRecv — mono‑trame stricte + pause inter‑trames + port locks + fuse 0x7D
+       + throttles (0x23/0x28) partagés bas‑niveau
        ========================================================================= */
     public byte[] sendRecv(byte[] payload, int timeoutMs) throws IOException {
         globalPortLock.lock();                 // exclusivité par port (inter‑instances)
@@ -452,14 +460,45 @@ public class LcpLink {
             int sleepApplied = (since < pause) ? (pause - (int)since) : 0;
             if (sleepApplied > 0) sleepMs(sleepApplied);
 
+            // (Option) tracer l'appelant sous DUMP_TX
+            if (DUMP_TX) {
+                int msg = (payload!=null && payload.length>0) ? (payload[0] & 0xFF) : -1;
+                log(String.format("sendRecv(msg=0x%02X) by [%s] thread=%s",
+                        msg, callerTop(), Thread.currentThread().getName()));
+            }
+
             // FUSE: Interdiction d'émettre 0x7D via LcpLink (perturbe le LCR)
             if (payload != null && payload.length > 0 && (payload[0] & 0xFF) == MSG_CHECK_REQUEST) {
                 throw new IOException("MSG_CHECK_REQUEST (0x7D) interdit via LcpLink. " +
                         "Ne jamais émettre 0x7D : la queue interne (RC=0x26) est gérée en lecture par waitQueued().");
             }
 
-            byte[] fr = buildFrame(payload);
+            // === Throttles bas-niveau (partagés) pour 0x23 et 0x28 (1 Hz) ===
+            if (payload != null && payload.length > 0) {
+                int msg = payload[0] & 0xFF;
+                if (msg == MSG_GET_MACHINE) {
+                    AtomicLong ts = LAST_GET_MACHINE.computeIfAbsent(portKey, k -> new AtomicLong(0));
+                    long last = ts.get();
+                    long now2 = System.currentTimeMillis();
+                    long dt = now2 - last;
+                    if (last != 0 && dt < MIN_POLL_GET_MACHINE_MS) {
+                        sleepMs((int)(MIN_POLL_GET_MACHINE_MS - dt));
+                    }
+                    ts.set(System.currentTimeMillis());
+                } else if (msg == MSG_GET_DEL_STATUS) {
+                    AtomicLong ts = LAST_GET_DELSTS.computeIfAbsent(portKey, k -> new AtomicLong(0));
+                    long last = ts.get();
+                    long now2 = System.currentTimeMillis();
+                    long dt = now2 - last;
+                    if (last != 0 && dt < MIN_POLL_GET_DEL_STATUS_MS) {
+                        sleepMs((int)(MIN_POLL_GET_DEL_STATUS_MS - dt));
+                    }
+                    ts.set(System.currentTimeMillis());
+                }
+            }
+            // === Fin throttles bas-niveau ===
 
+            byte[] fr = buildFrame(payload);
             try { port.purgeHwBuffers(true,true); }catch(Exception ignored){}
             port.write(fr, timeoutMs);
 
@@ -730,6 +769,22 @@ public class LcpLink {
         if (ms <= 0) return;
         try { Thread.sleep(ms); } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
+        }
+    }
+
+    // Tracer simple de l'appelant (pour debug sous DUMP_TX)
+    private static String callerTop() {
+        try {
+            StackTraceElement[] st = new Exception().getStackTrace();
+            for (StackTraceElement e : st) {
+                String cn = e.getClassName();
+                if (!cn.startsWith("com.pa.lcr.lcp")) { // skip internals
+                    return e.toString();
+                }
+            }
+            return st.length > 0 ? st[0].toString() : "(unknown)";
+        } catch (Exception ignored) {
+            return "(trace unavailable)";
         }
     }
 
