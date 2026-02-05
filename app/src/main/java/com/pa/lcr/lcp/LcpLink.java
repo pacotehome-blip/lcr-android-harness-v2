@@ -84,8 +84,8 @@ public class LcpLink {
     private static void log(String s){ if (logger != null) logger.log(s); }
 
     /* =========================================================================
-       STRUCTURE ParsedFrame (A2‑Enhanced)
-       ========================================================================= */
+      STRUCTURE ParsedFrame (A2‑Enhanced)
+      ========================================================================= */
     private static final class ParsedFrame {
         byte[] rawFrame;
         byte[] headerRaw;
@@ -481,6 +481,7 @@ public class LcpLink {
                     long last = ts.get();
                     long now2 = System.currentTimeMillis();
                     long dt = now2 - last;
+                    if (dt < 0) dt = 0; // clamp en cas de rollback horloge
                     if (last != 0 && dt < MIN_POLL_GET_MACHINE_MS) {
                         sleepMs((int)(MIN_POLL_GET_MACHINE_MS - dt));
                     }
@@ -490,6 +491,7 @@ public class LcpLink {
                     long last = ts.get();
                     long now2 = System.currentTimeMillis();
                     long dt = now2 - last;
+                    if (dt < 0) dt = 0; // clamp en cas de rollback horloge
                     if (last != 0 && dt < MIN_POLL_GET_DEL_STATUS_MS) {
                         sleepMs((int)(MIN_POLL_GET_DEL_STATUS_MS - dt));
                     }
