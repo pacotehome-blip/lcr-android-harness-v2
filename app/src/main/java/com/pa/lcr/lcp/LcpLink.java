@@ -7,8 +7,8 @@ import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * LcpLink — Version finale A2‑Enhanced (2026‑02‑05, timing/queueing + metrics)
- * ----------------------------------------------------------------------------
+ * LcpLink — Version finale A2‑Enhanced (2026‑02‑05, timing/queueing + portLock + metrics)
+ * ---------------------------------------------------------------------------------------
  * - Parsing structuré via ParsedFrame (header+payload décodés)
  * - API inchangée (sendRecv/readFrame → byte[])
  * - ThreadLocal pour extractions sécurisées
@@ -18,9 +18,10 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * Patch Timing/Queueing :
  * - Mono‑trame stricte (verrou txRxLock)
+ * - Verrou par port (portLock) pour exclusivité multi‑instances
  * - Pause inter‑trames (~60 ms + jitter) avant chaque émission
  * - Marqueur de fin d’échange (ACK + fin RX) pour cadencer le bus
- * - Déduplication runtime de GET_MACHINE (verrou dédié)
+ * - Déduplication runtime de GET_MACHINE (verrou dédié + throttle)
  * - Gap 80–120 ms après ISSUE_COMMAND (ex. RUN) pour laisser armer la session
  *
  * Metrics (léger et thread-safe) :
@@ -105,8 +106,13 @@ public class LcpLink {
     // Mono‑trame stricte : un seul échange à la fois
     private final Object txRxLock = new Object();
 
-    // Déduplication GET_MACHINE (évite doublons consécutifs)
+    // Verrou partagé par port pour éviter l’overlap si multi‑instances
+    private final Object portLock;
+
+    // Déduplication GET_MACHINE (évite doublons consécutifs) + throttle
     private final Object machinePollLock = new Object();
+    private static final int MIN_POLL_GET_MACHINE_MS = 500; // 500ms (ajuste à 1000ms si besoin)
+    private volatile long lastGetMachineAt = 0L;
 
     // Marqueur de fin d’échange (pour cadencer l’émission suivante)
     private volatile long lastExchangeFinishedAtMs = 0L;
@@ -120,6 +126,7 @@ public class LcpLink {
         this.fromAddr = from & 0xFF;
         this.syncPending = syncFirst;
         this.toggle = 0;
+        this.portLock = p; // même objet port utilisé comme moniteur partagé
     }
 
     /* =========================================================================
@@ -393,20 +400,27 @@ public class LcpLink {
     }
 
     /* =========================================================================
-       sendRecv — mono‑trame stricte + pause inter‑trames
+       sendRecv — mono‑trame stricte + pause inter‑trames + portLock
        ========================================================================= */
     public byte[] sendRecv(byte[] payload, int timeoutMs) throws IOException {
-        synchronized (txRxLock) {
-            // Pause inter‑trames depuis la fin réelle du dernier échange
+        synchronized (portLock) {              // exclusivité par port (anti multi‑instances)
+        synchronized (txRxLock) {              // séquence intra‑instance
             long now = System.currentTimeMillis();
+            // Baseline IFΔ : ignorer le premier delta (sinon ~epoch)
+            if (lastExchangeFinishedAtMs == 0L) lastExchangeFinishedAtMs = now;
             long since = now - lastExchangeFinishedAtMs;
 
-            // === [METRICS] === mise à jour Δ inter-trames
+            // === [METRICS] === mise à jour Δ inter‑trames
             metrics.updateInterFrameDelta(since);
 
             int pause = INTER_FRAME_PAUSE_MS + rnd(0, INTER_FRAME_JITTER_MS);
-            if (since < pause) {
-                sleepMs(pause - (int) since);
+            int sleepApplied = (since < pause) ? (pause - (int)since) : 0;
+            if (sleepApplied > 0) sleepMs(sleepApplied);
+
+            // Avertissement si on tente d’émettre 0x7D via LcpLink (à éviter)
+            if (payload != null && payload.length > 0 && (payload[0] & 0xFF) == MSG_CHECK_REQUEST) {
+                log("[WARN] Émission MSG_CHECK_REQUEST (0x7D) détectée via LcpLink — à éviter. " +
+                    "La queue interne est gérée côté lecture par waitQueued().");
             }
 
             byte[] fr = buildFrame(payload);
@@ -422,20 +436,20 @@ public class LcpLink {
             // Marque la fin d’échange (ACK + fin RX)
             lastExchangeFinishedAtMs = System.currentTimeMillis();
 
-            // (optionnel) log rapide du Δ inter‑trames
             if (DUMP_TX) {
-                log(String.format("IFΔ=%dms", since < 0 ? 0 : since));
+                log(String.format("IFΔ=%dms, sleep=%dms",
+                        (since < 0 ? 0 : since), sleepApplied));
             }
 
             // Important : on NE traite plus ici le "busy" pour ne jamais
             // renvoyer un payload au lieu d'un frame. La gestion "queued"
             // est faite au niveau des op* pour rester cohérent avec l'API.
             return rsp;
-        }
+        }}
     }
 
     /* =========================================================================
-       waitQueued
+       waitQueued — patiente sur la file interne (lecture seule, pas de 0x7D TX)
        ========================================================================= */
     private byte[] waitQueued(int timeoutMs, int pollMs) throws IOException {
 
@@ -510,7 +524,6 @@ public class LcpLink {
 
         byte[] p = extractPayload(rsp);
         if (st.busy || p==null || p.length==0) {
-            // === [METRICS] === frame avec status.busy
             if (st.busy) metrics.busyStatusFrames.incrementAndGet();
             p = waitQueued(5000,150);
         }
@@ -620,10 +633,18 @@ public class LcpLink {
     }
 
     /* =========================================================================
-       GET_MACHINE (fallback vers 0x28) — sérialisé (déduplication runtime)
+       GET_MACHINE (fallback vers 0x28) — sérialisé + throttle
        ========================================================================= */
     public int[] opMachineStatusFull() throws IOException {
         synchronized (machinePollLock) {
+            long now = System.currentTimeMillis();
+            if (lastGetMachineAt != 0L) {
+                long dt = now - lastGetMachineAt;
+                if (dt < MIN_POLL_GET_MACHINE_MS)
+                    sleepMs((int)(MIN_POLL_GET_MACHINE_MS - dt));
+            }
+            lastGetMachineAt = System.currentTimeMillis();
+
             // === [METRICS] === comptage + EMA intervalle poll
             metrics.opGetMachineCalls.incrementAndGet();
             metrics.updatePollInterval();
