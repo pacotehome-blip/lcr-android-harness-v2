@@ -325,6 +325,14 @@ public final class DeliveryController {
         } catch(Exception ignored){}
     }
 
+    // ============================== WAKE ================================
+
+    /** Petit "ping" LCR + tempo (identique à tes versions précédentes). */
+    private void wake() {
+        try { getMachineStrict(); } catch(Exception ignored){}
+        sleep(120);
+    }
+
     // ============================= CORE/GET =============================
 
     private int[] getMachineStrict() throws IOException {
