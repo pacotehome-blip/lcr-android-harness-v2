@@ -133,6 +133,7 @@ public final class DeliveryController {
         setProductSafe(productId);
         clearPresetsSafe();
 
+        // Laisse le bus se "poser"
         wakeStable(2, 600, 80);
     }
 
@@ -147,6 +148,7 @@ public final class DeliveryController {
         setProductSafe(productId);
         writeNetPresetSafe(raw);
 
+        // Laisse le bus se "poser"
         wakeStable(2, 600, 80);
     }
 
@@ -329,7 +331,7 @@ public final class DeliveryController {
 
     private int[] getMachineStrict() throws IOException {
         // opMachineStatusFull() gère 0x26/0x27 via waitQueued(), et throttle 1 Hz
-        int[] triple = link.opMachineStatusFull(); // { dev, ds, dc } ou {0, ds, dc} si fallback 0x28
+        int[] triple = link.opMachineStatusFull(); // { dev, ds, dc } ou {0, ds, dc} via fallback 0x28
         int ds = triple[1];
         int dc = triple[2];
         return new int[]{ ds, dc };
@@ -363,6 +365,7 @@ public final class DeliveryController {
             resync(); sleep(150);
             link.opSetField(field, data);
         }
+        // Laisse respirer le bus entre champs
         sleep(120);
     }
 
