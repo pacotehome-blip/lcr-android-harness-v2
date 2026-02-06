@@ -62,6 +62,11 @@ public class MainActivity extends AppCompatActivity {
     private static final long NO_PROGRESS_PROMPT_MS = 10_000; // 10s
     private volatile boolean promptShown = false;
 
+    // Orchestration live loop / END / print
+    private volatile boolean liveLoopActive = false;
+    private volatile boolean endingRequested = false;
+    private volatile boolean shouldPrintAtEnd = false;   // <-- NEW : imprime seulement si Terminé
+
     // USB detach robuste
     private volatile Integer currentUsbDeviceId = null;
     private volatile long lastDetachHandledAt = 0L;
@@ -121,13 +126,10 @@ public class MainActivity extends AppCompatActivity {
         btnContinue = findViewById(R.id.btnContinue);   // Continuer
         btnFinish   = findViewById(R.id.btnFinish);     // Terminé
 
-        // Masquer l'ancien "Start" si présent
         if (btnStartPreset != null) btnStartPreset.setVisibility(View.GONE);
 
-        // Zone de log sélectionnable
         try { txtLog.setTextIsSelectable(true); } catch(Exception ignored) {}
 
-        // Par défaut, désactiver Continuer/Terminé
         if (btnContinue != null) btnContinue.setEnabled(false);
         if (btnFinish   != null) btnFinish.setEnabled(false);
     }
@@ -148,7 +150,6 @@ public class MainActivity extends AppCompatActivity {
     private void wireEvents() {
         safeSetOnClick(btnConnect, v -> requestAndOpenFirstPort());
         safeSetOnClick(btnStartOpen, v -> startOpenMode());
-        // ancien start retiré : ne pas recâbler
         safeSetOnClick(btnEnd, v -> endGracefully());
         safeSetOnClick(btnClear, v -> { logBuf.setLength(0); runOnUiThread(() -> txtLog.setText("")); });
         safeSetOnClick(btnCopy, v -> copyLog());
@@ -165,7 +166,6 @@ public class MainActivity extends AppCompatActivity {
             });
         }
 
-        // Optionnel : faciliter “Select All” au long‑press
         txtLog.setOnLongClickListener(v -> {
             try {
                 txtLog.requestFocus();
@@ -175,7 +175,7 @@ public class MainActivity extends AppCompatActivity {
                     txtLog.requestFocus();
                 });
             } catch (Exception ignored) {}
-            return false; // conserve le menu système
+            return false;
         });
     }
 
@@ -229,7 +229,6 @@ public class MainActivity extends AppCompatActivity {
             }
             lastDetachHandledAt = now;
 
-            // Étendons la notion de "session en cours" pour éviter toute course :
             // STARTING, WAIT_FOR_FLOW, FLOW_ACTIVE, FINALIZING => cleanup différé
             DeliveryController.State s = (controller != null ? controller.getState() : DeliveryController.State.IDLE);
             boolean inProgress =
@@ -242,7 +241,6 @@ public class MainActivity extends AppCompatActivity {
                 detachedDuringFlow = true;
                 append("DETACHED pendant session (state=" + s + ") — I/O laissera remonter l'erreur; cleanup différé.\n");
 
-                // Fallback: si rien ne se passe dans 3s (blocage improbable), on nettoie de force.
                 mainHandler.postDelayed(() -> {
                     if (detachedDuringFlow) {
                         append("DETACHED timeout → cleanup forcé\n");
@@ -254,7 +252,6 @@ public class MainActivity extends AppCompatActivity {
                 return;
             }
 
-            // Session non active → nettoyage immédiat.
             append("DETACHED : arrêt contrôleur + fermeture port (no active session)\n");
             try { if (controller != null) controller.requestStop("usb detached"); } catch(Exception ignored){}
             cleanupUsb();
@@ -308,7 +305,6 @@ public class MainActivity extends AppCompatActivity {
             serialPort.setDTR(false);
             serialPort.purgeHwBuffers(true, true);
 
-            // ID du device actif (pour filtrer DETACHED)
             if (driver.getDevice() != null) currentUsbDeviceId = driver.getDevice().getDeviceId();
             else currentUsbDeviceId = dev.getDeviceId();
 
@@ -317,10 +313,8 @@ public class MainActivity extends AppCompatActivity {
             int to   = parseHexOrDefault(safe(edtTo),   0xFA);
             int from = parseHexOrDefault(safe(edtFrom), 0xFF);
 
-            // LcpLink
             lcpLink = new LcpLink(serialPort, to, from, true);
 
-            // Une seule instance de DeliveryController pour toute la session
             controller = new DeliveryController(
                     lcpLink,
                     new DeliveryController.DeliveryEvents() {
@@ -340,12 +334,23 @@ public class MainActivity extends AppCompatActivity {
                                     case ERROR:
                                         if (btnFinish != null) btnFinish.setEnabled(false);
                                         if (btnContinue != null) btnContinue.setEnabled(false);
-                                        // Si on avait reçu DETACHED pendant le flow, c'est le bon moment pour nettoyer.
+
+                                        // Impression après END si demandé via Terminé
+                                        if (s == DeliveryController.State.ENDED && shouldPrintAtEnd) {
+                                            shouldPrintAtEnd = false;
+                                            printTicket();  // <-- Impression ici
+                                        }
+
+                                        // Cleanup USB si détaché pendant le flow
                                         if (detachedDuringFlow) {
                                             append("Cleanup post-DETACHED (state=" + s + ")\n");
                                             cleanupUsb();
                                             detachedDuringFlow = false;
                                         }
+
+                                        // Reset des flags
+                                        endingRequested = false;
+                                        liveLoopActive = false;
                                         break;
                                     default: break;
                                 }
@@ -353,17 +358,30 @@ public class MainActivity extends AppCompatActivity {
                         }
                         @Override public void onFlowStarted() {
                             append("[SDK] FLOW détecté\n");
-                            // reset détection "no progress"
                             lastProgressAtMs = System.currentTimeMillis();
                             lastGross = -1; lastNet = -1; promptShown = false;
 
-                            uiExec.execute(() ->
-                                    controller.runLiveLoop(250, false, 0.0)
-                            );
+                            // Ne pas relancer de live loop si une fin est déjà demandée
+                            if (endingRequested) {
+                                append("[SDK] Fin déjà demandée → pas de live loop\n");
+                                return;
+                            }
+
+                            uiExec.execute(() -> {
+                                liveLoopActive = true;
+                                controller.runLiveLoop(250, false, 0.0);
+                            });
                         }
                         @Override public void onFlowStopped() {
                             append("[SDK] FLOW stoppé\n");
-                            // Si DETACHED est arrivé pendant le flow, nettoie ici aussi.
+                            liveLoopActive = false;
+
+                            // 👉 Flow=0 : activer Continuer & Terminé
+                            runOnUiThread(() -> {
+                                if (btnContinue != null) btnContinue.setEnabled(true);
+                                if (btnFinish   != null) btnFinish.setEnabled(true);
+                            });
+
                             if (detachedDuringFlow) {
                                 append("Cleanup post-DETACHED (onFlowStopped)\n");
                                 cleanupUsb();
@@ -373,16 +391,13 @@ public class MainActivity extends AppCompatActivity {
                         @Override public void onLiveSample(int ds, int dc, double gL, double nL) {
                             append(String.format("[LIVE] DS=0x%04X DC=0x%04X G=%.1f N=%.1f\n",
                                     ds, dc, gL, nL));
-                            // Détection "aucune progression" (alignée au prompt Python)
                             try {
-                                int g = (int)Math.round(gL * 1000); // échelle indifférente aux digits
+                                int g = (int)Math.round(gL * 1000);
                                 int n = (int)Math.round(nL * 1000);
                                 boolean progressed;
-                                if (lastGross < 0 && lastNet < 0) {
-                                    progressed = true; // init
-                                } else {
-                                    progressed = (g != lastGross) || (n != lastNet);
-                                }
+                                if (lastGross < 0 && lastNet < 0) progressed = true;
+                                else progressed = (g != lastGross) || (n != lastNet);
+
                                 long now = System.currentTimeMillis();
                                 if (progressed) {
                                     lastGross = g; lastNet = n;
@@ -414,12 +429,14 @@ public class MainActivity extends AppCompatActivity {
                                 if (btnFinish != null) btnFinish.setEnabled(false);
                                 if (btnContinue != null) btnContinue.setEnabled(false);
                             });
-                            // Si DETACHED a été reçu pendant FLOW, on termine le nettoyage ici.
+                            liveLoopActive = false;
+
                             if (detachedDuringFlow) {
                                 append("Cleanup post-DETACHED (onError)\n");
                                 cleanupUsb();
                                 detachedDuringFlow = false;
                             }
+                            // endingRequested réinitialisé sur ENDED/ERROR via onStateChanged
                         }
                     },
                     null
@@ -454,27 +471,38 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    // Terminé: END propre (équivalent Python 'T')
+    // Terminé: END propre + impression du ticket
     private void finishDelivery() {
         if (!checkReady()) return;
         append("[UI] Terminé demandé\n");
 
-        // 1) Couper la live loop pour libérer la PollWindow/le thread
+        endingRequested  = true;
+        shouldPrintAtEnd = true;  // <-- imprimera à ENDED
+
         try { controller.stopLiveLoop(); } catch (Exception ignored) {}
+        liveLoopActive = false;
 
-        // 2) Enchaîner l'END propre (sera exécuté juste après la fin de la loop)
-        controller.endGracefully(15_000, 200);
+        // Laisse la PollWindow se fermer proprement avant END
+        mainHandler.postDelayed(() -> {
+            try {
+                if (controller != null) {
+                    append("[UI] END → envoi 0x24\n");
+                    controller.endGracefully(15_000, 200);
+                }
+            } catch (Exception ignored) {}
+        }, 150);
 
-        // 3) UI : désactiver les boutons d'options
         if (btnContinue != null) btnContinue.setEnabled(false);
         if (btnFinish   != null) btnFinish.setEnabled(false);
     }
 
-    // Continuer: ferme le prompt (équivalent Python 'C')
+    // Continuer: pas d'impression, on ferme le prompt et on laisse la session se poursuivre
     private void continueDelivery() {
-        append("[UI] Aucune progression… Continuer.\n");
+        append("[UI] Aucune progression… Continuer (pas d'impression)\n");
+        shouldPrintAtEnd = false;
         promptShown = false;
         if (btnContinue != null) btnContinue.setEnabled(false);
+        // rien d'autre : la boucle live reprend si le FLOW revient
     }
 
     /* ============================== Actions ============================== */
@@ -486,7 +514,6 @@ public class MainActivity extends AppCompatActivity {
         controller.startOpenMode(product, 20_000, 200);
     }
 
-    // Ancien "start preset" (retiré du layout) – conservé pour usage futur
     @SuppressWarnings("unused")
     private void startPresetNet() {
         if (!checkReady()) return;
@@ -496,13 +523,42 @@ public class MainActivity extends AppCompatActivity {
         controller.startPresetNet(product, presetL, 20_000, 200);
     }
 
-    // Bouton A: END propre (même séquence que "Terminé")
+    // Bouton A: END propre (même séquence que "Terminé" mais sans forcer l'impression)
     private void endGracefully() {
         if (!checkReady()) return;
         append("[UI] END demandé (A)\n");
 
+        endingRequested  = true;
+        // on ne change PAS shouldPrintAtEnd ici : c'est "Terminé" qui décide d'imprimer
         try { controller.stopLiveLoop(); } catch (Exception ignored) {}
-        controller.endGracefully(15_000, 200);
+        liveLoopActive = false;
+
+        mainHandler.postDelayed(() -> {
+            try {
+                if (controller != null) {
+                    append("[UI] END (A) → envoi 0x24\n");
+                    controller.endGracefully(15_000, 200);
+                }
+            } catch (Exception ignored) {}
+        }, 150);
+    }
+
+    /* ============================== Impression ============================== */
+
+    private void printTicket() {
+        // ⚠️ Remplace par l’appel exact de ton SDK si le nom diffère.
+        // Exemples possibles selon tes libs:
+        // controller.printTicketFull();
+        // controller.printTicket();
+        // lcpLink.opPrintLastTicket();
+        try {
+            append("[PRINT] Impression du ticket en cours…\n");
+            controller.printTicketFull(); // <-- adapte le nom si besoin
+            append("[PRINT] Ticket imprimé\n");
+        } catch (NoSuchMethodError | Exception ex) {
+            append("[PRINT] API d'impression introuvable dans le SDK: " + ex.getMessage() + "\n");
+            // TODO: fallback LcpLink si tu veux imprimer via commandes brutes
+        }
     }
 
     /* ============================== Utils ============================== */
