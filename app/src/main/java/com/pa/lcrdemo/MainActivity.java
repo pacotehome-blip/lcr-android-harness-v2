@@ -12,6 +12,8 @@ import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbDeviceConnection;
 import android.hardware.usb.UsbManager;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.View;
 import android.widget.Button;
 import android.widget.CheckBox;
@@ -52,8 +54,9 @@ public class MainActivity extends AppCompatActivity {
     // Utils
     private final StringBuilder logBuf = new StringBuilder(16 * 1024);
     private final ExecutorService uiExec = Executors.newSingleThreadExecutor();
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
-    // Détection "aucune progression" (prompt Continuer/Terminé comme le script Python)
+    // Détection "aucune progression" (prompt Continuer/Terminé)
     private volatile long lastProgressAtMs = 0L;
     private volatile int lastGross = -1, lastNet = -1;
     private static final long NO_PROGRESS_PROMPT_MS = 10_000; // 10s
@@ -62,7 +65,9 @@ public class MainActivity extends AppCompatActivity {
     // USB detach robuste
     private volatile Integer currentUsbDeviceId = null;
     private volatile long lastDetachHandledAt = 0L;
-    private static final long DETACH_DEBOUNCE_MS = 1500L; // 1.5s anti double événement
+    private static final long DETACH_DEBOUNCE_MS = 1500L; // 1.5s
+    private volatile boolean detachedDuringFlow = false;  // détaché pendant WAIT_FOR_FLOW / FLOW_ACTIVE
+    private static final long DETACHED_FALLBACK_CLEANUP_MS = 3000L; // cleanup si rien ne se passe
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -117,14 +122,12 @@ public class MainActivity extends AppCompatActivity {
         btnFinish   = findViewById(R.id.btnFinish);     // Terminé
 
         // Masquer l'ancien "Start" si présent
-        if (btnStartPreset != null) {
-            btnStartPreset.setVisibility(View.GONE);
-        }
+        if (btnStartPreset != null) btnStartPreset.setVisibility(View.GONE);
 
         // Zone de log sélectionnable
         try { txtLog.setTextIsSelectable(true); } catch(Exception ignored) {}
 
-        // Par défaut, désactive Continuer/Terminé (activés à la demande)
+        // Par défaut, désactiver Continuer/Terminé
         if (btnContinue != null) btnContinue.setEnabled(false);
         if (btnFinish   != null) btnFinish.setEnabled(false);
     }
@@ -172,7 +175,7 @@ public class MainActivity extends AppCompatActivity {
                     txtLog.requestFocus();
                 });
             } catch (Exception ignored) {}
-            return false; // garde le menu système (Copier/Sélectionner tout)
+            return false; // conserve le menu système
         });
     }
 
@@ -226,14 +229,28 @@ public class MainActivity extends AppCompatActivity {
             }
             lastDetachHandledAt = now;
 
-            try {
-                append("DETACHED : arrêt contrôleur + fermeture port\n");
-                if (controller != null) controller.requestStop("usb detached");
-            } catch(Exception ignored){}
+            // Si une livraison est en attente de flow ou active, ne PAS couper la poll-window tout de suite.
+            DeliveryController.State s = (controller != null ? controller.getState() : DeliveryController.State.IDLE);
+            if (s == DeliveryController.State.WAIT_FOR_FLOW || s == DeliveryController.State.FLOW_ACTIVE) {
+                detachedDuringFlow = true;
+                append("DETACHED pendant FLOW/WAIT — on laisse l'I/O signaler l'erreur; cleanup différé.\n");
 
-            try { if (serialPort != null) serialPort.close(); } catch(Exception ignored){}
-            serialPort = null; lcpLink = null; controller = null;
-            currentUsbDeviceId = null;
+                // Fallback: si rien ne se passe dans 3s (blocage improbable), on nettoie de force.
+                mainHandler.postDelayed(() -> {
+                    if (detachedDuringFlow) {
+                        append("DETACHED timeout → cleanup forcé\n");
+                        try { if (controller != null) controller.requestStop("usb detached (timeout)"); } catch(Exception ignored){}
+                        cleanupUsb();
+                        detachedDuringFlow = false;
+                    }
+                }, DETACHED_FALLBACK_CLEANUP_MS);
+                return;
+            }
+
+            // Pas de flow actif → nettoyage immédiat.
+            append("DETACHED : arrêt contrôleur + fermeture port (no active flow)\n");
+            try { if (controller != null) controller.requestStop("usb detached"); } catch(Exception ignored){}
+            cleanupUsb();
         }
     };
 
@@ -284,12 +301,9 @@ public class MainActivity extends AppCompatActivity {
             serialPort.setDTR(false);
             serialPort.purgeHwBuffers(true, true);
 
-            // Mémorise l'ID du device en service (filtre DETACHED)
-            if (driver.getDevice() != null) {
-                currentUsbDeviceId = driver.getDevice().getDeviceId();
-            } else {
-                currentUsbDeviceId = dev.getDeviceId();
-            }
+            // ID du device actif (pour filtrer DETACHED)
+            if (driver.getDevice() != null) currentUsbDeviceId = driver.getDevice().getDeviceId();
+            else currentUsbDeviceId = dev.getDeviceId();
 
             append("Port ouvert 19200 8N1\n");
 
@@ -319,6 +333,12 @@ public class MainActivity extends AppCompatActivity {
                                     case ERROR:
                                         if (btnFinish != null) btnFinish.setEnabled(false);
                                         if (btnContinue != null) btnContinue.setEnabled(false);
+                                        // Si on avait reçu DETACHED pendant le flow, c'est le bon moment pour nettoyer.
+                                        if (detachedDuringFlow) {
+                                            append("Cleanup post-DETACHED (state=" + s + ")\n");
+                                            cleanupUsb();
+                                            detachedDuringFlow = false;
+                                        }
                                         break;
                                     default: break;
                                 }
@@ -336,6 +356,12 @@ public class MainActivity extends AppCompatActivity {
                         }
                         @Override public void onFlowStopped() {
                             append("[SDK] FLOW stoppé\n");
+                            // Si DETACHED est arrivé pendant le flow, nettoie ici aussi.
+                            if (detachedDuringFlow) {
+                                append("Cleanup post-DETACHED (onFlowStopped)\n");
+                                cleanupUsb();
+                                detachedDuringFlow = false;
+                            }
                         }
                         @Override public void onLiveSample(int ds, int dc, double gL, double nL) {
                             append(String.format("[LIVE] DS=0x%04X DC=0x%04X G=%.1f N=%.1f\n",
@@ -381,12 +407,18 @@ public class MainActivity extends AppCompatActivity {
                                 if (btnFinish != null) btnFinish.setEnabled(false);
                                 if (btnContinue != null) btnContinue.setEnabled(false);
                             });
+                            // Si DETACHED a été reçu pendant FLOW, on termine le nettoyage ici.
+                            if (detachedDuringFlow) {
+                                append("Cleanup post-DETACHED (onError)\n");
+                                cleanupUsb();
+                                detachedDuringFlow = false;
+                            }
                         }
                     },
                     null
             );
 
-            // RESYNC propre = GET_PRODUCT_ID
+            // RESYNC GET_PRODUCT_ID
             try {
                 lcpLink.sendRecv(new byte[]{0x00}, 2000);
                 append("[CONNECT] RESYNC GET_PRODUCT_ID OK\n");
@@ -437,11 +469,10 @@ public class MainActivity extends AppCompatActivity {
         if (!checkReady()) return;
         int product = parseIntOrDefault(safe(edtProduct), 1);
         append(String.format("[UI] Start OPEN product=%d\n", product));
-        // WAIT_FOR_FLOW 20s, poll 200ms
         controller.startOpenMode(product, 20_000, 200);
     }
 
-    // Ancien "start preset" (retiré du layout) – on peut garder pour plus tard
+    // Ancien "start preset" (retiré du layout) – conservé pour usage futur
     @SuppressWarnings("unused")
     private void startPresetNet() {
         if (!checkReady()) return;
@@ -504,6 +535,13 @@ public class MainActivity extends AppCompatActivity {
         if (!s.endsWith("\n")) s = s + "\n";
         logBuf.append(s);
         append(s);
+    }
+
+    private void cleanupUsb() {
+        try { if (serialPort != null) serialPort.close(); } catch(Exception ignored){}
+        serialPort = null; lcpLink = null; controller = null;
+        currentUsbDeviceId = null;
+        append("USB nettoyé (port fermé)\n");
     }
 
     private static boolean isEmpty(CharSequence cs){ return cs == null || cs.toString().trim().isEmpty(); }
