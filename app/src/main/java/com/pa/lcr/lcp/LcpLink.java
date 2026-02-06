@@ -9,9 +9,10 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * LcpLink — A2‑Enhanced + PythonCompat + CancelIO + PollGate
+ * LcpLink — A2‑Enhanced + PythonCompat + CancelIO + PollGate + PollOwner
  * (2026‑02‑05, verrous, parsing, metrics, guard 0x23/0x28, low-level throttles,
- *  any-poll coalesce, compat Python: 0x7D actif + cadence courte, cancel E/S global, poll gate)
+ *  any-poll coalesce, compat Python: 0x7D actif + cadence courte, cancel E/S global,
+ *  et fenêtre de poll exclusive)
  *
  * Version marker:
  *   LcpLink v2026-02-05 fuse+throttle+portlock+delstatus+lowlvlthrottle+anypoll+guard+pycompat+cancel+pollgate
@@ -128,6 +129,9 @@ public class LcpLink {
     // ======= Poll Gate (bloque 0x23/0x28 hors fenêtres autorisées) =======
     private volatile boolean pollingBlocked = true;
 
+    // ======= Poll Owner (exclusivité de la fenêtre) =======
+    private volatile Thread pollOwner = null;
+
     public void setPythonCompat(boolean enable, int pollMs){
         this.pythonCompat = enable;
         this.minPollMs = Math.max(150, pollMs);
@@ -137,10 +141,25 @@ public class LcpLink {
     public void resumeIO() { ioCancelled = false; log("[LCP] IO RESUMED"); }
     private void checkCancelled() throws IOException { if (ioCancelled) throw new IOException("CANCELLED"); }
 
-    /** Active/désactive le blocage des polls (0x23/0x28). */
+    /** Active/désactive explicitement le blocage général des polls */
     public void setPollingBlocked(boolean blocked) {
         this.pollingBlocked = blocked;
         log("[LCP] PollingBlocked=" + blocked);
+    }
+
+    /** Ouvre la fenêtre de poll et fixe un propriétaire exclusif (thread appelant). */
+    public void openPollWindow() {
+        this.pollOwner = Thread.currentThread();
+        this.pollingBlocked = false;
+        log("[LCP] PollWindow OPEN by " + this.pollOwner.getName());
+    }
+
+    /** Ferme la fenêtre de poll et libère le propriétaire. */
+    public void closePollWindow() {
+        this.pollingBlocked = true;
+        Thread owner = this.pollOwner;
+        this.pollOwner = null;
+        log("[LCP] PollWindow CLOSE (prevOwner=" + (owner != null ? owner.getName() : "none") + ")");
     }
 
     public LcpLink(UsbSerialPort p, int to, int from, boolean syncFirst) {
@@ -588,6 +607,8 @@ public class LcpLink {
 
     public int[] opDeliveryStatus() throws IOException {
         if (pollingBlocked) throw new IOException("POLL_BLOCKED");
+        if (pollOwner != null && Thread.currentThread() != pollOwner)
+            throw new IOException("POLL_OWNER_MISMATCH");
         synchronized (delStatusPollLock) {
             long now = System.currentTimeMillis();
             if (lastDelStatusAt != 0L) {
@@ -633,6 +654,8 @@ public class LcpLink {
 
     public int[] opMachineStatusFull() throws IOException {
         if (pollingBlocked) throw new IOException("POLL_BLOCKED");
+        if (pollOwner != null && Thread.currentThread() != pollOwner)
+            throw new IOException("POLL_OWNER_MISMATCH");
         synchronized (machinePollLock) {
             long now = System.currentTimeMillis();
             if (lastGetMachineAt != 0L) {

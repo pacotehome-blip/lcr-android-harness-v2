@@ -40,6 +40,8 @@ public class MainActivity extends AppCompatActivity {
     private EditText edtTo, edtFrom, edtProduct, edtPreset;
     private Button btnConnect, btnStartOpen, btnStartPreset, btnEnd;
     private Button btnClear, btnCopy;
+    // Nouveaux contrôles
+    private Button btnB, btnContinue, btnFinish;
     private CheckBox switchIoLog;
 
     // USB & LCP
@@ -50,6 +52,12 @@ public class MainActivity extends AppCompatActivity {
     // Utils
     private final StringBuilder logBuf = new StringBuilder(16 * 1024);
     private final ExecutorService uiExec = Executors.newSingleThreadExecutor();
+
+    // Détection "aucune progression" (prompt Continuer/Terminé comme Python)
+    private volatile long lastProgressAtMs = 0L;
+    private volatile int lastGross = -1, lastNet = -1;
+    private static final long NO_PROGRESS_PROMPT_MS = 10_000; // 10s
+    private volatile boolean promptShown = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -69,6 +77,7 @@ public class MainActivity extends AppCompatActivity {
 
         LcpLink.setLogger(this::appendAndBuffer);
 
+        append("I/O log activé\n");
         append("Prêt. Branchez le LCR puis cliquez 'Connexion USB'.\n");
     }
 
@@ -89,14 +98,28 @@ public class MainActivity extends AppCompatActivity {
         edtProduct   = findViewById(R.id.edtProduct);
         edtPreset    = findViewById(R.id.edtPreset);
 
-        btnConnect   = findViewById(R.id.btnConnect);
-        btnStartOpen   = findViewById(R.id.btnC);
-        btnStartPreset = findViewById(R.id.btnStart);
-        btnEnd         = findViewById(R.id.btnA);
+        btnConnect     = findViewById(R.id.btnConnect);
+        btnStartOpen   = findViewById(R.id.btnC);       // C – start delivery
+        btnStartPreset = findViewById(R.id.btnStart);   // ancien Start (sera masqué)
+        btnEnd         = findViewById(R.id.btnA);       // A reset (END)
 
         btnClear     = findViewById(R.id.btnClearLog);
         btnCopy      = findViewById(R.id.btnCopyLog);
         switchIoLog  = findViewById(R.id.switchIoLog);
+
+        // nouveaux
+        btnB        = findViewById(R.id.btnB);          // B ping
+        btnContinue = findViewById(R.id.btnContinue);   // Continuer (prompt)
+        btnFinish   = findViewById(R.id.btnFinish);     // Terminé (END)
+
+        // Masque l'ancien "Start" si présent
+        if (btnStartPreset != null) {
+            btnStartPreset.setVisibility(View.GONE);
+        }
+
+        // Par défaut, désactive le couple Continuer/Terminé (activés à la demande)
+        if (btnContinue != null) btnContinue.setEnabled(false);
+        if (btnFinish   != null) btnFinish.setEnabled(false);
     }
 
     private void setDefaults() {
@@ -109,17 +132,21 @@ public class MainActivity extends AppCompatActivity {
             switchIoLog.setChecked(true);
             LcpLink.DUMP_TX = true;
             LcpLink.DUMP_RX = true;
-            append("I/O log activé\n");
         }
     }
 
     private void wireEvents() {
         safeSetOnClick(btnConnect, v -> requestAndOpenFirstPort());
         safeSetOnClick(btnStartOpen, v -> startOpenMode());
-        safeSetOnClick(btnStartPreset, v -> startPresetNet());
+        // ancien start retiré : ne pas recâbler
         safeSetOnClick(btnEnd, v -> endGracefully());
         safeSetOnClick(btnClear, v -> { logBuf.setLength(0); runOnUiThread(() -> txtLog.setText("")); });
         safeSetOnClick(btnCopy, v -> copyLog());
+
+        // Nouveaux
+        safeSetOnClick(btnB, v -> doBPing());
+        safeSetOnClick(btnContinue, v -> continueDelivery());
+        safeSetOnClick(btnFinish, v -> finishDelivery());
 
         if (switchIoLog != null) {
             switchIoLog.setOnCheckedChangeListener((b, checked) -> {
@@ -156,6 +183,7 @@ public class MainActivity extends AppCompatActivity {
                 append("USB attaché — cliquez 'Connexion USB'\n");
             } else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(i.getAction())) {
                 append("USB détaché\n");
+                try { if (controller != null) controller.requestStop("usb detached"); } catch(Exception ignored){}
                 try { if (serialPort != null) serialPort.close(); } catch(Exception ignored){}
                 serialPort = null; lcpLink = null; controller = null;
             }
@@ -214,7 +242,7 @@ public class MainActivity extends AppCompatActivity {
             int to   = parseHexOrDefault(safe(edtTo),   0xFA);
             int from = parseHexOrDefault(safe(edtFrom), 0xFF);
 
-            // LcpLink = version corrigée (SYNC bit appliqué correctement)
+            // LcpLink
             lcpLink = new LcpLink(serialPort, to, from, true);
 
             // Une seule instance de DeliveryController pour toute la session
@@ -223,9 +251,31 @@ public class MainActivity extends AppCompatActivity {
                     new DeliveryController.DeliveryEvents() {
                         @Override public void onStateChanged(DeliveryController.State s) {
                             append("[SDK] State=" + s + "\n");
+                            runOnUiThread(() -> {
+                                switch (s) {
+                                    case STARTING:
+                                    case WAIT_FOR_FLOW:
+                                        if (btnFinish != null) btnFinish.setEnabled(true);
+                                        if (btnContinue != null) btnContinue.setEnabled(false);
+                                        break;
+                                    case FLOW_ACTIVE:
+                                        if (btnFinish != null) btnFinish.setEnabled(true);
+                                        break;
+                                    case ENDED:
+                                    case ERROR:
+                                        if (btnFinish != null) btnFinish.setEnabled(false);
+                                        if (btnContinue != null) btnContinue.setEnabled(false);
+                                        break;
+                                    default: break;
+                                }
+                            });
                         }
                         @Override public void onFlowStarted() {
                             append("[SDK] FLOW détecté\n");
+                            // reset détection "no progress"
+                            lastProgressAtMs = System.currentTimeMillis();
+                            lastGross = -1; lastNet = -1; promptShown = false;
+
                             uiExec.execute(() ->
                                     controller.runLiveLoop(250, false, 0.0)
                             );
@@ -236,6 +286,36 @@ public class MainActivity extends AppCompatActivity {
                         @Override public void onLiveSample(int ds, int dc, double gL, double nL) {
                             append(String.format("[LIVE] DS=0x%04X DC=0x%04X G=%.1f N=%.1f\n",
                                     ds, dc, gL, nL));
+                            // Détection "aucune progression" (alignée au prompt Python)
+                            try {
+                                int g = (int)Math.round(gL * 1000); // échelle indifférente aux digits
+                                int n = (int)Math.round(nL * 1000);
+                                boolean progressed;
+                                if (lastGross < 0 && lastNet < 0) {
+                                    progressed = true; // init
+                                } else {
+                                    progressed = (g != lastGross) || (n != lastNet);
+                                }
+                                long now = System.currentTimeMillis();
+                                if (progressed) {
+                                    lastGross = g; lastNet = n;
+                                    lastProgressAtMs = now;
+                                    if (promptShown) {
+                                        promptShown = false;
+                                        runOnUiThread(() -> { if (btnContinue != null) btnContinue.setEnabled(false); });
+                                    }
+                                } else {
+                                    long base = (lastProgressAtMs == 0L) ? now : lastProgressAtMs;
+                                    if (!promptShown && now - base >= NO_PROGRESS_PROMPT_MS) {
+                                        promptShown = true;
+                                        append("[LIVE] Aucune progression de volume… Continuer (C) / Terminer (T) ?\n");
+                                        runOnUiThread(() -> {
+                                            if (btnContinue != null) btnContinue.setEnabled(true);
+                                            if (btnFinish   != null) btnFinish.setEnabled(true);
+                                        });
+                                    }
+                                }
+                            } catch(Exception ignored){}
                         }
                         @Override public void onGuardReached() {
                             append("[SDK] Guard atteint → END demandé\n");
@@ -243,12 +323,16 @@ public class MainActivity extends AppCompatActivity {
                         @Override public void onError(String m, Throwable t) {
                             append("[SDK] ERREUR: " + m +
                                     (t != null ? (" / " + t.getMessage()) : "") + "\n");
+                            runOnUiThread(() -> {
+                                if (btnFinish != null) btnFinish.setEnabled(false);
+                                if (btnContinue != null) btnContinue.setEnabled(false);
+                            });
                         }
                     },
                     null
             );
 
-            // RESYNC propre = GET_PRODUCT_ID (Message 0x00, SYNC bit utilisé 1 fois)
+            // RESYNC propre = GET_PRODUCT_ID
             try {
                 lcpLink.sendRecv(new byte[]{0x00}, 2000);
                 append("[CONNECT] RESYNC GET_PRODUCT_ID OK\n");
@@ -263,22 +347,52 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    /* ============================== Nouveaux comportements UI ============================== */
+
+    // B ping: lit un statut machine (0x23 via op*)
+    private void doBPing() {
+        try {
+            if (!checkReady()) return;
+            int[] triple = lcpLink.opMachineStatusFull();
+            append(String.format("[PING] DS=0x%04X DC=0x%04X\n", triple[1], triple[2]));
+        } catch (Exception e) {
+            append("[PING] ERREUR: " + e.getMessage() + "\n");
+        }
+    }
+
+    // Terminé: END propre (équivalent Python 'T')
+    private void finishDelivery() {
+        if (!checkReady()) return;
+        append("[UI] Terminé demandé\n");
+        controller.endGracefully(15_000, 200);
+        if (btnContinue != null) btnContinue.setEnabled(false);
+        if (btnFinish   != null) btnFinish.setEnabled(false);
+    }
+
+    // Continuer: ferme le prompt (équivalent Python 'C')
+    private void continueDelivery() {
+        append("[UI] Aucune progression… Continuer.\n");
+        promptShown = false;
+        if (btnContinue != null) btnContinue.setEnabled(false);
+    }
+
     /* ============================== Actions ============================== */
 
     private void startOpenMode() {
         if (!checkReady()) return;
         int product = parseIntOrDefault(safe(edtProduct), 1);
         append(String.format("[UI] Start OPEN product=%d\n", product));
-
+        // WAIT_FOR_FLOW 20s, poll 200ms
         controller.startOpenMode(product, 20_000, 200);
     }
 
+    // Ancien "start preset" (retiré du layout) – on peut laisser pour plus tard
+    @SuppressWarnings("unused")
     private void startPresetNet() {
         if (!checkReady()) return;
         int product = parseIntOrDefault(safe(edtProduct), 1);
         double presetL = parseDoubleOrDefault(safe(edtPreset), 50.0);
         append(String.format("[UI] Start PRESET NET %d → %.1f L\n", product, presetL));
-
         controller.startPresetNet(product, presetL, 20_000, 200);
     }
 

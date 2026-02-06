@@ -6,18 +6,17 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 
 /**
- * DeliveryController — 2026-02-05 — LCP-safe + PythonCompat + STOP/cancel + PollGate
+ * DeliveryController — 2026-02-05 — LCP-safe + PythonCompat + STOP/cancel + PollWindowOwner
  *
  * Références:
  *  - "LCR API Internal Messages for LCP.pdf" (0x23/0x28/0x21/0x24/0x00, RC=0x26 queue)
  *  - "LCR Registers' Fields.xlsx" (#39 digits, #0 product, #5/#6 presets, #44/#45 counters)
  *
  * Comportement:
- *  - Active PythonCompat: 0x7D émis par les op* pour vider la file quand RC=0x26 (comme le script Python)
- *  - PollGate: ouvrerture/fermeture explicite lors de WAIT_FOR_FLOW & live loop
- *  - STARTING reste BLOQUANT tant que FLOW_ACTIVE != 1 (double confirmation); pas de 0x20/0x21/0x00/0x24 dans la boucle d'attente
- *  - AUCUN sendRecv(0x23/0x28/0x7D) direct : seulement op* de LcpLink
- *  - STOP = requestStop(...) : coupe live, bloque les polls, annule les IO, et fait sortir toutes les boucles
+ *  - PythonCompat: 0x7D via op*, poll court ~200ms
+ *  - Fenêtre de poll EXCLUSIVE (openPollWindow/closePollWindow) sur WAIT_FOR_FLOW et live loop
+ *  - WAIT_FOR_FLOW: retries bornés + RESYNC court (aligné script Python)
+ *  - AUCUN 0x20/0x21/0x00/0x24 dans la fenêtre d'attente (pure 0x23/0x28)
  */
 public final class DeliveryController {
 
@@ -45,7 +44,7 @@ public final class DeliveryController {
         // Mode PythonCompat: 0x7D actif + poll court ~200 ms
         this.link.setPythonCompat(true, 200);
 
-        // Par défaut : on BLOQUE les polls (pollGate); on n'ouvrira que dans WAIT_FOR_FLOW et live loop.
+        // Par défaut: poll bloqué jusqu'à ce qu'on ouvre une fenêtre
         this.link.setPollingBlocked(true);
         android.util.Log.i("DC", "DeliveryController PYCOMPAT engaged (poll=200ms); PollingBlocked=true");
     }
@@ -57,11 +56,11 @@ public final class DeliveryController {
     }
     private static void sleep(int ms){ try { Thread.sleep(ms); } catch(Exception ignored){} }
 
-    /** STOP immédiat: arrête live, bloque les polls, annule toutes les IO. */
+    /** STOP immédiat: arrête live, ferme la fenêtre de poll, annule les IO. */
     public void requestStop(String reason) {
         cancelled = true;
         liveRunning = false;
-        try { link.setPollingBlocked(true); } catch(Exception ignored){}
+        try { link.closePollWindow(); } catch(Exception ignored){}
         try { link.cancelIO(); } catch(Exception ignored){}
         android.util.Log.w("DC", "STOP requested: " + reason);
     }
@@ -123,12 +122,11 @@ public final class DeliveryController {
                 if (cancelled) throw new IOException("CANCELLED");
                 setState(State.WAIT_FOR_FLOW);
 
-                // Ouvrir la fenêtre de poll, attendre, puis refermer
-                link.setPollingBlocked(false);
+                link.openPollWindow();
                 try {
                     waitFlowStrict(timeoutMs, pollMs);
                 } finally {
-                    link.setPollingBlocked(true);
+                    link.closePollWindow();
                 }
 
                 if (cancelled) throw new IOException("CANCELLED");
@@ -163,12 +161,11 @@ public final class DeliveryController {
         exec.execute(() -> {
             liveRunning = true;
             try {
-                // ouvrir pollGate pendant la live loop
-                link.setPollingBlocked(false);
+                link.openPollWindow();
                 try {
                     liveLoopCore(pollMs, guardEnabled, guardMarginLitres);
                 } finally {
-                    link.setPollingBlocked(true);
+                    link.closePollWindow();
                 }
             } catch(Exception e){
                 fail("runLiveLoop: " + e.getMessage(), e);
@@ -219,12 +216,11 @@ public final class DeliveryController {
             link.opIssueCommand(0x00);     // RUN
             setState(State.WAIT_FOR_FLOW);
 
-            // Ouvre pollGate pour la fenêtre d'attente
-            link.setPollingBlocked(false);
+            link.openPollWindow();
             try {
                 waitFlowStrict(timeoutMs, pollMs);
             } finally {
-                link.setPollingBlocked(true);
+                link.closePollWindow();
             }
 
         } catch(IOException e){
@@ -235,26 +231,30 @@ public final class DeliveryController {
             link.opIssueCommand(0x00);
             setState(State.WAIT_FOR_FLOW);
 
-            link.setPollingBlocked(false);
+            link.openPollWindow();
             try {
                 waitFlowStrict(timeoutMs, pollMs);
             } finally {
-                link.setPollingBlocked(true);
+                link.closePollWindow();
             }
         }
     }
 
     /**
      * Attente FLOW=1 façon Python: alterne 0x23/0x28 à poll court,
-     * double confirmation FLOW. AUCUN 0x20/0x21/0x00/0x24 dans la boucle.
+     * double confirmation FLOW, retries bornés + RESYNC court.
+     * AUCUN 0x20/0x21/0x00/0x24 dans la boucle.
      */
     private void waitFlowStrict(long timeoutMs, long pollMs) throws IOException {
-
         long tEnd = System.currentTimeMillis() + timeoutMs;
 
         int confirm = 0;
         boolean prevFlow = false;
         boolean ask28 = false; // alterne 0x23/0x28
+
+        int ioErrors = 0;
+        final int IO_ERRORS_MAX = 5;        // borne stricte
+        final long RESYNC_BACKOFF_MS = 200; // backoff court aligné script
 
         android.util.Log.i("DC", "WAIT_FOR_FLOW: blocking until FLOW_ACTIVE=1");
 
@@ -264,16 +264,24 @@ public final class DeliveryController {
             int ds, dc;
             try {
                 if (!ask28) {
-                    int[] triple = link.opMachineStatusFull(); // 0x23 + 0x7D si RC=0x26
+                    int[] triple = link.opMachineStatusFull(); // 0x23 (+ 0x7D si 0x26)
                     ds = triple[1]; dc = triple[2];
                 } else {
-                    int[] d = link.opDeliveryStatus();         // 0x28 + 0x7D si RC=0x26
+                    int[] d = link.opDeliveryStatus();         // 0x28 (+ 0x7D si 0x26)
                     ds = d[0]; dc = d[1];
                 }
+                ioErrors = 0; // on a un RX valide → reset
+
             } catch (IOException io) {
-                if (cancelled) throw io;
-                // USB vient peut-être de tomber : petite pause puis continue si pas cancelled
-                sleep(150);
+                String m = io.getMessage();
+                if (cancelled || "POLL_BLOCKED".equals(m) || "POLL_OWNER_MISMATCH".equals(m) || "CANCELLED".equals(m))
+                    throw io;
+
+                ioErrors++;
+                if (ioErrors > IO_ERRORS_MAX) throw io;
+
+                try { resync(); } catch(Exception ignored){}
+                sleep((int)RESYNC_BACKOFF_MS);
                 continue;
             }
 
@@ -284,7 +292,6 @@ public final class DeliveryController {
 
             if (active && flow) return; // FLOW confirmé + ACTIVE
 
-            // Double confirmation FLOW
             if (flow) confirm++; else confirm = 0;
             if (!prevFlow && confirm >= FLOW_CONFIRM_REQUIRED) return;
             prevFlow = flow;
