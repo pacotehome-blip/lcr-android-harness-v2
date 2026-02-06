@@ -451,7 +451,14 @@ public class MainActivity extends AppCompatActivity {
     private void finishDelivery() {
         if (!checkReady()) return;
         append("[UI] Terminé demandé\n");
+
+        // 1) Couper la live loop pour libérer la PollWindow/le thread
+        try { controller.stopLiveLoop(); } catch (Exception ignored) {}
+
+        // 2) Enchaîner l'END propre (sera exécuté juste après la fin de la loop)
         controller.endGracefully(15_000, 200);
+
+        // 3) UI : désactiver les boutons d'options
         if (btnContinue != null) btnContinue.setEnabled(false);
         if (btnFinish   != null) btnFinish.setEnabled(false);
     }
@@ -482,9 +489,12 @@ public class MainActivity extends AppCompatActivity {
         controller.startPresetNet(product, presetL, 20_000, 200);
     }
 
+    // Bouton A: END propre (même séquence que "Terminé")
     private void endGracefully() {
         if (!checkReady()) return;
-        append("[UI] END demandé\n");
+        append("[UI] END demandé (A)\n");
+
+        try { controller.stopLiveLoop(); } catch (Exception ignored) {}
         controller.endGracefully(15_000, 200);
     }
 
