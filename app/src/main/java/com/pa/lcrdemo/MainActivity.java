@@ -66,7 +66,7 @@ public class MainActivity extends AppCompatActivity {
     private volatile Integer currentUsbDeviceId = null;
     private volatile long lastDetachHandledAt = 0L;
     private static final long DETACH_DEBOUNCE_MS = 1500L; // 1.5s
-    private volatile boolean detachedDuringFlow = false;  // détaché pendant WAIT_FOR_FLOW / FLOW_ACTIVE
+    private volatile boolean detachedDuringFlow = false;  // détaché pendant une session en cours
     private static final long DETACHED_FALLBACK_CLEANUP_MS = 3000L; // cleanup si rien ne se passe
 
     @Override
@@ -229,11 +229,18 @@ public class MainActivity extends AppCompatActivity {
             }
             lastDetachHandledAt = now;
 
-            // Si une livraison est en attente de flow ou active, ne PAS couper la poll-window tout de suite.
+            // Étendons la notion de "session en cours" pour éviter toute course :
+            // STARTING, WAIT_FOR_FLOW, FLOW_ACTIVE, FINALIZING => cleanup différé
             DeliveryController.State s = (controller != null ? controller.getState() : DeliveryController.State.IDLE);
-            if (s == DeliveryController.State.WAIT_FOR_FLOW || s == DeliveryController.State.FLOW_ACTIVE) {
+            boolean inProgress =
+                    (s == DeliveryController.State.STARTING) ||
+                    (s == DeliveryController.State.WAIT_FOR_FLOW) ||
+                    (s == DeliveryController.State.FLOW_ACTIVE) ||
+                    (s == DeliveryController.State.FINALIZING);
+
+            if (inProgress) {
                 detachedDuringFlow = true;
-                append("DETACHED pendant FLOW/WAIT — on laisse l'I/O signaler l'erreur; cleanup différé.\n");
+                append("DETACHED pendant session (state=" + s + ") — I/O laissera remonter l'erreur; cleanup différé.\n");
 
                 // Fallback: si rien ne se passe dans 3s (blocage improbable), on nettoie de force.
                 mainHandler.postDelayed(() -> {
@@ -247,8 +254,8 @@ public class MainActivity extends AppCompatActivity {
                 return;
             }
 
-            // Pas de flow actif → nettoyage immédiat.
-            append("DETACHED : arrêt contrôleur + fermeture port (no active flow)\n");
+            // Session non active → nettoyage immédiat.
+            append("DETACHED : arrêt contrôleur + fermeture port (no active session)\n");
             try { if (controller != null) controller.requestStop("usb detached"); } catch(Exception ignored){}
             cleanupUsb();
         }
