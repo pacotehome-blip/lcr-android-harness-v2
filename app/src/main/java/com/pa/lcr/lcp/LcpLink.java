@@ -9,18 +9,18 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * LcpLink — A2‑Enhanced + PythonCompat + CancelIO
+ * LcpLink — A2‑Enhanced + PythonCompat + CancelIO + PollGate
  * (2026‑02‑05, verrous, parsing, metrics, guard 0x23/0x28, low-level throttles,
- *  any-poll coalesce, compat Python: 0x7D actif + cadence courte, cancel E/S global)
+ *  any-poll coalesce, compat Python: 0x7D actif + cadence courte, cancel E/S global, poll gate)
  *
  * Version marker:
- *   LcpLink v2026-02-05 fuse+throttle+portlock+delstatus+lowlvlthrottle+anypoll+guard+pycompat+cancel
+ *   LcpLink v2026-02-05 fuse+throttle+portlock+delstatus+lowlvlthrottle+anypoll+guard+pycompat+cancel+pollgate
  */
 public class LcpLink {
 
     // ============================== VERSION ==============================
     private static final String LCP_VERSION =
-        "LcpLink v2026-02-05 fuse+throttle+portlock+delstatus+lowlvlthrottle+anypoll+guard+pycompat+cancel";
+        "LcpLink v2026-02-05 fuse+throttle+portlock+delstatus+lowlvlthrottle+anypoll+guard+pycompat+cancel+pollgate";
 
     // ============================ PROTO CONST ============================
     public static final int TILDE = 0x7E;
@@ -125,6 +125,9 @@ public class LcpLink {
     // ======= Breaker / Cancel IO global =======
     private volatile boolean ioCancelled = false;
 
+    // ======= Poll Gate (bloque 0x23/0x28 hors fenêtres autorisées) =======
+    private volatile boolean pollingBlocked = true;
+
     public void setPythonCompat(boolean enable, int pollMs){
         this.pythonCompat = enable;
         this.minPollMs = Math.max(150, pollMs);
@@ -133,6 +136,12 @@ public class LcpLink {
     public void cancelIO() { ioCancelled = true; log("[LCP] IO CANCELLED"); }
     public void resumeIO() { ioCancelled = false; log("[LCP] IO RESUMED"); }
     private void checkCancelled() throws IOException { if (ioCancelled) throw new IOException("CANCELLED"); }
+
+    /** Active/désactive le blocage des polls (0x23/0x28). */
+    public void setPollingBlocked(boolean blocked) {
+        this.pollingBlocked = blocked;
+        log("[LCP] PollingBlocked=" + blocked);
+    }
 
     public LcpLink(UsbSerialPort p, int to, int from, boolean syncFirst) {
         this.port = p;
@@ -578,6 +587,7 @@ public class LcpLink {
     }
 
     public int[] opDeliveryStatus() throws IOException {
+        if (pollingBlocked) throw new IOException("POLL_BLOCKED");
         synchronized (delStatusPollLock) {
             long now = System.currentTimeMillis();
             if (lastDelStatusAt != 0L) {
@@ -622,6 +632,7 @@ public class LcpLink {
     }
 
     public int[] opMachineStatusFull() throws IOException {
+        if (pollingBlocked) throw new IOException("POLL_BLOCKED");
         synchronized (machinePollLock) {
             long now = System.currentTimeMillis();
             if (lastGetMachineAt != 0L) {
