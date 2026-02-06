@@ -16,6 +16,7 @@ import android.view.View;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
+import android.widget.ScrollView;
 import android.widget.TextView;
 
 import androidx.appcompat.app.AppCompatActivity;
@@ -40,7 +41,6 @@ public class MainActivity extends AppCompatActivity {
     private EditText edtTo, edtFrom, edtProduct, edtPreset;
     private Button btnConnect, btnStartOpen, btnStartPreset, btnEnd;
     private Button btnClear, btnCopy;
-    // Nouveaux contrôles
     private Button btnB, btnContinue, btnFinish;
     private CheckBox switchIoLog;
 
@@ -53,11 +53,16 @@ public class MainActivity extends AppCompatActivity {
     private final StringBuilder logBuf = new StringBuilder(16 * 1024);
     private final ExecutorService uiExec = Executors.newSingleThreadExecutor();
 
-    // Détection "aucune progression" (prompt Continuer/Terminé comme Python)
+    // Détection "aucune progression" (prompt Continuer/Terminé comme le script Python)
     private volatile long lastProgressAtMs = 0L;
     private volatile int lastGross = -1, lastNet = -1;
     private static final long NO_PROGRESS_PROMPT_MS = 10_000; // 10s
     private volatile boolean promptShown = false;
+
+    // USB detach robuste
+    private volatile Integer currentUsbDeviceId = null;
+    private volatile long lastDetachHandledAt = 0L;
+    private static final long DETACH_DEBOUNCE_MS = 1500L; // 1.5s anti double événement
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -107,17 +112,19 @@ public class MainActivity extends AppCompatActivity {
         btnCopy      = findViewById(R.id.btnCopyLog);
         switchIoLog  = findViewById(R.id.switchIoLog);
 
-        // nouveaux
         btnB        = findViewById(R.id.btnB);          // B ping
-        btnContinue = findViewById(R.id.btnContinue);   // Continuer (prompt)
-        btnFinish   = findViewById(R.id.btnFinish);     // Terminé (END)
+        btnContinue = findViewById(R.id.btnContinue);   // Continuer
+        btnFinish   = findViewById(R.id.btnFinish);     // Terminé
 
-        // Masque l'ancien "Start" si présent
+        // Masquer l'ancien "Start" si présent
         if (btnStartPreset != null) {
             btnStartPreset.setVisibility(View.GONE);
         }
 
-        // Par défaut, désactive le couple Continuer/Terminé (activés à la demande)
+        // Zone de log sélectionnable
+        try { txtLog.setTextIsSelectable(true); } catch(Exception ignored) {}
+
+        // Par défaut, désactive Continuer/Terminé (activés à la demande)
         if (btnContinue != null) btnContinue.setEnabled(false);
         if (btnFinish   != null) btnFinish.setEnabled(false);
     }
@@ -143,7 +150,6 @@ public class MainActivity extends AppCompatActivity {
         safeSetOnClick(btnClear, v -> { logBuf.setLength(0); runOnUiThread(() -> txtLog.setText("")); });
         safeSetOnClick(btnCopy, v -> copyLog());
 
-        // Nouveaux
         safeSetOnClick(btnB, v -> doBPing());
         safeSetOnClick(btnContinue, v -> continueDelivery());
         safeSetOnClick(btnFinish, v -> finishDelivery());
@@ -155,6 +161,19 @@ public class MainActivity extends AppCompatActivity {
                 append("I/O log " + (checked ? "activé" : "désactivé") + "\n");
             });
         }
+
+        // Optionnel : faciliter “Select All” au long‑press
+        txtLog.setOnLongClickListener(v -> {
+            try {
+                txtLog.requestFocus();
+                txtLog.setSelectAllOnFocus(true);
+                txtLog.post(() -> {
+                    txtLog.clearFocus();
+                    txtLog.requestFocus();
+                });
+            } catch (Exception ignored) {}
+            return false; // garde le menu système (Copier/Sélectionner tout)
+        });
     }
 
     private void safeSetOnClick(View v, View.OnClickListener l){
@@ -179,14 +198,42 @@ public class MainActivity extends AppCompatActivity {
 
     private final BroadcastReceiver usbAttachDetach = new BroadcastReceiver() {
         @Override public void onReceive(Context c, Intent i) {
-            if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(i.getAction())) {
+            final String action = i.getAction();
+            if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(action)) {
                 append("USB attaché — cliquez 'Connexion USB'\n");
-            } else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(i.getAction())) {
-                append("USB détaché\n");
-                try { if (controller != null) controller.requestStop("usb detached"); } catch(Exception ignored){}
-                try { if (serialPort != null) serialPort.close(); } catch(Exception ignored){}
-                serialPort = null; lcpLink = null; controller = null;
+                return;
             }
+            if (!UsbManager.ACTION_USB_DEVICE_DETACHED.equals(action)) return;
+
+            UsbDevice det = i.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+            int detId = (det != null ? det.getDeviceId() : -1);
+            append(String.format("USB DETACHED reçu (devId=%d)\n", detId));
+
+            Integer curId = currentUsbDeviceId;
+            if (curId == null) {
+                append("DETACHED ignoré (aucun device actif)\n");
+                return;
+            }
+            if (det == null || detId != curId) {
+                append(String.format("DETACHED ignoré (devId=%d != actif=%d)\n", detId, curId));
+                return;
+            }
+
+            long now = System.currentTimeMillis();
+            if (now - lastDetachHandledAt < DETACH_DEBOUNCE_MS) {
+                append("DETACHED ignoré (debounce)\n");
+                return;
+            }
+            lastDetachHandledAt = now;
+
+            try {
+                append("DETACHED : arrêt contrôleur + fermeture port\n");
+                if (controller != null) controller.requestStop("usb detached");
+            } catch(Exception ignored){}
+
+            try { if (serialPort != null) serialPort.close(); } catch(Exception ignored){}
+            serialPort = null; lcpLink = null; controller = null;
+            currentUsbDeviceId = null;
         }
     };
 
@@ -236,6 +283,13 @@ public class MainActivity extends AppCompatActivity {
             serialPort.setRTS(false);
             serialPort.setDTR(false);
             serialPort.purgeHwBuffers(true, true);
+
+            // Mémorise l'ID du device en service (filtre DETACHED)
+            if (driver.getDevice() != null) {
+                currentUsbDeviceId = driver.getDevice().getDeviceId();
+            } else {
+                currentUsbDeviceId = dev.getDeviceId();
+            }
 
             append("Port ouvert 19200 8N1\n");
 
@@ -344,6 +398,7 @@ public class MainActivity extends AppCompatActivity {
             append("ERREUR ouverture USB: " + e.getMessage() + "\n");
             try { if (serialPort != null) serialPort.close(); } catch(Exception ignored){}
             serialPort = null; lcpLink = null; controller = null;
+            currentUsbDeviceId = null;
         }
     }
 
@@ -386,7 +441,7 @@ public class MainActivity extends AppCompatActivity {
         controller.startOpenMode(product, 20_000, 200);
     }
 
-    // Ancien "start preset" (retiré du layout) – on peut laisser pour plus tard
+    // Ancien "start preset" (retiré du layout) – on peut garder pour plus tard
     @SuppressWarnings("unused")
     private void startPresetNet() {
         if (!checkReady()) return;
@@ -427,7 +482,21 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void append(String s) {
-        runOnUiThread(() -> txtLog.append(s));
+        runOnUiThread(() -> {
+            boolean hasSelection = false;
+            try {
+                int selStart = txtLog.getSelectionStart();
+                int selEnd   = txtLog.getSelectionEnd();
+                hasSelection = (selStart != selEnd);
+            } catch (Exception ignored) {}
+
+            txtLog.append(s);
+
+            if (!hasSelection) {
+                ScrollView sv = findViewById(R.id.logScroll);
+                if (sv != null) sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
+            }
+        });
     }
 
     private void appendAndBuffer(String s) {
