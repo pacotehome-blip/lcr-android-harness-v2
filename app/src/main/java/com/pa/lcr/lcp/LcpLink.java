@@ -9,18 +9,18 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * LcpLink — A2‑Enhanced + PythonCompat
+ * LcpLink — A2‑Enhanced + PythonCompat + CancelIO
  * (2026‑02‑05, verrous, parsing, metrics, guard 0x23/0x28, low-level throttles,
- *  any-poll coalesce, et compat Python: 0x7D actif + cadence courte)
+ *  any-poll coalesce, compat Python: 0x7D actif + cadence courte, cancel E/S global)
  *
  * Version marker:
- *   LcpLink v2026-02-05 fuse+throttle+portlock+delstatus+lowlvlthrottle+anypoll+guard+pycompat
+ *   LcpLink v2026-02-05 fuse+throttle+portlock+delstatus+lowlvlthrottle+anypoll+guard+pycompat+cancel
  */
 public class LcpLink {
 
     // ============================== VERSION ==============================
     private static final String LCP_VERSION =
-        "LcpLink v2026-02-05 fuse+throttle+portlock+delstatus+lowlvlthrottle+anypoll+guard+pycompat";
+        "LcpLink v2026-02-05 fuse+throttle+portlock+delstatus+lowlvlthrottle+anypoll+guard+pycompat+cancel";
 
     // ============================ PROTO CONST ============================
     public static final int TILDE = 0x7E;
@@ -35,7 +35,7 @@ public class LcpLink {
     public static final int MSG_GET_MACHINE    = 0x23;
     public static final int MSG_ISSUE_COMMAND  = 0x24;
     public static final int MSG_GET_DEL_STATUS = 0x28;
-    public static final int MSG_CHECK_REQUEST  = 0x7D;  // Python script uses it actively
+    public static final int MSG_CHECK_REQUEST  = 0x7D;
     public static final int MSG_GET_PRODUCTID  = 0x00;
 
     public static final int RC_OK                = 0x00;
@@ -122,11 +122,17 @@ public class LcpLink {
     private volatile int minPollMs = 200; // e.g. --poll 0.2 → 200 ms
     private volatile int minPollAnyMs = MIN_POLL_ANY_MS_STD; // coalesce; ignored in pythonCompat
 
+    // ======= Breaker / Cancel IO global =======
+    private volatile boolean ioCancelled = false;
+
     public void setPythonCompat(boolean enable, int pollMs){
         this.pythonCompat = enable;
         this.minPollMs = Math.max(150, pollMs);
-        // coalesce global désactivé en pythonCompat (on laisse l’alternance 23/28)
+        log("[LCP] PythonCompat=" + enable + " pollMs=" + this.minPollMs);
     }
+    public void cancelIO() { ioCancelled = true; log("[LCP] IO CANCELLED"); }
+    public void resumeIO() { ioCancelled = false; log("[LCP] IO RESUMED"); }
+    private void checkCancelled() throws IOException { if (ioCancelled) throw new IOException("CANCELLED"); }
 
     public LcpLink(UsbSerialPort p, int to, int from, boolean syncFirst) {
         this.port = p;
@@ -248,6 +254,7 @@ public class LcpLink {
         long tEnd = System.currentTimeMillis() + timeout;
         int syncCount = 0;
         while(System.currentTimeMillis() < tEnd){
+            checkCancelled(); // cancel point
             int b = readByte(timeout);
             if(b < 0) continue;
             if(b == TILDE){
@@ -265,6 +272,7 @@ public class LcpLink {
         pf.header    = new byte[4];
 
         for(int i=0; i<4; i++){
+            checkCancelled(); // cancel point
             RawByte rb = readEscaped(timeout);
             if(rb.decoded < 0) throw new IOException("Header timeout");
             pf.header[i] = (byte)rb.decoded;
@@ -276,6 +284,7 @@ public class LcpLink {
         pf.payload = new byte[plen];
 
         for(int i=0; i<plen; i++){
+            checkCancelled(); // cancel point
             RawByte rb = readEscaped(timeout);
             if(rb.decoded<0) throw new IOException("Payload timeout");
             pf.payload[i] = (byte)rb.decoded;
@@ -283,7 +292,9 @@ public class LcpLink {
         }
         raw.add(pf.payloadRaw);
 
+        checkCancelled(); // cancel point
         RawByte c0 = readEscaped(timeout);
+        checkCancelled(); // cancel point
         RawByte c1 = readEscaped(timeout);
         if(c0.decoded<0 || c1.decoded<0) throw new IOException("CRC timeout");
 
@@ -325,10 +336,14 @@ public class LcpLink {
 
     // =============================== I/O =================================
     public byte[] sendRecv(byte[] payload, int timeoutMs) throws IOException {
+        checkCancelled(); // cancel point
+
         globalPortLock.lock();
         try {
         synchronized (portLock) {
         synchronized (txRxLock) {
+            checkCancelled(); // cancel point
+
             long now = System.currentTimeMillis();
             if (lastExchangeFinishedAtMs == 0L) lastExchangeFinishedAtMs = now;
             long since = now - lastExchangeFinishedAtMs;
@@ -345,9 +360,14 @@ public class LcpLink {
                         msg0, String.valueOf(inOK!=null && inOK), callerTop(), Thread.currentThread().getName()));
             }
 
-            // 0x7D fuse (désactivé si PythonCompat)
-            if (!pythonCompat && payload != null && payload.length > 0 && (payload[0] & 0xFF) == MSG_CHECK_REQUEST) {
-                throw new IOException("0x7D interdit (activer PythonCompat pour l'utiliser)");
+            // 0x7D — autorisé UNIQUEMENT en PythonCompat ET via op* (INTERNAL_OK)
+            if (payload != null && payload.length > 0 && (payload[0] & 0xFF) == MSG_CHECK_REQUEST) {
+                if (!pythonCompat) {
+                    throw new IOException("0x7D interdit (activer PythonCompat)");
+                }
+                if (INTERNAL_OK.get() == null || !INTERNAL_OK.get()) {
+                    throw new IOException("0x7D réservé aux op* (opCheckRequest). Appel direct interdit.");
+                }
             }
 
             // Guard: 0x23/0x28 seulement via op*
@@ -391,11 +411,16 @@ public class LcpLink {
                 }
             }
 
+            checkCancelled(); // cancel point
             byte[] fr = buildFrame(payload);
             try { port.purgeHwBuffers(true,true); }catch(Exception ignored){}
+
+            checkCancelled(); // cancel point
             port.write(fr, timeoutMs);
 
             metrics.txFrames.incrementAndGet();
+
+            checkCancelled(); // cancel point
             byte[] rsp = readFrame(timeoutMs);
 
             lastExchangeFinishedAtMs = System.currentTimeMillis();
@@ -406,11 +431,12 @@ public class LcpLink {
         }
     }
 
-    // ===================== Attente passsive (par défaut) =================
+    // ===================== Attente passive (par défaut) =================
     private byte[] waitQueued(int timeoutMs, int pollMs) throws IOException {
         long tStart = System.currentTimeMillis(), tEnd = tStart + timeoutMs;
         byte[] last=null; metrics.queuedWaits.incrementAndGet();
         while(System.currentTimeMillis() < tEnd){
+            checkCancelled(); // cancel point
             byte[] rsp = readFrame(Math.max(1200,pollMs+800));
             byte[] p   = extractPayload(rsp);
             LcpStatus st = extractStatus(rsp);
@@ -434,12 +460,19 @@ public class LcpLink {
     // ====================== Attente active (Python) ======================
     public byte[] opCheckRequest() throws IOException {
         if (!pythonCompat) throw new IOException("opCheckRequest() nécessite PythonCompat");
-        return sendRecv(new byte[]{ (byte)MSG_CHECK_REQUEST }, Math.max(1200, minPollMs + 800));
+        INTERNAL_OK.set(Boolean.TRUE);
+        try {
+            checkCancelled(); // cancel point
+            return sendRecv(new byte[]{ (byte)MSG_CHECK_REQUEST }, Math.max(1200, minPollMs + 800));
+        } finally {
+            INTERNAL_OK.remove();
+        }
     }
     private byte[] waitQueuedPython(int timeoutMs) throws IOException {
         long tEnd = System.currentTimeMillis() + timeoutMs;
         byte[] last = null;
         while (System.currentTimeMillis() < tEnd) {
+            checkCancelled(); // cancel point
             byte[] rsp = opCheckRequest();
             byte[] p   = extractPayload(rsp);
             if (p != null && p.length > 0) last = p;
@@ -450,7 +483,7 @@ public class LcpLink {
             if (rc == RC_REQUEST_QUEUED || rc == RC_NO_REQUEST_ACTIVE) {
                 sleep(minPollMs); continue;
             }
-            return p; // sortie dès qu'on a RC != 0x26
+            return p; // sortie dès RC != 0x26
         }
         throw new IOException("Queued timeout (python)");
     }
@@ -458,6 +491,7 @@ public class LcpLink {
     // ============================== op* =================================
     public byte[] opGetField(int field) throws IOException {
         byte[] req = new byte[]{ (byte)MSG_GET_FIELD, (byte)field };
+        checkCancelled();
         byte[] rsp = sendRecv(req,2000);
         LcpStatus st = extractStatus(rsp);
         byte[] p = extractPayload(rsp);
@@ -488,6 +522,7 @@ public class LcpLink {
         pl[0] = (byte)MSG_SET_FIELD; pl[1] = (byte)field;
         System.arraycopy(data,0,pl,2,data.length);
 
+        checkCancelled();
         byte[] rsp = sendRecv(pl,2000);
         LcpStatus st = extractStatus(rsp);
         byte[] p = extractPayload(rsp);
@@ -515,6 +550,7 @@ public class LcpLink {
     public byte[] opIssueCommand(int cmd) throws IOException {
         metrics.opIssueCommandCalls.incrementAndGet();
         byte[] req = new byte[]{ (byte)MSG_ISSUE_COMMAND, (byte)cmd };
+        checkCancelled();
         byte[] rsp = sendRecv(req,2000);
         LcpStatus st = extractStatus(rsp);
         byte[] p = extractPayload(rsp);
@@ -537,8 +573,7 @@ public class LcpLink {
         }
 
         if(p==null || p.length<1 || p[0]!=RC_OK) throw new IOException("CMD 0x"+Integer.toHexString(cmd));
-        // gap post commande
-        sleepMs(80 + rnd(0, 40));
+        sleepMs(80 + rnd(0, 40)); // gap post commande
         return p;
     }
 
@@ -555,6 +590,7 @@ public class LcpLink {
 
             INTERNAL_OK.set(Boolean.TRUE);
             try {
+                checkCancelled();
                 byte[] rsp = sendRecv(new byte[]{ (byte)MSG_GET_DEL_STATUS },2000);
                 LcpStatus st = extractStatus(rsp);
                 byte[] p = extractPayload(rsp);
@@ -599,6 +635,7 @@ public class LcpLink {
 
             INTERNAL_OK.set(Boolean.TRUE);
             try {
+                checkCancelled();
                 byte[] rsp = sendRecv(new byte[]{ (byte)MSG_GET_MACHINE },2000);
                 LcpStatus st = extractStatus(rsp);
                 byte[] p = extractPayload(rsp);
