@@ -65,7 +65,7 @@ public class MainActivity extends AppCompatActivity {
     // Orchestration live loop / END / print
     private volatile boolean liveLoopActive = false;
     private volatile boolean endingRequested = false;
-    private volatile boolean shouldPrintAtEnd = false;   // <-- NEW : imprime seulement si Terminé
+    private volatile boolean shouldPrintAtEnd = false;   // imprime seulement si Terminé
 
     // USB detach robuste
     private volatile Integer currentUsbDeviceId = null;
@@ -229,18 +229,17 @@ public class MainActivity extends AppCompatActivity {
             }
             lastDetachHandledAt = now;
 
-            // STARTING, WAIT_FOR_FLOW, FLOW_ACTIVE, FINALIZING => cleanup différé
+            // Session "en cours" = tout sauf IDLE/ENDED/ERROR (évite d'énumérer des états SDK)
             DeliveryController.State s = (controller != null ? controller.getState() : DeliveryController.State.IDLE);
-            boolean inProgress =
-                    (s == DeliveryController.State.STARTING) ||
-                    (s == DeliveryController.State.WAIT_FOR_FLOW) ||
-                    (s == DeliveryController.State.FLOW_ACTIVE) ||
-                    (s == DeliveryController.State.FINALIZING);
+            boolean inProgress = (s != DeliveryController.State.IDLE &&
+                                  s != DeliveryController.State.ENDED &&
+                                  s != DeliveryController.State.ERROR);
 
             if (inProgress) {
                 detachedDuringFlow = true;
                 append("DETACHED pendant session (state=" + s + ") — I/O laissera remonter l'erreur; cleanup différé.\n");
 
+                // Fallback: si rien ne se passe dans 3s (blocage improbable), on nettoie de force.
                 mainHandler.postDelayed(() -> {
                     if (detachedDuringFlow) {
                         append("DETACHED timeout → cleanup forcé\n");
@@ -252,6 +251,7 @@ public class MainActivity extends AppCompatActivity {
                 return;
             }
 
+            // Session non active → nettoyage immédiat.
             append("DETACHED : arrêt contrôleur + fermeture port (no active session)\n");
             try { if (controller != null) controller.requestStop("usb detached"); } catch(Exception ignored){}
             cleanupUsb();
@@ -305,6 +305,7 @@ public class MainActivity extends AppCompatActivity {
             serialPort.setDTR(false);
             serialPort.purgeHwBuffers(true, true);
 
+            // ID du device actif (pour filtrer DETACHED)
             if (driver.getDevice() != null) currentUsbDeviceId = driver.getDevice().getDeviceId();
             else currentUsbDeviceId = dev.getDeviceId();
 
@@ -313,8 +314,10 @@ public class MainActivity extends AppCompatActivity {
             int to   = parseHexOrDefault(safe(edtTo),   0xFA);
             int from = parseHexOrDefault(safe(edtFrom), 0xFF);
 
+            // LcpLink
             lcpLink = new LcpLink(serialPort, to, from, true);
 
+            // Une seule instance de DeliveryController pour toute la session
             controller = new DeliveryController(
                     lcpLink,
                     new DeliveryController.DeliveryEvents() {
@@ -338,7 +341,7 @@ public class MainActivity extends AppCompatActivity {
                                         // Impression après END si demandé via Terminé
                                         if (s == DeliveryController.State.ENDED && shouldPrintAtEnd) {
                                             shouldPrintAtEnd = false;
-                                            printTicket();  // <-- Impression ici
+                                            printTicket();  // Impression LCP
                                         }
 
                                         // Cleanup USB si détaché pendant le flow
@@ -358,6 +361,7 @@ public class MainActivity extends AppCompatActivity {
                         }
                         @Override public void onFlowStarted() {
                             append("[SDK] FLOW détecté\n");
+                            // reset détection "no progress"
                             lastProgressAtMs = System.currentTimeMillis();
                             lastGross = -1; lastNet = -1; promptShown = false;
 
@@ -376,7 +380,7 @@ public class MainActivity extends AppCompatActivity {
                             append("[SDK] FLOW stoppé\n");
                             liveLoopActive = false;
 
-                            // 👉 Flow=0 : activer Continuer & Terminé
+                            // Flow=0 : activer Continuer & Terminé
                             runOnUiThread(() -> {
                                 if (btnContinue != null) btnContinue.setEnabled(true);
                                 if (btnFinish   != null) btnFinish.setEnabled(true);
@@ -391,13 +395,16 @@ public class MainActivity extends AppCompatActivity {
                         @Override public void onLiveSample(int ds, int dc, double gL, double nL) {
                             append(String.format("[LIVE] DS=0x%04X DC=0x%04X G=%.1f N=%.1f\n",
                                     ds, dc, gL, nL));
+                            // Détection "aucune progression" (alignée au prompt Python)
                             try {
-                                int g = (int)Math.round(gL * 1000);
+                                int g = (int)Math.round(gL * 1000); // échelle indifférente aux digits
                                 int n = (int)Math.round(nL * 1000);
                                 boolean progressed;
-                                if (lastGross < 0 && lastNet < 0) progressed = true;
-                                else progressed = (g != lastGross) || (n != lastNet);
-
+                                if (lastGross < 0 && lastNet < 0) {
+                                    progressed = true; // init
+                                } else {
+                                    progressed = (g != lastGross) || (n != lastNet);
+                                }
                                 long now = System.currentTimeMillis();
                                 if (progressed) {
                                     lastGross = g; lastNet = n;
@@ -477,12 +484,13 @@ public class MainActivity extends AppCompatActivity {
         append("[UI] Terminé demandé\n");
 
         endingRequested  = true;
-        shouldPrintAtEnd = true;  // <-- imprimera à ENDED
+        shouldPrintAtEnd = true;  // imprimera à ENDED
 
+        // 1) Couper la live loop pour libérer la PollWindow/le thread
         try { controller.stopLiveLoop(); } catch (Exception ignored) {}
         liveLoopActive = false;
 
-        // Laisse la PollWindow se fermer proprement avant END
+        // 2) Enchaîner l'END propre après un léger délai pour laisser la loop s'éteindre
         mainHandler.postDelayed(() -> {
             try {
                 if (controller != null) {
@@ -492,6 +500,7 @@ public class MainActivity extends AppCompatActivity {
             } catch (Exception ignored) {}
         }, 150);
 
+        // 3) UI : désactiver les boutons d'options
         if (btnContinue != null) btnContinue.setEnabled(false);
         if (btnFinish   != null) btnFinish.setEnabled(false);
     }
@@ -514,6 +523,7 @@ public class MainActivity extends AppCompatActivity {
         controller.startOpenMode(product, 20_000, 200);
     }
 
+    // Ancien "start preset" (retiré du layout) – conservé pour usage futur
     @SuppressWarnings("unused")
     private void startPresetNet() {
         if (!checkReady()) return;
@@ -529,7 +539,8 @@ public class MainActivity extends AppCompatActivity {
         append("[UI] END demandé (A)\n");
 
         endingRequested  = true;
-        // on ne change PAS shouldPrintAtEnd ici : c'est "Terminé" qui décide d'imprimer
+        // shouldPrintAtEnd reste inchangé : seul "Terminé" décide d'imprimer
+
         try { controller.stopLiveLoop(); } catch (Exception ignored) {}
         liveLoopActive = false;
 
@@ -543,22 +554,60 @@ public class MainActivity extends AppCompatActivity {
         }, 150);
     }
 
-    /* ============================== Impression ============================== */
+    /* ============================== Impression (LCP) ============================== */
 
+    /**
+     * Impression du ticket par COMMANDE LCP (LCR-II imprime en autonome).
+     *
+     * TODO: Renseigner l’opcode exact et le payload selon ta doc:
+     *  - "LCR API Internal Messages for LCP.pdf"
+     *  - "LCR Registers' Fields.xlsx"
+     *
+     * Notes:
+     * - Appelée APRÈS ENDED pour imprimer le ticket final.
+     * - LcpLink gère l'encapsulation (framing/CRC/adresses). On envoie seulement [cmd, data...].
+     */
     private void printTicket() {
-        // ⚠️ Remplace par l’appel exact de ton SDK si le nom diffère.
-        // Exemples possibles selon tes libs:
-        // controller.printTicketFull();
-        // controller.printTicket();
-        // lcpLink.opPrintLastTicket();
+        // --------------- TODO: à ADAPTER selon ta doc LCP ----------------
+        // Exemples FICTIFS (NE PAS garder tels quels si ta doc diffère) :
+        final byte CMD_PRINT_TICKET = (byte)0x2A; // ← Remplacer par la vraie commande d'impression
+        final byte[] payload = new byte[]{};      // ← Renseigner si options requises, sinon vide
+        // ------------------------------------------------------------------
+
+        append("[PRINT] Impression demandée (LCP)…\n");
         try {
-            append("[PRINT] Impression du ticket en cours…\n");
-            controller.printTicketFull(); // <-- adapte le nom si besoin
-            append("[PRINT] Ticket imprimé\n");
-        } catch (NoSuchMethodError | Exception ex) {
-            append("[PRINT] API d'impression introuvable dans le SDK: " + ex.getMessage() + "\n");
-            // TODO: fallback LcpLink si tu veux imprimer via commandes brutes
+            if (lcpLink == null) {
+                append("[PRINT] LcpLink indisponible — impression annulée\n");
+                return;
+            }
+
+            // Fusion simple [CMD, ...payload]
+            byte[] msg = new byte[1 + payload.length];
+            msg[0] = CMD_PRINT_TICKET;
+            if (payload.length > 0) System.arraycopy(payload, 0, msg, 1, payload.length);
+
+            // Optionnel : sécuriser l’ordonnancement en ouvrant une courte PollWindow
+            try { lcpLink.openPollWindow(); } catch (Throwable ignored) {}
+
+            try {
+                // Timeout large (imprimante lente) — ajuste si besoin
+                byte[] resp = lcpLink.sendRecv(msg, 10_000);
+                append("[PRINT] Réponse LCP: " + bytesToHex(resp) + "\n");
+                append("[PRINT] Ticket imprimé (commande envoyée au LCR-II)\n");
+            } finally {
+                try { lcpLink.closePollWindow(); } catch (Throwable ignored) {}
+            }
+        } catch (Exception e) {
+            append("[PRINT] Erreur impression LCP: " + e.getMessage() + "\n");
         }
+    }
+
+    // Utilitaire pour loguer un buffer en hex
+    private static String bytesToHex(byte[] b) {
+        if (b == null) return "(null)";
+        StringBuilder sb = new StringBuilder();
+        for (byte x : b) sb.append(String.format("%02X ", x));
+        return sb.toString().trim();
     }
 
     /* ============================== Utils ============================== */
