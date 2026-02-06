@@ -151,15 +151,20 @@ public class LcpLink {
     public void openPollWindow() {
         this.pollOwner = Thread.currentThread();
         this.pollingBlocked = false;
-        log("[LCP] PollWindow OPEN by " + this.pollOwner.getName());
+        log("[LCP] PollWindow OPEN by " + this.pollOwner.getName() + " caller=" + callerTop());
     }
 
     /** Ferme la fenêtre de poll et libère le propriétaire. */
     public void closePollWindow() {
+        // Evite un log trompeur si déjà bloqué & sans owner
+        if (this.pollOwner == null && this.pollingBlocked) {
+            log("[LCP] PollWindow CLOSE ignored (no owner, already blocked) caller=" + callerTop());
+            return;
+        }
         this.pollingBlocked = true;
         Thread owner = this.pollOwner;
         this.pollOwner = null;
-        log("[LCP] PollWindow CLOSE (prevOwner=" + (owner != null ? owner.getName() : "none") + ")");
+        log("[LCP] PollWindow CLOSE (prevOwner=" + (owner != null ? owner.getName() : "none") + ") caller=" + callerTop());
     }
 
     public LcpLink(UsbSerialPort p, int to, int from, boolean syncFirst) {

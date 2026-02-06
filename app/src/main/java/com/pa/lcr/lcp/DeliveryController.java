@@ -16,7 +16,7 @@ import java.util.concurrent.Executors;
  *  - PythonCompat: 0x7D via op*, poll court ~200ms
  *  - Fenêtre de poll EXCLUSIVE (openPollWindow/closePollWindow) sur WAIT_FOR_FLOW et live loop
  *  - WAIT_FOR_FLOW: retries bornés + RESYNC court (aligné script Python)
- *  - AUCUN 0x20/0x21/0x00/0x24 dans la fenêtre d'attente (pure 0x23/0x28)
+ *  - AUCUN 0x20/0x21/0x00/0x24 dans la boucle d'attente (pure 0x23/0x28)
  */
 public final class DeliveryController {
 
@@ -62,7 +62,7 @@ public final class DeliveryController {
         liveRunning = false;
         try { link.closePollWindow(); } catch(Exception ignored){}
         try { link.cancelIO(); } catch(Exception ignored){}
-        android.util.Log.w("DC", "STOP requested: " + reason);
+        android.util.Log.w("DC", "STOP requested: " + reason + " (cancelled=" + cancelled + ")");
     }
 
     /** Réarme après un STOP (si tu relances une nouvelle session). */
@@ -70,7 +70,7 @@ public final class DeliveryController {
         cancelled = false;
         try { link.resumeIO(); } catch(Exception ignored){}
         try { link.setPollingBlocked(true); } catch(Exception ignored){}
-        android.util.Log.i("DC", "STOP cleared: IO resumed; PollingBlocked=true");
+        android.util.Log.i("DC", "STOP cleared: IO resumed; PollingBlocked=true (cancelled=" + cancelled + ")");
     }
 
     // ============================== API ================================
