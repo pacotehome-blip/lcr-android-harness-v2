@@ -1,553 +1,534 @@
 
 package com.pa.lcr.lcp;
 
-import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.Objects;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * DeliveryController — 2026-02-05 — LCP-safe + PythonCompat + STOP/cancel + PollWindowOwner
+ * DeliveryController
+ * ------------------
+ * Orchestrateur de livraison pour LCR-II via LCP.
  *
- * Références:
- *  - "LCR API Internal Messages for LCP.pdf" (0x23/0x28/0x21/0x24/0x00, RC=0x26 queue)
- *  - "LCR Registers' Fields.xlsx" (#39 digits, #0 product, #5/#6 presets, #44/#45 counters)
+ * Publie:
+ *  - onStateChanged(State)
+ *  - onFlowStarted(), onFlowStopped()
+ *  - onLiveSample(int ds, int dc, double grossL, double netL)   // compat UI actuelle
+ *  - onProgress(DeliveryProgress p)                              // progression "métier" (Δ, débit, stalled)
+ *  - onGuardReached()
+ *  - onError(String, Throwable)
  *
- * Comportement:
- *  - PythonCompat: 0x7D via op*, poll court ~200ms
- *  - Fenêtre de poll EXCLUSIVE (openPollWindow/closePollWindow) sur WAIT_FOR_FLOW et live loop
- *  - WAIT_FOR_FLOW: retries bornés + RESYNC court (aligné script Python)
- *  - AUCUN 0x20/0x21/0x00/0x24 dans la boucle d'attente (pure 0x23/0x28)
+ * Dépendances:
+ *  - LcpLink : abstrait l'I/O (framing/CRC/adresses, fenêtre de poll, etc.)
+ *
+ * IMPORTANT (TODO):
+ *  - Renseigner le mapping 0x28 (gross/net + digits) selon "LCR Registers' Fields.xlsx"
+ *    dans decodeGrossNetFrom0x28(...).
+ *
+ * NOTE:
+ *  - Ce contrôleur n'arrête JAMAIS la live-loop automatiquement quand le flow=0:
+ *    c'est l'APK qui décide (tu l'as demandé). Ici on publie l'info 'stalled' pour l'UI.
  */
-public final class DeliveryController {
+public class DeliveryController {
 
-    public enum State { IDLE, STARTING, WAIT_FOR_FLOW, FLOW_ACTIVE, FINALIZING, ENDED, ERROR }
+    /* ============================ Types & Events ============================ */
+
+    public enum State {
+        IDLE,
+        STARTING,
+        WAIT_FOR_FLOW,
+        FLOW_ACTIVE,
+        FINALIZING,
+        ENDED,
+        ERROR
+    }
+
+    public interface DeliveryEvents {
+        void onStateChanged(State s);
+        void onFlowStarted();
+        void onFlowStopped();
+        void onLiveSample(int ds, int dc, double grossL, double netL);
+        void onGuardReached();
+        void onError(String message, Throwable t);
+
+        /** Nouveau (opt-in par défaut): progression "prête à afficher" */
+        default void onProgress(DeliveryProgress p) { /* no-op */ }
+    }
+
+    /**
+     * Progression "métier" prête à consommer côté UI
+     * Le SDK fait la conversion REG→L, calcule Δ, débit L/min, flow/stalled.
+     */
+    public static final class DeliveryProgress {
+        public final long tEpochMs;          // now()
+        public final long tSinceStartMs;     // depuis le "start" perçu
+        public final long tSinceLastDeltaMs; // depuis dernière progression réelle
+
+        public final double grossL;
+        public final double netL;
+        public final double dGrossL;
+        public final double dNetL;
+
+        public final double flowGrossLpm;
+        public final double flowNetLpm;
+
+        public final boolean flowActive;     // "ON" si progression (et/ou bit DC si tu veux OR)
+        public final boolean stalled;        // stagnation (≥ STALL_MS)
+
+        public final int ds;                 // brut pour debug (0x23)
+        public final int dc;                 // brut pour debug (0x23)
+
+        public DeliveryProgress(long tEpochMs, long tSinceStartMs, long tSinceLastDeltaMs,
+                                double grossL, double netL, double dGrossL, double dNetL,
+                                double flowGrossLpm, double flowNetLpm,
+                                boolean flowActive, boolean stalled, int ds, int dc) {
+            this.tEpochMs = tEpochMs;
+            this.tSinceStartMs = tSinceStartMs;
+            this.tSinceLastDeltaMs = tSinceLastDeltaMs;
+            this.grossL = grossL;
+            this.netL = netL;
+            this.dGrossL = dGrossL;
+            this.dNetL = dNetL;
+            this.flowGrossLpm = flowGrossLpm;
+            this.flowNetLpm = flowNetLpm;
+            this.flowActive = flowActive;
+            this.stalled = stalled;
+            this.ds = ds;
+            this.dc = dc;
+        }
+    }
+
+    /* ============================ Configuration ============================ */
+
+    private static final long STALL_MS = 3_000;     // stagnation ≥ 3s (aligné Python)
+    private static final double EPS_L  = 0.001;     // 1 mL (clamp anti-quantification)
+
+    /* ============================ Dependencies ============================ */
 
     private final LcpLink link;
-    private final DeliveryEvents events;
-    private final Executor exec;
+    private final DeliveryEvents cb;
+    private final Executor cbExec; // exécuteur pour callbacks (évite de bloquer la loop)
 
-    private volatile State state = State.IDLE;
-    private volatile boolean liveRunning = false;
+    /* ============================ State ============================ */
 
-    // Réglages
-    private static final int FLOW_CONFIRM_REQUIRED = 2;      // confirmations FLOW=1
-    private static final int MIN_LOOP_POLL_MS     = 120;     // tempo mini live loop
+    private final AtomicReference<State> state = new AtomicReference<>(State.IDLE);
 
-    // STOP/cancel flag
-    private volatile boolean cancelled = false;
+    private final AtomicBoolean liveLoopRunning = new AtomicBoolean(false);
+    private Thread liveLoopThread;
 
-    public DeliveryController(LcpLink link, DeliveryEvents events, Executor executor) {
-        this.link   = link;
-        this.events = (events != null ? events : new DeliveryEvents(){});
-        this.exec   = (executor != null ? executor : Executors.newSingleThreadExecutor());
+    private volatile long startedAtMs      = 0L;
+    private volatile long lastEmitMs       = 0L;
+    private volatile long lastProgressAtMs = 0L;
 
-        // Mode PythonCompat: 0x7D actif + poll court ~200 ms
-        this.link.setPythonCompat(true, 200);
+    private volatile double lastGrossL = Double.NaN;
+    private volatile double lastNetL   = Double.NaN;
 
-        // Par défaut: poll bloqué jusqu'à ce qu'on ouvre une fenêtre
-        this.link.setPollingBlocked(true);
-        android.util.Log.i("DC", "DeliveryController PYCOMPAT engaged (poll=200ms); PollingBlocked=true");
+    /* ============================ Ctor ============================ */
+
+    public DeliveryController(LcpLink link, DeliveryEvents cb) {
+        this(link, cb, Executors.newSingleThreadExecutor());
     }
 
-    public State getState() { return state; }
-    private void setState(State s){
-        state = s;
-        try { events.onStateChanged(s); } catch(Exception ignored){}
-    }
-    private static void sleep(int ms){ try { Thread.sleep(ms); } catch(Exception ignored){} }
-
-    /** STOP immédiat: arrête live, ferme la fenêtre de poll, annule les IO. */
-    public void requestStop(String reason) {
-        cancelled = true;
-        liveRunning = false;
-        try { link.closePollWindow(); } catch(Exception ignored){}
-        try { link.cancelIO(); } catch(Exception ignored){}
-        android.util.Log.w("DC", "STOP requested: " + reason + " (cancelled=" + cancelled + ")");
+    public DeliveryController(LcpLink link, DeliveryEvents cb, Executor callbackExecutor) {
+        this.link = Objects.requireNonNull(link, "link");
+        this.cb   = Objects.requireNonNull(cb,   "cb");
+        this.cbExec = (callbackExecutor != null ? callbackExecutor : Executors.newSingleThreadExecutor());
     }
 
-    /** Réarme après un STOP (si tu relances une nouvelle session). */
-    public void resetStop() {
-        cancelled = false;
-        try { link.resumeIO(); } catch(Exception ignored){}
-        try { link.setPollingBlocked(true); } catch(Exception ignored){}
-        android.util.Log.i("DC", "STOP cleared: IO resumed; PollingBlocked=true (cancelled=" + cancelled + ")");
+    /* ============================ Public API ============================ */
+
+    public State getState() { return state.get(); }
+
+    /**
+     * Démarrage "OPEN" (aucune présélection de volume).
+     * NOTE: Sans la doc "start" exacte, on publie STARTING/WAIT_FOR_FLOW,
+     *       et on laisse la détection "flow" (progression) déclencher onFlowStarted côté UI.
+     *       Si tu as la commande LCP de "start delivery open", renseigne-la ici (TODO).
+     */
+    public void startOpenMode(int productId, int startTimeoutMs, int pollMs) {
+        setState(State.STARTING);
+        startedAtMs = System.currentTimeMillis();
+        lastEmitMs = startedAtMs;
+        lastProgressAtMs = startedAtMs;
+        lastGrossL = Double.NaN;
+        lastNetL   = Double.NaN;
+
+        // TODO: envoyer la/les commande(s) de START OPEN si définies dans ta doc LCP.
+        //       Exemple imaginaire :
+        // sendSimple((byte)0xC0, new byte[]{ (byte)productId }, 2000);
+
+        setState(State.WAIT_FOR_FLOW);
+
+        // L'UI (MainActivity) déclenchera runLiveLoop(...) dans onFlowStarted().
+        // Ici, on peut optionnellement lancer une courte surveillance pour publier onFlowStarted
+        // dès qu'on observe une progression (Δ > 0) dans les premières secondes.
+        // Mais comme ton UI démarre la live loop après onFlowStarted(), on laisse la logique
+        // de "détection flow" au début de runLiveLoop (ci-dessous).
     }
 
-    // ============================== API ================================
+    /** Démarrage "PRESET NET" (exemple) — à implémenter si/qd tu as la commande LCP. */
+    public void startPresetNet(int productId, double presetLiters, int startTimeoutMs, int pollMs) {
+        setState(State.STARTING);
+        startedAtMs = System.currentTimeMillis();
+        lastEmitMs = startedAtMs;
+        lastProgressAtMs = startedAtMs;
+        lastGrossL = Double.NaN;
+        lastNetL   = Double.NaN;
 
-    /** Mode ouvert (open) : RUN puis attente FLOW_ACTIVE=1 (bloquant). */
-    public void startOpenMode(int productId, long waitFlowTimeoutMs, long pollMs) {
-        exec.execute(() -> {
+        // TODO: envoyer la/les commande(s) de START PRESET NET selon la doc LCP (PDF/XLSX).
+        // Exemple imaginaire:
+        // byte[] payload = buildPresetPayload(productId, presetLiters);
+        // sendSimple((byte)0xC1, payload, 2000);
+
+        setState(State.WAIT_FOR_FLOW);
+    }
+
+    /**
+     * Live-loop : poll 0x23 (DS/DC) + 0x28 (Delivery Status), publie onLiveSample + onProgress.
+     * Ne s'arrête QUE via stopLiveLoop() ou changement d'état par endGracefully().
+     */
+    public void runLiveLoop(int pollMs, boolean reserved, double reserved2) {
+        if (!liveLoopRunning.compareAndSet(false, true)) return;
+        final int safePollMs = Math.max(50, pollMs);
+
+        liveLoopThread = new Thread(() -> {
             try {
-                if (cancelled) throw new IOException("CANCELLED");
-                setState(State.STARTING);
-                preStartSequence(productId);
+                // Si on arrive ici depuis WAIT_FOR_FLOW, le premier Δ>0 fera passer FLOW_ACTIVE
+                boolean flowAnnounced = (getState() == State.FLOW_ACTIVE);
 
-                if (cancelled) throw new IOException("CANCELLED");
-                runAndWaitFlow(waitFlowTimeoutMs, pollMs);
+                while (liveLoopRunning.get()) {
+                    long loopStart = System.currentTimeMillis();
 
-                if (cancelled) throw new IOException("CANCELLED");
-                setState(State.FLOW_ACTIVE);
-                events.onFlowStarted();
-            } catch(Exception e) {
-                fail("startOpenMode: " + e.getMessage(), e);
-            }
-        });
-    }
+                    int[] dsdc = null;
+                    try {
+                        dsdc = link.opMachineStatusFull(); // attendu triple: [?, DS, DC]
+                    } catch (Exception e) {
+                        fireError("opMachineStatusFull failed", e);
+                    }
 
-    /** Mode preset NET : set #6, clear #5, RUN, attente FLOW_ACTIVE=1. */
-    public void startPresetNet(int productId, double litres, long waitFlowTimeoutMs, long pollMs) {
-        exec.execute(() -> {
-            try {
-                if (cancelled) throw new IOException("CANCELLED");
-                setState(State.STARTING);
-                preStartSequencePreset(productId, litres);
+                    int ds = 0, dc = 0;
+                    if (dsdc != null && dsdc.length >= 3) {
+                        ds = dsdc[1];
+                        dc = dsdc[2];
+                    }
 
-                if (cancelled) throw new IOException("CANCELLED");
-                runAndWaitFlow(waitFlowTimeoutMs, pollMs);
+                    // 0x28: delivery status → volumes
+                    double grossL = 0.0, netL = 0.0;
+                    try {
+                        byte[] resp28 = sendSimple((byte)0x28, new byte[0], 3000);
+                        double[] gn = decodeGrossNetFrom0x28(resp28);
+                        grossL = gn[0];
+                        netL   = gn[1];
+                    } catch (Exception e) {
+                        // En cas d'échec, conserve les derniers connus (ou 0.0 si N/A)
+                        grossL = (Double.isNaN(lastGrossL) ? 0.0 : lastGrossL);
+                        netL   = (Double.isNaN(lastNetL)   ? 0.0 : lastNetL);
+                    }
 
-                if (cancelled) throw new IOException("CANCELLED");
-                setState(State.FLOW_ACTIVE);
-                events.onFlowStarted();
-            } catch(Exception e) {
-                fail("startPresetNet: " + e.getMessage(), e);
-            }
-        });
-    }
+                    // Publication compat UI actuelle
+                    fireLiveSample(ds, dc, grossL, netL);
 
-    /** Attendre FLOW uniquement (bloquant). */
-    public void waitForFlowOnly(long timeoutMs, long pollMs) {
-        exec.execute(() -> {
-            try {
-                if (cancelled) throw new IOException("CANCELLED");
-                setState(State.WAIT_FOR_FLOW);
+                    // Progression "métier"
+                    long now = System.currentTimeMillis();
+                    if (Double.isNaN(lastGrossL) || Double.isNaN(lastNetL)) {
+                        // Premier sample
+                        lastGrossL = grossL; lastNetL = netL;
+                        lastEmitMs = now; lastProgressAtMs = now;
+                    }
+                    double dG = grossL - lastGrossL;
+                    double dN = netL   - lastNetL;
+                    if (Math.abs(dG) < EPS_L) dG = 0.0;
+                    if (Math.abs(dN) < EPS_L) dN = 0.0;
 
-                link.openPollWindow();
-                try {
-                    waitFlowStrict(timeoutMs, pollMs);
-                } finally {
-                    link.closePollWindow();
+                    boolean progressed = (dG != 0.0 || dN != 0.0);
+                    if (progressed) lastProgressAtMs = now;
+
+                    long dtMs = Math.max(1L, now - lastEmitMs);
+                    double flowGrossLpm = (dG * 60000.0) / dtMs;
+                    double flowNetLpm   = (dN * 60000.0) / dtMs;
+
+                    boolean stalled   = (now - lastProgressAtMs) >= STALL_MS;
+                    boolean flowActive = progressed; // tu peux OR avec un bit DC si tu le confirms
+
+                    fireProgress(new DeliveryProgress(
+                            now,
+                            Math.max(0L, now - startedAtMs),
+                            Math.max(0L, now - lastProgressAtMs),
+                            grossL, netL, dG, dN,
+                            flowGrossLpm, flowNetLpm,
+                            flowActive, stalled, ds, dc
+                    ));
+
+                    // Transition d'état vers FLOW_ACTIVE la première fois qu'on voit une progression
+                    if (!flowAnnounced && progressed && (getState() == State.WAIT_FOR_FLOW || getState() == State.STARTING)) {
+                        setState(State.FLOW_ACTIVE);
+                        fireFlowStarted();
+                        flowAnnounced = true;
+                    }
+
+                    // Mémorise
+                    lastGrossL = grossL; lastNetL = netL; lastEmitMs = now;
+
+                    // Cadence
+                    long spent = System.currentTimeMillis() - loopStart;
+                    long sleep = safePollMs - spent;
+                    if (sleep > 0) {
+                        try { Thread.sleep(sleep); } catch (InterruptedException ignored) {}
+                    }
                 }
 
-                if (cancelled) throw new IOException("CANCELLED");
-                setState(State.FLOW_ACTIVE);
-                events.onFlowStarted();
-            } catch(Exception e) {
-                fail("waitForFlowOnly: " + e.getMessage(), e);
-            }
-        });
-    }
-
-    /** Fin propre (END), attente FLOW=0 & ACTIVE=0, clear ticket si besoin. */
-    public void endGracefully(long timeoutMs, long pollMs) {
-        exec.execute(() -> {
-            try {
-                if (cancelled) throw new IOException("CANCELLED");
-                setState(State.FINALIZING);
-                issueCommandWithRetry(0x02);     // END
-                if (cancelled) throw new IOException("CANCELLED");
-                waitEnd(timeoutMs, pollMs);      // FLOW=0 & ACTIVE=0
-                if (cancelled) throw new IOException("CANCELLED");
-                clearTicketIfNeeded();           // si ticket en attente
-                setState(State.ENDED);
-            } catch(Exception e) {
-                fail("endGracefully: " + e.getMessage(), e);
-            }
-        });
-    }
-
-    /** Boucle d’échantillonnage live (notifie la GUI via events). */
-    public void runLiveLoop(long pollMs, boolean guardEnabled, double guardMarginLitres) {
-        exec.execute(() -> {
-            liveRunning = true;
-            try {
-                link.openPollWindow();
-                try {
-                    liveLoopCore(pollMs, guardEnabled, guardMarginLitres);
-                } finally {
-                    link.closePollWindow();
+                // Sortie de boucle → flow stoppé (si on était en FLOW_ACTIVE)
+                if (getState() == State.FLOW_ACTIVE) {
+                    fireFlowStopped();
                 }
-            } catch(Exception e){
-                fail("runLiveLoop: " + e.getMessage(), e);
+
+            } catch (Throwable t) {
+                fireError("Live loop crashed", t);
+                setState(State.ERROR);
             } finally {
-                liveRunning = false;
+                liveLoopRunning.set(false);
             }
-        });
+        }, "lcp-live-loop");
+
+        liveLoopThread.setDaemon(true);
+        liveLoopThread.start();
     }
 
-    public void stopLiveLoop() { liveRunning = false; }
-
-    // ============================ PRE-START =============================
-
-    private void preStartSequence(int productId) throws IOException {
-        wake();                // ping + tempo
-        if (cancelled) throw new IOException("CANCELLED");
-        clearTicketIfNeeded(); // ticket en attente → clear
-        if (cancelled) throw new IOException("CANCELLED");
-        recoverIfActive();     // livraison active → END + attente
-
-        if (cancelled) throw new IOException("CANCELLED");
-        setProductSafe(productId);
-        if (cancelled) throw new IOException("CANCELLED");
-        clearPresetsSafe();
-    }
-
-    private void preStartSequencePreset(int productId, double litres) throws IOException {
-        wake();
-        if (cancelled) throw new IOException("CANCELLED");
-        clearTicketIfNeeded();
-        if (cancelled) throw new IOException("CANCELLED");
-        recoverIfActive();
-
-        int digits = readDigits(); // #39
-        int raw = (int)Math.round(litres * Math.pow(10, digits));
-
-        if (cancelled) throw new IOException("CANCELLED");
-        setProductSafe(productId);
-        if (cancelled) throw new IOException("CANCELLED");
-        writeNetPresetSafe(raw); // #6=raw, #5=0
-    }
-
-    // ========================== RUN + WAIT_FLOW =========================
-
-    private void runAndWaitFlow(long timeoutMs, long pollMs) throws IOException {
-        try {
-            if (cancelled) throw new IOException("CANCELLED");
-            link.opIssueCommand(0x00);     // RUN
-            setState(State.WAIT_FOR_FLOW);
-
-            link.openPollWindow();
-            try {
-                waitFlowStrict(timeoutMs, pollMs);
-            } finally {
-                link.closePollWindow();
-            }
-
-        } catch(IOException e){
-            if (cancelled) throw e;
-            resync(); sleep(200);
-            if (cancelled) throw new IOException("CANCELLED");
-
-            link.opIssueCommand(0x00);
-            setState(State.WAIT_FOR_FLOW);
-
-            link.openPollWindow();
-            try {
-                waitFlowStrict(timeoutMs, pollMs);
-            } finally {
-                link.closePollWindow();
-            }
+    /** Arrête la live loop (non bloquant). */
+    public void stopLiveLoop() {
+        liveLoopRunning.set(false);
+        Thread t = liveLoopThread;
+        if (t != null) {
+            try { t.join(500); } catch (InterruptedException ignored) {}
         }
     }
 
     /**
-     * Attente FLOW=1 façon Python: alterne 0x23/0x28 à poll court,
-     * double confirmation FLOW, retries bornés + RESYNC court.
-     * AUCUN 0x20/0x21/0x00/0x24 dans la boucle.
+     * Fin propre : envoie END (0x24), puis poll jusqu'à stabilisation ou timeout.
+     * Laisse l'UI décider de lancer l'impression après ENDED (côté APK).
      */
-    private void waitFlowStrict(long timeoutMs, long pollMs) throws IOException {
-        long tEnd = System.currentTimeMillis() + timeoutMs;
+    public void endGracefully(int endTimeoutMs, int pollMs) {
+        setState(State.FINALIZING);
 
-        int confirm = 0;
-        boolean prevFlow = false;
-        boolean ask28 = false; // alterne 0x23/0x28
-
-        int ioErrors = 0;
-        final int IO_ERRORS_MAX = 5;        // borne stricte
-        final long RESYNC_BACKOFF_MS = 200; // backoff court aligné script
-
-        android.util.Log.i("DC", "WAIT_FOR_FLOW: blocking until FLOW_ACTIVE=1");
-
-        while (System.currentTimeMillis() < tEnd) {
-            if (cancelled) throw new IOException("CANCELLED");
-
-            int ds, dc;
+        try {
+            // END (0x24) — selon tes logs, souvent "0x24 0x02" ou "0x24 0x00".
+            // On commence par 0x24 0x02 ; ajuste si nécessaire.
+            sendSimple((byte)0x24, new byte[]{ 0x02 }, 3000);
+        } catch (Exception e) {
+            // Tente une variante "0x24 0x00" si la première refuse
             try {
-                if (!ask28) {
-                    int[] triple = link.opMachineStatusFull(); // 0x23 (+ 0x7D si 0x26)
-                    ds = triple[1]; dc = triple[2];
-                } else {
-                    int[] d = link.opDeliveryStatus();         // 0x28 (+ 0x7D si 0x26)
-                    ds = d[0]; dc = d[1];
-                }
-                ioErrors = 0; // on a un RX valide → reset
-
-            } catch (IOException io) {
-                String m = io.getMessage();
-                if (cancelled || "POLL_BLOCKED".equals(m) || "POLL_OWNER_MISMATCH".equals(m) || "CANCELLED".equals(m))
-                    throw io;
-
-                ioErrors++;
-                if (ioErrors > IO_ERRORS_MAX) throw io;
-
-                try { resync(); } catch(Exception ignored){}
-                sleep((int)RESYNC_BACKOFF_MS);
-                continue;
-            }
-
-            ask28 = !ask28;
-
-            boolean flow   = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
-            boolean active = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
-
-            if (active && flow) return; // FLOW confirmé + ACTIVE
-
-            if (flow) confirm++; else confirm = 0;
-            if (!prevFlow && confirm >= FLOW_CONFIRM_REQUIRED) return;
-            prevFlow = flow;
-
-            sleep((int)Math.max(200, pollMs)); // poll court ~200ms
-        }
-
-        throw new IOException("START_TIMEOUT: FLOW non détecté");
-    }
-
-    // ============================ LIVE LOOP =============================
-
-    private void liveLoopCore(long pollMs, boolean guardEnabled, double guardMarginLitres)
-            throws IOException {
-
-        int digits = readDigits();
-        double scale = Math.pow(10, digits);
-
-        int p6 = safeRead32(6);   // preset NET
-        int p5 = safeRead32(5);   // preset GROSS
-
-        boolean guardNet = (p6 > 0);
-        double targetL = guardNet ? (p6 / scale) :
-                         (p5 > 0 ? (p5 / scale) : Double.NaN);
-
-        int g0 = safeRead32(44);
-        int n0 = safeRead32(45);
-
-        boolean guardFired = false;
-
-        while (liveRunning && state == State.FLOW_ACTIVE) {
-            if (cancelled) return;
-
-            int[] dsdc;
-            try {
-                dsdc = getMachineStrict(); // via opMachineStatusFull()
-            } catch(Exception e){
-                if (cancelled) return;
-                sleep(80);
-                continue;
-            }
-
-            int ds = dsdc[0];
-            int dc = dsdc[1];
-
-            boolean flow = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
-
-            int g = safeRead32(44);
-            int n = safeRead32(45);
-
-            double gL = g / scale;
-            double nL = n / scale;
-
-            try { events.onLiveSample(ds, dc, gL, nL); } catch(Exception ignored){}
-
-            if (!flow) {
-                try { events.onFlowStopped(); } catch(Exception ignored){}
+                sendSimple((byte)0x24, new byte[]{ 0x00 }, 3000);
+            } catch (Exception ex) {
+                fireError("END (0x24) failed", ex);
+                setState(State.ERROR);
                 return;
             }
-
-            if (guardEnabled && !Double.isNaN(targetL) && !guardFired) {
-                double delivered = guardNet ? ((n - n0) / scale)
-                                            : ((g - g0) / scale);
-
-                if (delivered >= targetL + guardMarginLitres) {
-                    try { events.onGuardReached(); } catch(Exception ignored){}
-                    try { link.opIssueCommand(0x02); } catch(Exception ignored){}
-                    guardFired = true;
-                }
-            }
-
-            sleep((int)Math.max(MIN_LOOP_POLL_MS, pollMs));
         }
-    }
 
-    // ============================= FIN/END ==============================
+        // Attendre stabilisation: on poll 0x23/0x28 jusqu'à stagnation "longue" ou fin
+        long deadline = System.currentTimeMillis() + Math.max(3000, endTimeoutMs);
+        long localLastProgressAt = System.currentTimeMillis();
+        double gPrev = Double.NaN, nPrev = Double.NaN;
 
-    private void waitEnd(long timeoutMs, long pollMs) throws IOException {
-        long tEnd = System.currentTimeMillis() + timeoutMs;
-
-        while (System.currentTimeMillis() < tEnd) {
-            if (cancelled) return;
+        while (System.currentTimeMillis() < deadline) {
             try {
-                int[] dsdc = getMachineStrict();
-                int dc = dsdc[1];
+                int[] dsdc = link.opMachineStatusFull();
+                int ds = (dsdc != null && dsdc.length >= 2) ? dsdc[1] : 0;
+                int dc = (dsdc != null && dsdc.length >= 3) ? dsdc[2] : 0;
 
-                boolean flow   = (dc & LcpLink.LCRSc_FLOW_ACTIVE)    != 0;
-                boolean active = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
+                byte[] r28 = sendSimple((byte)0x28, new byte[0], 3000);
+                double[] gn = decodeGrossNetFrom0x28(r28);
+                double g = gn[0], n = gn[1];
 
-                if (!flow && !active) return;
+                fireLiveSample(ds, dc, g, n); // compat UI
+                fireProgress(buildProgressForFinalize(gPrev, nPrev, g, n, ds, dc));
 
-            } catch(Exception ignored){}
+                boolean progressed = false;
+                if (!Double.isNaN(gPrev) && !Double.isNaN(nPrev)) {
+                    double dG = g - gPrev, dN = n - nPrev;
+                    if (Math.abs(dG) >= EPS_L || Math.abs(dN) >= EPS_L) progressed = true;
+                }
+                if (progressed) localLastProgressAt = System.currentTimeMillis();
 
-            sleep((int)Math.max(100, pollMs));
-        }
-    }
+                // sortie si stagnation "longue"
+                if (System.currentTimeMillis() - localLastProgressAt >= STALL_MS) {
+                    break;
+                }
 
-    private void clearTicketIfNeeded() throws IOException {
-        if (cancelled) throw new IOException("CANCELLED");
-        try {
-            int[] dsdc = getMachineStrict();
-            int ds = dsdc[0];
-            boolean pending = (ds & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
-            if (pending) issueCommandWithRetry(0x06); // CLEAR_TICKET
-        } catch(Exception ignored){}
-    }
+                gPrev = g; nPrev = n;
 
-    private void recoverIfActive() throws IOException {
-        if (cancelled) throw new IOException("CANCELLED");
-        try {
-            int[] dsdc = getMachineStrict();
-            int dc = dsdc[1];
-            boolean active = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
-            if (active) {
-                issueCommandWithRetry(0x02); // END
-                if (cancelled) throw new IOException("CANCELLED");
-                waitEnd(3000, 120);
+                try { Thread.sleep(Math.max(50, pollMs)); } catch (InterruptedException ignored) {}
+
+            } catch (Exception e) {
+                fireError("Finalize polling failed", e);
+                break;
             }
-        } catch(Exception ignored){}
-    }
-
-    // ============================== WAKE ================================
-
-    /** Petit "ping" LCR + tempo. */
-    private void wake() {
-        if (cancelled) return;
-        try { getMachineStrict(); } catch(Exception ignored){}
-        sleep(120);
-    }
-
-    // ============================= CORE/GET =============================
-
-    private int[] getMachineStrict() throws IOException {
-        int[] triple = link.opMachineStatusFull(); // { dev, ds, dc } (ou {0, ds, dc})
-        return new int[]{ triple[1], triple[2] };
-    }
-
-    // ============================ SET FIELDS ============================
-
-    private void setProductSafe(int productId) throws IOException {
-        if (productId < 1 || productId > 16)
-            throw new IllegalArgumentException("product 1..16");
-        byte v = (byte)((productId - 1) & 0xFF);
-        opSetFieldSafe(0, new byte[]{v}); // #0
-        sleep(120);
-    }
-
-    private void clearPresetsSafe() throws IOException {
-        opSetFieldSafe(5, i32be(0)); // #5 GROSS
-        sleep(120);
-        opSetFieldSafe(6, i32be(0)); // #6 NET
-        sleep(120);
-    }
-
-    private void writeNetPresetSafe(int raw) throws IOException {
-        opSetFieldSafe(6, i32be(raw)); // #6 NET
-        sleep(120);
-        opSetFieldSafe(5, i32be(0));   // #5 GROSS
-        sleep(120);
-    }
-
-    private void opSetFieldSafe(int field, byte[] data) throws IOException {
-        if (cancelled) throw new IOException("CANCELLED");
-        try {
-            link.opSetField(field, data);
-        } catch(IOException e){
-            if (cancelled) throw e;
-            resync(); sleep(150);
-            if (cancelled) throw new IOException("CANCELLED");
-            link.opSetField(field, data);
         }
+
+        setState(State.ENDED);
     }
 
-    private void issueCommandWithRetry(int cmd) throws IOException {
-        if (cancelled) throw new IOException("CANCELLED");
-        try {
-            link.opIssueCommand(cmd);
-        } catch(IOException e){
-            if (cancelled) throw e;
-            resync(); sleep(150);
-            if (cancelled) throw new IOException("CANCELLED");
-            link.opIssueCommand(cmd);
-        }
-    }
-
-    // ============================= RAW READS ============================
-
-    private int readDigits() {
-        try {
-            byte[] v = link.opGetField(39); // #39
-            int idx = (v != null && v.length > 0) ? (v[0] & 0xFF) : 1;
-            return digitsFromIndex(idx);
-        } catch(Exception e){
-            return 1;
-        }
-    }
-
-    private int safeRead32(int field) {
-        try {
-            byte[] d = link.opGetField(field);
-            return i32beToInt(d);
-        } catch(Exception e){
-            return 0;
-        }
-    }
-
-    // ============================== RESYNC ==============================
-
-    private void resync() {
-        if (cancelled) return;
-        try {
-            link.sendRecv(new byte[]{0x00}, 2000); // GET_PRODUCT_ID
-        } catch(Exception ignored){}
-    }
-
-    // ============================= HELPERS ==============================
-
-    private static int digitsFromIndex(int idx) {
-        switch(idx) {
-            case 0: return 2;
-            case 1: return 1;
-            case 2: return 0;
-            case 3: return 3;
-            default: return 1;
-        }
-    }
-
-    private static byte[] i32be(int v) {
-        return new byte[]{
-                (byte)((v >> 24) & 0xFF),
-                (byte)((v >> 16) & 0xFF),
-                (byte)((v >> 8)  & 0xFF),
-                (byte)(v & 0xFF)
-        };
-    }
-
-    private static int i32beToInt(byte[] d) {
-        return ((d[0] & 0xFF) << 24) |
-               ((d[1] & 0xFF) << 16) |
-               ((d[2] & 0xFF) << 8)  |
-               (d[3] & 0xFF);
-    }
-
-    private void fail(String msg, Throwable t) {
+    /** Demande d'arrêt externe (ex. USB détaché) */
+    public void requestStop(String reason) {
+        stopLiveLoop();
+        fireError("requestStop: " + reason, null);
         setState(State.ERROR);
-        try { events.onError(msg, t); } catch(Exception ignored){}
     }
 
-    // ============================== EVENTS ==============================
+    /* ============================ Helpers I/O ============================ */
 
-    public interface DeliveryEvents {
-        default void onStateChanged(State s) {}
-        default void onFlowStarted() {}
-        default void onFlowStopped() {}
-        default void onLiveSample(int ds, int dc, double gL, double nL) {}
-        default void onGuardReached() {}
-        default void onError(String m, Throwable t) {}
+    private byte[] sendSimple(byte cmd, byte[] payload, int timeoutMs) throws Exception {
+        // LcpLink encapsule framing/CRC/adresses; on envoie seulement [cmd, data...]
+        byte[] msg = new byte[1 + (payload != null ? payload.length : 0)];
+        msg[0] = cmd;
+        if (payload != null && payload.length > 0) {
+            System.arraycopy(payload, 0, msg, 1, payload.length);
+        }
+        // PollWindow "courte" autour de l'I/O (si ton LcpLink l'exige)
+        try { link.openPollWindow(); } catch (Throwable ignored) {}
+        try {
+            return link.sendRecv(msg, Math.max(500, timeoutMs));
+        } finally {
+            try { link.closePollWindow(); } catch (Throwable ignored) {}
+        }
+    }
+
+    /* ============================ Parsing 0x28 (TODO) ============================ */
+
+    /**
+     * Décode les volumes Gross/Net (en L) depuis la réponse 0x28.
+     *
+     * TODO (à RENSEIGNER):
+     *  - Selon "LCR Registers' Fields.xlsx", placer les offsets/taille pour G/N et digits.
+     *  - Implémenter scaleToLiters(...) en conséquence si digits ≠ 3.
+     *
+     * Actuellement, renvoie {0.0, 0.0} si mapping non renseigné.
+     */
+    private double[] decodeGrossNetFrom0x28(byte[] resp28) {
+        if (resp28 == null || resp28.length < 6) {
+            return new double[]{ 0.0, 0.0 };
+        }
+
+        // La réponse inclut l'en-tête LcpLink déjà retiré (payload brut "app").
+        // Suivant tes logs typiques:
+        //   RX:  ... 80 06  00 01 00 00 01 0D  ...
+        // Ici, "80 06" ressemblent à [dir|len], puis des champs.
+        // SANS la doc exacte, on ne peut pas deviner fiablement.
+        //
+        // → Renseigne ci-dessous "OFFSET/Tailles" d'après ton XLSX:
+
+        final int OFFSET_GROSS = -1;  // TODO: offset du gross (ex: 2, 4 octets)
+        final int SIZE_GROSS   = -1;  // TODO: taille en octets (ex: 4)
+        final int OFFSET_NET   = -1;  // TODO: offset du net   (ex: 6, 4 octets)
+        final int SIZE_NET     = -1;  // TODO: taille en octets (ex: 4)
+        final int DIGITS_GROSS = 3;   // TODO: digits (ex: 3 → milli-litres)
+        final int DIGITS_NET   = 3;   // TODO: digits
+
+        if (OFFSET_GROSS >= 0 && SIZE_GROSS > 0 && OFFSET_NET >= 0 && SIZE_NET > 0
+                && resp28.length >= Math.max(OFFSET_GROSS + SIZE_GROSS, OFFSET_NET + SIZE_NET)) {
+
+            long rawGross = readUnsigned(resp28, OFFSET_GROSS, SIZE_GROSS);
+            long rawNet   = readUnsigned(resp28, OFFSET_NET,   SIZE_NET);
+
+            double grossL = scaleToLiters(rawGross, DIGITS_GROSS);
+            double netL   = scaleToLiters(rawNet,   DIGITS_NET);
+
+            return new double[]{ grossL, netL };
+        }
+
+        // Fallback: 0.0 tant que le mapping n'est pas renseigné
+        return new double[]{ 0.0, 0.0 };
+    }
+
+    private static long readUnsigned(byte[] a, int off, int len) {
+        long v = 0;
+        for (int i = 0; i < len; i++) {
+            v = (v << 8) | (a[off + i] & 0xFFL);
+        }
+        return v;
+    }
+
+    /**
+     * Convertit une valeur entière "digits" en litres:
+     *  - digits = 0 → déjà en litres (multiplie par 10^0)
+     *  - digits = 3 → milli-litres → / 10^3
+     *  - etc.
+     */
+    private static double scaleToLiters(long raw, int digits) {
+        if (digits <= 0) return (double) raw;
+        double div = 1.0;
+        for (int i = 0; i < digits; i++) div *= 10.0;
+        return raw / div;
+    }
+
+    /* ============================ Callbacks Safe ============================ */
+
+    private void setState(State s) {
+        State prev = state.getAndSet(s);
+        if (prev != s) fireStateChanged(s);
+    }
+
+    private void fireStateChanged(State s) {
+        safeExec(() -> cb.onStateChanged(s));
+    }
+
+    private void fireFlowStarted() {
+        safeExec(cb::onFlowStarted);
+    }
+
+    private void fireFlowStopped() {
+        safeExec(cb::onFlowStopped);
+    }
+
+    private void fireLiveSample(int ds, int dc, double grossL, double netL) {
+        safeExec(() -> cb.onLiveSample(ds, dc, grossL, netL));
+    }
+
+    private void fireProgress(DeliveryProgress p) {
+        safeExec(() -> cb.onProgress(p));
+    }
+
+    private void fireError(String message, Throwable t) {
+        safeExec(() -> cb.onError(message, t));
+    }
+
+    private void safeExec(Runnable r) {
+        try { cbExec.execute(r); } catch (Throwable ignored) {}
+    }
+
+    /* ============================ Helpers finalize() ============================ */
+
+    private DeliveryProgress buildProgressForFinalize(double gPrev, double nPrev, double g, double n, int ds, int dc) {
+        long now = System.currentTimeMillis();
+        if (Double.isNaN(gPrev) || Double.isNaN(nPrev)) {
+            gPrev = g; nPrev = n;
+        }
+        double dG = g - gPrev;
+        double dN = n - nPrev;
+        if (Math.abs(dG) < EPS_L) dG = 0.0;
+        if (Math.abs(dN) < EPS_L) dN = 0.0;
+
+        long dtMs = Math.max(1L, now - lastEmitMs);
+        double flowGrossLpm = (dG * 60000.0) / dtMs;
+        double flowNetLpm   = (dN * 60000.0) / dtMs;
+
+        boolean progressed = (dG != 0.0 || dN != 0.0);
+        if (progressed) lastProgressAtMs = now;
+
+        boolean stalled = (now - lastProgressAtMs) >= STALL_MS;
+        boolean flowActive = progressed;
+
+        return new DeliveryProgress(
+                now,
+                Math.max(0L, now - startedAtMs),
+                Math.max(0L, now - lastProgressAtMs),
+                g, n, dG, dN,
+                flowGrossLpm, flowNetLpm,
+                flowActive, stalled, ds, dc
+        );
     }
 }
