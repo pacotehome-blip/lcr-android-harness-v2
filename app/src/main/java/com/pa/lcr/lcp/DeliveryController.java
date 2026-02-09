@@ -2,24 +2,18 @@
 package com.pa.lcr.lcp;
 
 import java.util.concurrent.*;
+import java.util.Arrays;
 
 public class DeliveryController {
 
     /* ============================= SECTION 1 ============================= */
-    /* Core imports already present. Below begins the full expanded content. */
+    private ScheduledFuture<?> liveLoopFuture;
 
-    // Executor management helpers
-    private java.util.concurrent.ScheduledFuture<?> liveLoopFuture;
-
-    // Guard logic
     private volatile boolean guardEnabled = false;
     private volatile double guardTargetLitres = 0;
 
-    // Delivery tracking
     private volatile double lastGross = 0;
     private volatile double lastNet = 0;
-
-    // Metrics
     private volatile long lastPollAt = 0;
 
     private final LcpLink link;
@@ -67,7 +61,7 @@ public class DeliveryController {
         this.exec = svc;
     }
 
-    private void log(String s) { if (events != null) events.onLog(s); }
+    private void log(String s){ if(events!=null) events.onLog(s); }
 
     private void setState(State s) {
         this.state = s;
@@ -88,12 +82,15 @@ public class DeliveryController {
         log(String.format("[PRE] MachineStatus dev=0x%04X ds=0x%04X dc=0x%04X", st[0], st[1], st[2]));
 
         log("[PRE] Setting product (#06) = " + product);
-        link.opSetField(0x06, new byte[]{ (byte) product });
+        link.opSetField(0x06, new byte[]{ (byte)product });
         this.presetProduct = product;
 
         log("[PRE] Setting NET preset (#06) value=" + presetLitres);
-        int tenths = (int)(presetLitres * 10);
-        byte[] presetBytes = new byte[]{ (byte)((tenths>>8)&0xFF), (byte)(tenths&0xFF) };
+        int tenths = (int)(presetLitres*10);
+        byte[] presetBytes = new byte[]{
+                (byte)((tenths>>8)&0xFF),
+                (byte)(tenths&0xFF)
+        };
         link.opSetField(0x06, presetBytes);
         this.presetLitres = presetLitres;
 
@@ -117,8 +114,6 @@ public class DeliveryController {
         boolean flow = (ds & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
         boolean active = (ds & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
 
-        log(String.format("[POLL] ds=0x%04X dc=0x%04X flow=%s active=%s", ds, dc, flow, active));
-
         if (!active) throw new Exception("Delivery not active after RUN");
 
         startTimestampMs = System.currentTimeMillis();
@@ -130,7 +125,7 @@ public class DeliveryController {
         startNet = lastNet;
 
         setState(State.RUNNING);
-        log("[START] Delivery ACTIVE — entering LIVE LOOP");
+        log("[START] Delivery ACTIVE");
     }
 
     /* ============================= SECTION 4 ============================= */
@@ -148,6 +143,7 @@ public class DeliveryController {
 
                         boolean flow = (ds & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
                         boolean active = (ds & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
+
                         if (!active) { stopping = true; return; }
 
                         double gross = decodeGrossLitres(ds, dc);
@@ -165,7 +161,7 @@ public class DeliveryController {
                         p.dc = dc;
 
                         lastGross = gross;
-                        lastNet   = net;
+                        lastNet = net;
 
                         if (events != null) events.onProgress(p);
                         if (events != null) events.onLiveSample(ds, dc, gross, net);
@@ -173,15 +169,16 @@ public class DeliveryController {
                         if (!flow && events != null) events.onFlowStopped();
 
                         if (guardEnabled && net >= guardTargetLitres) {
-                            log("[GUARD] Target reached → END DELIVERY");
+                            log("[GUARD] target reached");
                             if (events != null) events.onGuardReached();
                             stopping = true;
                         }
 
                     } catch (Exception e) {
                         setState(State.ERROR);
-                        if (events != null) events.onError("liveLoop", e);
+                        if(events!=null) events.onError("liveLoop", e);
                     }
+
                 }, 0, pollMs, TimeUnit.MILLISECONDS);
     }
 
@@ -206,101 +203,98 @@ public class DeliveryController {
             link.closePollWindow();
             pollWindowOpen = false;
         }
-
         if (liveLoopFuture != null) {
             liveLoopFuture.cancel(true);
             liveLoopFuture = null;
         }
 
         setState(State.ENDED);
-        log("[END] END DELIVERY sequence finished");
     }
 
     /* ============================= SECTION 6 ============================= */
-    private double decodeGrossLitres(int ds, int dc) {
+    private double decodeGrossLitres(int ds, int dc){
         return ((dc >> 4) & 0xFFF) / 10.0;
     }
-
-    private double decodeNetLitres(int ds, int dc) {
+    private double decodeNetLitres(int ds, int dc){
         return (dc & 0x0F) / 10.0;
     }
 
-    public void printTicketText(String txt, int heightDots, int timeoutMs) {
+    public void printTicketText(String txt, int heightDots, int timeoutMs){
         exec.execute(() -> {
-            try {
+            try{
                 byte[] data = txt.getBytes();
-                log("[PRINT] Sending ticket text (" + data.length + " bytes)");
                 link.opSetField(LcpLink.MSG_PRINT_TEXT, data);
-                log("[PRINT] Ticket text dispatched");
-            } catch (Exception e) {
+            } catch(Exception e){
                 if (events != null) events.onError("printTicketText", e);
             }
         });
     }
 
-    private static void safeSleep(long ms) { try { Thread.sleep(ms); } catch (Exception ignored) {} }
-
     /* ============================= SECTION 7 ============================= */
-    public void requestStop(String reason) {
+    public void requestStop(String reason){
         exec.execute(() -> {
             try {
-                log("[STOP] requestStop: " + reason);
                 stopping = true;
-                if (liveLoopFuture != null) {
+                if(liveLoopFuture != null){
                     liveLoopFuture.cancel(true);
                     liveLoopFuture = null;
                 }
-                try { link.cancelIO(); } catch (Exception ignored) {}
-                if (pollWindowOpen) {
-                    try { link.closePollWindow(); } catch (Exception ignored) {}
+                try { link.cancelIO(); } catch(Exception ignored){}
+                if(pollWindowOpen){
+                    try{ link.closePollWindow(); } catch(Exception ignored){}
                     pollWindowOpen = false;
                 }
                 setState(State.ENDED);
-            } catch (Exception e) {
-                if (events != null) events.onError("requestStop", e);
+            }catch(Exception e){
+                if(events!=null) events.onError("requestStop",e);
             }
         });
     }
 
-    private void safeOp(Runnable r, String tag) {
-        try { r.run(); }
-        catch (Exception e) {
+    private void safeOp(Runnable r, String tag){
+        try{ r.run(); }
+        catch(Exception e){
             setState(State.ERROR);
-            if (events != null) events.onError(tag, e);
+            if(events!=null) events.onError(tag,e);
         }
     }
 
-    private void failWithError(String message, Throwable t) {
-        try {
-            stopping = true;
-            if (liveLoopFuture != null) liveLoopFuture.cancel(true);
-            if (pollWindowOpen) try { link.closePollWindow(); } catch (Exception ignored) {}
-            pollWindowOpen = false;
-            setState(State.ERROR);
-            if (events != null) events.onError(message, t);
-        } catch (Exception ignored) {}
-    }
-
     /* ============================= SECTION 8 ============================= */
-    public void startOpenMode(int product, int timeoutMs, int pollMs) {
+    public void startOpenMode(int product, int timeoutMs, int pollMs){
         exec.execute(() -> safeOp(() -> {
-            log("[API] startOpenMode(product=" + product + ")");
             setState(State.PRESTART);
             stopping = false;
 
             prestartSequence(product, 0.0, pollMs);
             startDeliverySequence(pollMs);
             startLiveLoop(pollMs);
-
         }, "startOpenMode"));
     }
 
-    public void endGracefully(int timeoutMs, int pollMs) {
+    public void endGracefully(int timeoutMs, int pollMs){
         exec.execute(() -> safeOp(() -> {
-            log("[API] endGracefully()");
             stopping = true;
-            endDeliverySequence(timeoutMs, pollMs);
+            endDeliverySequence(timeoutMs,pollMs);
         }, "endGracefully"));
+    }
+
+    /* ============================= EXTRA METHODS REQUIRED BY MainActivity ============================= */
+
+    public void pingStatus(){
+        exec.execute(() -> safeOp(() -> {
+            int[] st = link.opMachineStatusFull();
+            log("[PING] " + Arrays.toString(st));
+        }, "pingStatus"));
+    }
+
+    public void resyncGetProductId(){
+        exec.execute(() -> safeOp(() -> {
+            byte[] rsp = link.opGetField(LcpLink.MSG_GET_PRODUCTID);
+            if(rsp != null && rsp.length >= 1){
+                presetProduct = rsp[0] & 0xFF;
+                log("[SYNC] Product=" + presetProduct);
+            }
+        }, "resyncGetProductId"));
     }
 
 }
