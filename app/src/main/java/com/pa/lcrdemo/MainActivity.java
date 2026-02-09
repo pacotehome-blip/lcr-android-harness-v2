@@ -49,20 +49,20 @@ public class MainActivity extends AppCompatActivity {
 
     // USB & SDK
     private UsbSerialPort serialPort;
-    private LcpLink lcpLink;                      // utilisé UNIQUEMENT pour construire le SDK, jamais appelé ici
+    private LcpLink lcpLink;               // UNIQUEMENT passé au SDK
     private DeliveryController controller;
 
     // Utils
-    private final StringBuilder logBuf = new StringBuilder(32 * 1024);
+    private final StringBuilder logBuf = new StringBuilder(64 * 1024);
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
     // Impression/fin
     private volatile boolean shouldPrintAtEnd = false;
 
-    // Derniers totaux (pour mettre dans le ticket)
+    // Derniers totaux (pour ticket)
     private volatile double lastGrossL = 0.0, lastNetL = 0.0;
 
-    // USB detach robuste
+    // USB detach
     private volatile Integer currentUsbDeviceId = null;
     private volatile long lastDetachHandledAt = 0L;
     private static final long DETACH_DEBOUNCE_MS = 1500L;
@@ -72,11 +72,9 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        bindViews();
-        setDefaults();
-        wireEvents();
+        bindViews(); setDefaults(); wireEvents();
 
-        // Logger I/O brut du LcpLink → UI (diagnostic fin, ne fait AUCUN appel)
+        // Echo des TX/RX (diagnostic) — aucune I/O UI
         LcpLink.setLogger(this::appendAndBuffer);
 
         registerReceiver(usbPermissionReceiver, new IntentFilter(ACTION_USB_PERMISSION));
@@ -106,19 +104,18 @@ public class MainActivity extends AppCompatActivity {
         edtPreset    = findViewById(R.id.edtPreset);
 
         btnConnect   = findViewById(R.id.btnConnect);
-        btnStartOpen = findViewById(R.id.btnC);       // C – start delivery (OPEN)
-        btnEnd       = findViewById(R.id.btnA);       // A – END
+        btnStartOpen = findViewById(R.id.btnC);
+        btnEnd       = findViewById(R.id.btnA);
 
         btnClear     = findViewById(R.id.btnClearLog);
         btnCopy      = findViewById(R.id.btnCopyLog);
         switchIoLog  = findViewById(R.id.switchIoLog);
 
-        btnPing      = findViewById(R.id.btnB);       // B – ping (via SDK)
+        btnPing      = findViewById(R.id.btnB);
         btnContinue  = findViewById(R.id.btnContinue);
         btnFinish    = findViewById(R.id.btnFinish);
 
         try { txtLog.setTextIsSelectable(true); } catch(Exception ignored) {}
-
         if (btnContinue != null) btnContinue.setEnabled(false);
         if (btnFinish   != null) btnFinish.setEnabled(false);
     }
@@ -131,34 +128,30 @@ public class MainActivity extends AppCompatActivity {
 
         if (switchIoLog != null) {
             switchIoLog.setChecked(true);
-            LcpLink.DUMP_TX = true;
-            LcpLink.DUMP_RX = true;
+            LcpLink.DUMP_TX = true; LcpLink.DUMP_RX = true;
         }
     }
 
     private void wireEvents() {
         safeSetOnClick(btnConnect, v -> requestAndOpenFirstPort());
         safeSetOnClick(btnStartOpen, v -> startOpenMode());
-        safeSetOnClick(btnEnd, v -> endGracefully());
-        safeSetOnClick(btnClear, v -> { logBuf.setLength(0); runOnUiThread(() -> txtLog.setText("")); });
-        safeSetOnClick(btnCopy, v -> copyLog());
+        safeSetOnClick(btnEnd,       v -> endGracefully());
+        safeSetOnClick(btnClear,     v -> { logBuf.setLength(0); runOnUiThread(() -> txtLog.setText("")); });
+        safeSetOnClick(btnCopy,      v -> copyLog());
 
-        safeSetOnClick(btnPing, v -> { if (controller != null) controller.pingStatus(); });
-        safeSetOnClick(btnContinue, v -> continueDelivery());
-        safeSetOnClick(btnFinish, v -> finishDelivery());
+        safeSetOnClick(btnPing,      v -> { if (controller != null) controller.pingStatus(); });
+        safeSetOnClick(btnContinue,  v -> continueDelivery());
+        safeSetOnClick(btnFinish,    v -> finishDelivery());
 
         if (switchIoLog != null) {
             switchIoLog.setOnCheckedChangeListener((b, checked) -> {
-                LcpLink.DUMP_TX = checked;
-                LcpLink.DUMP_RX = checked;
+                LcpLink.DUMP_TX = checked; LcpLink.DUMP_RX = checked;
                 append("I/O log " + (checked ? "activé" : "désactivé") + "\n");
             });
         }
     }
 
-    private void safeSetOnClick(View v, View.OnClickListener l){
-        if (v != null) v.setOnClickListener(l);
-    }
+    private void safeSetOnClick(View v, View.OnClickListener l){ if (v != null) v.setOnClickListener(l); }
 
     /* ============================== USB ============================== */
 
@@ -175,7 +168,7 @@ public class MainActivity extends AppCompatActivity {
 
     private final BroadcastReceiver usbAttachDetach = new BroadcastReceiver() {
         @Override public void onReceive(Context c, Intent i) {
-            final String action = i.getAction();
+            String action = i.getAction();
             if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(action)) {
                 append("USB attaché — cliquez 'Connexion USB'\n");
                 return;
@@ -207,8 +200,7 @@ public class MainActivity extends AppCompatActivity {
             UsbDevice dev = drivers.get(0).getDevice();
             if (!mgr.hasPermission(dev)) {
                 append("Demande de permission USB…\n");
-                PendingIntent pi = PendingIntent.getBroadcast(
-                        this, 0, new Intent(ACTION_USB_PERMISSION), PendingIntent.FLAG_IMMUTABLE);
+                PendingIntent pi = PendingIntent.getBroadcast(this, 0, new Intent(ACTION_USB_PERMISSION), PendingIntent.FLAG_IMMUTABLE);
                 mgr.requestPermission(dev, pi);
                 return;
             }
@@ -230,8 +222,7 @@ public class MainActivity extends AppCompatActivity {
             serialPort = driver.getPorts().get(0);
             serialPort.open(conn);
             serialPort.setParameters(19200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
-            serialPort.setRTS(false);
-            serialPort.setDTR(false);
+            serialPort.setRTS(false); serialPort.setDTR(false);
             serialPort.purgeHwBuffers(true, true);
 
             currentUsbDeviceId = (driver.getDevice() != null ? driver.getDevice().getDeviceId() : dev.getDeviceId());
@@ -240,10 +231,10 @@ public class MainActivity extends AppCompatActivity {
             int to   = parseHexOrDefault(safe(edtTo),   0xFA);
             int from = parseHexOrDefault(safe(edtFrom), 0xFF);
 
-            // Créer le LcpLink mais NE JAMAIS l’utiliser ici : on le donne au SDK.
+            // Créer le LcpLink → DONNER AU SDK UNIQUEMENT
             lcpLink = new LcpLink(serialPort, to, from, true);
 
-            // Instancier le SDK (DeliveryController maître)
+            // Instancier le SDK
             controller = new DeliveryController(
                     lcpLink,
                     new DeliveryController.DeliveryEvents() {
@@ -253,10 +244,8 @@ public class MainActivity extends AppCompatActivity {
                                 if (s == DeliveryController.State.ENDED || s == DeliveryController.State.ERROR) {
                                     if (btnFinish   != null) btnFinish.setEnabled(false);
                                     if (btnContinue != null) btnContinue.setEnabled(false);
-
                                     if (s == DeliveryController.State.ENDED && shouldPrintAtEnd) {
                                         shouldPrintAtEnd = false;
-                                        // Impression via SDK (0x22) — ticket simple de base
                                         controller.printTicketText(buildBasicTicket(), 90, 5000);
                                     }
                                 }
@@ -267,7 +256,6 @@ public class MainActivity extends AppCompatActivity {
                         @Override public void onFlowStopped() { append("[SDK] FLOW stoppé\n"); }
 
                         @Override public void onLiveSample(int ds, int dc, double gL, double nL) {
-                            // Echo lisible + mémoriser pour ticket
                             lastGrossL = gL; lastNetL = nL;
                             append(String.format("[LIVE] DS=0x%04X DC=0x%04X G=%.3f N=%.3f\n", ds, dc, gL, nL));
                         }
@@ -309,7 +297,7 @@ public class MainActivity extends AppCompatActivity {
                     Executors.newSingleThreadExecutor()
             );
 
-            // Resync côté SDK (pas d’appel direct UI → LcpLink)
+            // ✨ RESYNC via SDK (UI ne fait AUCUN sendRecv ici)
             controller.resyncGetProductId();
 
         } catch (Exception e) {
@@ -333,26 +321,26 @@ public class MainActivity extends AppCompatActivity {
         if (!checkReady()) return;
         int product = parseIntOrDefault(safe(edtProduct), 1);
         append(String.format("[UI] Start OPEN product=%d\n", product));
-        controller.startOpenMode(product, 20_000, 200); // le SDK démarrera sa live-loop lui-même
+        controller.startOpenMode(product, 20_000, 200); // le SDK démarre sa live-loop
     }
 
     private void endGracefully() {
         if (!checkReady()) return;
         append("[UI] END demandé (A)\n");
-        shouldPrintAtEnd = false; // "A" n’imprime pas automatiquement
-        controller.endGracefully(15_000, 200);
+        shouldPrintAtEnd = false;                // "A" n'imprime pas
+        controller.endGracefully(15_000, 200);   // SDK gère 0x24 et le poll de fin
     }
 
     private void continueDelivery() {
         append("[UI] Continuer (pas d'impression)\n");
         if (btnContinue != null) btnContinue.setEnabled(false);
-        // Rien d’autre : la live-loop continue (décision SDK)
+        // Rien d'autre : la live-loop continue côté SDK
     }
 
     private void finishDelivery() {
         if (!checkReady()) return;
         append("[UI] Terminé demandé\n");
-        shouldPrintAtEnd = true; // imprimera après ENDED
+        shouldPrintAtEnd = true;                 // imprimera après ENDED
         controller.endGracefully(15_000, 200);
         if (btnContinue != null) btnContinue.setEnabled(false);
         if (btnFinish   != null) btnFinish.setEnabled(false);
@@ -418,8 +406,5 @@ public class MainActivity extends AppCompatActivity {
     }
     private static int parseIntOrDefault(String s, int def){
         try { return Integer.parseInt(s); } catch(Exception e){ return def; }
-    }
-    private static double parseDoubleOrDefault(String s, double def){
-        try { return Double.parseDouble(s); } catch(Exception e){ return def; }
     }
 }
