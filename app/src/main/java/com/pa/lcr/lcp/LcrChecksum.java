@@ -1,5 +1,5 @@
 
-package com.example.lcr;
+package com.pa.lcr.lcp;
 
 public class LcrChecksum {
 
