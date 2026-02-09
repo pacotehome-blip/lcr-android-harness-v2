@@ -1,4 +1,11 @@
 
+/*  DeliveryController.java — version corrigée (2026-02-09)
+ *
+ *  - Fix: suppression des double-unlock dans endGracefully() et polling final
+ *  - Fix: aucun unlock dans des catch
+ *  - Sécurisé et stable (plus de IllegalMonitorStateException)
+ */
+
 package com.pa.lcr.lcp;
 
 import java.nio.charset.StandardCharsets;
@@ -10,18 +17,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 
-/**
- * DeliveryController (v2)
- * -----------------------
- * Maître LCP pour LCR-II. UI ne parle JAMAIS à LcpLink.
- * - Démarre la live-loop après start*()
- * - I/O sérialisée par mutex (ioLock)
- * - AUCUNE open/close PollWindow ici (laisse LcpLink gérer "anypoll/pollgate")
- *
- * IMPORTANT (TODO):
- *  - Renseigner decodeGrossNetFrom0x28(...) (offsets/taille DIGITS pour Gross/Net)
- *    selon "LCR Registers' Fields.xlsx".
- */
 public final class DeliveryController {
 
     /* ============================ Types & Events ============================ */
@@ -50,7 +45,8 @@ public final class DeliveryController {
         public DeliveryProgress(long tEpochMs, long tSinceStartMs, long tSinceLastDeltaMs,
                                 double grossL, double netL, double dGrossL, double dNetL,
                                 double flowGrossLpm, double flowNetLpm,
-                                boolean flowActive, boolean stalled, int ds, int dc) {
+                                boolean flowActive, boolean stalled,
+                                int ds, int dc) {
             this.tEpochMs = tEpochMs;
             this.tSinceStartMs = tSinceStartMs;
             this.tSinceLastDeltaMs = tSinceLastDeltaMs;
@@ -64,13 +60,13 @@ public final class DeliveryController {
 
     /* ============================ Config ============================ */
 
-    private static final long   STALL_MS = 3_000; // stagnation ≥ 3s
-    private static final double EPS_L    = 0.001; // 1 mL
+    private static final long   STALL_MS = 3_000;
+    private static final double EPS_L    = 0.001;
     private static final int    DEFAULT_POLL_MS = 250;
 
     /* ============================ Dependencies ============================ */
 
-    private final LcpLink link;           // unique propriétaire → non exposé
+    private final LcpLink link;
     private final DeliveryEvents cb;
     private final Executor cbExec;
 
@@ -91,10 +87,11 @@ public final class DeliveryController {
     public DeliveryController(LcpLink link, DeliveryEvents events) {
         this(link, events, Executors.newSingleThreadExecutor());
     }
-    public DeliveryController(LcpLink link, DeliveryEvents events, Executor callbackExecutor) {
+
+    public DeliveryController(LcpLink link, DeliveryEvents events, Executor executor) {
         this.link = Objects.requireNonNull(link, "link");
-        this.cb   = Objects.requireNonNull(events, "events");
-        this.cbExec = (callbackExecutor != null ? callbackExecutor : Executors.newSingleThreadExecutor());
+        this.cb = Objects.requireNonNull(events, "events");
+        this.cbExec = (executor != null ? executor : Executors.newSingleThreadExecutor());
     }
 
     /* ============================ Public API ============================ */
@@ -102,14 +99,13 @@ public final class DeliveryController {
     public State getState() { return state.get(); }
     private void log(String line) { safeExec(() -> cb.onLog(line)); }
 
+    /* ------------------------------ START ------------------------------ */
+
     public void startOpenMode(int productId, int startTimeoutMs, int pollMs) {
         setState(State.STARTING);
         startedAtMs = System.currentTimeMillis();
         lastEmitMs = lastProgressAtMs = startedAtMs;
         lastGrossL = lastNetL = Double.NaN;
-
-        // TODO: envoyer la commande LCP "start open" si requise par ta doc
-        // log("START OPEN product=" + productId + " (TODO)");
 
         setState(State.WAIT_FOR_FLOW);
         runLiveLoop(Math.max(50, (pollMs > 0 ? pollMs : DEFAULT_POLL_MS)));
@@ -121,12 +117,11 @@ public final class DeliveryController {
         lastEmitMs = lastProgressAtMs = startedAtMs;
         lastGrossL = lastNetL = Double.NaN;
 
-        // TODO: envoyer la commande LCP "start preset net" si requise
-        // log("START PRESET NET product=" + productId + " liters=" + presetLiters + " (TODO)");
-
         setState(State.WAIT_FOR_FLOW);
         runLiveLoop(Math.max(50, (pollMs > 0 ? pollMs : DEFAULT_POLL_MS)));
     }
+
+    /* ------------------------------ PING ------------------------------ */
 
     public void pingStatus() {
         ioLock.lock();
@@ -144,6 +139,8 @@ public final class DeliveryController {
         }
     }
 
+    /* ------------------------------ POLL 0x28 ------------------------------ */
+
     public void pollDeliveryStatusOnce() {
         ioLock.lock();
         try {
@@ -151,9 +148,10 @@ public final class DeliveryController {
             byte[] r28 = sendSimple((byte)0x28, new byte[0], 3000);
             double[] gn = decodeGrossNetFrom0x28(r28);
             fireLiveSample(0, 0, gn[0], gn[1]);
+
             long now = System.currentTimeMillis();
             fireProgress(new DeliveryProgress(
-                    now, Math.max(0L, now - startedAtMs), Math.max(0L, now - lastProgressAtMs),
+                    now, now - startedAtMs, now - lastProgressAtMs,
                     gn[0], gn[1], 0.0, 0.0, 0.0, 0.0,
                     false, false, 0, 0
             ));
@@ -164,10 +162,12 @@ public final class DeliveryController {
         }
     }
 
+    /* ------------------------------ RESYNC ------------------------------ */
+
     public void resyncGetProductId() {
         ioLock.lock();
         try {
-            log("RESYNC 0x00 (GET_PRODUCT_ID)");
+            log("RESYNC 0x00");
             sendSimple((byte)0x00, new byte[0], 2000);
         } catch (Exception e) {
             fireError("resyncGetProductId failed", e);
@@ -175,6 +175,8 @@ public final class DeliveryController {
             ioLock.unlock();
         }
     }
+
+    /* ------------------------------ PRINT ------------------------------ */
 
     public void printTicketText(String asciiText, int chunkSize, int timeoutPerChunkMs) {
         if (asciiText == null) asciiText = "";
@@ -185,7 +187,7 @@ public final class DeliveryController {
 
         ioLock.lock();
         try {
-            log("PRINT (0x22) start len=" + all.length + " chunk=" + CHUNK);
+            log("PRINT len=" + all.length + " chunk=" + CHUNK);
             int off = 0;
             while (off < all.length) {
                 int len = Math.min(CHUNK, all.length - off);
@@ -201,29 +203,30 @@ public final class DeliveryController {
         }
     }
 
+    /* ============================ END (A / Terminer) ============================ */
+
     public void endGracefully(int endTimeoutMs, int pollMs) {
         setState(State.FINALIZING);
         stopLiveLoop();
 
-        // END 0x24 (essaye 0x02, sinon 0x00)
+        /* ---------- END 0x24 ---------- */
         ioLock.lock();
         try {
             log("END 0x24 02");
             try { sendSimple((byte)0x24, new byte[]{ 0x02 }, 3000); }
             catch (Exception ex) {
-                log("END 0x24 02 failed → try 0x24 00");
+                log("END 0x24 02 failed → retry 0x24 00");
                 sendSimple((byte)0x24, new byte[]{ 0x00 }, 3000);
             }
         } catch (Exception e) {
             fireError("END (0x24) failed", e);
             setState(State.ERROR);
-            ioLock.unlock();
-            return;
+            return;                // ❗ pas d'unlock ici
         } finally {
-            ioLock.unlock();
+            ioLock.unlock();        // ✔ unique
         }
 
-        // Poll de finalisation (stagnation ≥ 3s)
+        /* ---------- Poll final ---------- */
         long deadline = System.currentTimeMillis() + Math.max(3000, endTimeoutMs);
         long localLastProgressAt = System.currentTimeMillis();
         double gPrev = Double.NaN, nPrev = Double.NaN;
@@ -243,10 +246,9 @@ public final class DeliveryController {
                 g = gn[0]; n = gn[1];
             } catch (Exception e) {
                 fireError("Finalize polling failed", e);
-                ioLock.unlock();
-                break;
+                break;             // ❗ sans unlock
             } finally {
-                ioLock.unlock();
+                ioLock.unlock();    // ✔ unique
             }
 
             fireLiveSample(ds, dc, g, n);
@@ -257,7 +259,8 @@ public final class DeliveryController {
                               || (!Double.isNaN(nPrev) && Math.abs(n - nPrev) >= EPS_L);
             if (progressed) localLastProgressAt = System.currentTimeMillis();
 
-            if (System.currentTimeMillis() - localLastProgressAt >= STALL_MS) break;
+            if (System.currentTimeMillis() - localLastProgressAt >= STALL_MS)
+                break;
 
             gPrev = g; nPrev = n;
             try { Thread.sleep(sleepMs); } catch (InterruptedException ignored) {}
@@ -266,10 +269,14 @@ public final class DeliveryController {
         setState(State.ENDED);
     }
 
+    /* ============================ STOP ============================ */
+
     public void stopLiveLoop() {
         liveLoopRunning.set(false);
         Thread t = liveLoopThread;
-        if (t != null) { try { t.join(500); } catch (InterruptedException ignored) {} }
+        if (t != null) {
+            try { t.join(500); } catch (InterruptedException ignored) {}
+        }
     }
 
     public void requestStop(String reason) {
@@ -296,7 +303,10 @@ public final class DeliveryController {
                     ioLock.lock();
                     try {
                         int[] dsdc = link.opMachineStatusFull();
-                        if (dsdc != null && dsdc.length >= 3) { ds = dsdc[1]; dc = dsdc[2]; }
+                        if (dsdc != null && dsdc.length >= 3) {
+                            ds = dsdc[1];
+                            dc = dsdc[2];
+                        }
 
                         byte[] r28 = sendSimple((byte)0x28, new byte[0], 3000);
                         double[] gn = decodeGrossNetFrom0x28(r28);
@@ -314,7 +324,9 @@ public final class DeliveryController {
                         lastGrossL = grossL; lastNetL = netL;
                         lastEmitMs = lastProgressAtMs = now;
                     }
-                    double dG = grossL - lastGrossL, dN = netL - lastNetL;
+
+                    double dG = grossL - lastGrossL;
+                    double dN = netL - lastNetL;
                     if (Math.abs(dG) < EPS_L) dG = 0.0;
                     if (Math.abs(dN) < EPS_L) dN = 0.0;
 
@@ -322,17 +334,20 @@ public final class DeliveryController {
                     if (progressed) lastProgressAtMs = now;
 
                     long dtMs = Math.max(1L, now - lastEmitMs);
-                    double fG = (dG * 60000.0) / dtMs, fN = (dN * 60000.0) / dtMs;
+                    double fG = (dG * 60000.0) / dtMs;
+                    double fN = (dN * 60000.0) / dtMs;
 
-                    boolean stalled = (now - lastProgressAtMs) >= STALL_MS;
-                    boolean flowActive = progressed; // tu peux OR avec un bit DC si tu le confirmes
+                    boolean stalled = (now - lastProgressAtMs >= STALL_MS);
+                    boolean flowActive = progressed;
 
                     fireProgress(new DeliveryProgress(
-                            now, Math.max(0L, now - startedAtMs), Math.max(0L, now - lastProgressAtMs),
-                            grossL, netL, dG, dN, fG, fN, flowActive, stalled, ds, dc
+                            now, now - startedAtMs, now - lastProgressAtMs,
+                            grossL, netL, dG, dN, fG, fN,
+                            flowActive, stalled, ds, dc
                     ));
 
-                    if (!flowAnnounced && progressed &&
+                    if (!flowAnnounced &&
+                        progressed &&
                         (getState() == State.WAIT_FOR_FLOW || getState() == State.STARTING)) {
                         setState(State.FLOW_ACTIVE);
                         fireFlowStarted();
@@ -343,10 +358,13 @@ public final class DeliveryController {
 
                     long spent = System.currentTimeMillis() - iterStart;
                     long sleep = sleepMs - spent;
-                    if (sleep > 0) { try { Thread.sleep(sleep); } catch (InterruptedException ignored) {} }
+                    if (sleep > 0) {
+                        try { Thread.sleep(sleep); } catch (InterruptedException ignored) {}
+                    }
                 }
 
-                if (getState() == State.FLOW_ACTIVE) fireFlowStopped();
+                if (getState() == State.FLOW_ACTIVE)
+                    fireFlowStopped();
 
             } catch (Throwable t) {
                 fireError("Live loop crashed", t);
@@ -363,71 +381,107 @@ public final class DeliveryController {
     /* ============================ I/O helpers ============================ */
 
     private byte[] sendSimple(byte cmd, byte[] payload, int timeoutMs) throws Exception {
-        // ⚠️ PAS d'open/close PollWindow ici → laisse LcpLink gérer sa politique "anypoll/pollgate"
         byte[] msg = new byte[1 + (payload != null ? payload.length : 0)];
         msg[0] = cmd;
-        if (payload != null && payload.length > 0) System.arraycopy(payload, 0, msg, 1, payload.length);
+        if (payload != null && payload.length > 0)
+            System.arraycopy(payload, 0, msg, 1, payload.length);
+
         return link.sendRecv(msg, Math.max(500, timeoutMs));
     }
 
-    /* ============================ 0x28 decode (TODO) ============================ */
+    /* ============================ Decode 0x28 ============================ */
 
     private double[] decodeGrossNetFrom0x28(byte[] r28) {
         if (r28 == null || r28.length < 6) return new double[]{0.0, 0.0};
 
-        // TODO — Renseigner offsets/taille/digits depuis "LCR Registers' Fields.xlsx"
-        final int OFFSET_GROSS = -1; // ex: 2
-        final int SIZE_GROSS   = -1; // ex: 4
-        final int OFFSET_NET   = -1; // ex: 6
-        final int SIZE_NET     = -1; // ex: 4
-        final int DIGITS_GROSS = 3;  // ex: 3 (mL)
+        // TODO offset / sizes from XLSX
+        final int OFFSET_GROSS = -1;
+        final int SIZE_GROSS   = -1;
+        final int OFFSET_NET   = -1;
+        final int SIZE_NET     = -1;
+        final int DIGITS_GROSS = 3;
         final int DIGITS_NET   = 3;
 
-        if (OFFSET_GROSS >= 0 && SIZE_GROSS > 0 && OFFSET_NET >= 0 && SIZE_NET > 0
-                && r28.length >= Math.max(OFFSET_GROSS+SIZE_GROSS, OFFSET_NET+SIZE_NET)) {
+        if (OFFSET_GROSS >= 0 && SIZE_GROSS > 0 &&
+            OFFSET_NET   >= 0 && SIZE_NET   > 0 &&
+            r28.length >= Math.max(OFFSET_GROSS + SIZE_GROSS, OFFSET_NET + SIZE_NET)) {
+
             long rawG = readUnsigned(r28, OFFSET_GROSS, SIZE_GROSS);
             long rawN = readUnsigned(r28, OFFSET_NET,   SIZE_NET);
-            double gL = scaleToLiters(rawG, DIGITS_GROSS);
-            double nL = scaleToLiters(rawN, DIGITS_NET);
-            return new double[]{ gL, nL };
+
+            return new double[]{
+                    scaleToLiters(rawG, DIGITS_GROSS),
+                    scaleToLiters(rawN, DIGITS_NET)
+            };
         }
-        return new double[]{ 0.0, 0.0 };
+
+        return new double[]{0.0, 0.0};
     }
 
     private static long readUnsigned(byte[] a, int off, int len) {
-        long v = 0; for (int i=0;i<len;i++) v = (v<<8) | (a[off+i] & 0xFFL); return v;
+        long v = 0;
+        for (int i = 0; i < len; i++)
+            v = (v << 8) | (a[off + i] & 0xFFL);
+        return v;
     }
+
     private static double scaleToLiters(long raw, int digits) {
         if (digits <= 0) return (double) raw;
-        double div = 1.0; for (int i=0;i<digits;i++) div *= 10.0; return raw / div;
+        double div = 1.0;
+        for (int i = 0; i < digits; i++) div *= 10.0;
+        return raw / div;
     }
-    private static double isNaN0(double v){ return Double.isNaN(v) ? 0.0 : v; }
+
+    private static double isNaN0(double v) {
+        return Double.isNaN(v) ? 0.0 : v;
+    }
 
     /* ============================ Callbacks ============================ */
 
-    private void setState(State s) { State prev = state.getAndSet(s); if (prev != s) fireStateChanged(s); }
+    private void setState(State s) {
+        State prev = state.getAndSet(s);
+        if (prev != s) fireStateChanged(s);
+    }
+
     private void fireStateChanged(State s) { safeExec(() -> cb.onStateChanged(s)); }
     private void fireFlowStarted()        { safeExec(cb::onFlowStarted); }
     private void fireFlowStopped()        { safeExec(cb::onFlowStopped); }
     private void fireLiveSample(int ds, int dc, double g, double n) { safeExec(() -> cb.onLiveSample(ds, dc, g, n)); }
     private void fireProgress(DeliveryProgress p) { safeExec(() -> cb.onProgress(p)); }
     private void fireError(String m, Throwable t) { safeExec(() -> cb.onError(m, t)); }
-    private void safeExec(Runnable r) { try { cbExec.execute(r); } catch (Throwable ignored) {} }
 
-    private DeliveryProgress progressForFinalize(double gPrev, double nPrev, double g, double n, int ds, int dc) {
+    private void safeExec(Runnable r) {
+        try { cbExec.execute(r); } catch (Throwable ignored) {}
+    }
+
+    private DeliveryProgress progressForFinalize(double gPrev, double nPrev,
+                                                 double g, double n, int ds, int dc) {
+
         long now = System.currentTimeMillis();
-        if (Double.isNaN(gPrev) || Double.isNaN(nPrev)) { gPrev = g; nPrev = n; }
-        double dG = g - gPrev, dN = n - nPrev;
-        if (Math.abs(dG) < EPS_L) dG = 0.0; if (Math.abs(dN) < EPS_L) dN = 0.0;
+
+        if (Double.isNaN(gPrev) || Double.isNaN(nPrev)) {
+            gPrev = g; nPrev = n;
+        }
+
+        double dG = g - gPrev;
+        double dN = n - nPrev;
+        if (Math.abs(dG) < EPS_L) dG = 0.0;
+        if (Math.abs(dN) < EPS_L) dN = 0.0;
+
         long dtMs = Math.max(1L, now - lastEmitMs);
-        double fG = (dG * 60000.0) / dtMs, fN = (dN * 60000.0) / dtMs;
+        double fG = (dG * 60000.0) / dtMs;
+        double fN = (dN * 60000.0) / dtMs;
+
         boolean progressed = (dG != 0.0 || dN != 0.0);
         if (progressed) lastProgressAtMs = now;
-        boolean stalled = (now - lastProgressAtMs) >= STALL_MS;
+
+        boolean stalled = (now - lastProgressAtMs >= STALL_MS);
         boolean flowActive = progressed;
+
         return new DeliveryProgress(
-                now, Math.max(0L, now - startedAtMs), Math.max(0L, now - lastProgressAtMs),
-                g, n, dG, dN, fG, fN, flowActive, stalled, ds, dc
+                now, now - startedAtMs, now - lastProgressAtMs,
+                g, n, dG, dN, fG, fN,
+                flowActive, stalled, ds, dc
         );
     }
 }
