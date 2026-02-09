@@ -67,6 +67,11 @@ public class MainActivity extends AppCompatActivity {
     private volatile boolean endingRequested = false;
     private volatile boolean shouldPrintAtEnd = false;   // imprime seulement si Terminé
 
+    // Flow=0 via DC (bitmask à ajuster avec ta doc)
+    private static final int FLOW_ACTIVE_MASK = 0x0001; // TODO: mettre le bon bit du champ DC (0x23)
+    private static final int NO_FLOW_DEBOUNCE_SAMPLES = 2;
+    private int noFlowStreak = 0;
+
     // USB detach robuste
     private volatile Integer currentUsbDeviceId = null;
     private volatile long lastDetachHandledAt = 0L;
@@ -229,7 +234,7 @@ public class MainActivity extends AppCompatActivity {
             }
             lastDetachHandledAt = now;
 
-            // Session "en cours" = tout sauf IDLE/ENDED/ERROR (évite d'énumérer des états SDK)
+            // Session "en cours" = tout sauf IDLE/ENDED/ERROR
             DeliveryController.State s = (controller != null ? controller.getState() : DeliveryController.State.IDLE);
             boolean inProgress = (s != DeliveryController.State.IDLE &&
                                   s != DeliveryController.State.ENDED &&
@@ -341,7 +346,7 @@ public class MainActivity extends AppCompatActivity {
                                         // Impression après END si demandé via Terminé
                                         if (s == DeliveryController.State.ENDED && shouldPrintAtEnd) {
                                             shouldPrintAtEnd = false;
-                                            printTicket();  // Impression LCP
+                                            printTicket();  // Impression LCP (0x22)
                                         }
 
                                         // Cleanup USB si détaché pendant le flow
@@ -354,6 +359,7 @@ public class MainActivity extends AppCompatActivity {
                                         // Reset des flags
                                         endingRequested = false;
                                         liveLoopActive = false;
+                                        noFlowStreak = 0;
                                         break;
                                     default: break;
                                 }
@@ -364,6 +370,7 @@ public class MainActivity extends AppCompatActivity {
                             // reset détection "no progress"
                             lastProgressAtMs = System.currentTimeMillis();
                             lastGross = -1; lastNet = -1; promptShown = false;
+                            noFlowStreak = 0;
 
                             // Ne pas relancer de live loop si une fin est déjà demandée
                             if (endingRequested) {
@@ -425,6 +432,20 @@ public class MainActivity extends AppCompatActivity {
                                     }
                                 }
                             } catch(Exception ignored){}
+
+                            // --- Déclenchement UI quand flow=0 (en plus de onFlowStopped) ---
+                            boolean flowActive = (dc & FLOW_ACTIVE_MASK) != 0;
+                            if (!flowActive) {
+                                noFlowStreak++;
+                                if (noFlowStreak >= NO_FLOW_DEBOUNCE_SAMPLES) {
+                                    runOnUiThread(() -> {
+                                        if (btnContinue != null) btnContinue.setEnabled(true);
+                                        if (btnFinish   != null) btnFinish.setEnabled(true);
+                                    });
+                                }
+                            } else {
+                                noFlowStreak = 0;
+                            }
                         }
                         @Override public void onGuardReached() {
                             append("[SDK] Guard atteint → END demandé\n");
@@ -554,46 +575,61 @@ public class MainActivity extends AppCompatActivity {
         }, 150);
     }
 
-    /* ============================== Impression (LCP) ============================== */
+    /* ============================== Impression (LCP 0x22) ============================== */
 
     /**
-     * Impression du ticket par COMMANDE LCP (LCR-II imprime en autonome).
-     *
-     * TODO: Renseigner l’opcode exact et le payload selon ta doc:
-     *  - "LCR API Internal Messages for LCP.pdf"
-     *  - "LCR Registers' Fields.xlsx"
-     *
-     * Notes:
-     * - Appelée APRÈS ENDED pour imprimer le ticket final.
-     * - LcpLink gère l'encapsulation (framing/CRC/adresses). On envoie seulement [cmd, data...].
+     * Impression du ticket par COMMANDE LCP 0x22 (PrintText).
+     * Le LCR-II imprime en autonome; on pousse les lignes de texte côté hôte.
      */
     private void printTicket() {
-        // --------------- TODO: à ADAPTER selon ta doc LCP ----------------
-        // Exemples FICTIFS (NE PAS garder tels quels si ta doc diffère) :
-        final byte CMD_PRINT_TICKET = (byte)0x2A; // ← Remplacer par la vraie commande d'impression
-        final byte[] payload = new byte[]{};      // ← Renseigner si options requises, sinon vide
-        // ------------------------------------------------------------------
-
-        append("[PRINT] Impression demandée (LCP)…\n");
         try {
             if (lcpLink == null) {
                 append("[PRINT] LcpLink indisponible — impression annulée\n");
                 return;
             }
 
-            // Fusion simple [CMD, ...payload]
-            byte[] msg = new byte[1 + payload.length];
-            msg[0] = CMD_PRINT_TICKET;
-            if (payload.length > 0) System.arraycopy(payload, 0, msg, 1, payload.length);
+            // --------- 1) Construire un ticket simple (exemple minimal) ----------
+            StringBuilder sb = new StringBuilder();
+            sb.append("Delivery Ticket").append('\n').append('\n');
+            sb.append("Time: ").append(new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX")
+                    .format(new java.util.Date())).append('\n');
+            // TODO: Ajouter tes totaux si tu veux refléter exactement le ticket Python.
+            String ticket = sb.toString();
+            byte[] full = ticket.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
 
-            // Optionnel : sécuriser l’ordonnancement en ouvrant une courte PollWindow
+            // --------- 2) Envoi 0x22 par blocs (≈ 90 octets, comme Python ~0x5A) ----------
+            final byte CMD_PRINT_TEXT = (byte)0x22;
+            final int  CHUNK = 90;
+
             try { lcpLink.openPollWindow(); } catch (Throwable ignored) {}
 
             try {
-                // Timeout large (imprimante lente) — ajuste si besoin
-                byte[] resp = lcpLink.sendRecv(msg, 10_000);
-                append("[PRINT] Réponse LCP: " + bytesToHex(resp) + "\n");
-                append("[PRINT] Ticket imprimé (commande envoyée au LCR-II)\n");
+                int off = 0;
+                while (off < full.length) {
+                    int len = Math.min(CHUNK, full.length - off);
+                    byte[] msg = new byte[1 + len];
+                    msg[0] = CMD_PRINT_TEXT;
+                    System.arraycopy(full, off, msg, 1, len);
+
+                    // Retry léger si timeout sporadique
+                    boolean ok = false;
+                    int tries = 0;
+                    while (!ok && tries < 2) {
+                        tries++;
+                        try {
+                            byte[] resp = lcpLink.sendRecv(msg, 5000); // 5s / bloc
+                            append("[PRINT] 0x22 ack: " + bytesToHex(resp) + "\n");
+                            ok = true;
+                        } catch (Exception ex) {
+                            if (tries >= 2) throw ex;
+                            append("[PRINT] 0x22 retry: " + ex.getMessage() + "\n");
+                            try { Thread.sleep(100); } catch (InterruptedException ignored) {}
+                        }
+                    }
+
+                    off += len;
+                }
+                append("[PRINT] Host print OK\n");
             } finally {
                 try { lcpLink.closePollWindow(); } catch (Throwable ignored) {}
             }
