@@ -1,8 +1,6 @@
 
 package com.pa.lcr.lcp;
 
-import java.io.IOException;
-
 public class LcrService {
 
     private final SerialPortController port;
@@ -11,18 +9,18 @@ public class LcrService {
         this.port = port;
     }
 
-    public byte[] readRegister(int reg, int length) throws IOException {
+    public byte[] readRegister(int reg, int length) throws Exception {
         byte[] req = LcrFrame.buildReadFrame(reg, length);
-        return port.transaction(req, length + 5); // cadre : STX CMD HI LO LEN + data + CRC
+        return port.transaction(req, length + 5);
     }
 
-    public void writeRegister(int reg, byte[] payload) throws IOException {
+    public void writeRegister(int reg, byte[] payload) throws Exception {
         byte[] req = LcrFrame.buildWriteFrame(reg, payload);
-        port.transaction(req, 4); // Confirme minimal ACK (à ajuster selon ton LCR)
+        port.transaction(req, 4);
     }
 
-    public byte[] poll() throws IOException {
+    public byte[] poll() throws Exception {
         byte[] req = LcrFrame.buildPollFrame();
-        return port.transaction(req, 8); // Format poll 0x28 typique LCR-II
+        return port.transaction(req, 8);
     }
 }

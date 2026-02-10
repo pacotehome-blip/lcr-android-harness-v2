@@ -15,7 +15,7 @@ public class MainActivity extends AppCompatActivity {
     private SerialPortController serial;
     private LcrService lcr;
 
-    private UsbSerialPort port;   // Ton port réel (déjà initialisé ailleurs)
+    private UsbSerialPort port;   // ton port réel
     private TextView statusView;
 
     @Override
@@ -23,25 +23,22 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
 
         statusView = new TextView(this);
-        statusView.setText("Initialisation…");
         setContentView(statusView);
 
         if (port != null) {
             initializeLcrLayer();
         } else {
-            statusView.setText("Port USB non initialisé.");
+            statusView.setText("Port USB non initialisé");
         }
     }
 
-    /**
-     * Initialisation propre de la couche LCR-II
-     */
     private void initializeLcrLayer() {
         try {
-            // Adapte SerialPortController pour UsbSerialPort.read/write
             serial = new SerialPortController(
-                    (buffer, timeout) -> port.read(buffer, timeout),
-                    (buffer, timeout) -> port.write(buffer, timeout)
+                // read
+                (buffer, timeout) -> port.read(buffer, timeout),
+                // write
+                (buffer, timeout) -> port.write(buffer, timeout)
             );
 
             lcr = new LcrService(serial);
@@ -53,9 +50,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /**
-     * Test minimal : poll 0x28
-     */
     private void testPoll() {
         new Thread(() -> {
             try {
@@ -70,9 +64,6 @@ public class MainActivity extends AppCompatActivity {
         }).start();
     }
 
-    /**
-     * Encode un tableau de bytes en hex (debug)
-     */
     private static String bytesToHex(byte[] bytes) {
         StringBuilder sb = new StringBuilder();
         for (byte b : bytes)

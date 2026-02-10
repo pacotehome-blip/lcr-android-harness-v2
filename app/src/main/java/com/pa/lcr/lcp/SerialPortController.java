@@ -8,7 +8,7 @@ public class SerialPortController {
     }
 
     public interface Writer {
-        int write(byte[] buffer, int timeout) throws Exception;
+        void write(byte[] buffer, int timeout) throws Exception;
     }
 
     private final Reader reader;
@@ -34,9 +34,9 @@ public class SerialPortController {
             }
 
             int n = reader.read(buffer, 1000);
-            if (n > 0)
-                offset += n;
+            if (n > 0) offset += n;
         }
+
         return buffer;
     }
 
