@@ -28,28 +28,52 @@ public class UsbReceiver extends BroadcastReceiver {
         UsbManager usb = (UsbManager) context.getSystemService(Context.USB_SERVICE);
         String action = intent.getAction();
 
-        /* =================== Permission USB ==================== */
+        /* ==========================================================
+           1) PERMISSION GRANTED ?
+           ========================================================== */
         if (ACTION_USB_PERMISSION.equals(action)) {
 
             UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
-            boolean granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
-
-            if (!granted) {
-                log("Permission USB REFUSÉE");
+            if (device == null) {
+                log("Permission event: device NULL");
                 return;
             }
 
-            log("Permission USB accordée → ouverture du port…");
+            boolean granted =
+                intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
+
+            if (!granted) {
+                log("Permission USB REFUSÉE pour " + device);
+                return;
+            }
+
+            log("Permission accordée → ouverture du port pour " + device);
             openSerialPort(context, usb, device);
             return;
         }
 
-        /* =================== USB détecté ====================== */
+        /* ==========================================================
+           2) USB DEVICE ATTACHED?
+           ========================================================== */
         if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(action)) {
 
             UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
-            log("USB détecté : " + device);
 
+            if (device == null) {
+                log("USB attach event : aucun device");
+                return;
+            }
+
+            log("USB détecté : VID=" +
+                Integer.toHexString(device.getVendorId()).toUpperCase() +
+                " PID=" +
+                Integer.toHexString(device.getProductId()).toUpperCase());
+
+            /*  
+               On demande la permission explicitement avec PendingIntent.
+               REMARQUE: même si device_filter est vide, Android va quand même déclencher
+               cet événement → parfait pour un SDK hybride.
+            */
             PendingIntent pi = PendingIntent.getBroadcast(
                     context,
                     0,
@@ -61,7 +85,9 @@ public class UsbReceiver extends BroadcastReceiver {
         }
     }
 
-    /* =================== Ouverture du port ==================== */
+    /* ==========================================================
+       OUVERTURE DU PORT SÉRIE (19200 8N1)
+       ========================================================== */
     private void openSerialPort(Context context, UsbManager usb, UsbDevice device) {
 
         try {
@@ -69,7 +95,7 @@ public class UsbReceiver extends BroadcastReceiver {
                     UsbSerialProber.getDefaultProber().probeDevice(device);
 
             if (driver == null) {
-                log("Aucun driver compatible trouvé pour " + device);
+                log("Aucun driver compatible pour ce device. Ignoré.");
                 return;
             }
 
@@ -77,29 +103,41 @@ public class UsbReceiver extends BroadcastReceiver {
 
             UsbDeviceConnection connection = usb.openDevice(device);
             if (connection == null) {
-                log("Impossible d’ouvrir la connexion USB");
+                log("Impossible d’ouvrir la connexion USB (permission ?)");
                 return;
             }
 
             port.open(connection);
             port.setParameters(
-                    19200,
-                    8,
-                    UsbSerialPort.STOPBITS_1,
-                    UsbSerialPort.PARITY_NONE
+                    19200,                     // BAUD
+                    8,                         // DATA BITS
+                    UsbSerialPort.STOPBITS_1,  // STOP
+                    UsbSerialPort.PARITY_NONE  // PARITY
             );
 
-            log("Port série ouvert et configuré (19200 8N1).");
+            log("Port série ouvert (19200 8N1) pour VID/PID = " +
+                String.format("%04X/%04X",
+                        device.getVendorId(),
+                        device.getProductId()));
 
+            /*  
+               Injection du port dans MainActivity
+               ------------------------------------------------------------
+               NOTE IMPORTANTE:
+               Android envoie souvent les broadcasts au niveau Application
+               donc "context" n’est parfois PAS MainActivity.
+
+               Donc on ne fait l’injection que si on est bien dans le bon contexte.
+            */
             if (context instanceof MainActivity) {
+                log("Injection du port → MainActivity");
                 ((MainActivity) context).setPort(port);
-                log("Port injecté dans MainActivity.");
             } else {
-                log("WARN: Le context n’est pas MainActivity.");
+                log("Context != MainActivity → injection ignorée (normal).");
             }
 
         } catch (Exception e) {
-            log("Erreur ouverture port: " + e.getMessage());
+            log("Erreur durant openSerialPort : " + e.getMessage());
         }
     }
 }

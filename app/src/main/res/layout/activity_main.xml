@@ -1,147 +1,168 @@
 
+<?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/root"
-    android:layout_width="match_parent"
-    android:layout_height="match_parent"
     android:orientation="vertical"
-    android:padding="12dp">
+    android:padding="6dp"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
 
-    <!-- Ligne paramètres LCP -->
+    <!-- Ligne paramètres -->
     <LinearLayout
+        android:orientation="horizontal"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal">
+        android:layout_height="wrap_content">
 
         <EditText
             android:id="@+id/edtTo"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:hint="To (0xFA)" />
+            android:hint="To"
+            android:layout_height="wrap_content"/>
 
         <EditText
             android:id="@+id/edtFrom"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:hint="From (0xFF)" />
+            android:hint="From"
+            android:layout_height="wrap_content"/>
     </LinearLayout>
 
-    <!-- Ligne produit / preset -->
+    <!-- Produit / preset -->
     <LinearLayout
+        android:orientation="horizontal"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal">
+        android:layout_height="wrap_content">
 
         <EditText
             android:id="@+id/edtProduct"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:hint="Produit (1..16)" />
+            android:hint="Produit"
+            android:layout_height="wrap_content"/>
 
         <EditText
             android:id="@+id/edtPreset"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:hint="Preset L (ex: 50.0)" />
+            android:hint="Preset L"
+            android:layout_height="wrap_content"/>
     </LinearLayout>
 
-    <!-- Ligne actions génériques -->
+    <!-- Ligne USB -->
     <LinearLayout
+        android:orientation="horizontal"
+        android:paddingTop="4dp"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal">
+        android:layout_height="wrap_content">
+
+        <Button
+            android:id="@+id/btnScanUsb"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="USB"/>
+
+        <Spinner
+            android:id="@+id/spnUsbDevices"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"/>
+
+        <Button
+            android:id="@+id/btnPingUsb"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Ping"/>
+    </LinearLayout>
+
+    <!-- Ligne actions -->
+    <LinearLayout
+        android:orientation="horizontal"
+        android:paddingTop="4dp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
 
         <Button
             android:id="@+id/btnCopyLog"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="Copier log" />
+            android:layout_height="wrap_content"
+            android:text="Copier"/>
 
         <Button
             android:id="@+id/btnClearLog"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="Effacer log" />
+            android:layout_height="wrap_content"
+            android:text="Clear"/>
 
         <Button
             android:id="@+id/btnConnect"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="Connexion USB" />
+            android:layout_height="wrap_content"
+            android:text="Connect"/>
     </LinearLayout>
 
-    <!-- Ligne A / B / C -->
+    <!-- Ligne A/B/C -->
     <LinearLayout
-        android:id="@+id/lineABC"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
         android:orientation="horizontal"
-        android:paddingTop="8dp">
+        android:paddingTop="4dp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
 
-        <!-- A reset / END -->
         <Button
             android:id="@+id/btnA"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="A reset (END)" />
+            android:layout_height="wrap_content"
+            android:text="A"/>
 
-        <!-- B ping -->
         <Button
             android:id="@+id/btnB"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="B ping" />
+            android:layout_height="wrap_content"
+            android:text="B"/>
 
-        <!-- C – start delivery -->
         <Button
             android:id="@+id/btnC"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="C – Start delivery" />
+            android:layout_height="wrap_content"
+            android:text="C"/>
     </LinearLayout>
 
-    <!-- Ligne "Continuer / Terminé" -->
+    <!-- Ligne Continue / Terminé -->
     <LinearLayout
-        android:id="@+id/liveControls"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
         android:orientation="horizontal"
-        android:paddingTop="8dp">
+        android:paddingTop="4dp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
 
         <Button
             android:id="@+id/btnContinue"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
             android:layout_weight="1"
             android:enabled="false"
-            android:text="Continuer" />
+            android:layout_height="wrap_content"
+            android:text="Go"/>
 
         <Button
             android:id="@+id/btnFinish"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
             android:layout_weight="1"
             android:enabled="false"
-            android:text="Terminé" />
+            android:layout_height="wrap_content"
+            android:text="Stop"/>
     </LinearLayout>
 
-    <!-- Switch I/O log -->
     <CheckBox
         android:id="@+id/switchIoLog"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="I/O log" />
+        android:text="I/O"/>
 
-    <!-- Ancien "Start" (retiré) : laissé GONE pour compat -->
     <Button
         android:id="@+id/btnStart"
         android:visibility="gone"
@@ -149,7 +170,6 @@
         android:layout_height="0dp"
         android:text="(retiré)" />
 
-    <!-- Zone de logs (sélectionnable) -->
     <ScrollView
         android:id="@+id/logScroll"
         android:layout_width="match_parent"
@@ -160,12 +180,11 @@
             android:id="@+id/txtLog"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:padding="6dp"
             android:typeface="monospace"
-            android:textSize="12sp"
+            android:textSize="11sp"
             android:textColor="#000000"
-            android:padding="8dp"
-            android:textIsSelectable="true"
-            android:autoLink="none" />
+            android:textIsSelectable="true"/>
     </ScrollView>
 
 </LinearLayout>

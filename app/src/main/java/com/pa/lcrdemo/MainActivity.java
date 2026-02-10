@@ -10,29 +10,48 @@ import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Spinner;
+import android.widget.ArrayAdapter;
+
+import android.hardware.usb.UsbManager;
+import android.hardware.usb.UsbDevice;
+import android.hardware.usb.UsbDeviceConnection;
+
 import android.content.ClipboardManager;
 import android.content.ClipData;
 import android.content.Context;
 
 import com.hoho.android.usbserial.driver.UsbSerialPort;
+import com.hoho.android.usbserial.driver.UsbSerialDriver;
+import com.hoho.android.usbserial.driver.UsbSerialProber;
+
 import com.pa.lcr.lcp.LcpLink;
 import com.pa.lcr.lcp.DeliveryController;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.Executors;
 
 public class MainActivity extends AppCompatActivity {
 
-    // UI
+    // UI de base
     private EditText edtTo, edtFrom, edtProduct, edtPreset;
     private Button btnCopyLog, btnClearLog, btnConnect;
     private Button btnA, btnB, btnC;
     private Button btnContinue, btnFinish;
     private CheckBox switchIoLog;
-
     private TextView txtLog;
     private ScrollView logScroll;
 
-    // LCP
+    // UI USB
+    private Spinner spnUsbDevices;
+    private Button btnScanUsb, btnPingUsb;
+
+    // USB backend
+    private UsbManager usbManager;
+    private final List<UsbDevice> usbList = new ArrayList<>();
+
+    // LCP backend
     private UsbSerialPort port = null;
     private LcpLink link;
     private DeliveryController ctrl;
@@ -47,19 +66,26 @@ public class MainActivity extends AppCompatActivity {
         installHandlers();
 
         log("Prêt. En attente du port USB… Brancher l'adaptateur RS‑232.");
+
+        new android.os.Handler().postDelayed(() -> {
+            if (port == null) {
+                log("UsbReceiver silencieux → tentative fallback USB…");
+                scanUsbDevices();
+            }
+        }, 800);
     }
 
-    /* ==========================================================
-       Reçoit le port USB depuis UsbReceiver
-       ========================================================== */
+    // ==========================================================
+    // Reçoit le port USB depuis UsbReceiver
+    // ==========================================================
     public void setPort(UsbSerialPort p) {
         this.port = p;
         log("USB détecté — port ouvert (19200 8N1).");
     }
 
-    /* ==========================================================
-       Bind UI elements
-       ========================================================== */
+    // ==========================================================
+    // Bind UI elements
+    // ==========================================================
     private void bindUI() {
         edtTo = findViewById(R.id.edtTo);
         edtFrom = findViewById(R.id.edtFrom);
@@ -76,28 +102,32 @@ public class MainActivity extends AppCompatActivity {
 
         btnContinue = findViewById(R.id.btnContinue);
         btnFinish = findViewById(R.id.btnFinish);
-
         switchIoLog = findViewById(R.id.switchIoLog);
 
         txtLog = findViewById(R.id.txtLog);
         logScroll = findViewById(R.id.logScroll);
+
+        spnUsbDevices = findViewById(R.id.spnUsbDevices);
+        btnScanUsb = findViewById(R.id.btnScanUsb);
+        btnPingUsb = findViewById(R.id.btnPingUsb);
+
+        usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
     }
 
-    /* ==========================================================
-       Valeurs par défaut UI
-       ========================================================== */
+    // ==========================================================
+    // Valeurs par défaut
+    // ==========================================================
     private void applyDefaultValues() {
         edtTo.setText("0xFA");
         edtFrom.setText("0xFF");
         edtProduct.setText("1");
         edtPreset.setText("50.0");
-
         switchIoLog.setChecked(true);
     }
 
-    /* ==========================================================
-       Attach button handlers
-       ========================================================== */
+    // ==========================================================
+    // Handlers UI
+    // ==========================================================
     private void installHandlers() {
 
         btnConnect.setOnClickListener(v -> initLcp());
@@ -129,7 +159,6 @@ public class MainActivity extends AppCompatActivity {
             int product = readInt(edtProduct, 1);
             double preset = readDouble(edtPreset, 0);
             log("C : Start Delivery (product=" + product + ", preset=" + preset + ")");
-
             ctrl.startOpenMode(product, 5000, 200);
             enableLiveButtons(true);
         });
@@ -146,11 +175,14 @@ public class MainActivity extends AppCompatActivity {
             ctrl.endGracefully(5000, 200);
             enableLiveButtons(false);
         });
+
+        btnScanUsb.setOnClickListener(v -> scanUsbDevices());
+        btnPingUsb.setOnClickListener(v -> pingSelectedUsbDevice());
     }
 
-    /* ==========================================================
-       Initialise LcpLink et DeliveryController
-       ========================================================== */
+    // ==========================================================
+    // Initialisation LCP
+    // ==========================================================
     private void initLcp() {
         if (port == null) {
             log("ERR: Port USB non initialisé. Brancher l'adaptateur RS‑232.");
@@ -178,9 +210,9 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /* ==========================================================
-       Helpers
-       ========================================================== */
+    // ==========================================================
+    // Log helper
+    // ==========================================================
     private void log(String s) {
         if (!switchIoLog.isChecked()) return;
 
@@ -216,9 +248,113 @@ public class MainActivity extends AppCompatActivity {
         catch(Exception ignored){ return def; }
     }
 
-    /* ==========================================================
-       Delivery Events implementation
-       ========================================================== */
+    // ==========================================================
+    // USB — Scan devices
+    // ==========================================================
+    private void scanUsbDevices() {
+
+        usbList.clear();
+
+        if (usbManager == null) {
+            log("USB Manager non disponible.");
+            return;
+        }
+
+        for (UsbDevice dev : usbManager.getDeviceList().values()) {
+            usbList.add(dev);
+        }
+
+        if (usbList.isEmpty()) {
+            log("Aucun périphérique USB détecté.");
+        }
+
+        List<String> labels = new ArrayList<>();
+        for (UsbDevice d : usbList) {
+            labels.add(String.format("VID=%04X PID=%04X", d.getVendorId(), d.getProductId()));
+        }
+
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(
+                this, android.R.layout.simple_spinner_item, labels);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spnUsbDevices.setAdapter(adapter);
+
+        log("Scan terminé : " + labels.size() + " périphérique(s) trouvé(s).");
+    }
+
+    // ==========================================================
+    // USB — Open port
+    // ==========================================================
+    private UsbSerialPort tryOpenDevice(UsbDevice dev) {
+
+        UsbSerialDriver driver = UsbSerialProber.getDefaultProber().probeDevice(dev);
+        if (driver == null) {
+            log("Aucun driver USB‑Série pour ce périphérique.");
+            return null;
+        }
+
+        UsbSerialPort p = driver.getPorts().get(0);
+        UsbDeviceConnection conn = usbManager.openDevice(dev);
+
+        if (conn == null) {
+            log("Permission USB refusée / impossible d'ouvrir le device.");
+            return null;
+        }
+
+        try {
+            p.open(conn);
+            p.setParameters(19200, 8,
+                    UsbSerialPort.STOPBITS_1,
+                    UsbSerialPort.PARITY_NONE);
+
+            log("Port ouvert pour " + dev);
+            return p;
+
+        } catch (Exception e) {
+            log("Erreur ouverture: " + e.getMessage());
+            return null;
+        }
+    }
+
+    // ==========================================================
+    // USB — Ping LCR-II
+    // ==========================================================
+    private void pingSelectedUsbDevice() {
+
+        int index = spnUsbDevices.getSelectedItemPosition();
+        if (index < 0 || index >= usbList.size()) {
+            log("Aucun device sélectionné.");
+            return;
+        }
+
+        UsbDevice dev = usbList.get(index);
+        UsbSerialPort testPort = tryOpenDevice(dev);
+
+        if (testPort == null) {
+            log("Impossible d'ouvrir le port USB sélectionné.");
+            return;
+        }
+
+        try {
+            log("PING (#23)…");
+
+            LcpLink testLink = new LcpLink(testPort, 0xFA, 0xFF, true);
+            DeliveryController testCtrl = new DeliveryController(
+                    testLink, null, Executors.newSingleThreadExecutor());
+
+            testCtrl.pingStatus();
+
+            log("✔ PING OK — registre LCR-II détecté !");
+            setPort(testPort);
+
+        } catch (Exception e) {
+            log("✖ PING FAIL — ce device n'est pas un registre LCR-II : " + e.getMessage());
+            try { testPort.close(); } catch(Exception ignored){}
+        }
+    }
+
+    // ==========================================================
+    // Delivery Events
+    // ==========================================================
     private class DeliveryEventsImpl implements DeliveryController.DeliveryEvents {
 
         @Override public void onStateChanged(DeliveryController.State s) {
