@@ -10,8 +10,8 @@ import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.ScrollView;
 import android.widget.TextView;
-import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.ClipData;
 import android.content.Context;
 
 import com.hoho.android.usbserial.driver.UsbSerialPort;
@@ -33,7 +33,7 @@ public class MainActivity extends AppCompatActivity {
     private ScrollView logScroll;
 
     // LCP
-    private UsbSerialPort port = null;   // Injecté via UsbReceiver
+    private UsbSerialPort port = null;
     private LcpLink link;
     private DeliveryController ctrl;
 
@@ -43,23 +43,23 @@ public class MainActivity extends AppCompatActivity {
         setContentView(R.layout.activity_main);
 
         bindUI();
+        applyDefaultValues();
         installHandlers();
 
-        switchIoLog.setChecked(true);
-        log("Prêt. En attente du port USB…");
+        log("Prêt. En attente du port USB… Brancher l'adaptateur RS‑232.");
     }
 
-    /* ======================================================
-       USBReceiver appellera ceci quand le port est ouvert
-       ====================================================== */
+    /* ==========================================================
+       Reçoit le port USB depuis UsbReceiver
+       ========================================================== */
     public void setPort(UsbSerialPort p) {
         this.port = p;
-        log("USB détecté: port ouvert");
+        log("USB détecté — port ouvert (19200 8N1).");
     }
 
-    /* ======================================================
-       Trouve tous les contrôles du XML
-       ====================================================== */
+    /* ==========================================================
+       Bind UI elements
+       ========================================================== */
     private void bindUI() {
         edtTo = findViewById(R.id.edtTo);
         edtFrom = findViewById(R.id.edtFrom);
@@ -83,12 +83,25 @@ public class MainActivity extends AppCompatActivity {
         logScroll = findViewById(R.id.logScroll);
     }
 
-    /* ======================================================
-       Attache les évènements UI
-       ====================================================== */
+    /* ==========================================================
+       Valeurs par défaut UI
+       ========================================================== */
+    private void applyDefaultValues() {
+        edtTo.setText("0xFA");
+        edtFrom.setText("0xFF");
+        edtProduct.setText("1");
+        edtPreset.setText("50.0");
+
+        switchIoLog.setChecked(true);
+    }
+
+    /* ==========================================================
+       Attach button handlers
+       ========================================================== */
     private void installHandlers() {
 
-        // 1) Copier log
+        btnConnect.setOnClickListener(v -> initLcp());
+
         btnCopyLog.setOnClickListener(v -> {
             ClipboardManager clip =
                     (ClipboardManager)getSystemService(Context.CLIPBOARD_SERVICE);
@@ -97,44 +110,36 @@ public class MainActivity extends AppCompatActivity {
             log("Log copié.");
         });
 
-        // 2) Effacer log
         btnClearLog.setOnClickListener(v -> txtLog.setText(""));
 
-        // 3) Connecter USB + init LCP
-        btnConnect.setOnClickListener(v -> initLcp());
-
-        // 4) Bouton A : RESET / END DELIVERY
         btnA.setOnClickListener(v -> {
             if (ctrl == null) { log("Pas connecté."); return; }
-            log("A: END (reset)");
+            log("A : END (reset)");
             ctrl.endGracefully(5000, 200);
         });
 
-        // 5) Bouton B : PING (#23)
         btnB.setOnClickListener(v -> {
             if (ctrl == null) { log("Pas connecté."); return; }
             log("PING (#23)");
             ctrl.pingStatus();
         });
 
-        // 6) Bouton C : START DELIVERY
         btnC.setOnClickListener(v -> {
             if (ctrl == null) { log("Pas connecté."); return; }
             int product = readInt(edtProduct, 1);
-            double preset = readDouble(edtPreset, 0.0);
-            log("C: Start Delivery product=" + product + " preset=" + preset);
+            double preset = readDouble(edtPreset, 0);
+            log("C : Start Delivery (product=" + product + ", preset=" + preset + ")");
+
             ctrl.startOpenMode(product, 5000, 200);
             enableLiveButtons(true);
         });
 
-        // 7) Continuer (reactiver loop)
         btnContinue.setOnClickListener(v -> {
             if (ctrl == null) return;
             log("Continuer...");
             ctrl.startLiveLoop(200);
         });
 
-        // 8) Terminé (fin de session)
         btnFinish.setOnClickListener(v -> {
             if (ctrl == null) return;
             log("Terminé.");
@@ -143,12 +148,12 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    /* ======================================================
-       Init du protocole LCP
-       ====================================================== */
+    /* ==========================================================
+       Initialise LcpLink et DeliveryController
+       ========================================================== */
     private void initLcp() {
         if (port == null) {
-            log("ERR: Port USB non initialisé.");
+            log("ERR: Port USB non initialisé. Brancher l'adaptateur RS‑232.");
             return;
         }
 
@@ -156,25 +161,26 @@ public class MainActivity extends AppCompatActivity {
             int to = parseHex(edtTo, 0xFA);
             int from = parseHex(edtFrom, 0xFF);
 
-            log(String.format("Init LCP to=0x%02X from=0x%02X", to, from));
+            log(String.format("Init LCP → to=0x%02X, from=0x%02X…", to, from));
 
             link = new LcpLink(port, to, from, true);
-            ctrl = new DeliveryController(link, new DeliveryEventsImpl(),
-                    Executors.newSingleThreadExecutor());
+            ctrl = new DeliveryController(
+                    link,
+                    new DeliveryEventsImpl(),
+                    Executors.newSingleThreadExecutor()
+            );
 
-            log("LCP prêt.");
-
+            log("LCP prêt. Appareil LCR-II accessible.");
             ctrl.pingStatus();
 
         } catch (Exception e) {
-            log("Erreur init LCP: " + e.getMessage());
+            log("Erreur init LCP : " + e.getMessage());
         }
     }
 
-    /* ======================================================
+    /* ==========================================================
        Helpers
-       ====================================================== */
-
+       ========================================================== */
     private void log(String s) {
         if (!switchIoLog.isChecked()) return;
 
@@ -210,13 +216,13 @@ public class MainActivity extends AppCompatActivity {
         catch(Exception ignored){ return def; }
     }
 
-    /* ======================================================
-       EVENTS
-       ====================================================== */
+    /* ==========================================================
+       Delivery Events implementation
+       ========================================================== */
     private class DeliveryEventsImpl implements DeliveryController.DeliveryEvents {
 
         @Override public void onStateChanged(DeliveryController.State s) {
-            log("État=" + s);
+            log("État = " + s);
         }
 
         @Override public void onFlowStarted() { log("Flow START"); }
@@ -233,11 +239,11 @@ public class MainActivity extends AppCompatActivity {
                     p.tSinceStartMs, p.grossL, p.netL, p.dGrossL, p.dNetL));
         }
 
-        @Override public void onGuardReached() { log("GUARD REACHED"); }
+        @Override public void onGuardReached() { log("GUARD reached"); }
 
         @Override
         public void onError(String msg, Throwable t) {
-            log("ERR[" + msg + "] " + t.getMessage());
+            log("ERR[" + msg + "] → " + t.getMessage());
         }
 
         @Override
