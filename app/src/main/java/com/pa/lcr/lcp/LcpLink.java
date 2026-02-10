@@ -10,18 +10,17 @@ import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * LcpLink — A2‑Enhanced + PythonCompat + CancelIO + PollGate + PollOwner
- * (2026‑02‑05, verrous, parsing, metrics, guard 0x23/0x28, low-level throttles,
- *  any-poll coalesce, compat Python: 0x7D actif + cadence courte, cancel E/S global,
- *  et fenêtre de poll exclusive)
  *
- * Version marker:
- *   LcpLink v2026-02-05 fuse+throttle+portlock+delstatus+lowlvlthrottle+anypoll+guard+pycompat+cancel+pollgate
+ * Corrections (2026‑02‑10):
+ *  - PollWindow "owner=ANY" par défaut (évite POLL_OWNER_MISMATCH avec ScheduledExecutor)
+ *  - Ajout opPrintText (MsgID 0x22) et opGetProductId (MsgID 0x00) conformes LCP [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+ *  - Ajout openPollWindowExclusive() (optionnel pour debug)
  */
 public class LcpLink {
 
     // ============================== VERSION ==============================
     private static final String LCP_VERSION =
-        "LcpLink v2026-02-05 fuse+throttle+portlock+delstatus+lowlvlthrottle+anypoll+guard+pycompat+cancel+pollgate";
+        "LcpLink v2026-02-10 pollwindow-any + opPrintText(0x22) + opGetProductId(0x00)";
 
     // ============================ PROTO CONST ============================
     public static final int TILDE = 0x7E;
@@ -32,19 +31,19 @@ public class LcpLink {
 
     public static final int MSG_GET_FIELD      = 0x20;
     public static final int MSG_SET_FIELD      = 0x21;
-    public static final int MSG_PRINT_TEXT     = 0x22;
+    public static final int MSG_PRINT_TEXT     = 0x22; // Print Text [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
     public static final int MSG_GET_MACHINE    = 0x23;
     public static final int MSG_ISSUE_COMMAND  = 0x24;
     public static final int MSG_GET_DEL_STATUS = 0x28;
     public static final int MSG_CHECK_REQUEST  = 0x7D;
-    public static final int MSG_GET_PRODUCTID  = 0x00;
+    public static final int MSG_GET_PRODUCTID  = 0x00; // Get Product ID [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
 
     public static final int RC_OK                = 0x00;
     public static final int RC_REQUEST_QUEUED    = 0x26;
     public static final int RC_NO_REQUEST_ACTIVE = 0x27;
     public static final int RC_REQUEST_ABORTED   = 0x28;
 
-    // Machine flags (ds/dc)
+    // Machine flags (dc = delivery code word)
     public static final int LCRSc_DEL_TICKET_PENDING = 0x0001;
     public static final int LCRSc_FLOW_ACTIVE        = 0x0004;
     public static final int LCRSc_DELIVERY_ACTIVE    = 0x0008;
@@ -129,7 +128,7 @@ public class LcpLink {
     // ======= Poll Gate (bloque 0x23/0x28 hors fenêtres autorisées) =======
     private volatile boolean pollingBlocked = true;
 
-    // ======= Poll Owner (exclusivité de la fenêtre) =======
+    // ======= Poll Owner (exclusivité optionnelle de la fenêtre) =======
     private volatile Thread pollOwner = null;
 
     public void setPythonCompat(boolean enable, int pollMs){
@@ -137,6 +136,7 @@ public class LcpLink {
         this.minPollMs = Math.max(150, pollMs);
         log("[LCP] PythonCompat=" + enable + " pollMs=" + this.minPollMs);
     }
+
     public void cancelIO() { ioCancelled = true; log("[LCP] IO CANCELLED"); }
     public void resumeIO() { ioCancelled = false; log("[LCP] IO RESUMED"); }
     private void checkCancelled() throws IOException { if (ioCancelled) throw new IOException("CANCELLED"); }
@@ -147,8 +147,19 @@ public class LcpLink {
         log("[LCP] PollingBlocked=" + blocked);
     }
 
-    /** Ouvre la fenêtre de poll et fixe un propriétaire exclusif (thread appelant). */
+    /**
+     * Ouvre la fenêtre de poll.
+     * Correction: "owner=ANY" par défaut (pollOwner=null).
+     * Le DeliveryController poll sur un ScheduledExecutor différent du thread PRESTART.
+     */
     public void openPollWindow() {
+        this.pollOwner = null;         // ANY thread allowed
+        this.pollingBlocked = false;
+        log("[LCP] PollWindow OPEN (owner=ANY) caller=" + callerTop());
+    }
+
+    /** Variante stricte: fenêtre liée au thread courant (utile pour debug) */
+    public void openPollWindowExclusive() {
         this.pollOwner = Thread.currentThread();
         this.pollingBlocked = false;
         log("[LCP] PollWindow OPEN by " + this.pollOwner.getName() + " caller=" + callerTop());
@@ -156,7 +167,6 @@ public class LcpLink {
 
     /** Ferme la fenêtre de poll et libère le propriétaire. */
     public void closePollWindow() {
-        // Evite un log trompeur si déjà bloqué & sans owner
         if (this.pollOwner == null && this.pollingBlocked) {
             log("[LCP] PollWindow CLOSE ignored (no owner, already blocked) caller=" + callerTop());
             return;
@@ -164,7 +174,7 @@ public class LcpLink {
         this.pollingBlocked = true;
         Thread owner = this.pollOwner;
         this.pollOwner = null;
-        log("[LCP] PollWindow CLOSE (prevOwner=" + (owner != null ? owner.getName() : "none") + ") caller=" + callerTop());
+        log("[LCP] PollWindow CLOSE (prevOwner=" + (owner != null ? owner.getName() : "ANY") + ") caller=" + callerTop());
     }
 
     public LcpLink(UsbSerialPort p, int to, int from, boolean syncFirst) {
@@ -262,8 +272,8 @@ public class LcpLink {
 
     // ============================= BUILD TX =============================
     private byte[] buildFrame(byte[] payload){
-        int status = toggle & 1;
-        if(syncPending){ status |= 0x02; syncPending = false; }
+        int status = toggle & 1;                // Message Identifier bit (bit 0)
+        if(syncPending){ status |= 0x02; syncPending = false; }  // Sync bit (bit 1)
         toggle ^= 1;
 
         byte[] header = new byte[]{ (byte)toAddr, (byte)fromAddr, (byte)status, (byte)payload.length };
@@ -287,7 +297,7 @@ public class LcpLink {
         long tEnd = System.currentTimeMillis() + timeout;
         int syncCount = 0;
         while(System.currentTimeMillis() < tEnd){
-            checkCancelled(); // cancel point
+            checkCancelled();
             int b = readByte(timeout);
             if(b < 0) continue;
             if(b == TILDE){
@@ -305,7 +315,7 @@ public class LcpLink {
         pf.header    = new byte[4];
 
         for(int i=0; i<4; i++){
-            checkCancelled(); // cancel point
+            checkCancelled();
             RawByte rb = readEscaped(timeout);
             if(rb.decoded < 0) throw new IOException("Header timeout");
             pf.header[i] = (byte)rb.decoded;
@@ -317,7 +327,7 @@ public class LcpLink {
         pf.payload = new byte[plen];
 
         for(int i=0; i<plen; i++){
-            checkCancelled(); // cancel point
+            checkCancelled();
             RawByte rb = readEscaped(timeout);
             if(rb.decoded<0) throw new IOException("Payload timeout");
             pf.payload[i] = (byte)rb.decoded;
@@ -325,9 +335,9 @@ public class LcpLink {
         }
         raw.add(pf.payloadRaw);
 
-        checkCancelled(); // cancel point
+        checkCancelled();
         RawByte c0 = readEscaped(timeout);
-        checkCancelled(); // cancel point
+        checkCancelled();
         RawByte c1 = readEscaped(timeout);
         if(c0.decoded<0 || c1.decoded<0) throw new IOException("CRC timeout");
 
@@ -369,97 +379,98 @@ public class LcpLink {
 
     // =============================== I/O =================================
     public byte[] sendRecv(byte[] payload, int timeoutMs) throws IOException {
-        checkCancelled(); // cancel point
+        checkCancelled();
 
         globalPortLock.lock();
         try {
-        synchronized (portLock) {
-        synchronized (txRxLock) {
-            checkCancelled(); // cancel point
+            synchronized (portLock) {
+                synchronized (txRxLock) {
+                    checkCancelled();
 
-            long now = System.currentTimeMillis();
-            if (lastExchangeFinishedAtMs == 0L) lastExchangeFinishedAtMs = now;
-            long since = now - lastExchangeFinishedAtMs;
-            metrics.updateInterFrameDelta(since);
+                    long now = System.currentTimeMillis();
+                    if (lastExchangeFinishedAtMs == 0L) lastExchangeFinishedAtMs = now;
+                    long since = now - lastExchangeFinishedAtMs;
+                    metrics.updateInterFrameDelta(since);
 
-            int pause = INTER_FRAME_PAUSE_MS + rnd(0, INTER_FRAME_JITTER_MS);
-            int sleepApplied = (since < pause) ? (pause - (int)since) : 0;
-            if (sleepApplied > 0) sleepMs(sleepApplied);
+                    int pause = INTER_FRAME_PAUSE_MS + rnd(0, INTER_FRAME_JITTER_MS);
+                    int sleepApplied = (since < pause) ? (pause - (int)since) : 0;
+                    if (sleepApplied > 0) sleepMs(sleepApplied);
 
-            if (DUMP_TX) {
-                int msg0 = (payload!=null && payload.length>0) ? (payload[0] & 0xFF) : -1;
-                Boolean inOK = INTERNAL_OK.get();
-                log(String.format("sendRecv(msg=0x%02X) inOK=%s by [%s] thread=%s",
-                        msg0, String.valueOf(inOK!=null && inOK), callerTop(), Thread.currentThread().getName()));
-            }
+                    if (DUMP_TX) {
+                        int msg0 = (payload!=null && payload.length>0) ? (payload[0] & 0xFF) : -1;
+                        Boolean inOK = INTERNAL_OK.get();
+                        log(String.format("sendRecv(msg=0x%02X) inOK=%s by [%s] thread=%s",
+                                msg0, String.valueOf(inOK!=null && inOK), callerTop(), Thread.currentThread().getName()));
+                    }
 
-            // 0x7D — autorisé UNIQUEMENT en PythonCompat ET via op* (INTERNAL_OK)
-            if (payload != null && payload.length > 0 && (payload[0] & 0xFF) == MSG_CHECK_REQUEST) {
-                if (!pythonCompat) {
-                    throw new IOException("0x7D interdit (activer PythonCompat)");
+                    // 0x7D — autorisé UNIQUEMENT en PythonCompat ET via op* (INTERNAL_OK)
+                    if (payload != null && payload.length > 0 && (payload[0] & 0xFF) == MSG_CHECK_REQUEST) {
+                        if (!pythonCompat) {
+                            throw new IOException("0x7D interdit (activer PythonCompat)");
+                        }
+                        if (INTERNAL_OK.get() == null || !INTERNAL_OK.get()) {
+                            throw new IOException("0x7D réservé aux op* (opCheckRequest). Appel direct interdit.");
+                        }
+                    }
+
+                    // Guard: 0x23/0x28 seulement via op*
+                    if (payload != null && payload.length > 0) {
+                        int msg = payload[0] & 0xFF;
+                        if ((msg == MSG_GET_MACHINE || msg == MSG_GET_DEL_STATUS)
+                                && (INTERNAL_OK.get() == null || !INTERNAL_OK.get())) {
+                            throw new IOException("Utiliser opMachineStatusFull()/opDeliveryStatus() pour 0x23/0x28.");
+                        }
+                    }
+
+                    // Throttles bas-niveau (par type)
+                    if (payload != null && payload.length > 0) {
+                        int msg = payload[0] & 0xFF;
+                        if (msg == MSG_GET_MACHINE) {
+                            AtomicLong ts = LAST_GET_MACHINE.computeIfAbsent(portKey, k -> new AtomicLong(0));
+                            long last = ts.get(), now2 = System.currentTimeMillis();
+                            long dt = now2 - last; if (dt < 0) dt = 0;
+                            int min = pythonCompat ? minPollMs : MIN_POLL_GET_MACHINE_MS_STD;
+                            if (last != 0 && dt < min) sleepMs((int)(min - dt));
+                            ts.set(System.currentTimeMillis());
+                        } else if (msg == MSG_GET_DEL_STATUS) {
+                            AtomicLong ts = LAST_GET_DELSTS.computeIfAbsent(portKey, k -> new AtomicLong(0));
+                            long last = ts.get(), now2 = System.currentTimeMillis();
+                            long dt = now2 - last; if (dt < 0) dt = 0;
+                            int min = pythonCompat ? minPollMs : MIN_POLL_GET_DEL_STATUS_MS_STD;
+                            if (last != 0 && dt < min) sleepMs((int)(min - dt));
+                            ts.set(System.currentTimeMillis());
+                        }
+                    }
+
+                    // Coalesce global 0x23/0x28 (désactivé en pythonCompat)
+                    if (!pythonCompat && payload != null && payload.length > 0) {
+                        int msg = payload[0] & 0xFF;
+                        if (msg == MSG_GET_MACHINE || msg == MSG_GET_DEL_STATUS) {
+                            AtomicLong tsAny = LAST_ANY_POLL.computeIfAbsent(portKey, k -> new AtomicLong(0));
+                            long lastA = tsAny.get(), nowA = System.currentTimeMillis();
+                            long dtA = nowA - lastA; if (dtA < 0) dtA = 0;
+                            if (lastA != 0 && dtA < minPollAnyMs) sleepMs((int)(minPollAnyMs - dtA));
+                            tsAny.set(System.currentTimeMillis());
+                        }
+                    }
+
+                    checkCancelled();
+                    byte[] fr = buildFrame(payload);
+                    try { port.purgeHwBuffers(true,true); }catch(Exception ignored){}
+
+                    checkCancelled();
+                    port.write(fr, timeoutMs);
+                    metrics.txFrames.incrementAndGet();
+
+                    checkCancelled();
+                    byte[] rsp = readFrame(timeoutMs);
+
+                    lastExchangeFinishedAtMs = System.currentTimeMillis();
+                    if (DUMP_TX) log(String.format("IFΔ=%dms, sleep=%dms", (since<0?0:since), sleepApplied));
+                    return rsp;
                 }
-                if (INTERNAL_OK.get() == null || !INTERNAL_OK.get()) {
-                    throw new IOException("0x7D réservé aux op* (opCheckRequest). Appel direct interdit.");
-                }
             }
-
-            // Guard: 0x23/0x28 seulement via op*
-            if (payload != null && payload.length > 0) {
-                int msg = payload[0] & 0xFF;
-                if ((msg == MSG_GET_MACHINE || msg == MSG_GET_DEL_STATUS)
-                    && (INTERNAL_OK.get() == null || !INTERNAL_OK.get())) {
-                    throw new IOException("Utiliser opMachineStatusFull()/opDeliveryStatus() pour 0x23/0x28.");
-                }
-            }
-
-            // Throttles bas-niveau (par type)
-            if (payload != null && payload.length > 0) {
-                int msg = payload[0] & 0xFF;
-                if (msg == MSG_GET_MACHINE) {
-                    AtomicLong ts = LAST_GET_MACHINE.computeIfAbsent(portKey, k -> new AtomicLong(0));
-                    long last = ts.get(), now2 = System.currentTimeMillis();
-                    long dt = now2 - last; if (dt < 0) dt = 0;
-                    int min = pythonCompat ? minPollMs : MIN_POLL_GET_MACHINE_MS_STD;
-                    if (last != 0 && dt < min) sleepMs((int)(min - dt));
-                    ts.set(System.currentTimeMillis());
-                } else if (msg == MSG_GET_DEL_STATUS) {
-                    AtomicLong ts = LAST_GET_DELSTS.computeIfAbsent(portKey, k -> new AtomicLong(0));
-                    long last = ts.get(), now2 = System.currentTimeMillis();
-                    long dt = now2 - last; if (dt < 0) dt = 0;
-                    int min = pythonCompat ? minPollMs : MIN_POLL_GET_DEL_STATUS_MS_STD;
-                    if (last != 0 && dt < min) sleepMs((int)(min - dt));
-                    ts.set(System.currentTimeMillis());
-                }
-            }
-
-            // Coalesce global 0x23/0x28 (désactivé en pythonCompat)
-            if (!pythonCompat && payload != null && payload.length > 0) {
-                int msg = payload[0] & 0xFF;
-                if (msg == MSG_GET_MACHINE || msg == MSG_GET_DEL_STATUS) {
-                    AtomicLong tsAny = LAST_ANY_POLL.computeIfAbsent(portKey, k -> new AtomicLong(0));
-                    long lastA = tsAny.get(), nowA = System.currentTimeMillis();
-                    long dtA = nowA - lastA; if (dtA < 0) dtA = 0;
-                    if (lastA != 0 && dtA < minPollAnyMs) sleepMs((int)(minPollAnyMs - dtA));
-                    tsAny.set(System.currentTimeMillis());
-                }
-            }
-
-            checkCancelled(); // cancel point
-            byte[] fr = buildFrame(payload);
-            try { port.purgeHwBuffers(true,true); }catch(Exception ignored){}
-
-            checkCancelled(); // cancel point
-            port.write(fr, timeoutMs);
-
-            metrics.txFrames.incrementAndGet();
-
-            checkCancelled(); // cancel point
-            byte[] rsp = readFrame(timeoutMs);
-
-            lastExchangeFinishedAtMs = System.currentTimeMillis();
-            if (DUMP_TX) log(String.format("IFΔ=%dms, sleep=%dms", (since<0?0:since), sleepApplied));
-            return rsp;
-        }} } finally {
+        } finally {
             globalPortLock.unlock();
         }
     }
@@ -469,7 +480,7 @@ public class LcpLink {
         long tStart = System.currentTimeMillis(), tEnd = tStart + timeoutMs;
         byte[] last=null; metrics.queuedWaits.incrementAndGet();
         while(System.currentTimeMillis() < tEnd){
-            checkCancelled(); // cancel point
+            checkCancelled();
             byte[] rsp = readFrame(Math.max(1200,pollMs+800));
             byte[] p   = extractPayload(rsp);
             LcpStatus st = extractStatus(rsp);
@@ -495,7 +506,7 @@ public class LcpLink {
         if (!pythonCompat) throw new IOException("opCheckRequest() nécessite PythonCompat");
         INTERNAL_OK.set(Boolean.TRUE);
         try {
-            checkCancelled(); // cancel point
+            checkCancelled();
             return sendRecv(new byte[]{ (byte)MSG_CHECK_REQUEST }, Math.max(1200, minPollMs + 800));
         } finally {
             INTERNAL_OK.remove();
@@ -505,7 +516,7 @@ public class LcpLink {
         long tEnd = System.currentTimeMillis() + timeoutMs;
         byte[] last = null;
         while (System.currentTimeMillis() < tEnd) {
-            checkCancelled(); // cancel point
+            checkCancelled();
             byte[] rsp = opCheckRequest();
             byte[] p   = extractPayload(rsp);
             if (p != null && p.length > 0) last = p;
@@ -516,7 +527,7 @@ public class LcpLink {
             if (rc == RC_REQUEST_QUEUED || rc == RC_NO_REQUEST_ACTIVE) {
                 sleep(minPollMs); continue;
             }
-            return p; // sortie dès RC != 0x26
+            return p;
         }
         throw new IOException("Queued timeout (python)");
     }
@@ -610,10 +621,73 @@ public class LcpLink {
         return p;
     }
 
+    /** MsgID 0x22: Print Text on LCR Printer. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf) */
+    public byte[] opPrintText(byte[] text) throws IOException {
+        if (text == null) text = new byte[0];
+        byte[] req = new byte[1 + text.length];
+        req[0] = (byte)MSG_PRINT_TEXT;
+        System.arraycopy(text, 0, req, 1, text.length);
+
+        checkCancelled();
+        byte[] rsp = sendRecv(req, 4000);
+        LcpStatus st = extractStatus(rsp);
+        byte[] p = extractPayload(rsp);
+
+        if (pythonCompat) {
+            if (st.busy || p==null || p.length==0
+                    || p[0]==RC_REQUEST_QUEUED || p[0]==RC_NO_REQUEST_ACTIVE) {
+                p = waitQueuedPython(8000);
+            }
+        } else {
+            if (st.busy || p==null || p.length==0) {
+                if (st.busy) metrics.busyStatusFrames.incrementAndGet();
+                p = waitQueued(8000,200);
+            }
+            if(p!=null && p.length>0 &&
+                    (p[0]==RC_REQUEST_QUEUED || p[0]==RC_NO_REQUEST_ACTIVE)){
+                if (p[0]==RC_REQUEST_QUEUED) metrics.rc26.incrementAndGet();
+                p = waitQueued(8000,200);
+            }
+        }
+
+        // Retour: rc + devStatus [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+        if(p==null || p.length<2 || p[0]!=RC_OK) throw new IOException("PRINT_TEXT");
+        return p;
+    }
+
+    /** MsgID 0x00: Get Product ID. Retour: rc, productID, name(ASCIIZ)... [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf) */
+    public byte[] opGetProductId() throws IOException {
+        checkCancelled();
+        byte[] rsp = sendRecv(new byte[]{ (byte)MSG_GET_PRODUCTID }, 3000);
+        LcpStatus st = extractStatus(rsp);
+        byte[] p = extractPayload(rsp);
+
+        if (pythonCompat) {
+            if (st.busy || p==null || p.length==0
+                    || p[0]==RC_REQUEST_QUEUED || p[0]==RC_NO_REQUEST_ACTIVE) {
+                p = waitQueuedPython(5000);
+            }
+        } else {
+            if (st.busy || p==null || p.length==0) {
+                if (st.busy) metrics.busyStatusFrames.incrementAndGet();
+                p = waitQueued(5000,150);
+            }
+            if(p!=null && p.length>0 &&
+                    (p[0]==RC_REQUEST_QUEUED || p[0]==RC_NO_REQUEST_ACTIVE)){
+                if (p[0]==RC_REQUEST_QUEUED) metrics.rc26.incrementAndGet();
+                p = waitQueued(5000,150);
+            }
+        }
+
+        if(p==null || p.length<2 || p[0]!=RC_OK) throw new IOException("GET_PRODUCT_ID");
+        return p;
+    }
+
     public int[] opDeliveryStatus() throws IOException {
         if (pollingBlocked) throw new IOException("POLL_BLOCKED");
         if (pollOwner != null && Thread.currentThread() != pollOwner)
             throw new IOException("POLL_OWNER_MISMATCH");
+
         synchronized (delStatusPollLock) {
             long now = System.currentTimeMillis();
             if (lastDelStatusAt != 0L) {
@@ -661,6 +735,7 @@ public class LcpLink {
         if (pollingBlocked) throw new IOException("POLL_BLOCKED");
         if (pollOwner != null && Thread.currentThread() != pollOwner)
             throw new IOException("POLL_OWNER_MISMATCH");
+
         synchronized (machinePollLock) {
             long now = System.currentTimeMillis();
             if (lastGetMachineAt != 0L) {
