@@ -1,15 +1,12 @@
 
 <?xml version="1.0" encoding="utf-8"?>
-<manifest 
-    xmlns:android="http://schemas.android.com/apk/res/android"
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Activer le support USB Host -->
     <uses-feature
         android:name="android.hardware.usb.host"
         android:required="true" />
 
-    <!-- Permission USB (Android 12+) -->
     <uses-permission
         android:name="android.permission.MANAGE_USB"
         tools:ignore="ProtectedPermissions" />
@@ -20,32 +17,24 @@
         android:label="LCR Harness V2"
         android:theme="@style/Theme.Material3.DayNight.NoActionBar">
 
-        <!-- MAIN ACTIVITY -->
         <activity
-           =".MainActivity"
+            android:name="com.pa.lcrdemo.MainActivity"
             android:exported="true">
             <intent-filter>
-                <action android:name="android.intent.action.MAIN"/>
-                <category android:name="android.intent.category.LAUNCHER"/>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
 
-        <!-- USB RECEIVER (mode SDK) -->
         <receiver
-            android:name=".UsbReceiver"
+            android:name="com.pa.lcrdemo.UsbReceiver"
             android:exported="true">
             <intent-filter>
-
-                <!-- intent -->
-                <action android:name="com.pa.lcrdemo.USB_PERMISSION"/>
-
-                <!-- Détection device USB branché -->
-                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"/>
-
+                <action android:name="com.pa.lcrdemo.USB_PERMISSION" />
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
             </intent-filter>
         </receiver>
 
-        <!-- OPTIONAL device filter (peut être vide si non utilisé) -->
         <meta-data
             android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
             android:resource="@xml/usb_device_filter" />
