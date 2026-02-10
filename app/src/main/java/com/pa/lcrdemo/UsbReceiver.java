@@ -7,6 +7,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbManager;
+import android.hardware.usb.UsbDeviceConnection;
 
 import com.hoho.android.usbserial.driver.UsbSerialDriver;
 import com.hoho.android.usbserial.driver.UsbSerialPort;
@@ -27,14 +28,11 @@ public class UsbReceiver extends BroadcastReceiver {
         UsbManager usb = (UsbManager) context.getSystemService(Context.USB_SERVICE);
         String action = intent.getAction();
 
-        /* ==========================================================
-           1. Permission reçue
-           ========================================================== */
+        /* =================== Permission USB ==================== */
         if (ACTION_USB_PERMISSION.equals(action)) {
-            UsbDevice device =
-                    intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
-            boolean granted =
-                    intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
+
+            UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+            boolean granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
 
             if (!granted) {
                 log("Permission USB REFUSÉE");
@@ -42,23 +40,19 @@ public class UsbReceiver extends BroadcastReceiver {
             }
 
             log("Permission USB accordée → ouverture du port…");
-
             openSerialPort(context, usb, device);
             return;
         }
 
-        /* ==========================================================
-           2. Nouveau périphérique USB détecté
-           ========================================================== */
+        /* =================== USB détecté ====================== */
         if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(action)) {
 
-            UsbDevice device =
-                    intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
-
-            log("USB DETECTÉ : " + device);
+            UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+            log("USB détecté : " + device);
 
             PendingIntent pi = PendingIntent.getBroadcast(
-                    context, 0,
+                    context,
+                    0,
                     new Intent(ACTION_USB_PERMISSION),
                     PendingIntent.FLAG_IMMUTABLE
             );
@@ -67,13 +61,12 @@ public class UsbReceiver extends BroadcastReceiver {
         }
     }
 
-    /* ==========================================================
-       Ouvre et configure le port série
-       ========================================================== */
+    /* =================== Ouverture du port ==================== */
     private void openSerialPort(Context context, UsbManager usb, UsbDevice device) {
 
         try {
-            UsbSerialDriver driver = UsbSerialProber.getDefaultProber().probeDevice(device);
+            UsbSerialDriver driver =
+                    UsbSerialProber.getDefaultProber().probeDevice(device);
 
             if (driver == null) {
                 log("Aucun driver compatible trouvé pour " + device);
@@ -82,17 +75,13 @@ public class UsbReceiver extends BroadcastReceiver {
 
             UsbSerialPort port = driver.getPorts().get(0);
 
-            log("Ouverture du port série…");
-
-            var connection = usb.openDevice(device);
+            UsbDeviceConnection connection = usb.openDevice(device);
             if (connection == null) {
                 log("Impossible d’ouvrir la connexion USB");
                 return;
             }
 
             port.open(connection);
-
-            // ✔ Configuration LCR-II standard : 19200, 8N1, no flow
             port.setParameters(
                     19200,
                     8,
@@ -100,20 +89,17 @@ public class UsbReceiver extends BroadcastReceiver {
                     UsbSerialPort.PARITY_NONE
             );
 
-            log("Port série configuré : 19200 8N1");
+            log("Port série ouvert et configuré (19200 8N1).");
 
-            // =====================================================
-            // Injection dans MainActivity
-            // =====================================================
             if (context instanceof MainActivity) {
-                log("Injection du port dans MainActivity");
                 ((MainActivity) context).setPort(port);
+                log("Port injecté dans MainActivity.");
             } else {
-                log("WARN: context n’est pas MainActivity → injection impossible");
+                log("WARN: Le context n’est pas MainActivity.");
             }
 
         } catch (Exception e) {
-            log("ERR ouverture port USB : " + e.getMessage());
+            log("Erreur ouverture port: " + e.getMessage());
         }
     }
 }
