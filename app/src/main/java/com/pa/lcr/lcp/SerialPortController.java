@@ -1,64 +1,47 @@
 
 package com.pa.lcr.lcp;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-
 public class SerialPortController {
 
-    private final InputStream in;
-    private final OutputStream out;
-
-    private static final int READ_TIMEOUT_MS = 1500;
-    private static final int MAX_RETRIES = 3;
-
-    public SerialPortController(InputStream in, OutputStream out) {
-        this.in = in;
-        this.out = out;
+    public interface Reader {
+        int read(byte[] buffer, int timeout) throws Exception;
     }
 
-    public synchronized void write(byte[] data) throws IOException {
-        out.write(data);
-        out.flush();
+    public interface Writer {
+        int write(byte[] buffer, int timeout) throws Exception;
     }
 
-    public synchronized byte[] readExact(int length) throws IOException {
+    private final Reader reader;
+    private final Writer writer;
+
+    public SerialPortController(Reader r, Writer w) {
+        this.reader = r;
+        this.writer = w;
+    }
+
+    public synchronized void write(byte[] data) throws Exception {
+        writer.write(data, 1000);
+    }
+
+    public synchronized byte[] readExact(int length) throws Exception {
         byte[] buffer = new byte[length];
         int offset = 0;
         long start = System.currentTimeMillis();
 
         while (offset < length) {
-            if (System.currentTimeMillis() - start > READ_TIMEOUT_MS) {
-                throw new IOException("Timeout: expected " + length + " bytes, got " + offset);
+            if (System.currentTimeMillis() - start > 1500) {
+                throw new Exception("Timeout readExact");
             }
 
-            int n = in.read(buffer, offset, length - offset);
-            if (n > 0) offset += n;
+            int n = reader.read(buffer, 1000);
+            if (n > 0)
+                offset += n;
         }
         return buffer;
     }
 
-    public synchronized byte[] transaction(byte[] request, int expectedResponseLength)
-            throws IOException {
-
-        IOException lastError = null;
-
-        for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-            try {
-                write(request);
-                return readExact(expectedResponseLength);
-
-            } catch (IOException ex) {
-                lastError = ex;
-
-                if (attempt == MAX_RETRIES)
-                    break;
-
-                try { Thread.sleep(100); } catch (InterruptedException ignored) {}
-            }
-        }
-
-        throw new IOException("Transaction failed after " + MAX_RETRIES + " attempts", lastError);
+    public synchronized byte[] transaction(byte[] request, int responseLength) throws Exception {
+        write(request);
+        return readExact(responseLength);
     }
 }
