@@ -3,6 +3,7 @@ package com.pa.lcr.lcp;
 
 import java.util.concurrent.*;
 import java.util.Arrays;
+import java.io.IOException;
 
 public class DeliveryController {
 
@@ -265,16 +266,16 @@ public class DeliveryController {
             setState(State.PRESTART);
             stopping = false;
 
-            try {   // <-- FIX: added
+            try {
                 prestartSequence(product, 0.0, pollMs);
-            } catch (Exception ex) {   // <-- FIX
+            } catch (Exception ex) {
                 if(events!=null) events.onError("prestartSequence", ex);
                 return;
             }
 
-            try {   // <-- FIX
+            try {
                 startDeliverySequence(pollMs);
-            } catch (Exception ex) {   // <-- FIX
+            } catch (Exception ex) {
                 if(events!=null) events.onError("startDeliverySequence", ex);
                 return;
             }
@@ -287,9 +288,9 @@ public class DeliveryController {
         exec.execute(() -> safeOp(() -> {
             stopping = true;
 
-            try {   // <-- FIX
+            try {
                 endDeliverySequence(timeoutMs,pollMs);
-            } catch (Exception ex) {   // <-- FIX
+            } catch (Exception ex) {
                 if(events!=null) events.onError("endDeliverySequence", ex);
             }
 
@@ -300,17 +301,25 @@ public class DeliveryController {
 
     public void pingStatus(){
         exec.execute(() -> safeOp(() -> {
-            int[] st = link.opMachineStatusFull();   // no change
-            log("[PING] " + Arrays.toString(st));
+            try {
+                int[] st = link.opMachineStatusFull();
+                log("[PING] " + Arrays.toString(st));
+            } catch (IOException e) {
+                if (events != null) events.onError("pingStatus", e);
+            }
         }, "pingStatus"));
     }
 
     public void resyncGetProductId(){
         exec.execute(() -> safeOp(() -> {
-            byte[] rsp = link.opGetField(LcpLink.MSG_GET_PRODUCTID);  // no change
-            if(rsp != null && rsp.length >= 1){
-                presetProduct = rsp[0] & 0xFF;
-                log("[SYNC] Product=" + presetProduct);
+            try {
+                byte[] rsp = link.opGetField(LcpLink.MSG_GET_PRODUCTID);
+                if(rsp != null && rsp.length >= 1){
+                    presetProduct = rsp[0] & 0xFF;
+                    log("[SYNC] Product=" + presetProduct);
+                }
+            } catch (IOException e) {
+                if (events != null) events.onError("resyncGetProductId", e);
             }
         }, "resyncGetProductId"));
     }
