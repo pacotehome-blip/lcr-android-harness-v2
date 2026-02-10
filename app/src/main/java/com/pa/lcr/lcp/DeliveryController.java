@@ -265,8 +265,20 @@ public class DeliveryController {
             setState(State.PRESTART);
             stopping = false;
 
-            prestartSequence(product, 0.0, pollMs);
-            startDeliverySequence(pollMs);
+            try {   // <-- FIX: added
+                prestartSequence(product, 0.0, pollMs);
+            } catch (Exception ex) {   // <-- FIX
+                if(events!=null) events.onError("prestartSequence", ex);
+                return;
+            }
+
+            try {   // <-- FIX
+                startDeliverySequence(pollMs);
+            } catch (Exception ex) {   // <-- FIX
+                if(events!=null) events.onError("startDeliverySequence", ex);
+                return;
+            }
+
             startLiveLoop(pollMs);
         }, "startOpenMode"));
     }
@@ -274,7 +286,13 @@ public class DeliveryController {
     public void endGracefully(int timeoutMs, int pollMs){
         exec.execute(() -> safeOp(() -> {
             stopping = true;
-            endDeliverySequence(timeoutMs,pollMs);
+
+            try {   // <-- FIX
+                endDeliverySequence(timeoutMs,pollMs);
+            } catch (Exception ex) {   // <-- FIX
+                if(events!=null) events.onError("endDeliverySequence", ex);
+            }
+
         }, "endGracefully"));
     }
 
@@ -282,14 +300,14 @@ public class DeliveryController {
 
     public void pingStatus(){
         exec.execute(() -> safeOp(() -> {
-            int[] st = link.opMachineStatusFull();
+            int[] st = link.opMachineStatusFull();   // no change
             log("[PING] " + Arrays.toString(st));
         }, "pingStatus"));
     }
 
     public void resyncGetProductId(){
         exec.execute(() -> safeOp(() -> {
-            byte[] rsp = link.opGetField(LcpLink.MSG_GET_PRODUCTID);
+            byte[] rsp = link.opGetField(LcpLink.MSG_GET_PRODUCTID);  // no change
             if(rsp != null && rsp.length >= 1){
                 presetProduct = rsp[0] & 0xFF;
                 log("[SYNC] Product=" + presetProduct);
