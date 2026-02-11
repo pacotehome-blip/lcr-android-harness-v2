@@ -3,14 +3,19 @@ package com.pa.lcrdemo;
 
 import androidx.appcompat.app.AppCompatActivity;
 
+import android.app.PendingIntent;
+import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbDeviceConnection;
 import android.hardware.usb.UsbManager;
 
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 
@@ -59,17 +64,54 @@ public class MainActivity extends AppCompatActivity {
     private TextView txtPrinterStatus;
     private Button btnRefreshPrinter;
 
+    // ---------- UI print pending (Cmd #6) ----------
+    private Button btnPrintPending;
+
     // ---------- USB backend ----------
     private UsbManager usbManager;
     private final List<UsbDevice> usbList = new ArrayList<>();
 
     // ---------- LCP backend ----------
     private UsbSerialPort port = null;
+    private UsbDevice lastSelectedDevice = null;
+
     private LcpLink link;
     private DeliveryController ctrl;
 
-    // pollMs used across the app (consistency)
+    // Poll / timeouts
     private static final int POLL_MS = 200;
+
+    // USB Permission
+    private static final String ACTION_USB_PERMISSION = "com.pa.lcrdemo.USB_PERMISSION";
+    private PendingIntent usbPermissionIntent;
+
+    // ==========================================================
+    // USB Permission Receiver
+    // ==========================================================
+    private final BroadcastReceiver usbPermissionReceiver = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) {
+            if (!ACTION_USB_PERMISSION.equals(intent.getAction())) return;
+
+            UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+            boolean granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
+
+            if (device == null) {
+                log("Permission USB: device=null");
+                return;
+            }
+
+            if (granted) {
+                log("Permission USB accordée: " + usbLabel(device));
+                // Try open immediately
+                UsbSerialPort p = tryOpenDevice(device);
+                if (p != null) {
+                    setPort(p);
+                }
+            } else {
+                log("Permission USB REFUSÉE: " + usbLabel(device));
+            }
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -80,23 +122,37 @@ public class MainActivity extends AppCompatActivity {
         applyDefaultValues();
         installHandlers();
 
-        // Apply initial dump flags (Option 1)
+        usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
+
+        // PendingIntent flags (Android 12+)
+        int piFlags = PendingIntent.FLAG_UPDATE_CURRENT;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            // For USB permission broadcast, mutable is safer on some devices; immutable also works in many cases.
+            // We'll use MUTABLE for compatibility.
+            piFlags |= PendingIntent.FLAG_MUTABLE;
+        }
+        usbPermissionIntent = PendingIntent.getBroadcast(this, 0, new Intent(ACTION_USB_PERMISSION), piFlags);
+
+        registerReceiver(usbPermissionReceiver, new IntentFilter(ACTION_USB_PERMISSION));
+
+        // Apply initial dump flags
         LcpLink.DUMP_TX = switchIoLog.isChecked();
         LcpLink.DUMP_RX = switchIoLog.isChecked();
 
-        // Printer status always visible (default)
+        // Printer status always visible (default text)
         txtPrinterStatus.setText("Imprimante: (non connecté / non lu)");
         txtPrinterStatus.setBackgroundColor(0xFFEEEEEE);
 
-        log("Prêt. En attente du port USB… Brancher l'adaptateur RS‑232.");
+        log("Prêt. 1) Choisir USB  2) Ouvrir/Ping  3) Connect (LCP).");
 
-        // Fallback USB scan if no receiver port
-        new Handler().postDelayed(() -> {
-            if (port == null) {
-                log("UsbReceiver silencieux → tentative fallback USB…");
-                scanUsbDevices();
-            }
-        }, 800);
+        // Auto-scan shortly after start
+        new Handler().postDelayed(this::scanUsbDevices, 400);
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        try { unregisterReceiver(usbPermissionReceiver); } catch (Exception ignored) {}
     }
 
     // ==========================================================
@@ -111,13 +167,15 @@ public class MainActivity extends AppCompatActivity {
     // Bind UI
     // ==========================================================
     private void bindUI() {
+        // Connexion
         edtTo = findViewById(R.id.edtTo);
         edtFrom = findViewById(R.id.edtFrom);
+
+        // Delivery params
         edtProduct = findViewById(R.id.edtProduct);
         edtPreset = findViewById(R.id.edtPreset);
 
-        btnCopyLog = findViewById(R.id.btnCopyLog);
-        btnClearLog = findViewById(R.id.btnClearLog);
+        // Buttons
         btnConnect = findViewById(R.id.btnConnect);
 
         btnA = findViewById(R.id.btnA);
@@ -127,24 +185,30 @@ public class MainActivity extends AppCompatActivity {
         btnContinue = findViewById(R.id.btnContinue);
         btnFinish = findViewById(R.id.btnFinish);
 
+        // Logs
         switchIoLog = findViewById(R.id.switchIoLog);
         txtLog = findViewById(R.id.txtLog);
         logScroll = findViewById(R.id.logScroll);
+        btnCopyLog = findViewById(R.id.btnCopyLog);
+        btnClearLog = findViewById(R.id.btnClearLog);
 
+        // USB
         spnUsbDevices = findViewById(R.id.spnUsbDevices);
         btnScanUsb = findViewById(R.id.btnScanUsb);
         btnPingUsb = findViewById(R.id.btnPingUsb);
 
-        // Ticket / Printer UI (always visible)
+        // Ticket
         txtTicketNumber = findViewById(R.id.txtTicketNumber);
         spnTicketRequired = findViewById(R.id.spnTicketRequired);
         btnRefreshTicket = findViewById(R.id.btnRefreshTicket);
         btnClearShift = findViewById(R.id.btnClearShift);
 
+        // Printer
         txtPrinterStatus = findViewById(R.id.txtPrinterStatus);
         btnRefreshPrinter = findViewById(R.id.btnRefreshPrinter);
 
-        usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
+        // Print pending (Cmd #6)
+        btnPrintPending = findViewById(R.id.btnPrintPending);
     }
 
     // ==========================================================
@@ -153,13 +217,13 @@ public class MainActivity extends AppCompatActivity {
     private void applyDefaultValues() {
         edtTo.setText("0xFA");
         edtFrom.setText("0xFF");
+
         edtProduct.setText("1");
         edtPreset.setText("50.0");
 
-        // Option 1: master logs + dumps
         switchIoLog.setChecked(true);
 
-        // TicketRequired default = 1 (No ticket required) — métier terrain [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+        // TicketRequired default = 1 (ticket non requis; imprime si possible) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
         ArrayAdapter<String> ticketReqAdapter = new ArrayAdapter<>(
                 this,
                 android.R.layout.simple_spinner_item,
@@ -181,12 +245,14 @@ public class MainActivity extends AppCompatActivity {
     // ==========================================================
     private void installHandlers() {
 
-        // Option 1: checkbox controls UI logs and I/O dumps
         switchIoLog.setOnCheckedChangeListener((btn, checked) -> {
             LcpLink.DUMP_TX = checked;
             LcpLink.DUMP_RX = checked;
             if (checked) log("[UI] I/O + logs activés");
         });
+
+        btnScanUsb.setOnClickListener(v -> scanUsbDevices());
+        btnPingUsb.setOnClickListener(v -> openSelectedUsbDevice());
 
         btnConnect.setOnClickListener(v -> initLcp());
 
@@ -202,46 +268,38 @@ public class MainActivity extends AppCompatActivity {
         // A: END
         btnA.setOnClickListener(v -> {
             if (ctrl == null) { log("Pas connecté."); return; }
-            log("A : END (reset)");
-            ctrl.endGracefully(15000, POLL_MS);
+            log("A : END");
+            ctrl.endGracefully(20000, POLL_MS);
         });
 
-        // B: PING / status
+        // B: PING / status (0x23)
         btnB.setOnClickListener(v -> {
             if (ctrl == null) { log("Pas connecté."); return; }
             log("PING (#23)");
             ctrl.pingStatus(POLL_MS);
         });
 
-        // C: Start Delivery (simple delivery) — uses preset!
+        // C: Start Delivery (product + preset)
         btnC.setOnClickListener(v -> {
             if (ctrl == null) { log("Pas connecté."); return; }
             int product = readInt(edtProduct, 1);
             double preset = readDouble(edtPreset, 0);
 
             log("C : Start Delivery (product=" + product + ", preset=" + preset + ")");
-            ctrl.startOpenMode(product, preset, 15000, POLL_MS);
-
-            // UI lock handled by onStateChanged
+            ctrl.startOpenMode(product, preset, 20000, POLL_MS);
         });
 
-        // Continue (debug only): keep but it will ignore unless RUNNING
         btnContinue.setOnClickListener(v -> {
             if (ctrl == null) return;
-            log("Continuer...");
+            log("Continuer live loop...");
             ctrl.startLiveLoop(POLL_MS);
         });
 
-        // Finish (END)
         btnFinish.setOnClickListener(v -> {
             if (ctrl == null) return;
-            log("Terminé.");
-            ctrl.endGracefully(15000, POLL_MS);
+            log("Terminé (END)");
+            ctrl.endGracefully(20000, POLL_MS);
         });
-
-        // USB scan & ping
-        btnScanUsb.setOnClickListener(v -> scanUsbDevices());
-        btnPingUsb.setOnClickListener(v -> pingSelectedUsbDevice());
 
         // Ticket refresh
         btnRefreshTicket.setOnClickListener(v -> {
@@ -249,37 +307,44 @@ public class MainActivity extends AppCompatActivity {
             ctrl.refreshTicketInfo(POLL_MS);
         });
 
-        // TicketRequired UI -> set field #37
+        // TicketRequired selection -> set field #37
         spnTicketRequired.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             boolean first = true;
             @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                if (first) { first = false; return; } // avoid immediate set at init
+                if (first) { first = false; return; }
                 if (ctrl == null) return;
                 ctrl.setTicketRequired(position, POLL_MS); // 0/1/2 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
             }
             @Override public void onNothingSelected(AdapterView<?> parent) {}
         });
 
-        // Clear Shift button (Field #16=0) depends on #37 behavior [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+        // Clear Shift (#16)=0
         btnClearShift.setOnClickListener(v -> {
             if (ctrl == null) { log("Pas connecté."); return; }
             log("SHIFT : ClearShift (#16)=0");
             ctrl.clearShiftNow(POLL_MS);
         });
 
-        // Printer status refresh (0x23). Disabled during RUNNING by onStateChanged. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+        // Printer status refresh (0x23) — avoid during RUNNING [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
         btnRefreshPrinter.setOnClickListener(v -> {
             if (ctrl == null) { log("Pas connecté."); return; }
             ctrl.refreshPrinterStatus(POLL_MS);
         });
+
+        // Print pending ticket (Cmd #6) — only when not RUNNING [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+        btnPrintPending.setOnClickListener(v -> {
+            if (ctrl == null) { log("Pas connecté."); return; }
+            log("PRINT PENDING : Cmd #6");
+            ctrl.printPendingTicket(POLL_MS, 25000);
+        });
     }
 
     // ==========================================================
-    // Init LCP
+    // Init LCP (after USB port is opened)
     // ==========================================================
     private void initLcp() {
         if (port == null) {
-            log("ERR: Port USB non initialisé. Brancher l'adaptateur RS‑232.");
+            log("ERR: Port USB non initialisé. 1) Scan 2) Ouvrir/Ping 3) Connect");
             return;
         }
 
@@ -291,7 +356,7 @@ public class MainActivity extends AppCompatActivity {
 
             link = new LcpLink(port, to, from, true);
 
-            // Bridge low-level logs (TX/RX dumps + internal)
+            // Bridge low-level logs
             LcpLink.setLogger(line -> log("[IO] " + line));
             LcpLink.DUMP_TX = switchIoLog.isChecked();
             LcpLink.DUMP_RX = switchIoLog.isChecked();
@@ -304,15 +369,10 @@ public class MainActivity extends AppCompatActivity {
 
             log("LCP prêt. Appareil LCR-II accessible.");
 
-            // Default ticket policy: force TicketRequired(#37)=1 (optional) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+            // Keep connect sequence minimal (avoid too many 0x23 right away). [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
             ctrl.ensureDefaultTicketRequiredIs1(POLL_MS);
-
-            // Refresh ticket info + printer status at connect (Option 2)
             ctrl.refreshTicketInfo(POLL_MS);
             ctrl.refreshPrinterStatus(POLL_MS);
-
-            // Optional: ping (includes printer status in our controller)
-            ctrl.pingStatus(POLL_MS);
 
         } catch (Exception e) {
             log("Erreur init LCP : " + e.getMessage());
@@ -320,10 +380,9 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // ==========================================================
-    // Logging helper
+    // Logging helper (respects checkbox)
     // ==========================================================
     private void log(String s) {
-        // Option 1: checkbox is master mute
         if (!switchIoLog.isChecked()) return;
 
         runOnUiThread(() -> {
@@ -340,19 +399,16 @@ public class MainActivity extends AppCompatActivity {
         boolean startingOrPre = (s == DeliveryController.State.STARTING || s == DeliveryController.State.PRESTART);
         boolean ending = (s == DeliveryController.State.ENDING);
 
-        // Start disabled while in progress
         btnC.setEnabled(!(running || startingOrPre || ending));
-        // Finish enabled when running/starting (allow user to stop quickly)
         btnFinish.setEnabled(running || startingOrPre);
 
-        // Avoid printer status refresh during RUNNING (0x23 may delay if printer offline) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+        // Avoid 0x23 during RUNNING (may be slow if printer offline) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
         btnRefreshPrinter.setEnabled(!running);
+        btnPrintPending.setEnabled(!running); // cmd#6 won't print if delivery active [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
 
-        // Ticket controls enabled when not running (optional policy)
         spnTicketRequired.setEnabled(!running);
         btnClearShift.setEnabled(!running);
 
-        // Continue: keep enabled only if running
         btnContinue.setEnabled(running);
     }
 
@@ -381,7 +437,21 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // ==========================================================
-    // USB scan
+    // USB helpers (labels with Manufacturer/Product)
+    // ==========================================================
+    private static String safe(String s) {
+        return (s == null || s.trim().isEmpty()) ? "?" : s.trim();
+    }
+
+    private static String usbLabel(UsbDevice d) {
+        String m = safe(d.getManufacturerName());
+        String p = safe(d.getProductName());
+        return String.format("%s - %s (VID=%04X PID=%04X)",
+                m, p, d.getVendorId(), d.getProductId());
+    }
+
+    // ==========================================================
+    // USB scan / open
     // ==========================================================
     private void scanUsbDevices() {
         usbList.clear();
@@ -395,9 +465,7 @@ public class MainActivity extends AppCompatActivity {
         }
 
         List<String> labels = new ArrayList<>();
-        for (UsbDevice d : usbList) {
-            labels.add(String.format("VID=%04X PID=%04X", d.getVendorId(), d.getProductId()));
-        }
+        for (UsbDevice d : usbList) labels.add(usbLabel(d));
 
         ArrayAdapter<String> adapter = new ArrayAdapter<>(
                 this, android.R.layout.simple_spinner_item, labels);
@@ -406,9 +474,40 @@ public class MainActivity extends AppCompatActivity {
 
         log("Scan terminé : " + labels.size() + " périphérique(s) trouvé(s).");
         if (labels.isEmpty()) log("Aucun périphérique USB détecté.");
+        else log("USB[0] = " + labels.get(0));
+    }
+
+    private void openSelectedUsbDevice() {
+        int index = spnUsbDevices.getSelectedItemPosition();
+        if (index < 0 || index >= usbList.size()) {
+            log("Aucun device sélectionné.");
+            return;
+        }
+
+        UsbDevice dev = usbList.get(index);
+        lastSelectedDevice = dev;
+
+        // Permission check
+        if (usbManager != null && !usbManager.hasPermission(dev)) {
+            log("Permission USB requise pour: " + usbLabel(dev));
+            usbManager.requestPermission(dev, usbPermissionIntent);
+            return;
+        }
+
+        UsbSerialPort p = tryOpenDevice(dev);
+        if (p == null) {
+            log("Impossible d'ouvrir le port USB sélectionné.");
+            return;
+        }
+
+        setPort(p);
+        log("PING (#23)…");
+        log("USB ouvert; maintenant tu peux faire Connect (LCP).");
     }
 
     private UsbSerialPort tryOpenDevice(UsbDevice dev) {
+        log("USB sélectionné: " + usbLabel(dev));
+
         UsbSerialDriver driver = UsbSerialProber.getDefaultProber().probeDevice(dev);
         if (driver == null) {
             log("Aucun driver USB‑Série pour ce périphérique.");
@@ -416,8 +515,8 @@ public class MainActivity extends AppCompatActivity {
         }
 
         UsbSerialPort p = driver.getPorts().get(0);
-        UsbDeviceConnection conn = usbManager.openDevice(dev);
 
+        UsbDeviceConnection conn = usbManager.openDevice(dev);
         if (conn == null) {
             log("Permission USB refusée / impossible d'ouvrir le device.");
             return null;
@@ -426,37 +525,12 @@ public class MainActivity extends AppCompatActivity {
         try {
             p.open(conn);
             p.setParameters(19200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
-            log("Port ouvert pour " + dev);
+            log("Port ouvert: " + usbLabel(dev) + " (19200 8N1)");
             return p;
         } catch (Exception e) {
             log("Erreur ouverture: " + e.getMessage());
+            try { p.close(); } catch (Exception ignored) {}
             return null;
-        }
-    }
-
-    private void pingSelectedUsbDevice() {
-        int index = spnUsbDevices.getSelectedItemPosition();
-        if (index < 0 || index >= usbList.size()) {
-            log("Aucun device sélectionné.");
-            return;
-        }
-
-        UsbDevice dev = usbList.get(index);
-        UsbSerialPort testPort = tryOpenDevice(dev);
-
-        if (testPort == null) {
-            log("Impossible d'ouvrir le port USB sélectionné.");
-            return;
-        }
-
-        try {
-            log("PING (#23)…");
-            // Reuse our normal connect path
-            setPort(testPort);
-            log("PING déclenché (voir I/O TX/RX).");
-        } catch (Exception e) {
-            log("✖ PING FAIL : " + e.getMessage());
-            try { testPort.close(); } catch(Exception ignored){}
         }
     }
 
@@ -475,7 +549,6 @@ public class MainActivity extends AppCompatActivity {
 
         @Override
         public void onProgress(DeliveryController.DeliveryProgress p) {
-            // "en livraison" = deliveredNetL / deliveredGrossL
             log(String.format("PROG t=%dms NET=%.1f (en_liv=%.1f) | GROSS=%.1f (en_liv=%.1f) ds=%04X dc=%04X",
                     p.tSinceStartMs,
                     p.netL, p.deliveredNetL,
@@ -490,14 +563,12 @@ public class MainActivity extends AppCompatActivity {
 
         @Override
         public void onTicketRequired(int mode) {
-            // mode: 0/1/2 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
             int idx = Math.max(0, Math.min(2, mode));
             runOnUiThread(() -> spnTicketRequired.setSelection(idx));
         }
 
         @Override
         public void onPrinterStatus(LcpLink.MachineStatusEx ms, boolean ticketPending) {
-            // prnStatus bits are decoded in LcpLink according to PDF Printer Bits [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
             final String text = "Imprimante: " + ms.printer().summary()
                     + " | ticketPending=" + ticketPending
                     + " | ds=0x" + String.format("%04X", ms.delStatus)
@@ -525,7 +596,6 @@ public class MainActivity extends AppCompatActivity {
 
         @Override
         public void onLog(String line) {
-            // App logs
             log("[LCP] " + line);
         }
     }

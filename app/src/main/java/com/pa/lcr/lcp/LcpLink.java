@@ -15,10 +15,9 @@ import java.util.concurrent.locks.ReentrantLock;
  *
  * Spec references (PDF):
  * - LCP framing: ~~ <to><from><status><len><payload...><crc0><crc1> + ESC rules + CRC seed 0x7E7E poly 0x1021. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
- * - Get Machine Status (0x23) returns payload 7 bytes: rc, devStatus(byte), prnStatus(byte), delStatus(u16), delCode(u16). [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
- * - Get Delivery Status (0x28) returns payload 6 bytes: rc, devStatus(byte), delStatus(u16), delCode(u16). [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
- * - Printer Bits are in prnStatus byte (0x10 paper, 0x20 no processor, 0x40 error, 0x80 printing started...). [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
- * - Delivery Code bit 0x0001 means delivery ticket pending (blocks new delivery until printed). [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+ * - Get Machine Status (0x23) payload 7 bytes: rc, devStatus(byte), prnStatus(byte), delStatus(u16), delCode(u16). [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+ * - Get Delivery Status (0x28) payload 6 bytes: rc, devStatus(byte), delStatus(u16), delCode(u16). [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+ * - Printer Bits in prnStatus (0x10 paper, 0x20 no processor, 0x40 error, 0x80 started printing, etc.). [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
  */
 public class LcpLink {
 
@@ -42,11 +41,11 @@ public class LcpLink {
     public static final int MSG_ISSUE_COMMAND  = 0x24;
     public static final int MSG_GET_DEL_STATUS = 0x28;
 
-    // queued support (legacy-compatible) — Check Request 0x7D [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+    // queued support (legacy-compatible)
     public static final int MSG_CHECK_REQUEST  = 0x7D;
     public static final int MSG_GET_PRODUCTID  = 0x00;
 
-    // Return codes (wire values commonly observed; doc lists queued concepts) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+    // Return codes observed in existing stack
     public static final int RC_OK                = 0x00;
     public static final int RC_REQUEST_QUEUED    = 0x26;
     public static final int RC_NO_REQUEST_ACTIVE = 0x27;
@@ -568,7 +567,6 @@ public class LcpLink {
                 sleep(pollMs);
                 continue;
             }
-
             return p;
         }
 
@@ -660,7 +658,6 @@ public class LcpLink {
             if ((p[0] & 0xFF) == RC_REQUEST_QUEUED || (p[0] & 0xFF) == RC_NO_REQUEST_ACTIVE) p = waitQueued(7000, 150);
         }
 
-        // Return from Get Field Data: rc, devStatus, fieldData... [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
         if (p == null || p.length < 2 || (p[0] & 0xFF) != RC_OK) throw new IOException("GET_FIELD #" + field);
         return Arrays.copyOfRange(p, 2, p.length);
     }
@@ -685,7 +682,6 @@ public class LcpLink {
             if ((p[0] & 0xFF) == RC_REQUEST_QUEUED || (p[0] & 0xFF) == RC_NO_REQUEST_ACTIVE) p = waitQueued(9000, 150);
         }
 
-        // Return from Set Field Data: rc, devStatus [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
         if (p == null || p.length < 1 || (p[0] & 0xFF) != RC_OK) throw new IOException("SET_FIELD #" + field);
     }
 
@@ -712,7 +708,6 @@ public class LcpLink {
         return p;
     }
 
-    /** MsgID 0x22: Print Text on LCR Printer */
     public byte[] opPrintText(byte[] text) throws IOException {
         if (text == null) text = new byte[0];
         byte[] req = new byte[1 + text.length];
@@ -737,7 +732,6 @@ public class LcpLink {
         return p;
     }
 
-    /** MsgID 0x00: Get Product ID */
     public byte[] opGetProductId() throws IOException {
         byte[] req = new byte[]{ (byte)MSG_GET_PRODUCTID };
         byte[] rsp = sendRecv(req, 3000);
@@ -749,9 +743,7 @@ public class LcpLink {
 
     // ============================== 0x23 / 0x28 ==============================
 
-    /**
-     * Printer status bits (prnStatus byte) are defined in the spec. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
-     */
+    /** Printer Bits decode. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf) */
     public static final class PrinterStatus {
         public final int raw;
         public final boolean reqDelivery;
@@ -815,7 +807,7 @@ public class LcpLink {
         }
     }
 
-    /** Get Machine Status (0x23): returns printer status byte; may delay if printer offline. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf) */
+    /** Get Machine Status (0x23) — may be slow if printer offline. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf) */
     public MachineStatusEx opMachineStatusEx() throws IOException {
         if (pollingBlocked) throw new IOException("POLL_BLOCKED");
         if (pollOwner != null && Thread.currentThread() != pollOwner)
@@ -834,7 +826,7 @@ public class LcpLink {
 
             INTERNAL_OK.set(Boolean.TRUE);
             try {
-                // doc: 0x23 can have ~2s delay if printer is offline [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+                // doc: 0x23 can incur ~2s delay if printer offline [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
                 byte[] rsp = sendRecv(new byte[]{ (byte)MSG_GET_MACHINE }, 6000);
                 LcpStatus st = extractStatus(rsp);
                 byte[] p = extractPayload(rsp);
@@ -849,7 +841,6 @@ public class LcpLink {
                     if ((p[0] & 0xFF) == RC_REQUEST_QUEUED || (p[0] & 0xFF) == RC_NO_REQUEST_ACTIVE) p = waitQueued(9000, 200);
                 }
 
-                // payload: rc(1), devStatus(1), prnStatus(1), delStatus(2), delCode(2) => 7 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
                 if (p == null || p.length < 7 || (p[0] & 0xFF) != RC_OK) {
                     throw new IOException("Invalid 0x23 payload");
                 }
@@ -867,13 +858,12 @@ public class LcpLink {
         }
     }
 
-    /** Backward-compatible helper: returns {devStatusByte, delStatus, delCode}. */
     public int[] opMachineStatusFull() throws IOException {
         MachineStatusEx ms = opMachineStatusEx();
         return new int[]{ ms.devStatus, ms.delStatus, ms.delCode };
     }
 
-    /** Get Delivery Status (0x28): no prnStatus (fast). Returns {delStatus, delCode}. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf) */
+    /** Get Delivery Status (0x28) — fast, no prnStatus. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf) */
     public int[] opDeliveryStatus() throws IOException {
         if (pollingBlocked) throw new IOException("POLL_BLOCKED");
         if (pollOwner != null && Thread.currentThread() != pollOwner)
@@ -905,7 +895,6 @@ public class LcpLink {
                     if ((p[0] & 0xFF) == RC_REQUEST_QUEUED || (p[0] & 0xFF) == RC_NO_REQUEST_ACTIVE) p = waitQueued(7000, 150);
                 }
 
-                // payload: rc(1), devStatus(1), delStatus(2), delCode(2) => 6 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
                 if (p == null || p.length < 6 || (p[0] & 0xFF) != RC_OK) throw new IOException("Invalid 0x28 payload");
                 int ds = u16be(p, 2);
                 int dc = u16be(p, 4);
