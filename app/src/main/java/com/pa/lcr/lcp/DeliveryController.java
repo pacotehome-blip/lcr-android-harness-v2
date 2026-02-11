@@ -7,32 +7,31 @@ import java.util.Arrays;
 import java.util.concurrent.*;
 
 /**
- * DeliveryController — version corrigée:
- * - Produit actif = Field #0 (ProductNumber_DL, LIST+0) mapping product 1..16 -> value 0..15. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
- * - Preset net = Field #6 (NetPreset_PL, VOLUME) encodé sur 4 bytes big-endian, décimales via Field #39. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
- * - FLOW_ACTIVE / DELIVERY_ACTIVE = bits dans delCode (dc) (Get Delivery Status 0x28). [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
- * - Quantités live via Field #44/#45 (GrossCount/NetCount). [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
- * - PrintText via MsgID 0x22 (opPrintText), ProductId via MsgID 0x00 (opGetProductId). [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
- * - Evite POLL_BLOCKED avec poll window temporaire.
- * - Live loop robuste: un raté ponctuel de lecture compteur ne met pas l’état ERROR.
- * - END: force PythonCompat pendant la séquence (queued + 0x7D).
+ * DeliveryController — version corrigée "métier" + impression détaillée.
+ *
+ * Références:
+ * - Champs: Excel "LCR Registers' Fields.xlsx" (Field #0, #6, #39, #44/#45, #16, #23, #37). [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+ * - Protocole: PDF "LCR API Internal Messages for LCP.pdf" (0x23 prnStatus bits; 0x28; DeliveryCode bits; TicketRequired behavior). [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
  */
 public class DeliveryController {
 
-    // ------------------------- Champs LCR (spec) -------------------------
-    private static final int FIELD_PRODUCT_NUMBER = 0;   // ProductNumber_DL [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
-    private static final int FIELD_GROSS_PRESET   = 5;   // GrossPreset_PL [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
-    private static final int FIELD_NET_PRESET     = 6;   // NetPreset_PL [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
-    private static final int FIELD_DECIMALS       = 39;  // Decimals_WM [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
-    private static final int FIELD_GROSS_COUNT    = 44;  // GrossCount_NE [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
-    private static final int FIELD_NET_COUNT      = 45;  // NetCount_NE [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+    // ------------------------- Champs LCR (métier) -------------------------
+    private static final int FIELD_PRODUCT_NUMBER = 0;   // ProductNumber [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+    private static final int FIELD_NET_PRESET     = 6;   // NetPreset [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+    private static final int FIELD_DECIMALS       = 39;  // Decimals [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+    private static final int FIELD_GROSS_COUNT    = 44;  // GrossCount [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+    private static final int FIELD_NET_COUNT      = 45;  // NetCount [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+
+    private static final int FIELD_CLEAR_SHIFT     = 16; // ClearShift [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+    private static final int FIELD_TICKET_NUMBER   = 23; // TicketNumber [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+    private static final int FIELD_TICKET_REQUIRED = 37; // TicketRequired [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
 
     // ------------------------- Dépendances -------------------------
     private final LcpLink link;
     private final DeliveryEvents events;
     private final ExecutorService exec;
 
-    // Un seul scheduler (évite double live loop / fuites)
+    // Un seul scheduler
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     private ScheduledFuture<?> liveLoopFuture;
 
@@ -43,7 +42,7 @@ public class DeliveryController {
     private volatile boolean stopping = false;
     private volatile boolean pollWindowOpen = false;
 
-    // Guard
+    // Guard (optionnel)
     private volatile boolean guardEnabled = false;
     private volatile double guardTargetLitres = 0;
 
@@ -58,34 +57,50 @@ public class DeliveryController {
     // Cache décimales (#39)
     private volatile int cachedDecimals = -1;
 
-    // Flow transitions (évite spam)
+    // Flow transitions
     private volatile Boolean lastFlow = null;
 
-    // UI state info
+    // Params preset
     private volatile int presetProduct = 1;
     private volatile double presetLitres = 0;
 
+    // ============================= EVENTS =============================
     public interface DeliveryEvents {
         void onStateChanged(State s);
         void onFlowStarted();
         void onFlowStopped();
-        void onLiveSample(int ds, int dc, double grossL, double netL);
         void onProgress(DeliveryProgress p);
-        void onGuardReached();
+
+        // UI métier
+        void onTicketNumber(int ticketNumber);
+        void onTicketRequired(int mode); // 0/1/2 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+
+        // UI statut imprimante détaillé
+        void onPrinterStatus(LcpLink.MachineStatusEx ms, boolean ticketPending);
+
         void onError(String msg, Throwable t);
         void onLog(String line);
     }
 
     public static final class DeliveryProgress {
         public long tSinceStartMs;
-        public double grossL;
-        public double netL;
+
+        // compteurs bruts (absolus, current delivery)
+        public double grossL;    // #44 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+        public double netL;      // #45 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+
+        // deltas depuis start = "en livraison"
+        public double deliveredGrossL;
+        public double deliveredNetL;
+
+        // deltas instantanés
         public double dGrossL;
         public double dNetL;
+
         public boolean flowActive;
         public boolean stalled;
-        public int ds; // delStatus
-        public int dc; // delCode
+        public int ds;
+        public int dc;
     }
 
     public DeliveryController(LcpLink link, DeliveryEvents cb, ExecutorService svc) {
@@ -94,7 +109,7 @@ public class DeliveryController {
         this.exec = svc;
     }
 
-    // ------------------------- Helpers log/etat -------------------------
+    // ============================= Helpers =============================
     private void log(String s){ if (events != null) events.onLog(s); }
 
     private void setState(State s) {
@@ -110,23 +125,41 @@ public class DeliveryController {
         }
     }
 
-    // ------------------------- Helpers protocole -------------------------
+    /** Ouvre une poll window temporaire si nécessaire (évite POLL_BLOCKED). */
+    private <T> T withPollWindow(Callable<T> op) throws Exception {
+        boolean openedHere = false;
+        if (!pollWindowOpen) {
+            link.openPollWindow(); // owner=ANY [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+            pollWindowOpen = true;
+            openedHere = true;
+        }
+        try {
+            return op.call();
+        } finally {
+            if (openedHere) {
+                try { link.closePollWindow(); } catch (Exception ignored) {}
+                pollWindowOpen = false;
+            }
+        }
+    }
+
     private static int productToList0Value(int product) {
         if (product < 1 || product > 16) throw new IllegalArgumentException("product must be 1..16");
-        return product - 1; // LIST+0: 0=>prod1, 1=>prod2, ...
+        return product - 1; // Field #0 values 0..15 => products 1..16 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
     }
 
     private int getDecimals() throws Exception {
         if (cachedDecimals >= 0) return cachedDecimals;
-        byte[] d = link.opGetField(FIELD_DECIMALS);
+        byte[] d = link.opGetField(FIELD_DECIMALS); // #39 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
         cachedDecimals = (d != null && d.length >= 1) ? (d[0] & 0xFF) : 0;
         return cachedDecimals;
     }
 
     private static int scaleForDecimalsIndex(int decimalsIndex) {
-        // LIST+14: 0=hundredths, 1=tenths, 2=whole [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+        // doc/excel: 0=Hundredths, 1=Tenths, 2=Whole, 3=Thousandths (on supporte 3) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
         if (decimalsIndex == 1) return 10;
         if (decimalsIndex == 2) return 1;
+        if (decimalsIndex == 3) return 1000;
         return 100;
     }
 
@@ -134,7 +167,6 @@ public class DeliveryController {
         int scale = scaleForDecimalsIndex(decimalsIndex);
         long raw = Math.round(litres * scale);
         int v = (int) raw;
-        // Big-endian (MSB first) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
         return new byte[] {
                 (byte)((v >> 24) & 0xFF),
                 (byte)((v >> 16) & 0xFF),
@@ -155,60 +187,183 @@ public class DeliveryController {
 
     private double readGrossLitres() throws Exception {
         int dec = getDecimals();
-        return decodeVolume(link.opGetField(FIELD_GROSS_COUNT), dec);
+        return decodeVolume(link.opGetField(FIELD_GROSS_COUNT), dec); // #44 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
     }
 
     private double readNetLitres() throws Exception {
         int dec = getDecimals();
-        return decodeVolume(link.opGetField(FIELD_NET_COUNT), dec);
+        return decodeVolume(link.opGetField(FIELD_NET_COUNT), dec); // #45 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
     }
 
-    /** Ouvre une poll window temporaire si nécessaire (évite POLL_BLOCKED). */
-    private <T> T withPollWindow(Callable<T> op) throws Exception {
-        boolean openedHere = false;
-        if (!pollWindowOpen) {
-            link.openPollWindow();
-            pollWindowOpen = true;
-            openedHere = true;
-        }
-        try {
-            return op.call();
-        } finally {
-            if (openedHere) {
-                try { link.closePollWindow(); } catch (Exception ignored) {}
-                pollWindowOpen = false;
+    // Field #23 TicketNumber = LONG/SL = 4 bytes signed int [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+    private static int s32be(byte[] b4) {
+        if (b4 == null || b4.length < 4) return 0;
+        return ((b4[0] & 0xFF) << 24) | ((b4[1] & 0xFF) << 16) | ((b4[2] & 0xFF) << 8) | (b4[3] & 0xFF);
+    }
+
+    private int readTicketNumber() throws Exception {
+        return s32be(link.opGetField(FIELD_TICKET_NUMBER)); // #23 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+    }
+
+    private int readTicketRequired() throws Exception {
+        byte[] raw = link.opGetField(FIELD_TICKET_REQUIRED); // #37 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+        return (raw != null && raw.length > 0) ? (raw[0] & 0xFF) : 0;
+    }
+
+    // ============================= PRINTER STATUS =============================
+
+    /**
+     * Rafraîchit le statut imprimante détaillé (0x23) + ticketPending (dc bit 0x0001).
+     * IMPORTANT: 0x23 peut introduire ~2s si printer offline; on l'appelle seulement Connect/Prestart/End. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+     */
+    public void refreshPrinterStatus(int pollMs) {
+        exec.execute(() -> safeOp(() -> {
+            try {
+                link.setPythonCompat(true, pollMs);
+
+                LcpLink.MachineStatusEx ms = withPollWindow(() -> link.opMachineStatusEx()); // 0x23 includes prnStatus [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+                boolean pending = (ms.delCode & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;     // blocks next delivery until printed [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+
+                log("[PRN] " + ms.toString() + " ticketPending=" + pending);
+
+                if (events != null) events.onPrinterStatus(ms, pending);
+
+            } catch (Exception e) {
+                if (events != null) events.onError("refreshPrinterStatus", e);
             }
-        }
+        }, "refreshPrinterStatus"));
+    }
+
+    // ============================= TICKET INFO (UI) =============================
+
+    public void refreshTicketInfo(int pollMs) {
+        exec.execute(() -> safeOp(() -> {
+            try {
+                link.setPythonCompat(true, pollMs);
+
+                int tr = readTicketRequired();
+                int tn = readTicketNumber();
+
+                log("[TICKET] TicketRequired(#37)=" + tr + " (0=req,1=optional,2=never)"); // [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+                log("[TICKET] TicketNumber(#23)=" + tn + " (increments after printing)");  // [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+
+                if (events != null) {
+                    events.onTicketRequired(tr);
+                    events.onTicketNumber(tn);
+                }
+
+            } catch (Exception e) {
+                if (events != null) events.onError("refreshTicketInfo", e);
+            }
+        }, "refreshTicketInfo"));
+    }
+
+    /** Met TicketRequired (#37) à une valeur (0/1/2) et loggue avant/après. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf) */
+    public void setTicketRequired(int mode, int pollMs) {
+        exec.execute(() -> safeOp(() -> {
+            try {
+                if (mode < 0 || mode > 2) throw new IllegalArgumentException("TicketRequired must be 0..2");
+
+                link.setPythonCompat(true, pollMs);
+
+                int before = readTicketRequired();
+                link.opSetField(FIELD_TICKET_REQUIRED, new byte[]{ (byte)mode });
+                int after = readTicketRequired();
+
+                log("[TICKET] TicketRequired(#37) change " + before + " -> " + after + " (requested=" + mode + ")"); // [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+                if (events != null) events.onTicketRequired(after);
+
+            } catch (Exception e) {
+                if (events != null) events.onError("setTicketRequired", e);
+            }
+        }, "setTicketRequired"));
+    }
+
+    /** Force la politique par défaut: TicketRequired(#37)=1 (optional), pour éviter blocage terrain. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf) */
+    public void ensureDefaultTicketRequiredIs1(int pollMs) {
+        exec.execute(() -> safeOp(() -> {
+            try {
+                link.setPythonCompat(true, pollMs);
+                int tr = readTicketRequired();
+                if (tr != 1) {
+                    log("[TICKET] TicketRequired(#37) read=" + tr + " -> setting to 1 (default optional)"); // [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+                    link.opSetField(FIELD_TICKET_REQUIRED, new byte[]{ (byte)1 });
+                    int tr2 = readTicketRequired();
+                    log("[TICKET] TicketRequired(#37) now=" + tr2);
+                    if (events != null) events.onTicketRequired(tr2);
+                } else {
+                    log("[TICKET] TicketRequired(#37) already 1 (default OK)");
+                }
+            } catch (Exception e) {
+                if (events != null) events.onError("ensureDefaultTicketRequiredIs1", e);
+            }
+        }, "ensureDefaultTicketRequiredIs1"));
+    }
+
+    /**
+     * ClearShift (#16)=0 (clear).
+     * NOTE: comportement dépend de TicketRequired (#37):
+     * - si #37=0 => shift ticket doit être imprimé avec succès avant clear
+     * - si #37=1 => imprime si possible, mais clear dans tous les cas
+     * [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+     */
+    public void clearShiftNow(int pollMs) {
+        exec.execute(() -> safeOp(() -> {
+            try {
+                link.setPythonCompat(true, pollMs);
+
+                int tr = readTicketRequired();
+                log("[SHIFT] TicketRequired(#37)=" + tr + " ; sending ClearShift(#16)=0"); // [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+                link.opSetField(FIELD_CLEAR_SHIFT, new byte[]{ 0x00 });
+                log("[SHIFT] ClearShift(#16)=0 sent");
+
+            } catch (Exception e) {
+                if (events != null) events.onError("clearShiftNow", e);
+            }
+        }, "clearShiftNow"));
+    }
+
+    // ============================= PING / STATUS =============================
+
+    public void pingStatus(int pollMs){
+        exec.execute(() -> safeOp(() -> {
+            try {
+                link.setPythonCompat(true, pollMs);
+
+                LcpLink.MachineStatusEx ms = withPollWindow(() -> link.opMachineStatusEx());
+                log("[PING] " + ms.toString());
+
+                boolean pending = (ms.delCode & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0; // [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+                if (events != null) events.onPrinterStatus(ms, pending);
+
+            } catch (Exception e) {
+                if (events != null) events.onError("pingStatus", e);
+            }
+        }, "pingStatus"));
     }
 
     // ============================= PRE-START =============================
     public void prestartSequence(int product, double presetLitres, int pollMs) throws Exception {
+
+        // Refresh printer status BEFORE starting a delivery (option 2)
+        refreshPrinterStatus(pollMs);
+
         log("[PRE] PythonCompat ON");
         link.setPythonCompat(true, pollMs);
 
-        // Read machine status (0x23) via poll window
-        withPollWindow(() -> {
-            log("[PRE] Reading machine status (#23)");
-            int[] st = link.opMachineStatusFull();
-            log(String.format("[PRE] MachineStatus dev=0x%04X ds=0x%04X dc=0x%04X", st[0], st[1], st[2]));
-            return null;
-        });
-
-        // Set active product (Field #0)
+        // Read machine status (0x23) once (already done above), but keep delivery status via 0x28 inside start logic.
+        // Set product
         int list0 = productToList0Value(product);
-        log("[PRE] Setting active product (Field #0) product=" + product + " (list0=" + list0 + ")");
+        log("[PRE] Setting active product (Field #0) product=" + product + " (list0=" + list0 + ")"); // [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
         link.opSetField(FIELD_PRODUCT_NUMBER, new byte[]{ (byte)list0 });
         this.presetProduct = product;
 
-        // Set net preset (Field #6) if > 0
+        // Set net preset (Field #6)
         this.presetLitres = presetLitres;
         if (presetLitres > 0.0) {
             int dec = getDecimals();
-            log("[PRE] Setting NET preset (Field #6) value=" + presetLitres + " (decimalsIndex=" + dec + ")");
+            log("[PRE] Setting NET preset (Field #6) value=" + presetLitres + " (decimalsIndex=" + dec + ")"); // [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
             link.opSetField(FIELD_NET_PRESET, encodeVolume(presetLitres, dec));
-
-            // Optionnel: clear gross preset
-            // link.opSetField(FIELD_GROSS_PRESET, encodeVolume(0.0, dec));
         }
 
         log("[PRE] Completed PRE-START");
@@ -220,14 +375,22 @@ public class DeliveryController {
         link.opIssueCommand(0x00);
         setState(State.STARTING);
 
-        // wait until delivery becomes active (delCode bit DELIVERY_ACTIVE)
         boolean active = withPollWindow(() -> {
             long deadline = System.currentTimeMillis() + 9000;
+
             while (System.currentTimeMillis() < deadline) {
-                int[] dsdc = link.opDeliveryStatus(); // 0x28
+                int[] dsdc = link.opDeliveryStatus(); // 0x28 fast (no prnStatus) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
                 int dc = dsdc[1];
-                boolean isActive = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
+
+                boolean isActive = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0; // [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
                 if (isActive) return true;
+
+                // block reason: ticket pending prevents start of new delivery
+                boolean pending = (dc & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0; // [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+                if (pending) {
+                    log("[START] blocked: TicketPending=true (dc bit0). Print ticket required to clear."); // [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+                }
+
                 Thread.sleep(Math.max(50, pollMs));
             }
             return false;
@@ -237,12 +400,11 @@ public class DeliveryController {
 
         startTimestampMs = System.currentTimeMillis();
 
-        // Counters
-        lastGross = readGrossLitres();
-        lastNet   = readNetLitres();
-        startGross = lastGross;
-        startNet   = lastNet;
-
+        // baselines
+        startGross = readGrossLitres();
+        startNet   = readNetLitres();
+        lastGross  = startGross;
+        lastNet    = startNet;
         lastFlow = null;
         stopping = false;
 
@@ -268,28 +430,34 @@ public class DeliveryController {
                 try {
                     if (stopping || state != State.RUNNING) return;
 
+                    // Use 0x28 during running (fast, no printer delay) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
                     int[] dsdc = withPollWindow(() -> link.opDeliveryStatus());
                     int ds = dsdc[0];
                     int dc = dsdc[1];
 
-                    boolean flow   = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
-                    boolean active = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
-
+                    boolean flow   = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;     // [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+                    boolean active = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0; // [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
                     if (!active) { stopping = true; return; }
 
-                    // Lire compteurs, mais ne pas tomber ERROR si un read rate ponctuellement
+                    // Lire compteurs (#44/#45). Si une lecture rate, conserver last (robuste terrain).
                     double gross = lastGross;
                     double net   = lastNet;
 
                     try { gross = readGrossLitres(); } catch (Exception ex) { log("[LIVE] WARN gross read failed: " + ex.getMessage()); }
-                    try { net   = readNetLitres(); } catch (Exception ex) { log("[LIVE] WARN net read failed: " + ex.getMessage()); }
+                    try { net   = readNetLitres(); }   catch (Exception ex) { log("[LIVE] WARN net read failed: " + ex.getMessage()); }
 
                     DeliveryProgress p = new DeliveryProgress();
                     p.tSinceStartMs = System.currentTimeMillis() - startTimestampMs;
+
                     p.grossL = gross;
                     p.netL = net;
+
+                    p.deliveredGrossL = gross - startGross;
+                    p.deliveredNetL = net - startNet;
+
                     p.dGrossL = gross - lastGross;
                     p.dNetL = net - lastNet;
+
                     p.flowActive = flow;
                     p.stalled = !flow;
                     p.ds = ds;
@@ -299,18 +467,17 @@ public class DeliveryController {
                     lastNet = net;
 
                     if (events != null) events.onProgress(p);
-                    if (events != null) events.onLiveSample(ds, dc, gross, net);
 
+                    // transitions flow
                     if (lastFlow == null) lastFlow = flow;
                     if (flow && !lastFlow && events != null) events.onFlowStarted();
                     if (!flow && lastFlow && events != null) events.onFlowStopped();
                     lastFlow = flow;
 
+                    // guard optional
                     if (guardEnabled) {
-                        double delivered = net - startNet;
-                        if (delivered >= guardTargetLitres) {
+                        if (p.deliveredNetL >= guardTargetLitres) {
                             log("[GUARD] target reached");
-                            if (events != null) events.onGuardReached();
                             stopping = true;
                         }
                     }
@@ -326,8 +493,15 @@ public class DeliveryController {
 
     // ============================= END =============================
     public void endDeliverySequence(int timeoutMs, int pollMs) throws Exception {
-        // IMPORTANT: le LCR peut répondre RC=0x26 (queued) aussi pendant END -> besoin 0x7D
-        link.setPythonCompat(true, pollMs);
+
+        // Refresh printer status BEFORE ending (option 2)
+        refreshPrinterStatus(pollMs);
+
+        // Ticket proof (before)
+        int trBefore = readTicketRequired();
+        int tnBefore = readTicketNumber();
+        log(String.format("[PRINT] Policy TicketRequired(#37)=%d (0=req,1=optional,2=never) TicketNumber(#23) before=%d",
+                trBefore, tnBefore)); // [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
 
         log("[END] Issuing END (Command #2)");
         setState(State.ENDING);
@@ -338,67 +512,73 @@ public class DeliveryController {
             liveLoopFuture = null;
         }
 
+        // Command #2 ends delivery and prints ticket if settings allow [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+        link.setPythonCompat(true, pollMs);
         link.opIssueCommand(0x02);
 
-        // Wait inactive
+        // Wait inactive and observe ticketPending transitions via 0x28 (fast)
         withPollWindow(() -> {
             long deadline = System.currentTimeMillis() + timeoutMs;
+            Boolean lastPending = null;
+
             while (System.currentTimeMillis() < deadline) {
-                int[] dsdc = link.opDeliveryStatus();
+                int[] dsdc = link.opDeliveryStatus(); // 0x28 fast [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
                 int dc = dsdc[1];
-                boolean active = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
+
+                boolean active  = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0; // [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+                boolean pending = (dc & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0; // blocks next delivery until printed [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+
+                if (lastPending == null || pending != lastPending) {
+                    log("[PRINT] TicketPending changed => " + pending);
+                    lastPending = pending;
+                }
+
                 if (!active) break;
                 Thread.sleep(pollMs);
             }
             return null;
         });
 
+        // Refresh printer status AFTER ending (option 2)
+        refreshPrinterStatus(pollMs);
+
+        // Ticket proof (after)
+        int tnAfter = readTicketNumber();
+        log(String.format("[PRINT] TicketNumber(#23) after=%d delta=%+d", tnAfter, (tnAfter - tnBefore))); // [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+
+        if (tnAfter > tnBefore) {
+            log("[PRINT] CONFIRMED: TicketNumber incremented => delivery ticket printed"); // [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+        } else {
+            log("[PRINT] NOT CONFIRMED: TicketNumber did not increment (ticket may be pending or printer not ready)");
+        }
+
         setState(State.ENDED);
     }
 
-    // ============================= PRINT =============================
-    public void printTicketText(String txt, int heightDots, int timeoutMs){
-        exec.execute(() -> {
-            try{
-                byte[] data = (txt == null ? "" : txt).getBytes(StandardCharsets.US_ASCII);
-                link.opPrintText(data); // MsgID 0x22 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
-            } catch(Exception e){
-                if (events != null) events.onError("printTicketText", e);
-            }
-        });
-    }
+    // ============================= PUBLIC ACTIONS =============================
 
-    // ============================= CONTROL API =============================
-    public void requestStop(String reason){
-        exec.execute(() -> safeOp(() -> {
-            stopping = true;
-
-            if(liveLoopFuture != null){
-                liveLoopFuture.cancel(true);
-                liveLoopFuture = null;
-            }
-
-            try { link.cancelIO(); } catch(Exception ignored){}
-
-            if(pollWindowOpen){
-                try{ link.closePollWindow(); } catch(Exception ignored){}
-                pollWindowOpen = false;
-            }
-
-            setState(State.ENDED);
-        }, "requestStop"));
-    }
-
-    /** Signature historique (sans preset) */
+    /** Compat signature (sans preset) */
     public void startOpenMode(int product, int timeoutMs, int pollMs){
         startOpenMode(product, 0.0, timeoutMs, pollMs);
     }
 
-    /** Version corrigée avec preset */
+    /** Version corrigée avec preset transmis */
     public void startOpenMode(int product, double presetLitres, int timeoutMs, int pollMs){
         exec.execute(() -> safeOp(() -> {
+
+            // Interdire un 2e start si livraison déjà en cours (cohérence simple)
+            if (state == State.RUNNING || state == State.STARTING || state == State.PRESTART || state == State.ENDING) {
+                log("[START] ignored: delivery already in progress state=" + state);
+                return;
+            }
+
             setState(State.PRESTART);
             stopping = false;
+            cachedDecimals = -1;
+            lastFlow = null;
+
+            // Option 2: refresh printer status before starting
+            refreshPrinterStatus(pollMs);
 
             try {
                 prestartSequence(product, presetLitres, pollMs);
@@ -415,46 +595,34 @@ public class DeliveryController {
             }
 
             startLiveLoop(pollMs);
+
         }, "startOpenMode"));
     }
 
     public void endGracefully(int timeoutMs, int pollMs){
         exec.execute(() -> safeOp(() -> {
-            stopping = true;
+            if (state == State.ENDED || state == State.IDLE) {
+                log("[END] ignored: already ended");
+                return;
+            }
             try {
-                endDeliverySequence(timeoutMs,pollMs);
+                endDeliverySequence(timeoutMs, pollMs);
             } catch (Exception ex) {
                 if(events!=null) events.onError("endDeliverySequence", ex);
             }
         }, "endGracefully"));
     }
 
-    // ============================= REQUIRED BY MainActivity =============================
-    public void pingStatus(){
+    /** Impression texte (MsgID 0x22) - utile si tu veux imprimer une ligne custom */
+    public void printText(String txt){
         exec.execute(() -> safeOp(() -> {
             try {
-                int[] st = withPollWindow(() -> link.opMachineStatusFull());
-                log("[PING] " + Arrays.toString(st));
-            } catch (IOException e) {
-                if (events != null) events.onError("pingStatus", e);
-            } catch (Exception e) {
-                if (events != null) events.onError("pingStatus", e);
+                byte[] data = (txt == null ? "" : txt).getBytes(StandardCharsets.US_ASCII);
+                link.opPrintText(data); // 0x22 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+            } catch (Exception ex) {
+                if (events != null) events.onError("printText", ex);
             }
-        }, "pingStatus"));
-    }
-
-    public void resyncGetProductId(){
-        exec.execute(() -> safeOp(() -> {
-            try {
-                byte[] p = link.opGetProductId(); // MsgID 0x00 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
-                if (p != null && p.length >= 2) {
-                    int productId = p[1] & 0xFF;
-                    log("[SYNC] ProductID=" + productId);
-                }
-            } catch (IOException e) {
-                if (events != null) events.onError("resyncGetProductId", e);
-            }
-        }, "resyncGetProductId"));
+        }, "printText"));
     }
 
     // ============================= GUARD API =============================
