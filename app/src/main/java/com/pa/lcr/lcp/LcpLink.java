@@ -13,23 +13,24 @@ import java.util.concurrent.locks.ReentrantLock;
  * LcpLink — LCP framing (~~ + escaping + CRC), queued handling (0x7D),
  * Printer status decoding (prnStatus bits), CancelIO, PollGate.
  *
- * Spec references:
- * - LCP framing: ~~ <to><from><status><len><data...><crc0><crc1> + ESC rules + CRC seed 0x7E7E poly 0x1021.
- * - Get Machine Status (0x23) returns: rc, devStatus(byte), prnStatus(byte), delStatus(u16), delCode(u16). Total payload=7.
- * - Printer Bits are in prnStatus byte.
- * - Delivery Code bit 0x0001 means delivery ticket pending (blocks new delivery until printed).
+ * Spec references (PDF):
+ * - LCP framing: ~~ <to><from><status><len><payload...><crc0><crc1> + ESC rules + CRC seed 0x7E7E poly 0x1021. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+ * - Get Machine Status (0x23) returns payload 7 bytes: rc, devStatus(byte), prnStatus(byte), delStatus(u16), delCode(u16). [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+ * - Get Delivery Status (0x28) returns payload 6 bytes: rc, devStatus(byte), delStatus(u16), delCode(u16). [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+ * - Printer Bits are in prnStatus byte (0x10 paper, 0x20 no processor, 0x40 error, 0x80 printing started...). [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+ * - Delivery Code bit 0x0001 means delivery ticket pending (blocks new delivery until printed). [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
  */
 public class LcpLink {
 
     // ============================== VERSION ==============================
     private static final String LCP_VERSION =
-            "LcpLink v2026-02-10 pollwindow-any + conditional-purge + robust-0x7D + printer-status(0x23)";
+            "LcpLink v2026-02-11 pollwindow-any + conditional-purge + robust-0x7D + printer-status(0x23) + sendRecv-recover";
 
     // ============================ PROTO CONST ============================
     public static final int TILDE = 0x7E;
     public static final int ESC   = 0x1B;
 
-    // CRC16/XMODEM variant per LCP doc: seed includes "~~" (0x7E7E), poly 0x1021
+    // CRC16/XMODEM per LCP doc: seed includes "~~" (0x7E7E), poly 0x1021 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
     private static final int SEED = 0x7E7E;
     private static final int POLY = 0x1021;
 
@@ -41,17 +42,17 @@ public class LcpLink {
     public static final int MSG_ISSUE_COMMAND  = 0x24;
     public static final int MSG_GET_DEL_STATUS = 0x28;
 
-    // queued support (legacy-compatible)
+    // queued support (legacy-compatible) — Check Request 0x7D [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
     public static final int MSG_CHECK_REQUEST  = 0x7D;
     public static final int MSG_GET_PRODUCTID  = 0x00;
 
-    // Return codes (from doc: 38=queued etc; on the wire we use 0x26/0x27/0x28 observed)
+    // Return codes (wire values commonly observed; doc lists queued concepts) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
     public static final int RC_OK                = 0x00;
     public static final int RC_REQUEST_QUEUED    = 0x26;
     public static final int RC_NO_REQUEST_ACTIVE = 0x27;
     public static final int RC_REQUEST_ABORTED   = 0x28;
 
-    // Delivery Code bits (documented)
+    // Delivery Code bits (documented) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
     public static final int LCRSc_DEL_TICKET_PENDING = 0x0001;
     public static final int LCRSc_FLOW_ACTIVE        = 0x0004;
     public static final int LCRSc_DELIVERY_ACTIVE    = 0x0008;
@@ -151,7 +152,7 @@ public class LcpLink {
     public void resumeIO() { ioCancelled = false; log("[LCP] IO RESUMED"); }
     private void checkCancelled() throws IOException { if (ioCancelled) throw new IOException("CANCELLED"); }
 
-    /** Force Sync bit on next outbound frame (recovery). */
+    /** Force Sync bit on next outbound frame (recovery). LCP "Synchronization" bit helps resync session. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf) */
     public void forceSyncNext() { this.syncPending = true; log("[LCP] forceSyncNext()"); }
 
     /** Drain RX a bit (recovery). */
@@ -166,6 +167,23 @@ public class LcpLink {
                 break;
             }
         }
+    }
+
+    /** Purge immediately HW buffers. */
+    private void purgeNow() {
+        try { port.purgeHwBuffers(true, true); }
+        catch (Exception ignored) {}
+    }
+
+    /** Retry is allowed only for idempotent/safe messages (GETs). */
+    private static boolean isSafeRetry(byte[] payload) {
+        if (payload == null || payload.length == 0) return false;
+        int msg = payload[0] & 0xFF;
+        return msg == MSG_GET_FIELD
+                || msg == MSG_GET_MACHINE
+                || msg == MSG_GET_DEL_STATUS
+                || msg == MSG_GET_PRODUCTID
+                || msg == MSG_CHECK_REQUEST;
     }
 
     /** Open poll window: owner=ANY by default. */
@@ -292,7 +310,7 @@ public class LcpLink {
     // ============================= BUILD TX =============================
     private byte[] buildFrame(byte[] payload){
         int status = toggle & 1;
-        if(syncPending){ status |= 0x02; syncPending = false; }
+        if(syncPending){ status |= 0x02; syncPending = false; } // Sync bit [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
         toggle ^= 1;
 
         byte[] header = new byte[]{ (byte)toAddr, (byte)fromAddr, (byte)status, (byte)payload.length };
@@ -432,7 +450,7 @@ public class LcpLink {
                             throw new IOException("0x7D reserved for opCheckRequest().");
                     }
 
-                    // Guard: 0x23/0x28 only via op* wrappers (prevents random calls outside poll window discipline)
+                    // Guard: 0x23/0x28 only via op* wrappers
                     if (payload != null && payload.length > 0) {
                         int msg = payload[0] & 0xFF;
                         if ((msg == MSG_GET_MACHINE || msg == MSG_GET_DEL_STATUS)
@@ -475,16 +493,47 @@ public class LcpLink {
 
                     // purge only if requested
                     if (needPurge) {
-                        try { port.purgeHwBuffers(true, true); } catch(Exception ignored) {}
+                        purgeNow();
                         needPurge = false;
                         log("[LCP] Purge applied");
                     }
 
+                    // --- TX ---
                     byte[] fr = buildFrame(payload);
                     port.write(fr, timeoutMs);
                     metrics.txFrames.incrementAndGet();
 
-                    byte[] rsp = readFrame(timeoutMs);
+                    // --- RX (with recovery) ---
+                    byte[] rsp;
+                    try {
+                        rsp = readFrame(timeoutMs);
+                    } catch (IOException io) {
+                        if (!isFramingTimeout(io)) throw io;
+
+                        log("[LCP] sendRecv framing-timeout -> recover: " + io.getMessage());
+
+                        // Drain residual bytes and purge buffers
+                        drainRx(200);
+                        purgeNow();
+
+                        // Force Sync bit on next outbound frame (spec) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+                        forceSyncNext();
+
+                        // Retry ONCE only for idempotent messages
+                        if (!isSafeRetry(payload)) {
+                            throw new IOException("Framing timeout; not auto-retrying non-idempotent msg 0x"
+                                    + Integer.toHexString(payload != null && payload.length > 0 ? (payload[0] & 0xFF) : -1), io);
+                        }
+
+                        sleepMs(80);
+                        int t2 = Math.max(timeoutMs, 5000);
+
+                        byte[] fr2 = buildFrame(payload);
+                        port.write(fr2, t2);
+                        metrics.txFrames.incrementAndGet();
+                        rsp = readFrame(t2);
+                    }
+
                     lastExchangeFinishedAtMs = System.currentTimeMillis();
 
                     if (DUMP_TX) log(String.format("IFΔ=%dms, sleep=%dms", (since < 0 ? 0 : since), sleepApplied));
@@ -575,11 +624,8 @@ public class LcpLink {
 
             int rc = p[0] & 0xFF;
             if (rc == RC_REQUEST_ABORTED) throw new IOException("Queued aborted");
-
             if (rc == RC_REQUEST_QUEUED) { sleep(minPollMs); continue; }
-
-            // IMPORTANT: rc=0x27 => no queued response ready; keep polling
-            if (rc == RC_NO_REQUEST_ACTIVE) { sleep(minPollMs); continue; }
+            if (rc == RC_NO_REQUEST_ACTIVE) { sleep(minPollMs); continue; } // keep polling
 
             return p;
         }
@@ -614,7 +660,7 @@ public class LcpLink {
             if ((p[0] & 0xFF) == RC_REQUEST_QUEUED || (p[0] & 0xFF) == RC_NO_REQUEST_ACTIVE) p = waitQueued(7000, 150);
         }
 
-        // Return from Get Field Data: rc, devStatus, fieldData...
+        // Return from Get Field Data: rc, devStatus, fieldData... [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
         if (p == null || p.length < 2 || (p[0] & 0xFF) != RC_OK) throw new IOException("GET_FIELD #" + field);
         return Arrays.copyOfRange(p, 2, p.length);
     }
@@ -639,7 +685,7 @@ public class LcpLink {
             if ((p[0] & 0xFF) == RC_REQUEST_QUEUED || (p[0] & 0xFF) == RC_NO_REQUEST_ACTIVE) p = waitQueued(9000, 150);
         }
 
-        // Return from Set Field Data: rc, devStatus
+        // Return from Set Field Data: rc, devStatus [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
         if (p == null || p.length < 1 || (p[0] & 0xFF) != RC_OK) throw new IOException("SET_FIELD #" + field);
     }
 
@@ -704,9 +750,7 @@ public class LcpLink {
     // ============================== 0x23 / 0x28 ==============================
 
     /**
-     * Printer status bits (prnStatus byte) are defined in the spec:
-     * 0x01 delivery request, 0x02 shift request, 0x04 diag request, 0x08 user request,
-     * 0x10 out of paper, 0x20 no processor online, 0x40 processor error, 0x80 begun to print.
+     * Printer status bits (prnStatus byte) are defined in the spec. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
      */
     public static final class PrinterStatus {
         public final int raw;
@@ -771,7 +815,7 @@ public class LcpLink {
         }
     }
 
-    /** Get Machine Status (0x23): returns printer status byte; may delay if printer offline. */
+    /** Get Machine Status (0x23): returns printer status byte; may delay if printer offline. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf) */
     public MachineStatusEx opMachineStatusEx() throws IOException {
         if (pollingBlocked) throw new IOException("POLL_BLOCKED");
         if (pollOwner != null && Thread.currentThread() != pollOwner)
@@ -790,8 +834,8 @@ public class LcpLink {
 
             INTERNAL_OK.set(Boolean.TRUE);
             try {
-                // 0x23 can take ~2s if printer offline => slightly higher timeout
-                byte[] rsp = sendRecv(new byte[]{ (byte)MSG_GET_MACHINE }, 3500);
+                // doc: 0x23 can have ~2s delay if printer is offline [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+                byte[] rsp = sendRecv(new byte[]{ (byte)MSG_GET_MACHINE }, 6000);
                 LcpStatus st = extractStatus(rsp);
                 byte[] p = extractPayload(rsp);
 
@@ -805,7 +849,7 @@ public class LcpLink {
                     if ((p[0] & 0xFF) == RC_REQUEST_QUEUED || (p[0] & 0xFF) == RC_NO_REQUEST_ACTIVE) p = waitQueued(9000, 200);
                 }
 
-                // payload: rc(1), devStatus(1), prnStatus(1), delStatus(2), delCode(2) => 7
+                // payload: rc(1), devStatus(1), prnStatus(1), delStatus(2), delCode(2) => 7 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
                 if (p == null || p.length < 7 || (p[0] & 0xFF) != RC_OK) {
                     throw new IOException("Invalid 0x23 payload");
                 }
@@ -829,7 +873,7 @@ public class LcpLink {
         return new int[]{ ms.devStatus, ms.delStatus, ms.delCode };
     }
 
-    /** Get Delivery Status (0x28): no prnStatus (fast). Returns {delStatus, delCode}. */
+    /** Get Delivery Status (0x28): no prnStatus (fast). Returns {delStatus, delCode}. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf) */
     public int[] opDeliveryStatus() throws IOException {
         if (pollingBlocked) throw new IOException("POLL_BLOCKED");
         if (pollOwner != null && Thread.currentThread() != pollOwner)
@@ -861,7 +905,7 @@ public class LcpLink {
                     if ((p[0] & 0xFF) == RC_REQUEST_QUEUED || (p[0] & 0xFF) == RC_NO_REQUEST_ACTIVE) p = waitQueued(7000, 150);
                 }
 
-                // payload: rc(1), devStatus(1), delStatus(2), delCode(2) => 6
+                // payload: rc(1), devStatus(1), delStatus(2), delCode(2) => 6 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
                 if (p == null || p.length < 6 || (p[0] & 0xFF) != RC_OK) throw new IOException("Invalid 0x28 payload");
                 int ds = u16be(p, 2);
                 int dc = u16be(p, 4);
