@@ -1,189 +1,333 @@
-
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:id="@+id/root"
-    android:orientation="vertical"
-    android:padding="6dp"
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/logScroll"
     android:layout_width="match_parent"
-    android:layout_height="match_parent">
+    android:layout_height="match_parent"
+    android:fillViewport="true">
 
-    <!-- Ligne paramètres -->
     <LinearLayout
-        android:orientation="horizontal"
+        android:id="@+id/root"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content">
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="12dp">
 
-        <EditText
-            android:id="@+id/edtTo"
-            android:layout_width="0dp"
-            android:layout_weight="1"
-            android:hint="To"
-            android:layout_height="wrap_content"/>
-
-        <EditText
-            android:id="@+id/edtFrom"
-            android:layout_width="0dp"
-            android:layout_weight="1"
-            android:hint="From"
-            android:layout_height="wrap_content"/>
-    </LinearLayout>
-
-    <!-- Produit / preset -->
-    <LinearLayout
-        android:orientation="horizontal"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content">
-
-        <EditText
-            android:id="@+id/edtProduct"
-            android:layout_width="0dp"
-            android:layout_weight="1"
-            android:hint="Produit"
-            android:layout_height="wrap_content"/>
-
-        <EditText
-            android:id="@+id/edtPreset"
-            android:layout_width="0dp"
-            android:layout_weight="1"
-            android:hint="Preset L"
-            android:layout_height="wrap_content"/>
-    </LinearLayout>
-
-    <!-- Ligne USB -->
-    <LinearLayout
-        android:orientation="horizontal"
-        android:paddingTop="4dp"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content">
-
-        <Button
-            android:id="@+id/btnScanUsb"
+        <!-- ===================== Connexion / Adresses ===================== -->
+        <TextView
+            android:id="@+id/lblConn"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="USB"/>
+            android:text="Connexion"
+            android:textStyle="bold"
+            android:paddingBottom="6dp" />
 
-        <Spinner
-            android:id="@+id/spnUsbDevices"
-            android:layout_width="0dp"
-            android:layout_weight="1"
-            android:layout_height="wrap_content"/>
-
-        <Button
-            android:id="@+id/btnPingUsb"
-            android:layout_width="wrap_content"
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Ping"/>
-    </LinearLayout>
+            android:orientation="horizontal">
 
-    <!-- Ligne actions -->
-    <LinearLayout
-        android:orientation="horizontal"
-        android:paddingTop="4dp"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content">
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="To:"
+                android:layout_gravity="center_vertical"
+                android:paddingEnd="6dp" />
 
-        <Button
-            android:id="@+id/btnCopyLog"
-            android:layout_width="0dp"
-            android:layout_weight="1"
-            android:layout_height="wrap_content"
-            android:text="Copier"/>
+            <EditText
+                android:id="@+id/edtTo"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:hint="0xFA"
+                android:inputType="text"
+                android:maxLines="1" />
 
-        <Button
-            android:id="@+id/btnClearLog"
-            android:layout_width="0dp"
-            android:layout_weight="1"
-            android:layout_height="wrap_content"
-            android:text="Clear"/>
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="From:"
+                android:layout_gravity="center_vertical"
+                android:paddingStart="12dp"
+                android:paddingEnd="6dp" />
+
+            <EditText
+                android:id="@+id/edtFrom"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:hint="0xFF"
+                android:inputType="text"
+                android:maxLines="1" />
+        </LinearLayout>
 
         <Button
             android:id="@+id/btnConnect"
-            android:layout_width="0dp"
-            android:layout_weight="1"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Connect"/>
-    </LinearLayout>
+            android:text="Connect"
+            android:layout_marginTop="8dp" />
 
-    <!-- Ligne A/B/C -->
-    <LinearLayout
-        android:orientation="horizontal"
-        android:paddingTop="4dp"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content">
+        <!-- ===================== USB Scan / Ping ===================== -->
+        <TextView
+            android:id="@+id/lblUsb"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="USB"
+            android:textStyle="bold"
+            android:paddingTop="10dp"
+            android:paddingBottom="6dp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnScanUsb"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Scan USB" />
+
+            <Button
+                android:id="@+id/btnPingUsb"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Ping USB"
+                android:layout_marginStart="8dp" />
+        </LinearLayout>
+
+        <Spinner
+            android:id="@+id/spnUsbDevices"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp" />
+
+        <!-- ===================== Paramètres de livraison ===================== -->
+        <TextView
+            android:id="@+id/lblDelivery"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Livraison (simple)"
+            android:textStyle="bold"
+            android:paddingTop="10dp"
+            android:paddingBottom="6dp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Produit:"
+                android:layout_gravity="center_vertical"
+                android:paddingEnd="6dp" />
+
+            <EditText
+                android:id="@+id/edtProduct"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:hint="1"
+                android:inputType="number"
+                android:maxLines="1" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Preset (L):"
+                android:layout_gravity="center_vertical"
+                android:paddingStart="12dp"
+                android:paddingEnd="6dp" />
+
+            <EditText
+                android:id="@+id/edtPreset"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:hint="50.0"
+                android:inputType="numberDecimal"
+                android:maxLines="1" />
+        </LinearLayout>
+
+        <!-- Boutons A/B/C + Finish/Continue -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="8dp">
+
+            <Button
+                android:id="@+id/btnA"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="A: END" />
+
+            <Button
+                android:id="@+id/btnB"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="B: PING"
+                android:layout_marginStart="8dp" />
+
+            <Button
+                android:id="@+id/btnC"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="C: START"
+                android:layout_marginStart="8dp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="6dp">
+
+            <Button
+                android:id="@+id/btnContinue"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Continuer" />
+
+            <Button
+                android:id="@+id/btnFinish"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Terminé"
+                android:layout_marginStart="8dp" />
+        </LinearLayout>
+
+        <!-- ===================== Ticket & Impression ===================== -->
+        <TextView
+            android:id="@+id/lblTicket"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Ticket & Impression"
+            android:textStyle="bold"
+            android:paddingTop="12dp"
+            android:paddingBottom="6dp" />
+
+        <!-- TicketNumber (#23) -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Ticket #23:"
+                android:paddingEnd="8dp" />
+
+            <TextView
+                android:id="@+id/txtTicketNumber"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="-" />
+        </LinearLayout>
+
+        <!-- TicketRequired (#37) -->
+        <Spinner
+            android:id="@+id/spnTicketRequired"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="6dp">
+
+            <Button
+                android:id="@+id/btnRefreshTicket"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Rafraîchir ticket" />
+
+            <Button
+                android:id="@+id/btnClearShift"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Clear shift (#16)"
+                android:layout_marginStart="8dp" />
+        </LinearLayout>
+
+        <!-- ===================== Statut imprimante (toujours visible) ===================== -->
+        <TextView
+            android:id="@+id/lblPrinterStatus"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Statut imprimante (0x23 / prnStatus):"
+            android:textStyle="bold"
+            android:paddingTop="12dp"
+            android:paddingBottom="6dp" />
+
+        <TextView
+            android:id="@+id/txtPrinterStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="(non connecté / non lu)"
+            android:padding="10dp"
+            android:background="#EEEEEE" />
 
         <Button
-            android:id="@+id/btnA"
-            android:layout_width="0dp"
-            android:layout_weight="1"
+            android:id="@+id/btnRefreshPrinter"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="A"/>
+            android:text="Rafraîchir imprimante"
+            android:layout_marginTop="6dp" />
 
-        <Button
-            android:id="@+id/btnB"
-            android:layout_width="0dp"
-            android:layout_weight="1"
+        <!-- ===================== Logs ===================== -->
+        <TextView
+            android:id="@+id/lblLogs"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="B"/>
+            android:text="Logs"
+            android:textStyle="bold"
+            android:paddingTop="12dp"
+            android:paddingBottom="6dp" />
 
-        <Button
-            android:id="@+id/btnC"
-            android:layout_width="0dp"
-            android:layout_weight="1"
+        <CheckBox
+            android:id="@+id/switchIoLog"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="C"/>
-    </LinearLayout>
+            android:text="Afficher logs + I/O (TX/RX)" />
 
-    <!-- Ligne Continue / Terminé -->
-    <LinearLayout
-        android:orientation="horizontal"
-        android:paddingTop="4dp"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content">
-
-        <Button
-            android:id="@+id/btnContinue"
-            android:layout_width="0dp"
-            android:layout_weight="1"
-            android:enabled="false"
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Go"/>
+            android:orientation="horizontal"
+            android:layout_marginTop="6dp">
 
-        <Button
-            android:id="@+id/btnFinish"
-            android:layout_width="0dp"
-            android:layout_weight="1"
-            android:enabled="false"
-            android:layout_height="wrap_content"
-            android:text="Stop"/>
-    </LinearLayout>
+            <Button
+                android:id="@+id/btnCopyLog"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Copier log" />
 
-    <CheckBox
-        android:id="@+id/switchIoLog"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="I/O"/>
-
-    <Button
-        android:id="@+id/btnStart"
-        android:visibility="gone"
-        android:layout_width="0dp"
-        android:layout_height="0dp"
-        android:text="(retiré)" />
-
-    <ScrollView
-        android:id="@+id/logScroll"
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1">
+            <Button
+                android:id="@+id/btnClearLog"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Effacer"
+                android:layout_marginStart="8dp" />
+        </LinearLayout>
 
         <TextView
             android:id="@+id/txtLog"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:padding="6dp"
+            android:textSize="12sp"
+            android:textIsSelectable="true"
             android:typeface="monospace"
-            android:textSize="11sp"
-            android:textColor="#000000"
-            android:textIsSelectable="true"/>
-    </ScrollView>
-
-</LinearLayout>
+            android:padding="10dp"
+            android:layout_marginTop="6dp"
+            android:background="#111111"
+            android:textColor="#E6E6E6"
+            android:text=""/>
+    </LinearLayout>
+</ScrollView>
