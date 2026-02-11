@@ -203,7 +203,7 @@
             android:id="@+id/lblTicket"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Ticket & Impression"
+            android:text="Ticket - Impression"
             android:textStyle="bold"
             android:paddingTop="12dp"
             android:paddingBottom="6dp" />
