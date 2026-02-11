@@ -21,6 +21,8 @@ import android.content.ClipboardManager;
 import android.content.ClipData;
 import android.content.Context;
 
+import android.util.Log;
+
 import com.hoho.android.usbserial.driver.UsbSerialPort;
 import com.hoho.android.usbserial.driver.UsbSerialDriver;
 import com.hoho.android.usbserial.driver.UsbSerialProber;
@@ -64,6 +66,11 @@ public class MainActivity extends AppCompatActivity {
         bindUI();
         applyDefaultValues();
         installHandlers();
+
+        // Option 1: la case "I/O" contrôle aussi DUMP_TX/DUMP_RX
+        // -> on applique l'état initial
+        LcpLink.DUMP_TX = switchIoLog.isChecked();
+        LcpLink.DUMP_RX = switchIoLog.isChecked();
 
         log("Prêt. En attente du port USB… Brancher l'adaptateur RS‑232.");
 
@@ -122,6 +129,8 @@ public class MainActivity extends AppCompatActivity {
         edtFrom.setText("0xFF");
         edtProduct.setText("1");
         edtPreset.setText("50.0");
+
+        // Option 1 : coché par défaut = logs + I/O dumps
         switchIoLog.setChecked(true);
     }
 
@@ -129,6 +138,15 @@ public class MainActivity extends AppCompatActivity {
     // Handlers UI
     // ==========================================================
     private void installHandlers() {
+
+        // Option 1: checkbox = master logs + I/O dumps
+        switchIoLog.setOnCheckedChangeListener((btn, checked) -> {
+            LcpLink.DUMP_TX = checked;
+            LcpLink.DUMP_RX = checked;
+
+            // Note: si checked=false, log() n'affiche rien (silence total) — OK pour Option 1
+            if (checked) log("[UI] I/O + logs activés");
+        });
 
         btnConnect.setOnClickListener(v -> initLcp());
 
@@ -196,6 +214,12 @@ public class MainActivity extends AppCompatActivity {
             log(String.format("Init LCP → to=0x%02X, from=0x%02X…", to, from));
 
             link = new LcpLink(port, to, from, true);
+
+            // Bridge LcpLink -> UI (TX/RX + logs bas niveau)
+            LcpLink.setLogger(line -> log("[IO] " + line));
+            LcpLink.DUMP_TX = switchIoLog.isChecked();
+            LcpLink.DUMP_RX = switchIoLog.isChecked();
+
             ctrl = new DeliveryController(
                     link,
                     new DeliveryEventsImpl(),
@@ -214,6 +238,7 @@ public class MainActivity extends AppCompatActivity {
     // Log helper
     // ==========================================================
     private void log(String s) {
+        // Option 1 : master mute (décoché = silence total)
         if (!switchIoLog.isChecked()) return;
 
         runOnUiThread(() -> {
@@ -338,12 +363,26 @@ public class MainActivity extends AppCompatActivity {
             log("PING (#23)…");
 
             LcpLink testLink = new LcpLink(testPort, 0xFA, 0xFF, true);
+
+            // Bridge logs I/O du test vers UI
+            LcpLink.setLogger(line -> log("[IO] " + line));
+            LcpLink.DUMP_TX = switchIoLog.isChecked();
+            LcpLink.DUMP_RX = switchIoLog.isChecked();
+
+            // Donne un callback au test controller pour voir erreurs/états
             DeliveryController testCtrl = new DeliveryController(
-                    testLink, null, Executors.newSingleThreadExecutor());
+                    testLink,
+                    new DeliveryEventsImpl(),
+                    Executors.newSingleThreadExecutor()
+            );
 
             testCtrl.pingStatus();
 
-            log("✔ PING OK — registre LCR-II détecté !");
+            // Ici on ne met plus "OK" immédiatement comme avant.
+            // Le vrai succès sera visible via RX + absence d'erreur.
+            log("PING déclenché (voir I/O TX/RX).");
+
+            // Si tu veux conserver le port du test si c'est le bon device:
             setPort(testPort);
 
         } catch (Exception e) {
@@ -379,11 +418,12 @@ public class MainActivity extends AppCompatActivity {
 
         @Override
         public void onError(String msg, Throwable t) {
-            log("ERR[" + msg + "] → " + t.getMessage());
+            log("ERR[" + msg + "] → " + (t != null ? t.getMessage() : "(null)"));
         }
 
         @Override
         public void onLog(String line) {
+            // Logs applicatifs LCP (pas les dumps TX/RX)
             log("[LCP] " + line);
         }
     }
