@@ -6,17 +6,10 @@ import java.nio.charset.StandardCharsets;
 import java.util.concurrent.*;
 
 /**
- * DeliveryController — version corrigée:
- * - START-GATE: bloque start si delCode.TICKET_PENDING (bit 0x0001)
- * - Cmd #6: Print pending ticket (jamais si delivery active)
- * - Cmd #0: Start/Resume via resumeDelivery()
- * - Timeline DS/DC (0x28) + Printer status (0x23)
- * - Live loop: 0x28 (fast) + fields #44/#45, détection FLOW_ACTIVE (bit 0x0004)
- *
- * Ajouts "terrain":
- * - onOperatorAlert(OperatorAlert): erreurs métier compréhensibles par le livreur
- * - endRecoveryOrExplain(): tente END même si state local IDLE, et explique l'échec
- *   en mettant FLOW_ACTIVE en évidence si bloqué.
+ * DeliveryController — version terrain robuste (Option 1, 30s):
+ * - Robustesse "queued long" gérée ici (sans modifier LcpLink)
+ * - Retry contrôlé (1 fois) pour SET_FIELD idempotents (#0 product, #6 net preset) + validation GET
+ * - Recovery END/PRINT avec messages opérateur (FLOW_ACTIVE explicite)
  */
 public class DeliveryController {
 
@@ -29,6 +22,10 @@ public class DeliveryController {
     private static final int FIELD_CLEAR_SHIFT = 16;     // ClearShift
     private static final int FIELD_TICKET_NUMBER = 23;   // TicketNumber (LONG/SL)
     private static final int FIELD_TICKET_REQUIRED = 37; // TicketRequired (0/1/2)
+
+    // ------------------------- Robustesse terrain (Option 1) -------------------------
+    private static final int QUEUED_LONG_TIMEOUT_MS = 30_000; // 30s
+    private static final int SETFIELD_RETRY_SLEEP_MS = 120;
 
     // ------------------------- Dépendances -------------------------
     private final LcpLink link;
@@ -72,7 +69,7 @@ public class DeliveryController {
         void onError(String msg, Throwable t);
         void onLog(String line);
 
-        // ✅ Nouveau: alerte "terrain" compréhensible pour le livreur
+        // Alerte “terrain”
         void onOperatorAlert(OperatorAlert alert);
     }
 
@@ -97,7 +94,8 @@ public class DeliveryController {
         PRINTER_NOT_READY,
         PRINT_TIMEOUT_TICKET_PENDING,
         PRINT_FORBIDDEN_DELIVERY_ACTIVE,
-        IO_OR_PROTOCOL_ERROR
+        IO_OR_PROTOCOL_ERROR,
+        WRITE_OR_VERIFY_FAILED
     }
 
     public static final class OperatorAlert {
@@ -189,9 +187,32 @@ public class DeliveryController {
         log(String.format("[%s] DS=%s DC=%s %s", tag, hx16(ds), hx16(dc), dcFlags(dc)));
     }
 
+    /** Lecture 0x28 (fast). */
     private int[] readDsDcFast() throws Exception {
-        // 0x28 Get Delivery Status (fast; no printer status)
-        return withPollWindow(() -> link.opDeliveryStatus());
+        return withPollWindow(() -> link.opDeliveryStatus()); // returns [ds, dc]
+    }
+
+    /** Lecture 0x28 tolérante (phase longue) : ignore “Queued timeout (python)” jusqu’à 30s. */
+    private int[] readDsDcFastLong(int pollMs) throws Exception {
+        long deadline = System.currentTimeMillis() + QUEUED_LONG_TIMEOUT_MS;
+        Exception last = null;
+
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                return readDsDcFast();
+            } catch (Exception e) {
+                last = e;
+                String m = e.getMessage();
+                if (m != null && m.contains("Queued timeout (python)")) {
+                    Thread.sleep(Math.max(50, pollMs));
+                    continue;
+                }
+                Thread.sleep(Math.max(50, pollMs));
+            }
+        }
+
+        if (last != null) throw last;
+        throw new IOException("readDsDcFastLong: timeout");
     }
 
     private void logTimeline(String step, int pollMs) {
@@ -274,8 +295,63 @@ public class DeliveryController {
         return (raw != null && raw.length > 0) ? (raw[0] & 0xFF) : 0;
     }
 
+    // ============================= Robustesse SET_FIELD (Option 1) =============================
+    private static boolean isFramingTimeoutMsg(String msg) {
+        if (msg == null) return false;
+        return msg.contains("Timeout sync ~~")
+                || msg.contains("Header timeout")
+                || msg.contains("Payload timeout")
+                || msg.contains("CRC timeout");
+    }
+
+    private static boolean isFramingTimeoutException(Throwable t) {
+        if (t == null) return false;
+        String m = t.getMessage();
+        if (m != null && (m.startsWith("Framing timeout") || isFramingTimeoutMsg(m))) return true;
+        Throwable c = t.getCause();
+        if (c != null) {
+            String cm = c.getMessage();
+            if (cm != null && isFramingTimeoutMsg(cm)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Retry contrôlé (1 fois) uniquement pour SET_FIELD idempotents,
+     * puis validation via GET_FIELD.
+     */
+    private void safeSetFieldWithRetry(int field, byte[] data, int pollMs, int verifyLen) throws Exception {
+        try {
+            link.opSetField(field, data);
+        } catch (IOException e) {
+            if (!isFramingTimeoutException(e)) throw e;
+
+            log("[SAFE-SET] Framing timeout on SET_FIELD #" + field + " -> recovery+retry once. msg=" + e.getMessage());
+
+            // Recovery de session
+            link.forceSyncNext();
+            link.requestPurge();
+            Thread.sleep(SETFIELD_RETRY_SLEEP_MS);
+
+            // Retry unique
+            link.opSetField(field, data);
+        }
+
+        // Vérification par GET
+        byte[] rb = link.opGetField(field);
+        if (rb == null) throw new IOException("SET_FIELD verify failed: null");
+
+        int n = Math.min(Math.min(verifyLen, data.length), rb.length);
+        if (n <= 0) throw new IOException("SET_FIELD verify failed: empty");
+
+        for (int i = 0; i < n; i++) {
+            if (rb[i] != data[i]) {
+                throw new IOException("SET_FIELD verify mismatch at i=" + i);
+            }
+        }
+    }
+
     // ============================= PRINTER STATUS =============================
-    /** Rafraîchit le statut imprimante détaillé (0x23) + ticketPending. */
     public void refreshPrinterStatus(int pollMs) {
         exec.execute(() -> safeOp(() -> {
             try {
@@ -309,7 +385,6 @@ public class DeliveryController {
         }, "refreshTicketInfo"));
     }
 
-    /** Met TicketRequired (#37) à une valeur (0/1/2). */
     public void setTicketRequired(int mode, int pollMs) {
         exec.execute(() -> safeOp(() -> {
             try {
@@ -333,7 +408,6 @@ public class DeliveryController {
         }, "setTicketRequired"));
     }
 
-    /** Force la politique par défaut: TicketRequired(#37)=1 (optional). */
     public void ensureDefaultTicketRequiredIs1(int pollMs) {
         exec.execute(() -> safeOp(() -> {
             try {
@@ -358,7 +432,6 @@ public class DeliveryController {
         }, "ensureDefaultTicketRequiredIs1"));
     }
 
-    /** ClearShift (#16)=0 (clear). */
     public void clearShiftNow(int pollMs) {
         exec.execute(() -> safeOp(() -> {
             try {
@@ -413,25 +486,21 @@ public class DeliveryController {
             try {
                 link.setPythonCompat(true, pollMs);
 
-                int[] dsdc0 = readDsDcFast();
-                int dc0 = dsdc0[1];
+                int[] dsdc0 = readDsDcFastLong(pollMs);
+                int ds0 = dsdc0[0], dc0 = dsdc0[1];
                 boolean active = (dc0 & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
 
                 if (active) {
-                    // message terrain optionnel
                     emitOperatorAlert(
                             OperatorIssueCode.PRINT_FORBIDDEN_DELIVERY_ACTIVE,
                             "Impression interdite",
                             "Impossible d'imprimer: la livraison est encore active.\nTerminer la livraison (Cmd #2) avant d'imprimer.",
-                            diagDsDc(dsdc0[0], dc0),
+                            diagDsDc(ds0, dc0),
                             true
                     );
                     log("[PRINT-PENDING] Refus: delivery active -> cmd#6 won't print while active.");
                     return;
                 }
-
-                logTimeline("PRINTPEND:BEFORE", pollMs);
-                refreshPrinterStatus(pollMs);
 
                 log("[PRINT-PENDING] Issue Command #6");
                 link.opIssueCommand(0x06);
@@ -440,10 +509,22 @@ public class DeliveryController {
                 boolean lastPending = true;
 
                 while (System.currentTimeMillis() < deadline) {
-                    int[] dsdc = readDsDcFast();
-                    int ds = dsdc[0], dc = dsdc[1];
+                    int[] dsdc;
+                    try {
+                        dsdc = readDsDcFast(); // lecture rapide, tolérée
+                    } catch (Exception e) {
+                        String m = e.getMessage();
+                        if (m != null && m.contains("Queued timeout (python)")) {
+                            Thread.sleep(Math.max(50, pollMs));
+                            continue;
+                        }
+                        Thread.sleep(Math.max(50, pollMs));
+                        continue;
+                    }
 
+                    int ds = dsdc[0], dc = dsdc[1];
                     boolean pending = (dc & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
+
                     if (pending != lastPending) {
                         logDsDc("PRINTPEND:STATE", ds, dc);
                         lastPending = pending;
@@ -453,8 +534,8 @@ public class DeliveryController {
                     Thread.sleep(pollMs);
                 }
 
-                // Vérifier si ticket encore pending
-                int[] dsdcEnd = readDsDcFast();
+                // Vérifier si encore pending (tolérance longue)
+                int[] dsdcEnd = readDsDcFastLong(pollMs);
                 boolean stillPending = (dsdcEnd[1] & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
                 if (stillPending) {
                     emitOperatorAlert(
@@ -465,9 +546,6 @@ public class DeliveryController {
                             true
                     );
                 }
-
-                logTimeline("PRINTPEND:AFTER", pollMs);
-                refreshPrinterStatus(pollMs);
 
             } catch (Exception e) {
                 if (events != null) events.onError("printPendingTicket", e);
@@ -496,21 +574,20 @@ public class DeliveryController {
 
         link.setPythonCompat(true, pollMs);
 
+        // Set product (#0) — retry safe + verify
         int list0 = productToList0Value(product);
         log("[PRE] Setting active product (Field #0) product=" + product + " (list0=" + list0 + ")");
-        link.opSetField(FIELD_PRODUCT_NUMBER, new byte[]{ (byte)list0 });
+        safeSetFieldWithRetry(FIELD_PRODUCT_NUMBER, new byte[]{ (byte)list0 }, pollMs, 1);
         this.presetProduct = product;
 
-        logTimeline("PRESTART:AFTER_PRODUCT", pollMs);
-
+        // Set net preset (#6) — retry safe + verify
         this.presetLitres = presetLitres;
         if (presetLitres > 0.0) {
             int dec = getDecimals();
             log("[PRE] Setting NET preset (Field #6) value=" + presetLitres + " (decimalsIndex=" + dec + ")");
-            link.opSetField(FIELD_NET_PRESET, encodeVolume(presetLitres, dec));
+            safeSetFieldWithRetry(FIELD_NET_PRESET, encodeVolume(presetLitres, dec), pollMs, 4);
         }
 
-        logTimeline("PRESTART:AFTER_PRESET", pollMs);
         log("[PRE] Completed PRE-START");
     }
 
@@ -521,8 +598,6 @@ public class DeliveryController {
         log("[START] RUN (Command #0)");
         link.opIssueCommand(0x00);
         setState(State.STARTING);
-
-        logTimeline("START:AFTER_RUN", pollMs);
 
         boolean active = withPollWindow(() -> {
             long deadline = System.currentTimeMillis() + 12000;
@@ -646,23 +721,37 @@ public class DeliveryController {
         link.setPythonCompat(true, pollMs);
         link.opIssueCommand(0x02);
 
-        withPollWindow(() -> {
-            long deadline = System.currentTimeMillis() + timeoutMs;
-            while (System.currentTimeMillis() < deadline) {
-                int[] dsdc = link.opDeliveryStatus();
-                int ds = dsdc[0];
-                int dc = dsdc[1];
+        long deadline = System.currentTimeMillis() + timeoutMs;
 
-                boolean active = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
-                if (!active) break;
-
-                Thread.sleep(pollMs);
-                logDsDc("END:STATE", ds, dc);
+        // Boucle d’attente : tolère queued timeout sans tout casser
+        while (System.currentTimeMillis() < deadline) {
+            int[] dsdc;
+            try {
+                dsdc = readDsDcFast();
+            } catch (Exception e) {
+                String m = e.getMessage();
+                if (m != null && m.contains("Queued timeout (python)")) {
+                    Thread.sleep(Math.max(50, pollMs));
+                    continue;
+                }
+                Thread.sleep(Math.max(50, pollMs));
+                continue;
             }
-            return null;
-        });
 
-        logTimeline("END:INACTIVE", pollMs);
+            int ds = dsdc[0], dc = dsdc[1];
+            boolean active = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
+
+            if (!active) break;
+            Thread.sleep(pollMs);
+        }
+
+        // Lecture finale “long” (30s) pour éviter faux timeout
+        try {
+            int[] dsdcLong = readDsDcFastLong(pollMs);
+            logDsDc("END:POST-LONG", dsdcLong[0], dsdcLong[1]);
+        } catch (Exception e) {
+            log("[END:POST-LONG] WARN: " + e.getMessage());
+        }
 
         refreshPrinterStatus(pollMs);
 
@@ -706,18 +795,13 @@ public class DeliveryController {
         startOpenMode(product, 0.0, timeoutMs, pollMs);
     }
 
-    /**
-     * ✅ Ajusté: ne pas ignorer IDLE si le compteur est actif (recovery).
-     * - Si compteur inactif ET déjà ENDED -> ignorer
-     * - Sinon -> tenter endDeliverySequence
-     */
+    /** END “normal” (mais ne bloque pas IDLE si compteur actif). */
     public void endGracefully(int timeoutMs, int pollMs){
         exec.execute(() -> safeOp(() -> {
             try {
                 link.setPythonCompat(true, pollMs);
 
-                // Lire l'état réel du compteur (0x28)
-                int[] dsdc = readDsDcFast();
+                int[] dsdc = readDsDcFastLong(pollMs);
                 int ds = dsdc[0], dc = dsdc[1];
                 boolean da = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
 
@@ -726,7 +810,6 @@ public class DeliveryController {
                     return;
                 }
 
-                // Sinon on tente l'END (même si state=IDLE)
                 endDeliverySequence(timeoutMs, pollMs);
 
             } catch (Exception ex) {
@@ -735,9 +818,7 @@ public class DeliveryController {
         }, "endGracefully"));
     }
 
-    /**
-     * ✅ Reprendre une livraison (Cmd #0) et remettre RUNNING/loop si nécessaire.
-     */
+    /** Reprendre une livraison (Cmd #0) et remettre RUNNING/loop si nécessaire. */
     public void resumeDelivery(int pollMs) {
         exec.execute(() -> safeOp(() -> {
             try {
@@ -767,11 +848,9 @@ public class DeliveryController {
 
                 if (!becameActive) {
                     log("[RESUME] WARN: delivery not active after Cmd#0 (timeout).");
-                    logTimeline("RESUME:AFTER_TIMEOUT", pollMs);
                     return;
                 }
 
-                // Si on n'était pas RUNNING, réinitialiser la baseline
                 if (state != State.RUNNING) {
                     setState(State.STARTING);
 
@@ -781,6 +860,7 @@ public class DeliveryController {
 
                     lastGross = startGross;
                     lastNet = startNet;
+
                     lastFlow = null;
                     stopping = false;
 
@@ -792,7 +872,6 @@ public class DeliveryController {
                 }
 
                 startLiveLoop(pollMs);
-                logTimeline("RESUME:AFTER", pollMs);
 
             } catch (Exception e) {
                 if (events != null) events.onError("resumeDelivery", e);
@@ -801,7 +880,7 @@ public class DeliveryController {
     }
 
     /**
-     * ✅ END Recovery avec message opérateur clair si échec.
+     * END Recovery avec message opérateur clair si échec.
      * Met FLOW_ACTIVE en évidence si persistant à 1.
      */
     public void endRecoveryOrExplain(int timeoutMs, int pollMs) {
@@ -809,7 +888,7 @@ public class DeliveryController {
             try {
                 link.setPythonCompat(true, pollMs);
 
-                int[] dsdc0 = readDsDcFast();
+                int[] dsdc0 = readDsDcFastLong(pollMs);
                 int ds0 = dsdc0[0], dc0 = dsdc0[1];
                 boolean da0 = (dc0 & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
 
@@ -818,7 +897,7 @@ public class DeliveryController {
                     return;
                 }
 
-                // tenter END
+                // tenter END normal
                 try {
                     endDeliverySequence(timeoutMs, pollMs);
                     return;
@@ -826,8 +905,8 @@ public class DeliveryController {
                     // produire une alerte terrain
                 }
 
-                // relire état final
-                int[] dsdc1 = readDsDcFast();
+                // relire état final (long)
+                int[] dsdc1 = readDsDcFastLong(pollMs);
                 int ds = dsdc1[0], dc = dsdc1[1];
                 boolean fa = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
                 boolean da = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
