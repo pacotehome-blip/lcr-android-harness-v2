@@ -48,6 +48,9 @@ public class MainActivity extends AppCompatActivity {
     private TextView txtLog;
     private ScrollView logScroll;
 
+    // ---------- LIVE (ligne unique) ----------
+    private TextView txtLive;
+
     // ---------- UI USB ----------
     private Spinner spnUsbDevices;
     private Button btnScanUsb, btnPingUsb;
@@ -78,7 +81,7 @@ public class MainActivity extends AppCompatActivity {
     private PendingIntent usbPermissionIntent;
 
     // ==========================================================
-    // FIX: latches anti-spam (évite popups répétitifs)
+    // FIX: anti-spam latches (évite popups répétitifs)
     // ==========================================================
     private boolean recoveryDialogShown = false;
     private boolean printDialogShown = false;
@@ -133,11 +136,16 @@ public class MainActivity extends AppCompatActivity {
         );
         registerReceiver(usbPermissionReceiver, new IntentFilter(ACTION_USB_PERMISSION));
 
+        // Dumps I/O contrôlés par le switch
         LcpLink.DUMP_TX = switchIoLog.isChecked();
         LcpLink.DUMP_RX = switchIoLog.isChecked();
 
         txtPrinterStatus.setText("Imprimante: (non connecté / non lu)");
         txtPrinterStatus.setBackgroundColor(0xFFEEEEEE);
+
+        if (txtLive != null) {
+            txtLive.setText("LIVE: (en attente)");
+        }
 
         log("Prêt. 1) Choisir USB 2) Ouvrir/Ping 3) Connect (LCP).");
         new Handler().postDelayed(this::scanUsbDevices, 400);
@@ -169,6 +177,9 @@ public class MainActivity extends AppCompatActivity {
         switchIoLog = findViewById(R.id.switchIoLog);
         txtLog = findViewById(R.id.txtLog);
         logScroll = findViewById(R.id.logScroll);
+
+        // LIVE
+        txtLive = findViewById(R.id.txtLive);
 
         btnCopyLog = findViewById(R.id.btnCopyLog);
         btnClearLog = findViewById(R.id.btnClearLog);
@@ -223,7 +234,7 @@ public class MainActivity extends AppCompatActivity {
         switchIoLog.setOnCheckedChangeListener((btn, checked) -> {
             LcpLink.DUMP_TX = checked;
             LcpLink.DUMP_RX = checked;
-            if (checked) log("[UI] I/O logs activés");
+            log("[UI] I/O logs " + (checked ? "activés" : "désactivés"));
         });
 
         btnScanUsb.setOnClickListener(v -> scanUsbDevices());
@@ -286,7 +297,7 @@ public class MainActivity extends AppCompatActivity {
                 if (ctrl != null) ctrl.setTicketRequired(position, POLL_MS);
             }
 
-            @Override public void onNothingSelected(AdapterView<?> parent) { }
+            @Override public void onNothingSelected(AdapterView<?> parent) {}
         });
 
         btnClearShift.setOnClickListener(v -> {
@@ -362,7 +373,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // ==========================================================
-    // Logging
+    // Logging (TRACE empilée)
     // ==========================================================
     private void log(String s) {
         if (!switchIoLog.isChecked()) return;
@@ -385,7 +396,7 @@ public class MainActivity extends AppCompatActivity {
                 return Integer.parseInt(t.substring(2), 16) & 0xFF;
             if (!t.isEmpty())
                 return Integer.parseInt(t, 16) & 0xFF;
-        } catch (Exception ignored) { }
+        } catch (Exception ignored) {}
         return def;
     }
 
@@ -407,7 +418,8 @@ public class MainActivity extends AppCompatActivity {
         String p = d.getProductName();
         if (m == null) m = "?";
         if (p == null) p = "?";
-        return String.format("%s - %s (VID=%04X PID=%04X)", m, p, d.getVendorId(), d.getProductId());
+        return String.format("%s - %s (VID=%04X PID=%04X)",
+                m, p, d.getVendorId(), d.getProductId());
     }
 
     private void scanUsbDevices() {
@@ -420,8 +432,7 @@ public class MainActivity extends AppCompatActivity {
         for (UsbDevice d : usbList) labels.add(usbLabel(d));
 
         spnUsbDevices.setAdapter(new ArrayAdapter<>(
-                this, android.R.layout.simple_spinner_item, labels
-        ));
+                this, android.R.layout.simple_spinner_item, labels));
 
         log("Scan USB : " + labels.size() + " périphérique(s).");
     }
@@ -470,7 +481,6 @@ public class MainActivity extends AppCompatActivity {
     // FIX: Recovery / Print dialogs (indépendant du flow)
     // ==========================================================
     private void maybeShowRecoveryOrPrintDialogs(int dc, boolean ticketPending) {
-
         boolean deliveryActive = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0; // 0x0008 [3](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/MainActivity.java)
 
         // Reset latches quand l'épisode est terminé
@@ -494,7 +504,6 @@ public class MainActivity extends AppCompatActivity {
                         if (ctrl != null) ctrl.resumeDelivery(POLL_MS);
                     })
                     .setNegativeButton("Terminer (Cmd#2)", (d, w) -> {
-                        // IMPORTANT: Recovery END (alerte terrain si FLOW_ACTIVE=1 persiste)
                         log("Recovery: Terminer → Cmd#2 (Recovery)");
                         if (ctrl != null) ctrl.endRecoveryOrExplain(20000, POLL_MS);
                     })
@@ -543,7 +552,6 @@ public class MainActivity extends AppCompatActivity {
         @Override
         public void onFlowStopped() {
             log("Flow STOP → débit=0");
-
             runOnUiThread(() -> {
                 btnContinue.setEnabled(true);
                 btnFinish.setEnabled(true);
@@ -566,13 +574,20 @@ public class MainActivity extends AppCompatActivity {
 
         @Override
         public void onProgress(DeliveryController.DeliveryProgress p) {
-            log(String.format(
-                    "PROG t=%dms NET=%.1f (Δ=%.1f) GROSS=%.1f (Δ=%.1f) ds=%04X dc=%04X",
+            // ✅ LIVE: une seule ligne (ne s’empile pas)
+            boolean flow = (p.dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0; // 0x0004 [3](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/MainActivity.java)
+            final String live = String.format(
+                    "t=%dms NET=%.1f (Δ=%.1f) GROSS=%.1f (Δ=%.1f) FLOW=%s dc=%04X",
                     p.tSinceStartMs,
                     p.netL, p.deliveredNetL,
                     p.grossL, p.deliveredGrossL,
-                    p.ds, p.dc
-            ));
+                    flow ? "1" : "0",
+                    p.dc
+            );
+
+            runOnUiThread(() -> {
+                if (txtLive != null) txtLive.setText(live);
+            });
         }
 
         @Override
@@ -590,9 +605,9 @@ public class MainActivity extends AppCompatActivity {
         public void onPrinterStatus(LcpLink.MachineStatusEx ms, boolean ticketPending) {
             final String text =
                     "Imprimante: " + ms.printer().summary() +
-                    " \n ticketPending=" + ticketPending +
-                    " \n ds=0x" + String.format("%04X", ms.delStatus) +
-                    " dc=0x" + String.format("%04X", ms.delCode);
+                            " \n ticketPending=" + ticketPending +
+                            " \n ds=0x" + String.format("%04X", ms.delStatus) +
+                            " dc=0x" + String.format("%04X", ms.delCode);
 
             runOnUiThread(() -> {
                 txtPrinterStatus.setText(text);
@@ -612,7 +627,7 @@ public class MainActivity extends AppCompatActivity {
                 txtPrinterStatus.setBackgroundColor(bg);
             });
 
-            // Trigger Recovery/Print indépendamment du FLOW
+            // ✅ Trigger Recovery/Print indépendamment du FLOW
             maybeShowRecoveryOrPrintDialogs(ms.delCode, ticketPending);
         }
 
