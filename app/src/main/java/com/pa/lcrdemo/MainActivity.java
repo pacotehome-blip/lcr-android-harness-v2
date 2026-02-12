@@ -453,7 +453,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void setPort(UsbSerialPort p) {
+    public void setPort(UsbSerialPort p) {
         this.port = p;
         log("USB prêt.");
     }
