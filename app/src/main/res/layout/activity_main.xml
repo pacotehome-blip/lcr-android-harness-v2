@@ -1,5 +1,5 @@
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
-    android:id="@+id/logScroll"
+    android:id="@+id/rootScroll"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:fillViewport="true">
@@ -150,7 +150,7 @@
                 android:maxLines="1" />
         </LinearLayout>
 
-        <!-- Boutons A/B/C + Finish/Continue -->
+        <!-- Boutons A/B/C -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -178,6 +178,7 @@
                 android:layout_marginStart="8dp" />
         </LinearLayout>
 
+        <!-- Continue / Finish -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -188,17 +189,19 @@
                 android:id="@+id/btnContinue"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Continuer" />
+                android:text="Continuer"
+                android:enabled="false" />
 
             <Button
                 android:id="@+id/btnFinish"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="Terminé"
-                android:layout_marginStart="8dp" />
+                android:layout_marginStart="8dp"
+                android:enabled="false" />
         </LinearLayout>
 
-        <!-- ===================== Ticket  Impression ===================== -->
+        <!-- ===================== Ticket Impression ===================== -->
         <TextView
             android:id="@+id/lblTicket"
             android:layout_width="wrap_content"
@@ -263,7 +266,7 @@
             android:text="Imprimer ticket (Cmd #6)"
             android:layout_marginTop="6dp" />
 
-        <!-- ===================== Statut imprimante (toujours visible) ===================== -->
+        <!-- ===================== Statut imprimante ===================== -->
         <TextView
             android:id="@+id/lblPrinterStatus"
             android:layout_width="wrap_content"
@@ -324,18 +327,28 @@
                 android:layout_marginStart="8dp" />
         </LinearLayout>
 
-        <TextView
-            android:id="@+id/txtLog"
+        <!-- ✅ ScrollView dédié aux logs : correspond à MainActivity.logScroll -->
+        <ScrollView
+            android:id="@+id/logScroll"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:textSize="12sp"
-            android:textIsSelectable="true"
-            android:typeface="monospace"
-            android:padding="10dp"
+            android:layout_height="260dp"
             android:layout_marginTop="6dp"
             android:background="#111111"
-            android:textColor="#E6E6E6"
-            android:text="" />
+            android:padding="0dp"
+            android:fillViewport="true">
+
+            <TextView
+                android:id="@+id/txtLog"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textSize="12sp"
+                android:textIsSelectable="true"
+                android:typeface="monospace"
+                android:padding="10dp"
+                android:background="#111111"
+                android:textColor="#E6E6E6"
+                android:text="" />
+        </ScrollView>
 
     </LinearLayout>
 </ScrollView>

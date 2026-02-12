@@ -1,47 +1,44 @@
 
 package com.pa.lcr.lcp;
 
-import java.io.IOException; // ✅ pour catch(IOException)
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.*;
 
 /**
- * DeliveryController — version corrigée complète:
- *  - START-GATE: bloque start si delCode.TICKET_PENDING (bit 0x0001)
- *  - Cmd #6: Print pending ticket (selon état, jamais si delivery active)
- *  - Cmd #0: Resume (Start/Resume) via resumeDelivery() (pour Option B UI)
- *  - Timeline DS/DC (0x28) + Printer status (0x23) aux étapes clés
- *  - Live loop: 0x28 (fast) + fields #44/#45, détection FLOW_ACTIVE (bit 0x0004)
+ * DeliveryController — version corrigée:
+ * - START-GATE: bloque start si delCode.TICKET_PENDING (bit 0x0001)
+ * - Cmd #6: Print pending ticket (jamais si delivery active)
+ * - Cmd #0: Start/Resume via resumeDelivery()
+ * - Timeline DS/DC (0x28) + Printer status (0x23)
+ * - Live loop: 0x28 (fast) + fields #44/#45, détection FLOW_ACTIVE (bit 0x0004)
  *
- * Notes robustesse:
- *  - Les opérations non-idempotentes (SET_FIELD/ISSUE_COMMAND/PRINT_TEXT)
- *    ne sont pas auto-retry par LcpLink (par design).
+ * Correctif principal:
+ * - resumeDelivery() remet correctement l'état RUNNING et relance le live loop
+ *   quand la livraison redevient active après Cmd#0.
  */
 public class DeliveryController {
 
     // ------------------------- Champs LCR (métier) -------------------------
-    private static final int FIELD_PRODUCT_NUMBER   = 0;   // ProductNumber (LIST+0)
-    private static final int FIELD_NET_PRESET       = 6;   // NetPreset (VOLUME/LV)
-    private static final int FIELD_DECIMALS         = 39;  // Decimals
-    private static final int FIELD_GROSS_COUNT      = 44;  // GrossCount (VOLUME/LV)
-    private static final int FIELD_NET_COUNT        = 45;  // NetCount (VOLUME/LV)
-
-    private static final int FIELD_CLEAR_SHIFT      = 16;  // ClearShift
-    private static final int FIELD_TICKET_NUMBER    = 23;  // TicketNumber (LONG/SL)
-    private static final int FIELD_TICKET_REQUIRED  = 37;  // TicketRequired (0/1/2)
+    private static final int FIELD_PRODUCT_NUMBER = 0;   // ProductNumber (LIST+0)
+    private static final int FIELD_NET_PRESET = 6;       // NetPreset (VOLUME/LV)
+    private static final int FIELD_DECIMALS = 39;        // Decimals
+    private static final int FIELD_GROSS_COUNT = 44;     // GrossCount (VOLUME/LV)
+    private static final int FIELD_NET_COUNT = 45;       // NetCount (VOLUME/LV)
+    private static final int FIELD_CLEAR_SHIFT = 16;     // ClearShift
+    private static final int FIELD_TICKET_NUMBER = 23;   // TicketNumber (LONG/SL)
+    private static final int FIELD_TICKET_REQUIRED = 37; // TicketRequired (0/1/2)
 
     // ------------------------- Dépendances -------------------------
     private final LcpLink link;
     private final DeliveryEvents events;
     private final ExecutorService exec;
-
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     private ScheduledFuture<?> liveLoopFuture;
 
     // ------------------------- État -------------------------
     public enum State { IDLE, PRESTART, STARTING, RUNNING, ENDING, ENDED, ERROR }
     private volatile State state = State.IDLE;
-
     private volatile boolean stopping = false;
     private volatile boolean pollWindowOpen = false;
 
@@ -68,28 +65,21 @@ public class DeliveryController {
         void onFlowStarted();
         void onFlowStopped();
         void onProgress(DeliveryProgress p);
-
         void onTicketNumber(int ticketNumber);
         void onTicketRequired(int mode); // 0/1/2
-
         void onPrinterStatus(LcpLink.MachineStatusEx ms, boolean ticketPending);
-
         void onError(String msg, Throwable t);
         void onLog(String line);
     }
 
     public static final class DeliveryProgress {
         public long tSinceStartMs;
-
-        public double grossL;    // #44
-        public double netL;      // #45
-
+        public double grossL; // #44
+        public double netL;   // #45
         public double deliveredGrossL;
         public double deliveredNetL;
-
         public double dGrossL;
         public double dNetL;
-
         public boolean flowActive;
         public boolean stalled;
         public int ds;
@@ -141,9 +131,9 @@ public class DeliveryController {
 
     private static String dcFlags(int dc) {
         boolean pending = (dc & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
-        boolean flow    = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
-        boolean active  = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
-        boolean begin   = (dc & LcpLink.LCRSc_BEGIN_DELIVERY) != 0;
+        boolean flow = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
+        boolean active = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
+        boolean begin = (dc & LcpLink.LCRSc_BEGIN_DELIVERY) != 0;
         return String.format("[ticketPending=%s flow=%s active=%s begin=%s]",
                 pending, flow, active, begin);
     }
@@ -195,17 +185,17 @@ public class DeliveryController {
         return new byte[] {
                 (byte)((v >> 24) & 0xFF),
                 (byte)((v >> 16) & 0xFF),
-                (byte)((v >>  8) & 0xFF),
-                (byte)( v        & 0xFF)
+                (byte)((v >> 8) & 0xFF),
+                (byte)( v & 0xFF)
         };
     }
 
     private static double decodeVolume(byte[] b4, int decimalsIndex) {
         if (b4 == null || b4.length < 4) return 0.0;
         int v = ((b4[0] & 0xFF) << 24)
-              | ((b4[1] & 0xFF) << 16)
-              | ((b4[2] & 0xFF) <<  8)
-              |  (b4[3] & 0xFF);
+                | ((b4[1] & 0xFF) << 16)
+                | ((b4[2] & 0xFF) << 8)
+                | (b4[3] & 0xFF);
         int scale = scaleForDecimalsIndex(decimalsIndex);
         return v / (double) scale;
     }
@@ -222,7 +212,10 @@ public class DeliveryController {
 
     private static int s32be(byte[] b4) {
         if (b4 == null || b4.length < 4) return 0;
-        return ((b4[0] & 0xFF) << 24) | ((b4[1] & 0xFF) << 16) | ((b4[2] & 0xFF) << 8) | (b4[3] & 0xFF);
+        return ((b4[0] & 0xFF) << 24)
+                | ((b4[1] & 0xFF) << 16)
+                | ((b4[2] & 0xFF) << 8)
+                | (b4[3] & 0xFF);
     }
 
     private int readTicketNumber() throws Exception {
@@ -235,7 +228,6 @@ public class DeliveryController {
     }
 
     // ============================= PRINTER STATUS =============================
-
     /**
      * Rafraîchit le statut imprimante détaillé (0x23) + ticketPending.
      * IMPORTANT: 0x23 peut être lent si printer offline; on l'appelle Connect/Prestart/End (pas RUNNING).
@@ -244,14 +236,10 @@ public class DeliveryController {
         exec.execute(() -> safeOp(() -> {
             try {
                 link.setPythonCompat(true, pollMs);
-
                 LcpLink.MachineStatusEx ms = withPollWindow(() -> link.opMachineStatusEx());
                 boolean pending = (ms.delCode & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
-
                 log("[PRN] " + ms.toString() + " ticketPending=" + pending);
-
                 if (events != null) events.onPrinterStatus(ms, pending);
-
             } catch (Exception e) {
                 if (events != null) events.onError("refreshPrinterStatus", e);
             }
@@ -259,23 +247,18 @@ public class DeliveryController {
     }
 
     // ============================= TICKET INFO (UI) =============================
-
     public void refreshTicketInfo(int pollMs) {
         exec.execute(() -> safeOp(() -> {
             try {
                 link.setPythonCompat(true, pollMs);
-
                 int tr = readTicketRequired();
                 int tn = readTicketNumber();
-
                 log("[TICKET] TicketRequired(#37)=" + tr + " (0=req,1=optional,2=never)");
                 log("[TICKET] TicketNumber(#23)=" + tn + " (increments after printing)");
-
                 if (events != null) {
                     events.onTicketRequired(tr);
                     events.onTicketNumber(tn);
                 }
-
             } catch (Exception e) {
                 if (events != null) events.onError("refreshTicketInfo", e);
             }
@@ -295,8 +278,8 @@ public class DeliveryController {
                 } catch (IOException ex) {
                     log("[TICKET] SET #37 refused/failed (likely mode/security). " + ex.getMessage());
                 }
-                int after = readTicketRequired();
 
+                int after = readTicketRequired();
                 log("[TICKET] TicketRequired(#37) now=" + after + " (requested=" + mode + ", before=" + before + ")");
                 if (events != null) events.onTicketRequired(after);
 
@@ -336,14 +319,10 @@ public class DeliveryController {
         exec.execute(() -> safeOp(() -> {
             try {
                 link.setPythonCompat(true, pollMs);
-
                 int tr = readTicketRequired();
                 log("[SHIFT] TicketRequired(#37)=" + tr + " ; sending ClearShift(#16)=0");
-
                 link.opSetField(FIELD_CLEAR_SHIFT, new byte[]{ 0x00 });
-
                 log("[SHIFT] ClearShift(#16)=0 sent");
-
             } catch (Exception e) {
                 if (events != null) events.onError("clearShiftNow", e);
             }
@@ -356,15 +335,11 @@ public class DeliveryController {
             try {
                 link.setPythonCompat(true, pollMs);
                 logTimeline("PING:BEFORE", pollMs);
-
                 LcpLink.MachineStatusEx ms = withPollWindow(() -> link.opMachineStatusEx());
                 log("[PING] " + ms.toString());
-
                 boolean pending = (ms.delCode & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
                 if (events != null) events.onPrinterStatus(ms, pending);
-
                 logTimeline("PING:AFTER", pollMs);
-
             } catch (Exception e) {
                 if (events != null) events.onError("pingStatus", e);
             }
@@ -372,7 +347,6 @@ public class DeliveryController {
     }
 
     // ============================= START-GATE =============================
-
     /**
      * START-GATE: bloque si un ticket de livraison est en attente (dc bit 0x0001).
      * Utilise 0x28 (fast) et affiche 0x23 seulement pour diagnostiquer si bloqué.
@@ -380,7 +354,6 @@ public class DeliveryController {
     private boolean startGateAllow(int pollMs) throws Exception {
         int[] dsdc = readDsDcFast();
         int ds = dsdc[0], dc = dsdc[1];
-
         logDsDc("START-GATE", ds, dc);
 
         boolean pending = (dc & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
@@ -423,11 +396,13 @@ public class DeliveryController {
                 while (System.currentTimeMillis() < deadline) {
                     int[] dsdc = readDsDcFast();
                     int ds = dsdc[0], dc = dsdc[1];
+
                     boolean pending = (dc & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
                     if (pending != lastPending) {
                         logDsDc("PRINTPEND:STATE", ds, dc);
                         lastPending = pending;
                     }
+
                     if (!pending) break;
                     Thread.sleep(pollMs);
                 }
@@ -443,7 +418,6 @@ public class DeliveryController {
 
     // ============================= PRE-START =============================
     public void prestartSequence(int product, double presetLitres, int pollMs) throws Exception {
-
         setState(State.PRESTART);
         logTimeline("PRESTART:ENTER", pollMs);
 
@@ -485,13 +459,12 @@ public class DeliveryController {
 
         log("[START] RUN (Command #0)");
         link.opIssueCommand(0x00);
-
         setState(State.STARTING);
+
         logTimeline("START:AFTER_RUN", pollMs);
 
         boolean active = withPollWindow(() -> {
             long deadline = System.currentTimeMillis() + 12000;
-
             while (System.currentTimeMillis() < deadline) {
                 int[] dsdc = link.opDeliveryStatus(); // 0x28
                 int ds = dsdc[0];
@@ -502,7 +475,6 @@ public class DeliveryController {
                     logDsDc("START:ACTIVE", ds, dc);
                     return true;
                 }
-
                 Thread.sleep(Math.max(50, pollMs));
             }
             return false;
@@ -510,15 +482,15 @@ public class DeliveryController {
 
         if (!active) throw new Exception("Delivery not active after RUN");
 
+        // init baseline
         startTimestampMs = System.currentTimeMillis();
         startGross = readGrossLitres();
-        startNet   = readNetLitres();
-        lastGross  = startGross;
-        lastNet    = startNet;
-
+        startNet = readNetLitres();
+        lastGross = startGross;
+        lastNet = startNet;
         lastFlow = null;
-        stopping = false;
 
+        stopping = false;
         setState(State.RUNNING);
         log("[START] Delivery ACTIVE");
     }
@@ -546,29 +518,28 @@ public class DeliveryController {
                     int ds = dsdc[0];
                     int dc = dsdc[1];
 
-                    boolean flow   = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
+                    boolean flow = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
                     boolean active = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
-                    if (!active) { stopping = true; return; }
+
+                    if (!active) {
+                        stopping = true;
+                        return;
+                    }
 
                     // Lire #44/#45. En cas d'échec, garder dernière valeur.
                     double gross = lastGross;
-                    double net   = lastNet;
-
+                    double net = lastNet;
                     try { gross = readGrossLitres(); } catch (Exception ex) { log("[LIVE] WARN gross read failed: " + ex.getMessage()); }
-                    try { net   = readNetLitres(); }   catch (Exception ex) { log("[LIVE] WARN net read failed: " + ex.getMessage()); }
+                    try { net = readNetLitres(); } catch (Exception ex) { log("[LIVE] WARN net read failed: " + ex.getMessage()); }
 
                     DeliveryProgress p = new DeliveryProgress();
                     p.tSinceStartMs = System.currentTimeMillis() - startTimestampMs;
-
                     p.grossL = gross;
                     p.netL = net;
-
                     p.deliveredGrossL = gross - startGross;
                     p.deliveredNetL = net - startNet;
-
                     p.dGrossL = gross - lastGross;
                     p.dNetL = net - lastNet;
-
                     p.flowActive = flow;
                     p.stalled = !flow;
                     p.ds = ds;
@@ -596,7 +567,6 @@ public class DeliveryController {
 
     // ============================= END =============================
     public void endDeliverySequence(int timeoutMs, int pollMs) throws Exception {
-
         logTimeline("END:ENTER", pollMs);
 
         // Refresh printer status BEFORE ending
@@ -609,6 +579,7 @@ public class DeliveryController {
                 trBefore, tnBefore));
 
         log("[END] Issuing END (Command #2)");
+
         setState(State.ENDING);
         stopping = true;
 
@@ -630,7 +601,7 @@ public class DeliveryController {
                 int ds = dsdc[0];
                 int dc = dsdc[1];
 
-                boolean active  = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
+                boolean active = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
                 boolean pending = (dc & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
 
                 if (lastPending == null || pending != lastPending) {
@@ -653,7 +624,6 @@ public class DeliveryController {
         // Ticket proof (after)
         int tnAfter = readTicketNumber();
         log(String.format("[PRINT] TicketNumber(#23) after=%d delta=%+d", tnAfter, (tnAfter - tnBefore)));
-
         if (tnAfter > tnBefore) {
             log("[PRINT] CONFIRMED: TicketNumber incremented => delivery ticket printed");
         } else {
@@ -664,11 +634,9 @@ public class DeliveryController {
     }
 
     // ============================= PUBLIC ACTIONS =============================
-
     /** Start with product + preset */
     public void startOpenMode(int product, double presetLitres, int timeoutMs, int pollMs){
         exec.execute(() -> safeOp(() -> {
-
             if (state == State.RUNNING || state == State.STARTING || state == State.PRESTART || state == State.ENDING) {
                 log("[START] ignored: delivery already in progress state=" + state);
                 return;
@@ -680,19 +648,11 @@ public class DeliveryController {
 
             logTimeline("STARTOPEN:ENTER", pollMs);
 
-            try {
-                prestartSequence(product, presetLitres, pollMs);
-            } catch (Exception ex) {
-                if(events!=null) events.onError("prestartSequence", ex);
-                return;
-            }
+            try { prestartSequence(product, presetLitres, pollMs); }
+            catch (Exception ex) { if(events!=null) events.onError("prestartSequence", ex); return; }
 
-            try {
-                startDeliverySequence(pollMs);
-            } catch (Exception ex) {
-                if(events!=null) events.onError("startDeliverySequence", ex);
-                return;
-            }
+            try { startDeliverySequence(pollMs); }
+            catch (Exception ex) { if(events!=null) events.onError("startDeliverySequence", ex); return; }
 
             startLiveLoop(pollMs);
 
@@ -710,30 +670,78 @@ public class DeliveryController {
                 log("[END] ignored: already ended");
                 return;
             }
-            try {
-                endDeliverySequence(timeoutMs, pollMs);
-            } catch (Exception ex) {
-                if(events!=null) events.onError("endDeliverySequence", ex);
-            }
+            try { endDeliverySequence(timeoutMs, pollMs); }
+            catch (Exception ex) { if(events!=null) events.onError("endDeliverySequence", ex); }
         }, "endGracefully"));
     }
 
     /**
-     * ✅ Reprendre une livraison (Command #0 = Start/Resume). 
-     * Utilisé par l'UI Option B (popup "Continuer").
+     * ✅ Correctif: Reprendre une livraison (Command #0 = Start/Resume) ET remettre RUNNING/loop.
+     * Cas visé: "récupération" (deliveryActive && ticketPending) où l'app était IDLE.
      */
     public void resumeDelivery(int pollMs) {
         exec.execute(() -> safeOp(() -> {
             try {
                 link.setPythonCompat(true, pollMs);
+
                 logTimeline("RESUME:BEFORE", pollMs);
 
-                link.opIssueCommand(0x00); // Cmd #0
-
+                // Cmd #0 = Start/Resume
+                link.opIssueCommand(0x00);
                 log("[RESUME] Cmd#0 sent (Start/Resume)");
-                logTimeline("RESUME:AFTER", pollMs);
 
-                if (state == State.RUNNING) startLiveLoop(pollMs);
+                // Vérifier si la livraison est réellement active (0x28)
+                boolean becameActive = withPollWindow(() -> {
+                    long deadline = System.currentTimeMillis() + 12000;
+                    while (System.currentTimeMillis() < deadline) {
+                        int[] dsdc = link.opDeliveryStatus(); // 0x28
+                        int ds = dsdc[0];
+                        int dc = dsdc[1];
+
+                        boolean active = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
+                        boolean begin  = (dc & LcpLink.LCRSc_BEGIN_DELIVERY) != 0;
+
+                        if (active || begin) {
+                            logDsDc("RESUME:ACTIVE", ds, dc);
+                            return true;
+                        }
+                        Thread.sleep(Math.max(50, pollMs));
+                    }
+                    return false;
+                });
+
+                if (!becameActive) {
+                    log("[RESUME] WARN: delivery not active after Cmd#0 (timeout).");
+                    logTimeline("RESUME:AFTER_TIMEOUT", pollMs);
+                    return;
+                }
+
+                // Si on n'était pas RUNNING, initialiser la baseline
+                if (state != State.RUNNING) {
+                    setState(State.STARTING);
+
+                    startTimestampMs = System.currentTimeMillis();
+                    try { startGross = readGrossLitres(); } catch (Exception ignored) { startGross = lastGross; }
+                    try { startNet   = readNetLitres();   } catch (Exception ignored) { startNet   = lastNet;   }
+
+                    lastGross = startGross;
+                    lastNet = startNet;
+
+                    lastFlow = null;
+                    stopping = false;
+
+                    setState(State.RUNNING);
+                    log("[RESUME] State -> RUNNING (baseline reset)");
+                } else {
+                    // Déjà RUNNING: juste s'assurer que le loop continue
+                    stopping = false;
+                    log("[RESUME] Already RUNNING");
+                }
+
+                // Démarrer (ou redémarrer) le live loop
+                startLiveLoop(pollMs);
+
+                logTimeline("RESUME:AFTER", pollMs);
 
             } catch (Exception e) {
                 if (events != null) events.onError("resumeDelivery", e);
