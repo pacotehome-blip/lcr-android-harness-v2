@@ -1,8 +1,8 @@
 
 package com.pa.lcrdemo;
 
-import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.app.AlertDialog;
+import androidx.appcompat.app.AppCompatActivity;
 
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
@@ -78,7 +78,7 @@ public class MainActivity extends AppCompatActivity {
     private PendingIntent usbPermissionIntent;
 
     // ==========================================================
-    // FIX: Anti-spam latches (évite popup en boucle au polling)
+    // FIX: latches anti-spam (évite popups répétitifs)
     // ==========================================================
     private boolean recoveryDialogShown = false;
     private boolean printDialogShown = false;
@@ -87,7 +87,8 @@ public class MainActivity extends AppCompatActivity {
     // USB Permission Receiver
     // ==========================================================
     private final BroadcastReceiver usbPermissionReceiver = new BroadcastReceiver() {
-        @Override public void onReceive(Context context, Intent intent) {
+        @Override
+        public void onReceive(Context context, Intent intent) {
             if (!ACTION_USB_PERMISSION.equals(intent.getAction())) return;
 
             UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
@@ -108,6 +109,9 @@ public class MainActivity extends AppCompatActivity {
         }
     };
 
+    // ==========================================================
+    // Lifecycle
+    // ==========================================================
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -127,7 +131,6 @@ public class MainActivity extends AppCompatActivity {
         usbPermissionIntent = PendingIntent.getBroadcast(
                 this, 0, new Intent(ACTION_USB_PERMISSION), piFlags
         );
-
         registerReceiver(usbPermissionReceiver, new IntentFilter(ACTION_USB_PERMISSION));
 
         LcpLink.DUMP_TX = switchIoLog.isChecked();
@@ -276,11 +279,14 @@ public class MainActivity extends AppCompatActivity {
 
         spnTicketRequired.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             boolean first = true;
-            @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
                 if (first) { first = false; return; }
                 if (ctrl != null) ctrl.setTicketRequired(position, POLL_MS);
             }
-            @Override public void onNothingSelected(AdapterView<?> parent) {}
+
+            @Override public void onNothingSelected(AdapterView<?> parent) { }
         });
 
         btnClearShift.setOnClickListener(v -> {
@@ -379,18 +385,18 @@ public class MainActivity extends AppCompatActivity {
                 return Integer.parseInt(t.substring(2), 16) & 0xFF;
             if (!t.isEmpty())
                 return Integer.parseInt(t, 16) & 0xFF;
-        } catch (Exception ignored) {}
+        } catch (Exception ignored) { }
         return def;
     }
 
     private int readInt(EditText edt, int def) {
         try { return Integer.parseInt(edt.getText().toString().trim()); }
-        catch(Exception ignored){ return def; }
+        catch (Exception ignored) { return def; }
     }
 
     private double readDouble(EditText edt, double def) {
         try { return Double.parseDouble(edt.getText().toString().trim()); }
-        catch(Exception ignored){ return def; }
+        catch (Exception ignored) { return def; }
     }
 
     // ==========================================================
@@ -414,7 +420,8 @@ public class MainActivity extends AppCompatActivity {
         for (UsbDevice d : usbList) labels.add(usbLabel(d));
 
         spnUsbDevices.setAdapter(new ArrayAdapter<>(
-                this, android.R.layout.simple_spinner_item, labels));
+                this, android.R.layout.simple_spinner_item, labels
+        ));
 
         log("Scan USB : " + labels.size() + " périphérique(s).");
     }
@@ -463,16 +470,17 @@ public class MainActivity extends AppCompatActivity {
     // FIX: Recovery / Print dialogs (indépendant du flow)
     // ==========================================================
     private void maybeShowRecoveryOrPrintDialogs(int dc, boolean ticketPending) {
-        boolean deliveryActive = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0; // bit 0x0008 [3](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/MainActivity.java)
 
-        // reset latches quand l'épisode est terminé
+        boolean deliveryActive = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0; // 0x0008 [3](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/MainActivity.java)
+
+        // Reset latches quand l'épisode est terminé
         if (!ticketPending) {
             recoveryDialogShown = false;
             printDialogShown = false;
             return;
         }
 
-        // 1) Recovery prioritaire : DELIVERY_ACTIVE && TICKET_PENDING
+        // A) Recovery prioritaire : DELIVERY_ACTIVE && TICKET_PENDING
         if (deliveryActive && ticketPending) {
             if (recoveryDialogShown) return;
             recoveryDialogShown = true;
@@ -486,16 +494,15 @@ public class MainActivity extends AppCompatActivity {
                         if (ctrl != null) ctrl.resumeDelivery(POLL_MS);
                     })
                     .setNegativeButton("Terminer (Cmd#2)", (d, w) -> {
-                        // ✅ IMPORTANT: mode recovery (alerte terrain si FLOW_ACTIVE=1 persiste)
+                        // IMPORTANT: Recovery END (alerte terrain si FLOW_ACTIVE=1 persiste)
                         log("Recovery: Terminer → Cmd#2 (Recovery)");
                         if (ctrl != null) ctrl.endRecoveryOrExplain(20000, POLL_MS);
                     })
                     .show());
-
             return;
         }
 
-        // 2) Impression possible : !DELIVERY_ACTIVE && TICKET_PENDING
+        // B) Impression possible : !DELIVERY_ACTIVE && TICKET_PENDING
         if (!deliveryActive && ticketPending) {
             if (printDialogShown) return;
             printDialogShown = true;
@@ -514,7 +521,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // ==========================================================
-    // Delivery Events (impl)
+    // Delivery Events implementation
     // ==========================================================
     private class DeliveryEventsImpl implements DeliveryController.DeliveryEvents {
 
@@ -583,16 +590,17 @@ public class MainActivity extends AppCompatActivity {
         public void onPrinterStatus(LcpLink.MachineStatusEx ms, boolean ticketPending) {
             final String text =
                     "Imprimante: " + ms.printer().summary() +
-                            " \n ticketPending=" + ticketPending +
-                            " \n ds=0x" + String.format("%04X", ms.delStatus) +
-                            " dc=0x" + String.format("%04X", ms.delCode);
+                    " \n ticketPending=" + ticketPending +
+                    " \n ds=0x" + String.format("%04X", ms.delStatus) +
+                    " dc=0x" + String.format("%04X", ms.delCode);
 
             runOnUiThread(() -> {
                 txtPrinterStatus.setText(text);
 
-                boolean hardErr = ms.printer().outOfPaper
-                        || ms.printer().noProcessor
-                        || ms.printer().processorError;
+                boolean hardErr =
+                        ms.printer().outOfPaper ||
+                        ms.printer().noProcessor ||
+                        ms.printer().processorError;
 
                 boolean printing = ms.printer().printingStarted;
 
@@ -604,7 +612,7 @@ public class MainActivity extends AppCompatActivity {
                 txtPrinterStatus.setBackgroundColor(bg);
             });
 
-            // ✅ Trigger Recovery/Print indépendamment de FLOW
+            // Trigger Recovery/Print indépendamment du FLOW
             maybeShowRecoveryOrPrintDialogs(ms.delCode, ticketPending);
         }
 
