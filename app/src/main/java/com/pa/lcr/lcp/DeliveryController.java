@@ -1,21 +1,21 @@
 
 package com.pa.lcr.lcp;
 
-import java.io.IOException;                   // ✅ FIX: required for catch(IOException)
+import java.io.IOException; // ✅ pour catch(IOException)
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.*;
 
 /**
- * DeliveryController — Correctifs complets:
- *  - START-GATE basé sur delCode (0x28) et DEL_TICKET_PENDING (bit 0x0001)
- *  - Cmd #6 "print ticket based on current state" (print pending ticket)
- *  - Timeline DS/DC pour retrouver la séquence gagnante
- *  - 0x23 seulement CONNECT/PRESTART/END (jamais pendant RUNNING)
- *  - Champs/encodage conformes (Field #0/#6/#39/#44/#45/#16/#23/#37)
+ * DeliveryController — version corrigée complète:
+ *  - START-GATE: bloque start si delCode.TICKET_PENDING (bit 0x0001)
+ *  - Cmd #6: Print pending ticket (selon état, jamais si delivery active)
+ *  - Cmd #0: Resume (Start/Resume) via resumeDelivery() (pour Option B UI)
+ *  - Timeline DS/DC (0x28) + Printer status (0x23) aux étapes clés
+ *  - Live loop: 0x28 (fast) + fields #44/#45, détection FLOW_ACTIVE (bit 0x0004)
  *
  * Notes robustesse:
- *  - Les opérations non-idempotentes (SET_FIELD/ISSUE_COMMAND/PRINT_TEXT) ne sont pas auto-retry par LcpLink.
- *    Si un framing-timeout survient, l’UI doit permettre de réessayer.
+ *  - Les opérations non-idempotentes (SET_FIELD/ISSUE_COMMAND/PRINT_TEXT)
+ *    ne sont pas auto-retry par LcpLink (par design).
  */
 public class DeliveryController {
 
@@ -237,7 +237,7 @@ public class DeliveryController {
     // ============================= PRINTER STATUS =============================
 
     /**
-     * Rafraîchit le statut imprimante détaillé (0x23) + ticketPending (dc bit 0x0001).
+     * Rafraîchit le statut imprimante détaillé (0x23) + ticketPending.
      * IMPORTANT: 0x23 peut être lent si printer offline; on l'appelle Connect/Prestart/End (pas RUNNING).
      */
     public void refreshPrinterStatus(int pollMs) {
@@ -503,9 +503,6 @@ public class DeliveryController {
                     return true;
                 }
 
-                boolean pending = (dc & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
-                if (pending) log("[START] note: ticketPending=true (may block future starts)");
-
                 Thread.sleep(Math.max(50, pollMs));
             }
             return false;
@@ -544,7 +541,7 @@ public class DeliveryController {
                 try {
                     if (stopping || state != State.RUNNING) return;
 
-                    // Use 0x28 during running
+                    // Use 0x28 during running (fast)
                     int[] dsdc = withPollWindow(() -> link.opDeliveryStatus());
                     int ds = dsdc[0];
                     int dc = dsdc[1];
@@ -582,7 +579,7 @@ public class DeliveryController {
 
                     if (events != null) events.onProgress(p);
 
-                    // transitions flow
+                    // transitions flow (pour UI: Flow STOP => proposer Continuer/Terminer)
                     if (lastFlow == null) lastFlow = flow;
                     if (flow && !lastFlow && events != null) events.onFlowStarted();
                     if (!flow && lastFlow && events != null) events.onFlowStopped();
@@ -719,6 +716,29 @@ public class DeliveryController {
                 if(events!=null) events.onError("endDeliverySequence", ex);
             }
         }, "endGracefully"));
+    }
+
+    /**
+     * ✅ Reprendre une livraison (Command #0 = Start/Resume). 
+     * Utilisé par l'UI Option B (popup "Continuer").
+     */
+    public void resumeDelivery(int pollMs) {
+        exec.execute(() -> safeOp(() -> {
+            try {
+                link.setPythonCompat(true, pollMs);
+                logTimeline("RESUME:BEFORE", pollMs);
+
+                link.opIssueCommand(0x00); // Cmd #0
+
+                log("[RESUME] Cmd#0 sent (Start/Resume)");
+                logTimeline("RESUME:AFTER", pollMs);
+
+                if (state == State.RUNNING) startLiveLoop(pollMs);
+
+            } catch (Exception e) {
+                if (events != null) events.onError("resumeDelivery", e);
+            }
+        }, "resumeDelivery"));
     }
 
     /** Impression texte (MsgID 0x22) */
