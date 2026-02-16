@@ -16,7 +16,6 @@ import android.hardware.usb.UsbDeviceConnection;
 import android.hardware.usb.UsbManager;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.Handler;
 import android.view.View;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
@@ -51,6 +50,9 @@ public class MainActivity extends AppCompatActivity {
     // ---------- LIVE (ligne unique) ----------
     private TextView txtLive;
 
+    // ---------- (Optionnel) statut LINK (si ajouté au XML) ----------
+    private TextView txtLinkStatus;
+
     // ---------- UI USB ----------
     private Spinner spnUsbDevices;
     private Button btnScanUsb, btnPingUsb;
@@ -81,6 +83,18 @@ public class MainActivity extends AppCompatActivity {
     private PendingIntent usbPermissionIntent;
 
     // ==========================================================
+    // UI/LINK state
+    // ==========================================================
+    private enum LinkState { DISCONNECTED, USB_READY, LCP_READY }
+    private volatile LinkState linkState = LinkState.DISCONNECTED;
+
+    // "livraison active" revalidée au resync (via delCode / DELIVERY_ACTIVE)
+    private volatile boolean deliveryActiveFlag = false;
+
+    // Auto reconnect à l'attach (comportement terrain)
+    private final boolean autoReconnect = true;
+
+    // ==========================================================
     // FIX: anti-spam latches (évite popups répétitifs)
     // ==========================================================
     private boolean recoveryDialogShown = false;
@@ -105,9 +119,58 @@ public class MainActivity extends AppCompatActivity {
             if (granted) {
                 log("Permission USB accordée: " + usbLabel(device));
                 UsbSerialPort p = tryOpenDevice(device);
-                if (p != null) setPort(p);
+                if (p != null) {
+                    setPort(p);
+
+                    // Auto init + resync après permission (terrain)
+                    if (autoReconnect) {
+                        initLcp();
+                        doResyncStatus();
+                    }
+                }
             } else {
                 log("Permission USB REFUSÉE: " + usbLabel(device));
+                onDisconnected("USB permission refusée");
+            }
+        }
+    };
+
+    // ==========================================================
+    // USB attach/detach Receiver (clé terrain)
+    // ==========================================================
+    private final BroadcastReceiver usbAttachDetachReceiver = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) {
+            String a = intent.getAction();
+            if (a == null) return;
+
+            UsbDevice dev = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+
+            if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(a)) {
+                if (dev == null) return;
+
+                // Si c’est notre device courant (match VID/PID), on coupe tout
+                if (lastSelectedDevice != null &&
+                        dev.getVendorId() == lastSelectedDevice.getVendorId() &&
+                        dev.getProductId() == lastSelectedDevice.getProductId()) {
+                    onDisconnected("USB DETACHED: " + usbLabel(dev));
+                } else {
+                    // En terrain, si un port était ouvert et n'importe quel detach survient,
+                    // tu peux aussi choisir de couper. Ici on reste conservateur.
+                    log("[USB] DETACHED (autre): " + usbLabel(dev));
+                }
+                return;
+            }
+
+            if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(a)) {
+                log("[USB] ATTACHED: " + (dev != null ? usbLabel(dev) : "(null)"));
+                scanUsbDevices();
+
+                if (!autoReconnect) return;
+
+                // Tentative auto sur le dernier device sélectionné
+                if (lastSelectedDevice != null) {
+                    openDeviceByMatch(lastSelectedDevice);
+                }
             }
         }
     };
@@ -134,7 +197,13 @@ public class MainActivity extends AppCompatActivity {
         usbPermissionIntent = PendingIntent.getBroadcast(
                 this, 0, new Intent(ACTION_USB_PERMISSION), piFlags
         );
+
         registerReceiver(usbPermissionReceiver, new IntentFilter(ACTION_USB_PERMISSION));
+
+        IntentFilter f = new IntentFilter();
+        f.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
+        f.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
+        registerReceiver(usbAttachDetachReceiver, f);
 
         // Dumps I/O contrôlés par le switch
         LcpLink.DUMP_TX = switchIoLog.isChecked();
@@ -147,14 +216,19 @@ public class MainActivity extends AppCompatActivity {
             txtLive.setText("LIVE: (en attente)");
         }
 
+        // UI OFF au départ (terrain)
+        setUiConnected(false);
+
         log("Prêt. 1) Choisir USB 2) Ouvrir/Ping 3) Connect (LCP).");
-        new Handler().postDelayed(this::scanUsbDevices, 400);
+        new android.os.Handler().postDelayed(this::scanUsbDevices, 400);
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
         try { unregisterReceiver(usbPermissionReceiver); } catch (Exception ignored) {}
+        try { unregisterReceiver(usbAttachDetachReceiver); } catch (Exception ignored) {}
+        safeClosePort();
     }
 
     // ==========================================================
@@ -180,6 +254,9 @@ public class MainActivity extends AppCompatActivity {
 
         // LIVE
         txtLive = findViewById(R.id.txtLive);
+
+        // (Optionnel) si ajouté au layout
+        txtLinkStatus = findViewById(R.id.txtLinkStatus);
 
         btnCopyLog = findViewById(R.id.btnCopyLog);
         btnClearLog = findViewById(R.id.btnClearLog);
@@ -319,23 +396,69 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // ==========================================================
-    // UI state
+    // UI state (CONNECTED/DISCONNECTED)
+    // ==========================================================
+    private void setUiConnected(boolean connected) {
+        // USB actions restent possibles
+        spnUsbDevices.setEnabled(true);
+        btnScanUsb.setEnabled(true);
+        btnPingUsb.setEnabled(true);
+
+        // Connect LCP seulement si port OK
+        btnConnect.setEnabled(connected && port != null);
+
+        boolean lcpOk = connected && (ctrl != null);
+
+        // commandes LCP
+        btnA.setEnabled(lcpOk);
+        btnB.setEnabled(lcpOk);
+
+        // Start : si pas de livraison active
+        btnC.setEnabled(lcpOk && !deliveryActiveFlag);
+
+        // Continue/Finish : si livraison active (revalidée au resync)
+        btnContinue.setEnabled(lcpOk && deliveryActiveFlag);
+        btnFinish.setEnabled(lcpOk && deliveryActiveFlag);
+
+        // Ticket / printer
+        btnRefreshTicket.setEnabled(lcpOk);
+        btnRefreshPrinter.setEnabled(lcpOk);
+        btnPrintPending.setEnabled(lcpOk);
+        spnTicketRequired.setEnabled(lcpOk);
+        btnClearShift.setEnabled(lcpOk);
+
+        // Feedback
+        if (!connected && txtLive != null) {
+            txtLive.setText("LIVE: DISCONNECTED");
+        }
+
+        if (txtLinkStatus != null) {
+            txtLinkStatus.setText(connected ? "LINK: CONNECTED" : "LINK: DISCONNECTED");
+            txtLinkStatus.setBackgroundColor(connected ? 0xFFC8E6C9 : 0xFFFFCDD2);
+        }
+    }
+
+    // ==========================================================
+    // UI state (DeliveryController.State)
     // ==========================================================
     private void setUiForState(DeliveryController.State s) {
         boolean running = (s == DeliveryController.State.RUNNING);
         boolean startingOrPre = (s == DeliveryController.State.STARTING || s == DeliveryController.State.PRESTART);
         boolean ending = (s == DeliveryController.State.ENDING);
 
-        btnC.setEnabled(!(running || startingOrPre || ending));
-        btnFinish.setEnabled(running || startingOrPre);
+        // Start interdit si épisode en cours OU deliveryActiveFlag
+        btnC.setEnabled(!(running || startingOrPre || ending) && !deliveryActiveFlag);
+
+        // Finish si épisode en cours OU deliveryActiveFlag
+        btnFinish.setEnabled(running || startingOrPre || deliveryActiveFlag);
+
+        // Continue si deliveryActiveFlag et pas RUNNING (ajuste si besoin)
+        btnContinue.setEnabled(deliveryActiveFlag && !running);
 
         btnRefreshPrinter.setEnabled(!running);
         btnPrintPending.setEnabled(!running);
         spnTicketRequired.setEnabled(!running);
         btnClearShift.setEnabled(!running);
-
-        // Continue activé UNIQUEMENT par onFlowStopped()
-        btnContinue.setEnabled(false);
     }
 
     // ==========================================================
@@ -344,6 +467,7 @@ public class MainActivity extends AppCompatActivity {
     private void initLcp() {
         if (port == null) {
             log("ERR: Port USB non initialisé.");
+            setUiConnected(false);
             return;
         }
 
@@ -362,14 +486,52 @@ public class MainActivity extends AppCompatActivity {
                     Executors.newSingleThreadExecutor()
             );
 
+            linkState = LinkState.LCP_READY;
             log("LCP prêt.");
-            ctrl.ensureDefaultTicketRequiredIs1(POLL_MS);
-            ctrl.refreshTicketInfo(POLL_MS);
-            ctrl.refreshPrinterStatus(POLL_MS);
+
+            // UI ON
+            runOnUiThread(() -> setUiConnected(true));
+
+            // Resync état (status/printer/ticket)
+            doResyncStatus();
 
         } catch (Exception e) {
             log("Erreur init LCP : " + e.getMessage());
+            onDisconnected("Init LCP failed");
         }
+    }
+
+    // ==========================================================
+    // Resync status (après reconnexion)
+    // ==========================================================
+    private void doResyncStatus() {
+        if (ctrl == null) return;
+        log("[LINK] Resync status...");
+        ctrl.pingStatus(POLL_MS);
+        ctrl.refreshTicketInfo(POLL_MS);
+        ctrl.refreshPrinterStatus(POLL_MS);
+    }
+
+    // ==========================================================
+    // Disconnect handler (gel UI + cleanup)
+    // ==========================================================
+    private void onDisconnected(String reason) {
+        log("[LINK] DISCONNECTED: " + reason);
+
+        linkState = LinkState.DISCONNECTED;
+        deliveryActiveFlag = false;
+
+        ctrl = null;
+        link = null;
+
+        safeClosePort();
+
+        runOnUiThread(() -> setUiConnected(false));
+    }
+
+    private void safeClosePort() {
+        try { if (port != null) port.close(); } catch (Exception ignored) {}
+        port = null;
     }
 
     // ==========================================================
@@ -453,6 +615,23 @@ public class MainActivity extends AppCompatActivity {
         if (p != null) setPort(p);
     }
 
+    // Tentative d'ouverture "par match" (auto-reconnect)
+    private void openDeviceByMatch(UsbDevice dev) {
+        if (usbManager == null || dev == null) return;
+
+        if (!usbManager.hasPermission(dev)) {
+            usbManager.requestPermission(dev, usbPermissionIntent);
+            return;
+        }
+
+        UsbSerialPort p = tryOpenDevice(dev);
+        if (p != null) {
+            setPort(p);
+            initLcp();
+            doResyncStatus();
+        }
+    }
+
     private UsbSerialPort tryOpenDevice(UsbDevice dev) {
         UsbSerialDriver driver = UsbSerialProber.getDefaultProber().probeDevice(dev);
         if (driver == null) return null;
@@ -468,20 +647,24 @@ public class MainActivity extends AppCompatActivity {
             return p;
         } catch (Exception e) {
             try { p.close(); } catch (Exception ignored) {}
+            log("ERR: Ouverture USB échouée: " + e.getMessage());
             return null;
         }
     }
 
     public void setPort(UsbSerialPort p) {
         this.port = p;
+        linkState = LinkState.USB_READY;
+
         log("USB prêt.");
+        runOnUiThread(() -> setUiConnected(true));
     }
 
     // ==========================================================
     // FIX: Recovery / Print dialogs (indépendant du flow)
     // ==========================================================
     private void maybeShowRecoveryOrPrintDialogs(int dc, boolean ticketPending) {
-        boolean deliveryActive = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0; // 0x0008 [3](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/MainActivity.java)
+        boolean deliveryActive = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
 
         // Reset latches quand l'épisode est terminé
         if (!ticketPending) {
@@ -553,6 +736,7 @@ public class MainActivity extends AppCompatActivity {
         public void onFlowStopped() {
             log("Flow STOP → débit=0");
             runOnUiThread(() -> {
+                // Ici, tu continues à autoriser Continue/Finish à la pause
                 btnContinue.setEnabled(true);
                 btnFinish.setEnabled(true);
 
@@ -561,11 +745,11 @@ public class MainActivity extends AppCompatActivity {
                         .setMessage("Le débit est à 0.\n\nPause OU réservoir plein.\n\nQue veux-tu faire ?")
                         .setPositiveButton("Continuer", (d, w) -> {
                             log("Popup: Continuer → Cmd#0");
-                            ctrl.resumeDelivery(POLL_MS);
+                            if (ctrl != null) ctrl.resumeDelivery(POLL_MS);
                         })
                         .setNegativeButton("Terminer", (d, w) -> {
                             log("Popup: Terminer → END");
-                            ctrl.endGracefully(20000, POLL_MS);
+                            if (ctrl != null) ctrl.endGracefully(20000, POLL_MS);
                         })
                         .setNeutralButton("Annuler", null)
                         .show();
@@ -575,7 +759,7 @@ public class MainActivity extends AppCompatActivity {
         @Override
         public void onProgress(DeliveryController.DeliveryProgress p) {
             // ✅ LIVE: une seule ligne (ne s’empile pas)
-            boolean flow = (p.dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0; // 0x0004 [3](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/MainActivity.java)
+            boolean flow = (p.dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
             final String live = String.format(
                     "t=%dms NET=%.1f (Δ=%.1f) GROSS=%.1f (Δ=%.1f) FLOW=%s dc=%04X",
                     p.tSinceStartMs,
@@ -603,6 +787,14 @@ public class MainActivity extends AppCompatActivity {
 
         @Override
         public void onPrinterStatus(LcpLink.MachineStatusEx ms, boolean ticketPending) {
+
+            // ✅ Revalidation "delivery active" au fil de l’eau (resync)
+            boolean da = (ms.delCode & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
+            deliveryActiveFlag = da;
+
+            // ✅ Re-apply UI connectée selon état réel
+            runOnUiThread(() -> setUiConnected(true));
+
             final String text =
                     "Imprimante: " + ms.printer().summary() +
                             " \n ticketPending=" + ticketPending +
@@ -648,6 +840,14 @@ public class MainActivity extends AppCompatActivity {
         @Override
         public void onError(String msg, Throwable t) {
             log("ERR[" + msg + "] → " + (t != null ? t.getMessage() : "(null)"));
+
+            // Heuristique terrain : si erreur IO/USB/Serial, on gèle l’UI
+            String m = ((msg != null) ? msg : "") + " " + ((t != null && t.getMessage() != null) ? t.getMessage() : "");
+            m = m.toLowerCase();
+
+            if (m.contains("usb") || m.contains("serial") || m.contains("io") || m.contains("device")) {
+                onDisconnected("I/O error: " + msg);
+            }
         }
 
         @Override

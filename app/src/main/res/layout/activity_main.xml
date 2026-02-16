@@ -1,11 +1,10 @@
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" 
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
     android:padding="10dp">
 
-    
     <!-- ===================== USB ===================== -->
     <Spinner
         android:id="@+id/spnUsbDevices"
@@ -34,7 +33,7 @@
             android:layout_marginStart="8dp"
             android:text="Ouvrir/Ping USB" />
     </LinearLayout>
-    
+
     <!-- ===================== PARAMÈTRES LCP ===================== -->
     <LinearLayout
         android:layout_width="match_parent"
@@ -94,7 +93,7 @@
         android:text="Connect (LCP)"
         android:layout_marginTop="6dp" />
 
-    <!-- ===================== BOUTONS A / B / C + CONTINUER / FINISH ===================== -->
+    <!-- ===================== BOUTONS A / B / C ===================== -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -125,6 +124,7 @@
             android:text="C" />
     </LinearLayout>
 
+    <!-- ===================== CONTINUER / TERMINER ===================== -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -147,6 +147,18 @@
             android:text="Terminer" />
     </LinearLayout>
 
+    <!-- ===================== LINK STATUS (AJOUT) ===================== -->
+    <!-- Optionnel mais utile : permet d’afficher CONNECTED/DISCONNECTED -->
+    <TextView
+        android:id="@+id/txtLinkStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="LINK: DISCONNECTED"
+        android:textStyle="bold"
+        android:layout_marginTop="8dp"
+        android:background="#FFEEEEEE"
+        android:padding="6dp" />
+
     <!-- ===================== LIVE (ligne unique) ===================== -->
     <TextView
         android:id="@+id/txtLive"
@@ -154,7 +166,7 @@
         android:layout_height="wrap_content"
         android:text="LIVE: (en attente)"
         android:textStyle="bold"
-        android:layout_marginTop="8dp" />
+        android:layout_marginTop="6dp" />
 
     <!-- ===================== TICKET / PRINTER ===================== -->
     <LinearLayout
