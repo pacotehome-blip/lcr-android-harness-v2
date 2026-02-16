@@ -353,5 +353,3 @@
             android:layout_marginStart="8dp"
             android:text="Copy log" />
     </LinearLayout>
-
-</LinearLayout>
