@@ -1,247 +1,184 @@
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" 
+    android:id="@+id/root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="10dp">
+
+    
+    <!-- ===================== USB ===================== -->
+    <Spinner
+        android:id="@+id/spnUsbDevices"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp" />
+
     <LinearLayout
-        android:id="@+id/root"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginTop="6dp">
+
+        <Button
+            android:id="@+id/btnScanUsb"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Scan USB" />
+
+        <Button
+            android:id="@+id/btnPingUsb"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="8dp"
+            android:text="Ouvrir/Ping USB" />
+    </LinearLayout>
+    
+    <!-- ===================== PARAMÈTRES LCP ===================== -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal">
+
+        <EditText
+            android:id="@+id/edtTo"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:hint="TO (ex: 0xFA)"
+            android:singleLine="true" />
+
+        <EditText
+            android:id="@+id/edtFrom"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:hint="FROM (ex: 0xFF)"
+            android:singleLine="true"
+            android:layout_marginStart="8dp" />
+    </LinearLayout>
+
+    <!-- ===================== PRODUIT / PRESET ===================== -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginTop="6dp">
+
+        <EditText
+            android:id="@+id/edtProduct"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:hint="Produit"
+            android:inputType="number"
+            android:singleLine="true" />
+
+        <EditText
+            android:id="@+id/edtPreset"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="8dp"
+            android:hint="Preset"
+            android:inputType="numberDecimal"
+            android:singleLine="true" />
+    </LinearLayout>
+
+    <!-- ===================== CONNEXION LCP ===================== -->
+    <Button
+        android:id="@+id/btnConnect"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Connect (LCP)"
+        android:layout_marginTop="6dp" />
+
+    <!-- ===================== BOUTONS A / B / C + CONTINUER / FINISH ===================== -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginTop="6dp">
+
+        <Button
+            android:id="@+id/btnA"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="A" />
+
+        <Button
+            android:id="@+id/btnB"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="8dp"
+            android:text="B" />
+
+        <Button
+            android:id="@+id/btnC"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="8dp"
+            android:text="C" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginTop="6dp">
+
+        <Button
+            android:id="@+id/btnContinue"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Continuer" />
+
+        <Button
+            android:id="@+id/btnFinish"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="8dp"
+            android:text="Terminer" />
+    </LinearLayout>
+
+    <!-- ===================== LIVE (ligne unique) ===================== -->
+    <TextView
+        android:id="@+id/txtLive"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="LIVE: (en attente)"
+        android:textStyle="bold"
+        android:layout_marginTop="8dp" />
+
+    <!-- ===================== TICKET / PRINTER ===================== -->
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="12dp">
+        android:layout_marginTop="8dp">
 
-        <!-- ===================== USB (AU-DESSUS) ===================== -->
         <TextView
-            android:id="@+id/lblUsb"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="USB"
-            android:textStyle="bold"
-            android:paddingBottom="6dp" />
-
-        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="horizontal">
+            android:text="Ticket / Impression"
+            android:textStyle="bold" />
 
-            <Button
-                android:id="@+id/btnScanUsb"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Scan USB" />
-
-            <Button
-                android:id="@+id/btnPingUsb"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Ouvrir/Ping"
-                android:layout_marginStart="8dp" />
-        </LinearLayout>
-
-        <Spinner
-            android:id="@+id/spnUsbDevices"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="6dp" />
-
-        <!-- ===================== Connexion / Adresses ===================== -->
         <TextView
-            android:id="@+id/lblConn"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Connexion (LCP)"
-            android:textStyle="bold"
-            android:paddingTop="12dp"
-            android:paddingBottom="6dp" />
-
-        <LinearLayout
+            android:id="@+id/txtTicketNumber"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="horizontal">
+            android:text="-" />
 
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="To:"
-                android:layout_gravity="center_vertical"
-                android:paddingEnd="6dp" />
-
-            <EditText
-                android:id="@+id/edtTo"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:hint="0xFA"
-                android:inputType="text"
-                android:maxLines="1" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="From:"
-                android:layout_gravity="center_vertical"
-                android:paddingStart="12dp"
-                android:paddingEnd="6dp" />
-
-            <EditText
-                android:id="@+id/edtFrom"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:hint="0xFF"
-                android:inputType="text"
-                android:maxLines="1" />
-        </LinearLayout>
-
-        <Button
-            android:id="@+id/btnConnect"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Connect"
-            android:layout_marginTop="8dp" />
-
-        <!-- ===================== Paramètres de livraison ===================== -->
-        <TextView
-            android:id="@+id/lblDelivery"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Livraison (simple)"
-            android:textStyle="bold"
-            android:paddingTop="12dp"
-            android:paddingBottom="6dp" />
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Produit:"
-                android:layout_gravity="center_vertical"
-                android:paddingEnd="6dp" />
-
-            <EditText
-                android:id="@+id/edtProduct"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:hint="1"
-                android:inputType="number"
-                android:maxLines="1" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Preset (L):"
-                android:layout_gravity="center_vertical"
-                android:paddingStart="12dp"
-                android:paddingEnd="6dp" />
-
-            <EditText
-                android:id="@+id/edtPreset"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:hint="50.0"
-                android:inputType="numberDecimal"
-                android:maxLines="1" />
-        </LinearLayout>
-
-        <!-- ===================== LIVE (ligne unique) ===================== -->
-        <!-- Correctif: ligne LIVE mise à jour (volumes qui montent) -->
-        <TextView
-            android:id="@+id/txtLive"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="LIVE: (en attente)"
-            android:textSize="14sp"
-            android:typeface="monospace"
-            android:padding="8dp"
-            android:layout_marginTop="8dp"
-            android:background="#222222"
-            android:textColor="#E6E6E6" />
-
-        <!-- Boutons A/B/C + Finish/Continue -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="8dp">
-
-            <Button
-                android:id="@+id/btnA"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="A: END" />
-
-            <Button
-                android:id="@+id/btnB"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="B: PING"
-                android:layout_marginStart="8dp" />
-
-            <Button
-                android:id="@+id/btnC"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="C: START"
-                android:layout_marginStart="8dp" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="6dp">
-
-            <Button
-                android:id="@+id/btnContinue"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Continuer" />
-
-            <Button
-                android:id="@+id/btnFinish"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Terminé"
-                android:layout_marginStart="8dp" />
-        </LinearLayout>
-
-        <!-- ===================== Ticket Impression ===================== -->
-        <TextView
-            android:id="@+id/lblTicket"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Ticket - Impression"
-            android:textStyle="bold"
-            android:paddingTop="12dp"
-            android:paddingBottom="6dp" />
-
-        <!-- TicketNumber (#23) -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center_vertical">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Ticket #23:"
-                android:paddingEnd="8dp" />
-
-            <TextView
-                android:id="@+id/txtTicketNumber"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="-" />
-        </LinearLayout>
-
-        <!-- TicketRequired (#37) -->
         <Spinner
             android:id="@+id/spnTicketRequired"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="6dp" />
+            android:layout_height="wrap_content" />
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -251,51 +188,54 @@
 
             <Button
                 android:id="@+id/btnRefreshTicket"
-                android:layout_width="wrap_content"
+                android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:text="Rafraîchir ticket" />
+                android:layout_weight="1"
+                android:text="Refresh Ticket" />
 
             <Button
                 android:id="@+id/btnClearShift"
-                android:layout_width="wrap_content"
+                android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:text="Clear shift (#16)"
-                android:layout_marginStart="8dp" />
+                android:layout_weight="1"
+                android:layout_marginStart="8dp"
+                android:text="Clear Shift" />
         </LinearLayout>
-
-        <!-- Cmd #6 -->
-        <Button
-            android:id="@+id/btnPrintPending"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Imprimer ticket (Cmd #6)"
-            android:layout_marginTop="6dp" />
-
-        <!-- ===================== Statut imprimante (toujours visible) ===================== -->
-        <TextView
-            android:id="@+id/lblPrinterStatus"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Statut imprimante (0x23 / prnStatus):"
-            android:textStyle="bold"
-            android:paddingTop="12dp"
-            android:paddingBottom="6dp" />
 
         <TextView
             android:id="@+id/txtPrinterStatus"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="(non connecté / non lu)"
-            android:padding="10dp"
-            android:background="#EEEEEE" />
+            android:text="Imprimante: (non connecté / non lu)"
+            android:layout_marginTop="6dp"
+            android:background="#EEEEEE"
+            android:padding="6dp" />
 
-        <Button
-            android:id="@+id/btnRefreshPrinter"
-            android:layout_width="wrap_content"
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Rafraîchir imprimante"
-            android:layout_marginTop="6dp" />
-   <!-- ===================== LOG SETTINGS ===================== -->
+            android:orientation="horizontal"
+            android:layout_marginTop="6dp">
+
+            <Button
+                android:id="@+id/btnRefreshPrinter"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Refresh Printer" />
+
+            <Button
+                android:id="@+id/btnPrintPending"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="8dp"
+                android:text="Print Pending" />
+        </LinearLayout>
+
+    </LinearLayout>
+
+    <!-- ===================== LOG SETTINGS ===================== -->
     <CheckBox
         android:id="@+id/switchIoLog"
         android:layout_width="wrap_content"
@@ -347,3 +287,5 @@
             android:layout_marginStart="8dp"
             android:text="Copy log" />
     </LinearLayout>
+
+</LinearLayout>
