@@ -9,6 +9,7 @@
     <Spinner
         android:id="@+id/spnUsbDevices"
         android:layout_width="match_parent"
+        android:layout_height="wrap_content"
         android:layout_marginTop="8dp" />
 
     <LinearLayout
@@ -146,7 +147,8 @@
             android:text="Terminer" />
     </LinearLayout>
 
-    <!-- ===================== LINK STATUS ===================== -->
+    <!-- ===================== LINK STATUS (AJOUT) ===================== -->
+    <!-- Optionnel mais utile : permet d’afficher CONNECTED/DISCONNECTED -->
     <TextView
         android:id="@+id/txtLinkStatus"
         android:layout_width="match_parent"
@@ -157,7 +159,7 @@
         android:background="#FFEEEEEE"
         android:padding="6dp" />
 
-    <!-- ===================== LIVE (ligne existante) ===================== -->
+    <!-- ===================== LIVE (ligne unique) ===================== -->
     <TextView
         android:id="@+id/txtLive"
         android:layout_width="match_parent"
@@ -166,7 +168,7 @@
         android:textStyle="bold"
         android:layout_marginTop="6dp" />
 
-    <!-- ===================== LIVE QTY NET / GROSS (CORRECTIF AJOUTÉ) ===================== -->
+    <!-- ===================== LIVE QTY NET/GROSS (AJOUT CORRECTIF) ===================== -->
     <LinearLayout
         android:id="@+id/liveQtyPanel"
         android:layout_width="match_parent"
@@ -283,7 +285,8 @@
         android:checked="true"
         android:layout_marginTop="8dp" />
 
-    <!-- ===================== LOG WINDOW ===================== -->
+    <!-- ===================== LOG WINDOW (FIXE + SCROLL INTERNE) ===================== -->
+    <!-- Correctif clé : height=0dp + weight=1 => fenêtre fixe à l'écran -->
     <ScrollView
         android:id="@+id/logScroll"
         android:layout_width="match_parent"
