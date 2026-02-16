@@ -301,55 +301,57 @@
             android:layout_height="wrap_content"
             android:text="Rafraîchir imprimante"
             android:layout_marginTop="6dp" />
+   <!-- ===================== LOG SETTINGS ===================== -->
+    <CheckBox
+        android:id="@+id/switchIoLog"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="I/O log"
+        android:checked="true"
+        android:layout_marginTop="8dp" />
 
-        <!-- ===================== Logs ===================== -->
-        <TextView
-            android:id="@+id/lblLogs"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Logs"
-            android:textStyle="bold"
-            android:paddingTop="12dp"
-            android:paddingBottom="6dp" />
-
-        <CheckBox
-            android:id="@+id/switchIoLog"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Afficher logs + I/O (TX/RX)" />
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="6dp">
-
-            <Button
-                android:id="@+id/btnCopyLog"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Copier log" />
-
-            <Button
-                android:id="@+id/btnClearLog"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Effacer"
-                android:layout_marginStart="8dp" />
-        </LinearLayout>
+    <!-- ===================== LOG WINDOW (FIXE + SCROLL INTERNE) ===================== -->
+    <!-- Correctif clé : height=0dp + weight=1 => fenêtre fixe à l'écran -->
+    <ScrollView
+        android:id="@+id/logScroll"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:fillViewport="true"
+        android:layout_marginTop="6dp"
+        android:background="#111111">
 
         <TextView
             android:id="@+id/txtLog"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:textSize="12sp"
-            android:textIsSelectable="true"
             android:typeface="monospace"
-            android:padding="10dp"
-            android:layout_marginTop="6dp"
-            android:background="#111111"
-            android:textColor="#E6E6E6"
-            android:text="" />
+            android:textIsSelectable="true"
+            android:textSize="12sp"
+            android:textColor="#00FF00"
+            android:padding="6dp" />
+    </ScrollView>
 
+    <!-- ===================== LOG ACTIONS ===================== -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="end"
+        android:layout_marginTop="6dp">
+
+        <Button
+            android:id="@+id/btnClearLog"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Clear log" />
+
+        <Button
+            android:id="@+id/btnCopyLog"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="Copy log" />
     </LinearLayout>
-</ScrollView>
+
+</LinearLayout>
