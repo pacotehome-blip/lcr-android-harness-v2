@@ -17,6 +17,7 @@ import android.hardware.usb.UsbManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.Looper;
 import android.view.View;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
@@ -89,6 +90,19 @@ public class MainActivity extends AppCompatActivity {
     // ==========================================================
     private boolean recoveryDialogShown = false;
     private boolean printDialogShown = false;
+
+    // ==========================================================
+    // LOG UI: TX/RX only for [IO] + batching flush 250ms
+    // - Filtrage: lignes [IO] gardées seulement si contiennent TX: ou RX:
+    // - Batching: append au TextView toutes les 250ms pour éviter jank/freezes UI
+    // ==========================================================
+    private final Object logLock = new Object();
+    private final StringBuilder logBuf = new StringBuilder(8192);
+    private final Handler uiHandler = new Handler(Looper.getMainLooper());
+    private boolean flushScheduled = false;
+
+    private static final int LOG_FLUSH_MS = 250;
+    private static final int LOG_MAX_CHARS = 20000;
 
     // ==========================================================
     // USB Permission Receiver
@@ -257,7 +271,13 @@ public class MainActivity extends AppCompatActivity {
             log("Log copié.");
         });
 
-        btnClearLog.setOnClickListener(v -> txtLog.setText(""));
+        btnClearLog.setOnClickListener(v -> {
+            txtLog.setText("");
+            synchronized (logLock) {
+                logBuf.setLength(0);
+                flushScheduled = false;
+            }
+        });
 
         btnA.setOnClickListener(v -> {
             if (ctrl == null) return;
@@ -373,19 +393,9 @@ public class MainActivity extends AppCompatActivity {
             );
 
             log("LCP prêt.");
-
-            // ============================
-            // Correctif #2 (validé) : déphasage anti-burst
-            // ============================
+            ctrl.ensureDefaultTicketRequiredIs1(POLL_MS);
+            ctrl.refreshTicketInfo(POLL_MS);
             ctrl.refreshPrinterStatus(POLL_MS);
-
-            new Handler().postDelayed(() -> {
-                if (ctrl != null) ctrl.refreshTicketInfo(POLL_MS);
-            }, 350);
-
-            new Handler().postDelayed(() -> {
-                if (ctrl != null) ctrl.ensureDefaultTicketRequiredIs1(POLL_MS);
-            }, 700);
 
         } catch (Exception e) {
             log("Erreur init LCP : " + e.getMessage());
@@ -393,17 +403,53 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // ==========================================================
-    // Logging (TRACE empilée)
+    // LOG (TX/RX only for [IO] + batching)
     // ==========================================================
     private void log(String s) {
         if (!switchIoLog.isChecked()) return;
 
-        runOnUiThread(() -> {
-            txtLog.append(s + "\n");
-            if (logScroll != null) {
-                logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
+        // Filtrage I/O: garder seulement TX/RX pour les lignes [IO]
+        if (s != null && s.startsWith("[IO]")) {
+            boolean keep = s.contains("TX:") || s.contains("RX:");
+            if (!keep) return;
+        }
+
+        synchronized (logLock) {
+            logBuf.append(s).append('\n');
+
+            // limite mémoire du buffer
+            if (logBuf.length() > LOG_MAX_CHARS) {
+                logBuf.delete(0, logBuf.length() - LOG_MAX_CHARS);
             }
-        });
+
+            if (!flushScheduled) {
+                flushScheduled = true;
+                uiHandler.postDelayed(this::flushLogToUi, LOG_FLUSH_MS);
+            }
+        }
+    }
+
+    private void flushLogToUi() {
+        final String chunk;
+        synchronized (logLock) {
+            flushScheduled = false;
+            if (logBuf.length() == 0) return;
+            chunk = logBuf.toString();
+            logBuf.setLength(0);
+        }
+
+        // UI update en une seule fois (réduit fortement le jank)
+        txtLog.append(chunk);
+
+        // limite taille TextView
+        int extra = txtLog.length() - LOG_MAX_CHARS;
+        if (extra > 0) {
+            txtLog.setText(txtLog.getText().subSequence(extra, txtLog.length()));
+        }
+
+        if (logScroll != null) {
+            logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
+        }
     }
 
     // ==========================================================
@@ -634,8 +680,8 @@ public class MainActivity extends AppCompatActivity {
 
                 boolean hardErr =
                         ms.printer().outOfPaper ||
-                        ms.printer().noProcessor ||
-                        ms.printer().processorError;
+                                ms.printer().noProcessor ||
+                                ms.printer().processorError;
 
                 boolean printing = ms.printer().printingStarted;
 

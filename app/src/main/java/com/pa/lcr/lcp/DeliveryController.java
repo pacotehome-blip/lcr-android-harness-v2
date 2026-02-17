@@ -646,7 +646,76 @@ public class DeliveryController {
         log("[START] Delivery ACTIVE");
     }
 
-    // ============================= LIVE LOOP =============================
+    // =====================================================================
+    // Python-like live loop helpers (fidèle au script)
+    // =====================================================================
+    private static final long LIVE_QT_SHORT_MS = 5_000;   // Python default qt=5s [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
+    private static final long LIVE_QT_LONG_MS  = 30_000;  // Python LONG_QT=30s [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
+    private static final long LIVE_WAIT_STEP_MS = 200;    // Python qp=0.2s [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
+
+    /**
+     * Python: op_machine_status_full() (0x23), fallback op_delivery_status() (0x28) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
+     */
+    private int[] readDsDcPythonLike(int pollMs) throws Exception {
+        try {
+            LcpLink.MachineStatusEx ms = withPollWindow(() -> link.opMachineStatusEx());
+            return new int[]{ ms.delStatus, ms.delCode };
+        } catch (Exception e) {
+            return withPollWindow(() -> link.opDeliveryStatus()); // [ds, dc]
+        }
+    }
+
+    /**
+     * Python: op_get_field(field) + logique d'attente longue si le compteur est "busy/queued". [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
+     * Ici on émule : retry + sleep (0.2s) jusqu'à 30s max.
+     */
+    private double readVolumeQueuedAware(int field, int pollMs) throws Exception {
+        long shortDeadline = System.currentTimeMillis() + LIVE_QT_SHORT_MS;
+        long longDeadline  = System.currentTimeMillis() + LIVE_QT_LONG_MS;
+
+        Exception last = null;
+
+        while (System.currentTimeMillis() < longDeadline) {
+            try {
+                int dec = getDecimals(); // #39 (déjà robuste)
+                byte[] raw = link.opGetField(field); // #44/#45 => 4 bytes
+                return decodeVolume(raw, dec);
+            } catch (Exception e) {
+                last = e;
+
+                String m = (e.getMessage() == null) ? "" : e.getMessage();
+                boolean transientOrQueued =
+                        m.contains("Queued timeout") ||
+                        m.contains("POLL_BLOCKED") ||
+                        m.contains("Timeout sync") ||
+                        m.contains("Header timeout") ||
+                        m.contains("Payload timeout") ||
+                        m.contains("CRC timeout");
+
+                // Non-transient => on remonte (comportement Python: certaines erreurs interrompent)
+                if (!transientOrQueued) throw e;
+
+                // Après le short deadline, on continue quand même jusqu'à la fenêtre longue (comme Python LONG_QT)
+                // [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
+                long sleep = Math.max(LIVE_WAIT_STEP_MS, pollMs);
+                try { Thread.sleep(sleep); }
+                catch (InterruptedException ie) { Thread.currentThread().interrupt(); throw ie; }
+
+                // (optionnel) tu peux logguer ici si tu veux, mais tu as dit : IO log TX/RX seulement.
+                // donc on reste silencieux côté "log()" pour ne pas polluer.
+                if (System.currentTimeMillis() < shortDeadline) {
+                    // phase courte
+                } else {
+                    // phase longue
+                }
+            }
+        }
+
+        if (last != null) throw last;
+        throw new IOException("readVolumeQueuedAware: timeout");
+    }
+
+    // ============================= LIVE LOOP (FIDÈLE PYTHON) =============================
     public void startLiveLoop(int pollMs) {
         exec.execute(() -> safeOp(() -> {
             if (state != State.RUNNING) {
@@ -664,10 +733,17 @@ public class DeliveryController {
                 try {
                     if (stopping || state != State.RUNNING) return;
 
-                    // 1) DS/DC
-                    int[] dsdc = withPollWindow(() -> link.opDeliveryStatus());
-                    int ds = dsdc[0];
-                    int dc = dsdc[1];
+                    // 1) DS/DC: Python-like (0x23) fallback (0x28) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
+                    int ds, dc;
+                    try {
+                        int[] dsdc = readDsDcPythonLike(pollMs);
+                        ds = dsdc[0];
+                        dc = dsdc[1];
+                    } catch (Exception ex) {
+                        // Python: si machine status échoue, il continue/retente selon cas.
+                        // Ici: on skip ce tick pour ne pas tuer la loop.
+                        return;
+                    }
 
                     boolean flow = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
                     boolean active = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
@@ -677,25 +753,15 @@ public class DeliveryController {
                         return;
                     }
 
-                    // =========================================================
-                    // CORRECTIF (Option A): pendant FLOW_ACTIVE, lire GROSS (#44) + NET (#45)
-                    // => même pattern que ton script Python (GET_FIELD 2C puis 2D)
-                    // =========================================================
+                    // 2) Volumes: Python-like ALWAYS #44 then #45 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
                     double gross = lastGross;
                     double net = lastNet;
 
-                    if (flow) {
-                        try { gross = readGrossLitres(); }
-                        catch (Exception ex) { log("[LIVE] WARN gross read failed: " + ex.getMessage()); }
-                        try { net = readNetLitres(); }
-                        catch (Exception ex) { log("[LIVE] WARN net read failed: " + ex.getMessage()); }
-                    } else {
-                        // Hors flow, on garde le comportement identique (on lit les deux)
-                        try { gross = readGrossLitres(); }
-                        catch (Exception ex) { log("[LIVE] WARN gross read failed: " + ex.getMessage()); }
-                        try { net = readNetLitres(); }
-                        catch (Exception ex) { log("[LIVE] WARN net read failed: " + ex.getMessage()); }
-                    }
+                    try { gross = readVolumeQueuedAware(FIELD_GROSS_COUNT, pollMs); }
+                    catch (Exception ignored) { /* silencieux */ }
+
+                    try { net = readVolumeQueuedAware(FIELD_NET_COUNT, pollMs); }
+                    catch (Exception ignored) { /* silencieux */ }
 
                     DeliveryProgress p = new DeliveryProgress();
                     p.tSinceStartMs = System.currentTimeMillis() - startTimestampMs;
