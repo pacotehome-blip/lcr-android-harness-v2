@@ -27,6 +27,10 @@ public class DeliveryController {
     private static final int QUEUED_LONG_TIMEOUT_MS = 30_000; // 30s
     private static final int SETFIELD_RETRY_SLEEP_MS = 120;
 
+    // ===== CORRECTIF #1 (validé) : liveLoop tolérante =====
+    private static final int LIVE_MAX_CONSEC_ERRORS = 5;
+    private volatile int liveConsecErrors = 0;
+
     // ------------------------- Dépendances -------------------------
     private final LcpLink link;
     private final DeliveryEvents events;
@@ -316,6 +320,21 @@ public class DeliveryController {
         return false;
     }
 
+    // ===== CORRECTIF #1 (validé) : identifier les erreurs transitoires liveLoop =====
+    private static boolean isTransientLiveException(Throwable t) {
+        if (t == null) return false;
+        String m = t.getMessage();
+        if ((m == null || m.isEmpty()) && t.getCause() != null) m = t.getCause().getMessage();
+        if (m == null) m = "";
+        return m.contains("Timeout sync ~~")
+                || m.contains("Header timeout")
+                || m.contains("Payload timeout")
+                || m.contains("CRC timeout")
+                || m.contains("Queued timeout (python)")
+                || m.contains("POLL_BLOCKED")
+                || m.contains("POLL_OWNER_MISMATCH");
+    }
+
     /**
      * Retry contrôlé (1 fois) uniquement pour SET_FIELD idempotents,
      * puis validation via GET_FIELD.
@@ -328,16 +347,13 @@ public class DeliveryController {
 
             log("[SAFE-SET] Framing timeout on SET_FIELD #" + field + " -> recovery+retry once. msg=" + e.getMessage());
 
-            // Recovery de session
             link.forceSyncNext();
             link.requestPurge();
             Thread.sleep(SETFIELD_RETRY_SLEEP_MS);
 
-            // Retry unique
             link.opSetField(field, data);
         }
 
-        // Vérification par GET
         byte[] rb = link.opGetField(field);
         if (rb == null) throw new IOException("SET_FIELD verify failed: null");
 
@@ -511,7 +527,7 @@ public class DeliveryController {
                 while (System.currentTimeMillis() < deadline) {
                     int[] dsdc;
                     try {
-                        dsdc = readDsDcFast(); // lecture rapide, tolérée
+                        dsdc = readDsDcFast();
                     } catch (Exception e) {
                         String m = e.getMessage();
                         if (m != null && m.contains("Queued timeout (python)")) {
@@ -534,7 +550,6 @@ public class DeliveryController {
                     Thread.sleep(pollMs);
                 }
 
-                // Vérifier si encore pending (tolérance longue)
                 int[] dsdcEnd = readDsDcFastLong(pollMs);
                 boolean stillPending = (dsdcEnd[1] & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
                 if (stillPending) {
@@ -574,13 +589,11 @@ public class DeliveryController {
 
         link.setPythonCompat(true, pollMs);
 
-        // Set product (#0) — retry safe + verify
         int list0 = productToList0Value(product);
         log("[PRE] Setting active product (Field #0) product=" + product + " (list0=" + list0 + ")");
         safeSetFieldWithRetry(FIELD_PRODUCT_NUMBER, new byte[]{ (byte)list0 }, pollMs, 1);
         this.presetProduct = product;
 
-        // Set net preset (#6) — retry safe + verify
         this.presetLitres = presetLitres;
         if (presetLitres > 0.0) {
             int dec = getDecimals();
@@ -683,12 +696,34 @@ public class DeliveryController {
 
                     if (events != null) events.onProgress(p);
 
+                    // ===== CORRECTIF #1 (validé) : reset erreurs si un cycle réussit =====
+                    liveConsecErrors = 0;
+
                     if (lastFlow == null) lastFlow = flow;
                     if (flow && !lastFlow && events != null) events.onFlowStarted();
                     if (!flow && lastFlow && events != null) events.onFlowStopped();
                     lastFlow = flow;
 
                 } catch (Exception e) {
+
+                    // ===== CORRECTIF #1 (validé) : tolérance erreurs transitoires =====
+                    if (isTransientLiveException(e) || isFramingTimeoutException(e)) {
+                        liveConsecErrors++;
+                        log("[LIVE] WARN transient error (" + liveConsecErrors + "/" + LIVE_MAX_CONSEC_ERRORS + "): " + e.getMessage());
+
+                        try {
+                            link.forceSyncNext();
+                            if (liveConsecErrors >= 3) link.requestPurge();
+                        } catch (Exception ignored) {}
+
+                        if (liveConsecErrors >= LIVE_MAX_CONSEC_ERRORS) {
+                            setState(State.ERROR);
+                            if (events != null) events.onError("liveLoop (too many transient errors)", e);
+                        }
+                        return;
+                    }
+
+                    // Non-transient => ERROR immédiat (comme avant)
                     setState(State.ERROR);
                     if (events != null) events.onError("liveLoop", e);
                 }
@@ -723,7 +758,6 @@ public class DeliveryController {
 
         long deadline = System.currentTimeMillis() + timeoutMs;
 
-        // Boucle d’attente : tolère queued timeout sans tout casser
         while (System.currentTimeMillis() < deadline) {
             int[] dsdc;
             try {
@@ -745,7 +779,6 @@ public class DeliveryController {
             Thread.sleep(pollMs);
         }
 
-        // Lecture finale “long” (30s) pour éviter faux timeout
         try {
             int[] dsdcLong = readDsDcFastLong(pollMs);
             logDsDc("END:POST-LONG", dsdcLong[0], dsdcLong[1]);
@@ -795,7 +828,6 @@ public class DeliveryController {
         startOpenMode(product, 0.0, timeoutMs, pollMs);
     }
 
-    /** END “normal” (mais ne bloque pas IDLE si compteur actif). */
     public void endGracefully(int timeoutMs, int pollMs){
         exec.execute(() -> safeOp(() -> {
             try {
@@ -818,7 +850,6 @@ public class DeliveryController {
         }, "endGracefully"));
     }
 
-    /** Reprendre une livraison (Cmd #0) et remettre RUNNING/loop si nécessaire. */
     public void resumeDelivery(int pollMs) {
         exec.execute(() -> safeOp(() -> {
             try {
@@ -829,7 +860,6 @@ public class DeliveryController {
                 link.opIssueCommand(0x00); // Cmd #0
                 log("[RESUME] Cmd#0 sent (Start/Resume)");
 
-                // Attendre que DA/BEGIN soient visibles
                 boolean becameActive = withPollWindow(() -> {
                     long deadline = System.currentTimeMillis() + 12000;
                     while (System.currentTimeMillis() < deadline) {
@@ -879,10 +909,6 @@ public class DeliveryController {
         }, "resumeDelivery"));
     }
 
-    /**
-     * END Recovery avec message opérateur clair si échec.
-     * Met FLOW_ACTIVE en évidence si persistant à 1.
-     */
     public void endRecoveryOrExplain(int timeoutMs, int pollMs) {
         exec.execute(() -> safeOp(() -> {
             try {
@@ -897,15 +923,11 @@ public class DeliveryController {
                     return;
                 }
 
-                // tenter END normal
                 try {
                     endDeliverySequence(timeoutMs, pollMs);
                     return;
-                } catch (Exception ignored) {
-                    // produire une alerte terrain
-                }
+                } catch (Exception ignored) { }
 
-                // relire état final (long)
                 int[] dsdc1 = readDsDcFastLong(pollMs);
                 int ds = dsdc1[0], dc = dsdc1[1];
                 boolean fa = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;

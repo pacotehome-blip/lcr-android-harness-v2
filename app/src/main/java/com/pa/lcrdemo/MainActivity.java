@@ -51,7 +51,7 @@ public class MainActivity extends AppCompatActivity {
     // ---------- LIVE (ligne unique) ----------
     private TextView txtLive;
 
-    // ---------- AJOUT : NET / GROSS (big digits) ----------
+    // ---------- NET / GROSS (big digits) ----------
     private TextView txtQtyNet;
     private TextView txtQtyGross;
 
@@ -151,7 +151,6 @@ public class MainActivity extends AppCompatActivity {
             txtLive.setText("LIVE: (en attente)");
         }
 
-        // Defaults NET/GROSS big digits (affichage)
         if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
         if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
 
@@ -186,10 +185,9 @@ public class MainActivity extends AppCompatActivity {
         txtLog = findViewById(R.id.txtLog);
         logScroll = findViewById(R.id.logScroll);
 
-        // LIVE
         txtLive = findViewById(R.id.txtLive);
 
-        // NET/GROSS (big digits)
+        // big digits
         txtQtyNet = findViewById(R.id.txtQtyNet);
         txtQtyGross = findViewById(R.id.txtQtyGross);
 
@@ -375,9 +373,19 @@ public class MainActivity extends AppCompatActivity {
             );
 
             log("LCP prêt.");
-            ctrl.ensureDefaultTicketRequiredIs1(POLL_MS);
-            ctrl.refreshTicketInfo(POLL_MS);
+
+            // ============================
+            // Correctif #2 (validé) : déphasage anti-burst
+            // ============================
             ctrl.refreshPrinterStatus(POLL_MS);
+
+            new Handler().postDelayed(() -> {
+                if (ctrl != null) ctrl.refreshTicketInfo(POLL_MS);
+            }, 350);
+
+            new Handler().postDelayed(() -> {
+                if (ctrl != null) ctrl.ensureDefaultTicketRequiredIs1(POLL_MS);
+            }, 700);
 
         } catch (Exception e) {
             log("Erreur init LCP : " + e.getMessage());
@@ -495,14 +503,12 @@ public class MainActivity extends AppCompatActivity {
     private void maybeShowRecoveryOrPrintDialogs(int dc, boolean ticketPending) {
         boolean deliveryActive = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
 
-        // Reset latches quand l'épisode est terminé
         if (!ticketPending) {
             recoveryDialogShown = false;
             printDialogShown = false;
             return;
         }
 
-        // A) Recovery prioritaire : DELIVERY_ACTIVE && TICKET_PENDING
         if (deliveryActive && ticketPending) {
             if (recoveryDialogShown) return;
             recoveryDialogShown = true;
@@ -523,7 +529,6 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
-        // B) Impression possible : !DELIVERY_ACTIVE && TICKET_PENDING
         if (!deliveryActive && ticketPending) {
             if (printDialogShown) return;
             printDialogShown = true;
@@ -586,7 +591,6 @@ public class MainActivity extends AppCompatActivity {
 
         @Override
         public void onProgress(DeliveryController.DeliveryProgress p) {
-            // LIVE technique inchangé (courant + delta) [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
             boolean flow = (p.dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
             final String live = String.format(
                     "t=%dms NET=%.1f (Δ=%.1f) GROSS=%.1f (Δ=%.1f) FLOW=%s dc=%04X",
@@ -600,13 +604,9 @@ public class MainActivity extends AppCompatActivity {
             runOnUiThread(() -> {
                 if (txtLive != null) txtLive.setText(live);
 
-                // ✅ Correctif: Big digits = valeurs courantes du registre (#45/#44) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/samsung-SM-T397U-Android-9_2026-02-16_175458.txt)[2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
-                if (txtQtyNet != null) {
-                    txtQtyNet.setText(String.format("NET: %.1f", p.netL));
-                }
-                if (txtQtyGross != null) {
-                    txtQtyGross.setText(String.format("GROSS: %.1f", p.grossL));
-                }
+                // Big digits = valeurs courantes du registre
+                if (txtQtyNet != null) txtQtyNet.setText(String.format("NET: %.1f", p.netL));
+                if (txtQtyGross != null) txtQtyGross.setText(String.format("GROSS: %.1f", p.grossL));
             });
         }
 
@@ -647,7 +647,6 @@ public class MainActivity extends AppCompatActivity {
                 txtPrinterStatus.setBackgroundColor(bg);
             });
 
-            // ✅ Trigger Recovery/Print indépendamment du FLOW [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
             maybeShowRecoveryOrPrintDialogs(ms.delCode, ticketPending);
         }
 
