@@ -75,8 +75,8 @@ public class DeliveryController {
 
     public static final class DeliveryProgress {
         public long tSinceStartMs;
-        public double grossL; // #44 (peut rester "dernier connu" pendant FLOW_ACTIVE)
-        public double netL;   // #45 (rafraîchi pendant FLOW_ACTIVE)
+        public double grossL; // #44
+        public double netL;   // #45
         public double deliveredGrossL;
         public double deliveredNetL;
         public double dGrossL;
@@ -664,6 +664,7 @@ public class DeliveryController {
                 try {
                     if (stopping || state != State.RUNNING) return;
 
+                    // 1) DS/DC
                     int[] dsdc = withPollWindow(() -> link.opDeliveryStatus());
                     int ds = dsdc[0];
                     int dc = dsdc[1];
@@ -676,20 +677,20 @@ public class DeliveryController {
                         return;
                     }
 
-                    // ==============================
-                    // CORRECTIF APPLIQUÉ (point 1 confirmé):
-                    // Pendant FLOW_ACTIVE, on rafraîchit UNIQUEMENT NET (#45).
-                    // GROSS (#44) reste au dernier connu.
-                    // ==============================
-                    double gross = lastGross; // dernier connu
-                    double net = lastNet;     // sera rafraîchi
+                    // =========================================================
+                    // CORRECTIF (Option A): pendant FLOW_ACTIVE, lire GROSS (#44) + NET (#45)
+                    // => même pattern que ton script Python (GET_FIELD 2C puis 2D)
+                    // =========================================================
+                    double gross = lastGross;
+                    double net = lastNet;
 
                     if (flow) {
-                        // NET only
+                        try { gross = readGrossLitres(); }
+                        catch (Exception ex) { log("[LIVE] WARN gross read failed: " + ex.getMessage()); }
                         try { net = readNetLitres(); }
                         catch (Exception ex) { log("[LIVE] WARN net read failed: " + ex.getMessage()); }
                     } else {
-                        // Hors flow, on peut resynchroniser les deux compteurs
+                        // Hors flow, on garde le comportement identique (on lit les deux)
                         try { gross = readGrossLitres(); }
                         catch (Exception ex) { log("[LIVE] WARN gross read failed: " + ex.getMessage()); }
                         try { net = readNetLitres(); }
@@ -700,24 +701,17 @@ public class DeliveryController {
                     p.tSinceStartMs = System.currentTimeMillis() - startTimestampMs;
                     p.grossL = gross;
                     p.netL = net;
-
-                    // deltas (gross delta sera stable pendant FLOW_ACTIVE si gross pas rafraîchi)
                     p.deliveredGrossL = gross - startGross;
                     p.deliveredNetL = net - startNet;
                     p.dGrossL = gross - lastGross;
                     p.dNetL = net - lastNet;
-
                     p.flowActive = flow;
                     p.stalled = !flow;
                     p.ds = ds;
                     p.dc = dc;
 
-                    // Mettre à jour les "last"
+                    lastGross = gross;
                     lastNet = net;
-                    if (!flow) {
-                        // On ne met à jour lastGross que quand on a relu gross
-                        lastGross = gross;
-                    }
 
                     if (events != null) events.onProgress(p);
 
@@ -929,7 +923,7 @@ public class DeliveryController {
                 try {
                     endDeliverySequence(timeoutMs, pollMs);
                     return;
-                } catch (Exception ignored) {}
+                } catch (Exception ignored) { }
 
                 int[] dsdc1 = readDsDcFastLong(pollMs);
                 int ds = dsdc1[0], dc = dsdc1[1];
