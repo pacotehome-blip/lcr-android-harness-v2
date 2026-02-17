@@ -17,6 +17,7 @@ import android.hardware.usb.UsbManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.SystemClock;
 import android.view.View;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
@@ -51,7 +52,7 @@ public class MainActivity extends AppCompatActivity {
     // ---------- LIVE (ligne unique) ----------
     private TextView txtLive;
 
-    // ---------- AJOUT MINIMAL : NET / GROSS (big digits) ----------
+    // ---------- AJOUT : NET / GROSS (big digits) ----------
     private TextView txtQtyNet;
     private TextView txtQtyGross;
 
@@ -83,6 +84,17 @@ public class MainActivity extends AppCompatActivity {
     private static final int POLL_MS = 200;
     private static final String ACTION_USB_PERMISSION = "com.pa.lcrdemo.USB_PERMISSION";
     private PendingIntent usbPermissionIntent;
+
+    // ==========================================================
+    // UI THROTTLE (AJOUT MINIMAL) — validé à 300ms
+    // ==========================================================
+    private static final int UI_THROTTLE_MS = 300;
+    private volatile long lastUiUpdateMs = 0;
+
+    // Dernières valeurs coalescées (overwrite)
+    private volatile String pendingLiveLine = null;
+    private volatile double pendingNet = 0.0;
+    private volatile double pendingGross = 0.0;
 
     // ==========================================================
     // FIX: anti-spam latches (évite popups répétitifs)
@@ -151,7 +163,7 @@ public class MainActivity extends AppCompatActivity {
             txtLive.setText("LIVE: (en attente)");
         }
 
-        // AJOUT MINIMAL : valeurs par défaut UI NET/GROSS
+        // NET/GROSS defaults
         if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
         if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
 
@@ -189,7 +201,7 @@ public class MainActivity extends AppCompatActivity {
         // LIVE
         txtLive = findViewById(R.id.txtLive);
 
-        // AJOUT MINIMAL : NET/GROSS
+        // NET/GROSS (big digits)
         txtQtyNet = findViewById(R.id.txtQtyNet);
         txtQtyGross = findViewById(R.id.txtQtyGross);
 
@@ -586,7 +598,7 @@ public class MainActivity extends AppCompatActivity {
 
         @Override
         public void onProgress(DeliveryController.DeliveryProgress p) {
-            // ✅ LIVE: une seule ligne (ne s’empile pas)
+            // --- Construction string LIVE identique ---
             boolean flow = (p.dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
             final String live = String.format(
                     "t=%dms NET=%.1f (Δ=%.1f) GROSS=%.1f (Δ=%.1f) FLOW=%s dc=%04X",
@@ -597,15 +609,28 @@ public class MainActivity extends AppCompatActivity {
                     p.dc
             );
 
-            runOnUiThread(() -> {
-                if (txtLive != null) txtLive.setText(live);
+            // --- COALESCE (overwrite) ---
+            pendingLiveLine = live;
+            pendingNet = p.deliveredNetL;
+            pendingGross = p.deliveredGrossL;
 
-                // ===== AJOUT MINIMAL : NET/GROSS en gros (sans toucher au reste) =====
+            // --- THROTTLE UI à 300ms (validé) ---
+            long now = SystemClock.elapsedRealtime();
+            if (now - lastUiUpdateMs < UI_THROTTLE_MS) return;
+            lastUiUpdateMs = now;
+
+            runOnUiThread(() -> {
+                String l = pendingLiveLine;
+                double net = pendingNet;
+                double gross = pendingGross;
+
+                if (txtLive != null && l != null) txtLive.setText(l);
+
                 if (txtQtyNet != null) {
-                    txtQtyNet.setText(String.format("NET: %.1f", p.deliveredNetL));
+                    txtQtyNet.setText(String.format("NET: %.1f", net));
                 }
                 if (txtQtyGross != null) {
-                    txtQtyGross.setText(String.format("GROSS: %.1f", p.deliveredGrossL));
+                    txtQtyGross.setText(String.format("GROSS: %.1f", gross));
                 }
             });
         }
