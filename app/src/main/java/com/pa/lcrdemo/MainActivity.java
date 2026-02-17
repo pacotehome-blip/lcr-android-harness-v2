@@ -86,15 +86,25 @@ public class MainActivity extends AppCompatActivity {
     private PendingIntent usbPermissionIntent;
 
     // ==========================================================
-    // UI THROTTLE (AJOUT MINIMAL) — validé à 300ms
+    // UI THROTTLE (validé à 300ms) + SNAPSHOT ATOMIQUE
     // ==========================================================
     private static final int UI_THROTTLE_MS = 300;
     private volatile long lastUiUpdateMs = 0;
 
-    // Dernières valeurs coalescées (overwrite)
-    private volatile String pendingLiveLine = null;
-    private volatile double pendingNet = 0.0;
-    private volatile double pendingGross = 0.0;
+    // Snapshot unique pour éviter mélange NET/GROSS entre ticks
+    private static final class UiSnapshot {
+        final String liveLine;
+        final double net;
+        final double gross;
+
+        UiSnapshot(String liveLine, double net, double gross) {
+            this.liveLine = liveLine;
+            this.net = net;
+            this.gross = gross;
+        }
+    }
+
+    private volatile UiSnapshot pendingSnap = null;
 
     // ==========================================================
     // FIX: anti-spam latches (évite popups répétitifs)
@@ -598,7 +608,7 @@ public class MainActivity extends AppCompatActivity {
 
         @Override
         public void onProgress(DeliveryController.DeliveryProgress p) {
-            // --- Construction string LIVE identique ---
+            // Format LIVE inchangé (comme avant) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
             boolean flow = (p.dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
             final String live = String.format(
                     "t=%dms NET=%.1f (Δ=%.1f) GROSS=%.1f (Δ=%.1f) FLOW=%s dc=%04X",
@@ -609,28 +619,25 @@ public class MainActivity extends AppCompatActivity {
                     p.dc
             );
 
-            // --- COALESCE (overwrite) ---
-            pendingLiveLine = live;
-            pendingNet = p.deliveredNetL;
-            pendingGross = p.deliveredGrossL;
+            // Snapshot atomique (évite mélange NET/GROSS)
+            pendingSnap = new UiSnapshot(live, p.deliveredNetL, p.deliveredGrossL);
 
-            // --- THROTTLE UI à 300ms (validé) ---
+            // Throttle UI à 300ms
             long now = SystemClock.elapsedRealtime();
             if (now - lastUiUpdateMs < UI_THROTTLE_MS) return;
             lastUiUpdateMs = now;
 
             runOnUiThread(() -> {
-                String l = pendingLiveLine;
-                double net = pendingNet;
-                double gross = pendingGross;
+                UiSnapshot s = pendingSnap;
+                if (s == null) return;
 
-                if (txtLive != null && l != null) txtLive.setText(l);
+                if (txtLive != null) txtLive.setText(s.liveLine);
 
                 if (txtQtyNet != null) {
-                    txtQtyNet.setText(String.format("NET: %.1f", net));
+                    txtQtyNet.setText(String.format("NET: %.1f", s.net));
                 }
                 if (txtQtyGross != null) {
-                    txtQtyGross.setText(String.format("GROSS: %.1f", gross));
+                    txtQtyGross.setText(String.format("GROSS: %.1f", s.gross));
                 }
             });
         }
@@ -672,7 +679,7 @@ public class MainActivity extends AppCompatActivity {
                 txtPrinterStatus.setBackgroundColor(bg);
             });
 
-            // ✅ Trigger Recovery/Print indépendamment du FLOW
+            // Trigger Recovery/Print indépendamment du FLOW
             maybeShowRecoveryOrPrintDialogs(ms.delCode, ticketPending);
         }
 
