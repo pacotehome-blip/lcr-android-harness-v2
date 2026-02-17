@@ -75,8 +75,8 @@ public class DeliveryController {
 
     public static final class DeliveryProgress {
         public long tSinceStartMs;
-        public double grossL; // #44
-        public double netL;   // #45
+        public double grossL; // #44 (peut rester "dernier connu" pendant FLOW_ACTIVE)
+        public double netL;   // #45 (rafraîchi pendant FLOW_ACTIVE)
         public double deliveredGrossL;
         public double deliveredNetL;
         public double dGrossL;
@@ -231,7 +231,7 @@ public class DeliveryController {
         return product - 1; // Field #0 values 0..15 => products 1..16
     }
 
-    // ======== CORRECTIF UNIQUE: getDecimals() robuste (retry + recovery) ========
+    // ======== getDecimals() robuste (retry + recovery) ========
     private int getDecimals() throws Exception {
         if (cachedDecimals >= 0) return cachedDecimals;
 
@@ -255,7 +255,7 @@ public class DeliveryController {
         if (last != null) throw last;
         throw new IOException("getDecimals: failed");
     }
-    // ======== FIN CORRECTIF UNIQUE ========
+    // ======== FIN getDecimals() robuste ========
 
     private static int scaleForDecimalsIndex(int decimalsIndex) {
         // 0=Hundredths, 1=Tenths, 2=Whole, 3=Thousandths
@@ -553,7 +553,6 @@ public class DeliveryController {
                     Thread.sleep(pollMs);
                 }
 
-                // Vérifier si encore pending (tolérance longue)
                 int[] dsdcEnd = readDsDcFastLong(pollMs);
                 boolean stillPending = (dsdcEnd[1] & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
                 if (stillPending) {
@@ -593,13 +592,11 @@ public class DeliveryController {
 
         link.setPythonCompat(true, pollMs);
 
-        // Set product (#0) — retry safe + verify
         int list0 = productToList0Value(product);
         log("[PRE] Setting active product (Field #0) product=" + product + " (list0=" + list0 + ")");
         safeSetFieldWithRetry(FIELD_PRODUCT_NUMBER, new byte[]{ (byte)list0 }, pollMs, 1);
         this.presetProduct = product;
 
-        // Set net preset (#6) — retry safe + verify
         this.presetLitres = presetLitres;
         if (presetLitres > 0.0) {
             int dec = getDecimals();
@@ -621,7 +618,7 @@ public class DeliveryController {
         boolean active = withPollWindow(() -> {
             long deadline = System.currentTimeMillis() + 12000;
             while (System.currentTimeMillis() < deadline) {
-                int[] dsdc = link.opDeliveryStatus(); // 0x28
+                int[] dsdc = link.opDeliveryStatus();
                 int ds = dsdc[0];
                 int dc = dsdc[1];
 
@@ -679,26 +676,48 @@ public class DeliveryController {
                         return;
                     }
 
-                    double gross = lastGross;
-                    double net = lastNet;
-                    try { gross = readGrossLitres(); } catch (Exception ex) { log("[LIVE] WARN gross read failed: " + ex.getMessage()); }
-                    try { net = readNetLitres(); } catch (Exception ex) { log("[LIVE] WARN net read failed: " + ex.getMessage()); }
+                    // ==============================
+                    // CORRECTIF APPLIQUÉ (point 1 confirmé):
+                    // Pendant FLOW_ACTIVE, on rafraîchit UNIQUEMENT NET (#45).
+                    // GROSS (#44) reste au dernier connu.
+                    // ==============================
+                    double gross = lastGross; // dernier connu
+                    double net = lastNet;     // sera rafraîchi
+
+                    if (flow) {
+                        // NET only
+                        try { net = readNetLitres(); }
+                        catch (Exception ex) { log("[LIVE] WARN net read failed: " + ex.getMessage()); }
+                    } else {
+                        // Hors flow, on peut resynchroniser les deux compteurs
+                        try { gross = readGrossLitres(); }
+                        catch (Exception ex) { log("[LIVE] WARN gross read failed: " + ex.getMessage()); }
+                        try { net = readNetLitres(); }
+                        catch (Exception ex) { log("[LIVE] WARN net read failed: " + ex.getMessage()); }
+                    }
 
                     DeliveryProgress p = new DeliveryProgress();
                     p.tSinceStartMs = System.currentTimeMillis() - startTimestampMs;
                     p.grossL = gross;
                     p.netL = net;
+
+                    // deltas (gross delta sera stable pendant FLOW_ACTIVE si gross pas rafraîchi)
                     p.deliveredGrossL = gross - startGross;
                     p.deliveredNetL = net - startNet;
                     p.dGrossL = gross - lastGross;
                     p.dNetL = net - lastNet;
+
                     p.flowActive = flow;
                     p.stalled = !flow;
                     p.ds = ds;
                     p.dc = dc;
 
-                    lastGross = gross;
+                    // Mettre à jour les "last"
                     lastNet = net;
+                    if (!flow) {
+                        // On ne met à jour lastGross que quand on a relu gross
+                        lastGross = gross;
+                    }
 
                     if (events != null) events.onProgress(p);
 
@@ -742,7 +761,6 @@ public class DeliveryController {
 
         long deadline = System.currentTimeMillis() + timeoutMs;
 
-        // Boucle d’attente : tolère queued timeout sans tout casser
         while (System.currentTimeMillis() < deadline) {
             int[] dsdc;
             try {
@@ -764,7 +782,6 @@ public class DeliveryController {
             Thread.sleep(pollMs);
         }
 
-        // Lecture finale “long” (30s) pour éviter faux timeout
         try {
             int[] dsdcLong = readDsDcFastLong(pollMs);
             logDsDc("END:POST-LONG", dsdcLong[0], dsdcLong[1]);
@@ -814,7 +831,6 @@ public class DeliveryController {
         startOpenMode(product, 0.0, timeoutMs, pollMs);
     }
 
-    /** END “normal” (mais ne bloque pas IDLE si compteur actif). */
     public void endGracefully(int timeoutMs, int pollMs){
         exec.execute(() -> safeOp(() -> {
             try {
@@ -837,7 +853,6 @@ public class DeliveryController {
         }, "endGracefully"));
     }
 
-    /** Reprendre une livraison (Cmd #0) et remettre RUNNING/loop si nécessaire. */
     public void resumeDelivery(int pollMs) {
         exec.execute(() -> safeOp(() -> {
             try {
@@ -848,7 +863,6 @@ public class DeliveryController {
                 link.opIssueCommand(0x00); // Cmd #0
                 log("[RESUME] Cmd#0 sent (Start/Resume)");
 
-                // Attendre que DA/BEGIN soient visibles
                 boolean becameActive = withPollWindow(() -> {
                     long deadline = System.currentTimeMillis() + 12000;
                     while (System.currentTimeMillis() < deadline) {
@@ -898,10 +912,6 @@ public class DeliveryController {
         }, "resumeDelivery"));
     }
 
-    /**
-     * END Recovery avec message opérateur clair si échec.
-     * Met FLOW_ACTIVE en évidence si persistant à 1.
-     */
     public void endRecoveryOrExplain(int timeoutMs, int pollMs) {
         exec.execute(() -> safeOp(() -> {
             try {
@@ -916,15 +926,11 @@ public class DeliveryController {
                     return;
                 }
 
-                // tenter END normal
                 try {
                     endDeliverySequence(timeoutMs, pollMs);
                     return;
-                } catch (Exception ignored) {
-                    // produire une alerte terrain
-                }
+                } catch (Exception ignored) {}
 
-                // relire état final (long)
                 int[] dsdc1 = readDsDcFastLong(pollMs);
                 int ds = dsdc1[0], dc = dsdc1[1];
                 boolean fa = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
