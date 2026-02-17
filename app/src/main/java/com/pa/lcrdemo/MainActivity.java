@@ -17,7 +17,6 @@ import android.hardware.usb.UsbManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
-import android.os.SystemClock;
 import android.view.View;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
@@ -86,27 +85,6 @@ public class MainActivity extends AppCompatActivity {
     private PendingIntent usbPermissionIntent;
 
     // ==========================================================
-    // UI THROTTLE (validé à 300ms) + SNAPSHOT ATOMIQUE
-    // ==========================================================
-    private static final int UI_THROTTLE_MS = 300;
-    private volatile long lastUiUpdateMs = 0;
-
-    // Snapshot unique pour éviter mélange NET/GROSS entre ticks
-    private static final class UiSnapshot {
-        final String liveLine;
-        final double net;
-        final double gross;
-
-        UiSnapshot(String liveLine, double net, double gross) {
-            this.liveLine = liveLine;
-            this.net = net;
-            this.gross = gross;
-        }
-    }
-
-    private volatile UiSnapshot pendingSnap = null;
-
-    // ==========================================================
     // FIX: anti-spam latches (évite popups répétitifs)
     // ==========================================================
     private boolean recoveryDialogShown = false;
@@ -173,7 +151,7 @@ public class MainActivity extends AppCompatActivity {
             txtLive.setText("LIVE: (en attente)");
         }
 
-        // NET/GROSS defaults
+        // Defaults NET/GROSS big digits (affichage)
         if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
         if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
 
@@ -608,7 +586,7 @@ public class MainActivity extends AppCompatActivity {
 
         @Override
         public void onProgress(DeliveryController.DeliveryProgress p) {
-            // Format LIVE inchangé (comme avant) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+            // LIVE technique inchangé (courant + delta) [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
             boolean flow = (p.dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
             final String live = String.format(
                     "t=%dms NET=%.1f (Δ=%.1f) GROSS=%.1f (Δ=%.1f) FLOW=%s dc=%04X",
@@ -619,25 +597,15 @@ public class MainActivity extends AppCompatActivity {
                     p.dc
             );
 
-            // Snapshot atomique (évite mélange NET/GROSS)
-            pendingSnap = new UiSnapshot(live, p.deliveredNetL, p.deliveredGrossL);
-
-            // Throttle UI à 300ms
-            long now = SystemClock.elapsedRealtime();
-            if (now - lastUiUpdateMs < UI_THROTTLE_MS) return;
-            lastUiUpdateMs = now;
-
             runOnUiThread(() -> {
-                UiSnapshot s = pendingSnap;
-                if (s == null) return;
+                if (txtLive != null) txtLive.setText(live);
 
-                if (txtLive != null) txtLive.setText(s.liveLine);
-
+                // ✅ Correctif: Big digits = valeurs courantes du registre (#45/#44) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/samsung-SM-T397U-Android-9_2026-02-16_175458.txt)[2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
                 if (txtQtyNet != null) {
-                    txtQtyNet.setText(String.format("NET: %.1f", s.net));
+                    txtQtyNet.setText(String.format("NET: %.1f", p.netL));
                 }
                 if (txtQtyGross != null) {
-                    txtQtyGross.setText(String.format("GROSS: %.1f", s.gross));
+                    txtQtyGross.setText(String.format("GROSS: %.1f", p.grossL));
                 }
             });
         }
@@ -679,7 +647,7 @@ public class MainActivity extends AppCompatActivity {
                 txtPrinterStatus.setBackgroundColor(bg);
             });
 
-            // Trigger Recovery/Print indépendamment du FLOW
+            // ✅ Trigger Recovery/Print indépendamment du FLOW [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
             maybeShowRecoveryOrPrintDialogs(ms.delCode, ticketPending);
         }
 
