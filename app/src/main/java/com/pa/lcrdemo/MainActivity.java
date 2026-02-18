@@ -82,6 +82,7 @@ public class MainActivity extends AppCompatActivity {
     private DeliveryController ctrl;
 
     private static final int POLL_MS = 200;
+
     private static final String ACTION_USB_PERMISSION = "com.pa.lcrdemo.USB_PERMISSION";
     private PendingIntent usbPermissionIntent;
 
@@ -100,7 +101,6 @@ public class MainActivity extends AppCompatActivity {
     private final StringBuilder logBuf = new StringBuilder(8192);
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private boolean flushScheduled = false;
-
     private static final int LOG_FLUSH_MS = 250;
     private static final int LOG_MAX_CHARS = 20000;
 
@@ -152,6 +152,7 @@ public class MainActivity extends AppCompatActivity {
         usbPermissionIntent = PendingIntent.getBroadcast(
                 this, 0, new Intent(ACTION_USB_PERMISSION), piFlags
         );
+
         registerReceiver(usbPermissionReceiver, new IntentFilter(ACTION_USB_PERMISSION));
 
         // Dumps I/O contrôlés par le switch
@@ -164,7 +165,6 @@ public class MainActivity extends AppCompatActivity {
         if (txtLive != null) {
             txtLive.setText("LIVE: (en attente)");
         }
-
         if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
         if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
 
@@ -191,7 +191,6 @@ public class MainActivity extends AppCompatActivity {
         btnA = findViewById(R.id.btnA);
         btnB = findViewById(R.id.btnB);
         btnC = findViewById(R.id.btnC);
-
         btnContinue = findViewById(R.id.btnContinue);
         btnFinish = findViewById(R.id.btnFinish);
 
@@ -254,7 +253,6 @@ public class MainActivity extends AppCompatActivity {
     // Handlers
     // ==========================================================
     private void installHandlers() {
-
         switchIoLog.setOnCheckedChangeListener((btn, checked) -> {
             LcpLink.DUMP_TX = checked;
             LcpLink.DUMP_RX = checked;
@@ -327,7 +325,8 @@ public class MainActivity extends AppCompatActivity {
                 if (ctrl != null) ctrl.setTicketRequired(position, POLL_MS);
             }
 
-            @Override public void onNothingSelected(AdapterView<?> parent) {}
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {}
         });
 
         btnClearShift.setOnClickListener(v -> {
@@ -376,11 +375,9 @@ public class MainActivity extends AppCompatActivity {
             log("ERR: Port USB non initialisé.");
             return;
         }
-
         try {
             int to = parseHex(edtTo, 0xFA);
             int from = parseHex(edtFrom, 0xFF);
-
             log(String.format("Init LCP → to=0x%02X, from=0x%02X…", to, from));
 
             link = new LcpLink(port, to, from, true);
@@ -393,6 +390,7 @@ public class MainActivity extends AppCompatActivity {
             );
 
             log("LCP prêt.");
+
             ctrl.ensureDefaultTicketRequiredIs1(POLL_MS);
             ctrl.refreshTicketInfo(POLL_MS);
             ctrl.refreshPrinterStatus(POLL_MS);
@@ -416,12 +414,9 @@ public class MainActivity extends AppCompatActivity {
 
         synchronized (logLock) {
             logBuf.append(s).append('\n');
-
-            // limite mémoire du buffer
             if (logBuf.length() > LOG_MAX_CHARS) {
                 logBuf.delete(0, logBuf.length() - LOG_MAX_CHARS);
             }
-
             if (!flushScheduled) {
                 flushScheduled = true;
                 uiHandler.postDelayed(this::flushLogToUi, LOG_FLUSH_MS);
@@ -438,10 +433,8 @@ public class MainActivity extends AppCompatActivity {
             logBuf.setLength(0);
         }
 
-        // UI update en une seule fois (réduit fortement le jank)
         txtLog.append(chunk);
 
-        // limite taille TextView
         int extra = txtLog.length() - LOG_MAX_CHARS;
         if (extra > 0) {
             txtLog.setText(txtLog.getText().subSequence(extra, txtLog.length()));
@@ -493,12 +486,12 @@ public class MainActivity extends AppCompatActivity {
         if (usbManager == null) return;
 
         usbList.addAll(usbManager.getDeviceList().values());
-
         List<String> labels = new ArrayList<>();
         for (UsbDevice d : usbList) labels.add(usbLabel(d));
 
         spnUsbDevices.setAdapter(new ArrayAdapter<>(
-                this, android.R.layout.simple_spinner_item, labels));
+                this, android.R.layout.simple_spinner_item, labels
+        ));
 
         log("Scan USB : " + labels.size() + " périphérique(s).");
     }
@@ -637,10 +630,16 @@ public class MainActivity extends AppCompatActivity {
 
         @Override
         public void onProgress(DeliveryController.DeliveryProgress p) {
+
+            // ✅ Correctif: affichage DeliveryState "officiel" (ACTIVE_FLOWING / ACTIVE_PAUSED / etc.)
+            String stateName = (p.deliveryState != null) ? p.deliveryState.name() : "N/A";
+
             boolean flow = (p.dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
+
             final String live = String.format(
-                    "t=%dms NET=%.1f (Δ=%.1f) GROSS=%.1f (Δ=%.1f) FLOW=%s dc=%04X",
+                    "t=%dms STATE=%s NET=%.1f (Δ=%.1f) GROSS=%.1f (Δ=%.1f) FLOW=%s dc=%04X",
                     p.tSinceStartMs,
+                    stateName,
                     p.netL, p.deliveredNetL,
                     p.grossL, p.deliveredGrossL,
                     flow ? "1" : "0",
@@ -669,19 +668,20 @@ public class MainActivity extends AppCompatActivity {
 
         @Override
         public void onPrinterStatus(LcpLink.MachineStatusEx ms, boolean ticketPending) {
+
             final String text =
                     "Imprimante: " + ms.printer().summary() +
-                            " \n ticketPending=" + ticketPending +
-                            " \n ds=0x" + String.format("%04X", ms.delStatus) +
-                            " dc=0x" + String.format("%04X", ms.delCode);
+                    " \n ticketPending=" + ticketPending +
+                    " \n ds=0x" + String.format("%04X", ms.delStatus) +
+                    " dc=0x" + String.format("%04X", ms.delCode);
 
             runOnUiThread(() -> {
                 txtPrinterStatus.setText(text);
 
                 boolean hardErr =
                         ms.printer().outOfPaper ||
-                                ms.printer().noProcessor ||
-                                ms.printer().processorError;
+                        ms.printer().noProcessor ||
+                        ms.printer().processorError;
 
                 boolean printing = ms.printer().printingStarted;
 

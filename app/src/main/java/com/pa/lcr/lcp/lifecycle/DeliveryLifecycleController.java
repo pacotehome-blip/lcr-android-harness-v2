@@ -8,8 +8,7 @@ import com.pa.lcr.lcp.util.LifecycleLogger;
  *
  * Garde-fou applicatif :
  * - n'envoie aucune commande LCP
- * - n'altère pas la logique existante
- * - bloque uniquement les actions incohérentes avec le protocole LCP
+ * - bloque uniquement les actions incohérentes avec le protocole
  */
 public class DeliveryLifecycleController {
 
@@ -24,39 +23,21 @@ public class DeliveryLifecycleController {
         return state;
     }
 
-    // --------------------------------------------------
-    // Transition interne (unique point de modification)
-    // --------------------------------------------------
-
     private void transition(DeliveryLifecycle to, String reason) {
-        logger.info(
-            "DeliveryLifecycle",
-            state + " → " + to + " (" + reason + ")"
-        );
+        logger.info("DeliveryLifecycle", state + " → " + to + " (" + reason + ")");
         state = to;
     }
-
-    // --------------------------------------------------
-    // START
-    // --------------------------------------------------
 
     public boolean allowStart(boolean ticketPending) {
         if (state == DeliveryLifecycle.IDLE) {
             if (ticketPending) {
-                logger.error(
-                    "DeliveryLifecycle",
-                    "START bloqué : ticketPending=true"
-                );
+                logger.error("DeliveryLifecycle", "START bloqué : ticketPending=true");
                 return false;
             }
             transition(DeliveryLifecycle.PRESTART, "Start demandé");
             return true;
         }
-
-        logger.error(
-            "DeliveryLifecycle",
-            "START bloqué en état " + state
-        );
+        logger.error("DeliveryLifecycle", "START bloqué en état " + state);
         return false;
     }
 
@@ -64,59 +45,33 @@ public class DeliveryLifecycleController {
         if (state == DeliveryLifecycle.PRESTART) {
             transition(DeliveryLifecycle.STARTING, "Prestart confirmé");
         } else {
-            logger.warn(
-                "DeliveryLifecycle",
-                "PrestartConfirm ignoré en état " + state
-            );
+            logger.warn("DeliveryLifecycle", "PrestartConfirm ignoré en état " + state);
         }
     }
-
-    // --------------------------------------------------
-    // Cmd#0 (START / RESUME)
-    // --------------------------------------------------
 
     public boolean allowCmd0(Cmd0Usage usage) {
         switch (state) {
             case STARTING:
                 return usage == Cmd0Usage.START;
-
             case PAUSED:
                 return usage == Cmd0Usage.RESUME;
-
             default:
-                logger.error(
-                    "DeliveryLifecycle",
-                    "Cmd#0 (" + usage + ") bloqué en état " + state
-                );
+                logger.error("DeliveryLifecycle", "Cmd#0 (" + usage + ") bloqué en état " + state);
                 return false;
         }
     }
 
-    // --------------------------------------------------
-    // START confirmé (begin=true)
-    // --------------------------------------------------
-
     public void onStartConfirmed(boolean begin) {
         if (state == DeliveryLifecycle.STARTING && begin) {
-            transition(
-                DeliveryLifecycle.ACTIVE,
-                "START confirmé (begin=true)"
-            );
+            transition(DeliveryLifecycle.ACTIVE, "START confirmé (begin=true)");
         } else if (state == DeliveryLifecycle.STARTING) {
-            logger.warn(
-                "DeliveryLifecycle",
-                "START non confirmé (begin=false)"
-            );
+            logger.warn("DeliveryLifecycle", "START non confirmé (begin=false)");
         }
     }
 
-    // --------------------------------------------------
-    // PAUSE / RESUME
-    // --------------------------------------------------
-
     public void onPauseDetected() {
         if (state == DeliveryLifecycle.ACTIVE) {
-            transition(DeliveryLifecycle.PAUSED, "Pause détectée");
+            transition(DeliveryLifecycle.PAUSED, "Pause confirmée");
         }
     }
 
@@ -125,30 +80,16 @@ public class DeliveryLifecycleController {
             transition(DeliveryLifecycle.ACTIVE, "Resume demandé");
             return true;
         }
-
-        logger.error(
-            "DeliveryLifecycle",
-            "RESUME bloqué en état " + state
-        );
+        logger.error("DeliveryLifecycle", "RESUME bloqué en état " + state);
         return false;
     }
 
-    // --------------------------------------------------
-    // END
-    // --------------------------------------------------
-
     public boolean allowEnd() {
-        if (state == DeliveryLifecycle.ACTIVE ||
-            state == DeliveryLifecycle.PAUSED) {
-
+        if (state == DeliveryLifecycle.ACTIVE || state == DeliveryLifecycle.PAUSED) {
             transition(DeliveryLifecycle.ENDING, "END demandé");
             return true;
         }
-
-        logger.error(
-            "DeliveryLifecycle",
-            "END bloqué en état " + state
-        );
+        logger.error("DeliveryLifecycle", "END bloqué en état " + state);
         return false;
     }
 
@@ -164,14 +105,8 @@ public class DeliveryLifecycleController {
         }
     }
 
-    // --------------------------------------------------
-    // Timeout (règle dure : ne change jamais l'état)
-    // --------------------------------------------------
-
+    /** Timeout: règle dure -> ne change jamais l'état */
     public void onTimeout(String context) {
-        logger.error(
-            "DeliveryLifecycle",
-            "Timeout dans " + context + " (état=" + state + ")"
-        );
+        logger.error("DeliveryLifecycle", "Timeout dans " + context + " (état=" + state + ")");
     }
 }
