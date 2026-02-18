@@ -27,6 +27,11 @@ public class DeliveryController {
     private static final int QUEUED_LONG_TIMEOUT_MS = 30_000; // 30s
     private static final int SETFIELD_RETRY_SLEEP_MS = 120;
 
+    // --- DC bits (doc SDK) --- [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/Android%20SDK%20Documentation-b0.14.pdf)
+    private static final int DC_SHIFT_TICKET_PENDING = 0x0002;
+    private static final int DC_DELIVERY_STARTING    = 0x0400;
+    private static final int DC_DELIVERY_QUEUED      = 0x0800;
+
     // ------------------------- Dépendances -------------------------
     private final LcpLink link;
     private final DeliveryEvents events;
@@ -71,7 +76,7 @@ public class DeliveryController {
     private volatile double lastStableNet = 0;
 
     // ==========================================================
-    // [DL] Garde-fou DeliveryLifecycle (non intrusif)
+    // Garde-fou DeliveryLifecycle
     // ==========================================================
     private final DeliveryLifecycleController lifecycle =
             new DeliveryLifecycleController(new AndroidLifecycleLogger());
@@ -103,7 +108,7 @@ public class DeliveryController {
         public int ds;
         public int dc;
 
-        // ✅ Correctif doc SDK : état “officiel” (ACTIVE_FLOWING / ACTIVE_PAUSED / etc.)
+        // DeliveryState "officiel" (ACTIVE_FLOWING / ACTIVE_PAUSED / etc.) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/Android%20SDK%20Documentation-b0.14.pdf)
         public LcpDeliveryState deliveryState;
     }
 
@@ -242,11 +247,10 @@ public class DeliveryController {
         }
     }
 
-    // ✅ Correctif (doc SDK): DeliveryState officiel calculé depuis DC bits
-    // Doc: ticket pending 0x0001, shift pending 0x0002, flow active 0x0004, delivery active 0x0008. [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/Android%20SDK%20Documentation-b0.14.pdf)
+    // --- DeliveryState officiel depuis DC bits (doc SDK) --- [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/Android%20SDK%20Documentation-b0.14.pdf)
     public static LcpDeliveryState computeDeliveryStateFromDc(int dc) {
         boolean ticketPending  = (dc & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0; // 0x0001
-        boolean shiftPending   = (dc & 0x0002) != 0;                          // 0x0002 (doc)
+        boolean shiftPending   = (dc & DC_SHIFT_TICKET_PENDING) != 0;         // 0x0002
         boolean flowActive     = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;       // 0x0004
         boolean deliveryActive = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;   // 0x0008
 
@@ -256,6 +260,32 @@ public class DeliveryController {
         if (ticketPending) return LcpDeliveryState.PENDING_TICKET;
         if (shiftPending)  return LcpDeliveryState.PENDING_SHIFT;
         return LcpDeliveryState.IDLE;
+    }
+
+    private static boolean dcIndicatesStartAccepted(int dc) {
+        boolean deliveryActive = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
+        boolean starting       = (dc & DC_DELIVERY_STARTING) != 0;
+        boolean queued         = (dc & DC_DELIVERY_QUEUED) != 0;
+        return deliveryActive || starting || queued;
+    }
+
+    private int[] safeReadDsDcAfterRecovery(int pollMs) throws Exception {
+        try { link.forceSyncNext(); } catch (Exception ignored) {}
+        try { link.requestPurge();  } catch (Exception ignored) {}
+        try { Thread.sleep(Math.max(50, SETFIELD_RETRY_SLEEP_MS)); }
+        catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+        return readDsDcFastLong(pollMs);
+    }
+
+    private void rollbackStartToIdle(String why) {
+        log("[START] ROLLBACK -> IDLE : " + why);
+        lifecycle.forceIdle("Start failed: " + why);
+        stopping = true;
+        if (liveLoopFuture != null) {
+            try { liveLoopFuture.cancel(true); } catch (Exception ignored) {}
+            liveLoopFuture = null;
+        }
+        setState(State.IDLE);
     }
 
     private static int productToList0Value(int product) {
@@ -353,7 +383,54 @@ public class DeliveryController {
         return (raw != null && raw.length > 0) ? (raw[0] & 0xFF) : 0;
     }
 
-    // ----------------------------- Ticket / Printer helpers -----------------------------
+    private static boolean isFramingTimeoutMsg(String msg) {
+        if (msg == null) return false;
+        return msg.contains("Timeout sync ~~")
+                || msg.contains("Header timeout")
+                || msg.contains("Payload timeout")
+                || msg.contains("CRC timeout");
+    }
+
+    private static boolean isFramingTimeoutException(Throwable t) {
+        if (t == null) return false;
+        String m = t.getMessage();
+        if (m != null && (m.startsWith("Framing timeout") || isFramingTimeoutMsg(m))) return true;
+        Throwable c = t.getCause();
+        if (c != null) {
+            String cm = c.getMessage();
+            if (cm != null && isFramingTimeoutMsg(cm)) return true;
+        }
+        return false;
+    }
+
+    private void safeSetFieldWithRetry(int field, byte[] data, int pollMs, int verifyLen) throws Exception {
+        try {
+            link.opSetField(field, data);
+        } catch (IOException e) {
+            if (!isFramingTimeoutException(e)) throw e;
+
+            log("[SAFE-SET] Framing timeout on SET_FIELD #" + field + " -> recovery+retry once. msg=" + e.getMessage());
+            link.forceSyncNext();
+            link.requestPurge();
+            Thread.sleep(SETFIELD_RETRY_SLEEP_MS);
+
+            link.opSetField(field, data);
+        }
+
+        byte[] rb = link.opGetField(field);
+        if (rb == null) throw new IOException("SET_FIELD verify failed: null");
+
+        int n = Math.min(Math.min(verifyLen, data.length), rb.length);
+        if (n <= 0) throw new IOException("SET_FIELD verify failed: empty");
+
+        for (int i = 0; i < n; i++) {
+            if (rb[i] != data[i]) {
+                throw new IOException("SET_FIELD verify mismatch at i=" + i);
+            }
+        }
+    }
+
+    // ----------------------------- Public helpers called by MainActivity -----------------------------
 
     public void refreshPrinterStatus(int pollMs) {
         exec.execute(() -> safeOp(() -> {
@@ -394,11 +471,8 @@ public class DeliveryController {
                 link.setPythonCompat(true, pollMs);
 
                 int before = readTicketRequired();
-                try {
-                    link.opSetField(FIELD_TICKET_REQUIRED, new byte[]{ (byte)mode });
-                } catch (IOException ex) {
-                    log("[TICKET] SET #37 refused/failed (likely mode/security). " + ex.getMessage());
-                }
+                try { link.opSetField(FIELD_TICKET_REQUIRED, new byte[]{ (byte)mode }); }
+                catch (IOException ex) { log("[TICKET] SET #37 refused/failed. " + ex.getMessage()); }
 
                 int after = readTicketRequired();
                 log("[TICKET] TicketRequired(#37) now=" + after + " (requested=" + mode + ", before=" + before + ")");
@@ -416,12 +490,9 @@ public class DeliveryController {
                 link.setPythonCompat(true, pollMs);
                 int tr = readTicketRequired();
                 if (tr != 1) {
-                    log("[TICKET] TicketRequired(#37) read=" + tr + " -> setting to 1 (default optional)");
-                    try {
-                        link.opSetField(FIELD_TICKET_REQUIRED, new byte[]{ (byte)1 });
-                    } catch (IOException ex) {
-                        log("[TICKET] SET #37 refused/failed (likely mode/security). " + ex.getMessage());
-                    }
+                    log("[TICKET] TicketRequired(#37) read=" + tr + " -> setting to 1");
+                    try { link.opSetField(FIELD_TICKET_REQUIRED, new byte[]{ (byte)1 }); }
+                    catch (IOException ex) { log("[TICKET] SET #37 refused/failed. " + ex.getMessage()); }
                     int tr2 = readTicketRequired();
                     log("[TICKET] TicketRequired(#37) now=" + tr2);
                     if (events != null) events.onTicketRequired(tr2);
@@ -448,8 +519,6 @@ public class DeliveryController {
         }, "clearShiftNow"));
     }
 
-    // ----------------------------- Ping -----------------------------
-
     public void pingStatus(int pollMs){
         exec.execute(() -> safeOp(() -> {
             try {
@@ -466,26 +535,6 @@ public class DeliveryController {
         }, "pingStatus"));
     }
 
-    // ----------------------------- Start gate -----------------------------
-
-    private boolean startGateAllow(int pollMs) throws Exception {
-        int[] dsdc = readDsDcFast();
-        int ds = dsdc[0], dc = dsdc[1];
-        logDsDc("START-GATE", ds, dc);
-
-        boolean pending = (dc & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
-        if (!pending) {
-            log("[START-GATE] OK: ticketPending=false");
-            return true;
-        }
-
-        log("[START-GATE] BLOCKED: ticketPending=true -> must print/clear last delivery ticket before starting");
-        refreshPrinterStatus(pollMs);
-        return false;
-    }
-
-    // ----------------------------- Print pending ticket -----------------------------
-
     public void printPendingTicket(int pollMs, int timeoutMs) {
         exec.execute(() -> safeOp(() -> {
             try {
@@ -499,7 +548,7 @@ public class DeliveryController {
                     emitOperatorAlert(
                             OperatorIssueCode.PRINT_FORBIDDEN_DELIVERY_ACTIVE,
                             "Impression interdite",
-                            "Impossible d'imprimer: la livraison est encore active.\nTerminer la livraison (Cmd #2) avant d'imprimer.",
+                            "Impossible d'imprimer: la livraison est encore active.\nTerminer la livraison avant d'imprimer.",
                             diagDsDc(ds0, dc0),
                             true
                     );
@@ -515,12 +564,8 @@ public class DeliveryController {
 
                 while (System.currentTimeMillis() < deadline) {
                     int[] dsdc;
-                    try {
-                        dsdc = readDsDcFast();
-                    } catch (Exception e) {
-                        Thread.sleep(Math.max(50, pollMs));
-                        continue;
-                    }
+                    try { dsdc = readDsDcFast(); }
+                    catch (Exception e) { Thread.sleep(Math.max(50, pollMs)); continue; }
 
                     int ds = dsdc[0], dc = dsdc[1];
                     boolean pending = (dc & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
@@ -540,7 +585,7 @@ public class DeliveryController {
                     emitOperatorAlert(
                             OperatorIssueCode.PRINT_TIMEOUT_TICKET_PENDING,
                             "Ticket toujours en attente",
-                            "Le ticket n'a pas été imprimé.\nVérifie l'imprimante (papier/connexion) puis réessaie.",
+                            "Le ticket n'a pas été imprimé.\nVérifie l'imprimante puis réessaie.",
                             diagDsDc(dsdcEnd[0], dsdcEnd[1]),
                             true
                     );
@@ -559,7 +604,23 @@ public class DeliveryController {
         }, "printPendingTicket"));
     }
 
-    // ----------------------------- Prestart / Start / Live -----------------------------
+    // ----------------------------- Start sequences -----------------------------
+
+    private boolean startGateAllow(int pollMs) throws Exception {
+        int[] dsdc = readDsDcFast();
+        int ds = dsdc[0], dc = dsdc[1];
+        logDsDc("START-GATE", ds, dc);
+
+        boolean pending = (dc & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
+        if (!pending) {
+            log("[START-GATE] OK: ticketPending=false");
+            return true;
+        }
+
+        log("[START-GATE] BLOCKED: ticketPending=true -> must print/clear last delivery ticket before starting");
+        refreshPrinterStatus(pollMs);
+        return false;
+    }
 
     public void prestartSequence(int product, double presetLitres, int pollMs) throws Exception {
         setState(State.PRESTART);
@@ -589,52 +650,6 @@ public class DeliveryController {
         log("[PRE] Completed PRE-START");
     }
 
-    private static boolean isFramingTimeoutMsg(String msg) {
-        if (msg == null) return false;
-        return msg.contains("Timeout sync ~~")
-                || msg.contains("Header timeout")
-                || msg.contains("Payload timeout")
-                || msg.contains("CRC timeout");
-    }
-
-    private static boolean isFramingTimeoutException(Throwable t) {
-        if (t == null) return false;
-        String m = t.getMessage();
-        if (m != null && (m.startsWith("Framing timeout") || isFramingTimeoutMsg(m))) return true;
-        Throwable c = t.getCause();
-        if (c != null) {
-            String cm = c.getMessage();
-            if (cm != null && isFramingTimeoutMsg(cm)) return true;
-        }
-        return false;
-    }
-
-    private void safeSetFieldWithRetry(int field, byte[] data, int pollMs, int verifyLen) throws Exception {
-        try {
-            link.opSetField(field, data);
-        } catch (IOException e) {
-            if (!isFramingTimeoutException(e)) throw e;
-
-            log("[SAFE-SET] Framing timeout on SET_FIELD #" + field + " -> recovery+retry once. msg=" + e.getMessage());
-            link.forceSyncNext();
-            link.requestPurge();
-            Thread.sleep(SETFIELD_RETRY_SLEEP_MS);
-            link.opSetField(field, data);
-        }
-
-        byte[] rb = link.opGetField(field);
-        if (rb == null) throw new IOException("SET_FIELD verify failed: null");
-
-        int n = Math.min(Math.min(verifyLen, data.length), rb.length);
-        if (n <= 0) throw new IOException("SET_FIELD verify failed: empty");
-
-        for (int i = 0; i < n; i++) {
-            if (rb[i] != data[i]) {
-                throw new IOException("SET_FIELD verify mismatch at i=" + i);
-            }
-        }
-    }
-
     public void startDeliverySequence(int pollMs) throws Exception {
         logTimeline("START:ENTER", pollMs);
 
@@ -643,9 +658,45 @@ public class DeliveryController {
             throw new IllegalStateException("Cmd#0 START blocked by DeliveryLifecycle state=" + lifecycle.getState());
         }
 
-        log("[START] RUN (Command #0)");
-        link.opIssueCommand(0x00);
         setState(State.STARTING);
+
+        boolean sentOrAccepted = false;
+        Exception lastSendError = null;
+
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            try {
+                log("[START] RUN (Command #0) attempt=" + attempt);
+                link.opIssueCommand(0x00);
+                sentOrAccepted = true;
+                break;
+            } catch (Exception e) {
+                lastSendError = e;
+
+                if (isFramingTimeoutException(e)) {
+                    log("[START] WARN: framing timeout on Cmd#0 attempt=" + attempt + " -> verify DS/DC; msg=" + e.getMessage());
+
+                    int[] dsdc = safeReadDsDcAfterRecovery(pollMs);
+                    int ds = dsdc[0], dc = dsdc[1];
+                    logDsDc("START:VERIFY", ds, dc);
+
+                    if (dcIndicatesStartAccepted(dc)) {
+                        log("[START] VERIFY OK: register indicates start accepted (active/starting/queued).");
+                        sentOrAccepted = true;
+                        break;
+                    } else {
+                        log("[START] VERIFY NO: register shows no start accepted; will retry once.");
+                        continue;
+                    }
+                }
+
+                throw e;
+            }
+        }
+
+        if (!sentOrAccepted) {
+            rollbackStartToIdle("Cmd#0 not accepted after retries; last=" + (lastSendError != null ? lastSendError.getMessage() : "null"));
+            throw new IOException("Start Cmd#0 failed (not accepted).", lastSendError);
+        }
 
         boolean active = withPollWindow(() -> {
             long deadline = System.currentTimeMillis() + 12000;
@@ -655,18 +706,26 @@ public class DeliveryController {
                 int dc = dsdc[1];
 
                 boolean isActive = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
+                boolean isQueuedOrStarting = ((dc & DC_DELIVERY_STARTING) != 0) || ((dc & DC_DELIVERY_QUEUED) != 0);
+
                 if (isActive) {
                     logDsDc("START:ACTIVE", ds, dc);
                     return true;
                 }
+                if (isQueuedOrStarting) {
+                    logDsDc("START:QUEUED/STARTING", ds, dc);
+                }
+
                 Thread.sleep(Math.max(50, pollMs));
             }
             return false;
         });
 
-        if (!active) throw new Exception("Delivery not active after RUN");
+        if (!active) {
+            rollbackStartToIdle("Delivery not active after RUN (timeout)");
+            throw new Exception("Delivery not active after RUN");
+        }
 
-        // [DL] START confirmé (aligné avec l'existant)
         lifecycle.onStartConfirmed(true);
 
         startTimestampMs = System.currentTimeMillis();
@@ -799,7 +858,6 @@ public class DeliveryController {
                     p.ds = ds;
                     p.dc = dc;
 
-                    // ✅ Correctif doc SDK : DeliveryState officiel
                     p.deliveryState = computeDeliveryStateFromDc(dc);
 
                     lastGross = gross;
@@ -831,10 +889,7 @@ public class DeliveryController {
                         long quietMs = now - lastVolumeChangeMs;
                         long sinceMs = now - flowStopSinceMs;
                         if (quietMs >= flowStopConfirmMs && sinceMs >= flowStopConfirmMs) {
-
-                            // [DL] Pause confirmée (pas un glitch)
                             lifecycle.onPauseDetected();
-
                             flowStopNotified = true;
                             flowStopPending = false;
                             if (events != null) events.onFlowStopped();
@@ -852,7 +907,7 @@ public class DeliveryController {
         }, "startLiveLoop"));
     }
 
-    // ----------------------------- StartOpenMode / End / Resume (APIs attendues par MainActivity) -----------------------------
+    // ----------------------------- UI entry points -----------------------------
 
     public void startOpenMode(int product, double presetLitres, int timeoutMs, int pollMs){
         exec.execute(() -> safeOp(() -> {
@@ -949,12 +1004,8 @@ public class DeliveryController {
 
         while (System.currentTimeMillis() < deadline) {
             int[] dsdc;
-            try {
-                dsdc = readDsDcFast();
-            } catch (Exception e) {
-                Thread.sleep(Math.max(50, pollMs));
-                continue;
-            }
+            try { dsdc = readDsDcFast(); }
+            catch (Exception e) { Thread.sleep(Math.max(50, pollMs)); continue; }
 
             int dc = dsdc[1];
             boolean active = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;

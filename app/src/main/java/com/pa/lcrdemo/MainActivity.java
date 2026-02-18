@@ -33,6 +33,7 @@ import com.hoho.android.usbserial.driver.UsbSerialPort;
 import com.hoho.android.usbserial.driver.UsbSerialProber;
 import com.pa.lcr.lcp.DeliveryController;
 import com.pa.lcr.lcp.LcpLink;
+import com.pa.lcr.lcp.lifecycle.LcpDeliveryState;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -40,7 +41,6 @@ import java.util.concurrent.Executors;
 
 public class MainActivity extends AppCompatActivity {
 
-    // ---------- UI base ----------
     private EditText edtTo, edtFrom, edtProduct, edtPreset;
     private Button btnCopyLog, btnClearLog, btnConnect;
     private Button btnA, btnB, btnC;
@@ -49,18 +49,13 @@ public class MainActivity extends AppCompatActivity {
     private TextView txtLog;
     private ScrollView logScroll;
 
-    // ---------- LIVE (ligne unique) ----------
     private TextView txtLive;
-
-    // ---------- NET / GROSS (big digits) ----------
     private TextView txtQtyNet;
     private TextView txtQtyGross;
 
-    // ---------- UI USB ----------
     private Spinner spnUsbDevices;
     private Button btnScanUsb, btnPingUsb;
 
-    // ---------- UI ticket + printer ----------
     private TextView txtTicketNumber;
     private Spinner spnTicketRequired;
     private Button btnRefreshTicket;
@@ -68,14 +63,11 @@ public class MainActivity extends AppCompatActivity {
     private TextView txtPrinterStatus;
     private Button btnRefreshPrinter;
 
-    // ---------- UI print pending ----------
     private Button btnPrintPending;
 
-    // ---------- USB backend ----------
     private UsbManager usbManager;
     private final List<UsbDevice> usbList = new ArrayList<>();
 
-    // ---------- LCP backend ----------
     private UsbSerialPort port = null;
     private UsbDevice lastSelectedDevice = null;
     private LcpLink link;
@@ -86,17 +78,9 @@ public class MainActivity extends AppCompatActivity {
     private static final String ACTION_USB_PERMISSION = "com.pa.lcrdemo.USB_PERMISSION";
     private PendingIntent usbPermissionIntent;
 
-    // ==========================================================
-    // FIX: anti-spam latches (évite popups répétitifs)
-    // ==========================================================
     private boolean recoveryDialogShown = false;
     private boolean printDialogShown = false;
 
-    // ==========================================================
-    // LOG UI: TX/RX only for [IO] + batching flush 250ms
-    // - Filtrage: lignes [IO] gardées seulement si contiennent TX: ou RX:
-    // - Batching: append au TextView toutes les 250ms pour éviter jank/freezes UI
-    // ==========================================================
     private final Object logLock = new Object();
     private final StringBuilder logBuf = new StringBuilder(8192);
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
@@ -104,9 +88,6 @@ public class MainActivity extends AppCompatActivity {
     private static final int LOG_FLUSH_MS = 250;
     private static final int LOG_MAX_CHARS = 20000;
 
-    // ==========================================================
-    // USB Permission Receiver
-    // ==========================================================
     private final BroadcastReceiver usbPermissionReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
@@ -130,9 +111,6 @@ public class MainActivity extends AppCompatActivity {
         }
     };
 
-    // ==========================================================
-    // Lifecycle
-    // ==========================================================
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -155,16 +133,13 @@ public class MainActivity extends AppCompatActivity {
 
         registerReceiver(usbPermissionReceiver, new IntentFilter(ACTION_USB_PERMISSION));
 
-        // Dumps I/O contrôlés par le switch
         LcpLink.DUMP_TX = switchIoLog.isChecked();
         LcpLink.DUMP_RX = switchIoLog.isChecked();
 
         txtPrinterStatus.setText("Imprimante: (non connecté / non lu)");
         txtPrinterStatus.setBackgroundColor(0xFFEEEEEE);
 
-        if (txtLive != null) {
-            txtLive.setText("LIVE: (en attente)");
-        }
+        if (txtLive != null) txtLive.setText("LIVE: (en attente)");
         if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
         if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
 
@@ -178,9 +153,6 @@ public class MainActivity extends AppCompatActivity {
         try { unregisterReceiver(usbPermissionReceiver); } catch (Exception ignored) {}
     }
 
-    // ==========================================================
-    // Bind UI
-    // ==========================================================
     private void bindUI() {
         edtTo = findViewById(R.id.edtTo);
         edtFrom = findViewById(R.id.edtFrom);
@@ -199,8 +171,6 @@ public class MainActivity extends AppCompatActivity {
         logScroll = findViewById(R.id.logScroll);
 
         txtLive = findViewById(R.id.txtLive);
-
-        // big digits
         txtQtyNet = findViewById(R.id.txtQtyNet);
         txtQtyGross = findViewById(R.id.txtQtyGross);
 
@@ -222,9 +192,6 @@ public class MainActivity extends AppCompatActivity {
         btnPrintPending = findViewById(R.id.btnPrintPending);
     }
 
-    // ==========================================================
-    // Defaults
-    // ==========================================================
     private void applyDefaultValues() {
         edtTo.setText("0xFA");
         edtFrom.setText("0xFF");
@@ -249,9 +216,6 @@ public class MainActivity extends AppCompatActivity {
         txtTicketNumber.setText("-");
     }
 
-    // ==========================================================
-    // Handlers
-    // ==========================================================
     private void installHandlers() {
         switchIoLog.setOnCheckedChangeListener((btn, checked) -> {
             LcpLink.DUMP_TX = checked;
@@ -297,14 +261,12 @@ public class MainActivity extends AppCompatActivity {
             ctrl.startOpenMode(product, preset, 20000, POLL_MS);
         });
 
-        // CONTINUER = Cmd #0
         btnContinue.setOnClickListener(v -> {
             if (ctrl == null) return;
             log("Continuer → Cmd#0 (Start/Resume)");
             ctrl.resumeDelivery(POLL_MS);
         });
 
-        // Terminer (normal)
         btnFinish.setOnClickListener(v -> {
             if (ctrl == null) return;
             log("Terminer → END");
@@ -347,29 +309,25 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    // ==========================================================
-    // UI state
-    // ==========================================================
     private void setUiForState(DeliveryController.State s) {
         boolean running = (s == DeliveryController.State.RUNNING);
         boolean startingOrPre = (s == DeliveryController.State.STARTING || s == DeliveryController.State.PRESTART);
         boolean ending = (s == DeliveryController.State.ENDING);
 
         btnC.setEnabled(!(running || startingOrPre || ending));
-        btnFinish.setEnabled(running || startingOrPre);
+
+        // Terminer peut rester actif (choix 1), mais on garde la logique existante de base:
+        btnFinish.setEnabled(running || startingOrPre || ending);
 
         btnRefreshPrinter.setEnabled(!running);
         btnPrintPending.setEnabled(!running);
         spnTicketRequired.setEnabled(!running);
         btnClearShift.setEnabled(!running);
 
-        // Continue activé UNIQUEMENT par onFlowStopped()
+        // Continue piloté par deliveryState dans onProgress (plus fiable)
         btnContinue.setEnabled(false);
     }
 
-    // ==========================================================
-    // Init LCP
-    // ==========================================================
     private void initLcp() {
         if (port == null) {
             log("ERR: Port USB non initialisé.");
@@ -400,13 +358,9 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    // ==========================================================
-    // LOG (TX/RX only for [IO] + batching)
-    // ==========================================================
     private void log(String s) {
         if (!switchIoLog.isChecked()) return;
 
-        // Filtrage I/O: garder seulement TX/RX pour les lignes [IO]
         if (s != null && s.startsWith("[IO]")) {
             boolean keep = s.contains("TX:") || s.contains("RX:");
             if (!keep) return;
@@ -445,9 +399,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    // ==========================================================
-    // Parse helpers
-    // ==========================================================
     private int parseHex(EditText edt, int def) {
         try {
             String t = edt.getText().toString().trim();
@@ -469,9 +420,6 @@ public class MainActivity extends AppCompatActivity {
         catch (Exception ignored) { return def; }
     }
 
-    // ==========================================================
-    // USB helpers
-    // ==========================================================
     private static String usbLabel(UsbDevice d) {
         String m = d.getManufacturerName();
         String p = d.getProductName();
@@ -536,9 +484,6 @@ public class MainActivity extends AppCompatActivity {
         log("USB prêt.");
     }
 
-    // ==========================================================
-    // FIX: Recovery / Print dialogs (indépendant du flow)
-    // ==========================================================
     private void maybeShowRecoveryOrPrintDialogs(int dc, boolean ticketPending) {
         boolean deliveryActive = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
 
@@ -554,16 +499,9 @@ public class MainActivity extends AppCompatActivity {
 
             runOnUiThread(() -> new AlertDialog.Builder(MainActivity.this)
                     .setTitle("Livraison précédente détectée")
-                    .setMessage("Un ticket est en attente.\n\nQue veux-tu faire ?")
-                    .setCancelable(false)
-                    .setPositiveButton("Continuer (Cmd#0)", (d, w) -> {
-                        log("Recovery: Continuer → Cmd#0");
-                        if (ctrl != null) ctrl.resumeDelivery(POLL_MS);
-                    })
-                    .setNegativeButton("Terminer (Cmd#2)", (d, w) -> {
-                        log("Recovery: Terminer → Cmd#2 (Recovery)");
-                        if (ctrl != null) ctrl.endRecoveryOrExplain(20000, POLL_MS);
-                    })
+                    .setMessage("Un ticket est en attente.\n\nUtilise les boutons Continuer/Terminer.")
+                    .setCancelable(true)
+                    .setPositiveButton("OK", null)
                     .show());
             return;
         }
@@ -575,7 +513,7 @@ public class MainActivity extends AppCompatActivity {
             runOnUiThread(() -> new AlertDialog.Builder(MainActivity.this)
                     .setTitle("Ticket en attente")
                     .setMessage("La livraison est terminée mais un ticket est encore en attente.\n\nImprimer maintenant ?")
-                    .setCancelable(false)
+                    .setCancelable(true)
                     .setPositiveButton("Imprimer (Cmd#6)", (d, w) -> {
                         log("TicketPending: Imprimer → Cmd#6");
                         if (ctrl != null) ctrl.printPendingTicket(POLL_MS, 25000);
@@ -585,9 +523,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    // ==========================================================
-    // Delivery Events implementation
-    // ==========================================================
     private class DeliveryEventsImpl implements DeliveryController.DeliveryEvents {
 
         @Override
@@ -601,39 +536,24 @@ public class MainActivity extends AppCompatActivity {
             log("Flow START");
             runOnUiThread(() -> {
                 btnContinue.setEnabled(false);
+                // Terminer reste possible (choix 1)
                 btnFinish.setEnabled(true);
             });
         }
 
         @Override
         public void onFlowStopped() {
-            log("Flow STOP → débit=0");
+            // ✅ plus de popup
+            log("Flow STOP → débit=0 (pause confirmée)");
             runOnUiThread(() -> {
                 btnContinue.setEnabled(true);
                 btnFinish.setEnabled(true);
-
-                new AlertDialog.Builder(MainActivity.this)
-                        .setTitle("Débit arrêté")
-                        .setMessage("Le débit est à 0.\n\nPause OU réservoir plein.\n\nQue veux-tu faire ?")
-                        .setPositiveButton("Continuer", (d, w) -> {
-                            log("Popup: Continuer → Cmd#0");
-                            ctrl.resumeDelivery(POLL_MS);
-                        })
-                        .setNegativeButton("Terminer", (d, w) -> {
-                            log("Popup: Terminer → END");
-                            ctrl.endGracefully(20000, POLL_MS);
-                        })
-                        .setNeutralButton("Annuler", null)
-                        .show();
             });
         }
 
         @Override
         public void onProgress(DeliveryController.DeliveryProgress p) {
-
-            // ✅ Correctif: affichage DeliveryState "officiel" (ACTIVE_FLOWING / ACTIVE_PAUSED / etc.)
             String stateName = (p.deliveryState != null) ? p.deliveryState.name() : "N/A";
-
             boolean flow = (p.dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
 
             final String live = String.format(
@@ -648,10 +568,17 @@ public class MainActivity extends AppCompatActivity {
 
             runOnUiThread(() -> {
                 if (txtLive != null) txtLive.setText(live);
-
-                // Big digits = valeurs courantes du registre
                 if (txtQtyNet != null) txtQtyNet.setText(String.format("NET: %.1f", p.netL));
                 if (txtQtyGross != null) txtQtyGross.setText(String.format("GROSS: %.1f", p.grossL));
+
+                // ✅ Pilotage UI via DeliveryState officiel (doc SDK) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/Android%20SDK%20Documentation-b0.14.pdf)
+                if (p.deliveryState == LcpDeliveryState.ACTIVE_FLOWING) {
+                    btnContinue.setEnabled(false); // flow actif => continuer désactivé
+                    btnFinish.setEnabled(true);    // choix 1: terminer toujours possible
+                } else if (p.deliveryState == LcpDeliveryState.ACTIVE_PAUSED) {
+                    btnContinue.setEnabled(true);  // pause => continuer possible
+                    btnFinish.setEnabled(true);    // choix 1
+                }
             });
         }
 
@@ -668,20 +595,19 @@ public class MainActivity extends AppCompatActivity {
 
         @Override
         public void onPrinterStatus(LcpLink.MachineStatusEx ms, boolean ticketPending) {
-
             final String text =
                     "Imprimante: " + ms.printer().summary() +
-                    " \n ticketPending=" + ticketPending +
-                    " \n ds=0x" + String.format("%04X", ms.delStatus) +
-                    " dc=0x" + String.format("%04X", ms.delCode);
+                            " \n ticketPending=" + ticketPending +
+                            " \n ds=0x" + String.format("%04X", ms.delStatus) +
+                            " dc=0x" + String.format("%04X", ms.delCode);
 
             runOnUiThread(() -> {
                 txtPrinterStatus.setText(text);
 
                 boolean hardErr =
                         ms.printer().outOfPaper ||
-                        ms.printer().noProcessor ||
-                        ms.printer().processorError;
+                                ms.printer().noProcessor ||
+                                ms.printer().processorError;
 
                 boolean printing = ms.printer().printingStarted;
 

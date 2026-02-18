@@ -1,10 +1,10 @@
+
 package com.pa.lcr.lcp.util;
 
 import android.util.Log;
 
 /**
- * Logger Logcat pour DeliveryLifecycleController.
- * Zéro dépendance à DeliveryEvents, donc non intrusif.
+ * Logger Logcat (non intrusif).
  */
 public class AndroidLifecycleLogger implements LifecycleLogger {
 
