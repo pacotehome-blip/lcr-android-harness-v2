@@ -21,9 +21,7 @@ public class DeliveryController {
     private static final int FIELD_CLEAR_SHIFT = 16;     // ClearShift
     private static final int FIELD_TICKET_NUMBER = 23;   // TicketNumber (LONG/SL)
     private static final int FIELD_TICKET_REQUIRED = 37; // TicketRequired (0/1/2)
-
-    // >>> NoFlowTimer (#25) pour confirmer flow stopped (Python-like)
-    private static final int FIELD_NO_FLOW_TIMER = 25;   // seconds
+    private static final int FIELD_NO_FLOW_TIMER = 25;   // NoFlowTimer (#25) seconds
 
     // ------------------------- Robustesse terrain -------------------------
     private static final int QUEUED_LONG_TIMEOUT_MS = 30_000; // 30s
@@ -35,10 +33,6 @@ public class DeliveryController {
     private final ExecutorService exec;
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     private ScheduledFuture<?> liveLoopFuture;
-
-    // [DL] Garde-fou DeliveryLifecycle
-    private final DeliveryLifecycleController lifecycle =
-            new DeliveryLifecycleController(new AndroidLifecycleLogger());
 
     // ------------------------- État -------------------------
     public enum State { IDLE, PRESTART, STARTING, RUNNING, ENDING, ENDED, ERROR }
@@ -76,6 +70,12 @@ public class DeliveryController {
     private volatile double lastStableGross = 0;
     private volatile double lastStableNet = 0;
 
+    // ==========================================================
+    // [DL] Garde-fou DeliveryLifecycle (non intrusif)
+    // ==========================================================
+    private final DeliveryLifecycleController lifecycle =
+            new DeliveryLifecycleController(new AndroidLifecycleLogger());
+
     // ============================= EVENTS =============================
     public interface DeliveryEvents {
         void onStateChanged(State s);
@@ -103,7 +103,7 @@ public class DeliveryController {
         public int ds;
         public int dc;
 
-        // ✅ Correctif: état delivery "officiel" (doc SDK)
+        // ✅ Correctif doc SDK : état “officiel” (ACTIVE_FLOWING / ACTIVE_PAUSED / etc.)
         public LcpDeliveryState deliveryState;
     }
 
@@ -242,13 +242,13 @@ public class DeliveryController {
         }
     }
 
-    // ✅ Correctif: compute "DeliveryState" (doc SDK) depuis DC bits
-    // Doc: ticket pending 0x0001, shift pending 0x0002, flow active 0x0004, delivery active 0x0008. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/Android%20SDK%20Documentation-b0.14.pdf)
+    // ✅ Correctif (doc SDK): DeliveryState officiel calculé depuis DC bits
+    // Doc: ticket pending 0x0001, shift pending 0x0002, flow active 0x0004, delivery active 0x0008. [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/Android%20SDK%20Documentation-b0.14.pdf)
     public static LcpDeliveryState computeDeliveryStateFromDc(int dc) {
-        boolean ticketPending = (dc & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
-        boolean shiftPending  = (dc & 0x0002) != 0; // doc SDK: shift ticket requested bit. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/Android%20SDK%20Documentation-b0.14.pdf)
-        boolean flowActive    = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
-        boolean deliveryActive= (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
+        boolean ticketPending  = (dc & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0; // 0x0001
+        boolean shiftPending   = (dc & 0x0002) != 0;                          // 0x0002 (doc)
+        boolean flowActive     = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;       // 0x0004
+        boolean deliveryActive = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;   // 0x0008
 
         if (deliveryActive) {
             return flowActive ? LcpDeliveryState.ACTIVE_FLOWING : LcpDeliveryState.ACTIVE_PAUSED;
@@ -263,6 +263,7 @@ public class DeliveryController {
         return product - 1;
     }
 
+    // ======== getDecimals() robuste (retry + recovery) ========
     private int getDecimals() throws Exception {
         if (cachedDecimals >= 0) return cachedDecimals;
 
@@ -352,6 +353,242 @@ public class DeliveryController {
         return (raw != null && raw.length > 0) ? (raw[0] & 0xFF) : 0;
     }
 
+    // ----------------------------- Ticket / Printer helpers -----------------------------
+
+    public void refreshPrinterStatus(int pollMs) {
+        exec.execute(() -> safeOp(() -> {
+            try {
+                link.setPythonCompat(true, pollMs);
+                LcpLink.MachineStatusEx ms = withPollWindow(() -> link.opMachineStatusEx());
+                boolean pending = (ms.delCode & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
+                log("[PRN] " + ms.toString() + " ticketPending=" + pending);
+                if (events != null) events.onPrinterStatus(ms, pending);
+            } catch (Exception e) {
+                if (events != null) events.onError("refreshPrinterStatus", e);
+            }
+        }, "refreshPrinterStatus"));
+    }
+
+    public void refreshTicketInfo(int pollMs) {
+        exec.execute(() -> safeOp(() -> {
+            try {
+                link.setPythonCompat(true, pollMs);
+                int tr = readTicketRequired();
+                int tn = readTicketNumber();
+                log("[TICKET] TicketRequired(#37)=" + tr + " (0=req,1=optional,2=never)");
+                log("[TICKET] TicketNumber(#23)=" + tn + " (increments after printing)");
+                if (events != null) {
+                    events.onTicketRequired(tr);
+                    events.onTicketNumber(tn);
+                }
+            } catch (Exception e) {
+                if (events != null) events.onError("refreshTicketInfo", e);
+            }
+        }, "refreshTicketInfo"));
+    }
+
+    public void setTicketRequired(int mode, int pollMs) {
+        exec.execute(() -> safeOp(() -> {
+            try {
+                if (mode < 0 || mode > 2) throw new IllegalArgumentException("TicketRequired must be 0..2");
+                link.setPythonCompat(true, pollMs);
+
+                int before = readTicketRequired();
+                try {
+                    link.opSetField(FIELD_TICKET_REQUIRED, new byte[]{ (byte)mode });
+                } catch (IOException ex) {
+                    log("[TICKET] SET #37 refused/failed (likely mode/security). " + ex.getMessage());
+                }
+
+                int after = readTicketRequired();
+                log("[TICKET] TicketRequired(#37) now=" + after + " (requested=" + mode + ", before=" + before + ")");
+                if (events != null) events.onTicketRequired(after);
+
+            } catch (Exception e) {
+                if (events != null) events.onError("setTicketRequired", e);
+            }
+        }, "setTicketRequired"));
+    }
+
+    public void ensureDefaultTicketRequiredIs1(int pollMs) {
+        exec.execute(() -> safeOp(() -> {
+            try {
+                link.setPythonCompat(true, pollMs);
+                int tr = readTicketRequired();
+                if (tr != 1) {
+                    log("[TICKET] TicketRequired(#37) read=" + tr + " -> setting to 1 (default optional)");
+                    try {
+                        link.opSetField(FIELD_TICKET_REQUIRED, new byte[]{ (byte)1 });
+                    } catch (IOException ex) {
+                        log("[TICKET] SET #37 refused/failed (likely mode/security). " + ex.getMessage());
+                    }
+                    int tr2 = readTicketRequired();
+                    log("[TICKET] TicketRequired(#37) now=" + tr2);
+                    if (events != null) events.onTicketRequired(tr2);
+                } else {
+                    log("[TICKET] TicketRequired(#37) already 1 (default OK)");
+                }
+            } catch (Exception e) {
+                if (events != null) events.onError("ensureDefaultTicketRequiredIs1", e);
+            }
+        }, "ensureDefaultTicketRequiredIs1"));
+    }
+
+    public void clearShiftNow(int pollMs) {
+        exec.execute(() -> safeOp(() -> {
+            try {
+                link.setPythonCompat(true, pollMs);
+                int tr = readTicketRequired();
+                log("[SHIFT] TicketRequired(#37)=" + tr + " ; sending ClearShift(#16)=0");
+                link.opSetField(FIELD_CLEAR_SHIFT, new byte[]{ 0x00 });
+                log("[SHIFT] ClearShift(#16)=0 sent");
+            } catch (Exception e) {
+                if (events != null) events.onError("clearShiftNow", e);
+            }
+        }, "clearShiftNow"));
+    }
+
+    // ----------------------------- Ping -----------------------------
+
+    public void pingStatus(int pollMs){
+        exec.execute(() -> safeOp(() -> {
+            try {
+                link.setPythonCompat(true, pollMs);
+                logTimeline("PING:BEFORE", pollMs);
+                LcpLink.MachineStatusEx ms = withPollWindow(() -> link.opMachineStatusEx());
+                log("[PING] " + ms.toString());
+                boolean pending = (ms.delCode & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
+                if (events != null) events.onPrinterStatus(ms, pending);
+                logTimeline("PING:AFTER", pollMs);
+            } catch (Exception e) {
+                if (events != null) events.onError("pingStatus", e);
+            }
+        }, "pingStatus"));
+    }
+
+    // ----------------------------- Start gate -----------------------------
+
+    private boolean startGateAllow(int pollMs) throws Exception {
+        int[] dsdc = readDsDcFast();
+        int ds = dsdc[0], dc = dsdc[1];
+        logDsDc("START-GATE", ds, dc);
+
+        boolean pending = (dc & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
+        if (!pending) {
+            log("[START-GATE] OK: ticketPending=false");
+            return true;
+        }
+
+        log("[START-GATE] BLOCKED: ticketPending=true -> must print/clear last delivery ticket before starting");
+        refreshPrinterStatus(pollMs);
+        return false;
+    }
+
+    // ----------------------------- Print pending ticket -----------------------------
+
+    public void printPendingTicket(int pollMs, int timeoutMs) {
+        exec.execute(() -> safeOp(() -> {
+            try {
+                link.setPythonCompat(true, pollMs);
+
+                int[] dsdc0 = readDsDcFastLong(pollMs);
+                int ds0 = dsdc0[0], dc0 = dsdc0[1];
+                boolean active = (dc0 & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
+
+                if (active) {
+                    emitOperatorAlert(
+                            OperatorIssueCode.PRINT_FORBIDDEN_DELIVERY_ACTIVE,
+                            "Impression interdite",
+                            "Impossible d'imprimer: la livraison est encore active.\nTerminer la livraison (Cmd #2) avant d'imprimer.",
+                            diagDsDc(ds0, dc0),
+                            true
+                    );
+                    log("[PRINT-PENDING] Refus: delivery active -> cmd#6 won't print while active.");
+                    return;
+                }
+
+                log("[PRINT-PENDING] Issue Command #6");
+                link.opIssueCommand(0x06);
+
+                long deadline = System.currentTimeMillis() + timeoutMs;
+                boolean lastPending = true;
+
+                while (System.currentTimeMillis() < deadline) {
+                    int[] dsdc;
+                    try {
+                        dsdc = readDsDcFast();
+                    } catch (Exception e) {
+                        Thread.sleep(Math.max(50, pollMs));
+                        continue;
+                    }
+
+                    int ds = dsdc[0], dc = dsdc[1];
+                    boolean pending = (dc & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
+
+                    if (pending != lastPending) {
+                        logDsDc("PRINTPEND:STATE", ds, dc);
+                        lastPending = pending;
+                    }
+
+                    if (!pending) break;
+                    Thread.sleep(pollMs);
+                }
+
+                int[] dsdcEnd = readDsDcFastLong(pollMs);
+                boolean stillPending = (dsdcEnd[1] & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
+                if (stillPending) {
+                    emitOperatorAlert(
+                            OperatorIssueCode.PRINT_TIMEOUT_TICKET_PENDING,
+                            "Ticket toujours en attente",
+                            "Le ticket n'a pas été imprimé.\nVérifie l'imprimante (papier/connexion) puis réessaie.",
+                            diagDsDc(dsdcEnd[0], dsdcEnd[1]),
+                            true
+                    );
+                }
+
+            } catch (Exception e) {
+                if (events != null) events.onError("printPendingTicket", e);
+                emitOperatorAlert(
+                        OperatorIssueCode.IO_OR_PROTOCOL_ERROR,
+                        "Erreur impression",
+                        "Erreur de communication lors de l'impression. Vérifie USB/RS-232 et réessaie.",
+                        "Exception=" + e.getMessage(),
+                        true
+                );
+            }
+        }, "printPendingTicket"));
+    }
+
+    // ----------------------------- Prestart / Start / Live -----------------------------
+
+    public void prestartSequence(int product, double presetLitres, int pollMs) throws Exception {
+        setState(State.PRESTART);
+        logTimeline("PRESTART:ENTER", pollMs);
+
+        refreshPrinterStatus(pollMs);
+
+        if (!startGateAllow(pollMs)) {
+            setState(State.IDLE);
+            throw new Exception("START-GATE blocked (ticketPending=true)");
+        }
+
+        link.setPythonCompat(true, pollMs);
+
+        int list0 = productToList0Value(product);
+        log("[PRE] Setting active product (Field #0) product=" + product + " (list0=" + list0 + ")");
+        safeSetFieldWithRetry(FIELD_PRODUCT_NUMBER, new byte[]{ (byte)list0 }, pollMs, 1);
+        this.presetProduct = product;
+
+        this.presetLitres = presetLitres;
+        if (presetLitres > 0.0) {
+            int dec = getDecimals();
+            log("[PRE] Setting NET preset (Field #6) value=" + presetLitres + " (decimalsIndex=" + dec + ")");
+            safeSetFieldWithRetry(FIELD_NET_PRESET, encodeVolume(presetLitres, dec), pollMs, 4);
+        }
+
+        log("[PRE] Completed PRE-START");
+    }
+
     private static boolean isFramingTimeoutMsg(String msg) {
         if (msg == null) return false;
         return msg.contains("Timeout sync ~~")
@@ -396,96 +633,6 @@ public class DeliveryController {
                 throw new IOException("SET_FIELD verify mismatch at i=" + i);
             }
         }
-    }
-
-    public void refreshPrinterStatus(int pollMs) {
-        exec.execute(() -> safeOp(() -> {
-            try {
-                link.setPythonCompat(true, pollMs);
-                LcpLink.MachineStatusEx ms = withPollWindow(() -> link.opMachineStatusEx());
-                boolean pending = (ms.delCode & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
-                log("[PRN] " + ms.toString() + " ticketPending=" + pending);
-                if (events != null) events.onPrinterStatus(ms, pending);
-            } catch (Exception e) {
-                if (events != null) events.onError("refreshPrinterStatus", e);
-            }
-        }, "refreshPrinterStatus"));
-    }
-
-    public void refreshTicketInfo(int pollMs) {
-        exec.execute(() -> safeOp(() -> {
-            try {
-                link.setPythonCompat(true, pollMs);
-                int tr = readTicketRequired();
-                int tn = readTicketNumber();
-                log("[TICKET] TicketRequired(#37)=" + tr + " (0=req,1=optional,2=never)");
-                log("[TICKET] TicketNumber(#23)=" + tn + " (increments after printing)");
-                if (events != null) {
-                    events.onTicketRequired(tr);
-                    events.onTicketNumber(tn);
-                }
-            } catch (Exception e) {
-                if (events != null) events.onError("refreshTicketInfo", e);
-            }
-        }, "refreshTicketInfo"));
-    }
-
-    public void clearShiftNow(int pollMs) {
-        exec.execute(() -> safeOp(() -> {
-            try {
-                link.setPythonCompat(true, pollMs);
-                int tr = readTicketRequired();
-                log("[SHIFT] TicketRequired(#37)=" + tr + " ; sending ClearShift(#16)=0");
-                link.opSetField(FIELD_CLEAR_SHIFT, new byte[]{ 0x00 });
-                log("[SHIFT] ClearShift(#16)=0 sent");
-            } catch (Exception e) {
-                if (events != null) events.onError("clearShiftNow", e);
-            }
-        }, "clearShiftNow"));
-    }
-
-    private boolean startGateAllow(int pollMs) throws Exception {
-        int[] dsdc = readDsDcFast();
-        int ds = dsdc[0], dc = dsdc[1];
-        logDsDc("START-GATE", ds, dc);
-
-        boolean pending = (dc & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
-        if (!pending) {
-            log("[START-GATE] OK: ticketPending=false");
-            return true;
-        }
-
-        log("[START-GATE] BLOCKED: ticketPending=true -> must print/clear last delivery ticket before starting");
-        refreshPrinterStatus(pollMs);
-        return false;
-    }
-
-    public void prestartSequence(int product, double presetLitres, int pollMs) throws Exception {
-        setState(State.PRESTART);
-        logTimeline("PRESTART:ENTER", pollMs);
-
-        refreshPrinterStatus(pollMs);
-
-        if (!startGateAllow(pollMs)) {
-            setState(State.IDLE);
-            throw new Exception("START-GATE blocked (ticketPending=true)");
-        }
-
-        link.setPythonCompat(true, pollMs);
-
-        int list0 = productToList0Value(product);
-        log("[PRE] Setting active product (Field #0) product=" + product + " (list0=" + list0 + ")");
-        safeSetFieldWithRetry(FIELD_PRODUCT_NUMBER, new byte[]{ (byte)list0 }, pollMs, 1);
-        this.presetProduct = product;
-
-        this.presetLitres = presetLitres;
-        if (presetLitres > 0.0) {
-            int dec = getDecimals();
-            log("[PRE] Setting NET preset (Field #6) value=" + presetLitres + " (decimalsIndex=" + dec + ")");
-            safeSetFieldWithRetry(FIELD_NET_PRESET, encodeVolume(presetLitres, dec), pollMs, 4);
-        }
-
-        log("[PRE] Completed PRE-START");
     }
 
     public void startDeliverySequence(int pollMs) throws Exception {
@@ -555,6 +702,7 @@ public class DeliveryController {
                 return decodeVolume(raw, dec);
             } catch (Exception e) {
                 last = e;
+
                 String m = (e.getMessage() == null) ? "" : e.getMessage();
                 boolean transientOrQueued =
                         m.contains("Queued timeout") ||
@@ -651,7 +799,7 @@ public class DeliveryController {
                     p.ds = ds;
                     p.dc = dc;
 
-                    // ✅ Correctif: DeliveryState officiel
+                    // ✅ Correctif doc SDK : DeliveryState officiel
                     p.deliveryState = computeDeliveryStateFromDc(dc);
 
                     lastGross = gross;
@@ -704,72 +852,7 @@ public class DeliveryController {
         }, "startLiveLoop"));
     }
 
-    public void endDeliverySequence(int timeoutMs, int pollMs) throws Exception {
-        logTimeline("END:ENTER", pollMs);
-
-        refreshPrinterStatus(pollMs);
-
-        int trBefore = readTicketRequired();
-        int tnBefore = readTicketNumber();
-        log(String.format("[PRINT] Policy TicketRequired(#37)=%d (0=req,1=optional,2=never) TicketNumber(#23) before=%d",
-                trBefore, tnBefore));
-
-        if (!lifecycle.allowEnd()) {
-            log("[END] blocked by DeliveryLifecycle state=" + lifecycle.getState());
-            return;
-        }
-
-        log("[END] Issuing END (Command #2)");
-
-        setState(State.ENDING);
-        stopping = true;
-
-        if (liveLoopFuture != null) {
-            liveLoopFuture.cancel(true);
-            liveLoopFuture = null;
-        }
-
-        link.setPythonCompat(true, pollMs);
-        link.opIssueCommand(0x02);
-
-        long deadline = System.currentTimeMillis() + timeoutMs;
-
-        while (System.currentTimeMillis() < deadline) {
-            int[] dsdc;
-            try {
-                dsdc = readDsDcFast();
-            } catch (Exception e) {
-                String m = e.getMessage();
-                if (m != null && m.contains("Queued timeout (python)")) {
-                    Thread.sleep(Math.max(50, pollMs));
-                    continue;
-                }
-                Thread.sleep(Math.max(50, pollMs));
-                continue;
-            }
-
-            int dc = dsdc[1];
-            boolean active = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
-
-            if (!active) break;
-            Thread.sleep(pollMs);
-        }
-
-        refreshPrinterStatus(pollMs);
-
-        int tnAfter = readTicketNumber();
-        log(String.format("[PRINT] TicketNumber(#23) after=%d delta=%+d", tnAfter, (tnAfter - tnBefore)));
-        if (tnAfter > tnBefore) {
-            log("[PRINT] CONFIRMED: TicketNumber incremented => delivery ticket printed");
-        } else {
-            log("[PRINT] NOT CONFIRMED: TicketNumber did not increment (ticket may be pending or printer not ready)");
-        }
-
-        lifecycle.onEndConfirmed();
-        lifecycle.onResetSyncCompleted();
-
-        setState(State.ENDED);
-    }
+    // ----------------------------- StartOpenMode / End / Resume (APIs attendues par MainActivity) -----------------------------
 
     public void startOpenMode(int product, double presetLitres, int timeoutMs, int pollMs){
         exec.execute(() -> safeOp(() -> {
@@ -809,6 +892,91 @@ public class DeliveryController {
         }, "startOpenMode"));
     }
 
+    public void startOpenMode(int product, int timeoutMs, int pollMs){
+        startOpenMode(product, 0.0, timeoutMs, pollMs);
+    }
+
+    public void endGracefully(int timeoutMs, int pollMs){
+        exec.execute(() -> safeOp(() -> {
+            try {
+                link.setPythonCompat(true, pollMs);
+
+                int[] dsdc = readDsDcFastLong(pollMs);
+                int ds = dsdc[0], dc = dsdc[1];
+                boolean da = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
+
+                if (!da && state == State.ENDED) {
+                    log("[END] ignored: meter inactive + already ENDED. " + diagDsDc(ds, dc));
+                    return;
+                }
+
+                endDeliverySequence(timeoutMs, pollMs);
+
+            } catch (Exception ex) {
+                if(events!=null) events.onError("endGracefully", ex);
+            }
+        }, "endGracefully"));
+    }
+
+    public void endDeliverySequence(int timeoutMs, int pollMs) throws Exception {
+        logTimeline("END:ENTER", pollMs);
+        refreshPrinterStatus(pollMs);
+
+        int trBefore = readTicketRequired();
+        int tnBefore = readTicketNumber();
+        log(String.format("[PRINT] Policy TicketRequired(#37)=%d (0=req,1=optional,2=never) TicketNumber(#23) before=%d",
+                trBefore, tnBefore));
+
+        if (!lifecycle.allowEnd()) {
+            log("[END] blocked by DeliveryLifecycle state=" + lifecycle.getState());
+            return;
+        }
+
+        log("[END] Issuing END (Command #2)");
+
+        setState(State.ENDING);
+        stopping = true;
+
+        if (liveLoopFuture != null) {
+            liveLoopFuture.cancel(true);
+            liveLoopFuture = null;
+        }
+
+        link.setPythonCompat(true, pollMs);
+        link.opIssueCommand(0x02);
+
+        long deadline = System.currentTimeMillis() + timeoutMs;
+
+        while (System.currentTimeMillis() < deadline) {
+            int[] dsdc;
+            try {
+                dsdc = readDsDcFast();
+            } catch (Exception e) {
+                Thread.sleep(Math.max(50, pollMs));
+                continue;
+            }
+
+            int dc = dsdc[1];
+            boolean active = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
+            if (!active) break;
+            Thread.sleep(pollMs);
+        }
+
+        refreshPrinterStatus(pollMs);
+
+        int tnAfter = readTicketNumber();
+        log(String.format("[PRINT] TicketNumber(#23) after=%d delta=%+d", tnAfter, (tnAfter - tnBefore)));
+        if (tnAfter > tnBefore) {
+            log("[PRINT] CONFIRMED: TicketNumber incremented => delivery ticket printed");
+        } else {
+            log("[PRINT] NOT CONFIRMED: TicketNumber did not increment (ticket may be pending or printer not ready)");
+        }
+
+        lifecycle.onEndConfirmed();
+        lifecycle.onResetSyncCompleted();
+        setState(State.ENDED);
+    }
+
     public void resumeDelivery(int pollMs) {
         exec.execute(() -> safeOp(() -> {
             try {
@@ -836,6 +1004,63 @@ public class DeliveryController {
                 if (events != null) events.onError("resumeDelivery", e);
             }
         }, "resumeDelivery"));
+    }
+
+    public void endRecoveryOrExplain(int timeoutMs, int pollMs) {
+        exec.execute(() -> safeOp(() -> {
+            try {
+                link.setPythonCompat(true, pollMs);
+
+                int[] dsdc0 = readDsDcFastLong(pollMs);
+                int ds0 = dsdc0[0], dc0 = dsdc0[1];
+                boolean da0 = (dc0 & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
+
+                if (!da0) {
+                    log("[RECOVER-END] Meter already inactive. " + diagDsDc(ds0, dc0));
+                    return;
+                }
+
+                try {
+                    endDeliverySequence(timeoutMs, pollMs);
+                    return;
+                } catch (Exception ignored) { }
+
+                int[] dsdc1 = readDsDcFastLong(pollMs);
+                int ds = dsdc1[0], dc = dsdc1[1];
+                boolean fa = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
+                boolean da = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
+
+                String title = "Impossible de terminer la livraison";
+                String msg =
+                        "Le compteur refuse de clôturer.\n\n" +
+                        "État critique: FLOW_ACTIVE=" + (fa ? "1" : "0") +
+                        ", DELIVERY_ACTIVE=" + (da ? "1" : "0") + ".\n\n" +
+                        "Actions:\n" +
+                        "1) Fermer pompe/valve (arrêter le débit).\n" +
+                        "2) Vérifier qu'il n'y a plus de débit réel.\n" +
+                        "3) Si aucun débit mais FLOW_ACTIVE reste à 1: capteur/pulses bloqué → support.\n\n" +
+                        "Puis réessayer « Terminer ».";
+
+                String diag = diagDsDc(ds, dc);
+
+                emitOperatorAlert(
+                        fa ? OperatorIssueCode.RECOVERY_FLOW_STUCK_ACTIVE : OperatorIssueCode.RECOVERY_END_TIMEOUT,
+                        title,
+                        msg,
+                        diag,
+                        true
+                );
+
+            } catch (Exception e) {
+                emitOperatorAlert(
+                        OperatorIssueCode.IO_OR_PROTOCOL_ERROR,
+                        "Erreur communication",
+                        "Impossible de lire l'état du compteur. Vérifie USB/RS-232 et réessaie.",
+                        "Exception=" + e.getMessage(),
+                        true
+                );
+            }
+        }, "endRecoveryOrExplain"));
     }
 
     public void printText(String txt){
