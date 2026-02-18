@@ -78,9 +78,6 @@ public class MainActivity extends AppCompatActivity {
     private static final String ACTION_USB_PERMISSION = "com.pa.lcrdemo.USB_PERMISSION";
     private PendingIntent usbPermissionIntent;
 
-    private boolean recoveryDialogShown = false;
-    private boolean printDialogShown = false;
-
     private final Object logLock = new Object();
     private final StringBuilder logBuf = new StringBuilder(8192);
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
@@ -142,6 +139,9 @@ public class MainActivity extends AppCompatActivity {
         if (txtLive != null) txtLive.setText("LIVE: (en attente)");
         if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
         if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
+
+        btnContinue.setEnabled(false);
+        btnFinish.setEnabled(false);
 
         log("Prêt. 1) Choisir USB 2) Ouvrir/Ping 3) Connect (LCP).");
         new Handler().postDelayed(this::scanUsbDevices, 400);
@@ -315,8 +315,6 @@ public class MainActivity extends AppCompatActivity {
         boolean ending = (s == DeliveryController.State.ENDING);
 
         btnC.setEnabled(!(running || startingOrPre || ending));
-
-        // Terminer peut rester actif (choix 1), mais on garde la logique existante de base:
         btnFinish.setEnabled(running || startingOrPre || ending);
 
         btnRefreshPrinter.setEnabled(!running);
@@ -324,7 +322,7 @@ public class MainActivity extends AppCompatActivity {
         spnTicketRequired.setEnabled(!running);
         btnClearShift.setEnabled(!running);
 
-        // Continue piloté par deliveryState dans onProgress (plus fiable)
+        // Continue piloté par onProgress() via deliveryState
         btnContinue.setEnabled(false);
     }
 
@@ -352,6 +350,9 @@ public class MainActivity extends AppCompatActivity {
             ctrl.ensureDefaultTicketRequiredIs1(POLL_MS);
             ctrl.refreshTicketInfo(POLL_MS);
             ctrl.refreshPrinterStatus(POLL_MS);
+
+            // ✅ recovery automatique (aucun popup)
+            ctrl.recoverActiveDelivery(POLL_MS);
 
         } catch (Exception e) {
             log("Erreur init LCP : " + e.getMessage());
@@ -484,45 +485,6 @@ public class MainActivity extends AppCompatActivity {
         log("USB prêt.");
     }
 
-    private void maybeShowRecoveryOrPrintDialogs(int dc, boolean ticketPending) {
-        boolean deliveryActive = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
-
-        if (!ticketPending) {
-            recoveryDialogShown = false;
-            printDialogShown = false;
-            return;
-        }
-
-        if (deliveryActive && ticketPending) {
-            if (recoveryDialogShown) return;
-            recoveryDialogShown = true;
-
-            runOnUiThread(() -> new AlertDialog.Builder(MainActivity.this)
-                    .setTitle("Livraison précédente détectée")
-                    .setMessage("Un ticket est en attente.\n\nUtilise les boutons Continuer/Terminer.")
-                    .setCancelable(true)
-                    .setPositiveButton("OK", null)
-                    .show());
-            return;
-        }
-
-        if (!deliveryActive && ticketPending) {
-            if (printDialogShown) return;
-            printDialogShown = true;
-
-            runOnUiThread(() -> new AlertDialog.Builder(MainActivity.this)
-                    .setTitle("Ticket en attente")
-                    .setMessage("La livraison est terminée mais un ticket est encore en attente.\n\nImprimer maintenant ?")
-                    .setCancelable(true)
-                    .setPositiveButton("Imprimer (Cmd#6)", (d, w) -> {
-                        log("TicketPending: Imprimer → Cmd#6");
-                        if (ctrl != null) ctrl.printPendingTicket(POLL_MS, 25000);
-                    })
-                    .setNegativeButton("Plus tard", null)
-                    .show());
-        }
-    }
-
     private class DeliveryEventsImpl implements DeliveryController.DeliveryEvents {
 
         @Override
@@ -534,21 +496,11 @@ public class MainActivity extends AppCompatActivity {
         @Override
         public void onFlowStarted() {
             log("Flow START");
-            runOnUiThread(() -> {
-                btnContinue.setEnabled(false);
-                // Terminer reste possible (choix 1)
-                btnFinish.setEnabled(true);
-            });
         }
 
         @Override
         public void onFlowStopped() {
-            // ✅ plus de popup
             log("Flow STOP → débit=0 (pause confirmée)");
-            runOnUiThread(() -> {
-                btnContinue.setEnabled(true);
-                btnFinish.setEnabled(true);
-            });
         }
 
         @Override
@@ -571,13 +523,19 @@ public class MainActivity extends AppCompatActivity {
                 if (txtQtyNet != null) txtQtyNet.setText(String.format("NET: %.1f", p.netL));
                 if (txtQtyGross != null) txtQtyGross.setText(String.format("GROSS: %.1f", p.grossL));
 
-                // ✅ Pilotage UI via DeliveryState officiel (doc SDK) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/Android%20SDK%20Documentation-b0.14.pdf)
+                // UI rules:
+                // ACTIVE_FLOWING => Continue OFF, Finish ON
+                // ACTIVE_PAUSED  => Continue ON,  Finish ON
+                // else           => both OFF
                 if (p.deliveryState == LcpDeliveryState.ACTIVE_FLOWING) {
-                    btnContinue.setEnabled(false); // flow actif => continuer désactivé
-                    btnFinish.setEnabled(true);    // choix 1: terminer toujours possible
+                    btnContinue.setEnabled(false);
+                    btnFinish.setEnabled(true);
                 } else if (p.deliveryState == LcpDeliveryState.ACTIVE_PAUSED) {
-                    btnContinue.setEnabled(true);  // pause => continuer possible
-                    btnFinish.setEnabled(true);    // choix 1
+                    btnContinue.setEnabled(true);
+                    btnFinish.setEnabled(true);
+                } else {
+                    btnContinue.setEnabled(false);
+                    btnFinish.setEnabled(false);
                 }
             });
         }
@@ -619,20 +577,16 @@ public class MainActivity extends AppCompatActivity {
                 txtPrinterStatus.setBackgroundColor(bg);
             });
 
-            maybeShowRecoveryOrPrintDialogs(ms.delCode, ticketPending);
+            // ✅ no recovery popup
         }
 
         @Override
         public void onOperatorAlert(DeliveryController.OperatorAlert alert) {
+            // Optionnel: conserve les alertes opérateur
             runOnUiThread(() -> new AlertDialog.Builder(MainActivity.this)
                     .setTitle(alert.title)
                     .setMessage(alert.message + "\n\n---\nDIAGNOSTIC:\n" + alert.diagnostics)
                     .setPositiveButton("OK", null)
-                    .setNeutralButton("Copier diagnostic", (d, w) -> {
-                        ClipboardManager clip = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-                        clip.setPrimaryClip(ClipData.newPlainText("diag", alert.diagnostics));
-                        log("Diagnostic copié.");
-                    })
                     .show());
         }
 

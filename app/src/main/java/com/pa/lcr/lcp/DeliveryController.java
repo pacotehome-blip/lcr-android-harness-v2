@@ -6,6 +6,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.concurrent.*;
 
 import com.pa.lcr.lcp.lifecycle.Cmd0Usage;
+import com.pa.lcr.lcp.lifecycle.DeliveryLifecycle;
 import com.pa.lcr.lcp.lifecycle.DeliveryLifecycleController;
 import com.pa.lcr.lcp.lifecycle.LcpDeliveryState;
 import com.pa.lcr.lcp.util.AndroidLifecycleLogger;
@@ -16,21 +17,33 @@ public class DeliveryController {
     private static final int FIELD_PRODUCT_NUMBER = 0;   // ProductNumber (LIST+0)
     private static final int FIELD_NET_PRESET = 6;       // NetPreset (VOLUME/LV)
     private static final int FIELD_DECIMALS = 39;        // Decimals
-    private static final int FIELD_GROSS_COUNT = 44;     // GrossCount (VOLUME/LV)
-    private static final int FIELD_NET_COUNT = 45;       // NetCount (VOLUME/LV)
+    private static final int FIELD_GROSS_COUNT = 44;     // GrossCount (VOLUME/LV) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/Android%20SDK%20Documentation-b0.14.pdf)
+    private static final int FIELD_NET_COUNT = 45;       // NetCount (VOLUME/LV) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/Android%20SDK%20Documentation-b0.14.pdf)
     private static final int FIELD_CLEAR_SHIFT = 16;     // ClearShift
-    private static final int FIELD_TICKET_NUMBER = 23;   // TicketNumber (LONG/SL)
-    private static final int FIELD_TICKET_REQUIRED = 37; // TicketRequired (0/1/2)
-    private static final int FIELD_NO_FLOW_TIMER = 25;   // NoFlowTimer (#25) seconds
+    private static final int FIELD_TICKET_NUMBER = 23;   // TicketNumber
+    private static final int FIELD_TICKET_REQUIRED = 37; // TicketRequired
+    private static final int FIELD_NO_FLOW_TIMER = 25;   // NoFlowTimer (#25) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/Android%20SDK%20Documentation-b0.14.pdf)
 
     // ------------------------- Robustesse terrain -------------------------
     private static final int QUEUED_LONG_TIMEOUT_MS = 30_000; // 30s
     private static final int SETFIELD_RETRY_SLEEP_MS = 120;
 
-    // --- DC bits (doc SDK) --- [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/Android%20SDK%20Documentation-b0.14.pdf)
-    private static final int DC_SHIFT_TICKET_PENDING = 0x0002;
-    private static final int DC_DELIVERY_STARTING    = 0x0400;
-    private static final int DC_DELIVERY_QUEUED      = 0x0800;
+    // --- Delivery Code Word bits (doc SDK) --- [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/Android%20SDK%20Documentation-b0.14.pdf)
+    private static final int DC_SHIFT_TICKET_PENDING = 0x0002; // shift ticket pending
+    private static final int DC_DELIVERY_STARTING    = 0x0400; // delivery is in process of being started
+    private static final int DC_DELIVERY_QUEUED      = 0x0800; // delivery queued
+
+    // --- Zombie detection (terrain) ---
+    private static final long ZOMBIE_STALL_MS = 4000;     // 4s sans augmentation
+    private static final long ZOMBIE_COOLDOWN_MS = 15000; // 15s entre tentatives
+    private volatile long lastZombieRecoveryMs = 0;
+
+    // UI override si flow bit reste coincé
+    private volatile boolean uiForcePaused = false;
+    private volatile long uiForcePausedUntilMs = 0;
+
+    // baseline lock: préserver startGross/startNet sur recover/zombie (continuer reprend au même point)
+    private volatile boolean baselineLocked = false;
 
     // ------------------------- Dépendances -------------------------
     private final LcpLink link;
@@ -108,7 +121,7 @@ public class DeliveryController {
         public int ds;
         public int dc;
 
-        // DeliveryState "officiel" (ACTIVE_FLOWING / ACTIVE_PAUSED / etc.) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/Android%20SDK%20Documentation-b0.14.pdf)
+        // Etat "officiel" pour l'UI (ACTIVE_FLOWING / ACTIVE_PAUSED / etc.) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/Android%20SDK%20Documentation-b0.14.pdf)
         public LcpDeliveryState deliveryState;
     }
 
@@ -166,6 +179,20 @@ public class DeliveryController {
         if (events != null) events.onOperatorAlert(new OperatorAlert(code, title, message, diagnostics, blocking));
     }
 
+    private static String hx16(int v) { return String.format("0x%04X", (v & 0xFFFF)); }
+
+    private static String dcFlags(int dc) {
+        boolean pending = (dc & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
+        boolean flow = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
+        boolean active = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
+        boolean begin = (dc & LcpLink.LCRSc_BEGIN_DELIVERY) != 0;
+        return String.format("[ticketPending=%s flow=%s active=%s begin=%s]", pending, flow, active, begin);
+    }
+
+    private void logDsDc(String tag, int ds, int dc) {
+        log(String.format("[%s] DS=%s DC=%s %s", tag, hx16(ds), hx16(dc), dcFlags(dc)));
+    }
+
     private String diagDsDc(int ds, int dc) {
         boolean tp = (dc & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
         boolean fa = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
@@ -197,20 +224,6 @@ public class DeliveryController {
         }
     }
 
-    private static String hx16(int v) { return String.format("0x%04X", (v & 0xFFFF)); }
-
-    private static String dcFlags(int dc) {
-        boolean pending = (dc & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
-        boolean flow = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
-        boolean active = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
-        boolean begin = (dc & LcpLink.LCRSc_BEGIN_DELIVERY) != 0;
-        return String.format("[ticketPending=%s flow=%s active=%s begin=%s]", pending, flow, active, begin);
-    }
-
-    private void logDsDc(String tag, int ds, int dc) {
-        log(String.format("[%s] DS=%s DC=%s %s", tag, hx16(ds), hx16(dc), dcFlags(dc)));
-    }
-
     private int[] readDsDcFast() throws Exception {
         return withPollWindow(() -> link.opDeliveryStatus()); // [ds, dc]
     }
@@ -237,25 +250,34 @@ public class DeliveryController {
         throw new IOException("readDsDcFastLong: timeout");
     }
 
-    private void logTimeline(String step, int pollMs) {
-        try {
-            link.setPythonCompat(true, pollMs);
-            int[] dsdc = readDsDcFast();
-            logDsDc("TL:" + step, dsdc[0], dsdc[1]);
-        } catch (Exception e) {
-            log("[TL:" + step + "] WARN: cannot read DS/DC: " + e.getMessage());
-        }
+    // ---------------- DeliveryState (doc SDK) ---------------- [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/Android%20SDK%20Documentation-b0.14.pdf)
+
+    public static LcpDeliveryState computeDeliveryStateFromDc(int dc) {
+        boolean ticketPending  = (dc & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0; // 0x0001 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/Android%20SDK%20Documentation-b0.14.pdf)
+        boolean shiftPending   = (dc & DC_SHIFT_TICKET_PENDING) != 0;         // 0x0002 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/Android%20SDK%20Documentation-b0.14.pdf)
+        boolean flowActive     = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;       // 0x0004 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/Android%20SDK%20Documentation-b0.14.pdf)
+        boolean deliveryActive = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;   // 0x0008 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/Android%20SDK%20Documentation-b0.14.pdf)
+
+        if (deliveryActive) return flowActive ? LcpDeliveryState.ACTIVE_FLOWING : LcpDeliveryState.ACTIVE_PAUSED;
+        if (ticketPending)  return LcpDeliveryState.PENDING_TICKET;
+        if (shiftPending)   return LcpDeliveryState.PENDING_SHIFT;
+        return LcpDeliveryState.IDLE;
     }
 
-    // --- DeliveryState officiel depuis DC bits (doc SDK) --- [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/Android%20SDK%20Documentation-b0.14.pdf)
-    public static LcpDeliveryState computeDeliveryStateFromDc(int dc) {
-        boolean ticketPending  = (dc & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0; // 0x0001
-        boolean shiftPending   = (dc & DC_SHIFT_TICKET_PENDING) != 0;         // 0x0002
-        boolean flowActive     = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;       // 0x0004
-        boolean deliveryActive = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;   // 0x0008
+    private LcpDeliveryState computeDeliveryStateForUi(int dc) {
+        boolean ticketPending  = (dc & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
+        boolean shiftPending   = (dc & DC_SHIFT_TICKET_PENDING) != 0;
+        boolean flowActive     = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
+        boolean deliveryActive = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
+
+        // expire override
+        if (uiForcePaused && System.currentTimeMillis() > uiForcePausedUntilMs) {
+            uiForcePaused = false;
+        }
 
         if (deliveryActive) {
-            return flowActive ? LcpDeliveryState.ACTIVE_FLOWING : LcpDeliveryState.ACTIVE_PAUSED;
+            if (!flowActive || uiForcePaused) return LcpDeliveryState.ACTIVE_PAUSED;
+            return LcpDeliveryState.ACTIVE_FLOWING;
         }
         if (ticketPending) return LcpDeliveryState.PENDING_TICKET;
         if (shiftPending)  return LcpDeliveryState.PENDING_SHIFT;
@@ -264,8 +286,8 @@ public class DeliveryController {
 
     private static boolean dcIndicatesStartAccepted(int dc) {
         boolean deliveryActive = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
-        boolean starting       = (dc & DC_DELIVERY_STARTING) != 0;
-        boolean queued         = (dc & DC_DELIVERY_QUEUED) != 0;
+        boolean starting       = (dc & DC_DELIVERY_STARTING) != 0; // [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/Android%20SDK%20Documentation-b0.14.pdf)
+        boolean queued         = (dc & DC_DELIVERY_QUEUED) != 0;    // [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/Android%20SDK%20Documentation-b0.14.pdf)
         return deliveryActive || starting || queued;
     }
 
@@ -288,12 +310,8 @@ public class DeliveryController {
         setState(State.IDLE);
     }
 
-    private static int productToList0Value(int product) {
-        if (product < 1 || product > 16) throw new IllegalArgumentException("product must be 1..16");
-        return product - 1;
-    }
+    // ---------------- Field read/encode helpers ----------------
 
-    // ======== getDecimals() robuste (retry + recovery) ========
     private int getDecimals() throws Exception {
         if (cachedDecimals >= 0) return cachedDecimals;
 
@@ -310,7 +328,8 @@ public class DeliveryController {
                     link.forceSyncNext();
                     if (i >= 3) link.requestPurge();
                 } catch (Exception ignored) {}
-                try { Thread.sleep(SETFIELD_RETRY_SLEEP_MS); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                try { Thread.sleep(SETFIELD_RETRY_SLEEP_MS); }
+                catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
             }
         }
 
@@ -321,7 +340,7 @@ public class DeliveryController {
     private int getNoFlowTimerSecondsSafe(int pollMs) {
         try {
             link.setPythonCompat(true, pollMs);
-            byte[] raw = link.opGetField(FIELD_NO_FLOW_TIMER); // #25
+            byte[] raw = link.opGetField(FIELD_NO_FLOW_TIMER); // #25 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/Android%20SDK%20Documentation-b0.14.pdf)
             if (raw != null && raw.length >= 1) return (raw[0] & 0xFF);
         } catch (Exception ignored) {}
         return -1;
@@ -358,12 +377,12 @@ public class DeliveryController {
 
     private double readGrossLitres() throws Exception {
         int dec = getDecimals();
-        return decodeVolume(link.opGetField(FIELD_GROSS_COUNT), dec); // #44
+        return decodeVolume(link.opGetField(FIELD_GROSS_COUNT), dec); // #44 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/Android%20SDK%20Documentation-b0.14.pdf)
     }
 
     private double readNetLitres() throws Exception {
         int dec = getDecimals();
-        return decodeVolume(link.opGetField(FIELD_NET_COUNT), dec); // #45
+        return decodeVolume(link.opGetField(FIELD_NET_COUNT), dec); // #45 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/Android%20SDK%20Documentation-b0.14.pdf)
     }
 
     private static int s32be(byte[] b4) {
@@ -413,7 +432,6 @@ public class DeliveryController {
             link.forceSyncNext();
             link.requestPurge();
             Thread.sleep(SETFIELD_RETRY_SLEEP_MS);
-
             link.opSetField(field, data);
         }
 
@@ -430,7 +448,121 @@ public class DeliveryController {
         }
     }
 
-    // ----------------------------- Public helpers called by MainActivity -----------------------------
+    // ============================
+    // ✅ Recovery auto (connect)
+    // ============================
+    public void recoverActiveDelivery(int pollMs) {
+        exec.execute(() -> safeOp(() -> {
+            try {
+                link.setPythonCompat(true, pollMs);
+
+                int[] dsdc = readDsDcFastLong(pollMs);
+                int ds = dsdc[0], dc = dsdc[1];
+                LcpDeliveryState st = computeDeliveryStateFromDc(dc);
+
+                logDsDc("RECOVER:DSDC", ds, dc);
+                log("[RECOVER] deliveryState=" + st);
+
+                if (st != LcpDeliveryState.ACTIVE_FLOWING && st != LcpDeliveryState.ACTIVE_PAUSED) {
+                    return;
+                }
+
+                // Baseline lock: on veut poursuivre la même livraison sans reset
+                baselineLocked = true;
+
+                // #44/#45 sont des quantités de livraison courante => baseline=0 pour afficher "déjà livré" = valeur courante [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/Android%20SDK%20Documentation-b0.14.pdf)
+                startTimestampMs = System.currentTimeMillis();
+                startGross = 0.0;
+                startNet = 0.0;
+
+                double gross = readGrossLitres();
+                double net = readNetLitres();
+                lastGross = gross;
+                lastNet = net;
+
+                long now = System.currentTimeMillis();
+                lastStableGross = gross;
+                lastStableNet = net;
+                lastVolumeChangeMs = now;
+
+                flowStopPending = false;
+                flowStopNotified = false;
+                flowStopSinceMs = 0;
+
+                // Forcer les états applicatifs sans envoyer de commande
+                lifecycle.forceState(DeliveryLifecycle.ACTIVE, "Recovered active delivery: " + st);
+
+                stopping = false;
+                setState(State.RUNNING);
+
+                startLiveLoop(pollMs);
+
+            } catch (Exception e) {
+                if (events != null) events.onError("recoverActiveDelivery", e);
+            }
+        }, "recoverActiveDelivery"));
+    }
+
+    // ============================
+    // Zombie soft recovery
+    // ============================
+    private void softRecoverZombie(int pollMs, int ds, int dc) {
+        long now = System.currentTimeMillis();
+        if (now - lastZombieRecoveryMs < ZOMBIE_COOLDOWN_MS) return;
+        lastZombieRecoveryMs = now;
+
+        log("[ZOMBIE] Detected: ACTIVE_FLOWING but volumes stalled >= " + ZOMBIE_STALL_MS + "ms. " + diagDsDc(ds, dc));
+        baselineLocked = true;
+
+        try {
+            link.setPythonCompat(true, pollMs);
+
+            // Command #1: PauseDelivery (doc SDK) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/Android%20SDK%20Documentation-b0.14.pdf)
+            link.opIssueCommand(0x01);
+
+            long deadline = now + 3000;
+            boolean paused = false;
+
+            while (System.currentTimeMillis() < deadline) {
+                int[] dsdc = readDsDcFast();
+                int dc2 = dsdc[1];
+
+                boolean deliveryActive = (dc2 & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
+                boolean flowActive = (dc2 & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
+
+                if (deliveryActive && !flowActive) {
+                    paused = true;
+                    break;
+                }
+                Thread.sleep(Math.max(50, pollMs));
+            }
+
+            if (paused) {
+                log("[ZOMBIE] Soft recovery OK: flow is now inactive => ACTIVE_PAUSED.");
+                uiForcePaused = false;
+                uiForcePausedUntilMs = 0;
+
+                // permettre RESUME côté guard
+                lifecycle.onPauseDetected();
+            } else {
+                log("[ZOMBIE] Pause request did not clear FLOW bit -> forcing UI PAUSED override (10s).");
+                uiForcePaused = true;
+                uiForcePausedUntilMs = System.currentTimeMillis() + 10000;
+
+                // permettre RESUME côté guard (UI pourra tenter Continue)
+                lifecycle.forceState(DeliveryLifecycle.PAUSED, "Zombie override PAUSED");
+            }
+        } catch (Exception e) {
+            log("[ZOMBIE] Soft recovery failed: " + e.getMessage() + " -> forcing UI PAUSED override (10s).");
+            uiForcePaused = true;
+            uiForcePausedUntilMs = System.currentTimeMillis() + 10000;
+            lifecycle.forceState(DeliveryLifecycle.PAUSED, "Zombie override PAUSED (exception)");
+        }
+    }
+
+    // =============================
+    // Public: Printer/Ticket APIs
+    // =============================
 
     public void refreshPrinterStatus(int pollMs) {
         exec.execute(() -> safeOp(() -> {
@@ -490,7 +622,7 @@ public class DeliveryController {
                 link.setPythonCompat(true, pollMs);
                 int tr = readTicketRequired();
                 if (tr != 1) {
-                    log("[TICKET] TicketRequired(#37) read=" + tr + " -> setting to 1");
+                    log("[TICKET] TicketRequired(#37) read=" + tr + " -> setting to 1 (default optional)");
                     try { link.opSetField(FIELD_TICKET_REQUIRED, new byte[]{ (byte)1 }); }
                     catch (IOException ex) { log("[TICKET] SET #37 refused/failed. " + ex.getMessage()); }
                     int tr2 = readTicketRequired();
@@ -523,12 +655,11 @@ public class DeliveryController {
         exec.execute(() -> safeOp(() -> {
             try {
                 link.setPythonCompat(true, pollMs);
-                logTimeline("PING:BEFORE", pollMs);
+                log("[PING] Request MachineStatusEx");
                 LcpLink.MachineStatusEx ms = withPollWindow(() -> link.opMachineStatusEx());
                 log("[PING] " + ms.toString());
                 boolean pending = (ms.delCode & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
                 if (events != null) events.onPrinterStatus(ms, pending);
-                logTimeline("PING:AFTER", pollMs);
             } catch (Exception e) {
                 if (events != null) events.onError("pingStatus", e);
             }
@@ -604,7 +735,12 @@ public class DeliveryController {
         }, "printPendingTicket"));
     }
 
-    // ----------------------------- Start sequences -----------------------------
+    // ----------------------------- Start / Prestart -----------------------------
+
+    private static int productToList0Value(int product) {
+        if (product < 1 || product > 16) throw new IllegalArgumentException("product must be 1..16");
+        return product - 1;
+    }
 
     private boolean startGateAllow(int pollMs) throws Exception {
         int[] dsdc = readDsDcFast();
@@ -624,8 +760,6 @@ public class DeliveryController {
 
     public void prestartSequence(int product, double presetLitres, int pollMs) throws Exception {
         setState(State.PRESTART);
-        logTimeline("PRESTART:ENTER", pollMs);
-
         refreshPrinterStatus(pollMs);
 
         if (!startGateAllow(pollMs)) {
@@ -650,10 +784,10 @@ public class DeliveryController {
         log("[PRE] Completed PRE-START");
     }
 
-    public void startDeliverySequence(int pollMs) throws Exception {
-        logTimeline("START:ENTER", pollMs);
+    // ----------------------------- START sequence (safe retry) -----------------------------
 
-        // [DL] Guard Cmd#0 START
+    public void startDeliverySequence(int pollMs) throws Exception {
+
         if (!lifecycle.allowCmd0(Cmd0Usage.START)) {
             throw new IllegalStateException("Cmd#0 START blocked by DeliveryLifecycle state=" + lifecycle.getState());
         }
@@ -726,6 +860,10 @@ public class DeliveryController {
             throw new Exception("Delivery not active after RUN");
         }
 
+        // start baseline (delivery from zero)
+        baselineLocked = false;
+        uiForcePaused = false;
+
         lifecycle.onStartConfirmed(true);
 
         startTimestampMs = System.currentTimeMillis();
@@ -749,6 +887,8 @@ public class DeliveryController {
         setState(State.RUNNING);
         log("[START] Delivery ACTIVE");
     }
+
+    // ----------------------------- LIVE LOOP (with zombie detection) -----------------------------
 
     private double readVolumeQueuedAware(int field, int pollMs) throws Exception {
         long longDeadline = System.currentTimeMillis() + 30_000;
@@ -795,10 +935,9 @@ public class DeliveryController {
                 return;
             }
 
-            int nft = getNoFlowTimerSecondsSafe(pollMs); // #25
+            int nft = getNoFlowTimerSecondsSafe(pollMs);
             if (nft >= 0) {
-                long ms = Math.max(FLOW_STOP_CONFIRM_MIN_MS, (long)nft * 1000L);
-                flowStopConfirmMs = ms;
+                flowStopConfirmMs = Math.max(FLOW_STOP_CONFIRM_MIN_MS, (long)nft * 1000L);
                 log("[LIVE] FlowStopConfirm = NoFlowTimer(#25)=" + nft + "s => " + flowStopConfirmMs + "ms");
             } else {
                 log("[LIVE] FlowStopConfirm = default " + flowStopConfirmMs + "ms (NoFlowTimer #25 unread)");
@@ -832,6 +971,7 @@ public class DeliveryController {
 
                     double gross = lastGross;
                     double net = lastNet;
+
                     try { gross = readVolumeQueuedAware(FIELD_GROSS_COUNT, pollMs); } catch (Exception ignored) {}
                     try { net   = readVolumeQueuedAware(FIELD_NET_COUNT, pollMs); } catch (Exception ignored) {}
 
@@ -845,6 +985,18 @@ public class DeliveryController {
                         lastStableNet = net;
                     }
 
+                    // ---------------- Zombie detection ----------------
+                    LcpDeliveryState uiState = computeDeliveryStateForUi(dc);
+                    boolean isActiveFlowingUi = (uiState == LcpDeliveryState.ACTIVE_FLOWING);
+                    boolean stalledTooLong = (now - lastVolumeChangeMs) >= ZOMBIE_STALL_MS;
+
+                    if (isActiveFlowingUi && stalledTooLong) {
+                        softRecoverZombie(pollMs, ds, dc);
+                        // recalculer état UI après tentative
+                        uiState = computeDeliveryStateForUi(dc);
+                    }
+                    // --------------------------------------------------
+
                     DeliveryProgress p = new DeliveryProgress();
                     p.tSinceStartMs = now - startTimestampMs;
                     p.grossL = gross;
@@ -857,14 +1009,14 @@ public class DeliveryController {
                     p.stalled = !flow;
                     p.ds = ds;
                     p.dc = dc;
-
-                    p.deliveryState = computeDeliveryStateFromDc(dc);
+                    p.deliveryState = uiState;
 
                     lastGross = gross;
                     lastNet = net;
 
                     if (events != null) events.onProgress(p);
 
+                    // 4) Transitions flow avec confirmation #25 (pause confirmée)
                     if (lastFlow == null) {
                         lastFlow = flow;
                         flowStopPending = false;
@@ -889,9 +1041,11 @@ public class DeliveryController {
                         long quietMs = now - lastVolumeChangeMs;
                         long sinceMs = now - flowStopSinceMs;
                         if (quietMs >= flowStopConfirmMs && sinceMs >= flowStopConfirmMs) {
-                            lifecycle.onPauseDetected();
                             flowStopNotified = true;
                             flowStopPending = false;
+
+                            lifecycle.onPauseDetected();
+
                             if (events != null) events.onFlowStopped();
                         }
                     }
@@ -931,8 +1085,6 @@ public class DeliveryController {
             stopping = false;
             cachedDecimals = -1;
             lastFlow = null;
-
-            logTimeline("STARTOPEN:ENTER", pollMs);
 
             try { prestartSequence(product, presetLitres, pollMs); }
             catch (Exception ex) { if(events!=null) events.onError("prestartSequence", ex); return; }
@@ -974,13 +1126,11 @@ public class DeliveryController {
     }
 
     public void endDeliverySequence(int timeoutMs, int pollMs) throws Exception {
-        logTimeline("END:ENTER", pollMs);
         refreshPrinterStatus(pollMs);
 
         int trBefore = readTicketRequired();
         int tnBefore = readTicketNumber();
-        log(String.format("[PRINT] Policy TicketRequired(#37)=%d (0=req,1=optional,2=never) TicketNumber(#23) before=%d",
-                trBefore, tnBefore));
+        log(String.format("[PRINT] Policy TicketRequired(#37)=%d TicketNumber before=%d", trBefore, tnBefore));
 
         if (!lifecycle.allowEnd()) {
             log("[END] blocked by DeliveryLifecycle state=" + lifecycle.getState());
@@ -1016,12 +1166,11 @@ public class DeliveryController {
         refreshPrinterStatus(pollMs);
 
         int tnAfter = readTicketNumber();
-        log(String.format("[PRINT] TicketNumber(#23) after=%d delta=%+d", tnAfter, (tnAfter - tnBefore)));
-        if (tnAfter > tnBefore) {
-            log("[PRINT] CONFIRMED: TicketNumber incremented => delivery ticket printed");
-        } else {
-            log("[PRINT] NOT CONFIRMED: TicketNumber did not increment (ticket may be pending or printer not ready)");
-        }
+        log(String.format("[PRINT] TicketNumber after=%d delta=%+d", tnAfter, (tnAfter - tnBefore)));
+
+        // reset baseline locks after ending
+        baselineLocked = false;
+        uiForcePaused = false;
 
         lifecycle.onEndConfirmed();
         lifecycle.onResetSyncCompleted();
@@ -1033,6 +1182,7 @@ public class DeliveryController {
             try {
                 link.setPythonCompat(true, pollMs);
 
+                // Autoriser RESUME uniquement quand PAUSED (garde-fou)
                 if (!lifecycle.allowCmd0(Cmd0Usage.RESUME)) {
                     log("[RESUME] Cmd#0 RESUME blocked by DeliveryLifecycle state=" + lifecycle.getState());
                     return;
@@ -1042,12 +1192,55 @@ public class DeliveryController {
                     return;
                 }
 
-                logTimeline("RESUME:BEFORE", pollMs);
-
                 link.opIssueCommand(0x00);
                 log("[RESUME] Cmd#0 sent (Start/Resume)");
 
+                // Attendre que delivery soit active (ou begin)
+                boolean becameActive = withPollWindow(() -> {
+                    long deadline = System.currentTimeMillis() + 12000;
+                    while (System.currentTimeMillis() < deadline) {
+                        int[] dsdc = link.opDeliveryStatus();
+                        int dc = dsdc[1];
+                        boolean da = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
+                        boolean begin = (dc & LcpLink.LCRSc_BEGIN_DELIVERY) != 0;
+                        if (da || begin) return true;
+                        Thread.sleep(Math.max(50, pollMs));
+                    }
+                    return false;
+                });
+
+                if (!becameActive) {
+                    log("[RESUME] WARN: delivery not active after Cmd#0 (timeout).");
+                    return;
+                }
+
                 lifecycle.onStartConfirmed(true);
+
+                // Baseline: si baselineLocked => ne pas reset startGross/startNet (reprendre où c'était)
+                if (baselineLocked) {
+                    log("[RESUME] baselineLocked=true -> preserving startGross/startNet (no reset).");
+                    try { lastGross = readGrossLitres(); } catch (Exception ignored) {}
+                    try { lastNet   = readNetLitres();   } catch (Exception ignored) {}
+                } else {
+                    // Comportement classique: reset baseline de session
+                    startTimestampMs = System.currentTimeMillis();
+                    try { startGross = readGrossLitres(); } catch (Exception ignored) { startGross = lastGross; }
+                    try { startNet   = readNetLitres();   } catch (Exception ignored) { startNet = lastNet; }
+                    lastGross = startGross;
+                    lastNet = startNet;
+                }
+
+                long now = System.currentTimeMillis();
+                lastStableGross = lastGross;
+                lastStableNet = lastNet;
+                lastVolumeChangeMs = now;
+                flowStopPending = false;
+                flowStopNotified = false;
+                flowStopSinceMs = 0;
+                lastFlow = null;
+
+                stopping = false;
+                setState(State.RUNNING);
 
                 startLiveLoop(pollMs);
 

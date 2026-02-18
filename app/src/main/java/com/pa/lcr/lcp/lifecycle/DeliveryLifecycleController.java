@@ -103,16 +103,20 @@ public class DeliveryLifecycleController {
         }
     }
 
-    /** Timeout: règle dure -> ne change jamais l'état */
     public void onTimeout(String context) {
         logger.error("DeliveryLifecycle", "Timeout dans " + context + " (état=" + state + ")");
     }
 
-    /**
-     * Rollback explicite: utilisé quand une séquence critique (START) n'est pas confirmée.
-     */
     public void forceIdle(String reason) {
         logger.warn("DeliveryLifecycle", "FORCE → IDLE (" + reason + ") from=" + state);
         state = DeliveryLifecycle.IDLE;
+    }
+
+    /**
+     * Force un état sans commander le registre (recovery UI).
+     */
+    public void forceState(DeliveryLifecycle to, String reason) {
+        logger.warn("DeliveryLifecycle", "FORCE → " + to + " (" + reason + ") from=" + state);
+        state = to;
     }
 }
