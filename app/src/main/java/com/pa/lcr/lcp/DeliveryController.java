@@ -5,6 +5,11 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.*;
 
+// [DL] Ajouts
+import com.pa.lcr.lcp.lifecycle.Cmd0Usage;
+import com.pa.lcr.lcp.lifecycle.DeliveryLifecycleController;
+import com.pa.lcr.lcp.util.AndroidLifecycleLogger;
+
 public class DeliveryController {
 
     // ------------------------- Champs LCR (métier) -------------------------
@@ -18,7 +23,7 @@ public class DeliveryController {
     private static final int FIELD_TICKET_REQUIRED = 37; // TicketRequired (0/1/2)
 
     // >>> AJOUT: NoFlowTimer (#25) pour confirmer flow stopped (SDK / Python-like)
-    private static final int FIELD_NO_FLOW_TIMER = 25;   // NoFlowTimer (#25) seconds [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
+    private static final int FIELD_NO_FLOW_TIMER = 25;   // NoFlowTimer (#25) seconds
 
     // ------------------------- Robustesse terrain -------------------------
     private static final int QUEUED_LONG_TIMEOUT_MS = 30_000; // 30s
@@ -30,6 +35,10 @@ public class DeliveryController {
     private final ExecutorService exec;
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     private ScheduledFuture<?> liveLoopFuture;
+
+    // [DL] Garde-fou applicatif DeliveryLifecycle (non intrusif)
+    private final DeliveryLifecycleController lifecycle =
+            new DeliveryLifecycleController(new AndroidLifecycleLogger());
 
     // ------------------------- État -------------------------
     public enum State { IDLE, PRESTART, STARTING, RUNNING, ENDING, ENDED, ERROR }
@@ -58,7 +67,7 @@ public class DeliveryController {
     // AJOUT: Confirmation flow stopped (basée sur NoFlowTimer #25)
     // ==========================================================
     private static final long FLOW_STOP_CONFIRM_MIN_MS = 2000; // garde-fou
-    private volatile long flowStopConfirmMs = 3000;            // valeur par défaut, sera remplacée par #25 si lisible
+    private volatile long flowStopConfirmMs = 3000;            // défaut, remplacé par #25 si lisible
 
     private volatile boolean flowStopPending = false;
     private volatile boolean flowStopNotified = false;
@@ -264,7 +273,7 @@ public class DeliveryController {
     private int getNoFlowTimerSecondsSafe(int pollMs) {
         try {
             link.setPythonCompat(true, pollMs);
-            byte[] raw = link.opGetField(FIELD_NO_FLOW_TIMER); // #25 (U8) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
+            byte[] raw = link.opGetField(FIELD_NO_FLOW_TIMER); // #25 (U8)
             if (raw != null && raw.length >= 1) return (raw[0] & 0xFF);
         } catch (Exception ignored) {}
         return -1;
@@ -608,6 +617,11 @@ public class DeliveryController {
     public void startDeliverySequence(int pollMs) throws Exception {
         logTimeline("START:ENTER", pollMs);
 
+        // [DL] Guard Cmd#0 START (évite Cmd#0 hors contexte)
+        if (!lifecycle.allowCmd0(Cmd0Usage.START)) {
+            throw new IllegalStateException("Cmd#0 START blocked by DeliveryLifecycle state=" + lifecycle.getState());
+        }
+
         log("[START] RUN (Command #0)");
         link.opIssueCommand(0x00);
         setState(State.STARTING);
@@ -631,6 +645,9 @@ public class DeliveryController {
 
         if (!active) throw new Exception("Delivery not active after RUN");
 
+        // [DL] On considère START confirmé ici (aligné avec l'existant)
+        lifecycle.onStartConfirmed(true);
+
         startTimestampMs = System.currentTimeMillis();
         startGross = readGrossLitres();
         startNet = readNetLitres();
@@ -642,12 +659,14 @@ public class DeliveryController {
         lastStableGross = startGross;
         lastStableNet = startNet;
         lastVolumeChangeMs = now;
+
         flowStopPending = false;
         flowStopNotified = false;
         flowStopSinceMs = 0;
 
         lastFlow = null;
         stopping = false;
+
         setState(State.RUNNING);
         log("[START] Delivery ACTIVE");
     }
@@ -669,7 +688,7 @@ public class DeliveryController {
     }
 
     private double readVolumeQueuedAware(int field, int pollMs) throws Exception {
-        long longDeadline  = System.currentTimeMillis() + LIVE_QT_LONG_MS;
+        long longDeadline = System.currentTimeMillis() + LIVE_QT_LONG_MS;
         Exception last = null;
 
         while (System.currentTimeMillis() < longDeadline) {
@@ -679,7 +698,6 @@ public class DeliveryController {
                 return decodeVolume(raw, dec);
             } catch (Exception e) {
                 last = e;
-
                 String m = (e.getMessage() == null) ? "" : e.getMessage();
                 boolean transientOrQueued =
                         m.contains("Queued timeout") ||
@@ -704,6 +722,7 @@ public class DeliveryController {
     // ============================= LIVE LOOP (fidèle + confirmation #25) =============================
     public void startLiveLoop(int pollMs) {
         exec.execute(() -> safeOp(() -> {
+
             if (state != State.RUNNING) {
                 log("[LIVE] ignored: state=" + state);
                 return;
@@ -713,12 +732,11 @@ public class DeliveryController {
                 return;
             }
 
-            // >>> AJOUT: caler le délai de confirmation sur NoFlowTimer #25 (seconds)
-            int nft = getNoFlowTimerSecondsSafe(pollMs); // #25 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
+            // >>> caler le délai de confirmation sur NoFlowTimer #25 (seconds)
+            int nft = getNoFlowTimerSecondsSafe(pollMs); // #25
             if (nft >= 0) {
                 long ms = Math.max(FLOW_STOP_CONFIRM_MIN_MS, (long)nft * 1000L);
                 flowStopConfirmMs = ms;
-                // pas de log [IO] ici; le UI peut afficher cette info si tu veux
                 log("[LIVE] FlowStopConfirm = NoFlowTimer(#25)=" + nft + "s => " + flowStopConfirmMs + "ms");
             } else {
                 log("[LIVE] FlowStopConfirm = default " + flowStopConfirmMs + "ms (NoFlowTimer #25 unread)");
@@ -737,8 +755,7 @@ public class DeliveryController {
                         ds = dsdc[0];
                         dc = dsdc[1];
                     } catch (Exception ex) {
-                        // skip tick
-                        return;
+                        return; // skip tick
                     }
 
                     boolean flow = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
@@ -746,7 +763,6 @@ public class DeliveryController {
 
                     if (!active) {
                         stopping = true;
-                        // reset confirmation
                         flowStopPending = false;
                         flowStopNotified = false;
                         flowStopSinceMs = 0;
@@ -763,7 +779,8 @@ public class DeliveryController {
                     long now = System.currentTimeMillis();
 
                     // 3) Stagnation/progression tracking (Python-like)
-                    boolean progressed = (Math.abs(gross - lastStableGross) > 1e-9) || (Math.abs(net - lastStableNet) > 1e-9);
+                    boolean progressed = (Math.abs(gross - lastStableGross) > 1e-9) ||
+                                         (Math.abs(net   - lastStableNet)   > 1e-9);
                     if (progressed) {
                         lastVolumeChangeMs = now;
                         lastStableGross = gross;
@@ -816,6 +833,10 @@ public class DeliveryController {
                         long quietMs = now - lastVolumeChangeMs;
                         long sinceMs = now - flowStopSinceMs;
                         if (quietMs >= flowStopConfirmMs && sinceMs >= flowStopConfirmMs) {
+
+                            // [DL] Pause CONFIRMÉE (pas un glitch)
+                            lifecycle.onPauseDetected();
+
                             flowStopNotified = true;
                             flowStopPending = false;
                             if (events != null) events.onFlowStopped();
@@ -833,10 +854,6 @@ public class DeliveryController {
         }, "startLiveLoop"));
     }
 
-    // ----------- reste inchangé : endGracefully/resume/endRecovery/printText etc. -----------
-    // (par souci de longueur, je conserve l'intégralité comme précédemment. Si tu veux,
-    // je te redonne aussi ces sections à l'identique, mais elles ne changent pas.)
-
     public void endDeliverySequence(int timeoutMs, int pollMs) throws Exception {
         logTimeline("END:ENTER", pollMs);
 
@@ -846,6 +863,12 @@ public class DeliveryController {
         int tnBefore = readTicketNumber();
         log(String.format("[PRINT] Policy TicketRequired(#37)=%d (0=req,1=optional,2=never) TicketNumber(#23) before=%d",
                 trBefore, tnBefore));
+
+        // [DL] Guard END (évite Cmd#2 hors ACTIVE/PAUSED côté lifecycle)
+        if (!lifecycle.allowEnd()) {
+            log("[END] blocked by DeliveryLifecycle state=" + lifecycle.getState());
+            return;
+        }
 
         log("[END] Issuing END (Command #2)");
 
@@ -900,13 +923,30 @@ public class DeliveryController {
             log("[PRINT] NOT CONFIRMED: TicketNumber did not increment (ticket may be pending or printer not ready)");
         }
 
+        // [DL] END confirmé + reset/sync immédiatement (pour ne pas bloquer le prochain START)
+        lifecycle.onEndConfirmed();
+        lifecycle.onResetSyncCompleted();
+
         setState(State.ENDED);
     }
 
     public void startOpenMode(int product, double presetLitres, int timeoutMs, int pollMs){
         exec.execute(() -> safeOp(() -> {
+
             if (state == State.RUNNING || state == State.STARTING || state == State.PRESTART || state == State.ENDING) {
                 log("[START] ignored: delivery already in progress state=" + state);
+                return;
+            }
+
+            // [DL] Guard START le plus tôt possible (sans casser prestartSequence)
+            boolean ticketPending = false;
+            try {
+                int[] dsdc = readDsDcFast();
+                ticketPending = (dsdc[1] & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
+            } catch (Exception ignored) { }
+
+            if (!lifecycle.allowStart(ticketPending)) {
+                log("[START] blocked by DeliveryLifecycle (ticketPending=" + ticketPending + ")");
                 return;
             }
 
@@ -918,6 +958,9 @@ public class DeliveryController {
 
             try { prestartSequence(product, presetLitres, pollMs); }
             catch (Exception ex) { if(events!=null) events.onError("prestartSequence", ex); return; }
+
+            // [DL] PRESTART confirmé (toutes écritures OK)
+            lifecycle.onPrestartConfirmed();
 
             try { startDeliverySequence(pollMs); }
             catch (Exception ex) { if(events!=null) events.onError("startDeliverySequence", ex); return; }
@@ -958,6 +1001,18 @@ public class DeliveryController {
             try {
                 link.setPythonCompat(true, pollMs);
 
+                // [DL] Cmd#0 RESUME autorisé uniquement si lifecycle est PAUSED
+                if (!lifecycle.allowCmd0(Cmd0Usage.RESUME)) {
+                    log("[RESUME] Cmd#0 RESUME blocked by DeliveryLifecycle state=" + lifecycle.getState());
+                    return;
+                }
+
+                // [DL] maintenant on “consomme” la reprise (PAUSED->ACTIVE)
+                if (!lifecycle.allowResume()) {
+                    log("[RESUME] blocked by DeliveryLifecycle state=" + lifecycle.getState());
+                    return;
+                }
+
                 logTimeline("RESUME:BEFORE", pollMs);
 
                 link.opIssueCommand(0x00); // Cmd #0
@@ -983,6 +1038,9 @@ public class DeliveryController {
                     log("[RESUME] WARN: delivery not active after Cmd#0 (timeout).");
                     return;
                 }
+
+                // [DL] Reprise confirmée (reste aligné avec l'existant)
+                lifecycle.onStartConfirmed(true);
 
                 if (state != State.RUNNING) {
                     setState(State.STARTING);
