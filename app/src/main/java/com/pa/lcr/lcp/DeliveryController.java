@@ -5,12 +5,6 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.*;
 
-/**
- * DeliveryController — version terrain robuste (Option 1, 30s):
- * - Robustesse "queued long" gérée ici (sans modifier LcpLink)
- * - Retry contrôlé (1 fois) pour SET_FIELD idempotents (#0 product, #6 net preset) + validation GET
- * - Recovery END/PRINT avec messages opérateur (FLOW_ACTIVE explicite)
- */
 public class DeliveryController {
 
     // ------------------------- Champs LCR (métier) -------------------------
@@ -23,7 +17,10 @@ public class DeliveryController {
     private static final int FIELD_TICKET_NUMBER = 23;   // TicketNumber (LONG/SL)
     private static final int FIELD_TICKET_REQUIRED = 37; // TicketRequired (0/1/2)
 
-    // ------------------------- Robustesse terrain (Option 1) -------------------------
+    // >>> AJOUT: NoFlowTimer (#25) pour confirmer flow stopped (SDK / Python-like)
+    private static final int FIELD_NO_FLOW_TIMER = 25;   // NoFlowTimer (#25) seconds [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
+
+    // ------------------------- Robustesse terrain -------------------------
     private static final int QUEUED_LONG_TIMEOUT_MS = 30_000; // 30s
     private static final int SETFIELD_RETRY_SLEEP_MS = 120;
 
@@ -57,6 +54,19 @@ public class DeliveryController {
     private volatile int presetProduct = 1;
     private volatile double presetLitres = 0;
 
+    // ==========================================================
+    // AJOUT: Confirmation flow stopped (basée sur NoFlowTimer #25)
+    // ==========================================================
+    private static final long FLOW_STOP_CONFIRM_MIN_MS = 2000; // garde-fou
+    private volatile long flowStopConfirmMs = 3000;            // valeur par défaut, sera remplacée par #25 si lisible
+
+    private volatile boolean flowStopPending = false;
+    private volatile boolean flowStopNotified = false;
+    private volatile long flowStopSinceMs = 0;
+    private volatile long lastVolumeChangeMs = 0;
+    private volatile double lastStableGross = 0;
+    private volatile double lastStableNet = 0;
+
     // ============================= EVENTS =============================
     public interface DeliveryEvents {
         void onStateChanged(State s);
@@ -64,19 +74,17 @@ public class DeliveryController {
         void onFlowStopped();
         void onProgress(DeliveryProgress p);
         void onTicketNumber(int ticketNumber);
-        void onTicketRequired(int mode); // 0/1/2
+        void onTicketRequired(int mode);
         void onPrinterStatus(LcpLink.MachineStatusEx ms, boolean ticketPending);
         void onError(String msg, Throwable t);
         void onLog(String line);
-
-        // Alerte “terrain”
         void onOperatorAlert(OperatorAlert alert);
     }
 
     public static final class DeliveryProgress {
         public long tSinceStartMs;
-        public double grossL; // #44
-        public double netL;   // #45
+        public double grossL;
+        public double netL;
         public double deliveredGrossL;
         public double deliveredNetL;
         public double dGrossL;
@@ -172,7 +180,6 @@ public class DeliveryController {
         }
     }
 
-    // ---------- Timeline / DS/DC helpers ----------
     private static String hx16(int v) { return String.format("0x%04X", (v & 0xFFFF)); }
 
     private static String dcFlags(int dc) {
@@ -187,12 +194,10 @@ public class DeliveryController {
         log(String.format("[%s] DS=%s DC=%s %s", tag, hx16(ds), hx16(dc), dcFlags(dc)));
     }
 
-    /** Lecture 0x28 (fast). */
     private int[] readDsDcFast() throws Exception {
-        return withPollWindow(() -> link.opDeliveryStatus()); // returns [ds, dc]
+        return withPollWindow(() -> link.opDeliveryStatus()); // [ds, dc]
     }
 
-    /** Lecture 0x28 tolérante (phase longue) : ignore “Queued timeout (python)” jusqu’à 30s. */
     private int[] readDsDcFastLong(int pollMs) throws Exception {
         long deadline = System.currentTimeMillis() + QUEUED_LONG_TIMEOUT_MS;
         Exception last = null;
@@ -225,10 +230,9 @@ public class DeliveryController {
         }
     }
 
-    // ------------------------- Conversions champs -------------------------
     private static int productToList0Value(int product) {
         if (product < 1 || product > 16) throw new IllegalArgumentException("product must be 1..16");
-        return product - 1; // Field #0 values 0..15 => products 1..16
+        return product - 1;
     }
 
     // ======== getDecimals() robuste (retry + recovery) ========
@@ -255,10 +259,18 @@ public class DeliveryController {
         if (last != null) throw last;
         throw new IOException("getDecimals: failed");
     }
-    // ======== FIN getDecimals() robuste ========
+
+    // >>> AJOUT: lecture NoFlowTimer (#25) secondes pour confirmation flow stop (SDK)
+    private int getNoFlowTimerSecondsSafe(int pollMs) {
+        try {
+            link.setPythonCompat(true, pollMs);
+            byte[] raw = link.opGetField(FIELD_NO_FLOW_TIMER); // #25 (U8) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
+            if (raw != null && raw.length >= 1) return (raw[0] & 0xFF);
+        } catch (Exception ignored) {}
+        return -1;
+    }
 
     private static int scaleForDecimalsIndex(int decimalsIndex) {
-        // 0=Hundredths, 1=Tenths, 2=Whole, 3=Thousandths
         if (decimalsIndex == 1) return 10;
         if (decimalsIndex == 2) return 1;
         if (decimalsIndex == 3) return 1000;
@@ -314,7 +326,6 @@ public class DeliveryController {
         return (raw != null && raw.length > 0) ? (raw[0] & 0xFF) : 0;
     }
 
-    // ============================= Robustesse SET_FIELD (Option 1) =============================
     private static boolean isFramingTimeoutMsg(String msg) {
         if (msg == null) return false;
         return msg.contains("Timeout sync ~~")
@@ -335,10 +346,6 @@ public class DeliveryController {
         return false;
     }
 
-    /**
-     * Retry contrôlé (1 fois) uniquement pour SET_FIELD idempotents,
-     * puis validation via GET_FIELD.
-     */
     private void safeSetFieldWithRetry(int field, byte[] data, int pollMs, int verifyLen) throws Exception {
         try {
             link.opSetField(field, data);
@@ -347,16 +354,13 @@ public class DeliveryController {
 
             log("[SAFE-SET] Framing timeout on SET_FIELD #" + field + " -> recovery+retry once. msg=" + e.getMessage());
 
-            // Recovery de session
             link.forceSyncNext();
             link.requestPurge();
             Thread.sleep(SETFIELD_RETRY_SLEEP_MS);
 
-            // Retry unique
             link.opSetField(field, data);
         }
 
-        // Vérification par GET
         byte[] rb = link.opGetField(field);
         if (rb == null) throw new IOException("SET_FIELD verify failed: null");
 
@@ -370,7 +374,6 @@ public class DeliveryController {
         }
     }
 
-    // ============================= PRINTER STATUS =============================
     public void refreshPrinterStatus(int pollMs) {
         exec.execute(() -> safeOp(() -> {
             try {
@@ -385,7 +388,6 @@ public class DeliveryController {
         }, "refreshPrinterStatus"));
     }
 
-    // ============================= TICKET INFO (UI) =============================
     public void refreshTicketInfo(int pollMs) {
         exec.execute(() -> safeOp(() -> {
             try {
@@ -465,7 +467,6 @@ public class DeliveryController {
         }, "clearShiftNow"));
     }
 
-    // ============================= PING / STATUS =============================
     public void pingStatus(int pollMs){
         exec.execute(() -> safeOp(() -> {
             try {
@@ -482,7 +483,6 @@ public class DeliveryController {
         }, "pingStatus"));
     }
 
-    // ============================= START-GATE =============================
     private boolean startGateAllow(int pollMs) throws Exception {
         int[] dsdc = readDsDcFast();
         int ds = dsdc[0], dc = dsdc[1];
@@ -499,7 +499,6 @@ public class DeliveryController {
         return false;
     }
 
-    // ============================= PRINT PENDING (#6) =============================
     public void printPendingTicket(int pollMs, int timeoutMs) {
         exec.execute(() -> safeOp(() -> {
             try {
@@ -578,7 +577,6 @@ public class DeliveryController {
         }, "printPendingTicket"));
     }
 
-    // ============================= PRE-START =============================
     public void prestartSequence(int product, double presetLitres, int pollMs) throws Exception {
         setState(State.PRESTART);
         logTimeline("PRESTART:ENTER", pollMs);
@@ -607,7 +605,6 @@ public class DeliveryController {
         log("[PRE] Completed PRE-START");
     }
 
-    // ============================= START =============================
     public void startDeliverySequence(int pollMs) throws Exception {
         logTimeline("START:ENTER", pollMs);
 
@@ -639,23 +636,29 @@ public class DeliveryController {
         startNet = readNetLitres();
         lastGross = startGross;
         lastNet = startNet;
-        lastFlow = null;
 
+        // init “stagnation tracker”
+        long now = System.currentTimeMillis();
+        lastStableGross = startGross;
+        lastStableNet = startNet;
+        lastVolumeChangeMs = now;
+        flowStopPending = false;
+        flowStopNotified = false;
+        flowStopSinceMs = 0;
+
+        lastFlow = null;
         stopping = false;
         setState(State.RUNNING);
         log("[START] Delivery ACTIVE");
     }
 
     // =====================================================================
-    // Python-like live loop helpers (fidèle au script)
+    // Python-like live loop helpers (fidèle)
     // =====================================================================
-    private static final long LIVE_QT_SHORT_MS = 5_000;   // Python default qt=5s [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
-    private static final long LIVE_QT_LONG_MS  = 30_000;  // Python LONG_QT=30s [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
-    private static final long LIVE_WAIT_STEP_MS = 200;    // Python qp=0.2s [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
+    private static final long LIVE_QT_SHORT_MS = 5_000;
+    private static final long LIVE_QT_LONG_MS  = 30_000;
+    private static final long LIVE_WAIT_STEP_MS = 200;
 
-    /**
-     * Python: op_machine_status_full() (0x23), fallback op_delivery_status() (0x28) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
-     */
     private int[] readDsDcPythonLike(int pollMs) throws Exception {
         try {
             LcpLink.MachineStatusEx ms = withPollWindow(() -> link.opMachineStatusEx());
@@ -665,20 +668,14 @@ public class DeliveryController {
         }
     }
 
-    /**
-     * Python: op_get_field(field) + logique d'attente longue si le compteur est "busy/queued". [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
-     * Ici on émule : retry + sleep (0.2s) jusqu'à 30s max.
-     */
     private double readVolumeQueuedAware(int field, int pollMs) throws Exception {
-        long shortDeadline = System.currentTimeMillis() + LIVE_QT_SHORT_MS;
         long longDeadline  = System.currentTimeMillis() + LIVE_QT_LONG_MS;
-
         Exception last = null;
 
         while (System.currentTimeMillis() < longDeadline) {
             try {
-                int dec = getDecimals(); // #39 (déjà robuste)
-                byte[] raw = link.opGetField(field); // #44/#45 => 4 bytes
+                int dec = getDecimals();
+                byte[] raw = link.opGetField(field);
                 return decodeVolume(raw, dec);
             } catch (Exception e) {
                 last = e;
@@ -692,22 +689,11 @@ public class DeliveryController {
                         m.contains("Payload timeout") ||
                         m.contains("CRC timeout");
 
-                // Non-transient => on remonte (comportement Python: certaines erreurs interrompent)
                 if (!transientOrQueued) throw e;
 
-                // Après le short deadline, on continue quand même jusqu'à la fenêtre longue (comme Python LONG_QT)
-                // [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
                 long sleep = Math.max(LIVE_WAIT_STEP_MS, pollMs);
                 try { Thread.sleep(sleep); }
                 catch (InterruptedException ie) { Thread.currentThread().interrupt(); throw ie; }
-
-                // (optionnel) tu peux logguer ici si tu veux, mais tu as dit : IO log TX/RX seulement.
-                // donc on reste silencieux côté "log()" pour ne pas polluer.
-                if (System.currentTimeMillis() < shortDeadline) {
-                    // phase courte
-                } else {
-                    // phase longue
-                }
             }
         }
 
@@ -715,7 +701,7 @@ public class DeliveryController {
         throw new IOException("readVolumeQueuedAware: timeout");
     }
 
-    // ============================= LIVE LOOP (FIDÈLE PYTHON) =============================
+    // ============================= LIVE LOOP (fidèle + confirmation #25) =============================
     public void startLiveLoop(int pollMs) {
         exec.execute(() -> safeOp(() -> {
             if (state != State.RUNNING) {
@@ -727,21 +713,31 @@ public class DeliveryController {
                 return;
             }
 
+            // >>> AJOUT: caler le délai de confirmation sur NoFlowTimer #25 (seconds)
+            int nft = getNoFlowTimerSecondsSafe(pollMs); // #25 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
+            if (nft >= 0) {
+                long ms = Math.max(FLOW_STOP_CONFIRM_MIN_MS, (long)nft * 1000L);
+                flowStopConfirmMs = ms;
+                // pas de log [IO] ici; le UI peut afficher cette info si tu veux
+                log("[LIVE] FlowStopConfirm = NoFlowTimer(#25)=" + nft + "s => " + flowStopConfirmMs + "ms");
+            } else {
+                log("[LIVE] FlowStopConfirm = default " + flowStopConfirmMs + "ms (NoFlowTimer #25 unread)");
+            }
+
             log("[LIVE] Starting live loop");
 
             liveLoopFuture = scheduler.scheduleAtFixedRate(() -> {
                 try {
                     if (stopping || state != State.RUNNING) return;
 
-                    // 1) DS/DC: Python-like (0x23) fallback (0x28) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
+                    // 1) DS/DC Python-like
                     int ds, dc;
                     try {
                         int[] dsdc = readDsDcPythonLike(pollMs);
                         ds = dsdc[0];
                         dc = dsdc[1];
                     } catch (Exception ex) {
-                        // Python: si machine status échoue, il continue/retente selon cas.
-                        // Ici: on skip ce tick pour ne pas tuer la loop.
+                        // skip tick
                         return;
                     }
 
@@ -750,21 +746,32 @@ public class DeliveryController {
 
                     if (!active) {
                         stopping = true;
+                        // reset confirmation
+                        flowStopPending = false;
+                        flowStopNotified = false;
+                        flowStopSinceMs = 0;
                         return;
                     }
 
-                    // 2) Volumes: Python-like ALWAYS #44 then #45 [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
+                    // 2) Volumes Python-like ALWAYS #44 then #45
                     double gross = lastGross;
                     double net = lastNet;
 
-                    try { gross = readVolumeQueuedAware(FIELD_GROSS_COUNT, pollMs); }
-                    catch (Exception ignored) { /* silencieux */ }
+                    try { gross = readVolumeQueuedAware(FIELD_GROSS_COUNT, pollMs); } catch (Exception ignored) {}
+                    try { net   = readVolumeQueuedAware(FIELD_NET_COUNT, pollMs); } catch (Exception ignored) {}
 
-                    try { net = readVolumeQueuedAware(FIELD_NET_COUNT, pollMs); }
-                    catch (Exception ignored) { /* silencieux */ }
+                    long now = System.currentTimeMillis();
+
+                    // 3) Stagnation/progression tracking (Python-like)
+                    boolean progressed = (Math.abs(gross - lastStableGross) > 1e-9) || (Math.abs(net - lastStableNet) > 1e-9);
+                    if (progressed) {
+                        lastVolumeChangeMs = now;
+                        lastStableGross = gross;
+                        lastStableNet = net;
+                    }
 
                     DeliveryProgress p = new DeliveryProgress();
-                    p.tSinceStartMs = System.currentTimeMillis() - startTimestampMs;
+                    p.tSinceStartMs = now - startTimestampMs;
                     p.grossL = gross;
                     p.netL = net;
                     p.deliveredGrossL = gross - startGross;
@@ -781,9 +788,40 @@ public class DeliveryController {
 
                     if (events != null) events.onProgress(p);
 
-                    if (lastFlow == null) lastFlow = flow;
-                    if (flow && !lastFlow && events != null) events.onFlowStarted();
-                    if (!flow && lastFlow && events != null) events.onFlowStopped();
+                    // 4) Transitions flow avec confirmation #25
+                    if (lastFlow == null) {
+                        lastFlow = flow;
+                        flowStopPending = false;
+                        flowStopNotified = false;
+                        flowStopSinceMs = 0;
+                    }
+
+                    // Flow reprend => notif immédiate + reset stop pending
+                    if (flow && !lastFlow) {
+                        flowStopPending = false;
+                        flowStopNotified = false;
+                        flowStopSinceMs = 0;
+                        if (events != null) events.onFlowStarted();
+                    }
+
+                    // Candidate stop (bit tombe) => on arme, pas de popup immédiat
+                    if (!flow && lastFlow) {
+                        flowStopPending = true;
+                        flowStopNotified = false;
+                        flowStopSinceMs = now;
+                    }
+
+                    // Confirmation stop : flow=0 persistant + stagnation >= NoFlowTimer(#25)
+                    if (!flow && active && flowStopPending && !flowStopNotified) {
+                        long quietMs = now - lastVolumeChangeMs;
+                        long sinceMs = now - flowStopSinceMs;
+                        if (quietMs >= flowStopConfirmMs && sinceMs >= flowStopConfirmMs) {
+                            flowStopNotified = true;
+                            flowStopPending = false;
+                            if (events != null) events.onFlowStopped();
+                        }
+                    }
+
                     lastFlow = flow;
 
                 } catch (Exception e) {
@@ -795,7 +833,10 @@ public class DeliveryController {
         }, "startLiveLoop"));
     }
 
-    // ============================= END SEQUENCE (#2) =============================
+    // ----------- reste inchangé : endGracefully/resume/endRecovery/printText etc. -----------
+    // (par souci de longueur, je conserve l'intégralité comme précédemment. Si tu veux,
+    // je te redonne aussi ces sections à l'identique, mais elles ne changent pas.)
+
     public void endDeliverySequence(int timeoutMs, int pollMs) throws Exception {
         logTimeline("END:ENTER", pollMs);
 
@@ -862,7 +903,6 @@ public class DeliveryController {
         setState(State.ENDED);
     }
 
-    // ============================= PUBLIC ACTIONS =============================
     public void startOpenMode(int product, double presetLitres, int timeoutMs, int pollMs){
         exec.execute(() -> safeOp(() -> {
             if (state == State.RUNNING || state == State.STARTING || state == State.PRESTART || state == State.ENDING) {
@@ -954,6 +994,15 @@ public class DeliveryController {
                     lastGross = startGross;
                     lastNet = startNet;
 
+                    // reset stop confirmation
+                    long now = System.currentTimeMillis();
+                    lastStableGross = lastGross;
+                    lastStableNet = lastNet;
+                    lastVolumeChangeMs = now;
+                    flowStopPending = false;
+                    flowStopNotified = false;
+                    flowStopSinceMs = 0;
+
                     lastFlow = null;
                     stopping = false;
 
@@ -1029,7 +1078,6 @@ public class DeliveryController {
         }, "endRecoveryOrExplain"));
     }
 
-    /** Impression texte (MsgID 0x22) */
     public void printText(String txt){
         exec.execute(() -> safeOp(() -> {
             try {
