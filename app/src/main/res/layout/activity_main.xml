@@ -60,18 +60,21 @@
     </LinearLayout>
 
     <!-- ===================== PRODUIT / PRESET ===================== -->
-    <!-- ✅ Produit fourni par DeliveryController (Spinner) -->
+    <!-- ✅ Produit saisi manuellement (prioritaire sur le scan) -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
         android:layout_marginTop="6dp">
 
-        <Spinner
-            android:id="@+id/spnProducts"
+        <EditText
+            android:id="@+id/edtProduct"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_weight="1" />
+            android:layout_weight="1"
+            android:hint="Produit (#)"
+            android:inputType="number"
+            android:singleLine="true" />
 
         <EditText
             android:id="@+id/edtPreset"
@@ -184,16 +187,7 @@
             android:textColor="#222222" />
     </LinearLayout>
 
-    <!-- ===================== LOG SETTINGS ===================== -->
-    <CheckBox
-        android:id="@+id/switchIoLog"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="I/O log"
-        android:checked="true"
-        android:layout_marginTop="8dp" />
-
-    <!-- ===================== LOG WINDOW ===================== -->
+    <!-- ===================== LOG ===================== -->
     <ScrollView
         android:id="@+id/logScroll"
         android:layout_width="match_parent"
