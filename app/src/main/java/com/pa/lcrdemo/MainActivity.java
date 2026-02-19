@@ -156,7 +156,7 @@ public class MainActivity extends AppCompatActivity {
     private void loadProductsFromController() {
         try {
             List<DeliveryController.ProductInfo> products =
-                    ctrl.getActiveProducts();
+                    ctrl.scanProducts();
 
             if (products.isEmpty()) {
                 log("Aucun produit actif trouvé");
