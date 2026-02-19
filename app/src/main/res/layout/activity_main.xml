@@ -61,7 +61,7 @@
     </LinearLayout>
 
     <!-- ===================== PRODUITS (liste 1..16) ===================== -->
-    <!-- ✅ Liste fixe fournie par l'UI; le produit actif est sélectionné par défaut via DeliveryController -->
+    <!-- Le produit actif est sélectionné par défaut par le DeliveryController -->
     <Spinner
         android:id="@+id/spnProducts"
         android:layout_width="match_parent"
@@ -69,7 +69,7 @@
         android:layout_marginTop="6dp" />
 
     <!-- ===================== PRODUIT / PRESET ===================== -->
-    <!-- ✅ Produit manuel = override; priorité sur le spinner si rempli -->
+    <!-- Produit manuel = override; priorité sur le spinner si rempli -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -104,7 +104,7 @@
         android:text="Connect (LCP)"
         android:layout_marginTop="6dp" />
 
-    <!-- ===================== BOUTONS A / B / C + CONTINUER / FINISH ===================== -->
+    <!-- ===================== BOUTONS A / B / C ===================== -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -135,6 +135,7 @@
             android:text="C" />
     </LinearLayout>
 
+    <!-- ===================== CONTINUER / FINISH ===================== -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -157,7 +158,7 @@
             android:text="Terminer" />
     </LinearLayout>
 
-    <!-- ===================== LIVE (ligne unique) ===================== -->
+    <!-- ===================== LIVE ===================== -->
     <TextView
         android:id="@+id/txtLive"
         android:layout_width="match_parent"
@@ -166,7 +167,7 @@
         android:textStyle="bold"
         android:layout_marginTop="8dp" />
 
-    <!-- ===================== AJOUT MINIMAL : NET / GROSS (big digits) ===================== -->
+    <!-- ===================== NET / GROSS ===================== -->
     <LinearLayout
         android:id="@+id/liveQtyPanel"
         android:layout_width="match_parent"
@@ -283,7 +284,7 @@
         android:checked="true"
         android:layout_marginTop="8dp" />
 
-    <!-- ===================== LOG WINDOW (FIXE + SCROLL INTERNE) ===================== -->
+    <!-- ===================== LOG WINDOW ===================== -->
     <ScrollView
         android:id="@+id/logScroll"
         android:layout_width="match_parent"
