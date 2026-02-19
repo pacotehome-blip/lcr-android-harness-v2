@@ -1,52 +1,42 @@
+
 package com.pa.lcr.lcp;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.util.concurrent.*;
 
 import com.pa.lcr.lcp.lifecycle.Cmd0Usage;
-import com.pa.lcr.lcp.lifecycle.DeliveryLifecycle;
 import com.pa.lcr.lcp.lifecycle.DeliveryLifecycleController;
 import com.pa.lcr.lcp.lifecycle.LcpDeliveryState;
 import com.pa.lcr.lcp.util.AndroidLifecycleLogger;
 
 /**
- * DeliveryController
- *
- * ✅ Version finale intégrée :
- *  - API publique complète (compatible MainActivity / UsbReceiver)
- *  - Détection ZOMBIE (ACTIVE_FLOWING + volumes figés)
- *  - Soft recovery (Cmd#1 Pause)
- *  - Sanity-check volumes (anti NET = NetTotal)
- *  - Suspension IO pendant recovery / END / PRINT
- *  - Reprise sans reset des volumes
+ * DeliveryController – FINAL (compilable)
+ * - API publique complète (MainActivity / UsbReceiver)
+ * - ZOMBIE detection + soft recovery (Cmd#1)
+ * - Sanity-check volumes (anti NET=NetTotal)
+ * - IO critical section (recovery / END / PRINT)
+ * - Recovery automatique au connect
+ * - Aucune exception checked ne fuit des Runnables
  */
 public class DeliveryController {
 
-    // ==========================================================
-    // CONSTANTES TERRAIN (FIX)
-    // ==========================================================
+    // ===================== CONSTANTES TERRAIN =====================
     private static final double MAX_VOLUME_JUMP_L = 500.0;
     private static final int POST_RECOVERY_SKIP_SAMPLES = 2;
     private static final long ZOMBIE_STALL_MS = 4000;
     private static final long ZOMBIE_COOLDOWN_MS = 15000;
 
-    // ==========================================================
-    // FIELDS LCR
-    // ==========================================================
+    // ===================== FIELDS LCR =====================
     private static final int FIELD_GROSS_COUNT = 44;
     private static final int FIELD_NET_COUNT   = 45;
     private static final int FIELD_DECIMALS    = 39;
-    private static final int FIELD_NO_FLOW_TIMER = 25;
     private static final int FIELD_TICKET_NUMBER = 23;
     private static final int FIELD_TICKET_REQUIRED = 37;
     private static final int FIELD_CLEAR_SHIFT = 16;
 
     private static final int DC_SHIFT_TICKET_PENDING = 0x0002;
 
-    // ==========================================================
-    // BACKEND
-    // ==========================================================
+    // ===================== BACKEND =====================
     private final LcpLink link;
     private final DeliveryEvents events;
     private final ExecutorService exec;
@@ -55,59 +45,34 @@ public class DeliveryController {
 
     private ScheduledFuture<?> liveLoopFuture;
 
-    // ==========================================================
-    // STATE
-    // ==========================================================
+    // ===================== STATE =====================
     public enum State { IDLE, PRESTART, STARTING, RUNNING, ENDING, ENDED, ERROR }
     private volatile State state = State.IDLE;
-
     private volatile boolean stopping = false;
     private volatile Boolean lastFlow = null;
 
-    // ==========================================================
-    // IO / RECOVERY FLAGS (FIX)
-    // ==========================================================
+    // ===================== IO / RECOVERY =====================
     private volatile boolean ioCriticalSection = false;
     private volatile int skipVolumeSamples = 0;
     private volatile long lastZombieRecoveryMs = 0;
     private volatile boolean baselineLocked = false;
 
-    // ==========================================================
-    // VOLUMES
-    // ==========================================================
+    // ===================== VOLUMES =====================
     private volatile long startTimestampMs = 0;
-
     private volatile double startGross = 0;
     private volatile double startNet   = 0;
-
     private volatile double lastGross = 0;
     private volatile double lastNet   = 0;
-
     private volatile double lastStableGross = 0;
     private volatile double lastStableNet   = 0;
     private volatile long   lastVolumeChangeMs = 0;
-
     private volatile int cachedDecimals = -1;
 
-    // ==========================================================
-    // FLOW STOP CONFIRM
-    // ==========================================================
-    private static final long FLOW_STOP_CONFIRM_MIN_MS = 2000;
-    private volatile long flowStopConfirmMs = 3000;
-
-    private volatile boolean flowStopPending = false;
-    private volatile boolean flowStopNotified = false;
-    private volatile long flowStopSinceMs = 0;
-
-    // ==========================================================
-    // LIFECYCLE GUARD
-    // ==========================================================
+    // ===================== LIFECYCLE GUARD =====================
     private final DeliveryLifecycleController lifecycle =
             new DeliveryLifecycleController(new AndroidLifecycleLogger());
 
-    // ==========================================================
-    // EVENTS
-    // ==========================================================
+    // ===================== EVENTS =====================
     public interface DeliveryEvents {
         void onStateChanged(State s);
         void onFlowStarted();
@@ -132,38 +97,22 @@ public class DeliveryController {
         public LcpDeliveryState deliveryState;
     }
 
-    // ==========================================================
-    // CONSTRUCTOR
-    // ==========================================================
+    // ===================== CONSTRUCTOR =====================
     public DeliveryController(LcpLink link, DeliveryEvents events, ExecutorService exec) {
         this.link = link;
         this.events = events;
         this.exec = exec;
     }
 
-    // ==========================================================
-    // LOG / STATE
-    // ==========================================================
-    private void log(String s) {
-        if (events != null) events.onLog(s);
-    }
+    // ===================== LOG / STATE =====================
+    private void log(String s) { if (events != null) events.onLog(s); }
 
     private void setState(State s) {
         this.state = s;
         if (events != null) events.onStateChanged(s);
     }
 
-    private void safeOp(Runnable r, String tag) {
-        try { r.run(); }
-        catch (Exception e) {
-            setState(State.ERROR);
-            if (events != null) events.onError(tag, e);
-        }
-    }
-
-    // ==========================================================
-    // DELIVERY STATE (UI)
-    // ==========================================================
+    // ===================== DELIVERY STATE (UI) =====================
     private LcpDeliveryState computeDeliveryStateForUi(int dc) {
         boolean ticketPending  = (dc & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
         boolean shiftPending   = (dc & DC_SHIFT_TICKET_PENDING) != 0;
@@ -179,21 +128,22 @@ public class DeliveryController {
         return LcpDeliveryState.IDLE;
     }
 
-    // ==========================================================
-    // SANITY CHECK (ANTI GLITCH)
-    // ==========================================================
+    // ===================== SANITY CHECK =====================
     private boolean isVolumePlausible(double v, double last) {
         if (v < 0) return false;
         return Math.abs(v - last) <= MAX_VOLUME_JUMP_L;
     }
 
-    // ==========================================================
-    // DECIMALS / VOLUME
-    // ==========================================================
-    private int getDecimals() throws Exception {
+    // ===================== SAFE IO HELPERS =====================
+    private int getDecimalsSafe() {
         if (cachedDecimals >= 0) return cachedDecimals;
-        byte[] d = link.opGetField(FIELD_DECIMALS);
-        cachedDecimals = (d != null && d.length > 0) ? (d[0] & 0xFF) : 0;
+        try {
+            byte[] d = link.opGetField(FIELD_DECIMALS);
+            cachedDecimals = (d != null && d.length > 0) ? (d[0] & 0xFF) : 0;
+        } catch (IOException e) {
+            log("[IO] getDecimals failed: " + e.getMessage());
+            cachedDecimals = 0;
+        }
         return cachedDecimals;
     }
 
@@ -202,22 +152,30 @@ public class DeliveryController {
         int v = ((b4[0] & 0xFF) << 24)
               | ((b4[1] & 0xFF) << 16)
               | ((b4[2] & 0xFF) << 8)
-              | (b4[3] & 0xFF);
+              |  (b4[3] & 0xFF);
         int scale = (decimals == 1) ? 10 : (decimals == 2 ? 1 : 100);
         return v / (double) scale;
     }
 
-    private double readGrossLitres() throws Exception {
-        return decodeVolume(link.opGetField(FIELD_GROSS_COUNT), getDecimals());
+    private double safeReadGross() {
+        try {
+            return decodeVolume(link.opGetField(FIELD_GROSS_COUNT), getDecimalsSafe());
+        } catch (IOException e) {
+            log("[IO] readGross failed: " + e.getMessage());
+            return lastGross;
+        }
     }
 
-    private double readNetLitres() throws Exception {
-        return decodeVolume(link.opGetField(FIELD_NET_COUNT), getDecimals());
+    private double safeReadNet() {
+        try {
+            return decodeVolume(link.opGetField(FIELD_NET_COUNT), getDecimalsSafe());
+        } catch (IOException e) {
+            log("[IO] readNet failed: " + e.getMessage());
+            return lastNet;
+        }
     }
 
-    // ==========================================================
-    // ZOMBIE RECOVERY
-    // ==========================================================
+    // ===================== ZOMBIE RECOVERY =====================
     private void softRecoverZombie(int pollMs, int ds, int dc) {
         long now = System.currentTimeMillis();
         if (now - lastZombieRecoveryMs < ZOMBIE_COOLDOWN_MS) return;
@@ -228,133 +186,130 @@ public class DeliveryController {
         baselineLocked = true;
 
         try {
-            log("[ZOMBIE] Soft recovery → PauseDelivery");
-            link.opIssueCommand(0x01); // Cmd#1
-            lifecycle.onPauseDetected();
-            skipVolumeSamples = POST_RECOVERY_SKIP_SAMPLES;
-        } catch (Exception e) {
-            log("[ZOMBIE] Recovery failed: " + e.getMessage());
+            log("[ZOMBIE] Soft recovery → Cmd#1 (Pause)");
+            try {
+                link.opIssueCommand(0x01);
+                lifecycle.onPauseDetected();
+                skipVolumeSamples = POST_RECOVERY_SKIP_SAMPLES;
+            } catch (IOException e) {
+                log("[ZOMBIE] Pause failed: " + e.getMessage());
+            }
         } finally {
             ioCriticalSection = false;
         }
     }
 
-    // ==========================================================
-    // LIVE LOOP
-    // ==========================================================
+    // ===================== LIVE LOOP =====================
     public void startLiveLoop(int pollMs) {
-        exec.execute(() -> safeOp(() -> {
+        exec.execute(() -> {
+            try {
+                if (state != State.RUNNING) return;
+                if (liveLoopFuture != null && !liveLoopFuture.isCancelled()) return;
 
-            if (state != State.RUNNING) return;
-            if (liveLoopFuture != null && !liveLoopFuture.isCancelled()) return;
+                liveLoopFuture = scheduler.scheduleAtFixedRate(() -> {
+                    try {
+                        if (stopping || state != State.RUNNING) return;
 
-            liveLoopFuture = scheduler.scheduleAtFixedRate(() -> {
-                try {
-                    if (stopping || state != State.RUNNING) return;
-
-                    int[] dsdc = link.opDeliveryStatus();
-                    int ds = dsdc[0];
-                    int dc = dsdc[1];
-
-                    boolean deliveryActive =
-                            (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
-                    boolean flowActive =
-                            (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
-
-                    if (!deliveryActive) return;
-
-                    double gross = lastGross;
-                    double net   = lastNet;
-
-                    if (!ioCriticalSection && skipVolumeSamples == 0) {
-                        double g = readGrossLitres();
-                        double n = readNetLitres();
-
-                        if (isVolumePlausible(g, lastGross) &&
-                            isVolumePlausible(n, lastNet)) {
-                            gross = g;
-                            net = n;
-                        } else {
-                            log("[SANITY] Reject sample g=" + g + " n=" + n);
+                        int[] dsdc;
+                        try {
+                            dsdc = link.opDeliveryStatus();
+                        } catch (IOException e) {
+                            log("[IO] opDeliveryStatus failed: " + e.getMessage());
+                            return;
                         }
-                    } else if (skipVolumeSamples > 0) {
-                        skipVolumeSamples--;
+
+                        int ds = dsdc[0];
+                        int dc = dsdc[1];
+                        boolean deliveryActive = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
+                        boolean flowActive     = (dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
+
+                        if (!deliveryActive) return;
+
+                        double gross = lastGross;
+                        double net   = lastNet;
+
+                        if (!ioCriticalSection && skipVolumeSamples == 0) {
+                            double g = safeReadGross();
+                            double n = safeReadNet();
+                            if (isVolumePlausible(g, lastGross) && isVolumePlausible(n, lastNet)) {
+                                gross = g; net = n;
+                            } else {
+                                log("[SANITY] Reject sample g=" + g + " n=" + n);
+                            }
+                        } else if (skipVolumeSamples > 0) {
+                            skipVolumeSamples--;
+                        }
+
+                        long now = System.currentTimeMillis();
+                        if (Math.abs(gross - lastStableGross) > 1e-9 ||
+                            Math.abs(net   - lastStableNet)   > 1e-9) {
+                            lastStableGross = gross;
+                            lastStableNet   = net;
+                            lastVolumeChangeMs = now;
+                        }
+
+                        LcpDeliveryState uiState = computeDeliveryStateForUi(dc);
+                        if (uiState == LcpDeliveryState.ACTIVE_FLOWING &&
+                            now - lastVolumeChangeMs >= ZOMBIE_STALL_MS) {
+                            softRecoverZombie(pollMs, ds, dc);
+                        }
+
+                        DeliveryProgress p = new DeliveryProgress();
+                        p.tSinceStartMs = now - startTimestampMs;
+                        p.grossL = gross;
+                        p.netL   = net;
+                        p.deliveredGrossL = gross - startGross;
+                        p.deliveredNetL   = net   - startNet;
+                        p.flowActive = flowActive;
+                        p.ds = ds;
+                        p.dc = dc;
+                        p.deliveryState = uiState;
+
+                        lastGross = gross;
+                        lastNet   = net;
+
+                        if (events != null) events.onProgress(p);
+
+                        if (lastFlow == null) lastFlow = flowActive;
+                        if (flowActive && !lastFlow && events != null) events.onFlowStarted();
+                        if (!flowActive && lastFlow && events != null) events.onFlowStopped();
+                        lastFlow = flowActive;
+
+                    } catch (Exception e) {
+                        log("[LIVE] Exception: " + e.getMessage());
+                        setState(State.ERROR);
                     }
+                }, 0, pollMs, TimeUnit.MILLISECONDS);
 
-                    long now = System.currentTimeMillis();
-                    boolean progressed =
-                            Math.abs(gross - lastStableGross) > 1e-9 ||
-                            Math.abs(net   - lastStableNet)   > 1e-9;
-
-                    if (progressed) {
-                        lastStableGross = gross;
-                        lastStableNet   = net;
-                        lastVolumeChangeMs = now;
-                    }
-
-                    LcpDeliveryState uiState =
-                            computeDeliveryStateForUi(dc);
-
-                    if (uiState == LcpDeliveryState.ACTIVE_FLOWING &&
-                        now - lastVolumeChangeMs >= ZOMBIE_STALL_MS) {
-                        softRecoverZombie(pollMs, ds, dc);
-                    }
-
-                    DeliveryProgress p = new DeliveryProgress();
-                    p.tSinceStartMs = now - startTimestampMs;
-                    p.grossL = gross;
-                    p.netL = net;
-                    p.deliveredGrossL = gross - startGross;
-                    p.deliveredNetL   = net - startNet;
-                    p.flowActive = flowActive;
-                    p.ds = ds;
-                    p.dc = dc;
-                    p.deliveryState = uiState;
-
-                    lastGross = gross;
-                    lastNet   = net;
-
-                    if (events != null) events.onProgress(p);
-
-                    if (lastFlow == null) lastFlow = flowActive;
-
-                    if (flowActive && !lastFlow && events != null)
-                        events.onFlowStarted();
-
-                    if (!flowActive && lastFlow && events != null)
-                        events.onFlowStopped();
-
-                    lastFlow = flowActive;
-
-                } catch (Exception e) {
-                    setState(State.ERROR);
-                    if (events != null) events.onError("liveLoop", e);
-                }
-            }, 0, pollMs, TimeUnit.MILLISECONDS);
-
-        }, "startLiveLoop"));
+            } catch (Exception e) {
+                log("[LIVE] Start failed: " + e.getMessage());
+                setState(State.ERROR);
+            }
+        });
     }
 
-    // ==========================================================
-    // ================= API PUBLIQUE ===========================
-    // ==========================================================
+    // ===================== API PUBLIQUE =====================
 
     public void startOpenMode(int product, double preset, int timeoutMs, int pollMs) {
-        exec.execute(() -> safeOp(() -> {
-            startTimestampMs = System.currentTimeMillis();
-            setState(State.STARTING);
-            startGross = readGrossLitres();
-            startNet   = readNetLitres();
-            lastGross = startGross;
-            lastNet   = startNet;
-            lastStableGross = lastGross;
-            lastStableNet   = lastNet;
-            lastVolumeChangeMs = System.currentTimeMillis();
-            baselineLocked = false;
-            stopping = false;
-            setState(State.RUNNING);
-            startLiveLoop(pollMs);
-        }, "startOpenMode"));
+        exec.execute(() -> {
+            try {
+                startTimestampMs = System.currentTimeMillis();
+                startGross = safeReadGross();
+                startNet   = safeReadNet();
+                lastGross = startGross;
+                lastNet   = startNet;
+                lastStableGross = lastGross;
+                lastStableNet   = lastNet;
+                lastVolumeChangeMs = System.currentTimeMillis();
+                baselineLocked = false;
+                stopping = false;
+                setState(State.RUNNING);
+                startLiveLoop(pollMs);
+            } catch (Exception e) {
+                log("[START] Exception: " + e.getMessage());
+                setState(State.ERROR);
+            }
+        });
     }
 
     public void startOpenMode(int product, int timeoutMs, int pollMs) {
@@ -362,129 +317,171 @@ public class DeliveryController {
     }
 
     public void resumeDelivery(int pollMs) {
-        exec.execute(() -> safeOp(() -> {
-            if (!lifecycle.allowCmd0(Cmd0Usage.RESUME)) return;
-            if (!lifecycle.allowResume()) return;
+        exec.execute(() -> {
+            try {
+                if (!lifecycle.allowCmd0(Cmd0Usage.RESUME)) return;
+                if (!lifecycle.allowResume()) return;
 
-            link.opIssueCommand(0x00); // Cmd#0
+                try {
+                    link.opIssueCommand(0x00);
+                } catch (IOException e) {
+                    log("[RESUME] Cmd#0 failed: " + e.getMessage());
+                    return;
+                }
 
-            if (!baselineLocked) {
-                startGross = readGrossLitres();
-                startNet   = readNetLitres();
+                if (!baselineLocked) {
+                    startGross = safeReadGross();
+                    startNet   = safeReadNet();
+                }
+
+                lastGross = startGross;
+                lastNet   = startNet;
+                lastStableGross = lastGross;
+                lastStableNet   = lastNet;
+                lastVolumeChangeMs = System.currentTimeMillis();
+                stopping = false;
+                setState(State.RUNNING);
+                startLiveLoop(pollMs);
+
+            } catch (Exception e) {
+                log("[RESUME] Exception: " + e.getMessage());
+                setState(State.ERROR);
             }
-
-            lastGross = startGross;
-            lastNet   = startNet;
-            lastStableGross = lastGross;
-            lastStableNet   = lastNet;
-            lastVolumeChangeMs = System.currentTimeMillis();
-
-            stopping = false;
-            setState(State.RUNNING);
-            startLiveLoop(pollMs);
-        }, "resumeDelivery"));
+        });
     }
 
     public void endGracefully(int timeoutMs, int pollMs) {
-        exec.execute(() -> safeOp(() -> {
+        exec.execute(() -> {
             ioCriticalSection = true;
             try {
                 lifecycle.allowEnd();
                 setState(State.ENDING);
                 stopping = true;
                 if (liveLoopFuture != null) liveLoopFuture.cancel(true);
-                link.opIssueCommand(0x02); // END
+                try {
+                    link.opIssueCommand(0x02);
+                } catch (IOException e) {
+                    log("[END] Cmd#2 failed: " + e.getMessage());
+                }
                 baselineLocked = false;
                 setState(State.ENDED);
             } finally {
                 ioCriticalSection = false;
                 skipVolumeSamples = POST_RECOVERY_SKIP_SAMPLES;
             }
-        }, "endGracefully"));
+        });
     }
 
     public void pingStatus(int pollMs) {
-        exec.execute(() -> safeOp(() -> {
-            int[] dsdc = link.opDeliveryStatus();
-            log("PING ds=" + dsdc[0] + " dc=" + dsdc[1]);
-        }, "pingStatus"));
+        exec.execute(() -> {
+            try {
+                int[] dsdc = link.opDeliveryStatus();
+                log("PING ds=" + dsdc[0] + " dc=" + dsdc[1]);
+            } catch (IOException e) {
+                log("[PING] failed: " + e.getMessage());
+            }
+        });
     }
 
     public void refreshTicketInfo(int pollMs) {
-        exec.execute(() -> safeOp(() -> {
-            int tr = decodeU8(link.opGetField(FIELD_TICKET_REQUIRED));
-            int tn = decodeS32(link.opGetField(FIELD_TICKET_NUMBER));
-            if (events != null) {
-                events.onTicketRequired(tr);
-                events.onTicketNumber(tn);
+        exec.execute(() -> {
+            try {
+                int tr = decodeU8(link.opGetField(FIELD_TICKET_REQUIRED));
+                int tn = decodeS32(link.opGetField(FIELD_TICKET_NUMBER));
+                if (events != null) {
+                    events.onTicketRequired(tr);
+                    events.onTicketNumber(tn);
+                }
+            } catch (IOException e) {
+                log("[TICKET] refresh failed: " + e.getMessage());
             }
-        }, "refreshTicketInfo"));
+        });
     }
 
     public void refreshPrinterStatus(int pollMs) {
-        exec.execute(() -> safeOp(() -> {
-            LcpLink.MachineStatusEx ms = link.opMachineStatusEx();
-            boolean pending = (ms.delCode & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
-            if (events != null) events.onPrinterStatus(ms, pending);
-        }, "refreshPrinterStatus"));
+        exec.execute(() -> {
+            try {
+                LcpLink.MachineStatusEx ms = link.opMachineStatusEx();
+                boolean pending = (ms.delCode & LcpLink.LCRSc_DEL_TICKET_PENDING) != 0;
+                if (events != null) events.onPrinterStatus(ms, pending);
+            } catch (IOException e) {
+                log("[PRN] refresh failed: " + e.getMessage());
+            }
+        });
     }
 
     public void setTicketRequired(int mode, int pollMs) {
-        exec.execute(() -> safeOp(() -> {
-            link.opSetField(FIELD_TICKET_REQUIRED, new byte[]{ (byte) mode });
-        }, "setTicketRequired"));
+        exec.execute(() -> {
+            try {
+                link.opSetField(FIELD_TICKET_REQUIRED, new byte[]{ (byte) mode });
+            } catch (IOException e) {
+                log("[TICKET] set failed: " + e.getMessage());
+            }
+        });
     }
 
     public void ensureDefaultTicketRequiredIs1(int pollMs) {
-        exec.execute(() -> safeOp(() -> {
-            int tr = decodeU8(link.opGetField(FIELD_TICKET_REQUIRED));
-            if (tr != 1) {
-                link.opSetField(FIELD_TICKET_REQUIRED, new byte[]{ 1 });
+        exec.execute(() -> {
+            try {
+                int tr = decodeU8(link.opGetField(FIELD_TICKET_REQUIRED));
+                if (tr != 1) {
+                    link.opSetField(FIELD_TICKET_REQUIRED, new byte[]{ 1 });
+                }
+            } catch (IOException e) {
+                log("[TICKET] ensure default failed: " + e.getMessage());
             }
-        }, "ensureDefaultTicketRequiredIs1"));
+        });
     }
 
     public void clearShiftNow(int pollMs) {
-        exec.execute(() -> safeOp(() -> {
-            link.opSetField(FIELD_CLEAR_SHIFT, new byte[]{ 0 });
-        }, "clearShiftNow"));
+        exec.execute(() -> {
+            try {
+                link.opSetField(FIELD_CLEAR_SHIFT, new byte[]{ 0 });
+            } catch (IOException e) {
+                log("[SHIFT] clear failed: " + e.getMessage());
+            }
+        });
     }
 
     public void printPendingTicket(int pollMs, int timeoutMs) {
-        exec.execute(() -> safeOp(() -> {
+        exec.execute(() -> {
             ioCriticalSection = true;
             try {
-                link.opIssueCommand(0x06); // PRINT
+                link.opIssueCommand(0x06);
+            } catch (IOException e) {
+                log("[PRINT] Cmd#6 failed: " + e.getMessage());
             } finally {
                 ioCriticalSection = false;
                 skipVolumeSamples = POST_RECOVERY_SKIP_SAMPLES;
             }
-        }, "printPendingTicket"));
+        });
     }
 
     public void recoverActiveDelivery(int pollMs) {
-        exec.execute(() -> safeOp(() -> {
-            int[] dsdc = link.opDeliveryStatus();
-            int dc = dsdc[1];
-            if ((dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0) {
-                baselineLocked = true;
-                startTimestampMs = System.currentTimeMillis();
-                startGross = readGrossLitres();
-                startNet   = readNetLitres();
-                lastGross = startGross;
-                lastNet   = startNet;
-                lastStableGross = lastGross;
-                lastStableNet   = lastNet;
-                lastVolumeChangeMs = System.currentTimeMillis();
-                setState(State.RUNNING);
-                startLiveLoop(pollMs);
+        exec.execute(() -> {
+            try {
+                int[] dsdc = link.opDeliveryStatus();
+                int dc = dsdc[1];
+                if ((dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0) {
+                    baselineLocked = true;
+                    startTimestampMs = System.currentTimeMillis();
+                    startGross = safeReadGross();
+                    startNet   = safeReadNet();
+                    lastGross = startGross;
+                    lastNet   = startNet;
+                    lastStableGross = lastGross;
+                    lastStableNet   = lastNet;
+                    lastVolumeChangeMs = System.currentTimeMillis();
+                    setState(State.RUNNING);
+                    startLiveLoop(pollMs);
+                }
+            } catch (IOException e) {
+                log("[RECOVER] failed: " + e.getMessage());
             }
-        }, "recoverActiveDelivery"));
+        });
     }
 
-    // ==========================================================
-    // HELPERS
-    // ==========================================================
+    // ===================== HELPERS =====================
     private static int decodeU8(byte[] b) {
         return (b != null && b.length > 0) ? (b[0] & 0xFF) : 0;
     }
