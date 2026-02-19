@@ -7,6 +7,7 @@ import android.app.PendingIntent;
 import android.content.*;
 import android.hardware.usb.*;
 import android.os.*;
+import android.view.View;          // ✅ FIX: manquait (View.FOCUS_DOWN / FOCUS_UP)
 import android.widget.*;
 
 import com.hoho.android.usbserial.driver.*;
@@ -132,7 +133,7 @@ public class MainActivity extends AppCompatActivity {
 
         link = new LcpLink(port, to, from, true);
 
-        // Active les dumps hex si tu veux: tu peux aussi le piloter via UI
+        // Tu peux laisser ON pour diagnostiquer le payload
         LcpLink.DUMP_TX = true;
         LcpLink.DUMP_RX = true;
 
@@ -141,8 +142,6 @@ public class MainActivity extends AppCompatActivity {
         log("LCP prêt — connecté au LCRNode " + fmtNode(to));
 
         ctrl = new DeliveryController(link, new DeliveryEventsImpl(), Executors.newSingleThreadExecutor());
-
-        // produit par défaut = product-get-active
         ctrl.refreshProductsUi();
     }
 
@@ -306,7 +305,7 @@ public class MainActivity extends AppCompatActivity {
         uiHandler.post(() -> {
             logBuf.append(s).append('\n');
             txtLog.setText(logBuf.toString());
-            logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
+            logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN)); // ✅ View import requis
         });
     }
 
@@ -314,7 +313,7 @@ public class MainActivity extends AppCompatActivity {
         uiHandler.post(() -> {
             logBuf.setLength(0);
             txtLog.setText("");
-            logScroll.fullScroll(View.FOCUS_UP);
+            logScroll.fullScroll(View.FOCUS_UP); // ✅ View import requis
         });
     }
 
