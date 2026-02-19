@@ -193,3 +193,137 @@
             android:textStyle="bold"
             android:textSize="18sp"
             android:textColor="#222222" />
+    </LinearLayout>
+
+    <!-- ===================== TICKET / PRINTER ===================== -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:layout_marginTop="8dp">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Ticket / Impression"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/txtTicketNumber"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="-" />
+
+        <Spinner
+            android:id="@+id/spnTicketRequired"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="6dp">
+
+            <Button
+                android:id="@+id/btnRefreshTicket"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Refresh Ticket" />
+
+            <Button
+                android:id="@+id/btnClearShift"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="8dp"
+                android:text="Clear Shift" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/txtPrinterStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Imprimante: (non connecté / non lu)"
+            android:layout_marginTop="6dp"
+            android:background="#EEEEEE"
+            android:padding="6dp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="6dp">
+
+            <Button
+                android:id="@+id/btnRefreshPrinter"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Refresh Printer" />
+
+            <Button
+                android:id="@+id/btnPrintPending"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="8dp"
+                android:text="Print Pending" />
+        </LinearLayout>
+
+    </LinearLayout>
+
+    <!-- ===================== LOG SETTINGS ===================== -->
+    <CheckBox
+        android:id="@+id/switchIoLog"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="I/O log"
+        android:checked="true"
+        android:layout_marginTop="8dp" />
+
+    <!-- ===================== LOG WINDOW (FIXE + SCROLL INTERNE) ===================== -->
+    <ScrollView
+        android:id="@+id/logScroll"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:fillViewport="true"
+        android:layout_marginTop="6dp"
+        android:background="#111111">
+
+        <TextView
+            android:id="@+id/txtLog"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:typeface="monospace"
+            android:textIsSelectable="true"
+            android:textSize="12sp"
+            android:textColor="#00FF00"
+            android:padding="6dp" />
+    </ScrollView>
+
+    <!-- ===================== LOG ACTIONS ===================== -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="end"
+        android:layout_marginTop="6dp">
+
+        <Button
+            android:id="@+id/btnClearLog"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Clear log" />
+
+        <Button
+            android:id="@+id/btnCopyLog"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="Copy log" />
+    </LinearLayout>
+
+</LinearLayout>
