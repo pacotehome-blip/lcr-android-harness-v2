@@ -22,12 +22,11 @@ import java.util.concurrent.Executors;
 public class MainActivity extends AppCompatActivity {
 
     // ================= UI =================
-    private EditText edtTo, edtFrom, edtProduct, edtPreset;
-    private Button btnConnect, btnA, btnB, btnC, btnContinue, btnFinish;
-    private Button btnScanUsb, btnPingUsb, btnClearLog, btnCopyLog;
+    private EditText edtTo, edtFrom, edtPreset;
+    private Button btnConnect, btnC, btnScanUsb, btnPingUsb, btnClearLog, btnCopyLog;
     private TextView txtLog, txtLive, txtQtyNet, txtQtyGross;
     private ScrollView logScroll;
-    private Spinner spnUsbDevices;
+    private Spinner spnUsbDevices, spnProducts;
 
     // ================= USB / LCP =================
     private UsbManager usbManager;
@@ -145,9 +144,41 @@ public class MainActivity extends AppCompatActivity {
             btnConnect.setEnabled(false);
             log("LCP prêt — connecté au LCRNode " + fmtNode(to));
 
+            // ===== Charger les produits depuis le Controller (maître) =====
+            loadProductsFromController();
+
         } catch (Exception e) {
             log("Init LCP failed: " + e.getMessage());
             link = null;
+        }
+    }
+
+    private void loadProductsFromController() {
+        try {
+            List<DeliveryController.ProductInfo> products =
+                    ctrl.getActiveProducts();
+
+            if (products.isEmpty()) {
+                log("Aucun produit actif trouvé");
+                spnProducts.setAdapter(null);
+                return;
+            }
+
+            ArrayAdapter<DeliveryController.ProductInfo> adapter =
+                    new ArrayAdapter<>(
+                            this,
+                            android.R.layout.simple_spinner_item,
+                            products
+                    );
+            adapter.setDropDownViewResource(
+                    android.R.layout.simple_spinner_dropdown_item
+            );
+            spnProducts.setAdapter(adapter);
+
+            log("Produits chargés: " + products.size());
+
+        } catch (Exception e) {
+            log("ERR lecture produits: " + e.getMessage());
         }
     }
 
@@ -171,6 +202,7 @@ public class MainActivity extends AppCompatActivity {
             currentDevice = null;
 
             btnConnect.setEnabled(true);
+            spnProducts.setAdapter(null);
         });
     }
 
@@ -206,12 +238,10 @@ public class MainActivity extends AppCompatActivity {
     private void bindUI() {
         edtTo = findViewById(R.id.edtTo);
         edtFrom = findViewById(R.id.edtFrom);
-        edtProduct = findViewById(R.id.edtProduct);
         edtPreset = findViewById(R.id.edtPreset);
 
         btnConnect = findViewById(R.id.btnConnect);
         btnC = findViewById(R.id.btnC);
-
         btnScanUsb = findViewById(R.id.btnScanUsb);
         btnPingUsb = findViewById(R.id.btnPingUsb);
         btnClearLog = findViewById(R.id.btnClearLog);
@@ -224,12 +254,12 @@ public class MainActivity extends AppCompatActivity {
         txtQtyGross = findViewById(R.id.txtQtyGross);
 
         spnUsbDevices = findViewById(R.id.spnUsbDevices);
+        spnProducts = findViewById(R.id.spnProducts);
     }
 
     private void applyDefaults() {
         edtTo.setText("0xFA");
         edtFrom.setText("0xFF");
-        edtProduct.setText("1");
         edtPreset.setText("50.0");
     }
 
@@ -239,9 +269,12 @@ public class MainActivity extends AppCompatActivity {
         btnConnect.setOnClickListener(v -> initLcp());
 
         btnC.setOnClickListener(v -> {
-            if (ctrl != null) {
+            if (ctrl != null && spnProducts.getSelectedItem() != null) {
+                DeliveryController.ProductInfo p =
+                        (DeliveryController.ProductInfo) spnProducts.getSelectedItem();
+
                 ctrl.startOpenMode(
-                        readInt(edtProduct, 1),
+                        p.number,
                         readDouble(edtPreset, 0),
                         20_000,
                         POLL_MS
@@ -332,11 +365,6 @@ public class MainActivity extends AppCompatActivity {
             if (s.startsWith("0x")) return Integer.parseInt(s.substring(2), 16);
             return Integer.parseInt(s, 16);
         } catch (Exception ex) { return def; }
-    }
-
-    private static int readInt(EditText e, int def) {
-        try { return Integer.parseInt(e.getText().toString()); }
-        catch (Exception ex) { return def; }
     }
 
     private static double readDouble(EditText e, double def) {
