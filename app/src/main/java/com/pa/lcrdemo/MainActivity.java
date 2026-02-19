@@ -132,7 +132,13 @@ public class MainActivity extends AppCompatActivity {
         try {
             int to = parseHex(edtTo, 0xFA);
             int from = parseHex(edtFrom, 0xFF);
-            log(String.format("Init LCP → to=0x%02X, from=0x%02X", to, from));
+
+            // ✅ LOG HUMAIN
+            log(String.format(
+                    "Init LCP → LCRNode=%s, Host=%s",
+                    fmtNode(to),
+                    fmtNode(from)
+            ));
 
             link = new LcpLink(port, to, from, true);
             LcpLink.setLogger(s -> log("[IO] " + s));
@@ -147,7 +153,12 @@ public class MainActivity extends AppCompatActivity {
             disableUsbUi();
             enableLcpUi();
             btnConnect.setEnabled(false);
-            log("LCP prêt");
+
+            // ✅ LOG HUMAIN
+            log(String.format(
+                    "LCP prêt — connecté au LCRNode %s",
+                    fmtNode(to)
+            ));
 
             ctrl.recoverActiveDelivery(POLL_MS);
 
@@ -225,9 +236,12 @@ public class MainActivity extends AppCompatActivity {
 
         btnC.setOnClickListener(v -> {
             if (ctrl != null)
-                ctrl.startOpenMode(readInt(edtProduct, 1),
+                ctrl.startOpenMode(
+                        readInt(edtProduct, 1),
                         readDouble(edtPreset, 0),
-                        20000, POLL_MS);
+                        20000,
+                        POLL_MS
+                );
         });
 
         btnContinue.setOnClickListener(v -> { if (ctrl != null) ctrl.resumeDelivery(POLL_MS); });
@@ -347,9 +361,12 @@ public class MainActivity extends AppCompatActivity {
 
         try {
             p.open(conn);
-            p.setParameters(19200, 8,
+            p.setParameters(
+                    19200,
+                    8,
                     UsbSerialPort.STOPBITS_1,
-                    UsbSerialPort.PARITY_NONE);
+                    UsbSerialPort.PARITY_NONE
+            );
             p.setDTR(true);
             p.setRTS(true);
             log("Port USB ouvert : " + usbLabel(dev));
@@ -361,8 +378,15 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private static String usbLabel(UsbDevice d) {
-        return String.format("%s (VID=%04X PID=%04X)",
-                d.getProductName(), d.getVendorId(), d.getProductId());
+        if (d == null) return "(unknown device)";
+        String m = d.getManufacturerName();
+        String p = d.getProductName();
+        if (m == null || m.isEmpty()) m = "Unknown manufacturer";
+        if (p == null || p.isEmpty()) p = "Unknown product";
+        return String.format(
+                "%s - %s (VID=%04X PID=%04X)",
+                m, p, d.getVendorId(), d.getProductId()
+        );
     }
 
     // ================= Utils =================
@@ -384,6 +408,10 @@ public class MainActivity extends AppCompatActivity {
         catch (Exception ex) { return def; }
     }
 
+    private static String fmtNode(int addr) {
+        return String.format("%d (0x%02X)", addr, addr);
+    }
+
     private void clearLog() {
         uiHandler.post(() -> {
             logBuf.setLength(0);
@@ -393,8 +421,11 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void copyLog() {
-        ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-        cm.setPrimaryClip(ClipData.newPlainText("log", logBuf.toString()));
+        ClipboardManager cm =
+                (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        cm.setPrimaryClip(
+                ClipData.newPlainText("log", logBuf.toString())
+        );
         log("Log copié");
     }
 
