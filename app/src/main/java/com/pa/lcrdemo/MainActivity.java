@@ -1,4 +1,3 @@
-
 package com.pa.lcrdemo;
 
 import androidx.appcompat.app.AppCompatActivity;
