@@ -14,12 +14,15 @@ import com.pa.lcr.lcp.util.AndroidLifecycleLogger;
 public class DeliveryController {
 
     // ===================== SDK FIELDS =====================
-    private static final int FIELD_PRODUCT_NUMBER = 0; // ProductNumber
-    private static final int FIELD_PRODUCT_CODE   = 1; // ProductCode
-    private static final int FIELD_DECIMALS        = 39;
+    private static final int FIELD_PRODUCT_NUMBER  = 0;   // ProductNumber
+    private static final int FIELD_PRODUCT_CODE    = 1;   // ProductCode
     private static final int FIELD_PRESET_NET      = 6;
-    private static final int FIELD_GROSS_TOTAL     = 44;
+    private static final int FIELD_DECIMALS        = 39;
     private static final int FIELD_NET_TOTAL       = 45;
+    private static final int FIELD_GROSS_TOTAL     = 44;
+    private static final int FIELD_DEFAULT_PRODUCT = 88;  // ✅ PRODUIT PAR DÉFAUT
+
+    private static final int MAX_PRODUCTS = 16;
 
     // ===================== BACKEND =====================
     private final LcpLink link;
@@ -59,19 +62,25 @@ public class DeliveryController {
         public LcpDeliveryState deliveryState;
     }
 
-    // ===================== PRODUIT (MÉTIER) =====================
+    // ===================== PRODUIT =====================
     public static final class ProductInfo {
-        public final int number;
+        public final int slot;   // 1..16
+        public final int number; // ProductNumber
         public final String code;
+        public final boolean active;
 
-        public ProductInfo(int number, String code) {
+        public ProductInfo(int slot, int number, String code, boolean active) {
+            this.slot = slot;
             this.number = number;
             this.code = code;
+            this.active = active;
         }
 
         @Override
         public String toString() {
-            return number + " - " + code;
+            return active
+                    ? slot + " - " + code
+                    : slot + " - (non configuré)";
         }
     }
 
@@ -92,26 +101,54 @@ public class DeliveryController {
     }
 
     // ======================================================
-    // ✅ PRODUIT ACTIF (SDK STRICT)
+    // ✅ PRODUIT PAR DÉFAUT (FIELD #88)
     // ======================================================
-    public List<ProductInfo> getActiveProducts() throws Exception {
+    private int applyDefaultProduct() throws Exception {
+        int def = decodeU8(link.opGetField(FIELD_DEFAULT_PRODUCT));
+
+        if (def <= 0 || def > MAX_PRODUCTS) {
+            throw new IllegalStateException("Produit par défaut invalide (#88)=" + def);
+        }
+
+        log("[PROD] Produit par défaut (#88) = " + def);
+        return def;
+    }
+
+    // ======================================================
+    // ✅ SCAN DES PRODUITS (APRÈS CONTEXTE)
+    // ======================================================
+    public List<ProductInfo> scanProducts() throws Exception {
         List<ProductInfo> products = new ArrayList<>();
 
-        int productNumber = decodeU8(link.opGetField(FIELD_PRODUCT_NUMBER));
-        String productCode = decodeAscii(link.opGetField(FIELD_PRODUCT_CODE));
+        // 1. Appliquer le produit par défaut
+        applyDefaultProduct();
 
-        if (productNumber > 0 && productCode != null && !productCode.isEmpty()) {
-            products.add(new ProductInfo(productNumber, productCode));
-            log("[PROD] Actif: " + productNumber + " - " + productCode);
-        } else {
-            log("[PROD] Aucun produit actif détecté");
+        // 2. Scanner les slots
+        for (int slot = 1; slot <= MAX_PRODUCTS; slot++) {
+
+            int number = decodeU8(link.opGetField(FIELD_PRODUCT_NUMBER));
+            String code = decodeAscii(link.opGetField(FIELD_PRODUCT_CODE));
+
+            boolean active =
+                    number > 0 &&
+                    code != null &&
+                    !code.isEmpty();
+
+            ProductInfo p = new ProductInfo(slot, number, code, active);
+            products.add(p);
+
+            if (active) {
+                log("[PROD] Actif: slot=" + slot + " num=" + number + " code=" + code);
+            } else {
+                log("[PROD] Slot " + slot + " non configuré");
+            }
         }
 
         return products;
     }
 
     // ======================================================
-    // START + LIVE + FINISH (inchangé ici)
+    // START DELIVERY (inchangé ici)
     // ======================================================
     public void startOpenMode(int product, double presetNetLitres, int timeoutMs, int pollMs) {
         exec.execute(() -> {
@@ -126,8 +163,8 @@ public class DeliveryController {
                 if (!lifecycle.allowCmd0(Cmd0Usage.START)) {
                     throw new IllegalStateException("RUN not allowed");
                 }
-                link.opIssueCommand(0x00);
 
+                link.opIssueCommand(0x00);
                 waitForActive(timeoutMs);
 
                 startNet   = readNet();
@@ -147,22 +184,14 @@ public class DeliveryController {
         liveTask = scheduler.scheduleAtFixedRate(() -> {
             if (state != State.RUNNING) return;
             try {
-                int[] dsdc = link.opDeliveryStatus();
-                boolean active = (dsdc[1] & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
-                boolean flow   = (dsdc[1] & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
-
                 double net   = readNet();
                 double gross = readGross();
 
                 DeliveryProgress p = new DeliveryProgress();
                 p.netDelta   = net - startNet;
                 p.grossDelta = gross - startGross;
-                p.flowActive = flow;
-                p.deliveryState =
-                        active
-                                ? (flow ? LcpDeliveryState.ACTIVE_FLOWING
-                                        : LcpDeliveryState.ACTIVE_PAUSED)
-                                : LcpDeliveryState.IDLE;
+                p.flowActive = true;
+                p.deliveryState = LcpDeliveryState.ACTIVE_FLOWING;
 
                 if (events != null) events.onProgress(p);
 
@@ -198,7 +227,7 @@ public class DeliveryController {
         throw new TimeoutException("ACTIVE not confirmed");
     }
 
-    // ===================== IO UTILS =====================
+    // ===================== IO =====================
     private double readNet() throws Exception {
         return decodeVolume(link.opGetField(FIELD_NET_TOTAL), decimals);
     }
