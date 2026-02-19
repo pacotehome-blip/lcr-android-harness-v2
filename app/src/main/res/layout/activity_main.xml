@@ -38,7 +38,8 @@
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="horizontal">
+        android:orientation="horizontal"
+        android:layout_marginTop="6dp">
 
         <EditText
             android:id="@+id/edtTo"
@@ -53,26 +54,24 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
+            android:layout_marginStart="8dp"
             android:hint="FROM (ex: 0xFF)"
-            android:singleLine="true"
-            android:layout_marginStart="8dp" />
+            android:singleLine="true" />
     </LinearLayout>
 
     <!-- ===================== PRODUIT / PRESET ===================== -->
+    <!-- ✅ Produit fourni par DeliveryController (Spinner) -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
         android:layout_marginTop="6dp">
 
-        <EditText
-            android:id="@+id/edtProduct"
+        <Spinner
+            android:id="@+id/spnProducts"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:hint="Produit"
-            android:inputType="number"
-            android:singleLine="true" />
+            android:layout_weight="1" />
 
         <EditText
             android:id="@+id/edtPreset"
@@ -93,7 +92,7 @@
         android:text="Connect (LCP)"
         android:layout_marginTop="6dp" />
 
-    <!-- ===================== BOUTONS A / B / C + CONTINUER / FINISH ===================== -->
+    <!-- ===================== BOUTONS A / B / C ===================== -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -124,6 +123,7 @@
             android:text="C" />
     </LinearLayout>
 
+    <!-- ===================== CONTINUER / TERMINER ===================== -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -146,7 +146,7 @@
             android:text="Terminer" />
     </LinearLayout>
 
-    <!-- ===================== LIVE (ligne unique) ===================== -->
+    <!-- ===================== LIVE ===================== -->
     <TextView
         android:id="@+id/txtLive"
         android:layout_width="match_parent"
@@ -155,7 +155,7 @@
         android:textStyle="bold"
         android:layout_marginTop="8dp" />
 
-    <!-- ===================== AJOUT MINIMAL : NET / GROSS (big digits) ===================== -->
+    <!-- ===================== NET / GROSS ===================== -->
     <LinearLayout
         android:id="@+id/liveQtyPanel"
         android:layout_width="match_parent"
@@ -184,85 +184,6 @@
             android:textColor="#222222" />
     </LinearLayout>
 
-    <!-- ===================== TICKET / PRINTER ===================== -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:layout_marginTop="8dp">
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Ticket / Impression"
-            android:textStyle="bold" />
-
-        <TextView
-            android:id="@+id/txtTicketNumber"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="-" />
-
-        <Spinner
-            android:id="@+id/spnTicketRequired"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content" />
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="6dp">
-
-            <Button
-                android:id="@+id/btnRefreshTicket"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="Refresh Ticket" />
-
-            <Button
-                android:id="@+id/btnClearShift"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginStart="8dp"
-                android:text="Clear Shift" />
-        </LinearLayout>
-
-        <TextView
-            android:id="@+id/txtPrinterStatus"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Imprimante: (non connecté / non lu)"
-            android:layout_marginTop="6dp"
-            android:background="#EEEEEE"
-            android:padding="6dp" />
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="6dp">
-
-            <Button
-                android:id="@+id/btnRefreshPrinter"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="Refresh Printer" />
-
-            <Button
-                android:id="@+id/btnPrintPending"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginStart="8dp"
-                android:text="Print Pending" />
-        </LinearLayout>
-
-    </LinearLayout>
-
     <!-- ===================== LOG SETTINGS ===================== -->
     <CheckBox
         android:id="@+id/switchIoLog"
@@ -272,8 +193,7 @@
         android:checked="true"
         android:layout_marginTop="8dp" />
 
-    <!-- ===================== LOG WINDOW (FIXE + SCROLL INTERNE) ===================== -->
-    <!-- Correctif clé : height=0dp + weight=1 => fenêtre fixe à l'écran -->
+    <!-- ===================== LOG WINDOW ===================== -->
     <ScrollView
         android:id="@+id/logScroll"
         android:layout_width="match_parent"
