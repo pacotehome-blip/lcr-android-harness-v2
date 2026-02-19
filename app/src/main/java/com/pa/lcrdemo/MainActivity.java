@@ -58,13 +58,10 @@ public class MainActivity extends AppCompatActivity {
                 log("Permission USB: device=null (ignored)");
                 return;
             }
-            if (granted) {
-                if (port == null) {
-                    UsbSerialPort p = tryOpenDevice(device);
-                    if (p != null) setPort(p, device);
-                }
-            } else {
-                log("Permission USB refusée");
+
+            if (granted && port == null) {
+                UsbSerialPort p = tryOpenDevice(device);
+                if (p != null) setPort(p, device);
             }
         }
     };
@@ -72,10 +69,12 @@ public class MainActivity extends AppCompatActivity {
     // ================= USB DETACH (FILTRÉ) =================
     private final BroadcastReceiver usbDetachReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
-            if (!UsbManager.ACTION_USB_DEVICE_DETACHED.equals(intent.getAction())) return;
+            if (!UsbManager.ACTION_USB_DEVICE_DETACHED.equals(intent.getAction()))
+                return;
 
             UsbDevice dev = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
-            if (dev == null || port == null || currentDevice == null) return;
+            if (dev == null || port == null || currentDevice == null)
+                return;
 
             if (dev.getVendorId() == currentDevice.getVendorId()
                     && dev.getProductId() == currentDevice.getProductId()) {
@@ -119,7 +118,7 @@ public class MainActivity extends AppCompatActivity {
         try { unregisterReceiver(usbDetachReceiver); } catch (Exception ignored) {}
     }
 
-    // ================= Init LCP (FINAL) =================
+    // ================= Init LCP =================
     private void initLcp() {
         if (port == null) {
             log("ERR: Port USB non initialisé");
@@ -137,7 +136,6 @@ public class MainActivity extends AppCompatActivity {
 
             link = new LcpLink(port, to, from, true);
             LcpLink.setLogger(s -> log("[IO] " + s));
-
             link.openPollWindow();
 
             ctrl = new DeliveryController(
@@ -147,8 +145,8 @@ public class MainActivity extends AppCompatActivity {
             );
 
             disableUsbUi();
-            enableLcpUi();                 // ✅ 1
-            btnConnect.setEnabled(false);  // ✅ 2
+            enableLcpUi();
+            btnConnect.setEnabled(false);
             log("LCP prêt");
 
             ctrl.recoverActiveDelivery(POLL_MS);
@@ -172,7 +170,7 @@ public class MainActivity extends AppCompatActivity {
 
             enableUsbUi();
             disableLcpUi();
-            btnConnect.setEnabled(true);   // ✅ 3
+            btnConnect.setEnabled(true);
 
             txtLive.setText("USB débranché");
             txtQtyNet.setText("-");
@@ -180,7 +178,7 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    // ================= UI Wiring =================
+    // ================= UI =================
     private void bindUI() {
         edtTo = findViewById(R.id.edtTo);
         edtFrom = findViewById(R.id.edtFrom);
@@ -228,8 +226,8 @@ public class MainActivity extends AppCompatActivity {
         btnC.setOnClickListener(v -> {
             if (ctrl != null)
                 ctrl.startOpenMode(readInt(edtProduct, 1),
-                                   readDouble(edtPreset, 0),
-                                   20000, POLL_MS);
+                        readDouble(edtPreset, 0),
+                        20000, POLL_MS);
         });
 
         btnContinue.setOnClickListener(v -> { if (ctrl != null) ctrl.resumeDelivery(POLL_MS); });
@@ -239,17 +237,12 @@ public class MainActivity extends AppCompatActivity {
         btnCopyLog.setOnClickListener(v -> copyLog());
     }
 
-    // ================= UI enable / disable =================
-    private void disableUsbUi() {
-        btnScanUsb.setEnabled(false);
-        btnPingUsb.setEnabled(false);
-        spnUsbDevices.setEnabled(false);
-    }
-
-    private void enableUsbUi() {
-        btnScanUsb.setEnabled(true);
-        btnPingUsb.setEnabled(true);
-        spnUsbDevices.setEnabled(true);
+    private void enableLcpUi() {
+        btnA.setEnabled(true);
+        btnB.setEnabled(true);
+        btnC.setEnabled(true);
+        btnClearShift.setEnabled(true);
+        btnPrintPending.setEnabled(true);
     }
 
     private void disableLcpUi() {
@@ -262,20 +255,21 @@ public class MainActivity extends AppCompatActivity {
         btnPrintPending.setEnabled(false);
     }
 
-    private void enableLcpUi() {
-        btnA.setEnabled(true);
-        btnB.setEnabled(true);
-        btnC.setEnabled(true);
-        btnClearShift.setEnabled(true);
-        btnPrintPending.setEnabled(true);
+    private void disableUsbUi() {
+        btnScanUsb.setEnabled(false);
+        btnPingUsb.setEnabled(false);
+        spnUsbDevices.setEnabled(false);
+    }
+
+    private void enableUsbUi() {
+        btnScanUsb.setEnabled(true);
+        btnPingUsb.setEnabled(true);
+        spnUsbDevices.setEnabled(true);
     }
 
     // ================= Delivery Events =================
     private class DeliveryEventsImpl implements DeliveryController.DeliveryEvents {
-        @Override public void onStateChanged(DeliveryController.State s) {
-            log("État=" + s);
-        }
-
+        @Override public void onStateChanged(DeliveryController.State s) { log("État=" + s); }
         @Override public void onFlowStarted() { log("Flow START"); }
         @Override public void onFlowStopped() { log("Flow STOP"); }
 
@@ -306,6 +300,13 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // ================= USB Helpers =================
+    public void setPort(UsbSerialPort p) {
+        UsbDevice d = null;
+        try { if (p != null && p.getDriver() != null) d = p.getDriver().getDevice(); }
+        catch (Exception ignored) {}
+        setPort(p, d);
+    }
+
     public void setPort(UsbSerialPort p, UsbDevice d) {
         port = p;
         currentDevice = d;
@@ -346,7 +347,9 @@ public class MainActivity extends AppCompatActivity {
 
         try {
             p.open(conn);
-            p.setParameters(19200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
+            p.setParameters(19200, 8,
+                    UsbSerialPort.STOPBITS_1,
+                    UsbSerialPort.PARITY_NONE);
             p.setDTR(true);
             p.setRTS(true);
             log("Port USB ouvert : " + usbLabel(dev));
