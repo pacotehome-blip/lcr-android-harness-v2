@@ -1,9 +1,8 @@
 
 package com.pa.lcr.lcp;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.concurrent.*;
 
 import com.pa.lcr.lcp.lifecycle.Cmd0Usage;
@@ -14,8 +13,8 @@ import com.pa.lcr.lcp.util.AndroidLifecycleLogger;
 public class DeliveryController {
 
     // ===================== SDK FIELDS =====================
-    private static final int FIELD_PRODUCT_NUMBER  = 0;   // ProductNumber
-    private static final int FIELD_PRODUCT_CODE    = 1;   // ProductCode
+    private static final int FIELD_PRODUCT_NUMBER  = 0;
+    private static final int FIELD_PRODUCT_CODE    = 1;
     private static final int FIELD_PRESET_NET      = 6;
     private static final int FIELD_DECIMALS        = 39;
     private static final int FIELD_NET_TOTAL       = 45;
@@ -91,27 +90,35 @@ public class DeliveryController {
     }
 
     // ======================================================
-    // ✅ Scan produit (conservé, non bloquant)
+    // ✅ Scan produit (informatif, non bloquant)
     // ======================================================
     public void scanProducts() {
         exec.execute(() -> {
-            log("[PROD] Scan produits (information seulement)");
+            log("[PROD] Scan produits (informatif)");
 
-            int def = decodeU8(link.opGetField(FIELD_DEFAULT_PRODUCT));
-            if (def > 0 && def <= MAX_PRODUCTS) {
-                log("[PROD] Produit par défaut (#88) = " + def);
-            } else {
-                log("[PROD] Aucun produit par défaut explicite (#88=0)");
+            try {
+                int def = decodeU8(link.opGetField(FIELD_DEFAULT_PRODUCT));
+                if (def > 0 && def <= MAX_PRODUCTS) {
+                    log("[PROD] Produit par défaut (#88) = " + def);
+                } else {
+                    log("[PROD] Aucun produit par défaut explicite (#88=0)");
+                }
+            } catch (IOException e) {
+                log("[PROD] Lecture #88 échouée: " + e.getMessage());
             }
 
             for (int slot = 1; slot <= MAX_PRODUCTS; slot++) {
-                int number = decodeU8(link.opGetField(FIELD_PRODUCT_NUMBER));
-                String code = decodeAscii(link.opGetField(FIELD_PRODUCT_CODE));
+                try {
+                    int number = decodeU8(link.opGetField(FIELD_PRODUCT_NUMBER));
+                    String code = decodeAscii(link.opGetField(FIELD_PRODUCT_CODE));
 
-                boolean active = number > 0 && !code.isEmpty();
-                if (active && currentProduct == null) {
-                    currentProduct = new ProductInfo(slot, number, code, true);
-                    log("[PROD] Produit courant retenu = " + number + " (" + code + ")");
+                    boolean active = number > 0 && !code.isEmpty();
+                    if (active && currentProduct == null) {
+                        currentProduct = new ProductInfo(slot, number, code, true);
+                        log("[PROD] Produit courant retenu = " + number + " (" + code + ")");
+                    }
+                } catch (IOException e) {
+                    log("[PROD] Slot " + slot + " lecture échouée: " + e.getMessage());
                 }
             }
 
@@ -126,7 +133,7 @@ public class DeliveryController {
     }
 
     // ======================================================
-    // START DELIVERY (produit fourni par l’UI)
+    // START DELIVERY
     // ======================================================
     public void startOpenMode(int product, double presetNetLitres, int timeoutMs, int pollMs) {
         exec.execute(() -> {
@@ -207,11 +214,12 @@ public class DeliveryController {
         throw new TimeoutException("ACTIVE not confirmed");
     }
 
-    private double readNet() throws Exception {
+    // ===================== IO =====================
+    private double readNet() throws IOException {
         return decodeVolume(link.opGetField(FIELD_NET_TOTAL), decimals);
     }
 
-    private double readGross() throws Exception {
+    private double readGross() throws IOException {
         return decodeVolume(link.opGetField(FIELD_GROSS_TOTAL), decimals);
     }
 
