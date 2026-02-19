@@ -1,7 +1,6 @@
 
 package com.pa.lcrdemo;
 
-import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 
 import android.app.PendingIntent;
@@ -19,14 +18,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.View;
-import android.widget.AdapterView;
-import android.widget.ArrayAdapter;
-import android.widget.Button;
-import android.widget.CheckBox;
-import android.widget.EditText;
-import android.widget.ScrollView;
-import android.widget.Spinner;
-import android.widget.TextView;
+import android.widget.*;
 
 import com.hoho.android.usbserial.driver.UsbSerialDriver;
 import com.hoho.android.usbserial.driver.UsbSerialPort;
@@ -43,56 +35,39 @@ public class MainActivity extends AppCompatActivity {
 
     // ================= UI =================
     private EditText edtTo, edtFrom, edtProduct, edtPreset;
-    private Button btnConnect;
-    private Button btnA, btnB, btnC;
-    private Button btnContinue, btnFinish;
+    private Button btnConnect, btnA, btnB, btnC, btnContinue, btnFinish;
     private Button btnCopyLog, btnClearLog;
-
     private CheckBox switchIoLog;
-    private TextView txtLog;
+    private TextView txtLog, txtLive, txtQtyNet, txtQtyGross;
     private ScrollView logScroll;
-
-    private TextView txtLive;
-    private TextView txtQtyNet, txtQtyGross;
 
     // ================= USB =================
     private Spinner spnUsbDevices;
     private Button btnScanUsb, btnPingUsb;
 
     // ================= Ticket / Printer =================
-    private TextView txtTicketNumber;
+    private TextView txtTicketNumber, txtPrinterStatus;
     private Spinner spnTicketRequired;
-    private Button btnRefreshTicket;
-    private Button btnClearShift;
-    private TextView txtPrinterStatus;
-    private Button btnRefreshPrinter;
-    private Button btnPrintPending;
+    private Button btnRefreshTicket, btnClearShift, btnRefreshPrinter, btnPrintPending;
 
     // ================= Backend =================
     private UsbManager usbManager;
     private final List<UsbDevice> usbList = new ArrayList<>();
-
-    private UsbSerialPort port = null;
+    private UsbSerialPort port;
     private LcpLink link;
     private DeliveryController ctrl;
 
     private static final int POLL_MS = 200;
-
     private static final String ACTION_USB_PERMISSION = "com.pa.lcrdemo.USB_PERMISSION";
     private PendingIntent usbPermissionIntent;
 
-    // ================= Log batching =================
-    private final Object logLock = new Object();
+    // ================= Logging =================
     private final StringBuilder logBuf = new StringBuilder(8192);
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
-    private boolean flushScheduled = false;
-    private static final int LOG_FLUSH_MS = 250;
-    private static final int LOG_MAX_CHARS = 20000;
 
-    // ================= USB permission receiver =================
+    // ================= USB Permission Receiver =================
     private final BroadcastReceiver usbPermissionReceiver = new BroadcastReceiver() {
-        @Override
-        public void onReceive(Context context, Intent intent) {
+        @Override public void onReceive(Context context, Intent intent) {
             if (!ACTION_USB_PERMISSION.equals(intent.getAction())) return;
 
             UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
@@ -102,7 +77,6 @@ public class MainActivity extends AppCompatActivity {
                 log("Permission USB: device=null");
                 return;
             }
-
             if (granted) {
                 log("Permission USB accordée: " + usbLabel(device));
                 UsbSerialPort p = tryOpenDevice(device);
@@ -126,29 +100,12 @@ public class MainActivity extends AppCompatActivity {
         usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
 
         int piFlags = PendingIntent.FLAG_UPDATE_CURRENT;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            piFlags = PendingIntent.FLAG_MUTABLE;
-        }
-        usbPermissionIntent = PendingIntent.getBroadcast(
-                this, 0, new Intent(ACTION_USB_PERMISSION), piFlags
-        );
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) piFlags = PendingIntent.FLAG_MUTABLE;
+        usbPermissionIntent = PendingIntent.getBroadcast(this, 0, new Intent(ACTION_USB_PERMISSION), piFlags);
         registerReceiver(usbPermissionReceiver, new IntentFilter(ACTION_USB_PERMISSION));
 
-        LcpLink.DUMP_TX = switchIoLog.isChecked();
-        LcpLink.DUMP_RX = switchIoLog.isChecked();
-
-        txtPrinterStatus.setText("Imprimante: (non connecté / non lu)");
-        txtPrinterStatus.setBackgroundColor(0xFFEEEEEE);
-
-        txtLive.setText("LIVE: (en attente)");
-        txtQtyNet.setText("NET: 0.0");
-        txtQtyGross.setText("GROSS: 0.0");
-
-        btnContinue.setEnabled(false);
-        btnFinish.setEnabled(false);
-
         log("Prêt. 1) Choisir USB 2) Ouvrir/Ping 3) Connect (LCP).");
-        new Handler().postDelayed(this::scanUsbDevices, 400);
+        new Handler().postDelayed(this::scanUsbDevices, 300);
     }
 
     @Override
@@ -169,9 +126,9 @@ public class MainActivity extends AppCompatActivity {
             log(String.format("Init LCP → to=0x%02X, from=0x%02X", to, from));
 
             link = new LcpLink(port, to, from, true);
-            LcpLink.setLogger(line -> log("[IO] " + line));
+            LcpLink.setLogger(s -> log("[IO] " + s));
 
-            // ✅ CORRECTIF CRITIQUE : ouvrir la PollWindow
+            // ✅ CORRECTIF CRITIQUE
             link.openPollWindow();
 
             ctrl = new DeliveryController(
@@ -181,10 +138,6 @@ public class MainActivity extends AppCompatActivity {
             );
 
             log("LCP prêt.");
-
-            ctrl.ensureDefaultTicketRequiredIs1(POLL_MS);
-            ctrl.refreshTicketInfo(POLL_MS);
-            ctrl.refreshPrinterStatus(POLL_MS);
             ctrl.recoverActiveDelivery(POLL_MS);
 
         } catch (Exception e) {
@@ -192,120 +145,152 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    // ================= PUBLIC (UsbReceiver) =================
-    public void setPort(UsbSerialPort p) {
-        this.port = p;
-        log("USB prêt.");
+    // ================= UI wiring =================
+    private void bindUI() {
+        edtTo = findViewById(R.id.edtTo);
+        edtFrom = findViewById(R.id.edtFrom);
+        edtProduct = findViewById(R.id.edtProduct);
+        edtPreset = findViewById(R.id.edtPreset);
+
+        btnConnect = findViewById(R.id.btnConnect);
+        btnA = findViewById(R.id.btnA);
+        btnB = findViewById(R.id.btnB);
+        btnC = findViewById(R.id.btnC);
+        btnContinue = findViewById(R.id.btnContinue);
+        btnFinish = findViewById(R.id.btnFinish);
+
+        txtLog = findViewById(R.id.txtLog);
+        logScroll = findViewById(R.id.logScroll);
+        txtLive = findViewById(R.id.txtLive);
+        txtQtyNet = findViewById(R.id.txtQtyNet);
+        txtQtyGross = findViewById(R.id.txtQtyGross);
+
+        spnUsbDevices = findViewById(R.id.spnUsbDevices);
+        btnScanUsb = findViewById(R.id.btnScanUsb);
+        btnPingUsb = findViewById(R.id.btnPingUsb);
+
+        txtTicketNumber = findViewById(R.id.txtTicketNumber);
+        txtPrinterStatus = findViewById(R.id.txtPrinterStatus);
+        btnClearShift = findViewById(R.id.btnClearShift);
+        btnPrintPending = findViewById(R.id.btnPrintPending);
     }
 
-    // ================= Handlers =================
+    private void applyDefaultValues() {
+        edtTo.setText("0xFA");
+        edtFrom.setText("0xFF");
+        edtProduct.setText("1");
+        edtPreset.setText("50.0");
+    }
+
     private void installHandlers() {
         btnConnect.setOnClickListener(v -> initLcp());
+        btnScanUsb.setOnClickListener(v -> scanUsbDevices());
+        btnPingUsb.setOnClickListener(v -> openSelectedUsb());
 
         btnC.setOnClickListener(v -> {
             if (ctrl == null) return;
-            int product = readInt(edtProduct, 1);
-            double preset = readDouble(edtPreset, 0);
-            log("C : Start Delivery (product=" + product + ", preset=" + preset + ")");
-            ctrl.startOpenMode(product, preset, 20000, POLL_MS);
+            ctrl.startOpenMode(readInt(edtProduct, 1), readDouble(edtPreset, 0), 20000, POLL_MS);
         });
 
         btnContinue.setOnClickListener(v -> {
-            if (ctrl == null) return;
-            log("Continuer → Cmd#0");
-            ctrl.resumeDelivery(POLL_MS);
+            if (ctrl != null) ctrl.resumeDelivery(POLL_MS);
         });
 
         btnFinish.setOnClickListener(v -> {
-            if (ctrl == null) return;
-            log("Terminer → END");
-            ctrl.endGracefully(20000, POLL_MS);
-        });
-
-        btnB.setOnClickListener(v -> {
-            if (ctrl == null) return;
-            log("PING");
-            ctrl.pingStatus(POLL_MS);
-        });
-
-        btnClearShift.setOnClickListener(v -> {
-            if (ctrl == null) return;
-            log("SHIFT : ClearShift");
-            ctrl.clearShiftNow(POLL_MS);
-        });
-
-        btnPrintPending.setOnClickListener(v -> {
-            if (ctrl == null) return;
-            log("PRINT PENDING");
-            ctrl.printPendingTicket(POLL_MS, 25000);
+            if (ctrl != null) ctrl.endGracefully(20000, POLL_MS);
         });
     }
 
     // ================= Delivery Events =================
     private class DeliveryEventsImpl implements DeliveryController.DeliveryEvents {
-
-        @Override
-        public void onStateChanged(DeliveryController.State s) {
-            log("État = " + s);
-        }
-
-        @Override
-        public void onFlowStarted() { log("Flow START"); }
-
-        @Override
-        public void onFlowStopped() { log("Flow STOP"); }
+        @Override public void onStateChanged(DeliveryController.State s) { log("État=" + s); }
+        @Override public void onFlowStarted() { log("Flow START"); }
+        @Override public void onFlowStopped() { log("Flow STOP"); }
 
         @Override
         public void onProgress(DeliveryController.DeliveryProgress p) {
-            final String live = String.format(
-                    "STATE=%s NET=%.1f GROSS=%.1f FLOW=%s",
-                    p.deliveryState, p.netL, p.grossL,
-                    p.flowActive ? "1" : "0"
-            );
-
             runOnUiThread(() -> {
-                txtLive.setText(live);
-                txtQtyNet.setText(String.format("NET: %.1f", p.netL));
-                txtQtyGross.setText(String.format("GROSS: %.1f", p.grossL));
-
-                if (p.deliveryState == LcpDeliveryState.ACTIVE_FLOWING) {
-                    btnContinue.setEnabled(false);
-                    btnFinish.setEnabled(true);
-                } else if (p.deliveryState == LcpDeliveryState.ACTIVE_PAUSED) {
-                    btnContinue.setEnabled(true);
-                    btnFinish.setEnabled(true);
-                } else {
-                    btnContinue.setEnabled(false);
-                    btnFinish.setEnabled(false);
-                }
+                txtLive.setText("STATE=" + p.deliveryState);
+                txtQtyNet.setText("NET=" + p.netL);
+                txtQtyGross.setText("GROSS=" + p.grossL);
             });
         }
 
-        @Override public void onTicketNumber(int n) {
-            runOnUiThread(() -> txtTicketNumber.setText(String.valueOf(n)));
-        }
+        @Override public void onTicketNumber(int n) {}
+        @Override public void onTicketRequired(int m) {}
+        @Override public void onPrinterStatus(LcpLink.MachineStatusEx ms, boolean t) {}
+        @Override public void onError(String m, Throwable t) { log("ERR " + m); }
+        @Override public void onLog(String l) { log(l); }
+    }
 
-        @Override public void onTicketRequired(int mode) {
-            runOnUiThread(() -> spnTicketRequired.setSelection(mode));
-        }
+    // ================= Helpers =================
+    public void setPort(UsbSerialPort p) { port = p; log("USB prêt."); }
 
-        @Override
-        public void onPrinterStatus(LcpLink.MachineStatusEx ms, boolean ticketPending) {
-            runOnUiThread(() -> txtPrinterStatus.setText(ms.toString()));
-        }
+    private void scanUsbDevices() {
+        usbList.clear();
+        usbList.addAll(usbManager.getDeviceList().values());
+        List<String> labels = new ArrayList<>();
+        for (UsbDevice d : usbList) labels.add(usbLabel(d));
+        spnUsbDevices.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, labels));
+        log("Scan USB : " + labels.size() + " périphérique(s).");
+    }
 
-        @Override
-        public void onError(String msg, Throwable t) {
-            log("ERR[" + msg + "] " + (t != null ? t.getMessage() : ""));
+    private void openSelectedUsb() {
+        int idx = spnUsbDevices.getSelectedItemPosition();
+        if (idx < 0 || idx >= usbList.size()) return;
+        UsbDevice dev = usbList.get(idx);
+        if (!usbManager.hasPermission(dev)) {
+            usbManager.requestPermission(dev, usbPermissionIntent);
+            return;
         }
+        UsbSerialPort p = tryOpenDevice(dev);
+        if (p != null) setPort(p);
+    }
 
-        @Override
-        public void onLog(String line) {
-            log("[LCP] " + line);
+    private UsbSerialPort tryOpenDevice(UsbDevice dev) {
+        UsbSerialDriver driver = UsbSerialProber.getDefaultProber().probeDevice(dev);
+        if (driver == null) return null;
+        UsbSerialPort p = driver.getPorts().get(0);
+        UsbDeviceConnection conn = usbManager.openDevice(dev);
+        if (conn == null) return null;
+        try {
+            p.open(conn);
+            p.setParameters(19200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
+            log("Port USB ouvert : " + usbLabel(dev));
+            return p;
+        } catch (Exception e) {
+            return null;
         }
     }
 
-    // ================= Helpers (USB / Parse / Log) =================
-    // … (inchangés, identiques à ta version précédente)
+    private static String usbLabel(UsbDevice d) {
+        return String.format("%s (VID=%04X PID=%04X)",
+                d.getProductName(), d.getVendorId(), d.getProductId());
+    }
 
+    private static int parseHex(EditText e, int def) {
+        try {
+            String s = e.getText().toString().trim();
+            if (s.startsWith("0x")) return Integer.parseInt(s.substring(2), 16);
+            return Integer.parseInt(s, 16);
+        } catch (Exception ex) { return def; }
+    }
+
+    private static int readInt(EditText e, int def) {
+        try { return Integer.parseInt(e.getText().toString()); }
+        catch (Exception ex) { return def; }
+    }
+
+    private static double readDouble(EditText e, double def) {
+        try { return Double.parseDouble(e.getText().toString()); }
+        catch (Exception ex) { return def; }
+    }
+
+    private void log(String s) {
+        uiHandler.post(() -> {
+            logBuf.append(s).append('\n');
+            txtLog.setText(logBuf.toString());
+            logScroll.fullScroll(View.FOCUS_DOWN);
+        });
+    }
 }
