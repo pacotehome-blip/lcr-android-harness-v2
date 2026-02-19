@@ -20,7 +20,7 @@ public class DeliveryController {
     private static final int FIELD_DECIMALS        = 39;
     private static final int FIELD_NET_TOTAL       = 45;
     private static final int FIELD_GROSS_TOTAL     = 44;
-    private static final int FIELD_DEFAULT_PRODUCT = 88;  // ✅ Produit par défaut
+    private static final int FIELD_DEFAULT_PRODUCT = 88;
 
     private static final int MAX_PRODUCTS = 16;
 
@@ -43,9 +43,22 @@ public class DeliveryController {
     private double startNet;
     private double startGross;
 
-    // ===================== LIFECYCLE =====================
-    private final DeliveryLifecycleController lifecycle =
-            new DeliveryLifecycleController(new AndroidLifecycleLogger());
+    // ===================== PRODUIT =====================
+    public static final class ProductInfo {
+        public final int slot;
+        public final int number;
+        public final String code;
+        public final boolean active;
+
+        public ProductInfo(int slot, int number, String code, boolean active) {
+            this.slot = slot;
+            this.number = number;
+            this.code = code;
+            this.active = active;
+        }
+    }
+
+    private volatile ProductInfo currentProduct = null;
 
     // ===================== EVENTS =====================
     public interface DeliveryEvents {
@@ -58,30 +71,7 @@ public class DeliveryController {
     public static final class DeliveryProgress {
         public double netDelta;
         public double grossDelta;
-        public boolean flowActive;
         public LcpDeliveryState deliveryState;
-    }
-
-    // ===================== PRODUIT =====================
-    public static final class ProductInfo {
-        public final int slot;   // 1..16
-        public final int number; // ProductNumber
-        public final String code;
-        public final boolean active;
-
-        public ProductInfo(int slot, int number, String code, boolean active) {
-            this.slot = slot;
-            this.number = number;
-            this.code = code;
-            this.active = active;
-        }
-
-        @Override
-        public String toString() {
-            return active
-                    ? slot + " - " + code
-                    : slot + " - (non configuré)";
-        }
     }
 
     // ===================== CONSTRUCTOR =====================
@@ -101,62 +91,48 @@ public class DeliveryController {
     }
 
     // ======================================================
-    // ✅ PRODUIT PAR DÉFAUT (#88) — AVEC FALLBACK
+    // ✅ Scan produit (conservé, non bloquant)
     // ======================================================
-    private int applyDefaultProduct() throws Exception {
-        int def = decodeU8(link.opGetField(FIELD_DEFAULT_PRODUCT));
+    public void scanProducts() {
+        exec.execute(() -> {
+            log("[PROD] Scan produits (information seulement)");
 
-        if (def > 0 && def <= MAX_PRODUCTS) {
-            log("[PROD] Produit par défaut (#88) = " + def);
-            return def;
-        }
-
-        // ✅ CAS NORMAL TERRAIN
-        log("[PROD] Aucun produit par défaut explicite (#88=0), utilisation du produit courant implicite");
-        return 0; // 0 = produit courant implicite
-    }
-
-    // ======================================================
-    // ✅ SCAN DES PRODUITS (APRÈS CONTEXTE)
-    // ======================================================
-    public List<ProductInfo> scanProducts() throws Exception {
-        List<ProductInfo> products = new ArrayList<>();
-
-        // 1. Appliquer (ou non) le produit par défaut
-        applyDefaultProduct();
-
-        // 2. Scanner les slots
-        for (int slot = 1; slot <= MAX_PRODUCTS; slot++) {
-
-            int number = decodeU8(link.opGetField(FIELD_PRODUCT_NUMBER));
-            String code = decodeAscii(link.opGetField(FIELD_PRODUCT_CODE));
-
-            boolean active =
-                    number > 0 &&
-                    code != null &&
-                    !code.isEmpty();
-
-            ProductInfo p = new ProductInfo(slot, number, code, active);
-            products.add(p);
-
-            if (active) {
-                log("[PROD] Actif: slot=" + slot +
-                        " num=" + number +
-                        " code=" + code);
+            int def = decodeU8(link.opGetField(FIELD_DEFAULT_PRODUCT));
+            if (def > 0 && def <= MAX_PRODUCTS) {
+                log("[PROD] Produit par défaut (#88) = " + def);
             } else {
-                log("[PROD] Slot " + slot + " non configuré");
+                log("[PROD] Aucun produit par défaut explicite (#88=0)");
             }
-        }
 
-        return products;
+            for (int slot = 1; slot <= MAX_PRODUCTS; slot++) {
+                int number = decodeU8(link.opGetField(FIELD_PRODUCT_NUMBER));
+                String code = decodeAscii(link.opGetField(FIELD_PRODUCT_CODE));
+
+                boolean active = number > 0 && !code.isEmpty();
+                if (active && currentProduct == null) {
+                    currentProduct = new ProductInfo(slot, number, code, true);
+                    log("[PROD] Produit courant retenu = " + number + " (" + code + ")");
+                }
+            }
+
+            if (currentProduct == null) {
+                log("[PROD] Aucun produit actif détecté (fallback opérateur requis)");
+            }
+        });
+    }
+
+    public ProductInfo getCurrentProduct() {
+        return currentProduct;
     }
 
     // ======================================================
-    // START DELIVERY
+    // START DELIVERY (produit fourni par l’UI)
     // ======================================================
     public void startOpenMode(int product, double presetNetLitres, int timeoutMs, int pollMs) {
         exec.execute(() -> {
             try {
+                log("[PRE] Produit demandé = " + product);
+
                 presetNetL = presetNetLitres;
                 setState(State.PRESTART);
 
@@ -164,7 +140,8 @@ public class DeliveryController {
                 link.opSetField(FIELD_PRESET_NET, encodePreset(presetNetL, decimals));
 
                 setState(State.STARTING);
-                if (!lifecycle.allowCmd0(Cmd0Usage.START)) {
+                if (!new DeliveryLifecycleController(new AndroidLifecycleLogger())
+                        .allowCmd0(Cmd0Usage.START)) {
                     throw new IllegalStateException("RUN not allowed");
                 }
 
@@ -194,7 +171,6 @@ public class DeliveryController {
                 DeliveryProgress p = new DeliveryProgress();
                 p.netDelta   = net - startNet;
                 p.grossDelta = gross - startGross;
-                p.flowActive = true;
                 p.deliveryState = LcpDeliveryState.ACTIVE_FLOWING;
 
                 if (events != null) events.onProgress(p);
@@ -231,7 +207,6 @@ public class DeliveryController {
         throw new TimeoutException("ACTIVE not confirmed");
     }
 
-    // ===================== IO =====================
     private double readNet() throws Exception {
         return decodeVolume(link.opGetField(FIELD_NET_TOTAL), decimals);
     }

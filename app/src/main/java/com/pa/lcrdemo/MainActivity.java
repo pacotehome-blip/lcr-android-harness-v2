@@ -22,11 +22,12 @@ import java.util.concurrent.Executors;
 public class MainActivity extends AppCompatActivity {
 
     // ================= UI =================
-    private EditText edtTo, edtFrom, edtPreset;
-    private Button btnConnect, btnC, btnScanUsb, btnPingUsb, btnClearLog, btnCopyLog;
+    private EditText edtTo, edtFrom, edtProduct, edtPreset;
+    private Button btnConnect, btnA, btnB, btnC, btnContinue, btnFinish;
+    private Button btnScanUsb, btnPingUsb, btnClearLog, btnCopyLog;
     private TextView txtLog, txtLive, txtQtyNet, txtQtyGross;
     private ScrollView logScroll;
-    private Spinner spnUsbDevices, spnProducts;
+    private Spinner spnUsbDevices;
 
     // ================= USB / LCP =================
     private UsbManager usbManager;
@@ -144,41 +145,12 @@ public class MainActivity extends AppCompatActivity {
             btnConnect.setEnabled(false);
             log("LCP prêt — connecté au LCRNode " + fmtNode(to));
 
-            // ===== Charger les produits depuis le Controller (maître) =====
-            loadProductsFromController();
+            // ✅ Scan produit conservé (information seulement)
+            ctrl.scanProducts();
 
         } catch (Exception e) {
             log("Init LCP failed: " + e.getMessage());
             link = null;
-        }
-    }
-
-    private void loadProductsFromController() {
-        try {
-            List<DeliveryController.ProductInfo> products =
-                    ctrl.scanProducts();
-
-            if (products.isEmpty()) {
-                log("Aucun produit actif trouvé");
-                spnProducts.setAdapter(null);
-                return;
-            }
-
-            ArrayAdapter<DeliveryController.ProductInfo> adapter =
-                    new ArrayAdapter<>(
-                            this,
-                            android.R.layout.simple_spinner_item,
-                            products
-                    );
-            adapter.setDropDownViewResource(
-                    android.R.layout.simple_spinner_dropdown_item
-            );
-            spnProducts.setAdapter(adapter);
-
-            log("Produits chargés: " + products.size());
-
-        } catch (Exception e) {
-            log("ERR lecture produits: " + e.getMessage());
         }
     }
 
@@ -202,7 +174,6 @@ public class MainActivity extends AppCompatActivity {
             currentDevice = null;
 
             btnConnect.setEnabled(true);
-            spnProducts.setAdapter(null);
         });
     }
 
@@ -238,10 +209,16 @@ public class MainActivity extends AppCompatActivity {
     private void bindUI() {
         edtTo = findViewById(R.id.edtTo);
         edtFrom = findViewById(R.id.edtFrom);
+        edtProduct = findViewById(R.id.edtProduct);
         edtPreset = findViewById(R.id.edtPreset);
 
         btnConnect = findViewById(R.id.btnConnect);
+        btnA = findViewById(R.id.btnA);
+        btnB = findViewById(R.id.btnB);
         btnC = findViewById(R.id.btnC);
+        btnContinue = findViewById(R.id.btnContinue);
+        btnFinish = findViewById(R.id.btnFinish);
+
         btnScanUsb = findViewById(R.id.btnScanUsb);
         btnPingUsb = findViewById(R.id.btnPingUsb);
         btnClearLog = findViewById(R.id.btnClearLog);
@@ -254,12 +231,12 @@ public class MainActivity extends AppCompatActivity {
         txtQtyGross = findViewById(R.id.txtQtyGross);
 
         spnUsbDevices = findViewById(R.id.spnUsbDevices);
-        spnProducts = findViewById(R.id.spnProducts);
     }
 
     private void applyDefaults() {
         edtTo.setText("0xFA");
         edtFrom.setText("0xFF");
+        edtProduct.setText("");     // ✅ produit manuel
         edtPreset.setText("50.0");
     }
 
@@ -268,18 +245,44 @@ public class MainActivity extends AppCompatActivity {
         btnPingUsb.setOnClickListener(v -> openSelectedUsb());
         btnConnect.setOnClickListener(v -> initLcp());
 
+        // ✅ Bouton C — priorité produit saisi
         btnC.setOnClickListener(v -> {
-            if (ctrl != null && spnProducts.getSelectedItem() != null) {
-                DeliveryController.ProductInfo p =
-                        (DeliveryController.ProductInfo) spnProducts.getSelectedItem();
-
-                ctrl.startOpenMode(
-                        p.number,
-                        readDouble(edtPreset, 0),
-                        20_000,
-                        POLL_MS
-                );
+            if (ctrl == null) {
+                log("ERR: LCP non initialisé");
+                return;
             }
+
+            int manualProduct = readInt(edtProduct, 0);
+            int productToUse;
+
+            if (manualProduct > 0) {
+                productToUse = manualProduct;
+                log("[PROD] Produit FORCÉ par l’opérateur = " + productToUse);
+            } else {
+                DeliveryController.ProductInfo p = ctrl.getCurrentProduct();
+                if (p == null) {
+                    log("ERR: Aucun produit disponible (scan + saisie vide)");
+                    return;
+                }
+                productToUse = p.number;
+                log("[PROD] Produit issu du registre = " + productToUse +
+                        " (" + p.code + ")");
+            }
+
+            double preset = readDouble(edtPreset, 0);
+            if (preset <= 0) {
+                log("ERR: Preset invalide");
+                return;
+            }
+
+            log("START livraison → produit=" + productToUse + " preset=" + preset);
+
+            ctrl.startOpenMode(
+                    productToUse,
+                    preset,
+                    20_000,
+                    POLL_MS
+            );
         });
 
         btnClearLog.setOnClickListener(v -> clearLog());
@@ -365,6 +368,11 @@ public class MainActivity extends AppCompatActivity {
             if (s.startsWith("0x")) return Integer.parseInt(s.substring(2), 16);
             return Integer.parseInt(s, 16);
         } catch (Exception ex) { return def; }
+    }
+
+    private static int readInt(EditText e, int def) {
+        try { return Integer.parseInt(e.getText().toString()); }
+        catch (Exception ex) { return def; }
     }
 
     private static double readDouble(EditText e, double def) {
