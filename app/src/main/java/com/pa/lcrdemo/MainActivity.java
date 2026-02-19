@@ -16,37 +16,29 @@ import com.pa.lcr.lcp.LcpLink;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * MainActivity — version "comme avant" (UI complète) + correctifs actuels :
- * - logs TX/RX payload (LcpLink.DUMP_TX/DUMP_RX)
- * - produit actif (Field #0) + set produit actif à la sélection (SET Field #0)
- * - override produit via edtProduct
- * - auto-scroll log
+ * MainActivity — UI complète (selon ton activity_main.xml) + correctifs actuels :
+ * - Logs TX/RX payload (switchIoLog -> LcpLink.DUMP_TX/DUMP_RX)
+ * - Produit actif + bascule à la sélection spinner (ctrl.selectProductFromUi)
+ * - btnC désactivé pendant RUNNING (flowing/paused)
+ * - btnContinue actif uniquement si paused (resumeIfPaused)
+ * - btnFinish actif si running (endDelivery)
+ * - log auto-scroll + buffer borné
  */
 public class MainActivity extends AppCompatActivity {
 
-    // ================= UI (selon ton XML) =================
-    private Spinner spnUsbDevices;
-    private Button btnScanUsb, btnPingUsb;
+    // ================= UI =================
+    private Spinner spnUsbDevices, spnProducts, spnTicketRequired;
+    private EditText edtTo, edtFrom, edtProduct, edtPreset;
 
-    private EditText edtTo, edtFrom;
-    private Spinner spnProducts;
-    private EditText edtProduct, edtPreset;
+    private Button btnScanUsb, btnPingUsb, btnConnect;
+    private Button btnA, btnB, btnC, btnContinue, btnFinish;
 
-    private Button btnConnect;
+    private TextView txtLive, txtQtyNet, txtQtyGross;
 
-    private Button btnA, btnB, btnC;
-    private Button btnContinue, btnFinish;
-
-    private TextView txtLive;
-    private TextView txtQtyNet, txtQtyGross;
-
-    // Ticket / Printer
     private TextView txtTicketNumber, txtPrinterStatus;
-    private Spinner spnTicketRequired;
     private Button btnRefreshTicket, btnClearShift, btnRefreshPrinter, btnPrintPending;
 
     private CheckBox switchIoLog;
@@ -64,18 +56,15 @@ public class MainActivity extends AppCompatActivity {
     private LcpLink link;
     private DeliveryController ctrl;
 
-    private static final int POLL_MS = 200;
+    private static final int POLL_MS = 200; // poll argument pour startOpenMode (ton choix 0.2s)
     private static final String ACTION_USB_PERMISSION = "com.pa.lcrdemo.USB_PERMISSION";
     private PendingIntent usbPermissionIntent;
 
-    // Executor I/O (pour actions directes sur link si nécessaire)
-    private final ExecutorService ioExec = Executors.newSingleThreadExecutor();
-
-    // ================= Log buffer =================
+    // ================= Logging =================
     private final StringBuilder logBuf = new StringBuilder(30000);
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
 
-    // Pour éviter de déclencher setProduct lors d’un setSelection programmatique
+    // Empêche un onItemSelected “rebond” lors d’un setSelection programmatique
     private boolean suppressProductSelect = false;
 
     // ================= USB Permission =================
@@ -114,6 +103,7 @@ public class MainActivity extends AppCompatActivity {
         }
     };
 
+    // ================= Lifecycle =================
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -144,7 +134,6 @@ public class MainActivity extends AppCompatActivity {
         super.onDestroy();
         try { unregisterReceiver(usbPermissionReceiver); } catch (Exception ignored) {}
         try { unregisterReceiver(usbDetachReceiver); } catch (Exception ignored) {}
-        try { ioExec.shutdownNow(); } catch (Exception ignored) {}
     }
 
     // =========================================================
@@ -169,7 +158,7 @@ public class MainActivity extends AppCompatActivity {
         // Logger
         LcpLink.setLogger(s -> log("[IO] " + s));
 
-        // Logs TX/RX payload contrôlés par switchIoLog
+        // Appliquer switch I/O log
         applyIoLogSwitch();
 
         link.openPollWindow();
@@ -177,10 +166,9 @@ public class MainActivity extends AppCompatActivity {
 
         ctrl = new DeliveryController(link, new DeliveryEventsImpl(), Executors.newSingleThreadExecutor());
 
-        // Produit par défaut = product-get-active (Field #0) + code (Field #1) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)[1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
+        // Produit par défaut = product-get-active + code + set selection UI
         ctrl.refreshProductsUi();
 
-        // UX
         btnConnect.setEnabled(false);
     }
 
@@ -212,7 +200,27 @@ public class MainActivity extends AppCompatActivity {
         @Override
         public void onStateChanged(DeliveryController.State s) {
             log("État=" + s);
+
+            // Affichage LIVE
             txtLive.setText("STATE: " + s);
+
+            // ✅ Règles boutons:
+            // - btnC désactivé pendant RUNNING (flowing OU paused)
+            // - btnContinue actif uniquement si paused
+            // - btnFinish actif si running
+            boolean runningFlow = (s == DeliveryController.State.RUNNING_FLOWING);
+            boolean runningPause = (s == DeliveryController.State.RUNNING_PAUSED);
+            boolean running = runningFlow || runningPause;
+
+            btnC.setEnabled(!running
+                    && s != DeliveryController.State.PRESTART
+                    && s != DeliveryController.State.STARTING
+                    && s != DeliveryController.State.ENDING);
+
+            btnContinue.setEnabled(runningPause);
+            btnFinish.setEnabled(running);
+
+            // Optionnel: A/B restent toujours possibles
         }
 
         @Override
@@ -237,7 +245,6 @@ public class MainActivity extends AppCompatActivity {
                     adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
                     spnProducts.setAdapter(adapter);
 
-                    // selectedIndex0 est 0..15
                     if (selectedIndex0 >= 0 && selectedIndex0 < items.size()) {
                         spnProducts.setSelection(selectedIndex0);
                     }
@@ -268,7 +275,6 @@ public class MainActivity extends AppCompatActivity {
         btnA = findViewById(R.id.btnA);
         btnB = findViewById(R.id.btnB);
         btnC = findViewById(R.id.btnC);
-
         btnContinue = findViewById(R.id.btnContinue);
         btnFinish = findViewById(R.id.btnFinish);
 
@@ -297,39 +303,52 @@ public class MainActivity extends AppCompatActivity {
         edtTo.setText("0xFA");
         edtFrom.setText("0xFF");
         edtPreset.setText("50.0");
-        edtProduct.setText(""); // override manuel vide par défaut
+        edtProduct.setText("");
 
-        // Spinner produits: liste 1..16 par défaut (sera remplacée par onProducts)
+        // Spinner produits init 1..16 (sera remplacé par onProducts)
         List<DeliveryController.ProductUiItem> init = new ArrayList<>();
-        for (int i = 1; i <= 16; i++) {
-            init.add(new DeliveryController.ProductUiItem(i, "Produit " + i));
-        }
+        for (int i = 1; i <= 16; i++) init.add(new DeliveryController.ProductUiItem(i, "Produit " + i));
         ArrayAdapter<DeliveryController.ProductUiItem> adapter =
                 new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, init);
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         spnProducts.setAdapter(adapter);
+
+        // TicketRequired spinner placeholder
+        ArrayAdapter<String> tr = new ArrayAdapter<>(
+                this, android.R.layout.simple_spinner_item,
+                new String[]{"Yes", "No", "Never"}
+        );
+        tr.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spnTicketRequired.setAdapter(tr);
 
         txtLive.setText("LIVE: (en attente)");
         txtQtyNet.setText("NET: 0.0");
         txtQtyGross.setText("GROSS: 0.0");
         txtTicketNumber.setText("-");
         txtPrinterStatus.setText("Imprimante: (non connecté / non lu)");
+
+        // au départ
+        btnContinue.setEnabled(false);
+        btnFinish.setEnabled(false);
     }
 
     private void wireHandlers() {
 
+        // USB
         btnScanUsb.setOnClickListener(v -> scanUsbDevices());
         btnPingUsb.setOnClickListener(v -> openSelectedUsb());
+
+        // Connect
         btnConnect.setOnClickListener(v -> initLcp());
 
         // Logs
         btnClearLog.setOnClickListener(v -> clearLog());
         btnCopyLog.setOnClickListener(v -> copyLog());
 
-        // Toggle I/O dump
+        // I/O dump
         switchIoLog.setOnCheckedChangeListener((buttonView, isChecked) -> applyIoLogSwitch());
 
-        // A) Basculer produit à la sélection (A)
+        // A) Sélection produit à la sélection spinner (immediate)
         spnProducts.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
                 if (suppressProductSelect) return;
@@ -339,13 +358,13 @@ public class MainActivity extends AppCompatActivity {
                 if (sel instanceof DeliveryController.ProductUiItem) {
                     int prod = ((DeliveryController.ProductUiItem) sel).product1;
                     log("[UI] Sélection produit → prod" + prod);
-                    ctrl.selectProductFromUi(prod); // SET Field #0 si nécessaire [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
+                    ctrl.selectProductFromUi(prod);
                 }
             }
             @Override public void onNothingSelected(AdapterView<?> parent) {}
         });
 
-        // Bouton C : Start (le controller re-valide quand même le produit)
+        // C (Start) : override manuel si présent
         btnC.setOnClickListener(v -> {
             if (ctrl == null) { log("ERR: LCP non initialisé"); return; }
 
@@ -371,88 +390,36 @@ public class MainActivity extends AppCompatActivity {
             ctrl.startOpenMode(product1to16, preset, 20_000, POLL_MS);
         });
 
-        // A/B/Continue/Finish : pour l’instant, on garde "comme avant" mais safe.
+        // Continue / Finish (liés au controller)
+        btnContinue.setOnClickListener(v -> {
+            if (ctrl != null) ctrl.resumeIfPaused(20_000);
+            else log("Continuer: LCP non initialisé");
+        });
+
+        btnFinish.setOnClickListener(v -> {
+            if (ctrl != null) ctrl.endDelivery(20_000);
+            else log("Terminer: LCP non initialisé");
+        });
+
+        // A/B (comme avant, safe)
         btnA.setOnClickListener(v -> {
-            // A = refresh produit actif (get-active) + refresh spinner
             if (ctrl != null) ctrl.refreshProductsUi();
             else log("A: LCP non initialisé");
         });
 
         btnB.setOnClickListener(v -> {
-            // B = sync-first (GetProductId) best effort
-            if (link == null) { log("B: LCP non initialisé"); return; }
-            ioExec.execute(() -> {
-                try {
-                    link.forceSyncNext();
-                    link.opGetProductId();
-                    log("B: sync-first OK");
-                } catch (Exception e) {
-                    log("B: sync-first ERR " + e.getMessage());
-                }
-            });
+            // B: refresh produits aussi (ou sync-first)
+            if (ctrl != null) ctrl.refreshProductsUi();
+            else log("B: LCP non initialisé");
         });
 
-        btnContinue.setOnClickListener(v -> {
-            // Continue (placeholder) : tu peux mapper à Cmd#0 si tu veux
-            if (link == null) { log("Continuer: LCP non initialisé"); return; }
-            ioExec.execute(() -> {
-                try {
-                    link.opIssueCommand(0x00);
-                    log("Continuer: Cmd#0 OK");
-                } catch (Exception e) {
-                    log("Continuer: ERR " + e.getMessage());
-                }
-            });
-        });
-
-        btnFinish.setOnClickListener(v -> {
-            // Finish = END (Cmd#2)
-            if (link == null) { log("Terminer: LCP non initialisé"); return; }
-            ioExec.execute(() -> {
-                try {
-                    link.opIssueCommand(0x02);
-                    log("Terminer: Cmd#2 OK");
-                } catch (Exception e) {
-                    log("Terminer: ERR " + e.getMessage());
-                }
-            });
-        });
-
-        // Ticket / Printer : handlers "comme avant" (safe), à compléter si tu veux.
-        btnRefreshTicket.setOnClickListener(v -> {
-            if (link == null) { log("Refresh Ticket: LCP non initialisé"); return; }
-            ioExec.execute(() -> {
-                try {
-                    // Exemple simple: lire field #23 TicketNumber (si dispo)
-                    byte[] data = link.opGetField(23);
-                    if (data != null && data.length >= 4) {
-                        int v32 = ((data[0]&0xFF)<<24)|((data[1]&0xFF)<<16)|((data[2]&0xFF)<<8)|(data[3]&0xFF);
-                        runOnUiThread(() -> txtTicketNumber.setText(String.valueOf(v32)));
-                        log("TicketNumber(#23)=" + v32);
-                    } else {
-                        log("TicketNumber(#23)=<n/a>");
-                    }
-                } catch (Exception e) {
-                    log("Refresh Ticket ERR: " + e.getMessage());
-                }
-            });
-        });
-
-        btnClearShift.setOnClickListener(v -> log("Clear Shift: (TODO mapping commande)"));
-
-        btnRefreshPrinter.setOnClickListener(v -> log("Refresh Printer: (TODO mapping 0x23)"));
-
+        // Ticket / Printer (stubs safe pour l’instant)
+        btnRefreshTicket.setOnClickListener(v -> log("Refresh Ticket: TODO (mapping)"));
+        btnClearShift.setOnClickListener(v -> log("Clear Shift: TODO (mapping)"));
+        btnRefreshPrinter.setOnClickListener(v -> log("Refresh Printer: TODO (mapping)"));
         btnPrintPending.setOnClickListener(v -> {
-            if (link == null) { log("Print Pending: LCP non initialisé"); return; }
-            ioExec.execute(() -> {
-                try {
-                    // Cmd#6 est souvent "print ticket pending" dans tes scripts terrain
-                    link.opIssueCommand(0x06);
-                    log("Print Pending: Cmd#6 OK");
-                } catch (Exception e) {
-                    log("Print Pending ERR: " + e.getMessage());
-                }
-            });
+            // Tu peux mapper plus tard à cmd#6 si tu veux
+            log("Print Pending: TODO (mapping)");
         });
     }
 
@@ -564,7 +531,7 @@ public class MainActivity extends AppCompatActivity {
         uiHandler.post(() -> {
             logBuf.append(s).append('\n');
 
-            // buffer simple: limiter à ~30k chars
+            // Buffer borné pour éviter lag (on garde la fin)
             if (logBuf.length() > 30000) {
                 logBuf.delete(0, logBuf.length() - 25000);
             }
