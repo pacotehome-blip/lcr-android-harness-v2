@@ -133,7 +133,6 @@ public class MainActivity extends AppCompatActivity {
             int to = parseHex(edtTo, 0xFA);
             int from = parseHex(edtFrom, 0xFF);
 
-            // ✅ LOG HUMAIN
             log(String.format(
                     "Init LCP → LCRNode=%s, Host=%s",
                     fmtNode(to),
@@ -154,7 +153,6 @@ public class MainActivity extends AppCompatActivity {
             enableLcpUi();
             btnConnect.setEnabled(false);
 
-            // ✅ LOG HUMAIN
             log(String.format(
                     "LCP prêt — connecté au LCRNode %s",
                     fmtNode(to)
@@ -173,11 +171,20 @@ public class MainActivity extends AppCompatActivity {
         runOnUiThread(() -> {
             log("USB débranché → attente reconnexion");
 
+            // ✅ STOPPE LE POLLING AVANT TOUT
+            if (ctrl != null) {
+                ctrl.shutdown();
+                ctrl = null;
+            }
+
+            if (link != null) {
+                try { link.closePollWindow(); } catch (Exception ignored) {}
+                link = null;
+            }
+
             try { if (port != null) port.close(); } catch (Exception ignored) {}
             port = null;
             currentDevice = null;
-            link = null;
-            ctrl = null;
 
             enableUsbUi();
             disableLcpUi();
