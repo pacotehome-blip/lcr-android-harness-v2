@@ -26,7 +26,7 @@ public class MainActivity extends AppCompatActivity {
     private Button btnConnect, btnA, btnB, btnC, btnContinue, btnFinish;
     private Button btnScanUsb, btnPingUsb, btnClearShift, btnPrintPending;
     private Button btnClearLog, btnCopyLog;
-    private TextView txtLog, txtLive, txtQtyNet, txtQtyGross, txtPrinterStatus;
+    private TextView txtLog, txtLive, txtQtyNet, txtQtyGross;
     private ScrollView logScroll;
     private Spinner spnUsbDevices;
 
@@ -66,7 +66,7 @@ public class MainActivity extends AppCompatActivity {
         }
     };
 
-    // ================= USB DETACH (FILTRÉ) =================
+    // ================= USB DETACH =================
     private final BroadcastReceiver usbDetachReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
             if (!UsbManager.ACTION_USB_DEVICE_DETACHED.equals(intent.getAction()))
@@ -133,11 +133,7 @@ public class MainActivity extends AppCompatActivity {
             int to = parseHex(edtTo, 0xFA);
             int from = parseHex(edtFrom, 0xFF);
 
-            log(String.format(
-                    "Init LCP → LCRNode=%s, Host=%s",
-                    fmtNode(to),
-                    fmtNode(from)
-            ));
+            log("Init LCP → LCRNode=" + fmtNode(to) + ", Host=" + fmtNode(from));
 
             link = new LcpLink(port, to, from, true);
             LcpLink.setLogger(s -> log("[IO] " + s));
@@ -153,11 +149,7 @@ public class MainActivity extends AppCompatActivity {
             enableLcpUi();
             btnConnect.setEnabled(false);
 
-            log(String.format(
-                    "LCP prêt — connecté au LCRNode %s",
-                    fmtNode(to)
-            ));
-
+            log("LCP prêt — connecté au LCRNode " + fmtNode(to));
             ctrl.recoverActiveDelivery(POLL_MS);
 
         } catch (Exception e) {
@@ -171,7 +163,6 @@ public class MainActivity extends AppCompatActivity {
         runOnUiThread(() -> {
             log("USB débranché → attente reconnexion");
 
-            // ✅ STOPPE LE POLLING AVANT TOUT
             if (ctrl != null) {
                 ctrl.shutdown();
                 ctrl = null;
@@ -196,7 +187,43 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    // ================= UI =================
+    // ================= Delivery Events =================
+    private class DeliveryEventsImpl implements DeliveryController.DeliveryEvents {
+
+        @Override
+        public void onStateChanged(DeliveryController.State s) {
+            log("État=" + s);
+        }
+
+        @Override
+        public void onProgress(DeliveryController.DeliveryProgress p) {
+            runOnUiThread(() -> {
+                txtLive.setText("STATE=" + p.deliveryState);
+                txtQtyNet.setText("NET=" + p.netL);
+                txtQtyGross.setText("GROSS=" + p.grossL);
+
+                if (p.deliveryState == LcpDeliveryState.ACTIVE_FLOWING) {
+                    btnContinue.setEnabled(false);
+                    btnFinish.setEnabled(true);
+                } else if (p.deliveryState == LcpDeliveryState.ACTIVE_PAUSED) {
+                    btnContinue.setEnabled(true);
+                    btnFinish.setEnabled(true);
+                }
+            });
+        }
+
+        @Override
+        public void onError(String msg, Throwable t) {
+            log("ERR[" + msg + "] " + (t != null ? t.getMessage() : ""));
+        }
+
+        @Override
+        public void onLog(String line) {
+            log(line);
+        }
+    }
+
+    // ================= UI Helpers =================
     private void bindUI() {
         edtTo = findViewById(R.id.edtTo);
         edtFrom = findViewById(R.id.edtFrom);
@@ -223,7 +250,6 @@ public class MainActivity extends AppCompatActivity {
         txtLive = findViewById(R.id.txtLive);
         txtQtyNet = findViewById(R.id.txtQtyNet);
         txtQtyGross = findViewById(R.id.txtQtyGross);
-        txtPrinterStatus = findViewById(R.id.txtPrinterStatus);
 
         spnUsbDevices = findViewById(R.id.spnUsbDevices);
     }
@@ -246,8 +272,7 @@ public class MainActivity extends AppCompatActivity {
                 ctrl.startOpenMode(
                         readInt(edtProduct, 1),
                         readDouble(edtPreset, 0),
-                        20000,
-                        POLL_MS
+                        20000, POLL_MS
                 );
         });
 
@@ -286,38 +311,6 @@ public class MainActivity extends AppCompatActivity {
         btnScanUsb.setEnabled(true);
         btnPingUsb.setEnabled(true);
         spnUsbDevices.setEnabled(true);
-    }
-
-    // ================= Delivery Events =================
-    private class DeliveryEventsImpl implements DeliveryController.DeliveryEvents {
-        @Override public void onStateChanged(DeliveryController.State s) { log("État=" + s); }
-        @Override public void onFlowStarted() { log("Flow START"); }
-        @Override public void onFlowStopped() { log("Flow STOP"); }
-
-        @Override
-        public void onProgress(DeliveryController.DeliveryProgress p) {
-            runOnUiThread(() -> {
-                txtLive.setText("STATE=" + p.deliveryState);
-                txtQtyNet.setText("NET=" + p.netL);
-                txtQtyGross.setText("GROSS=" + p.grossL);
-
-                if (p.deliveryState == LcpDeliveryState.ACTIVE_FLOWING) {
-                    btnContinue.setEnabled(false);
-                    btnFinish.setEnabled(true);
-                } else if (p.deliveryState == LcpDeliveryState.ACTIVE_PAUSED) {
-                    btnContinue.setEnabled(true);
-                    btnFinish.setEnabled(true);
-                }
-            });
-        }
-
-        @Override public void onTicketNumber(int n) {}
-        @Override public void onTicketRequired(int m) {}
-        @Override public void onPrinterStatus(LcpLink.MachineStatusEx ms, boolean t) {
-            txtPrinterStatus.setText(ms.toString());
-        }
-        @Override public void onError(String m, Throwable t) { log("ERR " + m); }
-        @Override public void onLog(String l) { log(l); }
     }
 
     // ================= USB Helpers =================
@@ -368,12 +361,9 @@ public class MainActivity extends AppCompatActivity {
 
         try {
             p.open(conn);
-            p.setParameters(
-                    19200,
-                    8,
+            p.setParameters(19200, 8,
                     UsbSerialPort.STOPBITS_1,
-                    UsbSerialPort.PARITY_NONE
-            );
+                    UsbSerialPort.PARITY_NONE);
             p.setDTR(true);
             p.setRTS(true);
             log("Port USB ouvert : " + usbLabel(dev));
