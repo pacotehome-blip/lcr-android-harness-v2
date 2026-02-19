@@ -20,7 +20,7 @@ public class DeliveryController {
     private static final int FIELD_DECIMALS        = 39;
     private static final int FIELD_NET_TOTAL       = 45;
     private static final int FIELD_GROSS_TOTAL     = 44;
-    private static final int FIELD_DEFAULT_PRODUCT = 88;  // ✅ PRODUIT PAR DÉFAUT
+    private static final int FIELD_DEFAULT_PRODUCT = 88;  // ✅ Produit par défaut
 
     private static final int MAX_PRODUCTS = 16;
 
@@ -101,17 +101,19 @@ public class DeliveryController {
     }
 
     // ======================================================
-    // ✅ PRODUIT PAR DÉFAUT (FIELD #88)
+    // ✅ PRODUIT PAR DÉFAUT (#88) — AVEC FALLBACK
     // ======================================================
     private int applyDefaultProduct() throws Exception {
         int def = decodeU8(link.opGetField(FIELD_DEFAULT_PRODUCT));
 
-        if (def <= 0 || def > MAX_PRODUCTS) {
-            throw new IllegalStateException("Produit par défaut invalide (#88)=" + def);
+        if (def > 0 && def <= MAX_PRODUCTS) {
+            log("[PROD] Produit par défaut (#88) = " + def);
+            return def;
         }
 
-        log("[PROD] Produit par défaut (#88) = " + def);
-        return def;
+        // ✅ CAS NORMAL TERRAIN
+        log("[PROD] Aucun produit par défaut explicite (#88=0), utilisation du produit courant implicite");
+        return 0; // 0 = produit courant implicite
     }
 
     // ======================================================
@@ -120,7 +122,7 @@ public class DeliveryController {
     public List<ProductInfo> scanProducts() throws Exception {
         List<ProductInfo> products = new ArrayList<>();
 
-        // 1. Appliquer le produit par défaut
+        // 1. Appliquer (ou non) le produit par défaut
         applyDefaultProduct();
 
         // 2. Scanner les slots
@@ -138,7 +140,9 @@ public class DeliveryController {
             products.add(p);
 
             if (active) {
-                log("[PROD] Actif: slot=" + slot + " num=" + number + " code=" + code);
+                log("[PROD] Actif: slot=" + slot +
+                        " num=" + number +
+                        " code=" + code);
             } else {
                 log("[PROD] Slot " + slot + " non configuré");
             }
@@ -148,7 +152,7 @@ public class DeliveryController {
     }
 
     // ======================================================
-    // START DELIVERY (inchangé ici)
+    // START DELIVERY
     // ======================================================
     public void startOpenMode(int product, double presetNetLitres, int timeoutMs, int pollMs) {
         exec.execute(() -> {
