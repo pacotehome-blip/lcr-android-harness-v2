@@ -1,3 +1,4 @@
+
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/root"
     android:layout_width="match_parent"
@@ -54,13 +55,21 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:layout_marginStart="8dp"
             android:hint="FROM (ex: 0xFF)"
-            android:singleLine="true" />
+            android:singleLine="true"
+            android:layout_marginStart="8dp" />
     </LinearLayout>
 
+    <!-- ===================== PRODUITS (liste 1..16) ===================== -->
+    <!-- ✅ Liste fixe fournie par l'UI; le produit actif est sélectionné par défaut via DeliveryController -->
+    <Spinner
+        android:id="@+id/spnProducts"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp" />
+
     <!-- ===================== PRODUIT / PRESET ===================== -->
-    <!-- ✅ Produit saisi manuellement (prioritaire sur le scan) -->
+    <!-- ✅ Produit manuel = override; priorité sur le spinner si rempli -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -72,7 +81,7 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:hint="Produit (#)"
+            android:hint="Produit (#) override"
             android:inputType="number"
             android:singleLine="true" />
 
@@ -95,7 +104,7 @@
         android:text="Connect (LCP)"
         android:layout_marginTop="6dp" />
 
-    <!-- ===================== BOUTONS A / B / C ===================== -->
+    <!-- ===================== BOUTONS A / B / C + CONTINUER / FINISH ===================== -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -126,7 +135,6 @@
             android:text="C" />
     </LinearLayout>
 
-    <!-- ===================== CONTINUER / TERMINER ===================== -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -149,7 +157,7 @@
             android:text="Terminer" />
     </LinearLayout>
 
-    <!-- ===================== LIVE ===================== -->
+    <!-- ===================== LIVE (ligne unique) ===================== -->
     <TextView
         android:id="@+id/txtLive"
         android:layout_width="match_parent"
@@ -158,7 +166,7 @@
         android:textStyle="bold"
         android:layout_marginTop="8dp" />
 
-    <!-- ===================== NET / GROSS ===================== -->
+    <!-- ===================== AJOUT MINIMAL : NET / GROSS (big digits) ===================== -->
     <LinearLayout
         android:id="@+id/liveQtyPanel"
         android:layout_width="match_parent"
@@ -185,49 +193,3 @@
             android:textStyle="bold"
             android:textSize="18sp"
             android:textColor="#222222" />
-    </LinearLayout>
-
-    <!-- ===================== LOG ===================== -->
-    <ScrollView
-        android:id="@+id/logScroll"
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
-        android:fillViewport="true"
-        android:layout_marginTop="6dp"
-        android:background="#111111">
-
-        <TextView
-            android:id="@+id/txtLog"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:typeface="monospace"
-            android:textIsSelectable="true"
-            android:textSize="12sp"
-            android:textColor="#00FF00"
-            android:padding="6dp" />
-    </ScrollView>
-
-    <!-- ===================== LOG ACTIONS ===================== -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="end"
-        android:layout_marginTop="6dp">
-
-        <Button
-            android:id="@+id/btnClearLog"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Clear log" />
-
-        <Button
-            android:id="@+id/btnCopyLog"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:text="Copy log" />
-    </LinearLayout>
-
-</LinearLayout>
