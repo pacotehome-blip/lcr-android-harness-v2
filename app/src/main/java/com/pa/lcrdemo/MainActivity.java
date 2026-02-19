@@ -24,8 +24,7 @@ public class MainActivity extends AppCompatActivity {
     // ================= UI =================
     private EditText edtTo, edtFrom, edtProduct, edtPreset;
     private Button btnConnect, btnA, btnB, btnC, btnContinue, btnFinish;
-    private Button btnScanUsb, btnPingUsb, btnClearShift, btnPrintPending;
-    private Button btnClearLog, btnCopyLog;
+    private Button btnScanUsb, btnPingUsb, btnClearLog, btnCopyLog;
     private TextView txtLog, txtLive, txtQtyNet, txtQtyGross;
     private ScrollView logScroll;
     private Spinner spnUsbDevices;
@@ -43,7 +42,7 @@ public class MainActivity extends AppCompatActivity {
     private PendingIntent usbPermissionIntent;
 
     // ================= Logging =================
-    private final StringBuilder logBuf = new StringBuilder(8192);
+    private final StringBuilder logBuf = new StringBuilder(16384);
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
 
     // ================= USB Permission =================
@@ -69,12 +68,10 @@ public class MainActivity extends AppCompatActivity {
     // ================= USB DETACH =================
     private final BroadcastReceiver usbDetachReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
-            if (!UsbManager.ACTION_USB_DEVICE_DETACHED.equals(intent.getAction()))
-                return;
+            if (!UsbManager.ACTION_USB_DEVICE_DETACHED.equals(intent.getAction())) return;
 
             UsbDevice dev = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
-            if (dev == null || port == null || currentDevice == null)
-                return;
+            if (dev == null || currentDevice == null) return;
 
             if (dev.getVendorId() == currentDevice.getVendorId()
                     && dev.getProductId() == currentDevice.getProductId()) {
@@ -96,12 +93,12 @@ public class MainActivity extends AppCompatActivity {
 
         usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
 
-        int piFlags = PendingIntent.FLAG_UPDATE_CURRENT;
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
-            piFlags = PendingIntent.FLAG_MUTABLE;
+            flags = PendingIntent.FLAG_MUTABLE;
 
         usbPermissionIntent = PendingIntent.getBroadcast(
-                this, 0, new Intent(ACTION_USB_PERMISSION), piFlags
+                this, 0, new Intent(ACTION_USB_PERMISSION), flags
         );
 
         registerReceiver(usbPermissionReceiver, new IntentFilter(ACTION_USB_PERMISSION));
@@ -145,12 +142,8 @@ public class MainActivity extends AppCompatActivity {
                     Executors.newSingleThreadExecutor()
             );
 
-            disableUsbUi();
-            enableLcpUi();
             btnConnect.setEnabled(false);
-
             log("LCP prêt — connecté au LCRNode " + fmtNode(to));
-            ctrl.recoverActiveDelivery(POLL_MS);
 
         } catch (Exception e) {
             log("Init LCP failed: " + e.getMessage());
@@ -161,7 +154,7 @@ public class MainActivity extends AppCompatActivity {
     // ================= USB DETACH =================
     private void onUsbDetached() {
         runOnUiThread(() -> {
-            log("USB débranché → attente reconnexion");
+            log("USB débranché → arrêt LCP");
 
             if (ctrl != null) {
                 ctrl.shutdown();
@@ -177,13 +170,7 @@ public class MainActivity extends AppCompatActivity {
             port = null;
             currentDevice = null;
 
-            enableUsbUi();
-            disableLcpUi();
             btnConnect.setEnabled(true);
-
-            txtLive.setText("USB débranché");
-            txtQtyNet.setText("-");
-            txtQtyGross.setText("-");
         });
     }
 
@@ -198,17 +185,9 @@ public class MainActivity extends AppCompatActivity {
         @Override
         public void onProgress(DeliveryController.DeliveryProgress p) {
             runOnUiThread(() -> {
-                txtLive.setText("STATE=" + p.deliveryState);
-                txtQtyNet.setText("NET=" + p.netL);
-                txtQtyGross.setText("GROSS=" + p.grossL);
-
-                if (p.deliveryState == LcpDeliveryState.ACTIVE_FLOWING) {
-                    btnContinue.setEnabled(false);
-                    btnFinish.setEnabled(true);
-                } else if (p.deliveryState == LcpDeliveryState.ACTIVE_PAUSED) {
-                    btnContinue.setEnabled(true);
-                    btnFinish.setEnabled(true);
-                }
+                txtQtyNet.setText(String.format("NET %.1f", p.netDelta));
+                txtQtyGross.setText(String.format("GROSS %.1f", p.grossDelta));
+                txtLive.setText(p.deliveryState.toString());
             });
         }
 
@@ -223,7 +202,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    // ================= UI Helpers =================
+    // ================= UI wiring =================
     private void bindUI() {
         edtTo = findViewById(R.id.edtTo);
         edtFrom = findViewById(R.id.edtFrom);
@@ -231,17 +210,10 @@ public class MainActivity extends AppCompatActivity {
         edtPreset = findViewById(R.id.edtPreset);
 
         btnConnect = findViewById(R.id.btnConnect);
-        btnA = findViewById(R.id.btnA);
-        btnB = findViewById(R.id.btnB);
         btnC = findViewById(R.id.btnC);
-        btnContinue = findViewById(R.id.btnContinue);
-        btnFinish = findViewById(R.id.btnFinish);
 
         btnScanUsb = findViewById(R.id.btnScanUsb);
         btnPingUsb = findViewById(R.id.btnPingUsb);
-        btnClearShift = findViewById(R.id.btnClearShift);
-        btnPrintPending = findViewById(R.id.btnPrintPending);
-
         btnClearLog = findViewById(R.id.btnClearLog);
         btnCopyLog = findViewById(R.id.btnCopyLog);
 
@@ -259,7 +231,6 @@ public class MainActivity extends AppCompatActivity {
         edtFrom.setText("0xFF");
         edtProduct.setText("1");
         edtPreset.setText("50.0");
-        disableLcpUi();
     }
 
     private void installHandlers() {
@@ -268,63 +239,32 @@ public class MainActivity extends AppCompatActivity {
         btnConnect.setOnClickListener(v -> initLcp());
 
         btnC.setOnClickListener(v -> {
-            if (ctrl != null)
+            if (ctrl != null) {
                 ctrl.startOpenMode(
                         readInt(edtProduct, 1),
                         readDouble(edtPreset, 0),
-                        20000, POLL_MS
+                        20_000,
+                        POLL_MS
                 );
+            }
         });
-
-        btnContinue.setOnClickListener(v -> { if (ctrl != null) ctrl.resumeDelivery(POLL_MS); });
-        btnFinish.setOnClickListener(v -> { if (ctrl != null) ctrl.endGracefully(20000, POLL_MS); });
 
         btnClearLog.setOnClickListener(v -> clearLog());
         btnCopyLog.setOnClickListener(v -> copyLog());
     }
 
-    private void enableLcpUi() {
-        btnA.setEnabled(true);
-        btnB.setEnabled(true);
-        btnC.setEnabled(true);
-        btnClearShift.setEnabled(true);
-        btnPrintPending.setEnabled(true);
-    }
-
-    private void disableLcpUi() {
-        btnA.setEnabled(false);
-        btnB.setEnabled(false);
-        btnC.setEnabled(false);
-        btnContinue.setEnabled(false);
-        btnFinish.setEnabled(false);
-        btnClearShift.setEnabled(false);
-        btnPrintPending.setEnabled(false);
-    }
-
-    private void disableUsbUi() {
-        btnScanUsb.setEnabled(false);
-        btnPingUsb.setEnabled(false);
-        spnUsbDevices.setEnabled(false);
-    }
-
-    private void enableUsbUi() {
-        btnScanUsb.setEnabled(true);
-        btnPingUsb.setEnabled(true);
-        spnUsbDevices.setEnabled(true);
-    }
-
     // ================= USB Helpers =================
+    public void setPort(UsbSerialPort p, UsbDevice d) {
+        port = p;
+        currentDevice = d;
+        log("USB prêt");
+    }
+
     public void setPort(UsbSerialPort p) {
         UsbDevice d = null;
         try { if (p != null && p.getDriver() != null) d = p.getDriver().getDevice(); }
         catch (Exception ignored) {}
         setPort(p, d);
-    }
-
-    public void setPort(UsbSerialPort p, UsbDevice d) {
-        port = p;
-        currentDevice = d;
-        log("USB prêt");
     }
 
     private void scanUsbDevices() {
@@ -375,11 +315,10 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private static String usbLabel(UsbDevice d) {
-        if (d == null) return "(unknown device)";
         String m = d.getManufacturerName();
         String p = d.getProductName();
-        if (m == null || m.isEmpty()) m = "Unknown manufacturer";
-        if (p == null || p.isEmpty()) p = "Unknown product";
+        if (m == null) m = "Unknown manufacturer";
+        if (p == null) p = "Unknown product";
         return String.format(
                 "%s - %s (VID=%04X PID=%04X)",
                 m, p, d.getVendorId(), d.getProductId()
@@ -409,6 +348,15 @@ public class MainActivity extends AppCompatActivity {
         return String.format("%d (0x%02X)", addr, addr);
     }
 
+    // ================= LOG (AUTO-SCROLL) =================
+    private void log(String s) {
+        uiHandler.post(() -> {
+            logBuf.append(s).append('\n');
+            txtLog.setText(logBuf.toString());
+            logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
+        });
+    }
+
     private void clearLog() {
         uiHandler.post(() -> {
             logBuf.setLength(0);
@@ -424,13 +372,5 @@ public class MainActivity extends AppCompatActivity {
                 ClipData.newPlainText("log", logBuf.toString())
         );
         log("Log copié");
-    }
-
-    private void log(String s) {
-        uiHandler.post(() -> {
-            logBuf.append(s).append('\n');
-            txtLog.setText(logBuf.toString());
-            logScroll.fullScroll(View.FOCUS_DOWN);
-        });
     }
 }
