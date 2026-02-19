@@ -41,35 +41,38 @@ import java.util.concurrent.Executors;
 
 public class MainActivity extends AppCompatActivity {
 
+    // ================= UI =================
     private EditText edtTo, edtFrom, edtProduct, edtPreset;
-    private Button btnCopyLog, btnClearLog, btnConnect;
+    private Button btnConnect;
     private Button btnA, btnB, btnC;
     private Button btnContinue, btnFinish;
+    private Button btnCopyLog, btnClearLog;
+
     private CheckBox switchIoLog;
     private TextView txtLog;
     private ScrollView logScroll;
 
     private TextView txtLive;
-    private TextView txtQtyNet;
-    private TextView txtQtyGross;
+    private TextView txtQtyNet, txtQtyGross;
 
+    // ================= USB =================
     private Spinner spnUsbDevices;
     private Button btnScanUsb, btnPingUsb;
 
+    // ================= Ticket / Printer =================
     private TextView txtTicketNumber;
     private Spinner spnTicketRequired;
     private Button btnRefreshTicket;
     private Button btnClearShift;
     private TextView txtPrinterStatus;
     private Button btnRefreshPrinter;
-
     private Button btnPrintPending;
 
+    // ================= Backend =================
     private UsbManager usbManager;
     private final List<UsbDevice> usbList = new ArrayList<>();
 
     private UsbSerialPort port = null;
-    private UsbDevice lastSelectedDevice = null;
     private LcpLink link;
     private DeliveryController ctrl;
 
@@ -78,6 +81,7 @@ public class MainActivity extends AppCompatActivity {
     private static final String ACTION_USB_PERMISSION = "com.pa.lcrdemo.USB_PERMISSION";
     private PendingIntent usbPermissionIntent;
 
+    // ================= Log batching =================
     private final Object logLock = new Object();
     private final StringBuilder logBuf = new StringBuilder(8192);
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
@@ -85,6 +89,7 @@ public class MainActivity extends AppCompatActivity {
     private static final int LOG_FLUSH_MS = 250;
     private static final int LOG_MAX_CHARS = 20000;
 
+    // ================= USB permission receiver =================
     private final BroadcastReceiver usbPermissionReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
@@ -108,6 +113,7 @@ public class MainActivity extends AppCompatActivity {
         }
     };
 
+    // ================= Lifecycle =================
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -123,11 +129,9 @@ public class MainActivity extends AppCompatActivity {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             piFlags = PendingIntent.FLAG_MUTABLE;
         }
-
         usbPermissionIntent = PendingIntent.getBroadcast(
                 this, 0, new Intent(ACTION_USB_PERMISSION), piFlags
         );
-
         registerReceiver(usbPermissionReceiver, new IntentFilter(ACTION_USB_PERMISSION));
 
         LcpLink.DUMP_TX = switchIoLog.isChecked();
@@ -136,9 +140,9 @@ public class MainActivity extends AppCompatActivity {
         txtPrinterStatus.setText("Imprimante: (non connecté / non lu)");
         txtPrinterStatus.setBackgroundColor(0xFFEEEEEE);
 
-        if (txtLive != null) txtLive.setText("LIVE: (en attente)");
-        if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
-        if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
+        txtLive.setText("LIVE: (en attente)");
+        txtQtyNet.setText("NET: 0.0");
+        txtQtyGross.setText("GROSS: 0.0");
 
         btnContinue.setEnabled(false);
         btnFinish.setEnabled(false);
@@ -153,6 +157,7 @@ public class MainActivity extends AppCompatActivity {
         try { unregisterReceiver(usbPermissionReceiver); } catch (Exception ignored) {}
     }
 
+    // ================= Bind UI =================
     private void bindUI() {
         edtTo = findViewById(R.id.edtTo);
         edtFrom = findViewById(R.id.edtFrom);
@@ -188,10 +193,10 @@ public class MainActivity extends AppCompatActivity {
 
         txtPrinterStatus = findViewById(R.id.txtPrinterStatus);
         btnRefreshPrinter = findViewById(R.id.btnRefreshPrinter);
-
         btnPrintPending = findViewById(R.id.btnPrintPending);
     }
 
+    // ================= Defaults =================
     private void applyDefaultValues() {
         edtTo.setText("0xFA");
         edtFrom.setText("0xFF");
@@ -205,7 +210,7 @@ public class MainActivity extends AppCompatActivity {
                 android.R.layout.simple_spinner_item,
                 new String[]{
                         "0 = Oui (ticket requis)",
-                        "1 = Non (ticket non requis, imprime si possible)",
+                        "1 = Non (ticket optionnel)",
                         "2 = Jamais (ne pas imprimer)"
                 }
         );
@@ -216,11 +221,12 @@ public class MainActivity extends AppCompatActivity {
         txtTicketNumber.setText("-");
     }
 
+    // ================= Handlers =================
     private void installHandlers() {
-        switchIoLog.setOnCheckedChangeListener((btn, checked) -> {
+        switchIoLog.setOnCheckedChangeListener((b, checked) -> {
             LcpLink.DUMP_TX = checked;
             LcpLink.DUMP_RX = checked;
-            log("[UI] I/O logs " + (checked ? "activés" : "désactivés"));
+            log("[UI] I/O logs " + (checked ? "ON" : "OFF"));
         });
 
         btnScanUsb.setOnClickListener(v -> scanUsbDevices());
@@ -249,7 +255,7 @@ public class MainActivity extends AppCompatActivity {
 
         btnB.setOnClickListener(v -> {
             if (ctrl == null) return;
-            log("PING (#23)");
+            log("PING");
             ctrl.pingStatus(POLL_MS);
         });
 
@@ -263,7 +269,7 @@ public class MainActivity extends AppCompatActivity {
 
         btnContinue.setOnClickListener(v -> {
             if (ctrl == null) return;
-            log("Continuer → Cmd#0 (Start/Resume)");
+            log("Continuer → Cmd#0");
             ctrl.resumeDelivery(POLL_MS);
         });
 
@@ -280,15 +286,12 @@ public class MainActivity extends AppCompatActivity {
 
         spnTicketRequired.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             boolean first = true;
-
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
                 if (first) { first = false; return; }
                 if (ctrl != null) ctrl.setTicketRequired(position, POLL_MS);
             }
-
-            @Override
-            public void onNothingSelected(AdapterView<?> parent) {}
+            @Override public void onNothingSelected(AdapterView<?> parent) {}
         });
 
         btnClearShift.setOnClickListener(v -> {
@@ -304,28 +307,31 @@ public class MainActivity extends AppCompatActivity {
 
         btnPrintPending.setOnClickListener(v -> {
             if (ctrl == null) return;
-            log("PRINT PENDING : Cmd #6");
+            log("PRINT PENDING");
             ctrl.printPendingTicket(POLL_MS, 25000);
         });
     }
 
+    // ================= UI state =================
     private void setUiForState(DeliveryController.State s) {
         boolean running = (s == DeliveryController.State.RUNNING);
-        boolean startingOrPre = (s == DeliveryController.State.STARTING || s == DeliveryController.State.PRESTART);
-        boolean ending = (s == DeliveryController.State.ENDING);
+        boolean startingOrPre =
+                (s == DeliveryController.State.STARTING ||
+                 s == DeliveryController.State.PRESTART ||
+                 s == DeliveryController.State.ENDING);
 
-        btnC.setEnabled(!(running || startingOrPre || ending));
-        btnFinish.setEnabled(running || startingOrPre || ending);
+        btnC.setEnabled(!running && !startingOrPre);
+        btnFinish.setEnabled(running || startingOrPre);
 
         btnRefreshPrinter.setEnabled(!running);
         btnPrintPending.setEnabled(!running);
         spnTicketRequired.setEnabled(!running);
         btnClearShift.setEnabled(!running);
 
-        // Continue piloté par onProgress() via deliveryState
-        btnContinue.setEnabled(false);
+        btnContinue.setEnabled(false); // piloté par deliveryState
     }
 
+    // ================= Init LCP + auto-recovery =================
     private void initLcp() {
         if (port == null) {
             log("ERR: Port USB non initialisé.");
@@ -334,7 +340,7 @@ public class MainActivity extends AppCompatActivity {
         try {
             int to = parseHex(edtTo, 0xFA);
             int from = parseHex(edtFrom, 0xFF);
-            log(String.format("Init LCP → to=0x%02X, from=0x%02X…", to, from));
+            log(String.format("Init LCP → to=0x%02X, from=0x%02X", to, from));
 
             link = new LcpLink(port, to, from, true);
             LcpLink.setLogger(line -> log("[IO] " + line));
@@ -351,7 +357,7 @@ public class MainActivity extends AppCompatActivity {
             ctrl.refreshTicketInfo(POLL_MS);
             ctrl.refreshPrinterStatus(POLL_MS);
 
-            // ✅ recovery automatique (aucun popup)
+            // ✅ auto-recovery si livraison déjà active
             ctrl.recoverActiveDelivery(POLL_MS);
 
         } catch (Exception e) {
@@ -359,6 +365,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    // ================= Logging =================
     private void log(String s) {
         if (!switchIoLog.isChecked()) return;
 
@@ -400,6 +407,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    // ================= Helpers =================
     private int parseHex(EditText edt, int def) {
         try {
             String t = edt.getText().toString().trim();
@@ -441,7 +449,6 @@ public class MainActivity extends AppCompatActivity {
         spnUsbDevices.setAdapter(new ArrayAdapter<>(
                 this, android.R.layout.simple_spinner_item, labels
         ));
-
         log("Scan USB : " + labels.size() + " périphérique(s).");
     }
 
@@ -450,7 +457,6 @@ public class MainActivity extends AppCompatActivity {
         if (index < 0 || index >= usbList.size()) return;
 
         UsbDevice dev = usbList.get(index);
-        lastSelectedDevice = dev;
 
         if (usbManager != null && !usbManager.hasPermission(dev)) {
             usbManager.requestPermission(dev, usbPermissionIntent);
@@ -480,11 +486,12 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    public void setPort(UsbSerialPort p) {
+    private void setPort(UsbSerialPort p) {
         this.port = p;
         log("USB prêt.");
     }
 
+    // ================= Delivery Events =================
     private class DeliveryEventsImpl implements DeliveryController.DeliveryEvents {
 
         @Override
@@ -500,33 +507,24 @@ public class MainActivity extends AppCompatActivity {
 
         @Override
         public void onFlowStopped() {
-            log("Flow STOP → débit=0 (pause confirmée)");
+            log("Flow STOP → pause confirmée");
         }
 
         @Override
         public void onProgress(DeliveryController.DeliveryProgress p) {
-            String stateName = (p.deliveryState != null) ? p.deliveryState.name() : "N/A";
-            boolean flow = (p.dc & LcpLink.LCRSc_FLOW_ACTIVE) != 0;
-
             final String live = String.format(
-                    "t=%dms STATE=%s NET=%.1f (Δ=%.1f) GROSS=%.1f (Δ=%.1f) FLOW=%s dc=%04X",
-                    p.tSinceStartMs,
-                    stateName,
-                    p.netL, p.deliveredNetL,
-                    p.grossL, p.deliveredGrossL,
-                    flow ? "1" : "0",
-                    p.dc
+                    "STATE=%s NET=%.1f GROSS=%.1f FLOW=%s",
+                    p.deliveryState,
+                    p.netL,
+                    p.grossL,
+                    p.flowActive ? "1" : "0"
             );
 
             runOnUiThread(() -> {
-                if (txtLive != null) txtLive.setText(live);
-                if (txtQtyNet != null) txtQtyNet.setText(String.format("NET: %.1f", p.netL));
-                if (txtQtyGross != null) txtQtyGross.setText(String.format("GROSS: %.1f", p.grossL));
+                txtLive.setText(live);
+                txtQtyNet.setText(String.format("NET: %.1f", p.netL));
+                txtQtyGross.setText(String.format("GROSS: %.1f", p.grossL));
 
-                // UI rules:
-                // ACTIVE_FLOWING => Continue OFF, Finish ON
-                // ACTIVE_PAUSED  => Continue ON,  Finish ON
-                // else           => both OFF
                 if (p.deliveryState == LcpDeliveryState.ACTIVE_FLOWING) {
                     btnContinue.setEnabled(false);
                     btnFinish.setEnabled(true);
@@ -555,18 +553,16 @@ public class MainActivity extends AppCompatActivity {
         public void onPrinterStatus(LcpLink.MachineStatusEx ms, boolean ticketPending) {
             final String text =
                     "Imprimante: " + ms.printer().summary() +
-                            " \n ticketPending=" + ticketPending +
-                            " \n ds=0x" + String.format("%04X", ms.delStatus) +
-                            " dc=0x" + String.format("%04X", ms.delCode);
+                    " \n ticketPending=" + ticketPending +
+                    " \n ds=0x" + String.format("%04X", ms.delStatus) +
+                    " dc=0x" + String.format("%04X", ms.delCode);
 
             runOnUiThread(() -> {
                 txtPrinterStatus.setText(text);
-
                 boolean hardErr =
                         ms.printer().outOfPaper ||
-                                ms.printer().noProcessor ||
-                                ms.printer().processorError;
-
+                        ms.printer().noProcessor ||
+                        ms.printer().processorError;
                 boolean printing = ms.printer().printingStarted;
 
                 int bg;
@@ -576,18 +572,6 @@ public class MainActivity extends AppCompatActivity {
 
                 txtPrinterStatus.setBackgroundColor(bg);
             });
-
-            // ✅ no recovery popup
-        }
-
-        @Override
-        public void onOperatorAlert(DeliveryController.OperatorAlert alert) {
-            // Optionnel: conserve les alertes opérateur
-            runOnUiThread(() -> new AlertDialog.Builder(MainActivity.this)
-                    .setTitle(alert.title)
-                    .setMessage(alert.message + "\n\n---\nDIAGNOSTIC:\n" + alert.diagnostics)
-                    .setPositiveButton("OK", null)
-                    .show());
         }
 
         @Override
