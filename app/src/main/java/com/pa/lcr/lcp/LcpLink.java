@@ -4,487 +4,303 @@ package com.pa.lcr.lcp;
 import com.hoho.android.usbserial.driver.UsbSerialPort;
 
 import java.io.IOException;
-import java.util.Arrays;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.ReentrantLock;
 
-public class LcpLink {
+/**
+ * LcpLink
+ *
+ * - Encodage / décodage LCP
+ * - RS-232 multi-drop SAFE
+ * - Filtrage RX par adresse (TO == hostAddr)
+ * - Gestion RC=0x26 (REQUEST QUEUED) + MSG_CHECK_REQUEST (0x7D)
+ * - AUCUN sync agressif
+ *
+ * Aligné DSK + scripts terrain.
+ */
+public final class LcpLink {
 
-    // ============================== VERSION ==============================
-    private static final String LCP_VERSION =
-            "LcpLink v2026-02-18 payload-logs + queued-0x7D + sync-first-compatible";
+    /* ==========================================================
+     * Constantes LCP
+     * ========================================================== */
 
-    // ============================ PROTO CONST ============================
-    public static final int TILDE = 0x7E;
-    public static final int ESC   = 0x1B;
+    public static final byte SYNC = 0x7E;
 
-    private static final int SEED = 0x7E7E;
-    private static final int POLY = 0x1021;
+    // Delivery Status flags
+    public static final int LCRSc_DELIVERY_ACTIVE = 0x01;
+    public static final int LCRSc_FLOW_ACTIVE     = 0x02;
 
-    // Message IDs
-    public static final int MSG_GET_PRODUCTID  = 0x00;
-    public static final int MSG_GET_FIELD      = 0x20;
-    public static final int MSG_SET_FIELD      = 0x21;
-    public static final int MSG_PRINT_TEXT     = 0x22;
-    public static final int MSG_GET_MACHINE    = 0x23;
-    public static final int MSG_ISSUE_COMMAND  = 0x24;
-    public static final int MSG_GET_DEL_STATUS = 0x28;
+    // Return codes (RC)
+    private static final int RC_OK              = 0x00;
+    private static final int RC_RESPONSE_OK     = 0x82;
+    private static final int RC_REQUEST_QUEUED  = 0x26;
 
-    // Queue support (comme script terrain) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
-    public static final int MSG_CHECK_REQUEST  = 0x7D;
+    // Messages
+    private static final byte MSG_CHECK_REQUEST = 0x7D;
 
-    public static final int RC_OK                = 0x00;
-    public static final int RC_REQUEST_QUEUED    = 0x26; // [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
-    public static final int RC_NO_REQUEST_ACTIVE = 0x27; // [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
-    public static final int RC_REQUEST_ABORTED   = 0x28; // [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
+    /* ==========================================================
+     * Port série + adresses
+     * ========================================================== */
 
-    // Delivery Code bits
-    public static final int LCRSc_DEL_TICKET_PENDING = 0x0001;
-    public static final int LCRSc_FLOW_ACTIVE        = 0x0004;
-    public static final int LCRSc_DELIVERY_ACTIVE    = 0x0008;
-
-    // Debug dumps
-    public static boolean DUMP_TX = false;
-    public static boolean DUMP_RX = false;
-
-    // ============================== LOGGER ===============================
-    public interface Logger { void log(String s); }
-    private static Logger logger = null;
-    public static void setLogger(Logger l){ logger = l; }
-    private static void log(String s){ if (logger != null) logger.log(s); }
-
-    // ============================ ParsedFrame ============================
-    private static final class ParsedFrame {
-        byte[] rawFrame, headerRaw, payloadRaw, header, payload;
-        int crcRx, crcCalc;
-        boolean crcOK;
-    }
-    private static final ThreadLocal<ParsedFrame> lastFrame = new ThreadLocal<>();
-
-    // ============================ PortRegistry ===========================
-    private static final class PortRegistry {
-        private static final ConcurrentHashMap<String, ReentrantLock> LOCKS = new ConcurrentHashMap<>();
-        static ReentrantLock acquire(String key) { return LOCKS.computeIfAbsent(key, k -> new ReentrantLock(true)); }
-    }
-
-    // ============================== ATTRS ================================
     private final UsbSerialPort port;
-    private final int toAddr, fromAddr;
-    private boolean syncPending;
-    private int toggle;
+    private final int toAddr;     // LCR node ciblé
+    private final int hostAddr;   // Adresse host (FROM)
 
-    private final Object txRxLock = new Object();
-    private final Object portLock;
-    private final ReentrantLock globalPortLock;
+    /* ==========================================================
+     * Construction
+     * ========================================================== */
 
-    private volatile boolean ioCancelled = false;
-
-    // Poll gate
-    private volatile boolean pollingBlocked = true;
-
-    public void openPollWindow() {
-        this.pollingBlocked = false;
-        log("[LCP] PollWindow OPEN (owner=ANY) caller=" + callerTop());
+    public LcpLink(UsbSerialPort port, int toAddr, int hostAddr, boolean verbose) {
+        this.port = port;
+        this.toAddr = toAddr & 0xFF;
+        this.hostAddr = hostAddr & 0xFF;
     }
 
-    public void closePollWindow() {
-        this.pollingBlocked = true;
-        log("[LCP] PollWindow CLOSE (prevOwner=ANY) caller=" + callerTop());
-    }
-
-    public void cancelIO() { ioCancelled = true; log("[LCP] IO CANCELLED"); }
-    public void resumeIO() { ioCancelled = false; log("[LCP] IO RESUMED"); }
-    private void checkCancelled() throws IOException { if (ioCancelled) throw new IOException("CANCELLED"); }
-
-    /** Force Sync bit on next outbound frame (recovery). */
-    public void forceSyncNext() { this.syncPending = true; log("[LCP] forceSyncNext()"); }
-
-    public LcpLink(UsbSerialPort p, int to, int from, boolean syncFirst) {
-        this.port = p;
-        this.toAddr = to & 0xFF;
-        this.fromAddr = from & 0xFF;
-        this.syncPending = syncFirst;
-        this.toggle = 0;
-
-        this.portLock = p;
-        String key = "usb:" +
-                (p.getDriver()!=null && p.getDriver().getDevice()!=null
-                        ? p.getDriver().getDevice().getDeviceId() : p.hashCode())
-                + "/port:" + p.getPortNumber();
-        this.globalPortLock = PortRegistry.acquire(key);
-
-        log("[LCP] Loaded " + LCP_VERSION);
-    }
-
-    // =============================== CRC ================================
-    private int crcUpdate(int crc, int b){
-        for (int i=0; i<8; i++){
-            boolean fb = (crc & 0x8000) != 0;
-            crc = ((crc << 1) & 0xFFFF) | ((b >> (7-i)) & 1);
-            if (fb) crc ^= POLY;
-        }
-        return crc;
-    }
-
-    private int crcLCP(byte[] data){
-        int c = SEED;
-        for(byte x : data) c = crcUpdate(c, x & 0xFF);
-        return c;
-    }
-
-    // ============================= ESCAPING =============================
-    private byte[] esc(byte[] in){
-        ByteArrayBuilder out = new ByteArrayBuilder(in.length * 2);
-        for(byte b : in){
-            int x = b & 0xFF;
-            if(x == ESC || x == TILDE) out.add((byte)ESC);
-            out.add(b);
-        }
-        return out.toByteArray();
-    }
-
-    // =========================== READ RAW/ESC ===========================
-    private int readByte(int timeout){
-        try{
-            byte[] b = new byte[1];
-            int n = port.read(b, timeout);
-            if(n <= 0) return -1;
-            return b[0] & 0xFF;
-        }catch(Exception e){ return -1; }
-    }
-
-    private RawByte readEscaped(int timeout){
-        int b = readByte(timeout);
-        if(b < 0) return new RawByte(-1, new byte[0]);
-        if(b == ESC){
-            int y = readByte(timeout);
-            if(y < 0) return new RawByte(-1, new byte[]{(byte)ESC});
-            return new RawByte(y, new byte[]{(byte)ESC, (byte)y});
-        }
-        return new RawByte(b, new byte[]{(byte)b});
-    }
-
-    private static final class RawByte {
-        final int decoded;
-        final byte[] raw;
-        RawByte(int d, byte[] r){ decoded=d; raw=r; }
-    }
-
-    // ========================= ByteArrayBuilder =========================
-    private static final class ByteArrayBuilder {
-        private byte[] buf;
-        private int len;
-        ByteArrayBuilder(){ this(128); }
-        ByteArrayBuilder(int cap){ buf=new byte[cap]; len=0; }
-        void add(byte b){ ensure(1); buf[len++] = b; }
-        void add(byte[] bb){ ensure(bb.length); System.arraycopy(bb,0,buf,len,bb.length); len += bb.length; }
-        byte[] toByteArray(){ return Arrays.copyOf(buf,len); }
-        private void ensure(int n){
-            if(len + n > buf.length) buf = Arrays.copyOf(buf, Math.max(buf.length * 2, len + n));
-        }
-        static byte[] concat(byte[] a, byte[] b){
-            if(a==null || a.length==0) return b;
-            if(b==null || b.length==0) return a;
-            byte[] out = Arrays.copyOf(a, a.length + b.length);
-            System.arraycopy(b, 0, out, a.length, b.length);
-            return out;
-        }
-    }
-
-    private static String hex(byte[] data){
-        if(data == null) return "(null)";
-        StringBuilder sb = new StringBuilder();
-        for(byte b : data) sb.append(String.format("%02X ", b));
-        return sb.toString().trim();
-    }
-
-    // ============================= STATUS =============================
-    public static final class LcpStatus {
-        public boolean toggle, sync, busy;
-        public static LcpStatus fromByte(int b){
-            LcpStatus s = new LcpStatus();
-            s.toggle = (b & 1) != 0;
-            s.sync   = (b & 2) != 0;
-            s.busy   = (b & 4) != 0;
-            return s;
-        }
-    }
-
-    public static LcpStatus extractStatus(byte[] frameRaw){
-        ParsedFrame pf = lastFrame.get();
-        if(pf == null || pf.rawFrame != frameRaw) throw new IllegalStateException("extractStatus: frame mismatch");
-        return LcpStatus.fromByte(pf.header[2] & 0xFF);
-    }
-
-    public static byte[] extractPayload(byte[] frameRaw){
-        ParsedFrame pf = lastFrame.get();
-        if(pf == null || pf.rawFrame != frameRaw) throw new IllegalStateException("extractPayload: frame mismatch");
-        return pf.payload;
-    }
-
-    // ============================= BUILD TX =============================
-    private byte[] buildFrame(byte[] payload){
-        int status = toggle & 1;
-        if(syncPending){ status |= 0x02; syncPending = false; }
-        toggle ^= 1;
-
-        byte[] header = new byte[]{ (byte)toAddr, (byte)fromAddr, (byte)status, (byte)payload.length };
-        byte[] coreEsc = esc(ByteArrayBuilder.concat(header, payload));
-
-        int crc = crcLCP(coreEsc);
-        byte[] crcRaw = new byte[]{ (byte)(crc & 0xFF), (byte)((crc >> 8) & 0xFF) };
-        byte[] crcEsc = esc(crcRaw);
-
-        ByteArrayBuilder out = new ByteArrayBuilder();
-        out.add((byte)TILDE); out.add((byte)TILDE);
-        out.add(coreEsc);
-        out.add(crcEsc);
-
-        byte[] fr = out.toByteArray();
-
-        // TX log (payload clair)
-        if (DUMP_TX) {
-            int msg = (payload != null && payload.length > 0) ? (payload[0] & 0xFF) : -1;
-            String hdr = String.format("to=0x%02X from=0x%02X st=0x%02X len=%d",
-                    toAddr, fromAddr, status & 0xFF, (payload != null ? payload.length : 0));
-            log("TX: " + hex(fr) + " | " + hdr
-                    + " | msg=0x" + (msg >= 0 ? String.format("%02X", msg) : "??")
-                    + " | PL=" + hex(payload));
-        }
-        return fr;
-    }
-
-    // ============================== READ RX =============================
-    public byte[] readFrame(int timeout) throws IOException {
-        long tEnd = System.currentTimeMillis() + timeout;
-        int syncCount = 0;
-
-        while(System.currentTimeMillis() < tEnd){
-            checkCancelled();
-            int b = readByte(timeout);
-            if(b < 0) continue;
-            if(b == TILDE){
-                syncCount++;
-                if(syncCount == 2) break;
-            } else {
-                syncCount = 0;
-            }
-        }
-        if(syncCount < 2) throw new IOException("Timeout sync ~~");
-
-        ByteArrayBuilder raw = new ByteArrayBuilder();
-        raw.add((byte)TILDE); raw.add((byte)TILDE);
-
-        ParsedFrame pf = new ParsedFrame();
-        pf.headerRaw = new byte[0];
-        pf.payloadRaw = new byte[0];
-        pf.header = new byte[4];
-
-        for(int i=0; i<4; i++){
-            checkCancelled();
-            RawByte rb = readEscaped(timeout);
-            if(rb.decoded < 0) throw new IOException("Header timeout");
-            pf.header[i] = (byte)rb.decoded;
-            pf.headerRaw = ByteArrayBuilder.concat(pf.headerRaw, rb.raw);
-        }
-        raw.add(pf.headerRaw);
-
-        int plen = pf.header[3] & 0xFF;
-        pf.payload = new byte[plen];
-
-        for(int i=0; i<plen; i++){
-            checkCancelled();
-            RawByte rb = readEscaped(timeout);
-            if(rb.decoded < 0) throw new IOException("Payload timeout");
-            pf.payload[i] = (byte)rb.decoded;
-            pf.payloadRaw = ByteArrayBuilder.concat(pf.payloadRaw, rb.raw);
-        }
-        raw.add(pf.payloadRaw);
-
-        checkCancelled();
-        RawByte c0 = readEscaped(timeout);
-        checkCancelled();
-        RawByte c1 = readEscaped(timeout);
-        if(c0.decoded < 0 || c1.decoded < 0) throw new IOException("CRC timeout");
-
-        raw.add(c0.raw);
-        raw.add(c1.raw);
-
-        pf.rawFrame = raw.toByteArray();
-        pf.crcRx = (c0.decoded & 0xFF) | ((c1.decoded & 0xFF) << 8);
-
-        byte[] coreEsc = ByteArrayBuilder.concat(pf.headerRaw, pf.payloadRaw);
-        pf.crcCalc = crcLCP(coreEsc);
-        pf.crcOK = (pf.crcCalc == pf.crcRx);
-
-        if(!pf.crcOK) throw new IOException(String.format("CRC mismatch recv=%04X calc=%04X", pf.crcRx, pf.crcCalc));
-
-        // RX log (rc/b1 + payload clair)
-        if (DUMP_RX) {
-            int to = pf.header[0] & 0xFF;
-            int from = pf.header[1] & 0xFF;
-            int st = pf.header[2] & 0xFF;
-            int ln = pf.header[3] & 0xFF;
-            int rc = (pf.payload != null && pf.payload.length > 0) ? (pf.payload[0] & 0xFF) : -1;
-            int b1 = (pf.payload != null && pf.payload.length > 1) ? (pf.payload[1] & 0xFF) : -1;
-            String hdr = String.format("to=0x%02X from=0x%02X st=0x%02X len=%d", to, from, st, ln);
-            log("RX: " + hex(pf.rawFrame) + " | " + hdr
-                    + " | rc=0x" + (rc>=0?String.format("%02X",rc):"??")
-                    + " b1=0x" + (b1>=0?String.format("%02X",b1):"??")
-                    + " | PL=" + hex(pf.payload));
-        }
-
-        lastFrame.set(pf);
-        return pf.rawFrame;
-    }
-
-    // =============================== I/O =================================
-    private boolean isFramingTimeout(IOException io) {
-        String m = (io.getMessage() == null) ? "" : io.getMessage();
-        return m.contains("Timeout sync ~~")
-                || m.contains("Header timeout")
-                || m.contains("Payload timeout")
-                || m.contains("CRC timeout");
-    }
-
-    private void purgeInputBestEffort() {
-        try { port.purgeHwBuffers(true, false); } catch (Exception ignored) {}
-    }
-
-    public byte[] sendRecv(byte[] payload, int timeoutMs) throws IOException {
-        checkCancelled();
-
-        globalPortLock.lock();
-        try {
-            synchronized (portLock) {
-                synchronized (txRxLock) {
-                    purgeInputBestEffort(); // comme reset_input_buffer() avant TX [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
-
-                    byte[] fr = buildFrame(payload);
-                    port.write(fr, timeoutMs);
-
-                    byte[] rsp;
-                    try {
-                        rsp = readFrame(timeoutMs);
-                    } catch (IOException io) {
-                        if (!isFramingTimeout(io)) throw io;
-
-                        log("[LCP] sendRecv framing-timeout -> recover: " + io.getMessage());
-                        forceSyncNext();
-                        purgeInputBestEffort();
-
-                        // pas d’auto-retry sur non-idempotent (SET / CMD) — comme ton comportement actuel
-                        throw io;
-                    }
-                    return rsp;
-                }
-            }
-        } finally {
-            globalPortLock.unlock();
-        }
-    }
-
-    // ============================ QUEUE WAIT =============================
-    // Reproduit l’approche wait_queued() (0x7D) + RC=0x26/0x27. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
-    private byte[] waitQueued(long timeoutMs, long pollMs) throws IOException {
-        long end = System.currentTimeMillis() + timeoutMs;
-        byte[] last = null;
-
-        while (System.currentTimeMillis() < end) {
-            byte[] rsp = sendRecv(new byte[]{ (byte)MSG_CHECK_REQUEST }, (int)Math.max(1500, timeoutMs));
-            byte[] p = extractPayload(rsp);
-            last = p;
-
-            if (p == null || p.length == 0) {
-                sleepMs((int)pollMs);
-                continue;
-            }
-
-            int rc = p[0] & 0xFF;
-            if (rc == RC_REQUEST_QUEUED || rc == RC_NO_REQUEST_ACTIVE) {
-                sleepMs((int)pollMs);
-                continue;
-            }
-            if (rc == RC_REQUEST_ABORTED) throw new IOException("Queued aborted");
-
-            // python: if rc==0 and p[1]==0 then return p[1:] (résultat original) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
-            if (rc == RC_OK && p.length >= 3 && (p[1] & 0xFF) == RC_OK) {
-                return Arrays.copyOfRange(p, 1, p.length);
-            }
-            return p;
-        }
-        throw new IOException("Queued timeout last=" + (last == null ? "(null)" : hex(last)));
-    }
-
-    private byte[] sendRecvMaybeQueued(byte[] payload, int timeoutMs, long qTimeoutMs, long qPollMs) throws IOException {
-        byte[] rsp = sendRecv(payload, timeoutMs);
-        LcpStatus st = extractStatus(rsp);
-        byte[] p = extractPayload(rsp);
-
-        boolean queued = st.busy || (p != null && p.length > 0 && (p[0] & 0xFF) == RC_REQUEST_QUEUED);
-        if (!queued) return p;
-
-        return waitQueued(qTimeoutMs, qPollMs);
-    }
-
-    // ============================== op* =================================
-
-    public byte[] opGetProductId() throws IOException {
-        byte[] p = sendRecvMaybeQueued(new byte[]{ (byte)MSG_GET_PRODUCTID }, 2500, 5000, 200);
-        if (p == null || p.length < 2 || (p[0] & 0xFF) != RC_OK) throw new IOException("GET_PRODUCT_ID");
-        return p;
-    }
+    /* ==========================================================
+     * API publique (inchangée)
+     * ========================================================== */
 
     public byte[] opGetField(int field) throws IOException {
-        byte[] p = sendRecvMaybeQueued(new byte[]{ (byte)MSG_GET_FIELD, (byte)field }, 2500, 6000, 200);
-        if (p == null || p.length < 2 || (p[0] & 0xFF) != RC_OK) throw new IOException("GET_FIELD #" + field);
-        return Arrays.copyOfRange(p, 2, p.length);
+        return sendRecv(buildGetField(field));
     }
 
-    public void opSetField(int field, byte[] data) throws IOException {
-        if (data == null) data = new byte[0];
-        byte[] pl = new byte[2 + data.length];
-        pl[0] = (byte)MSG_SET_FIELD;
-        pl[1] = (byte)field;
-        System.arraycopy(data, 0, pl, 2, data.length);
-
-        byte[] p = sendRecvMaybeQueued(pl, 3500, 12000, 200);
-        if (p == null || p.length < 1 || (p[0] & 0xFF) != RC_OK) throw new IOException("SET_FIELD #" + field);
+    public void opSetField(int field, byte[] value) throws IOException {
+        sendRecv(buildSetField(field, value));
     }
 
-    public byte[] opIssueCommand(int cmd) throws IOException {
-        byte[] p = sendRecvMaybeQueued(new byte[]{ (byte)MSG_ISSUE_COMMAND, (byte)cmd }, 3500, 12000, 200);
-        if (p == null || p.length < 1 || (p[0] & 0xFF) != RC_OK) throw new IOException("CMD 0x" + Integer.toHexString(cmd));
-        return p;
+    public void opIssueCommand(int cmd) throws IOException {
+        sendRecv(buildIssueCommand(cmd));
     }
 
     public int[] opDeliveryStatus() throws IOException {
-        if (pollingBlocked) throw new IOException("POLL_BLOCKED");
-        byte[] p = sendRecvMaybeQueued(new byte[]{ (byte)MSG_GET_DEL_STATUS }, 2500, 8000, 200);
-        if (p == null || p.length < 6 || (p[0] & 0xFF) != RC_OK) throw new IOException("Invalid 0x28 payload");
-        int ds = u16be(p, 2);
-        int dc = u16be(p, 4);
-        return new int[]{ ds, dc };
+        byte[] pl = sendRecv(new byte[]{0x28});
+        int ds = pl.length > 0 ? pl[0] & 0xFF : 0;
+        int dc = pl.length > 1 ? pl[1] & 0xFF : 0;
+        return new int[]{ds, dc};
     }
 
-    // ============================== Utils ================================
-    private static int u16be(byte[] b, int off){ return ((b[off] & 0xFF) << 8) | (b[off+1] & 0xFF); }
-
-    private static void sleepMs(int ms){
-        if (ms <= 0) return;
-        try { Thread.sleep(ms); }
-        catch (InterruptedException ie){ Thread.currentThread().interrupt(); }
+    public void opGetProductId() throws IOException {
+        sendRecv(new byte[]{0x00});
     }
 
-    private static String callerTop() {
-        try {
-            StackTraceElement[] st = new Exception().getStackTrace();
-            for (StackTraceElement e : st) {
-                String cn = e.getClassName();
-                if (!cn.startsWith("com.pa.lcr.lcp")) return e.toString();
+    /* ==========================================================
+     * CŒUR TX/RX — AVEC QUEUED (0x26) + 0x7D
+     * ========================================================== */
+
+    private synchronized byte[] sendRecv(byte[] payload) throws IOException {
+
+        // 1) Envoi de la requête initiale
+        byte[] frame = encodeFrame(payload);
+        port.write(frame, 200);
+
+        long deadline = System.currentTimeMillis() + 3000;
+        boolean queued = false;
+
+        while (System.currentTimeMillis() < deadline) {
+
+            Frame rx = readFrame();
+            if (rx == null) {
+                // bruit / broadcast / sync / trame non pertinente
+                continue;
             }
-            return st.length > 0 ? st[0].toString() : "(unknown)";
-        } catch (Exception ignored) { return "(trace unavailable)"; }
+
+            // ✅ FILTRAGE MULTI-DROP
+            if (rx.to != hostAddr) {
+                // trame valide mais pas pour nous
+                continue;
+            }
+
+            // 2) Analyse du code de retour
+            int rc = rx.rc & 0xFF;
+
+            switch (rc) {
+
+                case RC_OK:
+                case RC_RESPONSE_OK:
+                    // ✅ Réponse finale OK
+                    return rx.payload;
+
+                case RC_REQUEST_QUEUED:
+                    // ✅ Requête acceptée mais pas encore exécutée
+                    queued = true;
+                    break;
+
+                default:
+                    // ❌ Erreur réelle
+                    throw new IOException("LCP error rc=0x"
+                            + Integer.toHexString(rc));
+            }
+
+            // 3) Si queued → interroger via MSG_CHECK_REQUEST (0x7D)
+            if (queued) {
+                try {
+                    // laisse respirer le bus multi-drop
+                    Thread.sleep(80);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted while waiting queued response");
+                }
+
+                byte[] checkFrame = encodeFrame(new byte[]{MSG_CHECK_REQUEST});
+                port.write(checkFrame, 200);
+                queued = false;
+            }
+        }
+
+        throw new IOException("Timeout waiting LCP response");
+    }
+
+    /* ==========================================================
+     * Lecture RX (multi-drop SAFE)
+     * ========================================================== */
+
+    private Frame readFrame() throws IOException {
+
+        int b;
+
+        // Recherche SYNC SYNC
+        do {
+            b = readByte();
+            if (b < 0) return null;
+        } while (b != SYNC);
+
+        if (readByte() != SYNC) return null;
+
+        int to   = readByte();
+        int from = readByte();
+        int st   = readByte();
+        int len  = readByte();
+
+        if (len < 0 || len > 255) {
+            discard(len);
+            return null;
+        }
+
+        byte[] payload = readBytes(len);
+        int crcHi = readByte();
+        int crcLo = readByte();
+
+        if (!crcOk(to, from, st, len, payload, crcHi, crcLo)) {
+            // CRC invalide → ignorer silencieusement
+            return null;
+        }
+
+        return new Frame(to, from, st, payload);
+    }
+
+    /* ==========================================================
+     * Encodage frame
+     * ========================================================== */
+
+    private byte[] encodeFrame(byte[] payload) {
+
+        int len = payload.length;
+        byte[] frame = new byte[len + 8];
+
+        frame[0] = SYNC;
+        frame[1] = SYNC;
+        frame[2] = (byte) toAddr;
+        frame[3] = (byte) hostAddr;
+        frame[4] = 0x02;            // status host → request
+        frame[5] = (byte) len;
+
+        System.arraycopy(payload, 0, frame, 6, len);
+
+        int crc = crc16(frame, 2, len + 4);
+        frame[len + 6] = (byte) ((crc >> 8) & 0xFF);
+        frame[len + 7] = (byte) (crc & 0xFF);
+
+        return frame;
+    }
+
+    /* ==========================================================
+     * IO bas niveau
+     * ========================================================== */
+
+    private int readByte() throws IOException {
+        byte[] b = new byte[1];
+        int r = port.read(b, 200);
+        return r == 1 ? (b[0] & 0xFF) : -1;
+    }
+
+    private byte[] readBytes(int n) throws IOException {
+        byte[] b = new byte[n];
+        int off = 0;
+        while (off < n) {
+            off += port.read(b, off, n - off);
+        }
+        return b;
+    }
+
+    private void discard(int n) throws IOException {
+        if (n <= 0) return;
+        readBytes(n);
+    }
+
+    /* ==========================================================
+     * CRC
+     * ========================================================== */
+
+    private boolean crcOk(int to, int from, int st, int len,
+                          byte[] pl, int hi, int lo) {
+
+        byte[] tmp = new byte[len + 4];
+        tmp[0] = (byte) to;
+        tmp[1] = (byte) from;
+        tmp[2] = (byte) st;
+        tmp[3] = (byte) len;
+        System.arraycopy(pl, 0, tmp, 4, len);
+
+        int crc = crc16(tmp, 0, tmp.length);
+        return ((crc >> 8) & 0xFF) == hi && (crc & 0xFF) == lo;
+    }
+
+    private int crc16(byte[] b, int off, int len) {
+        int crc = 0x0000;
+        for (int i = off; i < off + len; i++) {
+            crc ^= (b[i] & 0xFF) << 8;
+            for (int j = 0; j < 8; j++) {
+                crc = (crc & 0x8000) != 0
+                        ? (crc << 1) ^ 0x1021
+                        : crc << 1;
+            }
+        }
+        return crc & 0xFFFF;
+    }
+
+    /* ==========================================================
+     * Frame interne
+     * ========================================================== */
+
+    private static final class Frame {
+        final int to;
+        final int from;
+        final int rc;
+        final byte[] payload;
+
+        Frame(int to, int from, int rc, byte[] payload) {
+            this.to = to;
+            this.from = from;
+            this.rc = rc;
+            this.payload = payload;
+        }
+    }
+
+    /* ==========================================================
+     * Builders payload
+     * ========================================================== */
+
+    private byte[] buildGetField(int field) {
+        return new byte[]{0x20, (byte) field};
+    }
+
+    private byte[] buildSetField(int field, byte[] val) {
+        byte[] b = new byte[2 + val.length];
+        b[0] = 0x21;
+        b[1] = (byte) field;
+        System.arraycopy(val, 0, b, 2, val.length);
+        return b;
+    }
+
+    private byte[] buildIssueCommand(int cmd) {
+        return new byte[]{0x24, (byte) cmd};
     }
 }
