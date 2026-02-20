@@ -1,143 +1,107 @@
 
 package com.pa.lcrdemo;
 
-import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
-import android.hardware.usb.UsbDevice;
-import android.hardware.usb.UsbManager;
-import android.hardware.usb.UsbDeviceConnection;
+import android.hardware.usb.*;
 
-import com.hoho.android.usbserial.driver.UsbSerialDriver;
-import com.hoho.android.usbserial.driver.UsbSerialPort;
-import com.hoho.android.usbserial.driver.UsbSerialProber;
+import com.hoho.android.usbserial.driver.*;
 
 public class UsbReceiver extends BroadcastReceiver {
 
     public static final String ACTION_USB_PERMISSION =
             "com.pa.lcrdemo.USB_PERMISSION";
 
-    private void log(String s) {
-        System.out.println("[USB] " + s);
-    }
-
     @Override
     public void onReceive(Context context, Intent intent) {
 
-        UsbManager usb = (UsbManager) context.getSystemService(Context.USB_SERVICE);
         String action = intent.getAction();
+        if (action == null) return;
 
-        /* ==========================================================
-           1) PERMISSION GRANTED ?
-           ========================================================== */
-        if (ACTION_USB_PERMISSION.equals(action)) {
+        switch (action) {
 
-            UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
-            if (device == null) {
-                log("Permission event: device NULL");
-                return;
-            }
+            case UsbManager.ACTION_USB_DEVICE_ATTACHED:
+                handleAttach(context, intent);
+                break;
 
-            boolean granted =
-                intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
+            case UsbManager.ACTION_USB_DEVICE_DETACHED:
+                handleDetach(context, intent);
+                break;
 
-            if (!granted) {
-                log("Permission USB REFUSÉE pour " + device);
-                return;
-            }
-
-            log("Permission accordée → ouverture du port pour " + device);
-            openSerialPort(context, usb, device);
-            return;
-        }
-
-        /* ==========================================================
-           2) USB DEVICE ATTACHED?
-           ========================================================== */
-        if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(action)) {
-
-            UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
-
-            if (device == null) {
-                log("USB attach event : aucun device");
-                return;
-            }
-
-            log("USB détecté : VID=" +
-                Integer.toHexString(device.getVendorId()).toUpperCase() +
-                " PID=" +
-                Integer.toHexString(device.getProductId()).toUpperCase());
-
-            /*  
-               On demande la permission explicitement avec PendingIntent.
-               REMARQUE: même si device_filter est vide, Android va quand même déclencher
-               cet événement → parfait pour un SDK hybride.
-            */
-            PendingIntent pi = PendingIntent.getBroadcast(
-                    context,
-                    0,
-                    new Intent(ACTION_USB_PERMISSION),
-                    PendingIntent.FLAG_IMMUTABLE
-            );
-
-            usb.requestPermission(device, pi);
+            case ACTION_USB_PERMISSION:
+                handlePermission(context, intent);
+                break;
         }
     }
 
-    /* ==========================================================
-       OUVERTURE DU PORT SÉRIE (19200 8N1)
-       ========================================================== */
-    private void openSerialPort(Context context, UsbManager usb, UsbDevice device) {
+    private void handleAttach(Context context, Intent intent) {
+        UsbDevice device =
+                intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+        if (device == null) return;
+
+        UsbManager mgr =
+                (UsbManager) context.getSystemService(Context.USB_SERVICE);
+
+        PendingIntent pi = PendingIntent.getBroadcast(
+                context,
+                0,
+                new Intent(ACTION_USB_PERMISSION),
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE
+        );
+
+        mgr.requestPermission(device, pi);
+    }
+
+    private void handlePermission(Context context, Intent intent) {
+        UsbDevice device =
+                intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+        if (device == null) return;
+
+        boolean granted =
+                intent.getBooleanExtra(
+                        UsbManager.EXTRA_PERMISSION_GRANTED, false);
+
+        if (!granted) return;
+
+        UsbManager mgr =
+                (UsbManager) context.getSystemService(Context.USB_SERVICE);
+
+        UsbSerialDriver driver =
+                UsbSerialProber.getDefaultProber().probeDevice(device);
+        if (driver == null) return;
+
+        UsbDeviceConnection conn = mgr.openDevice(device);
+        if (conn == null) return;
+
+        UsbSerialPort port = driver.getPorts().get(0);
 
         try {
-            UsbSerialDriver driver =
-                    UsbSerialProber.getDefaultProber().probeDevice(device);
-
-            if (driver == null) {
-                log("Aucun driver compatible pour ce device. Ignoré.");
-                return;
-            }
-
-            UsbSerialPort port = driver.getPorts().get(0);
-
-            UsbDeviceConnection connection = usb.openDevice(device);
-            if (connection == null) {
-                log("Impossible d’ouvrir la connexion USB (permission ?)");
-                return;
-            }
-
-            port.open(connection);
+            port.open(conn);
             port.setParameters(
-                    19200,                     // BAUD
-                    8,                         // DATA BITS
-                    UsbSerialPort.STOPBITS_1,  // STOP
-                    UsbSerialPort.PARITY_NONE  // PARITY
+                    19200,
+                    8,
+                    UsbSerialPort.STOPBITS_1,
+                    UsbSerialPort.PARITY_NONE
             );
 
-            log("Port série ouvert (19200 8N1) pour VID/PID = " +
-                String.format("%04X/%04X",
-                        device.getVendorId(),
-                        device.getProductId()));
-
-            /*  
-               Injection du port dans MainActivity
-               ------------------------------------------------------------
-               NOTE IMPORTANTE:
-               Android envoie souvent les broadcasts au niveau Application
-               donc "context" n’est parfois PAS MainActivity.
-
-               Donc on ne fait l’injection que si on est bien dans le bon contexte.
-            */
+            // ✅ Notification propre à l'Activity
             if (context instanceof MainActivity) {
-                log("Injection du port → MainActivity");
-                ((MainActivity) context).setPort(port);
-            } else {
-                log("Context != MainActivity → injection ignorée (normal).");
+                ((MainActivity) context).onUsbPortReady(port);
             }
 
         } catch (Exception e) {
-            log("Erreur durant openSerialPort : " + e.getMessage());
+            try { port.close(); } catch (Exception ignore) {}
+        }
+    }
+
+    private void handleDetach(Context context, Intent intent) {
+        UsbDevice device =
+                intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+        if (device == null) return;
+
+        if (context instanceof MainActivity) {
+            ((MainActivity) context).onUsbDetached();
         }
     }
 }
