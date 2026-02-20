@@ -21,13 +21,15 @@ import java.util.List;
 
 public class MainActivity extends AppCompatActivity {
 
+    /* ===================== CONSTANTES ===================== */
+
     private static final int TO_NODE_DEC = 250;     // 0xFA
-    private static final int FROM_NODE_HEX = 0xFF;
+    private static final int FROM_NODE_HEX = 0xFF; // Host
 
     public static final String ACTION_USB_PERMISSION =
             "com.pa.lcrdemo.USB_PERMISSION";
 
-    /* ================= USB ================= */
+    /* ===================== USB ===================== */
 
     private Spinner spnUsbDevices;
     private Button btnScanUsb;
@@ -37,7 +39,7 @@ public class MainActivity extends AppCompatActivity {
     private final List<UsbDevice> usbDevices = new ArrayList<>();
     private UsbSerialPort usbPort;
 
-    /* ================= LCP / LIVRAISON ================= */
+    /* ===================== LCP / LIVRAISON ===================== */
 
     private Spinner spnProducts;
     private EditText edtProduct;
@@ -56,11 +58,15 @@ public class MainActivity extends AppCompatActivity {
 
     private DeliveryControllerPort controller;
 
+    /* ===================== UI helpers ===================== */
+
     private boolean suppressProductSelection = false;
     private boolean userTouchedSpinner = false;
 
     private final StringBuilder logBuf = new StringBuilder(32768);
     private final Handler ui = new Handler(Looper.getMainLooper());
+
+    /* ===================== Lifecycle ===================== */
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -76,7 +82,7 @@ public class MainActivity extends AppCompatActivity {
         log("UI prête — Scan USB requis");
     }
 
-    /* ================= UI ================= */
+    /* ===================== UI ===================== */
 
     private void bindUi() {
         spnUsbDevices = findViewById(R.id.spnUsbDevices);
@@ -107,6 +113,7 @@ public class MainActivity extends AppCompatActivity {
         txtFromNode.setText("FROM : 0xFF");
         txtActiveNode.setText("Node actif : —");
 
+        // Spinner Produit 1..16 (statique)
         List<ProductUiItem> products = new ArrayList<>();
         for (int i = 1; i <= 16; i++) {
             products.add(new ProductUiItem(i, "Produit " + i));
@@ -171,7 +178,7 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    /* ================= USB ================= */
+    /* ===================== USB ===================== */
 
     private void scanUsb() {
         usbDevices.clear();
@@ -187,6 +194,7 @@ public class MainActivity extends AppCompatActivity {
             if (p == null) p = "Device";
 
             labels.add(m + " - " + p);
+
             log(String.format(
                     " - %s - %s (VID=%04X PID=%04X)",
                     m, p, d.getVendorId(), d.getProductId()
@@ -230,9 +238,11 @@ public class MainActivity extends AppCompatActivity {
             UsbSerialPort port = driver.getPorts().get(0);
 
             port.open(conn);
-            port.setParameters(19200, 8,
+            port.setParameters(
+                    19200, 8,
                     UsbSerialPort.STOPBITS_1,
-                    UsbSerialPort.PARITY_NONE);
+                    UsbSerialPort.PARITY_NONE
+            );
 
             onUsbPortReady(port);
 
@@ -283,13 +293,28 @@ public class MainActivity extends AppCompatActivity {
         ui.postDelayed(() -> controller.initialize(), 800);
     }
 
-    /* ================= UTILS ================= */
+    /* ===================== UsbReceiver callback ===================== */
+
+    public void onUsbDetached() {
+        log("USB détaché");
+
+        if (controller != null) {
+            controller.shutdown();
+            controller = null;
+        }
+
+        usbPort = null;
+        txtActiveNode.setText("Node actif : —");
+    }
+
+    /* ===================== Utils ===================== */
 
     private int readProduct() {
         try {
             int v = Integer.parseInt(edtProduct.getText().toString());
             if (v >= 1 && v <= 16) return v;
         } catch (Exception ignore) {}
+
         ProductUiItem it = (ProductUiItem) spnProducts.getSelectedItem();
         return it.product1;
     }

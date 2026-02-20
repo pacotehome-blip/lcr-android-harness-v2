@@ -21,7 +21,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     private final ExecutorService io = Executors.newSingleThreadExecutor();
 
     private Listener listener;
-    private DeliveryState state = DeliveryState.DISCONNECTED;
+    private volatile DeliveryState state = DeliveryState.DISCONNECTED;
 
     public DeliveryController(LcpLink link) {
         this.link = link;
@@ -58,7 +58,9 @@ public final class DeliveryController implements DeliveryControllerPort {
             try {
                 int idx0 = link.opGetField(FIELD_ACTIVE_PRODUCT)[0] & 0xFF;
                 notifyActiveNode();
-                listener.onProductsUpdated(null, idx0);
+                if (listener != null) {
+                    listener.onProductsUpdated(null, idx0);
+                }
             } catch (Exception e) {
                 error("refreshProducts", e);
             }
@@ -69,8 +71,10 @@ public final class DeliveryController implements DeliveryControllerPort {
     public void selectProduct(int product1to16) {
         io.execute(() -> {
             try {
-                link.opSetField(FIELD_ACTIVE_PRODUCT,
-                        new byte[]{(byte) (product1to16 - 1)});
+                link.opSetField(
+                        FIELD_ACTIVE_PRODUCT,
+                        new byte[]{(byte) (product1to16 - 1)}
+                );
                 notifyActiveNode();
             } catch (Exception e) {
                 error("selectProduct", e);
@@ -82,8 +86,10 @@ public final class DeliveryController implements DeliveryControllerPort {
     public void startDelivery(int product1to16, double presetNet) {
         io.execute(() -> {
             try {
-                link.opSetField(FIELD_ACTIVE_PRODUCT,
-                        new byte[]{(byte) (product1to16 - 1)});
+                link.opSetField(
+                        FIELD_ACTIVE_PRODUCT,
+                        new byte[]{(byte) (product1to16 - 1)}
+                );
                 link.opIssueCommand(CMD_RUN);
                 notifyActiveNode();
             } catch (Exception e) {
@@ -114,6 +120,23 @@ public final class DeliveryController implements DeliveryControllerPort {
                 error("endDelivery", e);
             }
         });
+    }
+
+    // ✅ CORRECTION BLOQUANTE
+    @Override
+    public boolean isPaused() {
+        return state == DeliveryState.RUNNING_PAUSED;
+    }
+
+    @Override
+    public DeliveryState getState() {
+        return state;
+    }
+
+    @Override
+    public boolean isDeliveryActive() {
+        return state == DeliveryState.RUNNING_FLOWING
+                || state == DeliveryState.RUNNING_PAUSED;
     }
 
     private void notifyActiveNode() {
