@@ -3,6 +3,9 @@ package com.pa.lcrdemo;
 
 import androidx.appcompat.app.AppCompatActivity;
 
+import android.app.PendingIntent;
+import android.content.Intent;
+import android.hardware.usb.*;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -10,25 +13,34 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.widget.*;
 
-import com.hoho.android.usbserial.driver.UsbSerialPort;
+import com.hoho.android.usbserial.driver.*;
 import com.pa.lcr.lcp.*;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
  * MainActivity
  *
- * UI PURE :
- *  - dépend UNIQUEMENT de DeliveryControllerPort
- *  - ne connaît PAS le protocole LCP
- *  - ne connaît PAS LcpLink directement
+ * UI complète :
+ *  - Scan USB / Open USB (manuel)
+ *  - Support UsbReceiver (hotplug)
+ *  - Dépend UNIQUEMENT de DeliveryControllerPort
  *
- * Toute interaction registre passe par DeliveryControllerPort.
+ * Aucune logique protocolaire ici.
  */
 public class MainActivity extends AppCompatActivity {
 
     /* ==========================================================
-     * UI
+     * UI USB
+     * ========================================================== */
+
+    private Spinner spnUsbDevices;
+    private Button btnScanUsb;
+    private Button btnOpenUsb;
+
+    /* ==========================================================
+     * UI Livraison
      * ========================================================== */
 
     private Spinner spnProducts;
@@ -38,16 +50,18 @@ public class MainActivity extends AppCompatActivity {
     private ScrollView logScroll;
 
     /* ==========================================================
+     * USB
+     * ========================================================== */
+
+    private UsbManager usbManager;
+    private final List<UsbDevice> usbDevices = new ArrayList<>();
+    private UsbSerialPort usbPort;
+
+    /* ==========================================================
      * Controller (PORT UNIQUEMENT)
      * ========================================================== */
 
     private DeliveryControllerPort controller;
-
-    /* ==========================================================
-     * USB
-     * ========================================================== */
-
-    private UsbSerialPort usbPort;
 
     /* ==========================================================
      * Helpers UI
@@ -56,8 +70,11 @@ public class MainActivity extends AppCompatActivity {
     private boolean suppressProductSelection = false;
     private boolean userTouchedSpinner = false;
 
-    private final StringBuilder logBuf = new StringBuilder(16_000);
+    private final StringBuilder logBuf = new StringBuilder(32_000);
     private final Handler ui = new Handler(Looper.getMainLooper());
+
+    public static final String ACTION_USB_PERMISSION =
+            "com.pa.lcrdemo.USB_PERMISSION";
 
     /* ==========================================================
      * Lifecycle
@@ -71,7 +88,9 @@ public class MainActivity extends AppCompatActivity {
         bindUi();
         wireUi();
 
-        log("UI prête — attente USB");
+        usbManager = (UsbManager) getSystemService(USB_SERVICE);
+
+        log("UI prête — Scan USB requis");
     }
 
     /* ==========================================================
@@ -79,18 +98,24 @@ public class MainActivity extends AppCompatActivity {
      * ========================================================== */
 
     private void bindUi() {
-        spnProducts  = findViewById(R.id.spnProducts);
-        btnA         = findViewById(R.id.btnA);
-        btnC         = findViewById(R.id.btnC);
-        btnContinue  = findViewById(R.id.btnContinue);
-        btnFinish    = findViewById(R.id.btnFinish);
+        // USB
+        spnUsbDevices = findViewById(R.id.spnUsbDevices);
+        btnScanUsb    = findViewById(R.id.btnScanUsb);
+        btnOpenUsb    = findViewById(R.id.btnPingUsb); // bouton Ouvrir/Ping
 
-        edtPreset    = findViewById(R.id.edtPreset);
-        edtProduct   = findViewById(R.id.edtProduct);
+        // Livraison
+        spnProducts   = findViewById(R.id.spnProducts);
+        btnA          = findViewById(R.id.btnA);
+        btnC          = findViewById(R.id.btnC);
+        btnContinue   = findViewById(R.id.btnContinue);
+        btnFinish     = findViewById(R.id.btnFinish);
 
-        txtLive      = findViewById(R.id.txtLive);
-        txtLog       = findViewById(R.id.txtLog);
-        logScroll    = findViewById(R.id.logScroll);
+        edtPreset     = findViewById(R.id.edtPreset);
+        edtProduct    = findViewById(R.id.edtProduct);
+
+        txtLive       = findViewById(R.id.txtLive);
+        txtLog        = findViewById(R.id.txtLog);
+        logScroll     = findViewById(R.id.logScroll);
     }
 
     /* ==========================================================
@@ -98,6 +123,11 @@ public class MainActivity extends AppCompatActivity {
      * ========================================================== */
 
     private void wireUi() {
+
+        /* ---------- USB ---------- */
+
+        btnScanUsb.setOnClickListener(v -> scanUsb());
+        btnOpenUsb.setOnClickListener(v -> openSelectedUsb());
 
         /* ---------- Spinner produits ---------- */
 
@@ -124,18 +154,13 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
 
-            @Override
-            public void onNothingSelected(AdapterView<?> parent) {
-                // no-op
-            }
+            @Override public void onNothingSelected(AdapterView<?> parent) {}
         });
 
         /* ---------- Boutons ---------- */
 
         btnA.setOnClickListener(v -> {
-            if (controller != null) {
-                controller.refreshProducts();
-            }
+            if (controller != null) controller.refreshProducts();
         });
 
         btnC.setOnClickListener(v -> {
@@ -148,25 +173,94 @@ public class MainActivity extends AppCompatActivity {
         });
 
         btnContinue.setOnClickListener(v -> {
-            if (controller != null) {
-                controller.resumeIfPaused();
-            }
+            if (controller != null) controller.resumeIfPaused();
         });
 
         btnFinish.setOnClickListener(v -> {
-            if (controller != null) {
-                controller.endDelivery();
-            }
+            if (controller != null) controller.endDelivery();
         });
     }
 
     /* ==========================================================
-     * USB callbacks (appelés par UsbReceiver)
+     * USB UI MANUELLE
      * ========================================================== */
 
-    /**
-     * Appelé par UsbReceiver quand le port série est prêt.
-     */
+    private void scanUsb() {
+        usbDevices.clear();
+        usbDevices.addAll(usbManager.getDeviceList().values());
+
+        List<String> labels = new ArrayList<>();
+        for (UsbDevice d : usbDevices) {
+            labels.add(String.format(
+                    "VID=%04X PID=%04X %s",
+                    d.getVendorId(),
+                    d.getProductId(),
+                    d.getDeviceName()
+            ));
+        }
+
+        spnUsbDevices.setAdapter(
+                new ArrayAdapter<>(
+                        this,
+                        android.R.layout.simple_spinner_item,
+                        labels
+                )
+        );
+
+        log("Scan USB: " + labels.size() + " périphérique(s)");
+    }
+
+    private void openSelectedUsb() {
+        int idx = spnUsbDevices.getSelectedItemPosition();
+        if (idx < 0 || idx >= usbDevices.size()) {
+            log("Aucun périphérique USB sélectionné");
+            return;
+        }
+
+        UsbDevice dev = usbDevices.get(idx);
+
+        if (!usbManager.hasPermission(dev)) {
+            PendingIntent pi = PendingIntent.getBroadcast(
+                    this,
+                    0,
+                    new Intent(ACTION_USB_PERMISSION),
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE
+            );
+            usbManager.requestPermission(dev, pi);
+            log("Demande permission USB");
+            return;
+        }
+
+        UsbSerialDriver driver =
+                UsbSerialProber.getDefaultProber().probeDevice(dev);
+        if (driver == null) {
+            log("Driver USB série introuvable");
+            return;
+        }
+
+        try {
+            UsbDeviceConnection conn = usbManager.openDevice(dev);
+            UsbSerialPort port = driver.getPorts().get(0);
+
+            port.open(conn);
+            port.setParameters(
+                    19200,
+                    8,
+                    UsbSerialPort.STOPBITS_1,
+                    UsbSerialPort.PARITY_NONE
+            );
+
+            onUsbPortReady(port);
+
+        } catch (Exception e) {
+            log("Open USB ERR: " + e.getMessage());
+        }
+    }
+
+    /* ==========================================================
+     * USB callbacks (appelés aussi par UsbReceiver)
+     * ========================================================== */
+
     public void onUsbPortReady(UsbSerialPort port) {
         this.usbPort = port;
         log("USB prêt");
@@ -221,9 +315,6 @@ public class MainActivity extends AppCompatActivity {
         controller.initialize();
     }
 
-    /**
-     * Appelé par UsbReceiver lors du detach USB.
-     */
     public void onUsbDetached() {
         log("USB débranché");
 
@@ -245,8 +336,7 @@ public class MainActivity extends AppCompatActivity {
                     edtProduct.getText().toString().trim()
             );
             if (v >= 1 && v <= 16) return v;
-        } catch (Exception ignore) {
-        }
+        } catch (Exception ignore) {}
 
         ProductUiItem it =
                 (ProductUiItem) spnProducts.getSelectedItem();
