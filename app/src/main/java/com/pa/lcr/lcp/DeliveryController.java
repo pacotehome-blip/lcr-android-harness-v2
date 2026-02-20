@@ -1,20 +1,9 @@
+
 package com.pa.lcr.lcp;
 
-import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/**
- * DeliveryController
- *
- * VERSION FINALE NETTOYÉE
- *
- * RÈGLES :
- *  - Aucun rafraîchissement automatique
- *  - L’état = ce que l’UI applique explicitement
- *  - Le controller exécute, il ne décide pas
- *  - Diagnostic minimal (node actif)
- */
 public final class DeliveryController implements DeliveryControllerPort {
 
     /* ===================== Constantes LCP ===================== */
@@ -54,14 +43,13 @@ public final class DeliveryController implements DeliveryControllerPort {
         io.execute(() -> {
             setState(DeliveryState.CONNECTED);
 
-            // Sync-first BEST EFFORT — sans conséquence
+            // Sync-first BEST EFFORT
             try {
                 link.opGetProductId();
             } catch (Exception e) {
                 log("sync-first skipped");
             }
 
-            // ✅ AUCUN refresh automatique
             log("LCP prêt (sans refresh automatique)");
         });
     }
@@ -70,6 +58,14 @@ public final class DeliveryController implements DeliveryControllerPort {
     public void shutdown() {
         io.shutdownNow();
         setState(DeliveryState.DISCONNECTED);
+    }
+
+    /* ===================== Interface obligatoire ===================== */
+
+    @Override
+    public void refreshProducts() {
+        // NO-OP volontaire : UX = pas de rafraîchissement
+        log("refreshProducts ignoré (mode sans rafraîchissement)");
     }
 
     /* ===================== Produit ===================== */
@@ -98,17 +94,13 @@ public final class DeliveryController implements DeliveryControllerPort {
             try {
                 setState(DeliveryState.PRESTART);
 
-                // Produit
                 int idx0 = product1to16 - 1;
                 link.opSetField(
                         FIELD_ACTIVE_PRODUCT,
                         new byte[]{(byte) idx0}
                 );
 
-                // Preset net
                 writePresetNet(presetNet);
-
-                // RUN
                 link.opIssueCommand(CMD_RUN);
 
                 notifyActiveNode();
@@ -188,9 +180,7 @@ public final class DeliveryController implements DeliveryControllerPort {
 
         Integer node = link.getLastResponderNode();
         if (node != null) {
-            listener.onLog(
-                    "Node actif : " + node
-            );
+            listener.onLog("Node actif : " + node);
         }
     }
 
