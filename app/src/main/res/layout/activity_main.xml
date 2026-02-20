@@ -35,7 +35,7 @@
             android:text="Ouvrir/Ping USB" />
     </LinearLayout>
 
-    <!-- ===================== PARAMÈTRES LCP ===================== -->
+    <!-- ===================== LCP (ÉTAT ÉDITABLE) ===================== -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -47,7 +47,8 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:hint="TO (ex: 0xFA)"
+            android:hint="TO (ex: 250)"
+            android:inputType="number"
             android:singleLine="true" />
 
         <EditText
@@ -55,43 +56,22 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:hint="FROM (ex: 0xFF)"
-            android:singleLine="true"
-            android:layout_marginStart="8dp" />
+            android:layout_marginStart="8dp"
+            android:hint="FROM (ex: 255)"
+            android:inputType="number"
+            android:singleLine="true" />
     </LinearLayout>
 
-    <!-- ===================== ÉTAT LCP (AJOUTÉ – NON INTRUSIF) ===================== -->
-    <LinearLayout
+    <!-- ===================== DIAGNOSTIC ===================== -->
+    <TextView
+        android:id="@+id/txtActiveNode"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:layout_marginTop="4dp"
-        android:padding="6dp"
-        android:background="#EEEEEE">
+        android:text="Node actif : —"
+        android:textStyle="bold"
+        android:layout_marginTop="4dp" />
 
-        <TextView
-            android:id="@+id/txtToNode"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="TO : 250 (0xFA)"
-            android:textStyle="bold" />
-
-        <TextView
-            android:id="@+id/txtFromNode"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="FROM : 0xFF" />
-
-        <TextView
-            android:id="@+id/txtActiveNode"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Node actif : —"
-            android:textStyle="bold"
-            android:textColor="#333333" />
-    </LinearLayout>
-
-    <!-- ===================== PRODUITS (liste 1..16) ===================== -->
+    <!-- ===================== PRODUITS ===================== -->
     <Spinner
         android:id="@+id/spnProducts"
         android:layout_width="match_parent"
@@ -110,7 +90,7 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:hint="Produit (#) override"
+            android:hint="Produit (#)"
             android:inputType="number"
             android:singleLine="true" />
 
@@ -125,7 +105,7 @@
             android:singleLine="true" />
     </LinearLayout>
 
-    <!-- ===================== CONNEXION LCP ===================== -->
+    <!-- ===================== CONNECT ===================== -->
     <Button
         android:id="@+id/btnConnect"
         android:layout_width="match_parent"
@@ -133,7 +113,7 @@
         android:text="Connect (LCP)"
         android:layout_marginTop="6dp" />
 
-    <!-- ===================== BOUTONS A / B / C ===================== -->
+    <!-- ===================== ACTIONS ===================== -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -164,7 +144,7 @@
             android:text="C" />
     </LinearLayout>
 
-    <!-- ===================== CONTINUER / FINISH ===================== -->
+    <!-- ===================== CONTINUER / FIN ===================== -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -196,43 +176,12 @@
         android:textStyle="bold"
         android:layout_marginTop="8dp" />
 
-    <!-- ===================== NET / GROSS ===================== -->
-    <LinearLayout
-        android:id="@+id/liveQtyPanel"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:layout_marginTop="6dp"
-        android:padding="8dp"
-        android:background="#F2F2F2">
-
-        <TextView
-            android:id="@+id/txtQtyNet"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="NET: 0.0"
-            android:textStyle="bold"
-            android:textSize="22sp"
-            android:textColor="#000000" />
-
-        <TextView
-            android:id="@+id/txtQtyGross"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="GROSS: 0.0"
-            android:textStyle="bold"
-            android:textSize="18sp"
-            android:textColor="#222222" />
-    </LinearLayout>
-
-    <!-- ===================== LOG WINDOW ===================== -->
+    <!-- ===================== LOG ===================== -->
     <ScrollView
         android:id="@+id/logScroll"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:fillViewport="true"
-        android:layout_marginTop="6dp"
         android:background="#111111">
 
         <TextView
@@ -240,7 +189,6 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:typeface="monospace"
-            android:textIsSelectable="true"
             android:textSize="12sp"
             android:textColor="#00FF00"
             android:padding="6dp" />

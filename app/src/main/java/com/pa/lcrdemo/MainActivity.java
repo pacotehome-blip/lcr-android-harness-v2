@@ -21,25 +21,28 @@ import java.util.List;
 
 public class MainActivity extends AppCompatActivity {
 
-    /* ===================== CONSTANTES ===================== */
-
-    private static final int TO_NODE_DEC = 250;     // 0xFA
-    private static final int FROM_NODE_HEX = 0xFF; // Host
+    /* ===================== USB ===================== */
 
     public static final String ACTION_USB_PERMISSION =
             "com.pa.lcrdemo.USB_PERMISSION";
-
-    /* ===================== USB ===================== */
-
-    private Spinner spnUsbDevices;
-    private Button btnScanUsb;
-    private Button btnPingUsb;
 
     private UsbManager usbManager;
     private final List<UsbDevice> usbDevices = new ArrayList<>();
     private UsbSerialPort usbPort;
 
-    /* ===================== LCP / LIVRAISON ===================== */
+    private Spinner spnUsbDevices;
+    private Button btnScanUsb;
+    private Button btnPingUsb;
+
+    /* ===================== LCP (ÉTAT ÉDITABLE) ===================== */
+
+    private EditText edtTo;
+    private EditText edtFrom;
+    private TextView txtActiveNode;
+
+    private Button btnConnect;
+
+    /* ===================== PRODUIT / PRESET ===================== */
 
     private Spinner spnProducts;
     private EditText edtProduct;
@@ -48,13 +51,13 @@ public class MainActivity extends AppCompatActivity {
     private Button btnA, btnB, btnC;
     private Button btnContinue, btnFinish;
 
-    private TextView txtToNode;
-    private TextView txtFromNode;
-    private TextView txtActiveNode;
-    private TextView txtLive;
+    /* ===================== LOG / LIVE ===================== */
 
+    private TextView txtLive;
     private TextView txtLog;
     private ScrollView logScroll;
+
+    /* ===================== CONTROLLER ===================== */
 
     private DeliveryControllerPort controller;
 
@@ -89,6 +92,12 @@ public class MainActivity extends AppCompatActivity {
         btnScanUsb    = findViewById(R.id.btnScanUsb);
         btnPingUsb    = findViewById(R.id.btnPingUsb);
 
+        edtTo         = findViewById(R.id.edtTo);
+        edtFrom       = findViewById(R.id.edtFrom);
+        txtActiveNode = findViewById(R.id.txtActiveNode);
+
+        btnConnect    = findViewById(R.id.btnConnect);
+
         spnProducts   = findViewById(R.id.spnProducts);
         edtProduct    = findViewById(R.id.edtProduct);
         edtPreset     = findViewById(R.id.edtPreset);
@@ -99,35 +108,35 @@ public class MainActivity extends AppCompatActivity {
         btnContinue   = findViewById(R.id.btnContinue);
         btnFinish     = findViewById(R.id.btnFinish);
 
-        txtToNode     = findViewById(R.id.txtToNode);
-        txtFromNode   = findViewById(R.id.txtFromNode);
-        txtActiveNode = findViewById(R.id.txtActiveNode);
         txtLive       = findViewById(R.id.txtLive);
-
         txtLog        = findViewById(R.id.txtLog);
         logScroll     = findViewById(R.id.logScroll);
     }
 
     private void initUiDefaults() {
-        txtToNode.setText("TO : 250 (0xFA)");
-        txtFromNode.setText("FROM : 0xFF");
+        // État par défaut lisible (modifiable par l’utilisateur)
+        edtTo.setText("250");
+        edtFrom.setText("255");
+
         txtActiveNode.setText("Node actif : —");
 
-        // Spinner Produit 1..16 (statique)
+        // Spinner produit 1..16 (statique)
         List<ProductUiItem> products = new ArrayList<>();
         for (int i = 1; i <= 16; i++) {
             products.add(new ProductUiItem(i, "Produit " + i));
         }
 
-        ArrayAdapter<ProductUiItem> adapter =
-                new ArrayAdapter<>(this,
+        ArrayAdapter<ProductUiItem> ad =
+                new ArrayAdapter<>(
+                        this,
                         android.R.layout.simple_spinner_item,
-                        products);
+                        products
+                );
+        ad.setDropDownViewResource(
+                android.R.layout.simple_spinner_dropdown_item
+        );
 
-        adapter.setDropDownViewResource(
-                android.R.layout.simple_spinner_dropdown_item);
-
-        spnProducts.setAdapter(adapter);
+        spnProducts.setAdapter(ad);
         spnProducts.setSelection(0);
 
         edtPreset.setText("50");
@@ -135,8 +144,16 @@ public class MainActivity extends AppCompatActivity {
 
     private void wireUi() {
 
+        /* ---------- USB ---------- */
+
         btnScanUsb.setOnClickListener(v -> scanUsb());
         btnPingUsb.setOnClickListener(v -> openSelectedUsb());
+
+        /* ---------- LCP ---------- */
+
+        btnConnect.setOnClickListener(v -> connectLcp());
+
+        /* ---------- Produits ---------- */
 
         spnProducts.setOnTouchListener((v, e) -> {
             if (e.getAction() == MotionEvent.ACTION_DOWN) {
@@ -145,20 +162,34 @@ public class MainActivity extends AppCompatActivity {
             return false;
         });
 
-        spnProducts.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-            @Override
-            public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
-                if (controller == null) return;
-                if (suppressProductSelection) return;
-                if (!userTouchedSpinner) return;
+        spnProducts.setOnItemSelectedListener(
+                new AdapterView.OnItemSelectedListener() {
+                    @Override
+                    public void onItemSelected(
+                            AdapterView<?> parent,
+                            View view,
+                            int pos,
+                            long id
+                    ) {
+                        if (controller == null) return;
+                        if (suppressProductSelection) return;
+                        if (!userTouchedSpinner) return;
 
-                userTouchedSpinner = false;
-                ProductUiItem it = (ProductUiItem) spnProducts.getSelectedItem();
-                controller.selectProduct(it.product1);
-            }
+                        userTouchedSpinner = false;
 
-            @Override public void onNothingSelected(AdapterView<?> parent) {}
-        });
+                        ProductUiItem it =
+                                (ProductUiItem) spnProducts.getSelectedItem();
+                        controller.selectProduct(it.product1);
+
+                        // UI = état (pas de refresh)
+                        edtProduct.setText(String.valueOf(it.product1));
+                    }
+
+                    @Override
+                    public void onNothingSelected(AdapterView<?> parent) {}
+                });
+
+        /* ---------- Actions ---------- */
 
         btnA.setOnClickListener(v -> {
             if (controller != null) controller.refreshProducts();
@@ -167,6 +198,7 @@ public class MainActivity extends AppCompatActivity {
         btnC.setOnClickListener(v -> {
             if (controller == null) return;
             controller.startDelivery(readProduct(), readPreset());
+            edtPreset.setText(String.valueOf(readPreset()));
         });
 
         btnContinue.setOnClickListener(v -> {
@@ -194,7 +226,6 @@ public class MainActivity extends AppCompatActivity {
             if (p == null) p = "Device";
 
             labels.add(m + " - " + p);
-
             log(String.format(
                     " - %s - %s (VID=%04X PID=%04X)",
                     m, p, d.getVendorId(), d.getProductId()
@@ -202,9 +233,12 @@ public class MainActivity extends AppCompatActivity {
         }
 
         spnUsbDevices.setAdapter(
-                new ArrayAdapter<>(this,
+                new ArrayAdapter<>(
+                        this,
                         android.R.layout.simple_spinner_item,
-                        labels));
+                        labels
+                )
+        );
     }
 
     private void openSelectedUsb() {
@@ -218,7 +252,8 @@ public class MainActivity extends AppCompatActivity {
 
         if (!usbManager.hasPermission(dev)) {
             PendingIntent pi = PendingIntent.getBroadcast(
-                    this, 0,
+                    this,
+                    0,
                     new Intent(ACTION_USB_PERMISSION),
                     PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE
             );
@@ -244,34 +279,52 @@ public class MainActivity extends AppCompatActivity {
                     UsbSerialPort.PARITY_NONE
             );
 
-            onUsbPortReady(port);
+            usbPort = port;
+            log("USB prêt");
 
         } catch (Exception e) {
             log("Open USB ERR: " + e.getMessage());
         }
     }
 
-    public void onUsbPortReady(UsbSerialPort port) {
-        if (usbPort != null) return;
+    /* ===================== LCP ===================== */
 
-        usbPort = port;
-        log("USB prêt");
+    private void connectLcp() {
+        if (usbPort == null) {
+            log("ERR: USB non connecté");
+            return;
+        }
 
-        LcpLink link = new LcpLink(port, TO_NODE_DEC, FROM_NODE_HEX, true);
+        int to   = parseInt(edtTo.getText().toString(), 250);
+        int from = parseInt(edtFrom.getText().toString(), 255);
+
+        // UI = état (normalisation)
+        edtTo.setText(String.valueOf(to));
+        edtFrom.setText(String.valueOf(from));
+        txtActiveNode.setText("Node actif : —");
+
+        if (controller != null) {
+            controller.shutdown();
+            controller = null;
+        }
+
+        LcpLink link = new LcpLink(usbPort, to, from, true);
         controller = new DeliveryController(link);
 
         controller.setListener(new DeliveryControllerPort.Listener() {
-
             @Override
             public void onStateChanged(DeliveryState state) {
                 ui.post(() -> txtLive.setText("LIVE: " + state));
             }
 
             @Override
-            public void onProductsUpdated(List<ProductUiItem> ignored, int idx0) {
+            public void onProductsUpdated(
+                    List<ProductUiItem> ignored,
+                    int activeIdx0
+            ) {
                 ui.post(() -> {
                     suppressProductSelection = true;
-                    spnProducts.setSelection(idx0);
+                    spnProducts.setSelection(activeIdx0);
                     suppressProductSelection = false;
                 });
             }
@@ -290,7 +343,8 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        ui.postDelayed(() -> controller.initialize(), 800);
+        ui.postDelayed(() -> controller.initialize(), 300);
+        log("Connect LCP appliqué");
     }
 
     /* ===================== UsbReceiver callback ===================== */
@@ -315,7 +369,8 @@ public class MainActivity extends AppCompatActivity {
             if (v >= 1 && v <= 16) return v;
         } catch (Exception ignore) {}
 
-        ProductUiItem it = (ProductUiItem) spnProducts.getSelectedItem();
+        ProductUiItem it =
+                (ProductUiItem) spnProducts.getSelectedItem();
         return it.product1;
     }
 
@@ -324,6 +379,14 @@ public class MainActivity extends AppCompatActivity {
             return Double.parseDouble(edtPreset.getText().toString());
         } catch (Exception e) {
             return 0.0;
+        }
+    }
+
+    private int parseInt(String s, int def) {
+        try {
+            return Integer.parseInt(s.trim());
+        } catch (Exception e) {
+            return def;
         }
     }
 
