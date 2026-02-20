@@ -10,7 +10,6 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.MotionEvent;
-import android.view.View;
 import android.widget.*;
 
 import com.hoho.android.usbserial.driver.*;
@@ -22,50 +21,69 @@ import java.util.List;
 /**
  * MainActivity
  *
- * UI complète :
- *  - Scan USB / Open USB (manuel)
- *  - Support UsbReceiver (hotplug)
- *  - Dépend UNIQUEMENT de DeliveryControllerPort
+ * UI complète et stable :
+ *  - Scan USB (fabricant + modèle)
+ *  - Log VID / PID
+ *  - TO / FROM affichés
+ *  - Node actif affiché (registre réellement répondant)
+ *  - Spinner Produit 1..16 (statique)
+ *  - Preset par défaut = 50
  *
- * Aucune logique protocolaire ici.
+ * Dépend UNIQUEMENT de DeliveryControllerPort.
  */
 public class MainActivity extends AppCompatActivity {
 
-    /* ==========================================================
+    /* =========================
+     * CONSTANTES TERRAIN
+     * ========================= */
+
+    private static final int TO_NODE_DEC = 250;     // 0xFA
+    private static final int FROM_NODE_HEX = 0xFF; // Host
+
+    public static final String ACTION_USB_PERMISSION =
+            "com.pa.lcrdemo.USB_PERMISSION";
+
+    /* =========================
      * UI USB
-     * ========================================================== */
+     * ========================= */
 
     private Spinner spnUsbDevices;
     private Button btnScanUsb;
     private Button btnOpenUsb;
 
-    /* ==========================================================
-     * UI Livraison
-     * ========================================================== */
+    /* =========================
+     * UI LIVRAISON
+     * ========================= */
 
     private Spinner spnProducts;
     private Button btnA, btnC, btnContinue, btnFinish;
     private EditText edtPreset, edtProduct;
-    private TextView txtLive, txtLog;
+
+    private TextView txtToNode;
+    private TextView txtFromNode;
+    private TextView txtActiveNode;
+
+    private TextView txtLive;
+    private TextView txtLog;
     private ScrollView logScroll;
 
-    /* ==========================================================
+    /* =========================
      * USB
-     * ========================================================== */
+     * ========================= */
 
     private UsbManager usbManager;
     private final List<UsbDevice> usbDevices = new ArrayList<>();
     private UsbSerialPort usbPort;
 
-    /* ==========================================================
-     * Controller (PORT UNIQUEMENT)
-     * ========================================================== */
+    /* =========================
+     * CONTROLLER
+     * ========================= */
 
     private DeliveryControllerPort controller;
 
-    /* ==========================================================
-     * Helpers UI
-     * ========================================================== */
+    /* =========================
+     * UI helpers
+     * ========================= */
 
     private boolean suppressProductSelection = false;
     private boolean userTouchedSpinner = false;
@@ -73,12 +91,9 @@ public class MainActivity extends AppCompatActivity {
     private final StringBuilder logBuf = new StringBuilder(32_000);
     private final Handler ui = new Handler(Looper.getMainLooper());
 
-    public static final String ACTION_USB_PERMISSION =
-            "com.pa.lcrdemo.USB_PERMISSION";
-
-    /* ==========================================================
+    /* =========================
      * Lifecycle
-     * ========================================================== */
+     * ========================= */
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -87,23 +102,22 @@ public class MainActivity extends AppCompatActivity {
 
         bindUi();
         wireUi();
+        initUiDefaults();
 
         usbManager = (UsbManager) getSystemService(USB_SERVICE);
 
         log("UI prête — Scan USB requis");
     }
 
-    /* ==========================================================
+    /* =========================
      * UI binding
-     * ========================================================== */
+     * ========================= */
 
     private void bindUi() {
-        // USB
         spnUsbDevices = findViewById(R.id.spnUsbDevices);
         btnScanUsb    = findViewById(R.id.btnScanUsb);
         btnOpenUsb    = findViewById(R.id.btnPingUsb);
 
-        // Livraison
         spnProducts   = findViewById(R.id.spnProducts);
         btnA          = findViewById(R.id.btnA);
         btnC          = findViewById(R.id.btnC);
@@ -113,23 +127,55 @@ public class MainActivity extends AppCompatActivity {
         edtPreset     = findViewById(R.id.edtPreset);
         edtProduct    = findViewById(R.id.edtProduct);
 
+        txtToNode     = findViewById(R.id.txtToNode);
+        txtFromNode   = findViewById(R.id.txtFromNode);
+        txtActiveNode = findViewById(R.id.txtActiveNode);
+
         txtLive       = findViewById(R.id.txtLive);
         txtLog        = findViewById(R.id.txtLog);
         logScroll     = findViewById(R.id.logScroll);
     }
 
-    /* ==========================================================
+    /* =========================
+     * Initialisation UI
+     * ========================= */
+
+    private void initUiDefaults() {
+        txtToNode.setText("TO : 250 (0xFA)");
+        txtFromNode.setText("FROM : 0xFF");
+        txtActiveNode.setText("Node actif : —");
+
+        // Spinner Produit 1..16 (STATIQUE)
+        List<ProductUiItem> products = new ArrayList<>();
+        for (int i = 1; i <= 16; i++) {
+            products.add(new ProductUiItem(i, "Produit " + i));
+        }
+
+        ArrayAdapter<ProductUiItem> adapter =
+                new ArrayAdapter<>(
+                        this,
+                        android.R.layout.simple_spinner_item,
+                        products
+                );
+        adapter.setDropDownViewResource(
+                android.R.layout.simple_spinner_dropdown_item
+        );
+
+        spnProducts.setAdapter(adapter);
+        spnProducts.setSelection(0);
+
+        edtPreset.setText("50");
+        edtProduct.setText("");
+    }
+
+    /* =========================
      * UI wiring
-     * ========================================================== */
+     * ========================= */
 
     private void wireUi() {
 
-        /* ---------- USB ---------- */
-
         btnScanUsb.setOnClickListener(v -> scanUsb());
         btnOpenUsb.setOnClickListener(v -> openSelectedUsb());
-
-        /* ---------- Spinner produits ---------- */
 
         spnProducts.setOnTouchListener((v, e) -> {
             if (e.getAction() == MotionEvent.ACTION_DOWN) {
@@ -157,19 +203,13 @@ public class MainActivity extends AppCompatActivity {
             @Override public void onNothingSelected(AdapterView<?> parent) {}
         });
 
-        /* ---------- Boutons ---------- */
-
         btnA.setOnClickListener(v -> {
             if (controller != null) controller.refreshProducts();
         });
 
         btnC.setOnClickListener(v -> {
             if (controller == null) return;
-
-            int product = readProduct();
-            double preset = readPreset();
-
-            controller.startDelivery(product, preset);
+            controller.startDelivery(readProduct(), readPreset());
         });
 
         btnContinue.setOnClickListener(v -> {
@@ -181,15 +221,10 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    /* ==========================================================
-     * USB UI MANUELLE
-     * ========================================================== */
+    /* =========================
+     * USB UI
+     * ========================= */
 
-    /**
-     * ✅ CORRECTIF APPLIQUÉ ICI :
-     *  - UI : Fabricant + Modèle
-     *  - LOG : VID / PID pour diagnostic bas niveau
-     */
     private void scanUsb() {
         usbDevices.clear();
         usbDevices.addAll(usbManager.getDeviceList().values());
@@ -199,23 +234,16 @@ public class MainActivity extends AppCompatActivity {
         log("Scan USB: " + usbDevices.size() + " périphérique(s)");
 
         for (UsbDevice d : usbDevices) {
+            String m = d.getManufacturerName();
+            String p = d.getProductName();
+            if (m == null) m = "Unknown manufacturer";
+            if (p == null) p = "Unknown device";
 
-            String manufacturer = d.getManufacturerName();
-            String product      = d.getProductName();
+            labels.add(m + " - " + p);
 
-            if (manufacturer == null) manufacturer = "Unknown manufacturer";
-            if (product == null)      product = "Unknown device";
-
-            // UI : fabricant + modèle
-            labels.add(manufacturer + " - " + product);
-
-            // LOG : VID / PID (debug bas niveau)
             log(String.format(
                     " - %s - %s (VID=%04X PID=%04X)",
-                    manufacturer,
-                    product,
-                    d.getVendorId(),
-                    d.getProductId()
+                    m, p, d.getVendorId(), d.getProductId()
             ));
         }
 
@@ -275,9 +303,9 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /* ==========================================================
-     * USB callbacks (appelés aussi par UsbReceiver)
-     * ========================================================== */
+    /* =========================
+     * USB callbacks
+     * ========================= */
 
     public void onUsbPortReady(UsbSerialPort port) {
 
@@ -289,7 +317,7 @@ public class MainActivity extends AppCompatActivity {
         this.usbPort = port;
         log("USB prêt");
 
-        LcpLink link = new LcpLink(port, 0xFA, 0xFF, true);
+        LcpLink link = new LcpLink(port, TO_NODE_DEC, FROM_NODE_HEX, true);
         controller = new DeliveryController(link);
 
         controller.setListener(new DeliveryControllerPort.Listener() {
@@ -300,26 +328,10 @@ public class MainActivity extends AppCompatActivity {
             }
 
             @Override
-            public void onProductsUpdated(
-                    List<ProductUiItem> products,
-                    int activeIndex0
-            ) {
+            public void onProductsUpdated(List<ProductUiItem> ignored, int activeIndex0) {
                 ui.post(() -> {
                     suppressProductSelection = true;
-
-                    ArrayAdapter<ProductUiItem> adapter =
-                            new ArrayAdapter<>(
-                                    MainActivity.this,
-                                    android.R.layout.simple_spinner_item,
-                                    products
-                            );
-                    adapter.setDropDownViewResource(
-                            android.R.layout.simple_spinner_dropdown_item
-                    );
-
-                    spnProducts.setAdapter(adapter);
                     spnProducts.setSelection(activeIndex0);
-
                     suppressProductSelection = false;
                 });
             }
@@ -327,6 +339,9 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onLog(String message) {
                 log(message);
+                if (message.startsWith("Node actif confirmé")) {
+                    ui.post(() -> txtActiveNode.setText(message));
+                }
             }
 
             @Override
@@ -335,7 +350,6 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        // ✅ délai avant initialize (registre pas toujours prêt immédiatement)
         ui.postDelayed(() -> controller.initialize(), 800);
     }
 
@@ -348,17 +362,16 @@ public class MainActivity extends AppCompatActivity {
         }
 
         usbPort = null;
+        txtActiveNode.setText("Node actif : —");
     }
 
-    /* ==========================================================
-     * Utils UI
-     * ========================================================== */
+    /* =========================
+     * Utils
+     * ========================= */
 
     private int readProduct() {
         try {
-            int v = Integer.parseInt(
-                    edtProduct.getText().toString().trim()
-            );
+            int v = Integer.parseInt(edtProduct.getText().toString().trim());
             if (v >= 1 && v <= 16) return v;
         } catch (Exception ignore) {}
 
@@ -369,9 +382,7 @@ public class MainActivity extends AppCompatActivity {
 
     private double readPreset() {
         try {
-            return Double.parseDouble(
-                    edtPreset.getText().toString().trim()
-            );
+            return Double.parseDouble(edtPreset.getText().toString().trim());
         } catch (Exception e) {
             return 0.0;
         }
@@ -381,9 +392,7 @@ public class MainActivity extends AppCompatActivity {
         ui.post(() -> {
             logBuf.append(s).append('\n');
             txtLog.setText(logBuf.toString());
-            logScroll.post(
-                    () -> logScroll.fullScroll(View.FOCUS_DOWN)
-            );
+            logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
         });
     }
 }

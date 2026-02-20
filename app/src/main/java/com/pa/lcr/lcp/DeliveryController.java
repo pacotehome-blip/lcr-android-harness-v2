@@ -83,6 +83,7 @@ public final class DeliveryController implements DeliveryControllerPort {
             // Sync-first BEST EFFORT (UNE FOIS)
             try {
                 link.opGetProductId(); // Msg 0x00
+                notifyActiveNode();
             } catch (Exception e) {
                 log("sync-first skipped: " + e.getMessage());
             }
@@ -111,7 +112,9 @@ public final class DeliveryController implements DeliveryControllerPort {
                 int activeIdx0 = readActiveProductIndex();
                 String code = readProductCode();
 
+                notifyActiveNode();
                 publishProducts(activeIdx0, code);
+
             } catch (Exception e) {
                 error("refreshProducts", e);
             }
@@ -132,6 +135,7 @@ public final class DeliveryController implements DeliveryControllerPort {
 
                 confirmActiveProduct(idx0);
 
+                notifyActiveNode();
                 publishProducts(idx0, readProductCode());
 
             } catch (Exception e) {
@@ -158,6 +162,7 @@ public final class DeliveryController implements DeliveryControllerPort {
 
                 link.opIssueCommand(CMD_RUN); // RUN
 
+                notifyActiveNode();
                 setState(DeliveryState.STARTING);
                 startMonitor();
 
@@ -175,6 +180,7 @@ public final class DeliveryController implements DeliveryControllerPort {
             if (state == DeliveryState.RUNNING_PAUSED) {
                 try {
                     link.opIssueCommand(CMD_RUN);
+                    notifyActiveNode();
                 } catch (Exception e) {
                     error("resumeIfPaused", e);
                 }
@@ -191,6 +197,7 @@ public final class DeliveryController implements DeliveryControllerPort {
 
                 link.opIssueCommand(CMD_END); // END
 
+                notifyActiveNode();
                 waitDeliveryClear();
                 setState(DeliveryState.ENDED);
 
@@ -336,7 +343,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         link.opSetField(FIELD_PRESET_NET, buf);
     }
 
-    private void waitDeliveryClear() throws Exception {
+   DeliveryClear() throws Exception {
         while (true) {
             int[] ds = link.opDeliveryStatus();
             int dc = ds[1];
@@ -372,6 +379,18 @@ public final class DeliveryController implements DeliveryControllerPort {
     /* ==========================================================
      * Logging / erreurs
      * ========================================================== */
+
+    private void notifyActiveNode() {
+        if (listener == null) return;
+
+        Integer node = link.getLastResponderNode();
+        if (node != null) {
+            listener.onLog(String.format(
+                    "Node actif confirmé : %d (0x%02X)",
+                    node, node
+            ));
+        }
+    }
 
     private void setState(DeliveryState s) {
         if (state != s) {
