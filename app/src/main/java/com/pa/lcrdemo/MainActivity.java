@@ -4,6 +4,8 @@ package com.pa.lcrdemo;
 import androidx.appcompat.app.AppCompatActivity;
 
 import android.app.PendingIntent;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Intent;
 import android.hardware.usb.*;
 import android.os.Bundle;
@@ -21,8 +23,12 @@ import java.util.List;
 
 public class MainActivity extends AppCompatActivity {
 
+    /* ===================== CONSTANTES ===================== */
+
     public static final String ACTION_USB_PERMISSION =
             "com.pa.lcrdemo.USB_PERMISSION";
+
+    /* ===================== USB ===================== */
 
     private UsbManager usbManager;
     private final List<UsbDevice> usbDevices = new ArrayList<>();
@@ -32,10 +38,14 @@ public class MainActivity extends AppCompatActivity {
     private Button btnScanUsb;
     private Button btnPingUsb;
 
+    /* ===================== LCP (ÉTAT ÉDITABLE) ===================== */
+
     private EditText edtTo;
     private EditText edtFrom;
     private TextView txtActiveNode;
     private Button btnConnect;
+
+    /* ===================== PRODUIT / PRESET ===================== */
 
     private Spinner spnProducts;
     private EditText edtProduct;
@@ -44,17 +54,27 @@ public class MainActivity extends AppCompatActivity {
     private Button btnA, btnB, btnC;
     private Button btnContinue, btnFinish;
 
+    /* ===================== LOG / LIVE ===================== */
+
     private TextView txtLive;
     private TextView txtLog;
     private ScrollView logScroll;
+    private Button btnClearLog;
+    private Button btnCopyLog;
+
+    /* ===================== CONTROLLER ===================== */
 
     private DeliveryControllerPort controller;
+
+    /* ===================== UI helpers ===================== */
 
     private boolean suppressProductSelection = false;
     private boolean userTouchedSpinner = false;
 
     private final StringBuilder logBuf = new StringBuilder(32768);
     private final Handler ui = new Handler(Looper.getMainLooper());
+
+    /* ===================== Lifecycle ===================== */
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -70,16 +90,21 @@ public class MainActivity extends AppCompatActivity {
         log("UI prête — Scan USB requis");
     }
 
+    /* ===================== UI ===================== */
+
     private void bindUi() {
-        spnUsbDevices = findViewById(R.id.spnUsbDevices);
+        // USB
         btnScanUsb    = findViewById(R.id.btnScanUsb);
         btnPingUsb    = findViewById(R.id.btnPingUsb);
+        spnUsbDevices = findViewById(R.id.spnUsbDevices);
 
+        // LCP
         edtTo         = findViewById(R.id.edtTo);
         edtFrom       = findViewById(R.id.edtFrom);
         txtActiveNode = findViewById(R.id.txtActiveNode);
         btnConnect    = findViewById(R.id.btnConnect);
 
+        // Produit / preset
         spnProducts   = findViewById(R.id.spnProducts);
         edtProduct    = findViewById(R.id.edtProduct);
         edtPreset     = findViewById(R.id.edtPreset);
@@ -90,9 +115,12 @@ public class MainActivity extends AppCompatActivity {
         btnContinue   = findViewById(R.id.btnContinue);
         btnFinish     = findViewById(R.id.btnFinish);
 
+        // Log
         txtLive       = findViewById(R.id.txtLive);
         txtLog        = findViewById(R.id.txtLog);
         logScroll     = findViewById(R.id.logScroll);
+        btnClearLog   = findViewById(R.id.btnClearLog);
+        btnCopyLog    = findViewById(R.id.btnCopyLog);
     }
 
     private void initUiDefaults() {
@@ -100,19 +128,23 @@ public class MainActivity extends AppCompatActivity {
         edtFrom.setText("255");
         txtActiveNode.setText("Node actif : —");
 
+        // Spinner Produit 1..16 (statique)
         List<ProductUiItem> products = new ArrayList<>();
         for (int i = 1; i <= 16; i++) {
             products.add(new ProductUiItem(i, "Produit " + i));
         }
 
-        ArrayAdapter<ProductUiItem> ad =
-                new ArrayAdapter<>(this,
+        ArrayAdapter<ProductUiItem> adapter =
+                new ArrayAdapter<>(
+                        this,
                         android.R.layout.simple_spinner_item,
-                        products);
-        ad.setDropDownViewResource(
-                android.R.layout.simple_spinner_dropdown_item);
+                        products
+                );
+        adapter.setDropDownViewResource(
+                android.R.layout.simple_spinner_dropdown_item
+        );
 
-        spnProducts.setAdapter(ad);
+        spnProducts.setAdapter(adapter);
         spnProducts.setSelection(0);
 
         edtPreset.setText("50");
@@ -120,9 +152,16 @@ public class MainActivity extends AppCompatActivity {
 
     private void wireUi() {
 
+        /* ---------- USB ---------- */
+
         btnScanUsb.setOnClickListener(v -> scanUsb());
         btnPingUsb.setOnClickListener(v -> openSelectedUsb());
+
+        /* ---------- LCP ---------- */
+
         btnConnect.setOnClickListener(v -> connectLcp());
+
+        /* ---------- Produits ---------- */
 
         spnProducts.setOnTouchListener((v, e) -> {
             if (e.getAction() == MotionEvent.ACTION_DOWN) {
@@ -152,6 +191,8 @@ public class MainActivity extends AppCompatActivity {
                     @Override public void onNothingSelected(AdapterView<?> parent) {}
                 });
 
+        /* ---------- Actions ---------- */
+
         btnC.setOnClickListener(v -> {
             if (controller == null) return;
             controller.startDelivery(readProduct(), readPreset());
@@ -165,9 +206,25 @@ public class MainActivity extends AppCompatActivity {
         btnFinish.setOnClickListener(v -> {
             if (controller != null) controller.endDelivery();
         });
+
+        /* ---------- LOG ---------- */
+
+        btnClearLog.setOnClickListener(v -> {
+            logBuf.setLength(0);
+            txtLog.setText("");
+        });
+
+        btnCopyLog.setOnClickListener(v -> {
+            ClipboardManager cm =
+                    (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            cm.setPrimaryClip(
+                    ClipData.newPlainText("log", txtLog.getText())
+            );
+            log("Log copié dans le presse-papiers");
+        });
     }
 
-    // ===================== USB =====================
+    /* ===================== USB ===================== */
 
     private void scanUsb() {
         usbDevices.clear();
@@ -193,7 +250,9 @@ public class MainActivity extends AppCompatActivity {
                 new ArrayAdapter<>(
                         this,
                         android.R.layout.simple_spinner_item,
-                        labels));
+                        labels
+                )
+        );
     }
 
     private void openSelectedUsb() {
@@ -241,14 +300,14 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    // ✅ Appelé par UsbReceiver
+    // Appelé par UsbReceiver
     public void onUsbPortReady(UsbSerialPort port) {
         if (usbPort != null) return;
         usbPort = port;
         log("USB prêt (receiver)");
     }
 
-    // ===================== LCP =====================
+    /* ===================== LCP ===================== */
 
     private void connectLcp() {
         if (usbPort == null) {
@@ -278,7 +337,9 @@ public class MainActivity extends AppCompatActivity {
             }
 
             @Override
-            public void onProductsUpdated(List<ProductUiItem> ignored, int idx0) {
+            public void onProductsUpdated(
+                    List<ProductUiItem> ignored, int idx0) {
+
                 ui.post(() -> {
                     suppressProductSelection = true;
                     spnProducts.setSelection(idx0);
@@ -304,6 +365,8 @@ public class MainActivity extends AppCompatActivity {
         log("Connect LCP appliqué");
     }
 
+    /* ===================== UsbReceiver ===================== */
+
     public void onUsbDetached() {
         log("USB détaché");
 
@@ -316,7 +379,7 @@ public class MainActivity extends AppCompatActivity {
         txtActiveNode.setText("Node actif : —");
     }
 
-    // ===================== Utils =====================
+    /* ===================== Utils ===================== */
 
     private int readProduct() {
         try {
@@ -349,8 +412,9 @@ public class MainActivity extends AppCompatActivity {
         ui.post(() -> {
             logBuf.append(s).append('\n');
             txtLog.setText(logBuf.toString());
-            logScroll.post(() ->
-                    logScroll.fullScroll(View.FOCUS_DOWN));
+            logScroll.post(
+                    () -> logScroll.fullScroll(View.FOCUS_DOWN)
+            );
         });
     }
 }
