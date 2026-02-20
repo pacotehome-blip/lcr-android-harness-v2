@@ -3,7 +3,6 @@ package com.pa.lcrdemo;
 
 import androidx.appcompat.app.AppCompatActivity;
 
-import android.hardware.usb.UsbSerialPort;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -11,20 +10,20 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.widget.*;
 
+import com.hoho.android.usbserial.driver.UsbSerialPort;
 import com.pa.lcr.lcp.*;
 
-import java.util.ArrayList;
 import java.util.List;
 
 /**
  * MainActivity
  *
  * UI PURE :
- *  - ne dépend QUE de DeliveryControllerPort
- *  - ne connaît PAS LcpLink
- *  - ne connaît PAS le protocole
+ *  - dépend UNIQUEMENT de DeliveryControllerPort
+ *  - ne connaît PAS le protocole LCP
+ *  - ne connaît PAS LcpLink directement
  *
- * Compatible USB multi-drop, registre autonome, queued LCP.
+ * Toute interaction registre passe par DeliveryControllerPort.
  */
 public class MainActivity extends AppCompatActivity {
 
@@ -118,17 +117,25 @@ public class MainActivity extends AppCompatActivity {
 
                 userTouchedSpinner = false;
 
-                ProductUiItem item = (ProductUiItem) spnProducts.getSelectedItem();
-                controller.selectProduct(item.product1);
+                ProductUiItem item =
+                        (ProductUiItem) spnProducts.getSelectedItem();
+                if (item != null) {
+                    controller.selectProduct(item.product1);
+                }
             }
 
-            @Override public void onNothingSelected(AdapterView<?> parent) {}
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+                // no-op
+            }
         });
 
         /* ---------- Boutons ---------- */
 
         btnA.setOnClickListener(v -> {
-            if (controller != null) controller.refreshProducts();
+            if (controller != null) {
+                controller.refreshProducts();
+            }
         });
 
         btnC.setOnClickListener(v -> {
@@ -141,11 +148,15 @@ public class MainActivity extends AppCompatActivity {
         });
 
         btnContinue.setOnClickListener(v -> {
-            if (controller != null) controller.resumeIfPaused();
+            if (controller != null) {
+                controller.resumeIfPaused();
+            }
         });
 
         btnFinish.setOnClickListener(v -> {
-            if (controller != null) controller.endDelivery();
+            if (controller != null) {
+                controller.endDelivery();
+            }
         });
     }
 
@@ -160,7 +171,7 @@ public class MainActivity extends AppCompatActivity {
         this.usbPort = port;
         log("USB prêt");
 
-        // Création du controller (1 port = 1 registre pour l'instant)
+        // 1 port = 1 registre (pour l’instant)
         LcpLink link = new LcpLink(port, 0xFA, 0xFF, true);
         controller = new DeliveryController(link);
 
@@ -172,19 +183,24 @@ public class MainActivity extends AppCompatActivity {
             }
 
             @Override
-            public void onProductsUpdated(List<ProductUiItem> products, int activeIndex0) {
+            public void onProductsUpdated(
+                    List<ProductUiItem> products,
+                    int activeIndex0
+            ) {
                 ui.post(() -> {
                     suppressProductSelection = true;
 
-                    ArrayAdapter<ProductUiItem> ad =
-                            new ArrayAdapter<>(MainActivity.this,
+                    ArrayAdapter<ProductUiItem> adapter =
+                            new ArrayAdapter<>(
+                                    MainActivity.this,
                                     android.R.layout.simple_spinner_item,
-                                    products);
+                                    products
+                            );
+                    adapter.setDropDownViewResource(
+                            android.R.layout.simple_spinner_dropdown_item
+                    );
 
-                    ad.setDropDownViewResource(
-                            android.R.layout.simple_spinner_dropdown_item);
-
-                    spnProducts.setAdapter(ad);
+                    spnProducts.setAdapter(adapter);
                     spnProducts.setSelection(activeIndex0);
 
                     suppressProductSelection = false;
@@ -225,17 +241,23 @@ public class MainActivity extends AppCompatActivity {
 
     private int readProduct() {
         try {
-            int v = Integer.parseInt(edtProduct.getText().toString().trim());
+            int v = Integer.parseInt(
+                    edtProduct.getText().toString().trim()
+            );
             if (v >= 1 && v <= 16) return v;
-        } catch (Exception ignore) {}
+        } catch (Exception ignore) {
+        }
 
-        ProductUiItem it = (ProductUiItem) spnProducts.getSelectedItem();
+        ProductUiItem it =
+                (ProductUiItem) spnProducts.getSelectedItem();
         return it != null ? it.product1 : 1;
     }
 
     private double readPreset() {
         try {
-            return Double.parseDouble(edtPreset.getText().toString().trim());
+            return Double.parseDouble(
+                    edtPreset.getText().toString().trim()
+            );
         } catch (Exception e) {
             return 0.0;
         }
@@ -245,7 +267,9 @@ public class MainActivity extends AppCompatActivity {
         ui.post(() -> {
             logBuf.append(s).append('\n');
             txtLog.setText(logBuf.toString());
-            logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
+            logScroll.post(
+                    () -> logScroll.fullScroll(View.FOCUS_DOWN)
+            );
         });
     }
 }
