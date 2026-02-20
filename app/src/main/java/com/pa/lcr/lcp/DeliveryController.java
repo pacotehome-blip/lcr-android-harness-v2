@@ -114,7 +114,6 @@ public final class DeliveryController implements DeliveryControllerPort {
 
                 notifyActiveNode();
                 publishProducts(activeIdx0, code);
-
             } catch (Exception e) {
                 error("refreshProducts", e);
             }
@@ -343,9 +342,13 @@ public final class DeliveryController implements DeliveryControllerPort {
         link.opSetField(FIELD_PRESET_NET, buf);
     }
 
-   DeliveryClear() throws Exception {
+    /* ==========================================================
+     * ✅ CORRECTION BLOQUANTE
+     * ========================================================== */
+
+    private void waitDeliveryClear() throws Exception {
         while (true) {
-            int[] ds = link.opDeliveryStatus();
+            ds = link.opDeliveryStatus();
             int dc = ds[1];
 
             boolean delivery = (dc & LcpLink.LCRSc_DELIVERY_ACTIVE) != 0;
