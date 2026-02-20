@@ -101,7 +101,7 @@ public class MainActivity extends AppCompatActivity {
         // USB
         spnUsbDevices = findViewById(R.id.spnUsbDevices);
         btnScanUsb    = findViewById(R.id.btnScanUsb);
-        btnOpenUsb    = findViewById(R.id.btnPingUsb); // bouton Ouvrir/Ping
+        btnOpenUsb    = findViewById(R.id.btnPingUsb);
 
         // Livraison
         spnProducts   = findViewById(R.id.spnProducts);
@@ -185,17 +185,37 @@ public class MainActivity extends AppCompatActivity {
      * USB UI MANUELLE
      * ========================================================== */
 
+    /**
+     * ✅ CORRECTIF APPLIQUÉ ICI :
+     *  - UI : Fabricant + Modèle
+     *  - LOG : VID / PID pour diagnostic bas niveau
+     */
     private void scanUsb() {
         usbDevices.clear();
         usbDevices.addAll(usbManager.getDeviceList().values());
 
         List<String> labels = new ArrayList<>();
+
+        log("Scan USB: " + usbDevices.size() + " périphérique(s)");
+
         for (UsbDevice d : usbDevices) {
-            labels.add(String.format(
-                    "VID=%04X PID=%04X %s",
+
+            String manufacturer = d.getManufacturerName();
+            String product      = d.getProductName();
+
+            if (manufacturer == null) manufacturer = "Unknown manufacturer";
+            if (product == null)      product = "Unknown device";
+
+            // UI : fabricant + modèle
+            labels.add(manufacturer + " - " + product);
+
+            // LOG : VID / PID (debug bas niveau)
+            log(String.format(
+                    " - %s - %s (VID=%04X PID=%04X)",
+                    manufacturer,
+                    product,
                     d.getVendorId(),
-                    d.getProductId(),
-                    d.getDeviceName()
+                    d.getProductId()
             ));
         }
 
@@ -206,8 +226,6 @@ public class MainActivity extends AppCompatActivity {
                         labels
                 )
         );
-
-        log("Scan USB: " + labels.size() + " périphérique(s)");
     }
 
     private void openSelectedUsb() {
@@ -262,10 +280,15 @@ public class MainActivity extends AppCompatActivity {
      * ========================================================== */
 
     public void onUsbPortReady(UsbSerialPort port) {
+
+        if (this.usbPort != null) {
+            log("USB déjà ouvert — ignore");
+            return;
+        }
+
         this.usbPort = port;
         log("USB prêt");
 
-        // 1 port = 1 registre (pour l’instant)
         LcpLink link = new LcpLink(port, 0xFA, 0xFF, true);
         controller = new DeliveryController(link);
 
@@ -312,7 +335,8 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        controller.initialize();
+        // ✅ délai avant initialize (registre pas toujours prêt immédiatement)
+        ui.postDelayed(() -> controller.initialize(), 800);
     }
 
     public void onUsbDetached() {
