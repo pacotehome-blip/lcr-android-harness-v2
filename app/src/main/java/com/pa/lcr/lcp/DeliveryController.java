@@ -1,4 +1,3 @@
-
 package com.pa.lcr.lcp;
 
 import java.util.ArrayList;
@@ -8,7 +7,7 @@ import java.util.concurrent.Executors;
 
 public final class DeliveryController implements DeliveryControllerPort {
 
-    private static final int FIELD_ACTIVE_PRODUCT = 0; // 0..15
+    private static final int FIELD_ACTIVE_PRODUCT = 0; // 0..15 pac
     private static final int FIELD_PRESET_NET = 6;
     private static final int FIELD_DECIMALS = 39;
 
