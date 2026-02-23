@@ -8,7 +8,7 @@ import java.util.List;
  * UX figée:
  * - pas de lecture registre au connect
  * - pas de refresh automatique
- * - toutes lectures uniquement sur action utilisateur (boutons)
+ * - lectures uniquement sur action utilisateur (boutons)
  */
 public interface DeliveryControllerPort {
 
@@ -21,10 +21,15 @@ public interface DeliveryControllerPort {
     void selectProduct(int product1to16);
 
     /* ===== Livraison ===== */
-    void startDelivery(int product1to16, double presetNet); // C
+    void startDelivery(int product1to16, double presetNet); // C = Start
     void resumeIfPaused();                                  // Continuer
-    void endDelivery();                                     // A et Finish
-    void requestStatus();                                   // B
+    void endDelivery();                                     // A = End + Finish = End
+
+    /**
+     * B = Diagnostic global (action utilisateur)
+     * Doit confirmer ce qui bloque ou ce qui ne va pas (delivery/ticket/printer).
+     */
+    void requestStatus();
 
     /* ===== État ===== */
     DeliveryState getState();

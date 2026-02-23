@@ -32,7 +32,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     @Override
     public void setListener(Listener listener) {
         this.listener = listener;
-        if (listener != null) link.setTraceSink(listener::onLog);  // TX/RX → UI log
+        if (listener != null) link.setTraceSink(listener::onLog); // TX/RX → UI log
         else link.setTraceSink(null);
     }
 
@@ -52,7 +52,6 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     @Override
     public void refreshProducts() {
-        // NO-OP volontaire (UX figée)
         log("refreshProducts ignoré (mode sans rafraîchissement)");
     }
 
@@ -80,7 +79,7 @@ public final class DeliveryController implements DeliveryControllerPort {
 
                 setState(DeliveryState.PRESTART);
 
-                // Action utilisateur → on peut lire 0x28 pour éviter start impossible
+                // Action utilisateur -> check état réel
                 int[] st = link.opDeliveryStatus();
                 int delCode = st[1];
 
@@ -105,7 +104,6 @@ public final class DeliveryController implements DeliveryControllerPort {
 
             } catch (Exception e) {
                 error("startDelivery", e);
-                // très important: ne pas rester bloqué en PRESTART
                 setState(DeliveryState.CONNECTED);
             }
         });
@@ -133,20 +131,36 @@ public final class DeliveryController implements DeliveryControllerPort {
                 if (state == DeliveryState.ENDING) { log("END ignoré: déjà en cours"); return; }
 
                 setState(DeliveryState.ENDING);
+
                 link.opIssueCommand(CMD_END);
                 notifyActiveNode();
 
-                // Fin réelle (action utilisateur A/Finish)
+                // Poll tolérant: on continue même si un poll timeout
                 long deadline = System.currentTimeMillis() + 15000;
+                int consecutiveFailures = 0;
+
                 while (System.currentTimeMillis() < deadline) {
-                    int[] st = link.opDeliveryStatus();
-                    int delCode = st[1];
-                    boolean active = (delCode & DC_DELIVERY_ACTIVE) != 0;
-                    boolean flow = (delCode & DC_FLOW_ACTIVE) != 0;
-                    if (!active && !flow) {
-                        setState(DeliveryState.ENDED);
-                        return;
+                    try {
+                        int[] st = link.opDeliveryStatus();
+                        consecutiveFailures = 0;
+
+                        int delCode = st[1];
+                        boolean active = (delCode & DC_DELIVERY_ACTIVE) != 0;
+                        boolean flow = (delCode & DC_FLOW_ACTIVE) != 0;
+
+                        if (!active && !flow) {
+                            setState(DeliveryState.ENDED);
+                            return;
+                        }
+
+                    } catch (Exception pollErr) {
+                        consecutiveFailures++;
+                        log("END: poll 0x28 timeout (" + consecutiveFailures + ")");
+                        if (consecutiveFailures >= 3) {
+                            try { Thread.sleep(400); } catch (InterruptedException ignored) {}
+                        }
                     }
+
                     try { Thread.sleep(250); } catch (InterruptedException ignored) {}
                 }
 
@@ -160,30 +174,81 @@ public final class DeliveryController implements DeliveryControllerPort {
         });
     }
 
+    /**
+     * ✅ B = Diagnostic global
+     * - 0x28 (delivery status)
+     * - 0x23 (machine + printer status)
+     * - log DIAG clair: ce qui bloque / ce qui ne va pas
+     */
     @Override
     public void requestStatus() {
         io.execute(() -> {
             try {
-                if (state == DeliveryState.DISCONNECTED) { log("STATUS bloqué: DISCONNECTED"); return; }
+                if (state == DeliveryState.DISCONNECTED) {
+                    log("DIAG: bloqué (DISCONNECTED)");
+                    return;
+                }
 
-                int[] st = link.opDeliveryStatus();
-                int delStatus = st[0];
-                int delCode = st[1];
+                // 1) Delivery status (0x28)
+                int[] ds28 = link.opDeliveryStatus();
+                int delStatus28 = ds28[0];
+                int delCode28 = ds28[1];
 
-                log("STATUS: delStatus=0x" + hex4(delStatus)
-                        + " delCode=0x" + hex4(delCode)
-                        + " flags=" + decodeFlags(delCode));
+                // 2) Machine status (0x23) inclut printer status
+                LcpLink.MachineStatus ms = link.opGetMachineStatus();
+                int prn = ms.prnStatus;
+                int delStatus23 = ms.delStatus;
+                int delCode23 = ms.delCode;
 
-                boolean active = (delCode & DC_DELIVERY_ACTIVE) != 0;
-                boolean flow = (delCode & DC_FLOW_ACTIVE) != 0;
+                // Delivery flags
+                boolean ticketPending  = (delCode23 & DC_TICKET_PENDING) != 0;
+                boolean flowActive     = (delCode23 & DC_FLOW_ACTIVE) != 0;
+                boolean deliveryActive = (delCode23 & DC_DELIVERY_ACTIVE) != 0;
 
-                if (active && flow) setState(DeliveryState.RUNNING_FLOWING);
-                else if (active) setState(DeliveryState.RUNNING_PAUSED);
+                // Printer bits (terrain)
+                boolean outOfPaper   = (prn & 0x10) != 0;
+                boolean noProcessor  = (prn & 0x20) != 0;
+                boolean printerError = (prn & 0x40) != 0;
+                boolean printing     = (prn & 0x80) != 0;
+
+                // Résumé "ce qui ne va pas"
+                StringBuilder sb = new StringBuilder();
+                sb.append("DIAG: ");
+
+                if (outOfPaper || noProcessor || printerError) {
+                    sb.append("BLOQUÉ → ");
+                    if (outOfPaper) sb.append("OUT_OF_PAPER ");
+                    if (noProcessor) sb.append("NO_PROCESSOR ");
+                    if (printerError) sb.append("PRINTER_ERROR ");
+                    if (ticketPending) sb.append("+ TICKET_PENDING ");
+                } else if (ticketPending) {
+                    sb.append("BLOQUÉ → TICKET_PENDING");
+                    if (printing) sb.append(" (printing)");
+                } else if (deliveryActive || flowActive) {
+                    sb.append("LIVRAISON ACTIVE → ");
+                    if (deliveryActive) sb.append("DELIVERY_ACTIVE ");
+                    if (flowActive) sb.append("FLOW_ACTIVE ");
+                } else if (printing) {
+                    sb.append("EN COURS → PRINTING");
+                } else {
+                    sb.append("OK");
+                }
+
+                log(sb.toString().trim());
+
+                // Détails minimaux
+                log("DIAG: 0x28 delStatus=0x" + hex4(delStatus28) + " delCode=0x" + hex4(delCode28));
+                log("DIAG: 0x23 prnStatus=0x" + hex2(prn) + " delStatus=0x" + hex4(delStatus23) + " delCode=0x" + hex4(delCode23));
+
+                // LIVE (action utilisateur B)
+                if (deliveryActive && flowActive) setState(DeliveryState.RUNNING_FLOWING);
+                else if (deliveryActive) setState(DeliveryState.RUNNING_PAUSED);
                 else setState(DeliveryState.CONNECTED);
 
                 notifyActiveNode();
 
             } catch (Exception e) {
+                log("DIAG: <timeout/erreur>");
                 error("status", e);
             }
         });
@@ -200,6 +265,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     private void writePresetNet(double preset) throws Exception {
         byte[] dec = link.opGetField(FIELD_DECIMALS);
         int idx = (dec.length >= 1) ? (dec[0] & 0xFF) : 0;
+
         int digits = decimalsDigits(idx);
         int scale = (int) Math.pow(10, digits);
         int value = (int) Math.round(preset * scale);
@@ -223,15 +289,6 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
     }
 
-    private String decodeFlags(int delCode) {
-        List<String> flags = new ArrayList<>();
-        if ((delCode & DC_TICKET_PENDING) != 0) flags.add("TICKET_PENDING");
-        if ((delCode & DC_FLOW_ACTIVE) != 0) flags.add("FLOW_ACTIVE");
-        if ((delCode & DC_DELIVERY_ACTIVE) != 0) flags.add("DELIVERY_ACTIVE");
-        if (flags.isEmpty()) flags.add("(none)");
-        return flags.toString();
-    }
-
     private void notifyActiveNode() {
         if (listener == null) return;
         Integer node = link.getLastResponderNode();
@@ -249,7 +306,6 @@ public final class DeliveryController implements DeliveryControllerPort {
         if (listener != null) listener.onError(ctx, e);
     }
 
-    private static String hex4(int v) {
-        return String.format("%04X", v & 0xFFFF);
-    }
+    private static String hex2(int v) { return String.format("%02X", v & 0xFF); }
+    private static String hex4(int v) { return String.format("%04X", v & 0xFFFF); }
 }

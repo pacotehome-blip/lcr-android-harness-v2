@@ -29,6 +29,7 @@ public final class LcpLink {
     private static final byte MSG_GET_PRODUCT_ID = 0x00;
     private static final byte MSG_GET_FIELD = 0x20;
     private static final byte MSG_SET_FIELD = 0x21;
+    private static final byte MSG_GET_MACHINE_STATUS = 0x23;   // ✅ NEW
     private static final byte MSG_ISSUE_COMMAND = 0x24;
     private static final byte MSG_GET_DELIVERY_STATUS = 0x28;
     private static final byte MSG_CHECK_REQUEST = 0x7D;
@@ -49,6 +50,30 @@ public final class LcpLink {
         this.toAddr = toAddr & 0xFF;
         this.hostAddr = hostAddr & 0xFF;
         this.syncFirstEnabled = syncFirstEnabled;
+    }
+
+    /* ============================================================
+     * Types publics
+     * ============================================================ */
+
+    /**
+     * 0x23 Get Machine Status payload:
+     * rc, devStatus, prnStatus, delStatus[2], delCode[2]
+     */
+    public static final class MachineStatus {
+        public final int rc;
+        public final int devStatus;
+        public final int prnStatus;
+        public final int delStatus; // u16
+        public final int delCode;   // u16
+
+        public MachineStatus(int rc, int devStatus, int prnStatus, int delStatus, int delCode) {
+            this.rc = rc;
+            this.devStatus = devStatus;
+            this.prnStatus = prnStatus;
+            this.delStatus = delStatus;
+            this.delCode = delCode;
+        }
     }
 
     /* ============================================================
@@ -74,7 +99,7 @@ public final class LcpLink {
     }
 
     public void opIssueCommand(int cmd) throws IOException {
-        // RUN/Pause/End sont parfois plus lents selon l’état: on laisse 6s
+        // RUN/END peuvent être plus lents selon l’état: 6s
         Response r = sendRecv(buildPayload(MSG_ISSUE_COMMAND, new byte[]{(byte) cmd}), 6000);
         ensureOk(r, "ISSUE_COMMAND 0x" + hex2(cmd));
     }
@@ -91,6 +116,27 @@ public final class LcpLink {
     public void opGetProductId() throws IOException {
         Response r = sendRecv(buildPayload(MSG_GET_PRODUCT_ID, null), 3000);
         ensureOk(r, "GET_PRODUCT_ID");
+    }
+
+    /**
+     * ✅ NEW: 0x23 Get Machine Status (inclut prnStatus)
+     * Timeout plus long car peut être lent si imprimante offline.
+     */
+    public MachineStatus opGetMachineStatus() throws IOException {
+        Response r = sendRecv(buildPayload(MSG_GET_MACHINE_STATUS, null), 6000);
+        ensureOk(r, "GET_MACHINE_STATUS");
+
+        if (r.payload.length < 7) {
+            throw new IOException("MACHINE_STATUS payload trop court len=" + r.payload.length);
+        }
+
+        int rc = r.payload[0] & 0xFF;
+        int dev = r.payload[1] & 0xFF;
+        int prn = r.payload[2] & 0xFF;
+        int delStatus = u16be(r.payload[3], r.payload[4]);
+        int delCode = u16be(r.payload[5], r.payload[6]);
+
+        return new MachineStatus(rc, dev, prn, delStatus, delCode);
     }
 
     /* ============================================================
@@ -190,7 +236,7 @@ public final class LcpLink {
     }
 
     /* ============================================================
-     * Read frame (tolérant: jamais d’exception “timeout lecture octet”)
+     * Read frame (tolérant)
      * ============================================================ */
 
     private Frame readFrame(int sliceTimeoutMs) throws IOException {
@@ -225,7 +271,6 @@ public final class LcpLink {
             return new Frame(to, from, status, payload, canonical);
 
         } catch (IOException e) {
-            // ✅ tolérance: frame partielle / timing → on ignore, on continue
             return null;
         }
     }
@@ -348,6 +393,7 @@ public final class LcpLink {
             case 0x00: return "GET_PRODUCT_ID (0x00)";
             case 0x20: return "GET_FIELD (0x20)";
             case 0x21: return "SET_FIELD (0x21)";
+            case 0x23: return "GET_MACHINE_STATUS (0x23)"; // ✅ NEW
             case 0x24: return "ISSUE_COMMAND (0x24)";
             case 0x28: return "GET_DELIVERY_STATUS (0x28)";
             case 0x7D: return "CHECK_REQUEST (0x7D)";
