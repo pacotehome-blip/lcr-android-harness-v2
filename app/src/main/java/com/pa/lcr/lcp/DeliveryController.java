@@ -8,21 +8,20 @@ import java.util.concurrent.Executors;
 
 public final class DeliveryController implements DeliveryControllerPort {
 
-    private static final int FIELD_ACTIVE_PRODUCT = 0;
+    private static final int FIELD_ACTIVE_PRODUCT = 0; // 0..15
     private static final int FIELD_PRESET_NET = 6;
     private static final int FIELD_DECIMALS = 39;
 
     private static final int CMD_RUN = 0x00;
     private static final int CMD_END = 0x02;
 
-    // Bits DeliveryCode (word 16-bit)
+    // DeliveryCode bits (16-bit)
     private static final int DC_TICKET_PENDING  = 0x0001;
     private static final int DC_FLOW_ACTIVE     = 0x0004;
     private static final int DC_DELIVERY_ACTIVE = 0x0008;
 
     private final LcpLink link;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
-
     private Listener listener;
     private volatile DeliveryState state = DeliveryState.DISCONNECTED;
 
@@ -33,7 +32,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     @Override
     public void setListener(Listener listener) {
         this.listener = listener;
-        if (listener != null) link.setTraceSink(listener::onLog);
+        if (listener != null) link.setTraceSink(listener::onLog);  // TX/RX → UI log
         else link.setTraceSink(null);
     }
 
@@ -53,6 +52,7 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     @Override
     public void refreshProducts() {
+        // NO-OP volontaire (UX figée)
         log("refreshProducts ignoré (mode sans rafraîchissement)");
     }
 
@@ -80,7 +80,7 @@ public final class DeliveryController implements DeliveryControllerPort {
 
                 setState(DeliveryState.PRESTART);
 
-                // Lecture explicite autorisée (action utilisateur) pour éviter starts impossibles
+                // Action utilisateur → on peut lire 0x28 pour éviter start impossible
                 int[] st = link.opDeliveryStatus();
                 int delCode = st[1];
 
@@ -97,9 +97,7 @@ public final class DeliveryController implements DeliveryControllerPort {
 
                 int idx0 = product1to16 - 1;
                 link.opSetField(FIELD_ACTIVE_PRODUCT, new byte[]{(byte) idx0});
-
                 writePresetNet(presetNet);
-
                 link.opIssueCommand(CMD_RUN);
 
                 notifyActiveNode();
@@ -107,6 +105,7 @@ public final class DeliveryController implements DeliveryControllerPort {
 
             } catch (Exception e) {
                 error("startDelivery", e);
+                // très important: ne pas rester bloqué en PRESTART
                 setState(DeliveryState.CONNECTED);
             }
         });
@@ -133,24 +132,17 @@ public final class DeliveryController implements DeliveryControllerPort {
                 if (state == DeliveryState.DISCONNECTED) { log("END bloqué: DISCONNECTED"); return; }
                 if (state == DeliveryState.ENDING) { log("END ignoré: déjà en cours"); return; }
 
-                // Si on ne sait pas, on laisse l’utilisateur essayer quand même, mais on loggue.
-                if (state != DeliveryState.RUNNING_FLOWING && state != DeliveryState.RUNNING_PAUSED) {
-                    log("END demandé (état=" + state + ") — envoi quand même");
-                }
-
                 setState(DeliveryState.ENDING);
                 link.opIssueCommand(CMD_END);
                 notifyActiveNode();
 
-                // Attendre fin réelle (action utilisateur "End")
+                // Fin réelle (action utilisateur A/Finish)
                 long deadline = System.currentTimeMillis() + 15000;
                 while (System.currentTimeMillis() < deadline) {
                     int[] st = link.opDeliveryStatus();
                     int delCode = st[1];
-
                     boolean active = (delCode & DC_DELIVERY_ACTIVE) != 0;
                     boolean flow = (delCode & DC_FLOW_ACTIVE) != 0;
-
                     if (!active && !flow) {
                         setState(DeliveryState.ENDED);
                         return;
@@ -168,12 +160,6 @@ public final class DeliveryController implements DeliveryControllerPort {
         });
     }
 
-    /**
-     * B = Status (action utilisateur)
-     * - GET_DELIVERY_STATUS (0x28) : TX/RX déjà loggué par LcpLink
-     * - Ajoute un résumé humain
-     * - Met à jour DeliveryState en conséquence
-     */
     @Override
     public void requestStatus() {
         io.execute(() -> {
@@ -184,11 +170,10 @@ public final class DeliveryController implements DeliveryControllerPort {
                 int delStatus = st[0];
                 int delCode = st[1];
 
-                List<String> flags = decodeFlags(delCode);
-                log("STATUS: delStatus=0x" + hex4(delStatus) + " delCode=0x" + hex4(delCode)
-                        + " flags=" + flags);
+                log("STATUS: delStatus=0x" + hex4(delStatus)
+                        + " delCode=0x" + hex4(delCode)
+                        + " flags=" + decodeFlags(delCode));
 
-                // Synchronise l'état UI (sans “magie”: c'est une action utilisateur)
                 boolean active = (delCode & DC_DELIVERY_ACTIVE) != 0;
                 boolean flow = (delCode & DC_FLOW_ACTIVE) != 0;
 
@@ -204,21 +189,17 @@ public final class DeliveryController implements DeliveryControllerPort {
         });
     }
 
-    @Override
-    public DeliveryState getState() { return state; }
+    @Override public DeliveryState getState() { return state; }
 
-    @Override
-    public boolean isDeliveryActive() {
+    @Override public boolean isDeliveryActive() {
         return state == DeliveryState.RUNNING_FLOWING || state == DeliveryState.RUNNING_PAUSED;
     }
 
-    @Override
-    public boolean isPaused() { return state == DeliveryState.RUNNING_PAUSED; }
+    @Override public boolean isPaused() { return state == DeliveryState.RUNNING_PAUSED; }
 
     private void writePresetNet(double preset) throws Exception {
         byte[] dec = link.opGetField(FIELD_DECIMALS);
         int idx = (dec.length >= 1) ? (dec[0] & 0xFF) : 0;
-
         int digits = decimalsDigits(idx);
         int scale = (int) Math.pow(10, digits);
         int value = (int) Math.round(preset * scale);
@@ -242,13 +223,13 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
     }
 
-    private List<String> decodeFlags(int delCode) {
+    private String decodeFlags(int delCode) {
         List<String> flags = new ArrayList<>();
         if ((delCode & DC_TICKET_PENDING) != 0) flags.add("TICKET_PENDING");
         if ((delCode & DC_FLOW_ACTIVE) != 0) flags.add("FLOW_ACTIVE");
         if ((delCode & DC_DELIVERY_ACTIVE) != 0) flags.add("DELIVERY_ACTIVE");
         if (flags.isEmpty()) flags.add("(none)");
-        return flags;
+        return flags.toString();
     }
 
     private void notifyActiveNode() {

@@ -4,75 +4,40 @@ package com.pa.lcr.lcp;
 import java.util.List;
 
 /**
- * DeliveryControllerPort
- *
- * Contrat strict entre l'UI (MainActivity) et la couche protocolaire.
- *
- * UX VERROUILLÉE:
- * - L'état = ce que l'utilisateur saisit.
- * - PAS de lecture registre au connect.
- * - PAS de sync/refresh "magique" automatique.
- *
- * Les lectures sont autorisées UNIQUEMENT via actions explicites (boutons).
+ * Contrat strict entre MainActivity et la couche protocolaire.
+ * UX figée:
+ * - pas de lecture registre au connect
+ * - pas de refresh automatique
+ * - toutes lectures uniquement sur action utilisateur (boutons)
  */
 public interface DeliveryControllerPort {
 
-    /* ==========================================================
-     * Cycle de vie
-     * ========================================================== */
+    /* ===== Cycle de vie ===== */
     void initialize();
     void shutdown();
 
-    /* ==========================================================
-     * Produits
-     * ========================================================== */
-
-    /**
-     * NO-OP volontaire (UX figée). Méthode conservée pour compatibilité interface.
-     */
-    void refreshProducts();
-
-    /**
-     * Demande de bascule du produit actif (action utilisateur).
-     * @param product1to16 produit demandé (1..16)
-     */
+    /* ===== Produits ===== */
+    void refreshProducts(); // NO-OP volontaire (contrat Java)
     void selectProduct(int product1to16);
 
-    /* ==========================================================
-     * Livraison
-     * ========================================================== */
-    void startDelivery(int product1to16, double presetNet);
-    void resumeIfPaused();
-    void endDelivery();
+    /* ===== Livraison ===== */
+    void startDelivery(int product1to16, double presetNet); // C
+    void resumeIfPaused();                                  // Continuer
+    void endDelivery();                                     // A et Finish
+    void requestStatus();                                   // B
 
-    /**
-     * Action utilisateur: lire l'état réel du registre (GetDeliveryStatus 0x28)
-     * et le publier dans le log + mettre à jour l'état UI.
-     */
-    void requestStatus();
-
-    /* ==========================================================
-     * État
-     * ========================================================== */
+    /* ===== État ===== */
     DeliveryState getState();
     boolean isDeliveryActive();
     boolean isPaused();
 
-    /* ==========================================================
-     * Événements UI
-     * ========================================================== */
+    /* ===== Events UI ===== */
     void setListener(Listener listener);
 
     interface Listener {
         void onStateChanged(DeliveryState state);
-
         void onProductsUpdated(List<ProductUiItem> products, int activeIndex0);
-
-        /**
-         * Log protocolaire / diagnostic (incluant TX/RX enrichis).
-         */
         void onLog(String message);
-
         void onError(String context, Throwable error);
     }
 }
