@@ -58,7 +58,6 @@ public class MainActivity extends AppCompatActivity {
     private final StringBuilder logBuf = new StringBuilder(32768);
     private final Handler ui = new Handler(Looper.getMainLooper());
 
-    // ✅ Debounce init
     private Runnable pendingInitRunnable = null;
 
     @Override
@@ -141,12 +140,27 @@ public class MainActivity extends AppCompatActivity {
             @Override public void onNothingSelected(AdapterView<?> parent) {}
         });
 
+        // ✅ Mapping boutons demandé:
+        // C = Start
         btnC.setOnClickListener(v -> {
             if (controller == null) return;
             controller.startDelivery(readProduct(), readPreset());
             edtPreset.setText(String.valueOf(readPreset()));
         });
 
+        // A = End
+        btnA.setOnClickListener(v -> {
+            if (controller == null) return;
+            controller.endDelivery();
+        });
+
+        // B = Status
+        btnB.setOnClickListener(v -> {
+            if (controller == null) return;
+            controller.requestStatus();
+        });
+
+        // Continue / Finish restent comme avant (tu peux garder Finish = End aussi)
         btnContinue.setOnClickListener(v -> { if (controller != null) controller.resumeIfPaused(); });
         btnFinish.setOnClickListener(v -> { if (controller != null) controller.endDelivery(); });
 
@@ -236,7 +250,6 @@ public class MainActivity extends AppCompatActivity {
             controller = null;
         }
 
-        // ✅ annule init en attente (évite double logs)
         if (pendingInitRunnable != null) ui.removeCallbacks(pendingInitRunnable);
 
         LcpLink link = new LcpLink(usbPort, to, from, true);
