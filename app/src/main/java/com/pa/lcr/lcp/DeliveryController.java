@@ -79,7 +79,6 @@ public final class DeliveryController implements DeliveryControllerPort {
 
                 setState(DeliveryState.PRESTART);
 
-                // Action utilisateur -> check état réel
                 int[] st = link.opDeliveryStatus();
                 int delCode = st[1];
 
@@ -135,7 +134,6 @@ public final class DeliveryController implements DeliveryControllerPort {
                 link.opIssueCommand(CMD_END);
                 notifyActiveNode();
 
-                // Poll tolérant: on continue même si un poll timeout
                 long deadline = System.currentTimeMillis() + 15000;
                 int consecutiveFailures = 0;
 
@@ -175,82 +173,107 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     /**
-     * ✅ B = Diagnostic global
-     * - 0x28 (delivery status)
-     * - 0x23 (machine + printer status)
-     * - log DIAG clair: ce qui bloque / ce qui ne va pas
+     * B = Diagnostic global (doit confirmer ce qui ne va pas)
+     * - Always try 0x23 first (printer + delStatus/delCode)
+     * - Then best-effort 0x28
+     * - Never let 0x28 timeout prevent printer diagnostics
      */
     @Override
     public void requestStatus() {
         io.execute(() -> {
+            if (state == DeliveryState.DISCONNECTED) {
+                log("DIAG: bloqué (DISCONNECTED)");
+                return;
+            }
+
+            // Variables diag
+            Integer prnStatus = null;
+            Integer delStatus23 = null, delCode23 = null;
+            Integer delStatus28 = null, delCode28 = null;
+
+            // 1) 0x23 (machine + printer) FIRST — this is the key
             try {
-                if (state == DeliveryState.DISCONNECTED) {
-                    log("DIAG: bloqué (DISCONNECTED)");
-                    return;
-                }
-
-                // 1) Delivery status (0x28)
-                int[] ds28 = link.opDeliveryStatus();
-                int delStatus28 = ds28[0];
-                int delCode28 = ds28[1];
-
-                // 2) Machine status (0x23) inclut printer status
                 LcpLink.MachineStatus ms = link.opGetMachineStatus();
-                int prn = ms.prnStatus;
-                int delStatus23 = ms.delStatus;
-                int delCode23 = ms.delCode;
-
-                // Delivery flags
-                boolean ticketPending  = (delCode23 & DC_TICKET_PENDING) != 0;
-                boolean flowActive     = (delCode23 & DC_FLOW_ACTIVE) != 0;
-                boolean deliveryActive = (delCode23 & DC_DELIVERY_ACTIVE) != 0;
-
-                // Printer bits (terrain)
-                boolean outOfPaper   = (prn & 0x10) != 0;
-                boolean noProcessor  = (prn & 0x20) != 0;
-                boolean printerError = (prn & 0x40) != 0;
-                boolean printing     = (prn & 0x80) != 0;
-
-                // Résumé "ce qui ne va pas"
-                StringBuilder sb = new StringBuilder();
-                sb.append("DIAG: ");
-
-                if (outOfPaper || noProcessor || printerError) {
-                    sb.append("BLOQUÉ → ");
-                    if (outOfPaper) sb.append("OUT_OF_PAPER ");
-                    if (noProcessor) sb.append("NO_PROCESSOR ");
-                    if (printerError) sb.append("PRINTER_ERROR ");
-                    if (ticketPending) sb.append("+ TICKET_PENDING ");
-                } else if (ticketPending) {
-                    sb.append("BLOQUÉ → TICKET_PENDING");
-                    if (printing) sb.append(" (printing)");
-                } else if (deliveryActive || flowActive) {
-                    sb.append("LIVRAISON ACTIVE → ");
-                    if (deliveryActive) sb.append("DELIVERY_ACTIVE ");
-                    if (flowActive) sb.append("FLOW_ACTIVE ");
-                } else if (printing) {
-                    sb.append("EN COURS → PRINTING");
-                } else {
-                    sb.append("OK");
-                }
-
-                log(sb.toString().trim());
-
-                // Détails minimaux
-                log("DIAG: 0x28 delStatus=0x" + hex4(delStatus28) + " delCode=0x" + hex4(delCode28));
-                log("DIAG: 0x23 prnStatus=0x" + hex2(prn) + " delStatus=0x" + hex4(delStatus23) + " delCode=0x" + hex4(delCode23));
-
-                // LIVE (action utilisateur B)
-                if (deliveryActive && flowActive) setState(DeliveryState.RUNNING_FLOWING);
-                else if (deliveryActive) setState(DeliveryState.RUNNING_PAUSED);
-                else setState(DeliveryState.CONNECTED);
-
-                notifyActiveNode();
-
+                prnStatus = ms.prnStatus;
+                delStatus23 = ms.delStatus;
+                delCode23 = ms.delCode;
             } catch (Exception e) {
-                log("DIAG: <timeout/erreur>");
+                log("DIAG: 0x23 <timeout/erreur>");
                 error("status", e);
             }
+
+            // 2) 0x28 best-effort (optional)
+            try {
+                int[] ds = link.opDeliveryStatus();
+                delStatus28 = ds[0];
+                delCode28 = ds[1];
+            } catch (Exception e) {
+                log("DIAG: 0x28 <timeout/erreur>");
+                // pas fatal, on continue
+            }
+
+            // 3) Décision sur base des meilleures infos disponibles
+            // Prefer delCode from 0x23 when available, else 0x28
+            Integer effectiveDelCode = (delCode23 != null) ? delCode23 : delCode28;
+
+            if (effectiveDelCode == null) {
+                log("DIAG: <timeout/erreur> (aucun état lisible)");
+                return;
+            }
+
+            boolean ticketPending  = (effectiveDelCode & DC_TICKET_PENDING) != 0;
+            boolean flowActive     = (effectiveDelCode & DC_FLOW_ACTIVE) != 0;
+            boolean deliveryActive = (effectiveDelCode & DC_DELIVERY_ACTIVE) != 0;
+
+            boolean outOfPaper = false, noProcessor = false, printerError = false, printing = false;
+            if (prnStatus != null) {
+                int prn = prnStatus;
+                outOfPaper   = (prn & 0x10) != 0;
+                noProcessor  = (prn & 0x20) != 0;
+                printerError = (prn & 0x40) != 0;
+                printing     = (prn & 0x80) != 0;
+            }
+
+            StringBuilder sb = new StringBuilder();
+            sb.append("DIAG: ");
+
+            if (prnStatus != null && (outOfPaper || noProcessor || printerError)) {
+                sb.append("BLOQUÉ → ");
+                if (outOfPaper) sb.append("OUT_OF_PAPER ");
+                if (noProcessor) sb.append("NO_PROCESSOR ");
+                if (printerError) sb.append("PRINTER_ERROR ");
+                if (ticketPending) sb.append("+ TICKET_PENDING ");
+            } else if (ticketPending) {
+                sb.append("BLOQUÉ → TICKET_PENDING");
+                if (printing) sb.append(" (printing)");
+            } else if (deliveryActive || flowActive) {
+                sb.append("LIVRAISON ACTIVE → ");
+                if (deliveryActive) sb.append("DELIVERY_ACTIVE ");
+                if (flowActive) sb.append("FLOW_ACTIVE ");
+            } else if (printing) {
+                sb.append("EN COURS → PRINTING");
+            } else {
+                sb.append("OK");
+            }
+
+            log(sb.toString().trim());
+
+            // Détails si dispo
+            if (delStatus28 != null && delCode28 != null) {
+                log("DIAG: 0x28 delStatus=0x" + hex4(delStatus28) + " delCode=0x" + hex4(delCode28));
+            }
+            if (prnStatus != null && delStatus23 != null && delCode23 != null) {
+                log("DIAG: 0x23 prnStatus=0x" + hex2(prnStatus) + " delStatus=0x" + hex4(delStatus23) + " delCode=0x" + hex4(delCode23));
+            } else if (prnStatus == null) {
+                log("DIAG: 0x23 prnStatus=(n/a)");
+            }
+
+            // LIVE (action utilisateur B)
+            if (deliveryActive && flowActive) setState(DeliveryState.RUNNING_FLOWING);
+            else if (deliveryActive) setState(DeliveryState.RUNNING_PAUSED);
+            else setState(DeliveryState.CONNECTED);
+
+            notifyActiveNode();
         });
     }
 
