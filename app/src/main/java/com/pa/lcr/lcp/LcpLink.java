@@ -9,6 +9,9 @@ import java.util.List;
 
 public final class LcpLink {
 
+    // Verrou global I/O pour éviter contention si plusieurs LcpLink existent brièvement (double connect, etc.)
+    private static final Object PORT_LOCK = new Object();
+
     /* ===================== Trace (vers UI) ===================== */
     public interface TraceSink { void onTrace(String line); }
     private volatile TraceSink trace;
@@ -53,7 +56,7 @@ public final class LcpLink {
     }
 
     /* ============================================================
-     * ✅ resynchronisation douce (sans reset USB)
+     * resynchronisation douce (sans reset USB)
      * ============================================================ */
     public void drainInput(int millis) {
         int total = 0;
@@ -61,7 +64,10 @@ public final class LcpLink {
         try {
             while (System.currentTimeMillis() < end) {
                 byte[] b = new byte[64];
-                int n = port.read(b, 30);
+                int n;
+                synchronized (PORT_LOCK) {
+                    n = port.read(b, 30);
+                }
                 if (n <= 0) break;
                 total += n;
             }
@@ -152,7 +158,9 @@ public final class LcpLink {
     private synchronized Response sendRecv(byte[] payload, int timeoutMs) throws IOException {
         byte[] txFrame = encodeFrame(payload);
         traceFrame(true, txFrame, payload);
-        port.write(txFrame, 500);
+        synchronized (PORT_LOCK) {
+            port.write(txFrame, 500);
+        }
 
         long deadline = System.currentTimeMillis() + timeoutMs;
         byte lastTxMsg = payload.length > 0 ? payload[0] : 0;
@@ -183,7 +191,9 @@ public final class LcpLink {
                 byte[] chkPayload = new byte[]{MSG_CHECK_REQUEST};
                 byte[] chkFrame = encodeFrame(chkPayload);
                 traceFrame(true, chkFrame, chkPayload);
-                port.write(chkFrame, 500);
+                synchronized (PORT_LOCK) {
+                    port.write(chkFrame, 500);
+                }
                 waitingQueued = false;
             }
         }
@@ -318,7 +328,10 @@ public final class LcpLink {
 
     private int readRawByte(int timeoutMs) throws IOException {
         byte[] b = new byte[1];
-        int n = port.read(b, timeoutMs);
+        int n;
+        synchronized (PORT_LOCK) {
+            n = port.read(b, timeoutMs);
+        }
         return (n == 1) ? (b[0] & 0xFF) : -1;
     }
 
@@ -407,7 +420,7 @@ public final class LcpLink {
         switch (cmd & 0xFF) {
             case 0x00: return "RUN (0x00)";
             case 0x02: return "END DELIVERY (0x02)";
-            case 0x06: return "PRINT LAST TICKET (0x06)"; // ✅ ajout diagnostic
+            case 0x06: return "PRINT LAST TICKET (0x06)";
             default: return "UNKNOWN (0x" + hex2(cmd) + ")";
         }
     }

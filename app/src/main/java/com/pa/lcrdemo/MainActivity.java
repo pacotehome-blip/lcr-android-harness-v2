@@ -30,7 +30,6 @@ public class MainActivity extends AppCompatActivity {
     private UsbManager usbManager;
     private final List<UsbDevice> usbDevices = new ArrayList<>();
     private UsbSerialPort usbPort;
-
     private Spinner spnUsbDevices;
     private Button btnScanUsb;
     private Button btnPingUsb;
@@ -61,25 +60,31 @@ public class MainActivity extends AppCompatActivity {
     /* ===================== UI helpers ===================== */
     private boolean suppressProductSelection = false;
     private boolean userTouchedSpinner = false;
-
     private final StringBuilder logBuf = new StringBuilder(32768);
     private final Handler ui = new Handler(Looper.getMainLooper());
 
     // Debounce init (évite double "LCP prêt..." si on clique Connect rapidement)
     private Runnable pendingInitRunnable = null;
 
+    // LIVE tick: poll léger via controller.requestLiveSample()
+    private final Runnable liveTick = new Runnable() {
+        @Override public void run() {
+            if (controller != null) {
+                controller.requestLiveSample();
+                ui.postDelayed(this, 300);
+            }
+        }
+    };
+
     /* ===================== Lifecycle ===================== */
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
-
         usbManager = (UsbManager) getSystemService(USB_SERVICE);
-
         bindUi();
         wireUi();
         initUiDefaults();
-
         log("UI prête — Scan USB requis");
     }
 
@@ -135,7 +140,6 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void wireUi() {
-
         /* ---------- USB ---------- */
         btnScanUsb.setOnClickListener(v -> scanUsb());
         btnPingUsb.setOnClickListener(v -> openSelectedUsb());
@@ -152,32 +156,27 @@ public class MainActivity extends AppCompatActivity {
         });
 
         spnProducts.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-            @Override
-            public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
+            @Override public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
                 if (controller == null) return;
                 if (suppressProductSelection) return;
                 if (!userTouchedSpinner) return;
-
                 userTouchedSpinner = false;
-
                 ProductUiItem it = (ProductUiItem) spnProducts.getSelectedItem();
                 controller.selectProduct(it.product1);
                 edtProduct.setText(String.valueOf(it.product1));
             }
-
-            @Override
-            public void onNothingSelected(AdapterView<?> parent) {}
+            @Override public void onNothingSelected(AdapterView<?> parent) {}
         });
 
         /* ---------- Actions (mapping verrouillé) ---------- */
-        // C = Start
+        // C = Start (reste ON comme demandé)
         btnC.setOnClickListener(v -> {
             if (controller == null) return;
             controller.startDelivery(readProduct(), readPreset());
             edtPreset.setText(String.valueOf(readPreset()));
         });
 
-        // A = End
+        // A = End (Terminer) -> sera OFF quand FLOW_ACTIVE=ON via updateButtons()
         btnA.setOnClickListener(v -> {
             if (controller == null) return;
             controller.endDelivery();
@@ -189,12 +188,12 @@ public class MainActivity extends AppCompatActivity {
             controller.requestStatus();
         });
 
-        // Continuer = Resume
+        // Continuer = Resume (OFF tant que FLOW_ACTIVE=ON)
         btnContinue.setOnClickListener(v -> {
             if (controller != null) controller.resumeIfPaused();
         });
 
-        // Terminer = End (même action que A, c'est ok)
+        // Terminer = End (même action que A)
         btnFinish.setOnClickListener(v -> {
             if (controller != null) controller.endDelivery();
         });
@@ -216,9 +215,7 @@ public class MainActivity extends AppCompatActivity {
     private void scanUsb() {
         usbDevices.clear();
         usbDevices.addAll(usbManager.getDeviceList().values());
-
         log("Scan USB: " + usbDevices.size() + " périphérique(s)");
-
         List<String> labels = new ArrayList<>();
         for (UsbDevice d : usbDevices) {
             String m = d.getManufacturerName();
@@ -226,11 +223,9 @@ public class MainActivity extends AppCompatActivity {
             if (m == null) m = "Unknown";
             if (p == null) p = "Device";
             labels.add(m + " - " + p);
-
             log(String.format(" - %s - %s (VID=%04X PID=%04X)",
                     m, p, d.getVendorId(), d.getProductId()));
         }
-
         spnUsbDevices.setAdapter(
                 new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, labels)
         );
@@ -242,7 +237,6 @@ public class MainActivity extends AppCompatActivity {
             log("Aucun périphérique USB sélectionné");
             return;
         }
-
         UsbDevice dev = usbDevices.get(idx);
 
         if (!usbManager.hasPermission(dev)) {
@@ -266,7 +260,6 @@ public class MainActivity extends AppCompatActivity {
             UsbSerialPort port = driver.getPorts().get(0);
             port.open(conn);
             port.setParameters(19200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
-
             usbPort = port;
             log("USB prêt");
         } catch (Exception e) {
@@ -284,12 +277,11 @@ public class MainActivity extends AppCompatActivity {
     // Appelé par UsbReceiver (si utilisé)
     public void onUsbDetached() {
         log("USB détaché");
-
         if (controller != null) {
             controller.shutdown();
             controller = null;
         }
-
+        ui.removeCallbacks(liveTick);
         usbPort = null;
         txtActiveNode.setText("Node actif : —");
     }
@@ -322,13 +314,15 @@ public class MainActivity extends AppCompatActivity {
         controller = new DeliveryController(link);
 
         controller.setListener(new DeliveryControllerPort.Listener() {
-            @Override
-            public void onStateChanged(DeliveryState state) {
-                ui.post(() -> txtLive.setText("LIVE: " + state));
+            @Override public void onStateChanged(DeliveryState state) {
+                ui.post(() -> {
+                    boolean flowOn = (state == DeliveryState.RUNNING_FLOWING);
+                    txtLive.setText("LIVE: " + state + " | FLOW_ACTIVE: " + (flowOn ? "ON" : "OFF"));
+                    updateButtons(state);
+                });
             }
 
-            @Override
-            public void onProductsUpdated(List<ProductUiItem> ignored, int idx0) {
+            @Override public void onProductsUpdated(List<ProductUiItem> ignored, int idx0) {
                 ui.post(() -> {
                     suppressProductSelection = true;
                     spnProducts.setSelection(idx0);
@@ -336,16 +330,14 @@ public class MainActivity extends AppCompatActivity {
                 });
             }
 
-            @Override
-            public void onLog(String msg) {
+            @Override public void onLog(String msg) {
                 log(msg);
                 if (msg.startsWith("Node actif")) {
                     ui.post(() -> txtActiveNode.setText(msg));
                 }
             }
 
-            @Override
-            public void onError(String ctx, Throwable e) {
+            @Override public void onError(String ctx, Throwable e) {
                 log("ERR[" + ctx + "] " + e.getMessage());
             }
         });
@@ -356,6 +348,26 @@ public class MainActivity extends AppCompatActivity {
         ui.postDelayed(pendingInitRunnable, 300);
 
         log("Connect LCP appliqué");
+
+        // démarre le tick LIVE (poll léger)
+        ui.removeCallbacks(liveTick);
+        ui.postDelayed(liveTick, 300);
+    }
+
+    private void updateButtons(DeliveryState state) {
+        boolean flowing = (state == DeliveryState.RUNNING_FLOWING);
+        boolean paused  = (state == DeliveryState.RUNNING_PAUSED);
+
+        // Start (C) reste ON
+        btnC.setEnabled(true);
+
+        // OFF tant que ça coule; ON quand paused
+        btnContinue.setEnabled(paused && !flowing);
+        btnFinish.setEnabled(paused && !flowing);
+        btnA.setEnabled(paused && !flowing);
+
+        // Status toujours ON
+        btnB.setEnabled(true);
     }
 
     /* ===================== Utils ===================== */
@@ -364,7 +376,6 @@ public class MainActivity extends AppCompatActivity {
             int v = Integer.parseInt(edtProduct.getText().toString());
             if (v >= 1 && v <= 16) return v;
         } catch (Exception ignore) {}
-
         ProductUiItem it = (ProductUiItem) spnProducts.getSelectedItem();
         return it.product1;
     }
