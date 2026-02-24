@@ -34,7 +34,7 @@ public class MainActivity extends AppCompatActivity {
     private Button btnScanUsb;
     private Button btnPingUsb;
 
-    /* ===================== LCP ===================== */
+    /* ===================== LCP (ÉTAT ÉDITABLE) ===================== */
     private EditText edtTo;
     private EditText edtFrom;
     private TextView txtActiveNode;
@@ -67,11 +67,14 @@ public class MainActivity extends AppCompatActivity {
     private boolean userTouchedSpinner = false;
     private final StringBuilder logBuf = new StringBuilder(32768);
     private final Handler ui = new Handler(Looper.getMainLooper());
+
+    // Debounce init
     private Runnable pendingInitRunnable = null;
 
-    // LIVE tick (poll léger) — appelle requestLiveSample() toutes les 300ms
+    // LIVE tick: poll léger via controller.requestLiveSample()
     private final Runnable liveTick = new Runnable() {
-        @Override public void run() {
+        @Override
+        public void run() {
             if (controller != null) {
                 controller.requestLiveSample();
                 ui.postDelayed(this, 300);
@@ -79,6 +82,7 @@ public class MainActivity extends AppCompatActivity {
         }
     };
 
+    /* ===================== Lifecycle ===================== */
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -116,7 +120,7 @@ public class MainActivity extends AppCompatActivity {
         btnContinue = findViewById(R.id.btnContinue);
         btnFinish = findViewById(R.id.btnFinish);
 
-        // LIVE + NET/GROSS (définis dans activity_main.xml)
+        // LIVE + NET/GROSS (dans activity_main.xml)
         txtLive = findViewById(R.id.txtLive);
         liveQtyPanel = findViewById(R.id.liveQtyPanel);
         txtQtyNet = findViewById(R.id.txtQtyNet);
@@ -134,13 +138,12 @@ public class MainActivity extends AppCompatActivity {
         edtFrom.setText("255");
         txtActiveNode.setText("Node actif : —");
 
-        // LIVE initial cohérent
         txtLive.setText("LIVE: (en attente)");
         if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.GONE);
         if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
         if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
 
-        // Spinner Produit 1..16
+        // Spinner Produit 1..16 (statique)
         List<ProductUiItem> products = new ArrayList<>();
         for (int i = 1; i <= 16; i++) products.add(new ProductUiItem(i, "Produit " + i));
         ArrayAdapter<ProductUiItem> adapter =
@@ -162,12 +165,15 @@ public class MainActivity extends AppCompatActivity {
 
         /* ---------- Produits ---------- */
         spnProducts.setOnTouchListener((v, e) -> {
-            if (e.getAction() == MotionEvent.ACTION_DOWN) userTouchedSpinner = true;
+            if (e.getAction() == MotionEvent.ACTION_DOWN) {
+                userTouchedSpinner = true;
+            }
             return false;
         });
 
         spnProducts.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-            @Override public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
                 if (controller == null) return;
                 if (suppressProductSelection) return;
                 if (!userTouchedSpinner) return;
@@ -177,11 +183,12 @@ public class MainActivity extends AppCompatActivity {
                 controller.selectProduct(it.product1);
                 edtProduct.setText(String.valueOf(it.product1));
             }
+
             @Override public void onNothingSelected(AdapterView<?> parent) {}
         });
 
         /* ---------- Actions ---------- */
-        // C = Start (reste ON)
+        // C = Start
         btnC.setOnClickListener(v -> {
             if (controller == null) return;
             controller.startDelivery(readProduct(), readPreset());
@@ -250,6 +257,7 @@ public class MainActivity extends AppCompatActivity {
             log("Aucun périphérique USB sélectionné");
             return;
         }
+
         UsbDevice dev = usbDevices.get(idx);
 
         if (!usbManager.hasPermission(dev)) {
@@ -263,7 +271,10 @@ public class MainActivity extends AppCompatActivity {
         }
 
         UsbSerialDriver driver = UsbSerialProber.getDefaultProber().probeDevice(dev);
-        if (driver == null) { log("Driver USB série introuvable"); return; }
+        if (driver == null) {
+            log("Driver USB série introuvable");
+            return;
+        }
 
         try {
             UsbDeviceConnection conn = usbManager.openDevice(dev);
@@ -277,20 +288,22 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    // ✅ requis par UsbReceiver.handlePermission()
+    // ✅ requis par UsbReceiver.handlePermission() [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/UsbReceiver.java)
     public void onUsbPortReady(UsbSerialPort port) {
         if (usbPort != null) return;
         usbPort = port;
         log("USB prêt (receiver)");
     }
 
-    // ✅ requis par UsbReceiver.handleDetach()
+    // ✅ requis par UsbReceiver.handleDetach() [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/UsbReceiver.java)
     public void onUsbDetached() {
         log("USB détaché");
+
         if (controller != null) {
             controller.shutdown();
             controller = null;
         }
+
         ui.removeCallbacks(liveTick);
         usbPort = null;
         txtActiveNode.setText("Node actif : —");
@@ -323,13 +336,11 @@ public class MainActivity extends AppCompatActivity {
         controller = new DeliveryController(link);
 
         controller.setListener(new DeliveryControllerPort.Listener() {
-
-            @Override public void onStateChanged(DeliveryState state) {
+            @Override
+            public void onStateChanged(DeliveryState state) {
                 ui.post(() -> {
                     boolean stableOff = (controller != null) && controller.isFlowOffStable();
 
-                    // - FLOW_ACTIVE ON seulement en RUNNING_FLOWING
-                    // - FLOW_ACTIVE OFF seulement en RUNNING_PAUSED ET stableOff
                     if (state == DeliveryState.RUNNING_FLOWING) {
                         txtLive.setText("LIVE: " + state + " | FLOW_ACTIVE: ON");
                         if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
@@ -347,7 +358,8 @@ public class MainActivity extends AppCompatActivity {
                 });
             }
 
-            @Override public void onLiveQty(double net, double gross) {
+            @Override
+            public void onLiveQty(double net, double gross) {
                 ui.post(() -> {
                     if (txtQtyNet != null) txtQtyNet.setText(String.format("NET: %.3f", net));
                     if (txtQtyGross != null) txtQtyGross.setText(String.format("GROSS: %.3f", gross));
@@ -355,7 +367,8 @@ public class MainActivity extends AppCompatActivity {
                 });
             }
 
-            @Override public void onProductsUpdated(List<ProductUiItem> ignored, int idx0) {
+            @Override
+            public void onProductsUpdated(List<ProductUiItem> ignored, int idx0) {
                 ui.post(() -> {
                     suppressProductSelection = true;
                     spnProducts.setSelection(idx0);
@@ -363,11 +376,78 @@ public class MainActivity extends AppCompatActivity {
                 });
             }
 
-            @Override public void onLog(String msg) {
+            @Override
+            public void onLog(String msg) {
                 log(msg);
                 if (msg.startsWith("Node actif")) {
                     ui.post(() -> txtActiveNode.setText(msg));
                 }
             }
 
-            @Override public void onError(String ctx, Throwable e) {
+            @Override
+            public void onError(String ctx, Throwable e) {
+                log("ERR[" + ctx + "] " + e.getMessage());
+            }
+        });
+
+        pendingInitRunnable = () -> {
+            if (controller != null) controller.initialize();
+        };
+        ui.postDelayed(pendingInitRunnable, 300);
+
+        log("Connect LCP appliqué");
+
+        ui.removeCallbacks(liveTick);
+        ui.postDelayed(liveTick, 300);
+    }
+
+    private void updateButtons(DeliveryState state, boolean stableOff) {
+        boolean flowing = (state == DeliveryState.RUNNING_FLOWING);
+        boolean paused = (state == DeliveryState.RUNNING_PAUSED);
+
+        // Start (C) reste ON
+        btnC.setEnabled(true);
+
+        // Continuer/Terminer/A : ON uniquement si paused + stableOff
+        boolean allow = paused && stableOff && !flowing;
+        btnContinue.setEnabled(allow);
+        btnFinish.setEnabled(allow);
+        btnA.setEnabled(allow);
+
+        btnB.setEnabled(true);
+    }
+
+    /* ===================== Utils ===================== */
+    private int readProduct() {
+        try {
+            int v = Integer.parseInt(edtProduct.getText().toString());
+            if (v >= 1 && v <= 16) return v;
+        } catch (Exception ignore) {}
+        ProductUiItem it = (ProductUiItem) spnProducts.getSelectedItem();
+        return it.product1;
+    }
+
+    private double readPreset() {
+        try {
+            return Double.parseDouble(edtPreset.getText().toString());
+        } catch (Exception e) {
+            return 0.0;
+        }
+    }
+
+    private int parseInt(String s, int def) {
+        try {
+            return Integer.parseInt(s.trim());
+        } catch (Exception e) {
+            return def;
+        }
+    }
+
+    private void log(String s) {
+        ui.post(() -> {
+            logBuf.append(s).append('\n');
+            txtLog.setText(logBuf.toString());
+            logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
+        });
+    }
+}
