@@ -68,16 +68,28 @@ public class MainActivity extends AppCompatActivity {
     private final StringBuilder logBuf = new StringBuilder(32768);
     private final Handler ui = new Handler(Looper.getMainLooper());
 
-    // Debounce init
+    // Anti-redraw (réduit GC + frames skipped)
+    private double lastNet = Double.NaN;
+    private double lastGross = Double.NaN;
+
+    // Debounce init (évite double init)
     private Runnable pendingInitRunnable = null;
 
-    // LIVE tick: poll léger via controller.requestLiveSample()
+    // ✅ LIVE tick adaptatif (corrige la latence)
     private final Runnable liveTick = new Runnable() {
         @Override
         public void run() {
-            if (controller != null) {
+            if (controller == null) return;
+
+            DeliveryState st = controller.getState();
+            if (st == DeliveryState.RUNNING_FLOWING) {
                 controller.requestLiveSample();
                 ui.postDelayed(this, 300);
+            } else if (st == DeliveryState.RUNNING_PAUSED) {
+                controller.requestLiveSample();
+                ui.postDelayed(this, 1500);
+            } else {
+                ui.postDelayed(this, 2000);
             }
         }
     };
@@ -152,6 +164,7 @@ public class MainActivity extends AppCompatActivity {
         spnProducts.setAdapter(adapter);
         spnProducts.setSelection(0);
 
+        // Valeur par défaut
         edtPreset.setText("50");
     }
 
@@ -288,14 +301,14 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    // ✅ requis par UsbReceiver.handlePermission() [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/UsbReceiver.java)
+    // ✅ requis par UsbReceiver.handlePermission()
     public void onUsbPortReady(UsbSerialPort port) {
         if (usbPort != null) return;
         usbPort = port;
         log("USB prêt (receiver)");
     }
 
-    // ✅ requis par UsbReceiver.handleDetach() [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/UsbReceiver.java)
+    // ✅ requis par UsbReceiver.handleDetach()
     public void onUsbDetached() {
         log("USB détaché");
 
@@ -361,8 +374,15 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onLiveQty(double net, double gross) {
                 ui.post(() -> {
-                    if (txtQtyNet != null) txtQtyNet.setText(String.format("NET: %.3f", net));
-                    if (txtQtyGross != null) txtQtyGross.setText(String.format("GROSS: %.3f", gross));
+                    // ✅ update UI seulement si changement
+                    if (Double.compare(net, lastNet) != 0) {
+                        if (txtQtyNet != null) txtQtyNet.setText(String.format("NET: %.3f", net));
+                        lastNet = net;
+                    }
+                    if (Double.compare(gross, lastGross) != 0) {
+                        if (txtQtyGross != null) txtQtyGross.setText(String.format("GROSS: %.3f", gross));
+                        lastGross = gross;
+                    }
                     if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
                 });
             }
