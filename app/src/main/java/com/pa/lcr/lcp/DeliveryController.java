@@ -5,11 +5,12 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public final class DeliveryController implements DeliveryControllerPort {
+
     private static final int FIELD_ACTIVE_PRODUCT = 0; // 0..15
-    private static final int FIELD_PRESET_NET = 6;     // preset net
-    private static final int FIELD_DECIMALS = 39;      // decimals index
-    private static final int FIELD_GROSS_COUNT = 44;   // gross count
-    private static final int FIELD_NET_COUNT = 45;     // net count
+    private static final int FIELD_PRESET_NET = 6;
+    private static final int FIELD_DECIMALS = 39;
+    private static final int FIELD_GROSS_COUNT = 44;
+    private static final int FIELD_NET_COUNT = 45;
 
     private static final int CMD_RUN = 0x00;
     private static final int CMD_END = 0x02;
@@ -35,11 +36,11 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     private volatile boolean startInProgress = false;
 
-    // --- Flow OFF stability (tampon 2000ms) ---
+    // --- OFF stable: snapshot + confirm (pas de loop #44/#45 en OFF stable) ---
     private static final long FLOW_OFF_STABLE_MS = 2000;
-    private volatile boolean flowOffStable = true;      // reset true hors livraison
-    private volatile long flowOffCandidateSinceMs = 0L; // 0 => pas en validation OFF
-    private volatile boolean offConfirmDone = false;    // évite relecture en boucle en OFF
+    private volatile boolean flowOffStable = true;
+    private volatile long flowOffCandidateSinceMs = 0L;
+    private volatile boolean offConfirmDone = false;
     private volatile int offSnapGrossRaw = Integer.MIN_VALUE;
     private volatile int offSnapNetRaw = Integer.MIN_VALUE;
 
@@ -50,7 +51,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     @Override
     public void setListener(Listener listener) {
         this.listener = listener;
-        if (listener != null) link.setTraceSink(listener::onLog); // TX/RX → UI log
+        if (listener != null) link.setTraceSink(listener::onLog);
         else link.setTraceSink(null);
     }
 
@@ -107,7 +108,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     /* =========================================================
-     * START
+     * START (avec retry auto unique après ticket)
      * ========================================================= */
     @Override
     public void startDelivery(int product1to16, double presetNet) {
@@ -136,11 +137,20 @@ public final class DeliveryController implements DeliveryControllerPort {
                 }
                 int delCode = st[1];
 
+                // Ticket pending: imprime + attend; si pas clear à 20s, retry auto unique à +2s
                 if ((delCode & DC_TICKET_PENDING) != 0) {
                     log("TICKET_PENDING détecté → Issue #6 (print ticket) puis START");
                     boolean cleared = clearTicketPending();
                     if (!cleared) {
-                        log("START: ticket toujours pending après timeout — impossible de démarrer sans impression");
+                        log("START différé: ticket pas encore clear (retry auto dans 2s)");
+                        try { Thread.sleep(2000); } catch (InterruptedException ignored) {}
+                        int[] stRetry = tryDeliveryStatusWithResync("START/retry-ticket");
+                        if (stRetry != null && (stRetry[1] & DC_TICKET_PENDING) == 0) {
+                            doStartSequence(product1to16, presetNet);
+                            startInProgress = false;
+                            return;
+                        }
+                        log("START bloqué: TICKET_PENDING toujours actif");
                         setState(DeliveryState.CONNECTED);
                         startInProgress = false;
                         return;
@@ -179,14 +189,15 @@ public final class DeliveryController implements DeliveryControllerPort {
         link.opIssueCommand(CMD_RUN);
         notifyActiveNode();
 
-        // reset OFF confirm state at start of delivery
+        // IMPORTANT: ne pas annoncer FLOWING tant que la vanne n'est pas réellement en flow
+        // -> état armé, la transition FLOWING sera faite par requestLiveSample() quand FLOW_ACTIVE(bit)=ON
         flowOffStable = false;
         flowOffCandidateSinceMs = 0L;
         offConfirmDone = false;
         offSnapGrossRaw = Integer.MIN_VALUE;
         offSnapNetRaw = Integer.MIN_VALUE;
 
-        setState(DeliveryState.RUNNING_FLOWING);
+        setState(DeliveryState.RUNNING_PAUSED);
     }
 
     /* =========================================================
@@ -239,7 +250,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                 offSnapGrossRaw = Integer.MIN_VALUE;
                 offSnapNetRaw = Integer.MIN_VALUE;
 
-                setState(DeliveryState.RUNNING_FLOWING);
+                setState(DeliveryState.RUNNING_PAUSED);
             } catch (Exception e) {
                 error("resumeIfPaused", e);
             }
@@ -247,7 +258,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     /* =========================================================
-     * END (Terminer)
+     * END
      * ========================================================= */
     @Override
     public void endDelivery() {
@@ -256,7 +267,6 @@ public final class DeliveryController implements DeliveryControllerPort {
                 if (state == DeliveryState.DISCONNECTED) { log("END bloqué: DISCONNECTED"); return; }
                 if (state == DeliveryState.ENDING) { log("END ignoré: déjà en cours"); return; }
 
-                // Garde-fou: Terminer seulement si OFF stable (>= 2000ms)
                 if (!flowOffStable) {
                     log("END refusé: FLOW_OFF non stable (>=2000ms requis)");
                     return;
@@ -310,25 +320,20 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     /* =========================================================
-     * Status/Diag (inchangé)
+     * Status/Diag (simple)
      * ========================================================= */
     @Override
     public void requestStatus() {
         io.execute(() -> {
             if (state == DeliveryState.DISCONNECTED) { log("DIAG: bloqué (DISCONNECTED)"); return; }
-
             try {
-                // 0x23
                 try {
-                    LcpLink.MachineStatus ms = link.opGetMachineStatus();
-                    // log possible via trace sink
+                    link.opGetMachineStatus();
                 } catch (Exception e) {
                     log("DIAG: 0x23 <timeout/erreur> → RESYNC");
                     softResync("B/0x23");
                     link.opGetMachineStatus();
                 }
-
-                // 0x28
                 try {
                     link.opDeliveryStatus();
                 } catch (Exception e) {
@@ -336,9 +341,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                     softResync("B/0x28");
                     link.opDeliveryStatus();
                 }
-
                 notifyActiveNode();
-
             } catch (Exception e) {
                 error("status", e);
             }
@@ -347,8 +350,8 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     /* =========================================================
      * LIVE
-     * - ON: #44/#45 à chaque tick (progression UI identique registre)
-     * - OFF: snapshot + confirm unique à +2000ms, puis stop relecture en OFF stable
+     * - ON: lit #44/#45 à chaque tick -> UI suit le registre
+     * - OFF: snapshot + confirm unique à +2000ms -> pas de loop #44/#45 en OFF stable
      * ========================================================= */
     @Override
     public void requestLiveSample() {
@@ -368,7 +371,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                     return;
                 }
 
-                // ===== FLOW ON : progression quasi temps réel =====
+                // ===== FLOW ON (progression quasi temps réel) =====
                 if (flowBit) {
                     // reset OFF candidate
                     flowOffStable = false;
@@ -394,17 +397,17 @@ public final class DeliveryController implements DeliveryControllerPort {
                     return;
                 }
 
-                // ===== FLOW OFF : validation OFF stable sans boucle =====
+                // ===== FLOW OFF (validation OFF stable sans boucle) =====
                 long now = System.currentTimeMillis();
 
-                // Si déjà confirmé stable OFF, on ne relit plus #44/#45 tant que le bit reste OFF
+                // si déjà confirmé stable OFF => pas de relecture #44/#45
                 if (offConfirmDone && flowOffStable) {
                     if (listener != null) listener.onFlowStability(false, true, getFlowOffAgeMs());
                     setState(DeliveryState.RUNNING_PAUSED);
                     return;
                 }
 
-                // Snapshot à l'entrée OFF (une seule fois)
+                // snapshot à l'entrée OFF (une seule fois)
                 if (flowOffCandidateSinceMs == 0L) {
                     flowOffCandidateSinceMs = now;
                     offConfirmDone = false;
@@ -427,7 +430,7 @@ public final class DeliveryController implements DeliveryControllerPort {
 
                 long age = now - flowOffCandidateSinceMs;
 
-                // Avant 2000ms : pas stable, et pas de lecture #44/#45
+                // avant 2000ms: pas stable, pas de lecture #44/#45
                 if (age < FLOW_OFF_STABLE_MS) {
                     flowOffStable = false;
                     if (listener != null) listener.onFlowStability(false, false, age);
@@ -435,7 +438,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                     return;
                 }
 
-                // Confirmation unique à >=2000ms (une seule relecture)
+                // confirmation unique à >=2000ms
                 ensureDigitsInFlow();
                 int gross2 = beI32(link.opGetField(FIELD_GROSS_COUNT));
                 int net2 = beI32(link.opGetField(FIELD_NET_COUNT));
@@ -448,7 +451,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                     if (listener != null) listener.onFlowStability(false, true, age);
                     setState(DeliveryState.RUNNING_PAUSED);
                 } else {
-                    // mouvement => restart fenêtre (mais pas de boucle de lecture en OFF: on repart sur un nouveau snapshot)
+                    // mouvement => restart fenêtre (sans boucle)
                     flowOffStable = false;
                     flowOffCandidateSinceMs = now;
                     offConfirmDone = false;
@@ -462,7 +465,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         });
     }
 
-    /* ===================== Resync + Decimals ===================== */
+    /* ===================== Helpers ===================== */
     private void softResync(String reason) {
         link.drainInput(250);
         link.forceSyncNext(reason);
