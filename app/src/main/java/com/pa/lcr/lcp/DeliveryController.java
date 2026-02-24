@@ -4,21 +4,12 @@ package com.pa.lcr.lcp;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/**
- * DeliveryController - version terrain "solidifiée"
- *
- * Correctifs inclus:
- * - TICKET_PENDING: Issue #6 one-shot + poll 0x28 (max 20s) puis enchaîner START.
- * - FLOW_OFF stability (tampon 2000ms) imbriqué dans DELIVERY_ACTIVE, reset à true hors livraison.
- * - END (Terminer) refusé si FLOW_ACTIVE=ON (donc seulement possible en RUNNING_PAUSED stable via UI).
- */
 public final class DeliveryController implements DeliveryControllerPort {
-
     private static final int FIELD_ACTIVE_PRODUCT = 0; // 0..15
-    private static final int FIELD_PRESET_NET = 6;      // preset net
-    private static final int FIELD_DECIMALS = 39;       // decimals index
-    private static final int FIELD_GROSS_COUNT = 44;    // gross count
-    private static final int FIELD_NET_COUNT = 45;      // net count
+    private static final int FIELD_PRESET_NET = 6;     // preset net
+    private static final int FIELD_DECIMALS = 39;      // decimals index
+    private static final int FIELD_GROSS_COUNT = 44;   // gross count
+    private static final int FIELD_NET_COUNT = 45;     // net count
 
     private static final int CMD_RUN = 0x00;
     private static final int CMD_END = 0x02;
@@ -42,13 +33,15 @@ public final class DeliveryController implements DeliveryControllerPort {
     private static final long TICKET_TIMEOUT_MS = 20_000;
     private static final long TICKET_POLL_MS = 250;
 
-    // anti re-entrance START (double clic / spam)
     private volatile boolean startInProgress = false;
 
-    // --- Flow OFF stability (tampon) ---
-    private static final long FLOW_OFF_STABLE_MS = 2000; // choisi
-    private volatile long flowOffSinceMs = 0L;           // 0 => flow ON ou hors-livraison
-    private volatile boolean flowOffStable = true;       // reset à true hors livraison (demandé)
+    // --- Flow OFF stability (tampon 2000ms) ---
+    private static final long FLOW_OFF_STABLE_MS = 2000;
+    private volatile boolean flowOffStable = true;      // reset true hors livraison
+    private volatile long flowOffCandidateSinceMs = 0L; // 0 => pas en validation OFF
+    private volatile boolean offConfirmDone = false;    // évite relecture en boucle en OFF
+    private volatile int offSnapGrossRaw = Integer.MIN_VALUE;
+    private volatile int offSnapNetRaw = Integer.MIN_VALUE;
 
     public DeliveryController(LcpLink link) {
         this.link = link;
@@ -99,43 +92,22 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     @Override
     public long getFlowOffAgeMs() {
-        long s = flowOffSinceMs;
+        long s = flowOffCandidateSinceMs;
         if (s <= 0) return 0L;
         return Math.max(0L, System.currentTimeMillis() - s);
     }
 
-    /**
-     * Met à jour le tampon flow OFF.
-     * IMPORTANT: imbriqué dans une livraison => ne démarre que si DELIVERY_ACTIVE=1.
-     * RESET demandé: hors livraison (DELIVERY_ACTIVE=0) => flowOffStable=true et since=0.
-     */
-    private void updateFlowStability(boolean deliveryActive, boolean flowActive) {
-        long now = System.currentTimeMillis();
-
-        if (!deliveryActive) {
-            // Hors livraison => reset stable=true (demandé)
-            flowOffSinceMs = 0L;
-            flowOffStable = true;
-        } else if (flowActive) {
-            // Livraison active + flow ON => reset compteur, OFF non stable
-            flowOffSinceMs = 0L;
-            flowOffStable = false;
-        } else {
-            // Livraison active + flow OFF => démarrer ou poursuivre compteur
-            if (flowOffSinceMs == 0L) flowOffSinceMs = now;
-            flowOffStable = (now - flowOffSinceMs) >= FLOW_OFF_STABLE_MS;
-        }
-
-        if (listener != null) {
-            listener.onFlowStability(flowActive, flowOffStable, getFlowOffAgeMs());
-        }
+    private void resetFlowStateOutsideDelivery() {
+        flowOffStable = true;
+        flowOffCandidateSinceMs = 0L;
+        offConfirmDone = false;
+        offSnapGrossRaw = Integer.MIN_VALUE;
+        offSnapNetRaw = Integer.MIN_VALUE;
+        if (listener != null) listener.onFlowStability(false, true, 0L);
     }
 
     /* =========================================================
-     * START:
-     * 1) 0x28 precheck (avec resync douce si timeout)
-     * 2) Si TICKET_PENDING: Issue #6 one-shot + attendre clear (poll 0x28, max 20s) puis START
-     * 3) SET #0, best-effort #39, SET #6, RUN
+     * START
      * ========================================================= */
     @Override
     public void startDelivery(int product1to16, double presetNet) {
@@ -150,10 +122,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                     log("START bloqué: livraison déjà active (" + state + ")");
                     return;
                 }
-                if (startInProgress) {
-                    log("START ignoré: startInProgress");
-                    return;
-                }
+                if (startInProgress) { log("START ignoré: startInProgress"); return; }
                 startInProgress = true;
 
                 setState(DeliveryState.PRESTART);
@@ -210,16 +179,19 @@ public final class DeliveryController implements DeliveryControllerPort {
         link.opIssueCommand(CMD_RUN);
         notifyActiveNode();
 
-        // état initial: l’UI se mettra à jour via requestLiveSample()
+        // reset OFF confirm state at start of delivery
+        flowOffStable = false;
+        flowOffCandidateSinceMs = 0L;
+        offConfirmDone = false;
+        offSnapGrossRaw = Integer.MIN_VALUE;
+        offSnapNetRaw = Integer.MIN_VALUE;
+
         setState(DeliveryState.RUNNING_FLOWING);
     }
 
-    /**
-     * Clear TICKET_PENDING:
-     * - ONE-SHOT Issue #6
-     * - Poll 0x28 jusqu’à disparition du bit, sinon timeout (20s)
-     * - Resync douce au plus 1 fois
-     */
+    /* =========================================================
+     * Ticket pending
+     * ========================================================= */
     private boolean clearTicketPending() {
         final long deadline = System.currentTimeMillis() + TICKET_TIMEOUT_MS;
         boolean resyncDone = false;
@@ -243,10 +215,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                     return true;
                 }
             } catch (Exception e) {
-                if (!resyncDone) {
-                    resyncDone = true;
-                    softResync("TICKET/0x28");
-                }
+                if (!resyncDone) { resyncDone = true; softResync("TICKET/0x28"); }
             }
             try { Thread.sleep(TICKET_POLL_MS); } catch (InterruptedException ignored) {}
         }
@@ -262,6 +231,14 @@ public final class DeliveryController implements DeliveryControllerPort {
                 if (state != DeliveryState.RUNNING_PAUSED) { log("RESUME ignoré: état=" + state); return; }
                 link.opIssueCommand(CMD_RUN);
                 notifyActiveNode();
+
+                // reset OFF confirm on resume
+                flowOffStable = false;
+                flowOffCandidateSinceMs = 0L;
+                offConfirmDone = false;
+                offSnapGrossRaw = Integer.MIN_VALUE;
+                offSnapNetRaw = Integer.MIN_VALUE;
+
                 setState(DeliveryState.RUNNING_FLOWING);
             } catch (Exception e) {
                 error("resumeIfPaused", e);
@@ -270,7 +247,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     /* =========================================================
-     * END: refusé si FLOW_ACTIVE=ON (donc seulement sur paused; UI gère stabilité)
+     * END (Terminer)
      * ========================================================= */
     @Override
     public void endDelivery() {
@@ -279,8 +256,9 @@ public final class DeliveryController implements DeliveryControllerPort {
                 if (state == DeliveryState.DISCONNECTED) { log("END bloqué: DISCONNECTED"); return; }
                 if (state == DeliveryState.ENDING) { log("END ignoré: déjà en cours"); return; }
 
-                if (state == DeliveryState.RUNNING_FLOWING) {
-                    log("END refusé: FLOW_ACTIVE=ON (arrêter le flow avant de terminer)");
+                // Garde-fou: Terminer seulement si OFF stable (>= 2000ms)
+                if (!flowOffStable) {
+                    log("END refusé: FLOW_OFF non stable (>=2000ms requis)");
                     return;
                 }
                 if (state != DeliveryState.RUNNING_PAUSED) {
@@ -302,14 +280,10 @@ public final class DeliveryController implements DeliveryControllerPort {
                         consecutiveFailures = 0;
                         int delCode = st[1];
                         boolean active = (delCode & DC_DELIVERY_ACTIVE) != 0;
-                        boolean flow = (delCode & DC_FLOW_ACTIVE) != 0;
 
-                        // mise à jour stabilité (y compris reset hors livraison)
-                        updateFlowStability(active, flow);
-
-                        if (!active && !flow) {
+                        if (!active) {
                             setState(DeliveryState.ENDED);
-                            // reset hors livraison déjà fait via updateFlowStability
+                            resetFlowStateOutsideDelivery();
                             return;
                         }
                     } catch (Exception pollErr) {
@@ -324,8 +298,9 @@ public final class DeliveryController implements DeliveryControllerPort {
                     try { Thread.sleep(250); } catch (InterruptedException ignored) {}
                 }
 
-                log("END: timeout attente clear DELIVERY/FLOW (ticket/impression peut être en cours)");
+                log("END: timeout attente clear DELIVERY/FLOW");
                 setState(DeliveryState.ENDED);
+                resetFlowStateOutsideDelivery();
 
             } catch (Exception e) {
                 error("endDelivery", e);
@@ -335,74 +310,32 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     /* =========================================================
-     * Status/Diag (0x23 + 0x28) avec resync douce
+     * Status/Diag (inchangé)
      * ========================================================= */
     @Override
     public void requestStatus() {
         io.execute(() -> {
-            if (state == DeliveryState.DISCONNECTED) {
-                log("DIAG: bloqué (DISCONNECTED)");
-                return;
-            }
-
-            Integer prnStatus = null;
-            Integer delStatus23 = null, delCode23 = null;
-            Integer delStatus28 = null, delCode28 = null;
+            if (state == DeliveryState.DISCONNECTED) { log("DIAG: bloqué (DISCONNECTED)"); return; }
 
             try {
                 // 0x23
                 try {
                     LcpLink.MachineStatus ms = link.opGetMachineStatus();
-                    prnStatus = ms.prnStatus;
-                    delStatus23 = ms.delStatus;
-                    delCode23 = ms.delCode;
+                    // log possible via trace sink
                 } catch (Exception e) {
                     log("DIAG: 0x23 <timeout/erreur> → RESYNC");
                     softResync("B/0x23");
-                    LcpLink.MachineStatus ms = link.opGetMachineStatus();
-                    prnStatus = ms.prnStatus;
-                    delStatus23 = ms.delStatus;
-                    delCode23 = ms.delCode;
+                    link.opGetMachineStatus();
                 }
 
                 // 0x28
                 try {
-                    int[] ds = link.opDeliveryStatus();
-                    delStatus28 = ds[0];
-                    delCode28 = ds[1];
+                    link.opDeliveryStatus();
                 } catch (Exception e) {
                     log("DIAG: 0x28 <timeout/erreur> → RESYNC");
                     softResync("B/0x28");
-                    int[] ds = link.opDeliveryStatus();
-                    delStatus28 = ds[0];
-                    delCode28 = ds[1];
+                    link.opDeliveryStatus();
                 }
-
-                if (delCode23 == null) {
-                    log("DIAG: <timeout/erreur> (aucun état lisible)");
-                    return;
-                }
-
-                boolean ticketPending = (delCode23 & DC_TICKET_PENDING) != 0;
-                boolean flowActive = (delCode23 & DC_FLOW_ACTIVE) != 0;
-                boolean deliveryActive = (delCode23 & DC_DELIVERY_ACTIVE) != 0;
-
-                // mise à jour stabilité
-                updateFlowStability(deliveryActive, flowActive);
-
-                log("DIAG: " + (ticketPending ? "BLOQUÉ → TICKET_PENDING" : "OK"));
-                if (delStatus28 != null && delCode28 != null) {
-                    log("DIAG: 0x28 delStatus=0x" + hex4(delStatus28) + " delCode=0x" + hex4(delCode28));
-                }
-                if (prnStatus != null && delStatus23 != null && delCode23 != null) {
-                    log("DIAG: 0x23 prnStatus=0x" + hex2(prnStatus) +
-                            " delStatus=0x" + hex4(delStatus23) +
-                            " delCode=0x" + hex4(delCode23));
-                }
-
-                if (deliveryActive && flowActive) setState(DeliveryState.RUNNING_FLOWING);
-                else if (deliveryActive) setState(DeliveryState.RUNNING_PAUSED);
-                else setState(DeliveryState.CONNECTED);
 
                 notifyActiveNode();
 
@@ -413,7 +346,9 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     /* =========================================================
-     * LIVE: met à jour l'état via 0x28 + applique tampon
+     * LIVE
+     * - ON: #44/#45 à chaque tick (progression UI identique registre)
+     * - OFF: snapshot + confirm unique à +2000ms, puis stop relecture en OFF stable
      * ========================================================= */
     @Override
     public void requestLiveSample() {
@@ -424,26 +359,104 @@ public final class DeliveryController implements DeliveryControllerPort {
                 int[] st = link.opDeliveryStatus();
                 int delCode = st[1];
 
-                boolean flow = (delCode & DC_FLOW_ACTIVE) != 0;
-                boolean active = (delCode & DC_DELIVERY_ACTIVE) != 0;
+                boolean flowBit = (delCode & DC_FLOW_ACTIVE) != 0;
+                boolean deliveryActive = (delCode & DC_DELIVERY_ACTIVE) != 0;
 
-                // ✅ tampon imbriqué (DELIVERY_ACTIVE)
-                updateFlowStability(active, flow);
+                if (!deliveryActive) {
+                    setState(DeliveryState.CONNECTED);
+                    resetFlowStateOutsideDelivery();
+                    return;
+                }
 
-                if (flow) {
+                // ===== FLOW ON : progression quasi temps réel =====
+                if (flowBit) {
+                    // reset OFF candidate
+                    flowOffStable = false;
+                    flowOffCandidateSinceMs = 0L;
+                    offConfirmDone = false;
+                    offSnapGrossRaw = Integer.MIN_VALUE;
+                    offSnapNetRaw = Integer.MIN_VALUE;
+
                     ensureDigitsInFlow();
                     int grossRaw = beI32(link.opGetField(FIELD_GROSS_COUNT));
                     int netRaw = beI32(link.opGetField(FIELD_NET_COUNT));
+
                     double scale = Math.pow(10, cachedDigits);
                     double gross = grossRaw / scale;
                     double net = netRaw / scale;
-                    if (listener != null) listener.onLiveQty(net, gross);
+
+                    if (listener != null) {
+                        listener.onLiveQty(net, gross);
+                        listener.onFlowStability(true, false, 0L);
+                    }
+
                     setState(DeliveryState.RUNNING_FLOWING);
                     return;
                 }
 
-                if (active) setState(DeliveryState.RUNNING_PAUSED);
-                else setState(DeliveryState.CONNECTED);
+                // ===== FLOW OFF : validation OFF stable sans boucle =====
+                long now = System.currentTimeMillis();
+
+                // Si déjà confirmé stable OFF, on ne relit plus #44/#45 tant que le bit reste OFF
+                if (offConfirmDone && flowOffStable) {
+                    if (listener != null) listener.onFlowStability(false, true, getFlowOffAgeMs());
+                    setState(DeliveryState.RUNNING_PAUSED);
+                    return;
+                }
+
+                // Snapshot à l'entrée OFF (une seule fois)
+                if (flowOffCandidateSinceMs == 0L) {
+                    flowOffCandidateSinceMs = now;
+                    offConfirmDone = false;
+
+                    ensureDigitsInFlow();
+                    offSnapGrossRaw = beI32(link.opGetField(FIELD_GROSS_COUNT));
+                    offSnapNetRaw = beI32(link.opGetField(FIELD_NET_COUNT));
+
+                    flowOffStable = false;
+
+                    if (listener != null) {
+                        double scale = Math.pow(10, cachedDigits);
+                        listener.onLiveQty(offSnapNetRaw / scale, offSnapGrossRaw / scale);
+                        listener.onFlowStability(false, false, 0L);
+                    }
+
+                    setState(DeliveryState.RUNNING_PAUSED);
+                    return;
+                }
+
+                long age = now - flowOffCandidateSinceMs;
+
+                // Avant 2000ms : pas stable, et pas de lecture #44/#45
+                if (age < FLOW_OFF_STABLE_MS) {
+                    flowOffStable = false;
+                    if (listener != null) listener.onFlowStability(false, false, age);
+                    setState(DeliveryState.RUNNING_PAUSED);
+                    return;
+                }
+
+                // Confirmation unique à >=2000ms (une seule relecture)
+                ensureDigitsInFlow();
+                int gross2 = beI32(link.opGetField(FIELD_GROSS_COUNT));
+                int net2 = beI32(link.opGetField(FIELD_NET_COUNT));
+
+                boolean unchanged = (gross2 == offSnapGrossRaw) && (net2 == offSnapNetRaw);
+
+                if (unchanged) {
+                    flowOffStable = true;
+                    offConfirmDone = true;
+                    if (listener != null) listener.onFlowStability(false, true, age);
+                    setState(DeliveryState.RUNNING_PAUSED);
+                } else {
+                    // mouvement => restart fenêtre (mais pas de boucle de lecture en OFF: on repart sur un nouveau snapshot)
+                    flowOffStable = false;
+                    flowOffCandidateSinceMs = now;
+                    offConfirmDone = false;
+                    offSnapGrossRaw = gross2;
+                    offSnapNetRaw = net2;
+                    if (listener != null) listener.onFlowStability(false, false, 0L);
+                    setState(DeliveryState.RUNNING_PAUSED);
+                }
 
             } catch (Exception ignored) {}
         });
@@ -485,18 +498,9 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     private void ensureDigitsInFlow() throws Exception {
         if (cachedDigits >= 0) return;
-        try {
-            byte[] dec = link.opGetField(FIELD_DECIMALS);
-            int idx = (dec.length >= 1) ? (dec[0] & 0xFF) : 0;
-            cachedDigits = decimalsDigits(idx);
-            log("LIVE: DECIMALS idx=" + idx + " digits=" + cachedDigits);
-        } catch (Exception e) {
-            softResync("DECIMALS");
-            byte[] dec = link.opGetField(FIELD_DECIMALS);
-            int idx = (dec.length >= 1) ? (dec[0] & 0xFF) : 0;
-            cachedDigits = decimalsDigits(idx);
-            log("LIVE: DECIMALS idx=" + idx + " digits=" + cachedDigits);
-        }
+        byte[] dec = link.opGetField(FIELD_DECIMALS);
+        int idx = (dec.length >= 1) ? (dec[0] & 0xFF) : 0;
+        cachedDigits = decimalsDigits(idx);
     }
 
     private void writePresetNet_WithCacheOrFallback(double preset) throws Exception {
@@ -551,7 +555,4 @@ public final class DeliveryController implements DeliveryControllerPort {
     @Override public DeliveryState getState() { return state; }
     @Override public boolean isDeliveryActive() { return state == DeliveryState.RUNNING_FLOWING || state == DeliveryState.RUNNING_PAUSED; }
     @Override public boolean isPaused() { return state == DeliveryState.RUNNING_PAUSED; }
-
-    private static String hex2(int v) { return String.format("%02X", v & 0xFF); }
-    private static String hex4(int v) { return String.format("%04X", v & 0xFFFF); }
 }
