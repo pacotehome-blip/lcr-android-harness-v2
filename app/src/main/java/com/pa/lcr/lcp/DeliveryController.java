@@ -8,43 +8,44 @@ import java.util.concurrent.Executors;
  * DeliveryController - version terrain "solidifiée"
  *
  * Ajouts clés:
- *  - Resync douce A/B/C (drainInput + forceSyncNext) via LcpLink. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/DeliveryControllerPort.java)
- *  - Gestion TICKET_PENDING conforme doc+python:
- *      si delCode a le bit 0x0001 => impossible de START tant que le ticket n'est pas imprimé;
- *      on force l'impression via ISSUE_COMMAND #6 (0x06) jusqu'à clear (poll 0x23). [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/DeliveryControllerPort.java)
- *  - Décimales (#39) best-effort après SET #0, et obligatoire en FLOW_ACTIVE pour NET/GROSS. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/DeliveryControllerPort.java)
+ * - Resync douce A/B/C (drainInput + forceSyncNext) via LcpLink.
+ * - Gestion TICKET_PENDING conforme doc+python:
+ *   si delCode a le bit 0x0001 => impossible de START tant que le ticket n'est pas imprimé;
+ *   on force l'impression via ISSUE_COMMAND #6 (0x06).
+ * - Décimales (#39) best-effort après SET #0, et obligatoire en FLOW_ACTIVE pour NET/GROSS.
  */
 public final class DeliveryController implements DeliveryControllerPort {
-
-    private static final int FIELD_ACTIVE_PRODUCT = 0;   // 0..15
-    private static final int FIELD_PRESET_NET     = 6;   // preset net
-    private static final int FIELD_DECIMALS       = 39;  // decimals index
-    private static final int FIELD_GROSS_COUNT    = 44;  // gross count
-    private static final int FIELD_NET_COUNT      = 45;  // net count
+    private static final int FIELD_ACTIVE_PRODUCT = 0; // 0..15
+    private static final int FIELD_PRESET_NET = 6; // preset net
+    private static final int FIELD_DECIMALS = 39; // decimals index
+    private static final int FIELD_GROSS_COUNT = 44; // gross count
+    private static final int FIELD_NET_COUNT = 45; // net count
 
     private static final int CMD_RUN = 0x00;
     private static final int CMD_END = 0x02;
 
-    // ✅ Python + doc: Issue #6 pour imprimer le dernier ticket et clear TICKET_PENDING [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/DeliveryControllerPort.java)
+    // ✅ Python + doc: Issue #6 pour imprimer le dernier ticket et clear TICKET_PENDING
     private static final int CMD_PRINT_LAST_TICKET = 0x06;
 
     // DeliveryCode bits (base reverse fonctionnelle)
-    private static final int DC_TICKET_PENDING  = 0x0001;
-    private static final int DC_FLOW_ACTIVE     = 0x0004;
+    private static final int DC_TICKET_PENDING = 0x0001;
+    private static final int DC_FLOW_ACTIVE = 0x0004;
     private static final int DC_DELIVERY_ACTIVE = 0x0008;
 
     private final LcpLink link;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private Listener listener;
-
     private volatile DeliveryState state = DeliveryState.DISCONNECTED;
 
     // Cache digits (décimales): lu best-effort après #0, obligatoire en flow
     private volatile int cachedDigits = -1;
 
-    // Paramètres du "ticket clear" (aligné Python: sleep 0.2 sec, timeout configurable)
+    // Paramètres du "ticket clear"
     private static final long TICKET_RETRY_MS = 200;
     private static final long TICKET_TIMEOUT_MS = 20_000;
+
+    // ✅ Polling 0x28 léger (évite 0x23, plus coûteux si imprimante offline)
+    private static final long TICKET_POLL_MS = 250;
 
     public DeliveryController(LcpLink link) {
         this.link = link;
@@ -53,7 +54,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     @Override
     public void setListener(Listener listener) {
         this.listener = listener;
-        if (listener != null) link.setTraceSink(listener::onLog); // TX/RX → UI log [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/DeliveryControllerPort.java)
+        if (listener != null) link.setTraceSink(listener::onLog); // TX/RX → UI log
         else link.setTraceSink(null);
     }
 
@@ -92,9 +93,9 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     /* =========================================================
      * START:
-     *  1) 0x28 precheck (avec resync douce si timeout)
-     *  2) Si TICKET_PENDING: boucle Issue #6 + poll 0x23 jusqu'à clear (sinon fail)
-     *  3) SET #0, best-effort #39, SET #6, RUN
+     * 1) 0x28 precheck (avec resync douce si timeout)
+     * 2) Si TICKET_PENDING: Issue #6 one-shot + poll 0x28 jusqu'à clear (sinon fail)
+     * 3) SET #0, best-effort #39, SET #6, RUN
      * ========================================================= */
     @Override
     public void startDelivery(int product1to16, double presetNet) {
@@ -119,10 +120,9 @@ public final class DeliveryController implements DeliveryControllerPort {
                     setState(DeliveryState.CONNECTED);
                     return;
                 }
-
                 int delCode = st[1];
 
-                // 2) Si ticket pending: clear via Issue #6 (comme le Python) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/DeliveryControllerPort.java)
+                // 2) Si ticket pending: clear via Issue #6
                 if ((delCode & DC_TICKET_PENDING) != 0) {
                     log("TICKET_PENDING détecté → Issue #6 (print ticket) jusqu’à clear");
                     boolean cleared = clearTicketPending();
@@ -168,40 +168,48 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     /**
      * Clear TICKET_PENDING:
-     *  - boucle: Issue #6, sleep 200ms, opGetMachineStatus (0x23)
-     *  - stop quand le bit tombe, sinon timeout -> false
+     * - ONE-SHOT Issue #6 (évite empilement => multi-impressions)
+     * - Poll 0x28 (Get Delivery Status) jusqu'à disparition du bit, sinon timeout
+     * - Resync douce au plus 1 fois sur erreurs/timeout en polling
      *
-     * Reproduit ton python: op_issue_command(0x06) + poll 0x23. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/DeliveryControllerPort.java)
+     * Note doc: 0x23 peut être plus lent si imprimante offline; 0x28 est préférable si prnStatus non requis.
      */
     private boolean clearTicketPending() {
-        long t0 = System.currentTimeMillis();
+        final long deadline = System.currentTimeMillis() + TICKET_TIMEOUT_MS;
+        boolean resyncDone = false;
 
-        while (System.currentTimeMillis() - t0 < TICKET_TIMEOUT_MS) {
+        // 1) ONE-SHOT : ne jamais empiler plusieurs Issue #6
+        try {
+            link.opIssueCommand(CMD_PRINT_LAST_TICKET);
+            notifyActiveNode();
+            log("TICKET: Issue #6 envoyé (one-shot), attente clear...");
+        } catch (Exception e) {
+            // Même si l’issue échoue/queue, on NE RETENTE PAS en boucle
+            softResync("TICKET/issue6");
+            log("TICKET: Issue #6 a échoué/timeout (one-shot) — polling 0x28 quand même");
+        }
 
+        // 2) Poll 0x28 jusqu’à clear ou timeout
+        while (System.currentTimeMillis() < deadline) {
             try {
-                // Issue #6 : impression du dernier ticket
-                link.opIssueCommand(CMD_PRINT_LAST_TICKET);
-            } catch (Exception e) {
-                // si busy ou timeout, resync et on continue
-                softResync("TICKET/issue6");
-            }
-
-            try { Thread.sleep(TICKET_RETRY_MS); } catch (InterruptedException ignored) {}
-
-            try {
-                LcpLink.MachineStatus ms = link.opGetMachineStatus();
+                int[] st = link.opDeliveryStatus();   // 0x28
+                int dc = st[1];
                 notifyActiveNode();
-                int dc = ms.delCode;
-
                 if ((dc & DC_TICKET_PENDING) == 0) {
                     log("Ticket cleared");
                     return true;
                 }
             } catch (Exception e) {
-                softResync("TICKET/0x23");
+                if (!resyncDone) {
+                    resyncDone = true;
+                    softResync("TICKET/0x28");
+                }
             }
+
+            try { Thread.sleep(TICKET_POLL_MS); } catch (InterruptedException ignored) {}
         }
 
+        log("TICKET: timeout — TICKET_PENDING toujours actif");
         return false;
     }
 
@@ -228,14 +236,12 @@ public final class DeliveryController implements DeliveryControllerPort {
             try {
                 if (state == DeliveryState.DISCONNECTED) { log("END bloqué: DISCONNECTED"); return; }
                 if (state == DeliveryState.ENDING) { log("END ignoré: déjà en cours"); return; }
-
                 if (state != DeliveryState.RUNNING_FLOWING && state != DeliveryState.RUNNING_PAUSED) {
                     log("END ignoré: aucune livraison active (state=" + state + ")");
                     return;
                 }
 
                 setState(DeliveryState.ENDING);
-
                 link.opIssueCommand(CMD_END);
                 notifyActiveNode();
 
@@ -247,28 +253,22 @@ public final class DeliveryController implements DeliveryControllerPort {
                     try {
                         int[] st = link.opDeliveryStatus();
                         consecutiveFailures = 0;
-
                         int delCode = st[1];
                         boolean active = (delCode & DC_DELIVERY_ACTIVE) != 0;
                         boolean flow = (delCode & DC_FLOW_ACTIVE) != 0;
-
                         if (!active && !flow) {
                             setState(DeliveryState.ENDED);
                             return;
                         }
-
                     } catch (Exception pollErr) {
                         consecutiveFailures++;
                         log("END: poll 0x28 timeout (" + consecutiveFailures + ")");
-
                         if (!resyncAttempted && consecutiveFailures >= 3) {
                             resyncAttempted = true;
                             softResync("END/poll");
                         }
-
                         try { Thread.sleep(250); } catch (InterruptedException ignored) {}
                     }
-
                     try { Thread.sleep(250); } catch (InterruptedException ignored) {}
                 }
 
@@ -331,11 +331,12 @@ public final class DeliveryController implements DeliveryControllerPort {
                     return;
                 }
 
-                boolean ticketPending  = (delCode23 & DC_TICKET_PENDING) != 0;
-                boolean flowActive     = (delCode23 & DC_FLOW_ACTIVE) != 0;
+                boolean ticketPending = (delCode23 & DC_TICKET_PENDING) != 0;
+                boolean flowActive = (delCode23 & DC_FLOW_ACTIVE) != 0;
                 boolean deliveryActive = (delCode23 & DC_DELIVERY_ACTIVE) != 0;
 
                 log("DIAG: " + (ticketPending ? "BLOQUÉ → TICKET_PENDING" : "OK"));
+
                 if (delStatus28 != null && delCode28 != null) {
                     log("DIAG: 0x28 delStatus=0x" + hex4(delStatus28) + " delCode=0x" + hex4(delCode28));
                 }
@@ -374,14 +375,11 @@ public final class DeliveryController implements DeliveryControllerPort {
 
                 if (flow) {
                     ensureDigitsInFlow();
-
                     int grossRaw = beI32(link.opGetField(FIELD_GROSS_COUNT));
-                    int netRaw   = beI32(link.opGetField(FIELD_NET_COUNT));
-
+                    int netRaw = beI32(link.opGetField(FIELD_NET_COUNT));
                     double scale = Math.pow(10, cachedDigits);
                     double gross = grossRaw / scale;
                     double net = netRaw / scale;
-
                     if (listener != null) listener.onLiveQty(net, gross);
                     setState(DeliveryState.RUNNING_FLOWING);
                     return;
@@ -395,9 +393,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     /* ===================== Resync + Decimals ===================== */
-
     private void softResync(String reason) {
-        // Utilise tes primitives (déjà présentes dans ton LcpLink) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/DeliveryControllerPort.java)
         link.drainInput(250);
         link.forceSyncNext(reason);
     }
@@ -454,7 +450,6 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
         int scale = (int) Math.pow(10, digits);
         int value = (int) Math.round(preset * scale);
-
         byte[] buf = new byte[]{
                 (byte) (value >> 24),
                 (byte) (value >> 16),
@@ -476,10 +471,10 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     private int beI32(byte[] b) {
         if (b == null || b.length < 4) return 0;
-        return ((b[0] & 0xFF) << 24) |
-               ((b[1] & 0xFF) << 16) |
-               ((b[2] & 0xFF) << 8) |
-               (b[3] & 0xFF);
+        return ((b[0] & 0xFF) << 24)
+                | ((b[1] & 0xFF) << 16)
+                | ((b[2] & 0xFF) << 8)
+                | (b[3] & 0xFF);
     }
 
     private void notifyActiveNode() {
@@ -497,7 +492,11 @@ public final class DeliveryController implements DeliveryControllerPort {
     private void error(String ctx, Exception e) { if (listener != null) listener.onError(ctx, e); }
 
     @Override public DeliveryState getState() { return state; }
-    @Override public boolean isDeliveryActive() { return state == DeliveryState.RUNNING_FLOWING || state == DeliveryState.RUNNING_PAUSED; }
+
+    @Override public boolean isDeliveryActive() {
+        return state == DeliveryState.RUNNING_FLOWING || state == DeliveryState.RUNNING_PAUSED;
+    }
+
     @Override public boolean isPaused() { return state == DeliveryState.RUNNING_PAUSED; }
 
     private static String hex2(int v) { return String.format("%02X", v & 0xFF); }

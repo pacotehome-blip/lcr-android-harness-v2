@@ -37,8 +37,8 @@ public final class LcpLink {
     private final UsbSerialPort port;
     private final int toAddr;
     private final int hostAddr;
-
     private final boolean syncFirstEnabled;
+
     private boolean syncUsed = false;
     private int msgIdBit = 0;
 
@@ -53,13 +53,8 @@ public final class LcpLink {
     }
 
     /* ============================================================
-     * ✅ NEW: resynchronisation douce (sans reset USB)
+     * ✅ resynchronisation douce (sans reset USB)
      * ============================================================ */
-
-    /**
-     * Vide le buffer RX best-effort (sans bloquer longtemps).
-     * Utile si des octets résiduels cassent le framing. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LcpLink.java)
-     */
     public void drainInput(int millis) {
         int total = 0;
         long end = System.currentTimeMillis() + Math.max(0, millis);
@@ -74,12 +69,6 @@ public final class LcpLink {
         t("RESYNC: drainInput bytes=" + total);
     }
 
-    /**
-     * Force le prochain message à repartir “comme au début” :
-     * - reset msgIdBit
-     * - reset syncUsed pour que nextStatusByte applique le bit SYNC (0x02)
-     *   via (syncFirstEnabled && !syncUsed). [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LcpLink.java)
-     */
     public synchronized void forceSyncNext(String reason) {
         t("RESYNC: forceSyncNext (" + reason + ")");
         this.msgIdBit = 0;
@@ -89,13 +78,13 @@ public final class LcpLink {
     /* ============================================================
      * Types publics
      * ============================================================ */
-
     public static final class MachineStatus {
         public final int rc;
         public final int devStatus;
         public final int prnStatus;
         public final int delStatus;
         public final int delCode;
+
         public MachineStatus(int rc, int devStatus, int prnStatus, int delStatus, int delCode) {
             this.rc = rc;
             this.devStatus = devStatus;
@@ -108,7 +97,6 @@ public final class LcpLink {
     /* ============================================================
      * API opérations
      * ============================================================ */
-
     public byte[] opGetField(int field) throws IOException {
         Response r = sendRecv(buildPayload(MSG_GET_FIELD, new byte[]{(byte) field}), 3000);
         ensureOk(r, "GET_FIELD #" + field);
@@ -161,7 +149,6 @@ public final class LcpLink {
     /* ============================================================
      * Core send/recv (queued aware) + TX/RX logging
      * ============================================================ */
-
     private synchronized Response sendRecv(byte[] payload, int timeoutMs) throws IOException {
         byte[] txFrame = encodeFrame(payload);
         traceFrame(true, txFrame, payload);
@@ -169,7 +156,6 @@ public final class LcpLink {
 
         long deadline = System.currentTimeMillis() + timeoutMs;
         byte lastTxMsg = payload.length > 0 ? payload[0] : 0;
-
         boolean waitingQueued = false;
 
         while (System.currentTimeMillis() < deadline) {
@@ -215,10 +201,8 @@ public final class LcpLink {
     /* ============================================================
      * Encode (escape + CRC seed 0x7E7E)
      * ============================================================ */
-
     private byte[] encodeFrame(byte[] payload) {
         int status = nextStatusByte();
-
         byte[] var = new byte[4 + payload.length];
         var[0] = (byte) toAddr;
         var[1] = (byte) hostAddr;
@@ -247,7 +231,7 @@ public final class LcpLink {
     private int nextStatusByte() {
         int st = (msgIdBit & 0x01);
         if (syncFirstEnabled && !syncUsed) {
-            st |= 0x02;
+            st = 0x02;
             syncUsed = true;
         }
         msgIdBit ^= 1;
@@ -257,7 +241,6 @@ public final class LcpLink {
     /* ============================================================
      * Read frame (tolérant)
      * ============================================================ */
-
     private Frame readFrame(int sliceTimeoutMs) throws IOException {
         int s1;
         do {
@@ -284,6 +267,7 @@ public final class LcpLink {
 
             int calc = crcLcp(rawForCrc.bytes(), 0, rawForCrc.length());
             int recv = ((crc1 & 0xFF) << 8) | (crc0 & 0xFF);
+
             if (calc != recv) return null;
 
             byte[] canonical = buildCanonicalFrame(to, from, status, payload, crc0, crc1);
@@ -341,7 +325,6 @@ public final class LcpLink {
     /* ============================================================
      * Trace formatting (log figé)
      * ============================================================ */
-
     private void traceFrame(boolean tx, byte[] canonicalFrame, byte[] relatedTxPayload) {
         String dir = tx ? "TX" : "RX";
         t(dir + ": " + hexDump(canonicalFrame));
@@ -357,11 +340,11 @@ public final class LcpLink {
         int status = f[4] & 0xFF;
         int len = f[5] & 0xFF;
 
-        out.add("SYNC      : ~~");
-        out.add("TO        : 0x" + hex2(to));
-        out.add("FROM      : 0x" + hex2(from));
-        out.add("STATUS    : 0x" + hex2(status) + " (" + explainStatus(status) + ")");
-        out.add("LEN       : " + len);
+        out.add("SYNC : ~~");
+        out.add("TO : 0x" + hex2(to));
+        out.add("FROM : 0x" + hex2(from));
+        out.add("STATUS : 0x" + hex2(status) + " (" + explainStatus(status) + ")");
+        out.add("LEN : " + len);
 
         byte[] pl = new byte[Math.max(0, Math.min(len, f.length - 8))];
         if (pl.length > 0) System.arraycopy(f, 6, pl, 0, pl.length);
@@ -369,34 +352,34 @@ public final class LcpLink {
         if (tx) {
             if (pl.length >= 1) {
                 byte msg = pl[0];
-                out.add("MSG       : " + explainMsg(msg));
+                out.add("MSG : " + explainMsg(msg));
                 if ((msg & 0xFF) == 0x21 && pl.length >= 2) {
-                    out.add("FIELD     : #" + (pl[1] & 0xFF));
-                    if (pl.length > 2) out.add("DATA      : " + hexDump(slice(pl, 2, pl.length - 2)));
+                    out.add("FIELD : #" + (pl[1] & 0xFF));
+                    if (pl.length > 2) out.add("DATA : " + hexDump(slice(pl, 2, pl.length - 2)));
                 } else if ((msg & 0xFF) == 0x20 && pl.length >= 2) {
-                    out.add("FIELD     : #" + (pl[1] & 0xFF));
+                    out.add("FIELD : #" + (pl[1] & 0xFF));
                 } else if ((msg & 0xFF) == 0x24 && pl.length >= 2) {
-                    out.add("CMD       : " + explainCommand(pl[1] & 0xFF));
+                    out.add("CMD : " + explainCommand(pl[1] & 0xFF));
                 }
             }
         } else {
-            if (pl.length >= 1) out.add("RC        : " + explainRc(pl[0] & 0xFF));
-            if (pl.length >= 2) out.add("DEVSTAT   : 0x" + hex2(pl[1] & 0xFF));
+            if (pl.length >= 1) out.add("RC : " + explainRc(pl[0] & 0xFF));
+            if (pl.length >= 2) out.add("DEVSTAT : 0x" + hex2(pl[1] & 0xFF));
             byte txMsg = (relatedTxPayload != null && relatedTxPayload.length >= 1) ? relatedTxPayload[0] : 0;
-            out.add("REPLY-TO  : " + explainMsg(txMsg));
+            out.add("REPLY-TO : " + explainMsg(txMsg));
             if (txMsg == 0x20 && relatedTxPayload != null && relatedTxPayload.length >= 2) {
                 int field = relatedTxPayload[1] & 0xFF;
-                out.add("FIELD     : #" + field + " (data len=" + Math.max(0, pl.length - 2) + ")");
+                out.add("FIELD : #" + field + " (data len=" + Math.max(0, pl.length - 2) + ")");
                 if (field == 39 && pl.length >= 3) {
                     int ix = pl[2] & 0xFF;
-                    out.add("DECIMALS  : index=" + ix + " -> digits=" + decimalsDigits(ix));
+                    out.add("DECIMALS : index=" + ix + " -> digits=" + decimalsDigits(ix));
                 }
             }
         }
 
         int crc0 = f[f.length - 2] & 0xFF;
         int crc1 = f[f.length - 1] & 0xFF;
-        out.add("CRC       : 0x" + hex2(crc1) + hex2(crc0) + " (lo=" + hex2(crc0) + " hi=" + hex2(crc1) + ")");
+        out.add("CRC : 0x" + hex2(crc1) + hex2(crc0) + " (lo=" + hex2(crc0) + " hi=" + hex2(crc1) + ")");
         return out;
     }
 
@@ -416,7 +399,7 @@ public final class LcpLink {
             case 0x24: return "ISSUE_COMMAND (0x24)";
             case 0x28: return "GET_DELIVERY_STATUS (0x28)";
             case 0x7D: return "CHECK_REQUEST (0x7D)";
-            default:   return "UNKNOWN (0x" + hex2(msg) + ")";
+            default: return "UNKNOWN (0x" + hex2(msg) + ")";
         }
     }
 
@@ -424,7 +407,8 @@ public final class LcpLink {
         switch (cmd & 0xFF) {
             case 0x00: return "RUN (0x00)";
             case 0x02: return "END DELIVERY (0x02)";
-            default:   return "UNKNOWN (0x" + hex2(cmd) + ")";
+            case 0x06: return "PRINT LAST TICKET (0x06)"; // ✅ ajout diagnostic
+            default: return "UNKNOWN (0x" + hex2(cmd) + ")";
         }
     }
 
@@ -515,20 +499,31 @@ public final class LcpLink {
         private int len = 0;
 
         void append(byte b) { ensure(1); buf[len++] = b; }
-        void appendBytes(byte[] b, int off, int l) { if (l > 0) { ensure(l); System.arraycopy(b, off, buf, len, l); len += l; } }
+
+        void appendBytes(byte[] b, int off, int l) {
+            if (l > 0) { ensure(l); System.arraycopy(b, off, buf, len, l); len += l; }
+        }
+
         void appendEscaped(byte b) {
             int v = b & 0xFF;
             if (v == (ESC & 0xFF) || v == (SYNC & 0xFF)) append(ESC);
             append(b);
         }
+
         void appendEscapedCrc(byte b) {
             int v = b & 0xFF;
             if (v == (ESC & 0xFF) || v == (SYNC & 0xFF)) append(ESC);
             append(b);
         }
+
         byte[] bytes() { return buf; }
         int length() { return len; }
-        byte[] toArray() { byte[] out = new byte[len]; System.arraycopy(buf, 0, out, 0, len); return out; }
+
+        byte[] toArray() {
+            byte[] out = new byte[len];
+            System.arraycopy(buf, 0, out, 0, len);
+            return out;
+        }
 
         private void ensure(int extra) {
             if (len + extra <= buf.length) return;
