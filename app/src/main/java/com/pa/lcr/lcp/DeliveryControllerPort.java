@@ -11,6 +11,7 @@ import java.util.List;
  * - lectures uniquement sur action utilisateur (boutons)
  *
  * ✅ Extension compatible: LIVE ajouté en "default" (ne casse pas les implémentations existantes).
+ * ✅ Extension compatible: stabilité du FLOW_OFF exposée (default).
  */
 public interface DeliveryControllerPort {
 
@@ -44,6 +45,14 @@ public interface DeliveryControllerPort {
     boolean isDeliveryActive();
     boolean isPaused();
 
+    /**
+     * ✅ FLOW_OFF stable (tampon côté controller).
+     * Permet au SDK/UI de savoir si le flow est OFF depuis assez longtemps.
+     * Default pour compatibilité.
+     */
+    default boolean isFlowOffStable() { return true; }
+    default long getFlowOffAgeMs() { return 0L; }
+
     /* ===== Events UI ===== */
     void setListener(Listener listener);
 
@@ -57,5 +66,11 @@ public interface DeliveryControllerPort {
          * ✅ LIVE quantités (optionnel): par défaut no-op pour compatibilité.
          */
         default void onLiveQty(double net, double gross) { /* no-op */ }
+
+        /**
+         * ✅ Notification fine: flow actif / flow off stable / âge du off.
+         * Default no-op pour compatibilité.
+         */
+        default void onFlowStability(boolean flowActive, boolean flowOffStable, long flowOffAgeMs) { /* no-op */ }
     }
 }
