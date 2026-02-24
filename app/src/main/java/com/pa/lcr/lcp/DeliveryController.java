@@ -4,30 +4,18 @@ package com.pa.lcr.lcp;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/**
- * DeliveryController (base reverse fonctionnelle) + correctifs:
- *
- * 1) #39 (DECIMALS) n'est plus lu avant START.
- *    - On ne lit DECIMALS que lorsque FLOW_ACTIVE == ON (LIVE), puis on met en cache.
- * 2) A/B/C resync douce:
- *    A) Avant START: si 0x28 timeout -> drain + forceSyncNext + retry 0x28 (1 fois)
- *    B) Bouton Status: si 0x23/0x28 timeout -> resync douce + retry (1 fois)
- *    C) Après END: si poll 0x28 timeouts répétés -> resync douce (1 fois)
- *
- * Transport LCP/CRC/queued inchangé (LcpLink stable). [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LcpLink.java)[2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/DeliveryController.java)
- */
 public final class DeliveryController implements DeliveryControllerPort {
 
-    private static final int FIELD_ACTIVE_PRODUCT = 0; // 0..15
-    private static final int FIELD_PRESET_NET = 6;
-    private static final int FIELD_DECIMALS = 39;
-    private static final int FIELD_GROSS_COUNT = 44;
-    private static final int FIELD_NET_COUNT = 45;
+    private static final int FIELD_ACTIVE_PRODUCT = 0;   // 0..15
+    private static final int FIELD_PRESET_NET     = 6;   // preset net
+    private static final int FIELD_DECIMALS       = 39;  // decimals index
+    private static final int FIELD_GROSS_COUNT    = 44;  // gross count
+    private static final int FIELD_NET_COUNT      = 45;  // net count
 
     private static final int CMD_RUN = 0x00;
     private static final int CMD_END = 0x02;
 
-    // DeliveryCode bits (tel que ta base reverse fonctionnelle) [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/DeliveryController.java)
+    // DeliveryCode bits (tel que ta base reverse fonctionnelle)
     private static final int DC_TICKET_PENDING  = 0x0001;
     private static final int DC_FLOW_ACTIVE     = 0x0004;
     private static final int DC_DELIVERY_ACTIVE = 0x0008;
@@ -35,9 +23,10 @@ public final class DeliveryController implements DeliveryControllerPort {
     private final LcpLink link;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private Listener listener;
+
     private volatile DeliveryState state = DeliveryState.DISCONNECTED;
 
-    // ✅ Cache décimales: lu seulement quand FLOW_ACTIVE==ON (LIVE)
+    // ✅ Cache digits (décimales) : lu seulement lorsque FLOW_ACTIVE = ON
     private volatile int cachedDigits = -1;
 
     public DeliveryController(LcpLink link) {
@@ -47,7 +36,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     @Override
     public void setListener(Listener listener) {
         this.listener = listener;
-        if (listener != null) link.setTraceSink(listener::onLog); // TX/RX → UI log [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LcpLink.java)[2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/DeliveryController.java)
+        if (listener != null) link.setTraceSink(listener::onLog);  // TX/RX -> UI log
         else link.setTraceSink(null);
     }
 
@@ -85,8 +74,8 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     /* =========================================================
-     * A) START : resync douce si 0x28 timeout / session sale.
-     *     IMPORTANT: on ne lit plus #39 ici.
+     * A) START : resync douce si 0x28 timeout
+     *     IMPORTANT : on ne lit plus #39 ici
      * ========================================================= */
     @Override
     public void startDelivery(int product1to16, double presetNet) {
@@ -104,7 +93,7 @@ public final class DeliveryController implements DeliveryControllerPort {
 
                 setState(DeliveryState.PRESTART);
 
-                // 1) Status 0x28 (avec resync douce si timeout)
+                // 1) Pré-check 0x28 (avec resync douce si timeout)
                 int[] st = tryDeliveryStatusWithResync("START/precheck");
                 if (st == null) {
                     log("START bloqué: status indisponible (resync échouée)");
@@ -125,13 +114,11 @@ public final class DeliveryController implements DeliveryControllerPort {
                     return;
                 }
 
-                // 2) Séquence START: SET #0, SET #6, RUN
+                // 2) Séquence START (comme base stable) : SET #0, SET #6, RUN
                 int idx0 = product1to16 - 1;
                 link.opSetField(FIELD_ACTIVE_PRODUCT, new byte[]{(byte) idx0});
 
-                // ✅ Écriture du preset sans lire #39.
-                //    On utilise cachedDigits si déjà connu (précédent flow),
-                //    sinon fallback terrain à 1 décimale (comme ton parc typique).
+                // ✅ preset sans lire #39 (utilise cache si connu, sinon fallback)
                 writePresetNet_NoReadDecimals(presetNet);
 
                 link.opIssueCommand(CMD_RUN);
@@ -161,7 +148,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     /* =========================================================
-     * C) END : poll 0x28 + resync douce après 3 timeouts (1 fois)
+     * C) END : poll 0x28 + resync douce après timeouts
      * ========================================================= */
     @Override
     public void endDelivery() {
@@ -197,14 +184,13 @@ public final class DeliveryController implements DeliveryControllerPort {
                         consecutiveFailures++;
                         log("END: poll 0x28 timeout (" + consecutiveFailures + ")");
 
+                        // ✅ resync douce une seule fois
                         if (!resyncAttempted && consecutiveFailures >= 3) {
                             resyncAttempted = true;
                             softResync("END/poll");
                         }
 
-                        if (consecutiveFailures >= 3) {
-                            try { Thread.sleep(400); } catch (InterruptedException ignored) {}
-                        }
+                        try { Thread.sleep(250); } catch (InterruptedException ignored) {}
                     }
 
                     try { Thread.sleep(250); } catch (InterruptedException ignored) {}
@@ -221,7 +207,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     /* =========================================================
-     * B) Status/Diag : resync douce sur timeout 0x23/0x28
+     * B) Status/Diag : resync douce sur timeout
      * ========================================================= */
     @Override
     public void requestStatus() {
@@ -235,7 +221,7 @@ public final class DeliveryController implements DeliveryControllerPort {
             Integer delStatus23 = null, delCode23 = null;
             Integer delStatus28 = null, delCode28 = null;
 
-            // 0x23 d'abord
+            // 1) 0x23 d'abord (avec resync si timeout)
             try {
                 LcpLink.MachineStatus ms = link.opGetMachineStatus();
                 prnStatus = ms.prnStatus;
@@ -249,12 +235,12 @@ public final class DeliveryController implements DeliveryControllerPort {
                     prnStatus = ms.prnStatus;
                     delStatus23 = ms.delStatus;
                     delCode23 = ms.delCode;
-                } catch (Exception e2) {
+                } catch (Exception ignored) {
                     log("DIAG: 0x23 <timeout/erreur> (après resync)");
                 }
             }
 
-            // 0x28 best-effort
+            // 2) 0x28 best-effort (avec resync si timeout)
             try {
                 int[] ds = link.opDeliveryStatus();
                 delStatus28 = ds[0];
@@ -266,7 +252,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                     int[] ds = link.opDeliveryStatus();
                     delStatus28 = ds[0];
                     delCode28 = ds[1];
-                } catch (Exception e2) {
+                } catch (Exception ignored) {
                     log("DIAG: 0x28 <timeout/erreur> (après resync)");
                 }
             }
@@ -292,7 +278,6 @@ public final class DeliveryController implements DeliveryControllerPort {
 
             StringBuilder sb = new StringBuilder();
             sb.append("DIAG: ");
-
             if (prnStatus != null && (outOfPaper || noProcessor || printerError)) {
                 sb.append("BLOQUÉ → ");
                 if (outOfPaper) sb.append("OUT_OF_PAPER ");
@@ -311,7 +296,6 @@ public final class DeliveryController implements DeliveryControllerPort {
             } else {
                 sb.append("OK");
             }
-
             log(sb.toString().trim());
 
             if (delStatus28 != null && delCode28 != null) {
@@ -321,8 +305,6 @@ public final class DeliveryController implements DeliveryControllerPort {
                 log("DIAG: 0x23 prnStatus=0x" + hex2(prnStatus) +
                         " delStatus=0x" + hex4(delStatus23) +
                         " delCode=0x" + hex4(delCode23));
-            } else if (prnStatus == null) {
-                log("DIAG: 0x23 prnStatus=(n/a)");
             }
 
             if (deliveryActive && flowActive) setState(DeliveryState.RUNNING_FLOWING);
@@ -334,9 +316,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     /* =========================================================
-     * LIVE sample (NET/GROSS uniquement quand FLOW_ACTIVE)
-     *
-     * ✅ C’est ici qu’on lit #39 (DECIMALS) si besoin, et on cache.
+     * LIVE sample : lit #39 uniquement quand FLOW_ACTIVE == ON
      * ========================================================= */
     @Override
     public void requestLiveSample() {
@@ -351,7 +331,6 @@ public final class DeliveryController implements DeliveryControllerPort {
                 boolean active = (delCode & DC_DELIVERY_ACTIVE) != 0;
 
                 if (flow) {
-                    // ✅ Lire DECIMALS seulement en flow
                     ensureDigitsInFlow();
 
                     int grossRaw = beI32(link.opGetField(FIELD_GROSS_COUNT));
@@ -366,11 +345,8 @@ public final class DeliveryController implements DeliveryControllerPort {
                     return;
                 }
 
-                if (active) {
-                    setState(DeliveryState.RUNNING_PAUSED);
-                } else {
-                    setState(DeliveryState.CONNECTED);
-                }
+                if (active) setState(DeliveryState.RUNNING_PAUSED);
+                else setState(DeliveryState.CONNECTED);
 
             } catch (Exception ignored) {
                 // LIVE tolérant
@@ -378,13 +354,11 @@ public final class DeliveryController implements DeliveryControllerPort {
         });
     }
 
-    /* ===================== Helpers resync ===================== */
+    /* ===================== Helpers RESYNC ===================== */
 
     private void softResync(String reason) {
-        try {
-            link.drainInput(250);
-            link.forceSyncNext(reason);
-        } catch (Exception ignored) {}
+        link.drainInput(250);
+        link.forceSyncNext(reason);
     }
 
     private int[] tryDeliveryStatusWithResync(String reason) {
@@ -403,24 +377,34 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
     }
 
-    /* ===================== DECIMALS logic ===================== */
+    /* ===================== DECIMALS ===================== */
 
     private void ensureDigitsInFlow() throws Exception {
         if (cachedDigits >= 0) return;
-        byte[] dec = link.opGetField(FIELD_DECIMALS);
-        int idx = (dec.length >= 1) ? (dec[0] & 0xFF) : 0;
-        cachedDigits = decimalsDigits(idx);
-        log("LIVE: DECIMALS idx=" + idx + " digits=" + cachedDigits);
+
+        try {
+            byte[] dec = link.opGetField(FIELD_DECIMALS);
+            int idx = (dec.length >= 1) ? (dec[0] & 0xFF) : 0;
+            cachedDigits = decimalsDigits(idx);
+            log("LIVE: DECIMALS idx=" + idx + " digits=" + cachedDigits);
+        } catch (Exception e) {
+            // resync + retry une fois
+            softResync("DECIMALS");
+            byte[] dec = link.opGetField(FIELD_DECIMALS);
+            int idx = (dec.length >= 1) ? (dec[0] & 0xFF) : 0;
+            cachedDigits = decimalsDigits(idx);
+            log("LIVE: DECIMALS idx=" + idx + " digits=" + cachedDigits);
+        }
     }
 
     /**
-     * Écriture preset net sans lecture #39.
-     * Utilise cache si connu, sinon fallback digits=1 (terrain).
+     * Écrit le preset net sans lire #39.
+     * Utilise le cache si connu, sinon fallback digits=1 (terrain).
      */
     private void writePresetNet_NoReadDecimals(double preset) throws Exception {
         int digits = cachedDigits;
         if (digits < 0) {
-            digits = 1; // fallback terrain
+            digits = 1;
             log("START: preset sans DECIMALS (fallback digits=1)");
         }
         int scale = (int) Math.pow(10, digits);
@@ -453,6 +437,8 @@ public final class DeliveryController implements DeliveryControllerPort {
                (b[3] & 0xFF);
     }
 
+    /* ===================== Misc ===================== */
+
     private void notifyActiveNode() {
         if (listener == null) return;
         Integer node = link.getLastResponderNode();
@@ -465,10 +451,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     private void log(String msg) { if (listener != null) listener.onLog(msg); }
-
-    private void error(String ctx, Exception e) {
-        if (listener != null) listener.onError(ctx, e);
-    }
+    private void error(String ctx, Exception e) { if (listener != null) listener.onError(ctx, e); }
 
     @Override public DeliveryState getState() { return state; }
     @Override public boolean isDeliveryActive() { return state == DeliveryState.RUNNING_FLOWING || state == DeliveryState.RUNNING_PAUSED; }
