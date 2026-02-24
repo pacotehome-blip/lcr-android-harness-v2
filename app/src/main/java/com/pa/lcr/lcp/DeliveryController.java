@@ -4,6 +4,16 @@ package com.pa.lcr.lcp;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+/**
+ * DeliveryController - version terrain "solidifiée"
+ *
+ * Ajouts clés:
+ *  - Resync douce A/B/C (drainInput + forceSyncNext) via LcpLink. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/DeliveryControllerPort.java)
+ *  - Gestion TICKET_PENDING conforme doc+python:
+ *      si delCode a le bit 0x0001 => impossible de START tant que le ticket n'est pas imprimé;
+ *      on force l'impression via ISSUE_COMMAND #6 (0x06) jusqu'à clear (poll 0x23). [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/DeliveryControllerPort.java)
+ *  - Décimales (#39) best-effort après SET #0, et obligatoire en FLOW_ACTIVE pour NET/GROSS. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/DeliveryControllerPort.java)
+ */
 public final class DeliveryController implements DeliveryControllerPort {
 
     private static final int FIELD_ACTIVE_PRODUCT = 0;   // 0..15
@@ -15,7 +25,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     private static final int CMD_RUN = 0x00;
     private static final int CMD_END = 0x02;
 
-    // ✅ Python/doc : Issue #6 = print last ticket / clear ticket_pending
+    // ✅ Python + doc: Issue #6 pour imprimer le dernier ticket et clear TICKET_PENDING [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/DeliveryControllerPort.java)
     private static final int CMD_PRINT_LAST_TICKET = 0x06;
 
     // DeliveryCode bits (base reverse fonctionnelle)
@@ -29,12 +39,12 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     private volatile DeliveryState state = DeliveryState.DISCONNECTED;
 
-    // cache digits
+    // Cache digits (décimales): lu best-effort après #0, obligatoire en flow
     private volatile int cachedDigits = -1;
 
-    // paramètres ticket clear (aligné Python: retry toutes les 200ms)
+    // Paramètres du "ticket clear" (aligné Python: sleep 0.2 sec, timeout configurable)
     private static final long TICKET_RETRY_MS = 200;
-    private static final long TICKET_TIMEOUT_MS = 20_000; // ajuste au besoin
+    private static final long TICKET_TIMEOUT_MS = 20_000;
 
     public DeliveryController(LcpLink link) {
         this.link = link;
@@ -43,7 +53,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     @Override
     public void setListener(Listener listener) {
         this.listener = listener;
-        if (listener != null) link.setTraceSink(listener::onLog);
+        if (listener != null) link.setTraceSink(listener::onLog); // TX/RX → UI log [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/DeliveryControllerPort.java)
         else link.setTraceSink(null);
     }
 
@@ -81,7 +91,10 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     /* =========================================================
-     * START : A) resync 0x28 si timeout, puis CLEAR TICKET_PENDING via Issue #6
+     * START:
+     *  1) 0x28 precheck (avec resync douce si timeout)
+     *  2) Si TICKET_PENDING: boucle Issue #6 + poll 0x23 jusqu'à clear (sinon fail)
+     *  3) SET #0, best-effort #39, SET #6, RUN
      * ========================================================= */
     @Override
     public void startDelivery(int product1to16, double presetNet) {
@@ -99,7 +112,7 @@ public final class DeliveryController implements DeliveryControllerPort {
 
                 setState(DeliveryState.PRESTART);
 
-                // 1) Précheck 0x28 (avec resync douce)
+                // 1) Precheck 0x28 (resync douce A)
                 int[] st = tryDeliveryStatusWithResync("START/precheck");
                 if (st == null) {
                     log("START bloqué: status indisponible (resync échouée)");
@@ -107,40 +120,42 @@ public final class DeliveryController implements DeliveryControllerPort {
                     return;
                 }
 
-                int delCode28 = st[1];
+                int delCode = st[1];
 
-                // 2) Si ticket pending: clear via Issue #6 (comme Python/doc)
-                if ((delCode28 & DC_TICKET_PENDING) != 0) {
-                    log("TICKET_PENDING détecté → tentative clear via Issue #6");
+                // 2) Si ticket pending: clear via Issue #6 (comme le Python) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/DeliveryControllerPort.java)
+                if ((delCode & DC_TICKET_PENDING) != 0) {
+                    log("TICKET_PENDING détecté → Issue #6 (print ticket) jusqu’à clear");
                     boolean cleared = clearTicketPending();
                     if (!cleared) {
                         log("START bloqué: Impossible de clear TICKET_PENDING");
                         setState(DeliveryState.CONNECTED);
                         return;
                     }
+                    // Re-lire 0x28 (best-effort) après clear
+                    int[] st2 = tryDeliveryStatusWithResync("START/post-ticket");
+                    if (st2 != null) delCode = st2[1];
                 }
 
-                // 3) Recheck 0x28 après clear (best-effort)
-                int[] st2 = tryDeliveryStatusWithResync("START/post-ticket");
-                if (st2 != null) delCode28 = st2[1];
-
-                // 4) Si encore delivery active, on reflète l'état
-                if ((delCode28 & DC_DELIVERY_ACTIVE) != 0) {
+                // 3) Si livraison déjà active (au cas où)
+                if ((delCode & DC_DELIVERY_ACTIVE) != 0) {
                     log("START bloqué: DELIVERY_ACTIVE (déjà en cours)");
-                    setState((delCode28 & DC_FLOW_ACTIVE) != 0 ? DeliveryState.RUNNING_FLOWING : DeliveryState.RUNNING_PAUSED);
+                    setState((delCode & DC_FLOW_ACTIVE) != 0 ? DeliveryState.RUNNING_FLOWING : DeliveryState.RUNNING_PAUSED);
                     return;
                 }
 
-                // 5) Séquence START: SET #0 -> best-effort #39 -> SET #6 -> RUN
+                // 4) SET #0 (produit)
                 int idx0 = product1to16 - 1;
                 link.opSetField(FIELD_ACTIVE_PRODUCT, new byte[]{(byte) idx0});
                 notifyActiveNode();
 
+                // 5) Best-effort DECIMALS après #0 validé
                 bestEffortReadDecimalsAfterProduct();
+
+                // 6) SET #6 (preset) avec cache/fallback
                 writePresetNet_WithCacheOrFallback(presetNet);
 
+                // 7) RUN
                 link.opIssueCommand(CMD_RUN);
-
                 notifyActiveNode();
                 setState(DeliveryState.RUNNING_FLOWING);
 
@@ -152,19 +167,22 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     /**
-     * Clear ticket pending by repeatedly issuing command 0x06 and re-reading 0x23
-     * until the bit clears, or timeout.
+     * Clear TICKET_PENDING:
+     *  - boucle: Issue #6, sleep 200ms, opGetMachineStatus (0x23)
+     *  - stop quand le bit tombe, sinon timeout -> false
      *
-     * Aligné au Python fourni. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/DeliveryControllerPort.java)
+     * Reproduit ton python: op_issue_command(0x06) + poll 0x23. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/DeliveryControllerPort.java)
      */
     private boolean clearTicketPending() {
         long t0 = System.currentTimeMillis();
 
         while (System.currentTimeMillis() - t0 < TICKET_TIMEOUT_MS) {
+
             try {
-                link.opIssueCommand(CMD_PRINT_LAST_TICKET);  // Issue #6
+                // Issue #6 : impression du dernier ticket
+                link.opIssueCommand(CMD_PRINT_LAST_TICKET);
             } catch (Exception e) {
-                // si le registre est busy, on peut resync puis continuer
+                // si busy ou timeout, resync et on continue
                 softResync("TICKET/issue6");
             }
 
@@ -180,10 +198,10 @@ public final class DeliveryController implements DeliveryControllerPort {
                     return true;
                 }
             } catch (Exception e) {
-                // 0x23 peut timeout: resync et continue
                 softResync("TICKET/0x23");
             }
         }
+
         return false;
     }
 
@@ -202,7 +220,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     /* =========================================================
-     * END : seulement si livraison active + resync douce après timeouts
+     * END: seulement si livraison active + poll 0x28; resync douce après 3 timeouts
      * ========================================================= */
     @Override
     public void endDelivery() {
@@ -242,12 +260,15 @@ public final class DeliveryController implements DeliveryControllerPort {
                     } catch (Exception pollErr) {
                         consecutiveFailures++;
                         log("END: poll 0x28 timeout (" + consecutiveFailures + ")");
+
                         if (!resyncAttempted && consecutiveFailures >= 3) {
                             resyncAttempted = true;
                             softResync("END/poll");
                         }
+
                         try { Thread.sleep(250); } catch (InterruptedException ignored) {}
                     }
+
                     try { Thread.sleep(250); } catch (InterruptedException ignored) {}
                 }
 
@@ -262,7 +283,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     /* =========================================================
-     * Status/Diag (B) : resync douce sur timeout
+     * B) Status/Diag (0x23 + 0x28 best-effort) avec resync douce
      * ========================================================= */
     @Override
     public void requestStatus() {
@@ -272,23 +293,27 @@ public final class DeliveryController implements DeliveryControllerPort {
                 return;
             }
 
+            Integer prnStatus = null;
+            Integer delStatus23 = null, delCode23 = null;
+            Integer delStatus28 = null, delCode28 = null;
+
             try {
-                // 0x23 (avec resync si timeout)
-                LcpLink.MachineStatus ms;
+                // 0x23
                 try {
-                    ms = link.opGetMachineStatus();
+                    LcpLink.MachineStatus ms = link.opGetMachineStatus();
+                    prnStatus = ms.prnStatus;
+                    delStatus23 = ms.delStatus;
+                    delCode23 = ms.delCode;
                 } catch (Exception e) {
                     log("DIAG: 0x23 <timeout/erreur> → RESYNC");
                     softResync("B/0x23");
-                    ms = link.opGetMachineStatus();
+                    LcpLink.MachineStatus ms = link.opGetMachineStatus();
+                    prnStatus = ms.prnStatus;
+                    delStatus23 = ms.delStatus;
+                    delCode23 = ms.delCode;
                 }
 
-                int delStatus23 = ms.delStatus;
-                int delCode23 = ms.delCode;
-                int prnStatus = ms.prnStatus;
-
-                // 0x28 best-effort (avec resync si timeout)
-                int delStatus28, delCode28;
+                // 0x28
                 try {
                     int[] ds = link.opDeliveryStatus();
                     delStatus28 = ds[0];
@@ -301,13 +326,24 @@ public final class DeliveryController implements DeliveryControllerPort {
                     delCode28 = ds[1];
                 }
 
+                if (delCode23 == null) {
+                    log("DIAG: <timeout/erreur> (aucun état lisible)");
+                    return;
+                }
+
                 boolean ticketPending  = (delCode23 & DC_TICKET_PENDING) != 0;
                 boolean flowActive     = (delCode23 & DC_FLOW_ACTIVE) != 0;
                 boolean deliveryActive = (delCode23 & DC_DELIVERY_ACTIVE) != 0;
 
                 log("DIAG: " + (ticketPending ? "BLOQUÉ → TICKET_PENDING" : "OK"));
-                log("DIAG: 0x28 delStatus=0x" + hex4(delStatus28) + " delCode=0x" + hex4(delCode28));
-                log("DIAG: 0x23 prnStatus=0x" + hex2(prnStatus) + " delStatus=0x" + hex4(delStatus23) + " delCode=0x" + hex4(delCode23));
+                if (delStatus28 != null && delCode28 != null) {
+                    log("DIAG: 0x28 delStatus=0x" + hex4(delStatus28) + " delCode=0x" + hex4(delCode28));
+                }
+                if (prnStatus != null && delStatus23 != null && delCode23 != null) {
+                    log("DIAG: 0x23 prnStatus=0x" + hex2(prnStatus) +
+                            " delStatus=0x" + hex4(delStatus23) +
+                            " delCode=0x" + hex4(delCode23));
+                }
 
                 if (deliveryActive && flowActive) setState(DeliveryState.RUNNING_FLOWING);
                 else if (deliveryActive) setState(DeliveryState.RUNNING_PAUSED);
@@ -322,7 +358,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     /* =========================================================
-     * LIVE: NET/GROSS seulement quand FLOW_ACTIVE (et lit #39 en flow)
+     * LIVE: NET/GROSS seulement quand FLOW_ACTIVE; lit #39 en flow si nécessaire
      * ========================================================= */
     @Override
     public void requestLiveSample() {
@@ -361,6 +397,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     /* ===================== Resync + Decimals ===================== */
 
     private void softResync(String reason) {
+        // Utilise tes primitives (déjà présentes dans ton LcpLink) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/DeliveryControllerPort.java)
         link.drainInput(250);
         link.forceSyncNext(reason);
     }
