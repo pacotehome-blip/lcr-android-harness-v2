@@ -29,7 +29,7 @@ public final class LcpLink {
     private static final byte MSG_GET_PRODUCT_ID = 0x00;
     private static final byte MSG_GET_FIELD = 0x20;
     private static final byte MSG_SET_FIELD = 0x21;
-    private static final byte MSG_GET_MACHINE_STATUS = 0x23;   // ✅ NEW
+    private static final byte MSG_GET_MACHINE_STATUS = 0x23;
     private static final byte MSG_ISSUE_COMMAND = 0x24;
     private static final byte MSG_GET_DELIVERY_STATUS = 0x28;
     private static final byte MSG_CHECK_REQUEST = 0x7D;
@@ -53,20 +53,49 @@ public final class LcpLink {
     }
 
     /* ============================================================
-     * Types publics
+     * ✅ NEW: resynchronisation douce (sans reset USB)
      * ============================================================ */
 
     /**
-     * 0x23 Get Machine Status payload:
-     * rc, devStatus, prnStatus, delStatus[2], delCode[2]
+     * Vide le buffer RX best-effort (sans bloquer longtemps).
+     * Utile si des octets résiduels cassent le framing. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LcpLink.java)
      */
+    public void drainInput(int millis) {
+        int total = 0;
+        long end = System.currentTimeMillis() + Math.max(0, millis);
+        try {
+            while (System.currentTimeMillis() < end) {
+                byte[] b = new byte[64];
+                int n = port.read(b, 30);
+                if (n <= 0) break;
+                total += n;
+            }
+        } catch (Exception ignored) {}
+        t("RESYNC: drainInput bytes=" + total);
+    }
+
+    /**
+     * Force le prochain message à repartir “comme au début” :
+     * - reset msgIdBit
+     * - reset syncUsed pour que nextStatusByte applique le bit SYNC (0x02)
+     *   via (syncFirstEnabled && !syncUsed). [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LcpLink.java)
+     */
+    public synchronized void forceSyncNext(String reason) {
+        t("RESYNC: forceSyncNext (" + reason + ")");
+        this.msgIdBit = 0;
+        this.syncUsed = false;
+    }
+
+    /* ============================================================
+     * Types publics
+     * ============================================================ */
+
     public static final class MachineStatus {
         public final int rc;
         public final int devStatus;
         public final int prnStatus;
-        public final int delStatus; // u16
-        public final int delCode;   // u16
-
+        public final int delStatus;
+        public final int delCode;
         public MachineStatus(int rc, int devStatus, int prnStatus, int delStatus, int delCode) {
             this.rc = rc;
             this.devStatus = devStatus;
@@ -77,7 +106,7 @@ public final class LcpLink {
     }
 
     /* ============================================================
-     * API opérations (retours nettoyés)
+     * API opérations
      * ============================================================ */
 
     public byte[] opGetField(int field) throws IOException {
@@ -99,7 +128,6 @@ public final class LcpLink {
     }
 
     public void opIssueCommand(int cmd) throws IOException {
-        // RUN/END peuvent être plus lents selon l’état: 6s
         Response r = sendRecv(buildPayload(MSG_ISSUE_COMMAND, new byte[]{(byte) cmd}), 6000);
         ensureOk(r, "ISSUE_COMMAND 0x" + hex2(cmd));
     }
@@ -118,24 +146,15 @@ public final class LcpLink {
         ensureOk(r, "GET_PRODUCT_ID");
     }
 
-    /**
-     * ✅ NEW: 0x23 Get Machine Status (inclut prnStatus)
-     * Timeout plus long car peut être lent si imprimante offline.
-     */
     public MachineStatus opGetMachineStatus() throws IOException {
         Response r = sendRecv(buildPayload(MSG_GET_MACHINE_STATUS, null), 6000);
         ensureOk(r, "GET_MACHINE_STATUS");
-
-        if (r.payload.length < 7) {
-            throw new IOException("MACHINE_STATUS payload trop court len=" + r.payload.length);
-        }
-
+        if (r.payload.length < 7) throw new IOException("MACHINE_STATUS payload trop court len=" + r.payload.length);
         int rc = r.payload[0] & 0xFF;
         int dev = r.payload[1] & 0xFF;
         int prn = r.payload[2] & 0xFF;
         int delStatus = u16be(r.payload[3], r.payload[4]);
         int delCode = u16be(r.payload[5], r.payload[6]);
-
         return new MachineStatus(rc, dev, prn, delStatus, delCode);
     }
 
@@ -154,7 +173,7 @@ public final class LcpLink {
         boolean waitingQueued = false;
 
         while (System.currentTimeMillis() < deadline) {
-            Frame rx = readFrame(250); // slices courts
+            Frame rx = readFrame(250);
             if (rx == null) continue;
             if (rx.to != hostAddr) continue;
 
@@ -166,7 +185,7 @@ public final class LcpLink {
             if (rc == RC_REQUEST_QUEUED) {
                 waitingQueued = true;
             } else if (rc == RC_NO_REQUEST_ACTIVE) {
-                // en mode queued: on continue à sonder
+                // continue
             } else if (rc == RC_REQUEST_ABORTED) {
                 throw new IOException("Queued aborted (rc=0x28)");
             } else {
@@ -217,8 +236,8 @@ public final class LcpLink {
         out.append(SYNC);
         out.appendBytes(escVar.bytes(), 0, escVar.length());
 
-        byte crc0 = (byte) (crc & 0xFF);          // low
-        byte crc1 = (byte) ((crc >> 8) & 0xFF);   // high
+        byte crc0 = (byte) (crc & 0xFF);
+        byte crc1 = (byte) ((crc >> 8) & 0xFF);
         out.appendEscapedCrc(crc0);
         out.appendEscapedCrc(crc1);
 
@@ -260,8 +279,8 @@ public final class LcpLink {
             byte[] payload = new byte[len];
             for (int i = 0; i < len; i++) payload[i] = (byte) readUnescapedByte(rawForCrc, sliceTimeoutMs);
 
-            int crc0 = readCrcByte(sliceTimeoutMs); // low
-            int crc1 = readCrcByte(sliceTimeoutMs); // high
+            int crc0 = readCrcByte(sliceTimeoutMs);
+            int crc1 = readCrcByte(sliceTimeoutMs);
 
             int calc = crcLcp(rawForCrc.bytes(), 0, rawForCrc.length());
             int recv = ((crc1 & 0xFF) << 8) | (crc0 & 0xFF);
@@ -393,7 +412,7 @@ public final class LcpLink {
             case 0x00: return "GET_PRODUCT_ID (0x00)";
             case 0x20: return "GET_FIELD (0x20)";
             case 0x21: return "SET_FIELD (0x21)";
-            case 0x23: return "GET_MACHINE_STATUS (0x23)"; // ✅ NEW
+            case 0x23: return "GET_MACHINE_STATUS (0x23)";
             case 0x24: return "ISSUE_COMMAND (0x24)";
             case 0x28: return "GET_DELIVERY_STATUS (0x28)";
             case 0x7D: return "CHECK_REQUEST (0x7D)";
