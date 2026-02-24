@@ -15,7 +15,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     private static final int CMD_RUN = 0x00;
     private static final int CMD_END = 0x02;
 
-    // DeliveryCode bits (tel que ta base reverse fonctionnelle)
+    // DeliveryCode bits (base reverse fonctionnelle) [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/MainActivity.java)
     private static final int DC_TICKET_PENDING  = 0x0001;
     private static final int DC_FLOW_ACTIVE     = 0x0004;
     private static final int DC_DELIVERY_ACTIVE = 0x0008;
@@ -26,7 +26,7 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     private volatile DeliveryState state = DeliveryState.DISCONNECTED;
 
-    // ✅ Cache digits (décimales) : lu seulement lorsque FLOW_ACTIVE = ON
+    // ✅ Cache digits: lu best-effort après #0 validé, et obligatoire en FLOW_ACTIVE
     private volatile int cachedDigits = -1;
 
     public DeliveryController(LcpLink link) {
@@ -36,7 +36,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     @Override
     public void setListener(Listener listener) {
         this.listener = listener;
-        if (listener != null) link.setTraceSink(listener::onLog);  // TX/RX -> UI log
+        if (listener != null) link.setTraceSink(listener::onLog); // TX/RX -> UI log [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/DeliveryControllerPort.java)[2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/MainActivity.java)
         else link.setTraceSink(null);
     }
 
@@ -75,7 +75,7 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     /* =========================================================
      * A) START : resync douce si 0x28 timeout
-     *     IMPORTANT : on ne lit plus #39 ici
+     *     + best-effort DECIMALS juste après #0 validé
      * ========================================================= */
     @Override
     public void startDelivery(int product1to16, double presetNet) {
@@ -93,7 +93,7 @@ public final class DeliveryController implements DeliveryControllerPort {
 
                 setState(DeliveryState.PRESTART);
 
-                // 1) Pré-check 0x28 (avec resync douce si timeout)
+                // 1) Pré-check 0x28 (avec resync douce si timeout) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/DeliveryControllerPort.java)[2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/MainActivity.java)
                 int[] st = tryDeliveryStatusWithResync("START/precheck");
                 if (st == null) {
                     log("START bloqué: status indisponible (resync échouée)");
@@ -114,13 +114,19 @@ public final class DeliveryController implements DeliveryControllerPort {
                     return;
                 }
 
-                // 2) Séquence START (comme base stable) : SET #0, SET #6, RUN
+                // 2) Sélection produit (#0) — queued aware via LcpLink.sendRecv [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/DeliveryControllerPort.java)[2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/MainActivity.java)
                 int idx0 = product1to16 - 1;
                 link.opSetField(FIELD_ACTIVE_PRODUCT, new byte[]{(byte) idx0});
+                notifyActiveNode();
 
-                // ✅ preset sans lire #39 (utilise cache si connu, sinon fallback)
-                writePresetNet_NoReadDecimals(presetNet);
+                // ✅ 3) Best-effort DECIMALS (#39) tout de suite après #0 validé
+                //    (on ne bloque jamais START si #39 est lent/busy)
+                bestEffortReadDecimalsAfterProduct();
 
+                // 4) Preset (#6) en utilisant digits si connus, sinon fallback
+                writePresetNet_WithCacheOrFallback(presetNet);
+
+                // 5) RUN
                 link.opIssueCommand(CMD_RUN);
 
                 notifyActiveNode();
@@ -157,6 +163,12 @@ public final class DeliveryController implements DeliveryControllerPort {
                 if (state == DeliveryState.DISCONNECTED) { log("END bloqué: DISCONNECTED"); return; }
                 if (state == DeliveryState.ENDING) { log("END ignoré: déjà en cours"); return; }
 
+                // ✅ garde-fou: END seulement si livraison active
+                if (state != DeliveryState.RUNNING_FLOWING && state != DeliveryState.RUNNING_PAUSED) {
+                    log("END ignoré: aucune livraison active (state=" + state + ")");
+                    return;
+                }
+
                 setState(DeliveryState.ENDING);
 
                 link.opIssueCommand(CMD_END);
@@ -184,7 +196,6 @@ public final class DeliveryController implements DeliveryControllerPort {
                         consecutiveFailures++;
                         log("END: poll 0x28 timeout (" + consecutiveFailures + ")");
 
-                        // ✅ resync douce une seule fois
                         if (!resyncAttempted && consecutiveFailures >= 3) {
                             resyncAttempted = true;
                             softResync("END/poll");
@@ -221,7 +232,7 @@ public final class DeliveryController implements DeliveryControllerPort {
             Integer delStatus23 = null, delCode23 = null;
             Integer delStatus28 = null, delCode28 = null;
 
-            // 1) 0x23 d'abord (avec resync si timeout)
+            // 1) 0x23 d'abord (avec resync si timeout) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/DeliveryControllerPort.java)[2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/MainActivity.java)
             try {
                 LcpLink.MachineStatus ms = link.opGetMachineStatus();
                 prnStatus = ms.prnStatus;
@@ -240,7 +251,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                 }
             }
 
-            // 2) 0x28 best-effort (avec resync si timeout)
+            // 2) 0x28 best-effort (avec resync si timeout) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/DeliveryControllerPort.java)[2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/MainActivity.java)
             try {
                 int[] ds = link.opDeliveryStatus();
                 delStatus28 = ds[0];
@@ -316,7 +327,8 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     /* =========================================================
-     * LIVE sample : lit #39 uniquement quand FLOW_ACTIVE == ON
+     * LIVE: NET/GROSS seulement quand FLOW_ACTIVE
+     *     + assure DECIMALS en flow
      * ========================================================= */
     @Override
     public void requestLiveSample() {
@@ -354,9 +366,10 @@ public final class DeliveryController implements DeliveryControllerPort {
         });
     }
 
-    /* ===================== Helpers RESYNC ===================== */
+    /* ===================== RESYNC helpers ===================== */
 
     private void softResync(String reason) {
+        // Utilise tes primitives LcpLink (déjà présentes) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/DeliveryControllerPort.java)
         link.drainInput(250);
         link.forceSyncNext(reason);
     }
@@ -377,18 +390,35 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
     }
 
-    /* ===================== DECIMALS ===================== */
+    /* ===================== DECIMALS logic ===================== */
 
+    /**
+     * Best-effort après #0 validé : si ça timeoute, on ne bloque pas START.
+     */
+    private void bestEffortReadDecimalsAfterProduct() {
+        if (cachedDigits >= 0) return;
+        try {
+            byte[] dec = link.opGetField(FIELD_DECIMALS);
+            int idx = (dec.length >= 1) ? (dec[0] & 0xFF) : 0;
+            cachedDigits = decimalsDigits(idx);
+            log("START: DECIMALS idx=" + idx + " digits=" + cachedDigits);
+        } catch (Exception e) {
+            log("START: DECIMALS indisponible (best-effort)");
+        }
+    }
+
+    /**
+     * Obligatoire en flow : si on n’a pas encore cachedDigits, on lit #39.
+     * Si timeout, resync + retry une fois.
+     */
     private void ensureDigitsInFlow() throws Exception {
         if (cachedDigits >= 0) return;
-
         try {
             byte[] dec = link.opGetField(FIELD_DECIMALS);
             int idx = (dec.length >= 1) ? (dec[0] & 0xFF) : 0;
             cachedDigits = decimalsDigits(idx);
             log("LIVE: DECIMALS idx=" + idx + " digits=" + cachedDigits);
         } catch (Exception e) {
-            // resync + retry une fois
             softResync("DECIMALS");
             byte[] dec = link.opGetField(FIELD_DECIMALS);
             int idx = (dec.length >= 1) ? (dec[0] & 0xFF) : 0;
@@ -398,13 +428,13 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     /**
-     * Écrit le preset net sans lire #39.
-     * Utilise le cache si connu, sinon fallback digits=1 (terrain).
+     * Écrit preset net (#6) en utilisant cachedDigits, sinon fallback digits=1.
+     * (On évite absolument de lire #39 ici.)
      */
-    private void writePresetNet_NoReadDecimals(double preset) throws Exception {
+    private void writePresetNet_WithCacheOrFallback(double preset) throws Exception {
         int digits = cachedDigits;
         if (digits < 0) {
-            digits = 1;
+            digits = 1; // fallback terrain
             log("START: preset sans DECIMALS (fallback digits=1)");
         }
         int scale = (int) Math.pow(10, digits);
