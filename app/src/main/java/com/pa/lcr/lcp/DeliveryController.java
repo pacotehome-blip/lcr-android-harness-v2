@@ -4,9 +4,6 @@ package com.pa.lcr.lcp;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/**
- * DeliveryController - version terrain (flow canonique).
- */
 public final class DeliveryController implements DeliveryControllerPort {
 
     private static final int FIELD_ACTIVE_PRODUCT = 0; // 0..15
@@ -19,7 +16,6 @@ public final class DeliveryController implements DeliveryControllerPort {
     private static final int CMD_END = 0x02;
     private static final int CMD_PRINT_LAST_TICKET = 0x06;
 
-    // DeliveryCode bits
     private static final int DC_TICKET_PENDING = 0x0001;
     private static final int DC_FLOW_ACTIVE = 0x0004;
     private static final int DC_DELIVERY_ACTIVE = 0x0008;
@@ -33,25 +29,20 @@ public final class DeliveryController implements DeliveryControllerPort {
     private Listener listener;
     private volatile DeliveryState state = DeliveryState.DISCONNECTED;
 
-    // Cache digits (#39)
     private volatile int cachedDigits = -1;
-
-    // Flow off stable
     private volatile boolean flowOffStable = true;
 
-    // LiveTick filter (TX/RX/↳) only during requestLiveSample()
     private final ThreadLocal<Boolean> inLiveSample = new ThreadLocal<>();
-
-    // Global TX/RX display flag (checkbox)
     private volatile boolean txRxEnabled = false;
 
-    // Start intention from C
     private volatile boolean pendingStart = false;
     private volatile int pendingProduct1to16 = 1;
     private volatile double pendingPresetNet = 0.0;
 
-    // Prevent re-entry
     private volatile boolean startInProgress = false;
+
+    // ✅ anti “resync storm”
+    private volatile long lastResyncMs = 0L;
 
     public DeliveryController(LcpLink link) {
         this.link = link;
@@ -65,9 +56,6 @@ public final class DeliveryController implements DeliveryControllerPort {
             return;
         }
 
-        // Trace filtering:
-        // - If checkbox OFF: hide TX/RX/↳ globally
-        // - If checkbox ON: show TX/RX/↳ except when liveTick sample is running (avoid spam)
         link.setTraceSink(line -> {
             if (!txRxEnabled) {
                 if (line.startsWith("TX:") || line.startsWith("RX:") || line.startsWith("↳")) return;
@@ -93,7 +81,6 @@ public final class DeliveryController implements DeliveryControllerPort {
             setState(DeliveryState.CONNECTED);
             if (listener != null) {
                 listener.onLog("LCP prêt (sans refresh automatique)");
-                // Live connecté immédiat = lecture 0x28 best-effort
                 refreshConnectedLive("INIT");
             }
         });
@@ -123,22 +110,16 @@ public final class DeliveryController implements DeliveryControllerPort {
         });
     }
 
-    @Override
-    public DeliveryState getState() { return state; }
+    @Override public DeliveryState getState() { return state; }
 
     @Override
     public boolean isDeliveryActive() {
         return state == DeliveryState.RUNNING_FLOWING || state == DeliveryState.RUNNING_PAUSED;
     }
 
-    @Override
-    public boolean isPaused() { return state == DeliveryState.RUNNING_PAUSED; }
-
-    @Override
-    public boolean isFlowOffStable() { return flowOffStable; }
-
-    @Override
-    public long getFlowOffAgeMs() { return 0L; }
+    @Override public boolean isPaused() { return state == DeliveryState.RUNNING_PAUSED; }
+    @Override public boolean isFlowOffStable() { return flowOffStable; }
+    @Override public long getFlowOffAgeMs() { return 0L; }
 
     // ============================================================
     // A = Align / Recover (no START intention)
@@ -154,7 +135,6 @@ public final class DeliveryController implements DeliveryControllerPort {
                 doAlignOrRecover();
             } catch (Exception e) {
                 if (listener != null) listener.onError("alignOrRecover", e);
-                // ✅ fallback
                 setState(DeliveryState.CONNECTED);
                 refreshConnectedLive("A/ERR");
             }
@@ -190,7 +170,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                 if (isReadyToStart(st)) {
                     if (listener != null) listener.onLog("[C] Register ready → START now");
                     pendingStart = false;
-                    doStartNewDelivery(pendingProduct1to16, pendingPresetNet);
+                    doStartNewDelivery(pendingProduct1to16, pendingPresetNet); // ✅ start direct (no START/0x28)
                     startInProgress = false;
                     return;
                 }
@@ -202,13 +182,12 @@ public final class DeliveryController implements DeliveryControllerPort {
                     listener.onLog("[C] Register NOT ready → align/recover");
                 }
 
-                doAlignOrRecover(); // will auto-start if pendingStart and clean
+                doAlignOrRecover();
                 startInProgress = false;
 
             } catch (Exception e) {
                 if (listener != null) listener.onError("startDelivery(C-intent)", e);
                 startInProgress = false;
-                // ✅ rollback
                 setState(DeliveryState.CONNECTED);
                 refreshConnectedLive("C/ERR");
             }
@@ -282,7 +261,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     // ============================================================
-    // LIVE tick (UI calls only when RUNNING_FLOWING)
+    // LIVE tick
     // ============================================================
     @Override
     public void requestLiveSample() {
@@ -378,8 +357,8 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
 
         if (st.deliveryActive && !st.flowActive) {
-            if (listener != null) listener.onLog("[A] Delivery active paused → RUN (resume)");
-            link.opIssueCommand(CMD_RUN);
+            // IMPORTANT: ne pas forcer RUN ici (on veut rester PAUSED après recovery)
+            flowOffStable = true;
             setState(DeliveryState.RUNNING_PAUSED);
             if (listener != null) listener.onLiveStatus("LIVE: RUNNING_PAUSED (recovered)");
             return;
@@ -402,24 +381,18 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
     }
 
-    // ✅ START with rollback (no PRESTART stuck)
+    // ✅ START direct + rollback (no START/0x28)
     private void doStartNewDelivery(int product1to16, double presetNet) {
         try {
-            DeliveryStatus st = readStatusWithResync("START/0x28");
-            if (st == null || !isReadyToStart(st)) {
-                if (listener != null) listener.onLog("[START] Refused: register not ready");
-                setState(DeliveryState.CONNECTED);
-                refreshConnectedLive("START/refused");
-                return;
-            }
-
             setState(DeliveryState.PRESTART);
-            if (listener != null) listener.onLiveStatus("LIVE: PRESTART");
+            if (listener != null) listener.onLiveStatus("LIVE: PRESTART (internal)");
 
             int idx0 = product1to16 - 1;
             link.opSetField(FIELD_ACTIVE_PRODUCT, new byte[]{(byte) idx0});
+
             bestEffortReadDecimals();
             writePresetNet_WithCacheOrFallback(presetNet);
+
             link.opIssueCommand(CMD_RUN);
 
             flowOffStable = false;
@@ -428,7 +401,6 @@ public final class DeliveryController implements DeliveryControllerPort {
 
         } catch (Exception e) {
             if (listener != null) listener.onError("START", e);
-            // ✅ rollback
             setState(DeliveryState.CONNECTED);
             refreshConnectedLive("START/ERR");
         }
@@ -449,9 +421,6 @@ public final class DeliveryController implements DeliveryControllerPort {
         return false;
     }
 
-    // ============================================================
-    // Status helpers
-    // ============================================================
     private static final class DeliveryStatus {
         final int delStatus;
         final int delCode;
@@ -488,7 +457,11 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
     }
 
+    // ✅ throttle pour éviter les storms
     private void softResync(String reason) {
+        long now = System.currentTimeMillis();
+        if (now - lastResyncMs < 1500) return;
+        lastResyncMs = now;
         link.drainInput(250);
         link.forceSyncNext(reason);
     }
