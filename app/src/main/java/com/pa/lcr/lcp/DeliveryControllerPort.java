@@ -12,6 +12,7 @@ import java.util.List;
  *
  * ✅ Extension compatible: LIVE ajouté en "default" (ne casse pas les implémentations existantes).
  * ✅ Extension compatible: stabilité du FLOW_OFF exposée (default).
+ * ✅ Extension compatible: snapshot NET/GROSS hors boucle (default).
  */
 public interface DeliveryControllerPort {
 
@@ -39,6 +40,12 @@ public interface DeliveryControllerPort {
      * Sert à mettre à jour NET/GROSS quand FLOW_ACTIVE est ON.
      */
     default void requestLiveSample() { /* no-op */ }
+
+    /**
+     * ✅ Snapshot NET/GROSS (une seule lecture) hors boucle liveTick.
+     * Utilisé après crash/reconnect/resync pour afficher ce qui a été livré.
+     */
+    default void requestLiveSnapshot() { /* no-op */ }
 
     /* ===== État ===== */
     DeliveryState getState();
@@ -69,7 +76,6 @@ public interface DeliveryControllerPort {
 
         /**
          * ✅ Notification fine: flow actif / flow off stable / âge du off.
-         * Default no-op pour compatibilité.
          */
         default void onFlowStability(boolean flowActive, boolean flowOffStable, long flowOffAgeMs) { /* no-op */ }
     }
