@@ -6,7 +6,7 @@ import java.util.concurrent.Executors;
 
 public final class DeliveryController implements DeliveryControllerPort {
 
-    private static final int FIELD_ACTIVE_PRODUCT = 0; // 0..15
+    private static final int FIELD_ACTIVE_PRODUCT = 0;
     private static final int FIELD_PRESET_NET = 6;
     private static final int FIELD_DECIMALS = 39;
     private static final int FIELD_GROSS_COUNT = 44;
@@ -16,16 +16,12 @@ public final class DeliveryController implements DeliveryControllerPort {
     private static final int CMD_END = 0x02;
     private static final int CMD_PRINT_LAST_TICKET = 0x06;
 
-    // DeliveryCode bits (SDK / LCP docs)
     private static final int DC_TICKET_PENDING = 0x0001;
     private static final int DC_FLOW_ACTIVE = 0x0004;
-    private static final int DC_DELIVERY_ACTIVE = 0x0008;  // [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/DeliveryController.java)[5](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/lcr_simple_deliverV2.py)
+    private static final int DC_DELIVERY_ACTIVE = 0x0008;
 
     private static final long TICKET_TIMEOUT_MS = 20_000;
     private static final long TICKET_POLL_MS = 250;
-
-    // Flow confirmation like python: detect real movement (stagnation >= 3s means OFF stable)
-    private static final long FLOW_STABLE_OFF_MS = 3000;   // [3](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
 
     private final LcpLink link;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
@@ -45,25 +41,14 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     private volatile boolean startInProgress = false;
 
-    // Anti resync-storm
     private volatile long lastResyncMs = 0L;
 
-    // Real-flow detector (counts)
-    private volatile int lastGrossRaw = Integer.MIN_VALUE;
-    private volatile int lastNetRaw = Integer.MIN_VALUE;
-    private volatile long lastCountChangeMs = 0L;
-
-    public DeliveryController(LcpLink link) {
-        this.link = link;
-    }
+    public DeliveryController(LcpLink link) { this.link = link; }
 
     @Override
     public void setListener(Listener listener) {
         this.listener = listener;
-        if (listener == null) {
-            link.setTraceSink(null);
-            return;
-        }
+        if (listener == null) { link.setTraceSink(null); return; }
 
         link.setTraceSink(line -> {
             if (!txRxEnabled) {
@@ -88,29 +73,18 @@ public final class DeliveryController implements DeliveryControllerPort {
     public void initialize() {
         io.execute(() -> {
             setState(DeliveryState.CONNECTED);
-            if (listener != null) {
-                listener.onLog("LCP prêt (sans refresh automatique)");
-            }
-            refreshConnectedOrActiveLive("INIT");
+            if (listener != null) listener.onLog("LCP prêt (sans refresh automatique)");
+            refreshConnectedLive("INIT");
         });
     }
 
-    @Override
-    public void shutdown() {
-        io.shutdownNow();
-        setState(DeliveryState.DISCONNECTED);
-    }
-
-    @Override
-    public void refreshProducts() {
-        if (listener != null) listener.onLog("refreshProducts ignoré (mode sans rafraîchissement)");
-    }
+    @Override public void shutdown() { io.shutdownNow(); setState(DeliveryState.DISCONNECTED); }
+    @Override public void refreshProducts() { if (listener != null) listener.onLog("refreshProducts ignoré"); }
 
     @Override
     public void selectProduct(int product1to16) {
         io.execute(() -> {
             try {
-                if (state == DeliveryState.DISCONNECTED) return;
                 int idx0 = product1to16 - 1;
                 link.opSetField(FIELD_ACTIVE_PRODUCT, new byte[]{(byte) idx0});
             } catch (Exception e) {
@@ -120,43 +94,32 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     @Override public DeliveryState getState() { return state; }
-
-    @Override
-    public boolean isDeliveryActive() {
-        return state == DeliveryState.RUNNING_FLOWING || state == DeliveryState.RUNNING_PAUSED;
-    }
-
+    @Override public boolean isDeliveryActive() { return state == DeliveryState.RUNNING_FLOWING || state == DeliveryState.RUNNING_PAUSED; }
     @Override public boolean isPaused() { return state == DeliveryState.RUNNING_PAUSED; }
     @Override public boolean isFlowOffStable() { return flowOffStable; }
     @Override public long getFlowOffAgeMs() { return 0L; }
 
-    // ============================================================
-    // A = Align / Recover (no START intention)
-    // ============================================================
+    // A = align/recover (doit traiter TicketPending)
     @Override
     public void alignOrRecover() {
         io.execute(() -> {
             try {
-                if (state == DeliveryState.DISCONNECTED) return;
-                if (listener != null) listener.onLog("[A] Align / recover requested");
                 pendingStart = false;
+                if (listener != null) listener.onLog("[A] Align / recover requested");
                 doAlignOrRecover();
             } catch (Exception e) {
                 if (listener != null) listener.onError("alignOrRecover", e);
                 setState(DeliveryState.CONNECTED);
-                refreshConnectedOrActiveLive("A/ERR");
+                refreshConnectedLive("A/ERR");
             }
         });
     }
 
-    // ============================================================
-    // C = Start intent (validate; align if needed; auto-start when clean)
-    // ============================================================
+    // C = intent start (si ticket pending: align+print puis auto-start)
     @Override
     public void startDelivery(int product1to16, double presetNet) {
         io.execute(() -> {
             try {
-                if (state == DeliveryState.DISCONNECTED) return;
                 if (isDeliveryActive() || state == DeliveryState.PRESTART || state == DeliveryState.ENDING) return;
                 if (startInProgress) return;
 
@@ -170,8 +133,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                 DeliveryStatus st = readStatusWithResync("C/precheck");
                 if (st == null) {
                     startInProgress = false;
-                    setState(DeliveryState.CONNECTED);
-                    refreshConnectedOrActiveLive("C/precheck-null");
+                    refreshConnectedLive("C/precheck-null");
                     return;
                 }
 
@@ -190,21 +152,17 @@ public final class DeliveryController implements DeliveryControllerPort {
                     listener.onLog("[C] Register NOT ready → align/recover");
                 }
 
-                doAlignOrRecover(); // auto-start if pendingStart and clean
+                doAlignOrRecover(); // WILL clear ticket and then auto-start
                 startInProgress = false;
 
             } catch (Exception e) {
                 if (listener != null) listener.onError("startDelivery(C-intent)", e);
                 startInProgress = false;
-                setState(DeliveryState.CONNECTED);
-                refreshConnectedOrActiveLive("C/ERR");
+                refreshConnectedLive("C/ERR");
             }
         });
     }
 
-    // ============================================================
-    // Resume / End
-    // ============================================================
     @Override
     public void resumeIfPaused() {
         io.execute(() -> {
@@ -223,10 +181,8 @@ public final class DeliveryController implements DeliveryControllerPort {
     public void endDelivery() {
         io.execute(() -> {
             try {
-                if (state == DeliveryState.DISCONNECTED) return;
-                if (state == DeliveryState.ENDING) return;
-                if (!flowOffStable) return;
                 if (state != DeliveryState.RUNNING_PAUSED) return;
+                if (!flowOffStable) return;
 
                 setState(DeliveryState.ENDING);
                 if (listener != null) listener.onLog("[END] Issue END (0x02)");
@@ -235,23 +191,17 @@ public final class DeliveryController implements DeliveryControllerPort {
                 long deadline = System.currentTimeMillis() + 15000;
                 while (System.currentTimeMillis() < deadline) {
                     DeliveryStatus st = readStatusWithResync("END/poll");
-                    if (st != null && !st.deliveryActive) {
-                        flowOffStable = true;
-                        setState(DeliveryState.CONNECTED);
-                        refreshConnectedOrActiveLive("END/done");
-                        return;
-                    }
+                    if (st != null && !st.deliveryActive) break;
                     try { Thread.sleep(250); } catch (InterruptedException ignored) {}
                 }
 
-                flowOffStable = true;
                 setState(DeliveryState.CONNECTED);
-                refreshConnectedOrActiveLive("END/timeout");
+                refreshConnectedLive("END/done");
 
             } catch (Exception e) {
                 if (listener != null) listener.onError("endDelivery", e);
                 setState(DeliveryState.CONNECTED);
-                refreshConnectedOrActiveLive("END/ERR");
+                refreshConnectedLive("END/ERR");
             }
         });
     }
@@ -268,9 +218,6 @@ public final class DeliveryController implements DeliveryControllerPort {
         });
     }
 
-    // ============================================================
-    // LIVE tick (UI calls only when RUNNING_FLOWING)
-    // ============================================================
     @Override
     public void requestLiveSample() {
         io.execute(() -> {
@@ -280,43 +227,30 @@ public final class DeliveryController implements DeliveryControllerPort {
                 if (st == null) return;
 
                 if (!st.deliveryActive) {
-                    flowOffStable = true;
                     setState(DeliveryState.CONNECTED);
-                    refreshConnectedOrActiveLive("LIVE/inactive");
+                    refreshConnectedLive("LIVE/inactive");
+                    flowOffStable = true;
                     return;
                 }
 
-                // if bit says off => paused
                 if (!st.flowActive) {
-                    flowOffStable = true;
                     setState(DeliveryState.RUNNING_PAUSED);
                     if (listener != null) listener.onLiveStatus("LIVE: RUNNING_PAUSED (FLOW OFF)");
+                    flowOffStable = true;
                     return;
                 }
 
-                // bit says on: confirm by counter change (real flow)
                 ensureDigits();
                 int grossRaw = beI32(link.opGetField(FIELD_GROSS_COUNT));
                 int netRaw = beI32(link.opGetField(FIELD_NET_COUNT));
-                boolean changed = updateCountsAndDetectChange(grossRaw, netRaw);
-
-                if (!changed) {
-                    // no movement -> paused/wait
-                    flowOffStable = isFlowOffStableNow();
-                    setState(DeliveryState.RUNNING_PAUSED);
-                    if (listener != null) listener.onLiveStatus("LIVE: RUNNING_PAUSED (FLOW WAIT)");
-                    return;
-                }
-
-                // movement -> flowing
-                flowOffStable = false;
                 double scale = Math.pow(10, cachedDigits);
+
                 if (listener != null) {
                     listener.onLiveQty(netRaw / scale, grossRaw / scale);
-                    listener.onFlowStability(true, false, 0L);
                     listener.onLiveStatus("LIVE: RUNNING_FLOWING (FLOW ON)");
                 }
                 setState(DeliveryState.RUNNING_FLOWING);
+                flowOffStable = false;
 
             } catch (Exception ignored) {
             } finally {
@@ -332,51 +266,25 @@ public final class DeliveryController implements DeliveryControllerPort {
                 DeliveryStatus st = readStatusWithResync("SNAP/0x28");
                 if (st == null) return;
 
-                // If no active delivery: stay CONNECTED qualified
                 if (!st.deliveryActive) {
-                    flowOffStable = true;
-                    if (listener != null) listener.onLiveStatus(st.ticketPending
-                            ? "LIVE: CONNECTED — Ticket pending"
-                            : "LIVE: CONNECTED — Prêt à livrer");
+                    setState(DeliveryState.CONNECTED);
+                    refreshConnectedLive("SNAP/inactive");
                     return;
                 }
 
-                // Active delivery: confirm flow via counts
-                ensureDigits();
-                int grossRaw = beI32(link.opGetField(FIELD_GROSS_COUNT));
-                int netRaw = beI32(link.opGetField(FIELD_NET_COUNT));
-                boolean changed = updateCountsAndDetectChange(grossRaw, netRaw);
-
-                double scale = Math.pow(10, cachedDigits);
-                if (listener != null) listener.onLiveQty(netRaw / scale, grossRaw / scale);
-
-                if (st.flowActive && changed) {
-                    flowOffStable = false;
-                    setState(DeliveryState.RUNNING_FLOWING);
-                    if (listener != null) listener.onLiveStatus("LIVE: RUNNING_FLOWING (FLOW ON)");
-                } else {
-                    flowOffStable = true;
-                    setState(DeliveryState.RUNNING_PAUSED);
-                    if (listener != null) listener.onLiveStatus("LIVE: RUNNING_PAUSED (FLOW OFF)");
-                }
+                setState(DeliveryState.RUNNING_PAUSED);
+                if (listener != null) listener.onLiveStatus("LIVE: RUNNING_PAUSED (snapshot)");
 
             } catch (Exception ignored) {}
         });
     }
 
-    // ============================================================
-    // Align/recover core
-    // ============================================================
+    // === Align/recover core ===
     private void doAlignOrRecover() throws Exception {
         DeliveryStatus st = readStatusWithResync("A/0x28");
         if (st == null) return;
 
-        // Ticket pending without active delivery => stay CONNECTED, don't jump to RUNNING_*
-        if (st.ticketPending && !st.deliveryActive) {
-            if (listener != null) listener.onLiveStatus("LIVE: CONNECTED — Ticket pending");
-            return;
-        }
-
+        // ✅ ALWAYS handle ticket pending (like python Issue #6)
         if (st.ticketPending) {
             if (listener != null) {
                 listener.onLiveStatus("LIVE: CONNECTED — Ticket_pending (recovering)");
@@ -388,30 +296,29 @@ public final class DeliveryController implements DeliveryControllerPort {
             if (st == null) return;
         }
 
-        // Active delivery: decide paused/flowing based on REAL flow
-        if (st.deliveryActive) {
-            ensureDigits();
-            int grossRaw = beI32(link.opGetField(FIELD_GROSS_COUNT));
-            int netRaw = beI32(link.opGetField(FIELD_NET_COUNT));
-            boolean changed = updateCountsAndDetectChange(grossRaw, netRaw);
-
-            if (st.flowActive && changed) {
-                flowOffStable = false;
-                setState(DeliveryState.RUNNING_FLOWING);
-                if (listener != null) listener.onLiveStatus("LIVE: RUNNING_FLOWING (recovered)");
-            } else {
-                flowOffStable = true;
-                setState(DeliveryState.RUNNING_PAUSED);
-                if (listener != null) listener.onLiveStatus("LIVE: RUNNING_PAUSED (recovered)");
-            }
+        // If active delivery but no flow -> paused (operator decides continue/end)
+        if (st.deliveryActive && !st.flowActive) {
+            setState(DeliveryState.RUNNING_PAUSED);
+            flowOffStable = true;
+            if (listener != null) listener.onLiveStatus("LIVE: RUNNING_PAUSED (recovered)");
             return;
         }
 
-        // Now clean (idle)
+        // If active delivery & flow -> reflect
+        if (st.deliveryActive && st.flowActive) {
+            setState(DeliveryState.RUNNING_FLOWING);
+            flowOffStable = false;
+            if (listener != null) listener.onLiveStatus("LIVE: RUNNING_FLOWING (recovered)");
+            return;
+        }
+
+        // clean idle
+        setState(DeliveryState.CONNECTED);
         if (listener != null) listener.onLiveStatus(st.ticketPending
                 ? "LIVE: CONNECTED — Ticket pending"
                 : "LIVE: CONNECTED — Prêt à livrer");
 
+        // auto-start if C intent pending and now clean
         if (pendingStart && isReadyToStart(st)) {
             if (listener != null) listener.onLog("[AUTO] Alignment complete → START");
             pendingStart = false;
@@ -419,7 +326,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
     }
 
-    // ✅ START direct, no extra START/0x28 precheck
+    // START direct + rollback
     private void doStartNewDelivery(int product1to16, double presetNet) {
         try {
             setState(DeliveryState.PRESTART);
@@ -433,14 +340,14 @@ public final class DeliveryController implements DeliveryControllerPort {
 
             link.opIssueCommand(CMD_RUN);
 
-            flowOffStable = false;
             setState(DeliveryState.RUNNING_PAUSED);
+            flowOffStable = true;
             if (listener != null) listener.onLiveStatus("LIVE: RUNNING_PAUSED");
 
         } catch (Exception e) {
             if (listener != null) listener.onError("START", e);
             setState(DeliveryState.CONNECTED);
-            refreshConnectedOrActiveLive("START/ERR");
+            refreshConnectedLive("START/ERR");
         }
     }
 
@@ -495,7 +402,6 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
     }
 
-    // ✅ throttle to avoid storms
     private void softResync(String reason) {
         long now = System.currentTimeMillis();
         if (now - lastResyncMs < 1500) return;
@@ -504,21 +410,13 @@ public final class DeliveryController implements DeliveryControllerPort {
         link.forceSyncNext(reason);
     }
 
-    // Connect/live qualifier respecting active delivery vs ticket_pending
-    private void refreshConnectedOrActiveLive(String tag) {
+    private void refreshConnectedLive(String tag) {
         DeliveryStatus st = readStatusWithResync("LIVE/" + tag);
         if (listener == null) return;
         if (st == null) {
             listener.onLiveStatus("LIVE: CONNECTED — (état inconnu)");
             return;
         }
-
-        // If active delivery: reflect paused/flowing (real-flow will be updated by snapshot/sample)
-        if (st.deliveryActive) {
-            listener.onLiveStatus("LIVE: (delivery active)");
-            return;
-        }
-
         listener.onLiveStatus(st.ticketPending
                 ? "LIVE: CONNECTED — Ticket pending"
                 : "LIVE: CONNECTED — Prêt à livrer");
@@ -570,29 +468,6 @@ public final class DeliveryController implements DeliveryControllerPort {
                 | ((b[1] & 0xFF) << 16)
                 | ((b[2] & 0xFF) << 8)
                 | (b[3] & 0xFF);
-    }
-
-    // Real-flow helpers (counts)
-    private boolean updateCountsAndDetectChange(int grossRaw, int netRaw) {
-        long now = System.currentTimeMillis();
-        if (lastGrossRaw == Integer.MIN_VALUE) {
-            lastGrossRaw = grossRaw;
-            lastNetRaw = netRaw;
-            lastCountChangeMs = now;
-            return false;
-        }
-        boolean changed = (grossRaw != lastGrossRaw) || (netRaw != lastNetRaw);
-        if (changed) {
-            lastGrossRaw = grossRaw;
-            lastNetRaw = netRaw;
-            lastCountChangeMs = now;
-        }
-        return changed;
-    }
-
-    private boolean isFlowOffStableNow() {
-        long now = System.currentTimeMillis();
-        return lastCountChangeMs > 0 && (now - lastCountChangeMs) >= FLOW_STABLE_OFF_MS;
     }
 
     private void setState(DeliveryState s) {
