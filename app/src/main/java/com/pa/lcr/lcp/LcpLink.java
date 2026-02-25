@@ -10,23 +10,19 @@ public final class LcpLink {
 
     private static final Object PORT_LOCK = new Object();
 
-    /* ===================== Trace (vers UI) ===================== */
     public interface TraceSink { void onTrace(String line); }
     private volatile TraceSink trace;
     public void setTraceSink(TraceSink sink) { this.trace = sink; }
     private void t(String s) { TraceSink ts = trace; if (ts != null) ts.onTrace(s); }
 
-    /* ===================== Constantes LCP ===================== */
     public static final byte SYNC = 0x7E;
     private static final byte ESC = 0x1B;
 
-    // Return codes (payload[0])
     private static final int RC_OK = 0x00;
     private static final int RC_REQUEST_QUEUED = 0x26;
     private static final int RC_NO_REQUEST_ACTIVE = 0x27;
     private static final int RC_REQUEST_ABORTED = 0x28;
 
-    // Msg IDs
     private static final byte MSG_GET_PRODUCT_ID = 0x00;
     private static final byte MSG_GET_FIELD = 0x20;
     private static final byte MSG_SET_FIELD = 0x21;
@@ -48,10 +44,9 @@ public final class LcpLink {
 
     // ✅ Ajout : état “transport fermé”
     private volatile boolean closed = false;
-
     public boolean isClosed() { return closed; }
 
-    /** ✅ Ajout : fermer proprement la session (appelé sur detach / shutdown controller). */
+    /** ✅ Ajout : fermer proprement la session */
     public synchronized void close() {
         closed = true;
         try {
@@ -66,9 +61,6 @@ public final class LcpLink {
         this.syncFirstEnabled = syncFirstEnabled;
     }
 
-    /* ============================================================
-     * resynchronisation douce (sans reset USB)
-     * ============================================================ */
     public void drainInput(int millis) {
         if (closed) return;
         int total = 0;
@@ -95,9 +87,6 @@ public final class LcpLink {
         this.syncUsed = false;
     }
 
-    /* ============================================================
-     * Types publics
-     * ============================================================ */
     public static final class MachineStatus {
         public final int rc;
         public final int devStatus;
@@ -114,10 +103,12 @@ public final class LcpLink {
     }
 
     /* ============================================================
-     * API opérations
+     * API opérations — timeouts augmentés (éviter faux “Transport down”)
      * ============================================================ */
+
     public byte[] opGetField(int field) throws IOException {
-        Response r = sendRecv(buildPayload(MSG_GET_FIELD, new byte[]{(byte) field}), 3000);
+        // avant: 3000ms dans ta version actuelle [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LcpLink.java)
+        Response r = sendRecv(buildPayload(MSG_GET_FIELD, new byte[]{(byte) field}), 5000);
         ensureOk(r, "GET_FIELD #" + field);
         if (r.payload.length < 2) throw new IOException("GET_FIELD payload trop court");
         byte[] fieldData = new byte[r.payload.length - 2];
@@ -126,21 +117,22 @@ public final class LcpLink {
     }
 
     public void opSetField(int field, byte[] value) throws IOException {
+        // avant: 3000ms dans ta version actuelle [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LcpLink.java)
         byte[] pl = new byte[2 + (value == null ? 0 : value.length)];
         pl[0] = MSG_SET_FIELD;
         pl[1] = (byte) field;
         if (value != null && value.length > 0) System.arraycopy(value, 0, pl, 2, value.length);
-        Response r = sendRecv(pl, 3000);
+        Response r = sendRecv(pl, 8000);
         ensureOk(r, "SET_FIELD #" + field);
     }
 
     public void opIssueCommand(int cmd) throws IOException {
-        Response r = sendRecv(buildPayload(MSG_ISSUE_COMMAND, new byte[]{(byte) cmd}), 6000);
+        Response r = sendRecv(buildPayload(MSG_ISSUE_COMMAND, new byte[]{(byte) cmd}), 10000);
         ensureOk(r, "ISSUE_COMMAND 0x" + hex2(cmd));
     }
 
     public int[] opDeliveryStatus() throws IOException {
-        Response r = sendRecv(buildPayload(MSG_GET_DELIVERY_STATUS, null), 3000);
+        Response r = sendRecv(buildPayload(MSG_GET_DELIVERY_STATUS, null), 6000);
         ensureOk(r, "GET_DELIVERY_STATUS");
         if (r.payload.length < 6) throw new IOException("DELIVERY_STATUS payload trop court len=" + r.payload.length);
         int delStatus = u16be(r.payload[2], r.payload[3]);
@@ -149,12 +141,12 @@ public final class LcpLink {
     }
 
     public void opGetProductId() throws IOException {
-        Response r = sendRecv(buildPayload(MSG_GET_PRODUCT_ID, null), 3000);
+        Response r = sendRecv(buildPayload(MSG_GET_PRODUCT_ID, null), 5000);
         ensureOk(r, "GET_PRODUCT_ID");
     }
 
     public MachineStatus opGetMachineStatus() throws IOException {
-        Response r = sendRecv(buildPayload(MSG_GET_MACHINE_STATUS, null), 6000);
+        Response r = sendRecv(buildPayload(MSG_GET_MACHINE_STATUS, null), 10000);
         ensureOk(r, "GET_MACHINE_STATUS");
         if (r.payload.length < 7) throw new IOException("MACHINE_STATUS payload trop court len=" + r.payload.length);
         int rc = r.payload[0] & 0xFF;
@@ -166,7 +158,7 @@ public final class LcpLink {
     }
 
     /* ============================================================
-     * Core send/recv (queued aware) + TX/RX logging
+     * send/recv queued aware + 0x7D
      * ============================================================ */
     private synchronized Response sendRecv(byte[] payload, int timeoutMs) throws IOException {
         if (closed) throw new IOException("Transport closed");
@@ -186,13 +178,12 @@ public final class LcpLink {
         final int queuedWindowMs = queuedWindowFor(origMsg, timeoutMs);
 
         long nextCheckAt = 0L;
-        int checkDelayMs = 200;
-        final int checkDelayMax = 650;
+        int checkDelayMs = 220;
+        final int checkDelayMax = 700;
 
         while (System.currentTimeMillis() < deadline) {
             if (closed) throw new IOException("Transport closed");
 
-            // queued -> CHECK_REQUEST
             if (queued && System.currentTimeMillis() >= nextCheckAt) {
                 byte[] chkPayload = new byte[]{ MSG_CHECK_REQUEST };
                 byte[] chkFrame = encodeFrame(chkPayload);
@@ -201,7 +192,7 @@ public final class LcpLink {
                     if (closed) throw new IOException("Transport closed");
                     port.write(chkFrame, 500);
                 }
-                checkDelayMs = Math.min(checkDelayMax, (int) (checkDelayMs * 1.35));
+                checkDelayMs = Math.min(checkDelayMax, (int)(checkDelayMs * 1.35));
                 nextCheckAt = System.currentTimeMillis() + checkDelayMs;
             }
 
@@ -214,7 +205,6 @@ public final class LcpLink {
 
             int rc0 = (rx.payload.length >= 1) ? (rx.payload[0] & 0xFF) : 0xFF;
 
-            // Enter queued mode
             if (rc0 == RC_REQUEST_QUEUED) {
                 if (!queued) {
                     queued = true;
@@ -226,15 +216,11 @@ public final class LcpLink {
                 continue;
             }
 
-            if (queued && rc0 == RC_NO_REQUEST_ACTIVE) {
-                continue;
-            }
+            if (queued && rc0 == RC_NO_REQUEST_ACTIVE) continue;
 
-            if (rc0 == RC_REQUEST_ABORTED) {
-                throw new IOException("Queued aborted (rc=0x28)");
-            }
+            if (rc0 == RC_REQUEST_ABORTED) throw new IOException("Queued aborted (rc=0x28)");
 
-            // unwrap ONLY if signature [OK, OK, ...]
+            // unwrap only if signature [OK, OK, ...]
             if (queued && rc0 == RC_OK && rx.payload.length >= 3 && ((rx.payload[1] & 0xFF) == RC_OK)) {
                 byte[] norm = new byte[rx.payload.length - 1];
                 System.arraycopy(rx.payload, 1, norm, 0, norm.length);
@@ -268,9 +254,6 @@ public final class LcpLink {
         if (r.rc != RC_OK) throw new IOException(ctx + ": rc=0x" + hex2(r.rc));
     }
 
-    /* ============================================================
-     * Encode (escape + CRC seed 0x7E7E)
-     * ============================================================ */
     private byte[] encodeFrame(byte[] payload) {
         int status = nextStatusByte();
         byte[] var = new byte[4 + payload.length];
@@ -308,9 +291,6 @@ public final class LcpLink {
         return st;
     }
 
-    /* ============================================================
-     * Read frame (tolérant)
-     * ============================================================ */
     private Frame readFrame(int sliceTimeoutMs) throws IOException {
         if (closed) return null;
 
@@ -397,7 +377,6 @@ public final class LcpLink {
         return (n == 1) ? (b[0] & 0xFF) : -1;
     }
 
-    /* ===================== Trace (format minimal) ===================== */
     private void traceFrame(boolean tx, byte[] canonicalFrame, byte[] relatedTxPayload) {
         String dir = tx ? "TX" : "RX";
         t(dir + ": " + hexDump(canonicalFrame));
