@@ -2,7 +2,6 @@
 package com.pa.lcr.lcp;
 
 import com.hoho.android.usbserial.driver.UsbSerialPort;
-
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
@@ -90,7 +89,6 @@ public final class LcpLink {
         public final int prnStatus;
         public final int delStatus;
         public final int delCode;
-
         public MachineStatus(int rc, int devStatus, int prnStatus, int delStatus, int delCode) {
             this.rc = rc;
             this.devStatus = devStatus;
@@ -154,53 +152,145 @@ public final class LcpLink {
 
     /* ============================================================
      * Core send/recv (queued aware) + TX/RX logging
+     *
+     * ✅ Correctif: gestion robuste de REQUEST_QUEUED (0x26)
+     * - fenêtre queued longue (comme le script Python)
+     * - backoff CHECK_REQUEST
+     * - normalisation des réponses CHECK_REQUEST (strip du premier byte)
      * ============================================================ */
     private synchronized Response sendRecv(byte[] payload, int timeoutMs) throws IOException {
+
+        final byte origMsg = (payload != null && payload.length > 0) ? payload[0] : 0;
+
+        // 1) Transmit original request
         byte[] txFrame = encodeFrame(payload);
         traceFrame(true, txFrame, payload);
         synchronized (PORT_LOCK) {
             port.write(txFrame, 500);
         }
 
-        long deadline = System.currentTimeMillis() + timeoutMs;
-        byte lastTxMsg = payload.length > 0 ? payload[0] : 0;
-        boolean waitingQueued = false;
+        // 2) Timing / state for queued handling
+        long now = System.currentTimeMillis();
+        long deadline = now + timeoutMs;
+
+        boolean inQueuedMode = false;
+        boolean sentCheckRequest = false;
+        long queuedDeadline = 0L;
+
+        // Backoff for CHECK_REQUEST
+        long nextCheckAt = 0L;
+        int checkDelayMs = 180;     // initial (more gentle than 80ms)
+        int checkDelayMax = 600;    // cap
+
+        // How long we allow queued to resolve (per message)
+        // Align with Python: can extend to ~30s in busy phases. [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/UsbReceiver.java)
+        final int queuedWindowMs = queuedWindowFor(origMsg, timeoutMs);
 
         while (System.currentTimeMillis() < deadline) {
+
             Frame rx = readFrame(250);
             if (rx == null) continue;
             if (rx.to != hostAddr) continue;
 
             lastResponderNode = rx.from;
+
+            // Note: traceFrame(false, ...) expects "relatedTxPayload" for REPLY-TO explanation.
+            // When in queued mode, we still want to show the original request as context.
             traceFrame(false, rx.rawFrame, payload);
 
-            int rc = (rx.payload.length >= 1) ? (rx.payload[0] & 0xFF) : 0xFF;
+            // rc in first byte of payload (standard response layout) [3](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/_layouts/15/Doc.aspx?sourcedoc=%7BC9E1B497-22D3-4455-A2FF-D09799A0E233%7D&file=LCR%20Registers%27%20Fields.xlsx&action=default&mobileredirect=true)
+            int rc0 = (rx.payload.length >= 1) ? (rx.payload[0] & 0xFF) : 0xFF;
 
-            if (rc == RC_REQUEST_QUEUED) {
-                waitingQueued = true;
-            } else if (rc == RC_NO_REQUEST_ACTIVE) {
-                // continue
-            } else if (rc == RC_REQUEST_ABORTED) {
-                throw new IOException("Queued aborted (rc=0x28)");
-            } else {
-                return new Response(lastTxMsg, rc, rx);
-            }
+            // 3) If not queued yet, detect queued
+            if (rc0 == RC_REQUEST_QUEUED) {
+                if (!inQueuedMode) {
+                    inQueuedMode = true;
+                    sentCheckRequest = false;
 
-            if (waitingQueued) {
-                try { Thread.sleep(80); } catch (InterruptedException ignored) {}
-                byte[] chkPayload = new byte[]{MSG_CHECK_REQUEST};
-                byte[] chkFrame = encodeFrame(chkPayload);
-                traceFrame(true, chkFrame, chkPayload);
-                synchronized (PORT_LOCK) {
-                    port.write(chkFrame, 500);
+                    // Extend deadline into a "queued window" (once)
+                    long qd = System.currentTimeMillis() + queuedWindowMs;
+                    queuedDeadline = qd;
+                    deadline = Math.max(deadline, qd);
+
+                    t("↳ QUEUED: fenêtre étendue à " + queuedWindowMs + " ms (msg=" + explainMsg(origMsg) + ")");
                 }
-                waitingQueued = false;
+
+                // Schedule first CHECK_REQUEST
+                if (nextCheckAt == 0L) nextCheckAt = System.currentTimeMillis() + checkDelayMs;
+                continue;
             }
+
+            // 4) If we are in queued mode, interpret CHECK_REQUEST results.
+            if (inQueuedMode) {
+
+                // Some devices may answer "no request active" during checks
+                if (rc0 == RC_NO_REQUEST_ACTIVE) {
+                    // Keep checking until queued window expires
+                    if (nextCheckAt == 0L) nextCheckAt = System.currentTimeMillis() + checkDelayMs;
+                    continue;
+                }
+
+                // If still queued, keep waiting
+                if (rc0 == RC_REQUEST_QUEUED) {
+                    if (nextCheckAt == 0L) nextCheckAt = System.currentTimeMillis() + checkDelayMs;
+                    continue;
+                }
+
+                // If aborted -> fail fast
+                if (rc0 == RC_REQUEST_ABORTED) {
+                    throw new IOException("Queued aborted (rc=0x28)");
+                }
+
+                // ✅ Normalisation CHECK_REQUEST:
+                // Python strips first byte of CHECK_REQUEST response: p = p[1:] [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/UsbReceiver.java)
+                //
+                // When queued resolves, many firmwares return:
+                //   payload = [RC_OK, <original_response_payload...>]
+                // where <original_response_payload...> begins with original rc, devStatus, etc.
+                //
+                // So if we see RC_OK and at least 2 bytes, we strip payload[0] and return the rest,
+                // preserving the expected layout for callers (opDeliveryStatus/opGetField/opIssueCommand).
+                if (rc0 == RC_OK && rx.payload.length >= 2) {
+                    byte[] norm = new byte[rx.payload.length - 1];
+                    System.arraycopy(rx.payload, 1, norm, 0, norm.length);
+                    int normRc = (norm.length >= 1) ? (norm[0] & 0xFF) : 0xFF;
+
+                    // Return a Response that looks exactly like a direct response to origMsg
+                    return new Response(origMsg, normRc, norm);
+                }
+
+                // Otherwise: it looks like a direct (non-queued) response layout already
+                return new Response(origMsg, rc0, rx.payload);
+            }
+
+            // 5) Not queued mode: direct response
+            if (rc0 == RC_REQUEST_ABORTED) {
+                throw new IOException("Request aborted (rc=0x28)");
+            }
+            return new Response(origMsg, rc0, rx.payload);
         }
 
+        // If we exit loop due to deadline, log timeout
         t("RX: <timeout>");
-        t("↳ Aucun octet reçu / réponse valide avant expiration (msg=" + explainMsg(lastTxMsg) + ")");
+        t("↳ Aucun octet reçu / réponse valide avant expiration (msg=" + explainMsg(origMsg) + ")");
         throw new IOException("Timeout waiting LCP response");
+    }
+
+    /**
+     * Choisit une fenêtre queued (ms) alignée sur la pratique terrain.
+     * - 0x28 / 0x23 / 0x24 peuvent être queued plus longtemps (tickets, switch, etc.) [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/UsbReceiver.java)[3](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/_layouts/15/Doc.aspx?sourcedoc=%7BC9E1B497-22D3-4455-A2FF-D09799A0E233%7D&file=LCR%20Registers%27%20Fields.xlsx&action=default&mobileredirect=true)
+     */
+    private static int queuedWindowFor(byte origMsg, int baseTimeoutMs) {
+        int base = Math.max(baseTimeoutMs, 6000);
+        int longWin = 30000; // 30s like python LONG_QT behavior in busy periods [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/UsbReceiver.java)
+        switch (origMsg & 0xFF) {
+            case 0x28: // GET_DELIVERY_STATUS
+            case 0x23: // GET_MACHINE_STATUS
+            case 0x24: // ISSUE_COMMAND
+                return Math.max(base, longWin);
+            default:
+                return Math.max(base, 12000);
+        }
     }
 
     private void ensureOk(Response r, String ctx) throws IOException {
@@ -277,7 +367,6 @@ public final class LcpLink {
 
             int calc = crcLcp(rawForCrc.bytes(), 0, rawForCrc.length());
             int recv = ((crc1 & 0xFF) << 8) | (crc0 & 0xFF);
-
             if (calc != recv) return null;
 
             byte[] canonical = buildCanonicalFrame(to, from, status, payload, crc0, crc1);
@@ -501,9 +590,17 @@ public final class LcpLink {
     private static final class Response {
         final int rc;
         final byte[] payload;
+
+        // Direct frame payload
         Response(byte txMsg, int rc, Frame rx) {
             this.rc = rc;
             this.payload = (rx != null && rx.payload != null) ? rx.payload : new byte[0];
+        }
+
+        // ✅ Normalized payload (used for CHECK_REQUEST unwrapping)
+        Response(byte txMsg, int rc, byte[] normalizedPayload) {
+            this.rc = rc;
+            this.payload = (normalizedPayload != null) ? normalizedPayload : new byte[0];
         }
     }
 

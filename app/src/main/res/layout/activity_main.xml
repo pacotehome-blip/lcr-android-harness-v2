@@ -312,14 +312,6 @@
         android:layout_marginTop="6dp">
 
     <!-- ===================== LOG OPTIONS ===================== -->
-    <CheckBox
-        android:id="@+id/cbTxRx"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Afficher TX / RX"
-        android:checked="false"
-        android:layout_marginTop="6dp"/>
-
         <Button
             android:id="@+id/btnClearLog"
             android:layout_width="wrap_content"
@@ -332,6 +324,14 @@
             android:layout_height="wrap_content"
             android:layout_marginStart="8dp"
             android:text="Copy log" />
+        <CheckBox
+            android:id="@+id/cbTxRx"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Afficher TX / RX"
+            android:checked="false"
+            android:layout_marginTop="6dp"/>
+
     </LinearLayout>
 
 </LinearLayout>
