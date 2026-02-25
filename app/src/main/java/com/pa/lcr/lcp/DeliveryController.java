@@ -5,14 +5,16 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * DeliveryController - version terrain (tick LIVE uniquement quand FLOW_ACTIVE=ON).
+ * DeliveryController - version terrain (flow canonique).
  *
  * Règles:
- *  - requestLiveSample(): utilisée par le liveTick uniquement en RUNNING_FLOWING.
- *    -> si FLOW_ACTIVE(bit)=OFF, on sort vite (pas de lecture #44/#45) et on passe PAUSED.
- *  - requestLiveSnapshot(): lecture ponctuelle NET/GROSS (une seule lecture) hors boucle
- *    (après crash/resync/reconnect/sortie de flow).
- *  - Les traces TX/RX/↳ sont filtrées uniquement pendant requestLiveSample() (pas de spam log).
+ * - A = alignOrRecover() : ne démarre jamais
+ * - C = startDelivery(product,preset) : intention nouvelle livraison:
+ *     * validate 0x28
+ *     * si non prêt -> alignOrRecover + pendingStart=true
+ *     * dès que clean -> START auto
+ * - LIVE tick uniquement si FLOW_ACTIVE=ON (piloté UI), lectures #44/#45 uniquement en flow
+ * - TX/RX filtrables globalement (checkbox), tick toujours filtré pour éviter spam
  */
 public final class DeliveryController implements DeliveryControllerPort {
 
@@ -31,25 +33,34 @@ public final class DeliveryController implements DeliveryControllerPort {
     private static final int DC_FLOW_ACTIVE = 0x0004;
     private static final int DC_DELIVERY_ACTIVE = 0x0008;
 
-    private final LcpLink link;
-    private final ExecutorService io = Executors.newSingleThreadExecutor();
-    private Listener listener;
-
-    private volatile DeliveryState state = DeliveryState.DISCONNECTED;
-
-    // Cache digits (décimales)
-    private volatile int cachedDigits = -1;
-
-    // Ticket clear parameters
     private static final long TICKET_TIMEOUT_MS = 20_000;
     private static final long TICKET_POLL_MS = 250;
-    private volatile boolean startInProgress = false;
 
-    // OFF stable (utilisé par l'UI pour activer Continuer/Terminer)
+    private final LcpLink link;
+    private final ExecutorService io = Executors.newSingleThreadExecutor();
+
+    private Listener listener;
+    private volatile DeliveryState state = DeliveryState.DISCONNECTED;
+
+    // Cache digits (#39)
+    private volatile int cachedDigits = -1;
+
+    // Flow off stable
     private volatile boolean flowOffStable = true;
 
-    // Filtrage logs liveTick (TX/RX/↳)
+    // LiveTick filter (TX/RX/↳) only during requestLiveSample()
     private final ThreadLocal<Boolean> inLiveSample = new ThreadLocal<>();
+
+    // Global TX/RX display flag (checkbox)
+    private volatile boolean txRxEnabled = false;
+
+    // Start intention from C
+    private volatile boolean pendingStart = false;
+    private volatile int pendingProduct1to16 = 1;
+    private volatile double pendingPresetNet = 0.0;
+
+    // Prevent re-entry
+    private volatile boolean startInProgress = false;
 
     public DeliveryController(LcpLink link) {
         this.link = link;
@@ -58,14 +69,18 @@ public final class DeliveryController implements DeliveryControllerPort {
     @Override
     public void setListener(Listener listener) {
         this.listener = listener;
-
         if (listener == null) {
             link.setTraceSink(null);
             return;
         }
 
-        // Filtrer TX/RX/↳ uniquement pendant requestLiveSample() (liveTick)
+        // Trace filtering:
+        // - If checkbox OFF: hide TX/RX/↳ globally
+        // - If checkbox ON: show TX/RX/↳ except when liveTick sample is running (avoid spam)
         link.setTraceSink(line -> {
+            if (!txRxEnabled) {
+                if (line.startsWith("TX:") || line.startsWith("RX:") || line.startsWith("↳")) return;
+            }
             if (Boolean.TRUE.equals(inLiveSample.get())) {
                 if (line.startsWith("TX:") || line.startsWith("RX:") || line.startsWith("↳")) return;
             }
@@ -74,10 +89,21 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     @Override
+    public void setTxRxLoggingEnabled(boolean enabled) {
+        io.execute(() -> {
+            txRxEnabled = enabled;
+            if (listener != null) listener.onLog("[LOG] TX/RX " + (enabled ? "ON" : "OFF"));
+        });
+    }
+
+    @Override
     public void initialize() {
         io.execute(() -> {
             setState(DeliveryState.CONNECTED);
-            if (listener != null) listener.onLog("LCP prêt (sans refresh automatique)");
+            if (listener != null) {
+                listener.onLog("LCP prêt (sans refresh automatique)");
+                listener.onLiveStatus("LIVE: CONNECTED — (validation requise)");
+            }
         });
     }
 
@@ -127,101 +153,82 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     @Override
     public long getFlowOffAgeMs() {
-        // Non utilisé dans le mode tick-only-flowing.
         return 0L;
     }
 
-    /* ================= START (ticket-aware) ================= */
+    // ============================================================
+    // A = Align / Recover (no START intention)
+    // ============================================================
+    @Override
+    public void alignOrRecover() {
+        io.execute(() -> {
+            try {
+                if (state == DeliveryState.DISCONNECTED) return;
+                if (isDeliveryActive()) return; // pas d’align pendant une livraison active (sauf reconnect, traité ailleurs)
+                pendingStart = false;
+                if (listener != null) listener.onLog("[A] Align / recover requested");
+                doAlignOrRecover();
+            } catch (Exception e) {
+                if (listener != null) listener.onError("alignOrRecover", e);
+            }
+        });
+    }
+
+    // ============================================================
+    // C = Start intent (validate; align if needed; auto-start when clean)
+    // ============================================================
     @Override
     public void startDelivery(int product1to16, double presetNet) {
         io.execute(() -> {
             try {
                 if (state == DeliveryState.DISCONNECTED) return;
-                if (state == DeliveryState.PRESTART || state == DeliveryState.ENDING) return;
-                if (state == DeliveryState.RUNNING_FLOWING || state == DeliveryState.RUNNING_PAUSED) return;
+                if (isDeliveryActive() || state == DeliveryState.PRESTART || state == DeliveryState.ENDING) return;
                 if (startInProgress) return;
 
                 startInProgress = true;
-                setState(DeliveryState.PRESTART);
+                pendingStart = true;
+                pendingProduct1to16 = product1to16;
+                pendingPresetNet = presetNet;
 
-                int[] st = tryDeliveryStatusWithResync("START/precheck");
+                if (listener != null) listener.onLog("[C] New delivery requested");
+
+                DeliveryStatus st = readStatusWithResync("C/precheck");
                 if (st == null) {
-                    setState(DeliveryState.CONNECTED);
                     startInProgress = false;
                     return;
                 }
 
-                int delCode = st[1];
-
-                if ((delCode & DC_TICKET_PENDING) != 0) {
-                    if (listener != null) listener.onLog("TICKET_PENDING détecté → Issue #6 (print ticket) puis START");
-                    boolean cleared = clearTicketPending();
-                    if (!cleared) {
-                        if (listener != null) listener.onLog("START différé: ticket pas clear (retry auto 2s)");
-                        try { Thread.sleep(2000); } catch (InterruptedException ignored) {}
-                        int[] stRetry = tryDeliveryStatusWithResync("START/retry-ticket");
-                        if (stRetry != null && (stRetry[1] & DC_TICKET_PENDING) == 0) {
-                            doStartSequence(product1to16, presetNet);
-                            startInProgress = false;
-                            return;
-                        }
-                        setState(DeliveryState.CONNECTED);
-                        startInProgress = false;
-                        return;
-                    }
+                if (isReadyToStart(st)) {
+                    if (listener != null) listener.onLog("[C] Register ready → START now");
+                    pendingStart = false;
+                    doStartNewDelivery(pendingProduct1to16, pendingPresetNet);
+                    startInProgress = false;
+                    return;
                 }
 
-                doStartSequence(product1to16, presetNet);
+                // Not ready: show recovering + align, then auto-start when clean
+                if (listener != null) {
+                    if (st.ticketPending) {
+                        listener.onLiveStatus("LIVE: CONNECTED — Ticket_pending (recovering)");
+                    } else {
+                        listener.onLiveStatus("LIVE: CONNECTED — Alignement en cours");
+                    }
+                    listener.onLog("[C] Register NOT ready → align/recover");
+                }
+
+                doAlignOrRecover(); // will auto-start if pendingStart and clean
                 startInProgress = false;
 
             } catch (Exception e) {
-                if (listener != null) listener.onError("startDelivery", e);
-                setState(DeliveryState.CONNECTED);
+                if (listener != null) listener.onError("startDelivery(C-intent)", e);
                 startInProgress = false;
             }
         });
     }
 
-    private void doStartSequence(int product1to16, double presetNet) throws Exception {
-        int idx0 = product1to16 - 1;
-        link.opSetField(FIELD_ACTIVE_PRODUCT, new byte[]{(byte) idx0});
-
-        bestEffortReadDecimalsAfterProduct();
-        writePresetNet_WithCacheOrFallback(presetNet);
-
-        link.opIssueCommand(CMD_RUN);
-
-        // Armé: pas FLOWING tant que FLOW_ACTIVE(bit)=ON
-        flowOffStable = false;
-        setState(DeliveryState.RUNNING_PAUSED);
-    }
-
-    private boolean clearTicketPending() {
-        final long deadline = System.currentTimeMillis() + TICKET_TIMEOUT_MS;
-        boolean resyncDone = false;
-
-        try {
-            link.opIssueCommand(CMD_PRINT_LAST_TICKET);
-        } catch (Exception e) {
-            softResync("TICKET/issue6");
-        }
-
-        while (System.currentTimeMillis() < deadline) {
-            try {
-                int[] st = link.opDeliveryStatus();
-                int dc = st[1];
-                if ((dc & DC_TICKET_PENDING) == 0) return true;
-            } catch (Exception e) {
-                if (!resyncDone) {
-                    resyncDone = true;
-                    softResync("TICKET/0x28");
-                }
-            }
-            try { Thread.sleep(TICKET_POLL_MS); } catch (InterruptedException ignored) {}
-        }
-        return false;
-    }
-
+    // ============================================================
+    // Resume / End
+    // ============================================================
     @Override
     public void resumeIfPaused() {
         io.execute(() -> {
@@ -246,23 +253,26 @@ public final class DeliveryController implements DeliveryControllerPort {
                 if (state != DeliveryState.RUNNING_PAUSED) return;
 
                 setState(DeliveryState.ENDING);
+                if (listener != null) listener.onLog("[END] Issue END (0x02)");
                 link.opIssueCommand(CMD_END);
 
                 long deadline = System.currentTimeMillis() + 15000;
                 while (System.currentTimeMillis() < deadline) {
-                    int[] st = link.opDeliveryStatus();
-                    int dc = st[1];
-                    boolean active = (dc & DC_DELIVERY_ACTIVE) != 0;
-                    if (!active) {
-                        setState(DeliveryState.ENDED);
+                    DeliveryStatus st = readStatusWithResync("END/poll");
+                    if (st != null && !st.deliveryActive) {
                         flowOffStable = true;
+                        // Retour à CONNECTED — Prêt à livrer
+                        setState(DeliveryState.CONNECTED);
+                        if (listener != null) listener.onLiveStatus("LIVE: CONNECTED — Prêt à livrer");
                         return;
                     }
                     try { Thread.sleep(250); } catch (InterruptedException ignored) {}
                 }
 
-                setState(DeliveryState.ENDED);
+                // fallback
                 flowOffStable = true;
+                setState(DeliveryState.CONNECTED);
+                if (listener != null) listener.onLiveStatus("LIVE: CONNECTED — Prêt à livrer");
 
             } catch (Exception e) {
                 if (listener != null) listener.onError("endDelivery", e);
@@ -283,35 +293,34 @@ public final class DeliveryController implements DeliveryControllerPort {
         });
     }
 
-    /** LIVE tick: appelé uniquement quand RUNNING_FLOWING (côté UI). */
+    // ============================================================
+    // LIVE tick (UI calls only when RUNNING_FLOWING)
+    // ============================================================
     @Override
     public void requestLiveSample() {
         io.execute(() -> {
             inLiveSample.set(true);
             try {
-                int[] st = link.opDeliveryStatus();
-                int dc = st[1];
+                DeliveryStatus st = readStatusWithResync("LIVE/0x28");
+                if (st == null) return;
 
-                boolean flowBit = (dc & DC_FLOW_ACTIVE) != 0;
-                boolean deliveryActive = (dc & DC_DELIVERY_ACTIVE) != 0;
-
-                if (!deliveryActive) {
-                    setState(DeliveryState.CONNECTED);
+                if (!st.deliveryActive) {
                     flowOffStable = true;
+                    setState(DeliveryState.CONNECTED);
+                    if (listener != null) listener.onLiveStatus("LIVE: CONNECTED — Prêt à livrer");
                     return;
                 }
 
-                // Si le flow n'est plus actif: sortir vite (pas de #44/#45).
-                if (!flowBit) {
+                if (!st.flowActive) {
                     flowOffStable = true;
                     setState(DeliveryState.RUNNING_PAUSED);
+                    if (listener != null) listener.onLiveStatus("LIVE: RUNNING_PAUSED (FLOW OFF)");
                     return;
                 }
 
-                // Flow ON: progression quasi temps réel
+                // Flow ON
                 flowOffStable = false;
-
-                ensureDigitsInFlow();
+                ensureDigits();
                 int grossRaw = beI32(link.opGetField(FIELD_GROSS_COUNT));
                 int netRaw = beI32(link.opGetField(FIELD_NET_COUNT));
                 double scale = Math.pow(10, cachedDigits);
@@ -319,62 +328,205 @@ public final class DeliveryController implements DeliveryControllerPort {
                 if (listener != null) {
                     listener.onLiveQty(netRaw / scale, grossRaw / scale);
                     listener.onFlowStability(true, false, 0L);
+                    listener.onLiveStatus("LIVE: RUNNING_FLOWING (FLOW ON)");
                 }
-
                 setState(DeliveryState.RUNNING_FLOWING);
 
             } catch (Exception ignored) {
+                // on garde silencieux pour éviter spam; erreurs visibles via logs métier ailleurs
             } finally {
                 inLiveSample.remove();
             }
         });
     }
 
-    /** Snapshot NET/GROSS: une seule lecture hors boucle (après crash/resync/reconnect/sortie de flow). */
     @Override
     public void requestLiveSnapshot() {
         io.execute(() -> {
             try {
-                int[] st = link.opDeliveryStatus();
-                int dc = st[1];
+                DeliveryStatus st = readStatusWithResync("SNAP/0x28");
+                if (st == null) return;
 
-                boolean deliveryActive = (dc & DC_DELIVERY_ACTIVE) != 0;
-                if (!deliveryActive) {
+                if (!st.deliveryActive) {
                     flowOffStable = true;
+                    if (listener != null) listener.onLiveStatus(st.ticketPending
+                            ? "LIVE: CONNECTED — Ticket pending"
+                            : "LIVE: CONNECTED — Prêt à livrer");
                     return;
                 }
 
-                ensureDigitsInFlow();
+                ensureDigits();
                 int grossRaw = beI32(link.opGetField(FIELD_GROSS_COUNT));
                 int netRaw = beI32(link.opGetField(FIELD_NET_COUNT));
                 double scale = Math.pow(10, cachedDigits);
 
                 if (listener != null) listener.onLiveQty(netRaw / scale, grossRaw / scale);
 
-            } catch (Exception ignored) {}
+                if (st.flowActive) {
+                    setState(DeliveryState.RUNNING_FLOWING);
+                    if (listener != null) listener.onLiveStatus("LIVE: RUNNING_FLOWING (FLOW ON)");
+                } else {
+                    setState(DeliveryState.RUNNING_PAUSED);
+                    if (listener != null) listener.onLiveStatus("LIVE: RUNNING_PAUSED (FLOW OFF)");
+                }
+
+            } catch (Exception ignored) { }
         });
     }
 
-    /* ================= Helpers ================= */
-    private void softResync(String reason) {
-        link.drainInput(250);
-        link.forceSyncNext(reason);
+    // ============================================================
+    // Align/recover core
+    // ============================================================
+    private void doAlignOrRecover() throws Exception {
+        DeliveryStatus st = readStatusWithResync("A/0x28");
+        if (st == null) return;
+
+        // Ticket pending
+        if (st.ticketPending) {
+            if (listener != null) {
+                listener.onLiveStatus("LIVE: CONNECTED — Ticket_pending (recovering)");
+                listener.onLog("[A] Ticket pending → Issue #6");
+            }
+            boolean ok = clearTicketPending();
+            if (!ok) {
+                if (listener != null) listener.onLog("[A] Ticket not cleared (timeout)");
+                // on laisse en ticket pending
+                return;
+            }
+            // Revalider après clear
+            st = readStatusWithResync("A/0x28-after-ticket");
+            if (st == null) return;
+        }
+
+        // Delivery active paused: resume
+        if (st.deliveryActive && !st.flowActive) {
+            if (listener != null) listener.onLog("[A] Delivery active paused → RUN (resume)");
+            link.opIssueCommand(CMD_RUN);
+            setState(DeliveryState.RUNNING_PAUSED);
+            if (listener != null) listener.onLiveStatus("LIVE: RUNNING_PAUSED (recovered)");
+            return;
+        }
+
+        // If delivery active & flowing, just reflect state
+        if (st.deliveryActive && st.flowActive) {
+            setState(DeliveryState.RUNNING_FLOWING);
+            if (listener != null) listener.onLiveStatus("LIVE: RUNNING_FLOWING (recovered)");
+            return;
+        }
+
+        // Now clean (or idle)
+        if (listener != null) listener.onLiveStatus(st.ticketPending
+                ? "LIVE: CONNECTED — Ticket pending"
+                : "LIVE: CONNECTED — Prêt à livrer");
+
+        // Auto-start if C intent is pending and register clean
+        if (pendingStart && isReadyToStart(st)) {
+            if (listener != null) listener.onLog("[AUTO] Alignment complete → START");
+            pendingStart = false;
+            doStartNewDelivery(pendingProduct1to16, pendingPresetNet);
+        }
     }
 
-    private int[] tryDeliveryStatusWithResync(String reason) {
+    private void doStartNewDelivery(int product1to16, double presetNet) throws Exception {
+        // strict check: must be ready
+        DeliveryStatus st = readStatusWithResync("START/0x28");
+        if (st == null || !isReadyToStart(st)) {
+            if (listener != null) listener.onLog("[START] Refused: register not ready");
+            return;
+        }
+
+        setState(DeliveryState.PRESTART);
+        if (listener != null) listener.onLiveStatus("LIVE: PRESTART (internal)");
+
+        // product
+        int idx0 = product1to16 - 1;
+        link.opSetField(FIELD_ACTIVE_PRODUCT, new byte[]{(byte) idx0});
+        bestEffortReadDecimals();
+
+        // preset net
+        writePresetNet_WithCacheOrFallback(presetNet);
+
+        // RUN
+        link.opIssueCommand(CMD_RUN);
+
+        flowOffStable = false;
+        setState(DeliveryState.RUNNING_PAUSED);
+        if (listener != null) listener.onLiveStatus("LIVE: RUNNING_PAUSED");
+    }
+
+    // ============================================================
+    // Ticket clear
+    // ============================================================
+    private boolean clearTicketPending() {
+        final long deadline = System.currentTimeMillis() + TICKET_TIMEOUT_MS;
+        boolean resyncDone = false;
+
         try {
-            return link.opDeliveryStatus();
+            link.opIssueCommand(CMD_PRINT_LAST_TICKET);
+        } catch (Exception e) {
+            softResync("TICKET/issue6");
+        }
+
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                DeliveryStatus st = readStatusWithResync("TICKET/0x28");
+                if (st != null && !st.ticketPending) return true;
+            } catch (Exception e) {
+                if (!resyncDone) {
+                    resyncDone = true;
+                    softResync("TICKET/0x28");
+                }
+            }
+            try { Thread.sleep(TICKET_POLL_MS); } catch (InterruptedException ignored) {}
+        }
+        return false;
+    }
+
+    // ============================================================
+    // Status helpers
+    // ============================================================
+    private static final class DeliveryStatus {
+        final int delStatus;
+        final int delCode;
+        final boolean ticketPending;
+        final boolean flowActive;
+        final boolean deliveryActive;
+
+        DeliveryStatus(int delStatus, int delCode) {
+            this.delStatus = delStatus;
+            this.delCode = delCode;
+            this.ticketPending = (delCode & DC_TICKET_PENDING) != 0;
+            this.flowActive = (delCode & DC_FLOW_ACTIVE) != 0;
+            this.deliveryActive = (delCode & DC_DELIVERY_ACTIVE) != 0;
+        }
+    }
+
+    private boolean isReadyToStart(DeliveryStatus st) {
+        return !st.ticketPending && !st.deliveryActive && !st.flowActive;
+    }
+
+    private DeliveryStatus readStatusWithResync(String reason) {
+        try {
+            int[] st = link.opDeliveryStatus();
+            return new DeliveryStatus(st[0], st[1]);
         } catch (Exception e) {
             softResync(reason);
             try {
-                return link.opDeliveryStatus();
+                int[] st2 = link.opDeliveryStatus();
+                return new DeliveryStatus(st2[0], st2[1]);
             } catch (Exception e2) {
+                if (listener != null) listener.onLog("[0x28] Failed after resync: " + reason);
                 return null;
             }
         }
     }
 
-    private void bestEffortReadDecimalsAfterProduct() {
+    private void softResync(String reason) {
+        link.drainInput(250);
+        link.forceSyncNext(reason);
+    }
+
+    private void bestEffortReadDecimals() {
         if (cachedDigits >= 0) return;
         try {
             byte[] dec = link.opGetField(FIELD_DECIMALS);
@@ -383,7 +535,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         } catch (Exception ignored) {}
     }
 
-    private void ensureDigitsInFlow() throws Exception {
+    private void ensureDigits() throws Exception {
         if (cachedDigits >= 0) return;
         byte[] dec = link.opGetField(FIELD_DECIMALS);
         int idx = (dec.length >= 1) ? (dec[0] & 0xFF) : 0;
@@ -427,4 +579,13 @@ public final class DeliveryController implements DeliveryControllerPort {
         state = s;
         if (listener != null) listener.onStateChanged(s);
     }
+
+    // Helpers called from startNewDelivery (kept simple)
+    private void setProduct() { /* not used in this version; start uses doStartNewDelivery */ }
+    private void readDecimalsIfNeeded() { /* not used */ }
+    private void writePreset() { /* not used */ }
+    private void issueRun() { /* not used */ }
+    private void enterPrestart() { /* not used */ }
+    private void printLastTicket() { /* handled by clearTicketPending */ }
+    private void resumePausedDelivery() { /* handled by doAlignOrRecover */ }
 }

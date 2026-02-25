@@ -5,14 +5,13 @@ import java.util.List;
 
 /**
  * Contrat strict entre MainActivity et la couche protocolaire.
- * UX figée:
- * - pas de lecture registre au connect
- * - pas de refresh automatique
- * - lectures uniquement sur action utilisateur (boutons)
  *
- * ✅ Extension compatible: LIVE ajouté en "default" (ne casse pas les implémentations existantes).
- * ✅ Extension compatible: stabilité du FLOW_OFF exposée (default).
- * ✅ Extension compatible: snapshot NET/GROSS hors boucle (default).
+ * Règles métier (baseline):
+ * - A = aligner / recover (ne démarre jamais)
+ * - C = intention nouvelle livraison: validate, align si besoin, START auto quand clean
+ * - UI inchangée: seule la logique controller évolue
+ *
+ * Extensions compatibles via "default" pour ne pas casser les implémentations existantes.
  */
 public interface DeliveryControllerPort {
 
@@ -25,26 +24,37 @@ public interface DeliveryControllerPort {
     void selectProduct(int product1to16);
 
     /* ===== Livraison ===== */
-    void startDelivery(int product1to16, double presetNet); // C = Start
-    void resumeIfPaused(); // Continuer
-    void endDelivery(); // A = End + Finish = End
+
+    /**
+     * C = intention de démarrer une NOUVELLE livraison.
+     * Le controller valide 0x28:
+     * - si clean -> START immédiat
+     * - sinon -> alignOrRecover + START auto quand clean
+     */
+    void startDelivery(int product1to16, double presetNet);
+
+    /**
+     * A = aligner / recover (ticket pending, reprise après crash), sans intention start.
+     */
+    default void alignOrRecover() { /* no-op (compat) */ }
+
+    /**
+     * Continuer (resume) si une livraison est pausée (RUNNING_PAUSED).
+     */
+    void resumeIfPaused();
+
+    /**
+     * Terminer livraison (END). Réservé au bouton "Terminer" (pas A).
+     */
+    void endDelivery();
 
     /**
      * B = Diagnostic global (action utilisateur)
-     * Doit confirmer ce qui bloque ou ce qui ne va pas (delivery/ticket/printer).
      */
     void requestStatus();
 
-    /**
-     * ✅ LIVE tick (optionnel): par défaut no-op pour compatibilité.
-     * Sert à mettre à jour NET/GROSS quand FLOW_ACTIVE est ON.
-     */
+    /* ===== LIVE ===== */
     default void requestLiveSample() { /* no-op */ }
-
-    /**
-     * ✅ Snapshot NET/GROSS (une seule lecture) hors boucle liveTick.
-     * Utilisé après crash/reconnect/resync pour afficher ce qui a été livré.
-     */
     default void requestLiveSnapshot() { /* no-op */ }
 
     /* ===== État ===== */
@@ -52,13 +62,11 @@ public interface DeliveryControllerPort {
     boolean isDeliveryActive();
     boolean isPaused();
 
-    /**
-     * ✅ FLOW_OFF stable (tampon côté controller).
-     * Permet au SDK/UI de savoir si le flow est OFF depuis assez longtemps.
-     * Default pour compatibilité.
-     */
     default boolean isFlowOffStable() { return true; }
     default long getFlowOffAgeMs() { return 0L; }
+
+    /* ===== Option support: afficher TX/RX ===== */
+    default void setTxRxLoggingEnabled(boolean enabled) { /* no-op (compat) */ }
 
     /* ===== Events UI ===== */
     void setListener(Listener listener);
@@ -69,14 +77,13 @@ public interface DeliveryControllerPort {
         void onLog(String message);
         void onError(String context, Throwable error);
 
-        /**
-         * ✅ LIVE quantités (optionnel): par défaut no-op pour compatibilité.
-         */
         default void onLiveQty(double net, double gross) { /* no-op */ }
+        default void onFlowStability(boolean flowActive, boolean flowOffStable, long flowOffAgeMs) { /* no-op */ }
 
         /**
-         * ✅ Notification fine: flow actif / flow off stable / âge du off.
+         * ✅ Ajout: texte Live métier (CONNECTED — Ticket_pending (recovering), CONNECTED — Prêt à livrer, etc.)
+         * Default no-op pour compatibilité.
          */
-        default void onFlowStability(boolean flowActive, boolean flowOffStable, long flowOffAgeMs) { /* no-op */ }
+        default void onLiveStatus(String liveText) { /* no-op */ }
     }
 }
