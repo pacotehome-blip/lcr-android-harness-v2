@@ -8,7 +8,6 @@ import java.util.List;
 
 public final class LcpLink {
 
-    // Verrou global I/O pour éviter contention si plusieurs LcpLink existent brièvement (double connect, etc.)
     private static final Object PORT_LOCK = new Object();
 
     /* ===================== Trace (vers UI) ===================== */
@@ -153,140 +152,103 @@ public final class LcpLink {
     /* ============================================================
      * Core send/recv (queued aware) + TX/RX logging
      *
-     * ✅ Correctif: gestion robuste de REQUEST_QUEUED (0x26)
-     * - fenêtre queued longue (comme le script Python)
-     * - backoff CHECK_REQUEST
-     * - normalisation des réponses CHECK_REQUEST (strip du premier byte)
+     * ✅ FIXES:
+     * 1) Si RC=0x26 REQUEST_QUEUED: entrer en mode queued et envoyer périodiquement CHECK_REQUEST (0x7D)
+     * 2) Déballage de la réponse 0x7D: payload = payload[1:] (comme le script Python) [4](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
      * ============================================================ */
     private synchronized Response sendRecv(byte[] payload, int timeoutMs) throws IOException {
 
         final byte origMsg = (payload != null && payload.length > 0) ? payload[0] : 0;
 
-        // 1) Transmit original request
+        // TX original
         byte[] txFrame = encodeFrame(payload);
         traceFrame(true, txFrame, payload);
         synchronized (PORT_LOCK) {
             port.write(txFrame, 500);
         }
 
-        // 2) Timing / state for queued handling
-        long now = System.currentTimeMillis();
-        long deadline = now + timeoutMs;
+        long deadline = System.currentTimeMillis() + timeoutMs;
 
-        boolean inQueuedMode = false;
-        boolean sentCheckRequest = false;
-        long queuedDeadline = 0L;
-
-        // Backoff for CHECK_REQUEST
-        long nextCheckAt = 0L;
-        int checkDelayMs = 180;     // initial (more gentle than 80ms)
-        int checkDelayMax = 600;    // cap
-
-        // How long we allow queued to resolve (per message)
-        // Align with Python: can extend to ~30s in busy phases. [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/UsbReceiver.java)
+        boolean queued = false;
         final int queuedWindowMs = queuedWindowFor(origMsg, timeoutMs);
 
+        // CHECK_REQUEST scheduling (gentle backoff)
+        long nextCheckAt = 0L;
+        int checkDelayMs = 200;
+        final int checkDelayMax = 650;
+
         while (System.currentTimeMillis() < deadline) {
+
+            // ✅ If queued: actively send CHECK_REQUEST on schedule
+            if (queued && System.currentTimeMillis() >= nextCheckAt) {
+                byte[] chkPayload = new byte[]{ MSG_CHECK_REQUEST };
+                byte[] chkFrame = encodeFrame(chkPayload);
+                traceFrame(true, chkFrame, chkPayload);
+                synchronized (PORT_LOCK) {
+                    port.write(chkFrame, 500);
+                }
+                checkDelayMs = Math.min(checkDelayMax, (int)(checkDelayMs * 1.35));
+                nextCheckAt = System.currentTimeMillis() + checkDelayMs;
+            }
 
             Frame rx = readFrame(250);
             if (rx == null) continue;
             if (rx.to != hostAddr) continue;
 
             lastResponderNode = rx.from;
-
-            // Note: traceFrame(false, ...) expects "relatedTxPayload" for REPLY-TO explanation.
-            // When in queued mode, we still want to show the original request as context.
             traceFrame(false, rx.rawFrame, payload);
 
-            // rc in first byte of payload (standard response layout) [3](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/_layouts/15/Doc.aspx?sourcedoc=%7BC9E1B497-22D3-4455-A2FF-D09799A0E233%7D&file=LCR%20Registers%27%20Fields.xlsx&action=default&mobileredirect=true)
             int rc0 = (rx.payload.length >= 1) ? (rx.payload[0] & 0xFF) : 0xFF;
 
-            // 3) If not queued yet, detect queued
+            // Enter queued mode
             if (rc0 == RC_REQUEST_QUEUED) {
-                if (!inQueuedMode) {
-                    inQueuedMode = true;
-                    sentCheckRequest = false;
-
-                    // Extend deadline into a "queued window" (once)
+                if (!queued) {
+                    queued = true;
                     long qd = System.currentTimeMillis() + queuedWindowMs;
-                    queuedDeadline = qd;
                     deadline = Math.max(deadline, qd);
-
+                    nextCheckAt = System.currentTimeMillis() + checkDelayMs;
                     t("↳ QUEUED: fenêtre étendue à " + queuedWindowMs + " ms (msg=" + explainMsg(origMsg) + ")");
                 }
-
-                // Schedule first CHECK_REQUEST
-                if (nextCheckAt == 0L) nextCheckAt = System.currentTimeMillis() + checkDelayMs;
                 continue;
             }
 
-            // 4) If we are in queued mode, interpret CHECK_REQUEST results.
-            if (inQueuedMode) {
-
-                // Some devices may answer "no request active" during checks
-                if (rc0 == RC_NO_REQUEST_ACTIVE) {
-                    // Keep checking until queued window expires
-                    if (nextCheckAt == 0L) nextCheckAt = System.currentTimeMillis() + checkDelayMs;
-                    continue;
-                }
-
-                // If still queued, keep waiting
-                if (rc0 == RC_REQUEST_QUEUED) {
-                    if (nextCheckAt == 0L) nextCheckAt = System.currentTimeMillis() + checkDelayMs;
-                    continue;
-                }
-
-                // If aborted -> fail fast
-                if (rc0 == RC_REQUEST_ABORTED) {
-                    throw new IOException("Queued aborted (rc=0x28)");
-                }
-
-                // ✅ Normalisation CHECK_REQUEST:
-                // Python strips first byte of CHECK_REQUEST response: p = p[1:] [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/UsbReceiver.java)
-                //
-                // When queued resolves, many firmwares return:
-                //   payload = [RC_OK, <original_response_payload...>]
-                // where <original_response_payload...> begins with original rc, devStatus, etc.
-                //
-                // So if we see RC_OK and at least 2 bytes, we strip payload[0] and return the rest,
-                // preserving the expected layout for callers (opDeliveryStatus/opGetField/opIssueCommand).
-                if (rc0 == RC_OK && rx.payload.length >= 2) {
-                    byte[] norm = new byte[rx.payload.length - 1];
-                    System.arraycopy(rx.payload, 1, norm, 0, norm.length);
-                    int normRc = (norm.length >= 1) ? (norm[0] & 0xFF) : 0xFF;
-
-                    // Return a Response that looks exactly like a direct response to origMsg
-                    return new Response(origMsg, normRc, norm);
-                }
-
-                // Otherwise: it looks like a direct (non-queued) response layout already
-                return new Response(origMsg, rc0, rx.payload);
+            // queued: NO_REQUEST_ACTIVE -> keep waiting/checking
+            if (queued && rc0 == RC_NO_REQUEST_ACTIVE) {
+                continue;
             }
 
-            // 5) Not queued mode: direct response
+            // aborted
             if (rc0 == RC_REQUEST_ABORTED) {
-                throw new IOException("Request aborted (rc=0x28)");
+                throw new IOException("Queued aborted (rc=0x28)");
             }
+
+            // ✅ Unwrap CHECK_REQUEST packaging:
+            // Many firmwares return: [RC_OK, <original_response_payload...>]
+            // Python strips first byte: p = p[1:] [4](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LCR%20API%20Internal%20Messages%20for%20LCP.pdf)
+            if (queued && rc0 == RC_OK && rx.payload.length >= 2) {
+                byte[] norm = new byte[rx.payload.length - 1];
+                System.arraycopy(rx.payload, 1, norm, 0, norm.length);
+                int normRc = (norm.length >= 1) ? (norm[0] & 0xFF) : 0xFF;
+                return new Response(origMsg, normRc, norm);
+            }
+
+            // direct response
             return new Response(origMsg, rc0, rx.payload);
         }
 
-        // If we exit loop due to deadline, log timeout
         t("RX: <timeout>");
         t("↳ Aucun octet reçu / réponse valide avant expiration (msg=" + explainMsg(origMsg) + ")");
         throw new IOException("Timeout waiting LCP response");
     }
 
-    /**
-     * Choisit une fenêtre queued (ms) alignée sur la pratique terrain.
-     * - 0x28 / 0x23 / 0x24 peuvent être queued plus longtemps (tickets, switch, etc.) [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/UsbReceiver.java)[3](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/_layouts/15/Doc.aspx?sourcedoc=%7BC9E1B497-22D3-4455-A2FF-D09799A0E233%7D&file=LCR%20Registers%27%20Fields.xlsx&action=default&mobileredirect=true)
-     */
     private static int queuedWindowFor(byte origMsg, int baseTimeoutMs) {
         int base = Math.max(baseTimeoutMs, 6000);
-        int longWin = 30000; // 30s like python LONG_QT behavior in busy periods [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/UsbReceiver.java)
+        int longWin = 30000; // long queued window (terrain)
         switch (origMsg & 0xFF) {
             case 0x28: // GET_DELIVERY_STATUS
             case 0x23: // GET_MACHINE_STATUS
             case 0x24: // ISSUE_COMMAND
+            case 0x21: // SET_FIELD often queued too
                 return Math.max(base, longWin);
             default:
                 return Math.max(base, 12000);
@@ -353,7 +315,6 @@ public final class LcpLink {
 
         try {
             ByteArray rawForCrc = new ByteArray();
-
             int to = readUnescapedByte(rawForCrc, sliceTimeoutMs);
             int from = readUnescapedByte(rawForCrc, sliceTimeoutMs);
             int status = readUnescapedByte(rawForCrc, sliceTimeoutMs);
@@ -441,7 +402,6 @@ public final class LcpLink {
         int from = f[3] & 0xFF;
         int status = f[4] & 0xFF;
         int len = f[5] & 0xFF;
-
         out.add("SYNC : ~~");
         out.add("TO : 0x" + hex2(to));
         out.add("FROM : 0x" + hex2(from));
@@ -469,14 +429,6 @@ public final class LcpLink {
             if (pl.length >= 2) out.add("DEVSTAT : 0x" + hex2(pl[1] & 0xFF));
             byte txMsg = (relatedTxPayload != null && relatedTxPayload.length >= 1) ? relatedTxPayload[0] : 0;
             out.add("REPLY-TO : " + explainMsg(txMsg));
-            if (txMsg == 0x20 && relatedTxPayload != null && relatedTxPayload.length >= 2) {
-                int field = relatedTxPayload[1] & 0xFF;
-                out.add("FIELD : #" + field + " (data len=" + Math.max(0, pl.length - 2) + ")");
-                if (field == 39 && pl.length >= 3) {
-                    int ix = pl[2] & 0xFF;
-                    out.add("DECIMALS : index=" + ix + " -> digits=" + decimalsDigits(ix));
-                }
-            }
         }
 
         int crc0 = f[f.length - 2] & 0xFF;
@@ -521,16 +473,6 @@ public final class LcpLink {
             case RC_NO_REQUEST_ACTIVE: return "0x27 NO_REQUEST_ACTIVE";
             case RC_REQUEST_ABORTED: return "0x28 REQUEST_ABORTED";
             default: return "0x" + hex2(rc) + " (ERROR)";
-        }
-    }
-
-    private static int decimalsDigits(int idx) {
-        switch (idx) {
-            case 0: return 2;
-            case 1: return 1;
-            case 2: return 0;
-            case 3: return 3;
-            default: return 2;
         }
     }
 
@@ -591,13 +533,13 @@ public final class LcpLink {
         final int rc;
         final byte[] payload;
 
-        // Direct frame payload
+        // direct
         Response(byte txMsg, int rc, Frame rx) {
             this.rc = rc;
             this.payload = (rx != null && rx.payload != null) ? rx.payload : new byte[0];
         }
 
-        // ✅ Normalized payload (used for CHECK_REQUEST unwrapping)
+        // normalized (unwrapped)
         Response(byte txMsg, int rc, byte[] normalizedPayload) {
             this.rc = rc;
             this.payload = (normalizedPayload != null) ? normalizedPayload : new byte[0];
@@ -609,32 +551,26 @@ public final class LcpLink {
         private int len = 0;
 
         void append(byte b) { ensure(1); buf[len++] = b; }
-
         void appendBytes(byte[] b, int off, int l) {
             if (l > 0) { ensure(l); System.arraycopy(b, off, buf, len, l); len += l; }
         }
-
         void appendEscaped(byte b) {
             int v = b & 0xFF;
             if (v == (ESC & 0xFF) || v == (SYNC & 0xFF)) append(ESC);
             append(b);
         }
-
         void appendEscapedCrc(byte b) {
             int v = b & 0xFF;
             if (v == (ESC & 0xFF) || v == (SYNC & 0xFF)) append(ESC);
             append(b);
         }
-
         byte[] bytes() { return buf; }
         int length() { return len; }
-
         byte[] toArray() {
             byte[] out = new byte[len];
             System.arraycopy(buf, 0, out, 0, len);
             return out;
         }
-
         private void ensure(int extra) {
             if (len + extra <= buf.length) return;
             int n = Math.max(buf.length * 2, len + extra + 64);

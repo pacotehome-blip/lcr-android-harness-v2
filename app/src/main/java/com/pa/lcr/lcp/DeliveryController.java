@@ -6,15 +6,6 @@ import java.util.concurrent.Executors;
 
 /**
  * DeliveryController - version terrain (flow canonique).
- *
- * Règles:
- * - A = alignOrRecover() : ne démarre jamais
- * - C = startDelivery(product,preset) : intention nouvelle livraison:
- *     * validate 0x28
- *     * si non prêt -> alignOrRecover + pendingStart=true
- *     * dès que clean -> START auto
- * - LIVE tick uniquement si FLOW_ACTIVE=ON (piloté UI), lectures #44/#45 uniquement en flow
- * - TX/RX filtrables globalement (checkbox), tick toujours filtré pour éviter spam
  */
 public final class DeliveryController implements DeliveryControllerPort {
 
@@ -102,7 +93,8 @@ public final class DeliveryController implements DeliveryControllerPort {
             setState(DeliveryState.CONNECTED);
             if (listener != null) {
                 listener.onLog("LCP prêt (sans refresh automatique)");
-                listener.onLiveStatus("LIVE: CONNECTED — (validation requise)");
+                // Live connecté immédiat = lecture 0x28 best-effort
+                refreshConnectedLive("INIT");
             }
         });
     }
@@ -132,9 +124,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     @Override
-    public DeliveryState getState() {
-        return state;
-    }
+    public DeliveryState getState() { return state; }
 
     @Override
     public boolean isDeliveryActive() {
@@ -142,19 +132,13 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     @Override
-    public boolean isPaused() {
-        return state == DeliveryState.RUNNING_PAUSED;
-    }
+    public boolean isPaused() { return state == DeliveryState.RUNNING_PAUSED; }
 
     @Override
-    public boolean isFlowOffStable() {
-        return flowOffStable;
-    }
+    public boolean isFlowOffStable() { return flowOffStable; }
 
     @Override
-    public long getFlowOffAgeMs() {
-        return 0L;
-    }
+    public long getFlowOffAgeMs() { return 0L; }
 
     // ============================================================
     // A = Align / Recover (no START intention)
@@ -164,12 +148,15 @@ public final class DeliveryController implements DeliveryControllerPort {
         io.execute(() -> {
             try {
                 if (state == DeliveryState.DISCONNECTED) return;
-                if (isDeliveryActive()) return; // pas d’align pendant une livraison active (sauf reconnect, traité ailleurs)
+                if (isDeliveryActive()) return;
                 pendingStart = false;
                 if (listener != null) listener.onLog("[A] Align / recover requested");
                 doAlignOrRecover();
             } catch (Exception e) {
                 if (listener != null) listener.onError("alignOrRecover", e);
+                // ✅ fallback
+                setState(DeliveryState.CONNECTED);
+                refreshConnectedLive("A/ERR");
             }
         });
     }
@@ -195,6 +182,8 @@ public final class DeliveryController implements DeliveryControllerPort {
                 DeliveryStatus st = readStatusWithResync("C/precheck");
                 if (st == null) {
                     startInProgress = false;
+                    setState(DeliveryState.CONNECTED);
+                    refreshConnectedLive("C/precheck-null");
                     return;
                 }
 
@@ -206,13 +195,10 @@ public final class DeliveryController implements DeliveryControllerPort {
                     return;
                 }
 
-                // Not ready: show recovering + align, then auto-start when clean
                 if (listener != null) {
-                    if (st.ticketPending) {
-                        listener.onLiveStatus("LIVE: CONNECTED — Ticket_pending (recovering)");
-                    } else {
-                        listener.onLiveStatus("LIVE: CONNECTED — Alignement en cours");
-                    }
+                    listener.onLiveStatus(st.ticketPending
+                            ? "LIVE: CONNECTED — Ticket_pending (recovering)"
+                            : "LIVE: CONNECTED — Alignement en cours");
                     listener.onLog("[C] Register NOT ready → align/recover");
                 }
 
@@ -222,6 +208,9 @@ public final class DeliveryController implements DeliveryControllerPort {
             } catch (Exception e) {
                 if (listener != null) listener.onError("startDelivery(C-intent)", e);
                 startInProgress = false;
+                // ✅ rollback
+                setState(DeliveryState.CONNECTED);
+                refreshConnectedLive("C/ERR");
             }
         });
     }
@@ -261,22 +250,21 @@ public final class DeliveryController implements DeliveryControllerPort {
                     DeliveryStatus st = readStatusWithResync("END/poll");
                     if (st != null && !st.deliveryActive) {
                         flowOffStable = true;
-                        // Retour à CONNECTED — Prêt à livrer
                         setState(DeliveryState.CONNECTED);
-                        if (listener != null) listener.onLiveStatus("LIVE: CONNECTED — Prêt à livrer");
+                        refreshConnectedLive("END/done");
                         return;
                     }
                     try { Thread.sleep(250); } catch (InterruptedException ignored) {}
                 }
 
-                // fallback
                 flowOffStable = true;
                 setState(DeliveryState.CONNECTED);
-                if (listener != null) listener.onLiveStatus("LIVE: CONNECTED — Prêt à livrer");
+                refreshConnectedLive("END/timeout");
 
             } catch (Exception e) {
                 if (listener != null) listener.onError("endDelivery", e);
                 setState(DeliveryState.CONNECTED);
+                refreshConnectedLive("END/ERR");
             }
         });
     }
@@ -307,7 +295,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                 if (!st.deliveryActive) {
                     flowOffStable = true;
                     setState(DeliveryState.CONNECTED);
-                    if (listener != null) listener.onLiveStatus("LIVE: CONNECTED — Prêt à livrer");
+                    refreshConnectedLive("LIVE/inactive");
                     return;
                 }
 
@@ -318,7 +306,6 @@ public final class DeliveryController implements DeliveryControllerPort {
                     return;
                 }
 
-                // Flow ON
                 flowOffStable = false;
                 ensureDigits();
                 int grossRaw = beI32(link.opGetField(FIELD_GROSS_COUNT));
@@ -333,7 +320,6 @@ public final class DeliveryController implements DeliveryControllerPort {
                 setState(DeliveryState.RUNNING_FLOWING);
 
             } catch (Exception ignored) {
-                // on garde silencieux pour éviter spam; erreurs visibles via logs métier ailleurs
             } finally {
                 inLiveSample.remove();
             }
@@ -359,7 +345,6 @@ public final class DeliveryController implements DeliveryControllerPort {
                 int grossRaw = beI32(link.opGetField(FIELD_GROSS_COUNT));
                 int netRaw = beI32(link.opGetField(FIELD_NET_COUNT));
                 double scale = Math.pow(10, cachedDigits);
-
                 if (listener != null) listener.onLiveQty(netRaw / scale, grossRaw / scale);
 
                 if (st.flowActive) {
@@ -370,7 +355,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                     if (listener != null) listener.onLiveStatus("LIVE: RUNNING_PAUSED (FLOW OFF)");
                 }
 
-            } catch (Exception ignored) { }
+            } catch (Exception ignored) {}
         });
     }
 
@@ -381,24 +366,17 @@ public final class DeliveryController implements DeliveryControllerPort {
         DeliveryStatus st = readStatusWithResync("A/0x28");
         if (st == null) return;
 
-        // Ticket pending
         if (st.ticketPending) {
             if (listener != null) {
                 listener.onLiveStatus("LIVE: CONNECTED — Ticket_pending (recovering)");
                 listener.onLog("[A] Ticket pending → Issue #6");
             }
             boolean ok = clearTicketPending();
-            if (!ok) {
-                if (listener != null) listener.onLog("[A] Ticket not cleared (timeout)");
-                // on laisse en ticket pending
-                return;
-            }
-            // Revalider après clear
+            if (!ok) return;
             st = readStatusWithResync("A/0x28-after-ticket");
             if (st == null) return;
         }
 
-        // Delivery active paused: resume
         if (st.deliveryActive && !st.flowActive) {
             if (listener != null) listener.onLog("[A] Delivery active paused → RUN (resume)");
             link.opIssueCommand(CMD_RUN);
@@ -407,19 +385,16 @@ public final class DeliveryController implements DeliveryControllerPort {
             return;
         }
 
-        // If delivery active & flowing, just reflect state
         if (st.deliveryActive && st.flowActive) {
             setState(DeliveryState.RUNNING_FLOWING);
             if (listener != null) listener.onLiveStatus("LIVE: RUNNING_FLOWING (recovered)");
             return;
         }
 
-        // Now clean (or idle)
         if (listener != null) listener.onLiveStatus(st.ticketPending
                 ? "LIVE: CONNECTED — Ticket pending"
                 : "LIVE: CONNECTED — Prêt à livrer");
 
-        // Auto-start if C intent is pending and register clean
         if (pendingStart && isReadyToStart(st)) {
             if (listener != null) listener.onLog("[AUTO] Alignment complete → START");
             pendingStart = false;
@@ -427,56 +402,48 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
     }
 
-    private void doStartNewDelivery(int product1to16, double presetNet) throws Exception {
-        // strict check: must be ready
-        DeliveryStatus st = readStatusWithResync("START/0x28");
-        if (st == null || !isReadyToStart(st)) {
-            if (listener != null) listener.onLog("[START] Refused: register not ready");
-            return;
+    // ✅ START with rollback (no PRESTART stuck)
+    private void doStartNewDelivery(int product1to16, double presetNet) {
+        try {
+            DeliveryStatus st = readStatusWithResync("START/0x28");
+            if (st == null || !isReadyToStart(st)) {
+                if (listener != null) listener.onLog("[START] Refused: register not ready");
+                setState(DeliveryState.CONNECTED);
+                refreshConnectedLive("START/refused");
+                return;
+            }
+
+            setState(DeliveryState.PRESTART);
+            if (listener != null) listener.onLiveStatus("LIVE: PRESTART");
+
+            int idx0 = product1to16 - 1;
+            link.opSetField(FIELD_ACTIVE_PRODUCT, new byte[]{(byte) idx0});
+            bestEffortReadDecimals();
+            writePresetNet_WithCacheOrFallback(presetNet);
+            link.opIssueCommand(CMD_RUN);
+
+            flowOffStable = false;
+            setState(DeliveryState.RUNNING_PAUSED);
+            if (listener != null) listener.onLiveStatus("LIVE: RUNNING_PAUSED");
+
+        } catch (Exception e) {
+            if (listener != null) listener.onError("START", e);
+            // ✅ rollback
+            setState(DeliveryState.CONNECTED);
+            refreshConnectedLive("START/ERR");
         }
-
-        setState(DeliveryState.PRESTART);
-        if (listener != null) listener.onLiveStatus("LIVE: PRESTART (internal)");
-
-        // product
-        int idx0 = product1to16 - 1;
-        link.opSetField(FIELD_ACTIVE_PRODUCT, new byte[]{(byte) idx0});
-        bestEffortReadDecimals();
-
-        // preset net
-        writePresetNet_WithCacheOrFallback(presetNet);
-
-        // RUN
-        link.opIssueCommand(CMD_RUN);
-
-        flowOffStable = false;
-        setState(DeliveryState.RUNNING_PAUSED);
-        if (listener != null) listener.onLiveStatus("LIVE: RUNNING_PAUSED");
     }
 
-    // ============================================================
-    // Ticket clear
-    // ============================================================
     private boolean clearTicketPending() {
         final long deadline = System.currentTimeMillis() + TICKET_TIMEOUT_MS;
-        boolean resyncDone = false;
-
         try {
             link.opIssueCommand(CMD_PRINT_LAST_TICKET);
         } catch (Exception e) {
             softResync("TICKET/issue6");
         }
-
         while (System.currentTimeMillis() < deadline) {
-            try {
-                DeliveryStatus st = readStatusWithResync("TICKET/0x28");
-                if (st != null && !st.ticketPending) return true;
-            } catch (Exception e) {
-                if (!resyncDone) {
-                    resyncDone = true;
-                    softResync("TICKET/0x28");
-                }
-            }
+            DeliveryStatus st = readStatusWithResync("TICKET/0x28");
+            if (st != null && !st.ticketPending) return true;
             try { Thread.sleep(TICKET_POLL_MS); } catch (InterruptedException ignored) {}
         }
         return false;
@@ -524,6 +491,18 @@ public final class DeliveryController implements DeliveryControllerPort {
     private void softResync(String reason) {
         link.drainInput(250);
         link.forceSyncNext(reason);
+    }
+
+    private void refreshConnectedLive(String tag) {
+        DeliveryStatus st = readStatusWithResync("LIVE/" + tag);
+        if (listener == null) return;
+        if (st == null) {
+            listener.onLiveStatus("LIVE: CONNECTED — (état inconnu)");
+            return;
+        }
+        listener.onLiveStatus(st.ticketPending
+                ? "LIVE: CONNECTED — Ticket pending"
+                : "LIVE: CONNECTED — Prêt à livrer");
     }
 
     private void bestEffortReadDecimals() {
@@ -579,13 +558,4 @@ public final class DeliveryController implements DeliveryControllerPort {
         state = s;
         if (listener != null) listener.onStateChanged(s);
     }
-
-    // Helpers called from startNewDelivery (kept simple)
-    private void setProduct() { /* not used in this version; start uses doStartNewDelivery */ }
-    private void readDecimalsIfNeeded() { /* not used */ }
-    private void writePreset() { /* not used */ }
-    private void issueRun() { /* not used */ }
-    private void enterPrestart() { /* not used */ }
-    private void printLastTicket() { /* handled by clearTicketPending */ }
-    private void resumePausedDelivery() { /* handled by doAlignOrRecover */ }
 }
