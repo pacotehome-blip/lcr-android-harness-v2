@@ -33,19 +33,26 @@ public class MainActivity extends AppCompatActivity {
     private Spinner spnUsbDevices;
     private Button btnScanUsb;
     private Button btnPingUsb;
+
     private EditText edtTo;
     private EditText edtFrom;
     private TextView txtActiveNode;
+
     private Button btnConnect;
+
     private Spinner spnProducts;
     private EditText edtProduct;
     private EditText edtPreset;
+
     private Button btnA, btnB, btnC;
     private Button btnContinue, btnFinish;
+
     private TextView txtLive;
+
     private View liveQtyPanel;
     private TextView txtQtyNet;
     private TextView txtQtyGross;
+
     private TextView txtLog;
     private ScrollView logScroll;
     private Button btnClearLog;
@@ -54,9 +61,14 @@ public class MainActivity extends AppCompatActivity {
 
     private CheckBox cbTxRx;
     private CheckBox cbLogTs;
+
     private boolean logTsEnabled = false;
 
     private DeliveryControllerPort controller;
+
+    // ✅ EB-2: garder la référence transport pour reconfigurer les timestamps TX/RX à chaud
+    private LcpLink link = null;
+
     private boolean suppressProductSelection = false;
     private boolean userTouchedSpinner = false;
 
@@ -99,10 +111,13 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+
         usbManager = (UsbManager) getSystemService(USB_SERVICE);
+
         bindUi();
         wireUi();
         initUiDefaults();
+
         log("UI prête — Scan USB requis");
     }
 
@@ -110,27 +125,38 @@ public class MainActivity extends AppCompatActivity {
         btnScanUsb = findViewById(R.id.btnScanUsb);
         btnPingUsb = findViewById(R.id.btnPingUsb);
         spnUsbDevices = findViewById(R.id.spnUsbDevices);
+
         edtTo = findViewById(R.id.edtTo);
         edtFrom = findViewById(R.id.edtFrom);
+
         txtActiveNode = findViewById(R.id.txtActiveNode);
+
         btnConnect = findViewById(R.id.btnConnect);
+
         spnProducts = findViewById(R.id.spnProducts);
         edtProduct = findViewById(R.id.edtProduct);
         edtPreset = findViewById(R.id.edtPreset);
+
         btnA = findViewById(R.id.btnA);
         btnB = findViewById(R.id.btnB);
         btnC = findViewById(R.id.btnC);
+
         btnContinue = findViewById(R.id.btnContinue);
         btnFinish = findViewById(R.id.btnFinish);
+
         txtLive = findViewById(R.id.txtLive);
+
         liveQtyPanel = findViewById(R.id.liveQtyPanel);
         txtQtyNet = findViewById(R.id.txtQtyNet);
         txtQtyGross = findViewById(R.id.txtQtyGross);
+
         txtLog = findViewById(R.id.txtLog);
         logScroll = findViewById(R.id.logScroll);
+
         btnClearLog = findViewById(R.id.btnClearLog);
         btnCopyLog = findViewById(R.id.btnCopyLog);
         btnScrollDown = findViewById(R.id.btnScrollDown);
+
         cbTxRx = findViewById(R.id.cbTxRx);
         cbLogTs = findViewById(R.id.cbLogTs);
     }
@@ -138,11 +164,15 @@ public class MainActivity extends AppCompatActivity {
     private void initUiDefaults() {
         edtTo.setText("250");
         edtFrom.setText("255");
+
         txtActiveNode.setText("Node actif : —");
         txtLive.setText("LIVE: (en attente)");
-        if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.GONE);
+
+        // ✅ Exigence: NET/GROSS toujours affichés
+        if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
         if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
         if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
+
         List<ProductUiItem> products = new ArrayList<>();
         for (int i = 1; i <= 16; i++) products.add(new ProductUiItem(i, "Produit " + i));
         ArrayAdapter<ProductUiItem> adapter =
@@ -150,11 +180,13 @@ public class MainActivity extends AppCompatActivity {
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         spnProducts.setAdapter(adapter);
         spnProducts.setSelection(0);
+
         edtPreset.setText("50");
 
         SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
         boolean showTxRx = prefs.getBoolean("log_tx_rx", false);
         if (cbTxRx != null) cbTxRx.setChecked(showTxRx);
+
         boolean ts = prefs.getBoolean("log_ts", false);
         logTsEnabled = ts;
         if (cbLogTs != null) cbLogTs.setChecked(ts);
@@ -169,12 +201,14 @@ public class MainActivity extends AppCompatActivity {
             if (e.getAction() == MotionEvent.ACTION_DOWN) userTouchedSpinner = true;
             return false;
         });
+
         spnProducts.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
                 if (controller == null) return;
                 if (suppressProductSelection) return;
                 if (!userTouchedSpinner) return;
                 userTouchedSpinner = false;
+
                 ProductUiItem it = (ProductUiItem) spnProducts.getSelectedItem();
                 controller.selectProduct(it.product1);
                 edtProduct.setText(String.valueOf(it.product1));
@@ -185,15 +219,18 @@ public class MainActivity extends AppCompatActivity {
         btnA.setOnClickListener(v -> { if (controller != null) controller.alignOrRecover(); });
         btnB.setOnClickListener(v -> { if (controller != null) controller.requestStatus(); });
         btnC.setOnClickListener(v -> { if (controller != null) controller.startDelivery(readProduct(), readPreset()); });
+
         btnContinue.setOnClickListener(v -> { if (controller != null) controller.resumeIfPaused(); });
         btnFinish.setOnClickListener(v -> { if (controller != null) controller.endDelivery(); });
 
         btnClearLog.setOnClickListener(v -> { logBuf.setLength(0); txtLog.setText(""); });
+
         btnCopyLog.setOnClickListener(v -> {
             ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
             cm.setPrimaryClip(ClipData.newPlainText("log", txtLog.getText()));
             log("Log copié dans le presse-papiers");
         });
+
         if (btnScrollDown != null) {
             btnScrollDown.setOnClickListener(v -> logScroll.fullScroll(View.FOCUS_DOWN));
         }
@@ -207,21 +244,29 @@ public class MainActivity extends AppCompatActivity {
             });
         }
 
-if (cbLogTs != null) {
-    cbLogTs.setOnCheckedChangeListener((buttonView, checked) -> {
-        SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
-        prefs.edit().putBoolean("log_ts", checked).apply();
-        logTsEnabled = checked;
-        if (controller != null) controller.setLogTimestampsEnabled(checked);
-        log("Option timestamps (UI+IO): " + (checked ? "ON" : "OFF"));
-    });
-}
+        if (cbLogTs != null) {
+            cbLogTs.setOnCheckedChangeListener((buttonView, checked) -> {
+                SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
+                prefs.edit().putBoolean("log_ts", checked).apply();
+
+                logTsEnabled = checked;
+
+                // ✅ Timestamp IO au niveau controller
+                if (controller != null) controller.setLogTimestampsEnabled(checked);
+
+                // ✅ EB-2: Timestamp IO au niveau transport (TX/RX) à chaud
+                if (link != null) link.setTraceTimestampsEnabled(checked);
+
+                log("Option timestamps (UI+IO): " + (checked ? "ON" : "OFF"));
+            });
+        }
     }
 
     private void scanUsb() {
         usbDevices.clear();
         usbDevices.addAll(usbManager.getDeviceList().values());
         log("Scan USB: " + usbDevices.size() + " périphérique(s)");
+
         List<String> labels = new ArrayList<>();
         for (UsbDevice d : usbDevices) {
             String m = d.getManufacturerName();
@@ -242,6 +287,7 @@ if (cbLogTs != null) {
         }
 
         UsbDevice dev = usbDevices.get(idx);
+
         if (!usbManager.hasPermission(dev)) {
             PendingIntent pi = PendingIntent.getBroadcast(
                     this, 0, new Intent(ACTION_USB_PERMISSION),
@@ -277,16 +323,26 @@ if (cbLogTs != null) {
 
     public void onUsbDetached() {
         log("USB détaché");
+
         if (controller != null) {
             // ✅ USB detach = fermeture transport
             controller.shutdown(true);
             controller = null;
         }
+
+        // ✅ EB-2: le lien transport n'existe plus
+        link = null;
+
         stopLiveTick();
         usbPort = null;
+
         txtActiveNode.setText("Node actif : —");
         txtLive.setText("LIVE: (en attente)");
-        if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.GONE);
+
+        // ✅ NET/GROSS toujours affichés
+        if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
+        if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
+        if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
     }
 
     private void connectLcp() {
@@ -297,6 +353,7 @@ if (cbLogTs != null) {
 
         int to = parseInt(edtTo.getText().toString(), 250);
         int from = parseInt(edtFrom.getText().toString(), 255);
+
         edtTo.setText(String.valueOf(to));
         edtFrom.setText(String.valueOf(from));
         txtActiveNode.setText("Node actif : —");
@@ -306,35 +363,51 @@ if (cbLogTs != null) {
             controller.shutdown(false);
             controller = null;
         }
+
+        // On remplace aussi le link transport
+        link = null;
+
         if (pendingInitRunnable != null) ui.removeCallbacks(pendingInitRunnable);
 
-        LcpLink link = new LcpLink(usbPort, to, from, true);
-        controller = new DeliveryController(link);
+        // Création transport
+        link = new LcpLink(usbPort, to, from, true);
 
         SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
         boolean showTxRx = prefs.getBoolean("log_tx_rx", false);
+        boolean ts = prefs.getBoolean("log_ts", false);
+
+        // ✅ Timestamp IO au niveau transport (TX/RX)
+        link.setTraceTimestampsEnabled(ts);
+
+        // Création controller
+        controller = new DeliveryController(link);
         controller.setTxRxLoggingEnabled(showTxRx);
+        controller.setLogTimestampsEnabled(ts);
+
+        logTsEnabled = ts;
+        if (cbTxRx != null) cbTxRx.setChecked(showTxRx);
+        if (cbLogTs != null) cbLogTs.setChecked(ts);
 
         controller.setListener(new DeliveryControllerPort.Listener() {
             @Override
-            
-public void onStateChanged(DeliveryState state) {
-    ui.post(() -> {
-        boolean stableOff = (controller != null) && controller.isFlowOffStable();
-        updateButtons(state, stableOff);
+            public void onStateChanged(DeliveryState state) {
+                ui.post(() -> {
+                    boolean stableOff = (controller != null) && controller.isFlowOffStable();
+                    updateButtons(state, stableOff);
 
-        // LIVE tick: seulement pendant RUNNING_FLOWING (après Continuer)
-        if (state == DeliveryState.RUNNING_FLOWING) {
-            startLiveTickIfNeeded();
-            if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
-        } else {
-            stopLiveTick();
-            if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.GONE);
-        }
-    });
-}
+                    // LIVE tick: seulement pendant RUNNING_FLOWING (après Continuer)
+                    if (state == DeliveryState.RUNNING_FLOWING) startLiveTickIfNeeded();
+                    else stopLiveTick();
 
-            @Override public void onLiveStatus(String liveText) { ui.post(() -> txtLive.setText(liveText)); }
+                    // ✅ NET/GROSS toujours affichés
+                    if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
+                });
+            }
+
+            @Override
+            public void onLiveStatus(String liveText) {
+                ui.post(() -> txtLive.setText(liveText));
+            }
 
             @Override
             public void onLiveQty(double net, double gross) {
@@ -379,16 +452,21 @@ public void onStateChanged(DeliveryState state) {
 
         log("Connect LCP appliqué");
         stopLiveTick();
+
+        if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
     }
 
     private void updateButtons(DeliveryState state, boolean stableOff) {
         boolean connected = (state == DeliveryState.CONNECTED);
         boolean paused = (state == DeliveryState.RUNNING_PAUSED);
-        boolean flowing = (state == DeliveryState.RUNNING_FLOWING);
+
         btnA.setEnabled(connected);
         btnC.setEnabled(connected);
+
+        // RUNNING_PAUSED: Continuer toujours disponible; Terminer seulement si FLOW OFF confirmé.
         btnContinue.setEnabled(paused);
         btnFinish.setEnabled(paused && stableOff);
+
         btnB.setEnabled(true);
     }
 
@@ -412,12 +490,17 @@ public void onStateChanged(DeliveryState state) {
     }
 
     private String uiTs() {
-        java.text.SimpleDateFormat df = new java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.CANADA_FRENCH);
+        java.text.SimpleDateFormat df =
+                new java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.CANADA_FRENCH);
         return df.format(new java.util.Date(System.currentTimeMillis()));
     }
+
     private void log(String s) {
         ui.post(() -> {
-            String line = logTsEnabled ? ("[UI " + uiTs() + "] " + s) : s;
+            // ✅ Ne pas polluer les lignes IO (TX/RX/↳ ou déjà [IO ...]) avec un timestamp UI
+            boolean isIoLine = s.startsWith("[IO ") || s.startsWith("TX:") || s.startsWith("RX:") || s.startsWith("↳");
+            String line = (logTsEnabled && !isIoLine) ? ("[UI " + uiTs() + "] " + s) : s;
+
             logBuf.append(line).append('\n');
             txtLog.setText(logBuf.toString());
             logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));

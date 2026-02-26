@@ -2,9 +2,13 @@
 package com.pa.lcr.lcp;
 
 import com.hoho.android.usbserial.driver.UsbSerialPort;
+
 import java.io.IOException;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
+import java.util.Locale;
 
 public final class LcpLink {
 
@@ -12,9 +16,26 @@ public final class LcpLink {
 
     public interface TraceSink { void onTrace(String line); }
     private volatile TraceSink trace;
-
     public void setTraceSink(TraceSink sink) { this.trace = sink; }
-    private void t(String s) { TraceSink ts = trace; if (ts != null) ts.onTrace(s); }
+
+    // Horodatage IO (lié aux trames TX/RX) au niveau transport
+    private volatile boolean traceTsEnabled = false;
+    private static final ThreadLocal<SimpleDateFormat> TRACE_DF =
+            ThreadLocal.withInitial(() -> new SimpleDateFormat("HH:mm:ss.SSS", Locale.CANADA_FRENCH));
+    public void setTraceTimestampsEnabled(boolean enabled) { this.traceTsEnabled = enabled; }
+    private String traceTs() { return TRACE_DF.get().format(new Date(System.currentTimeMillis())); }
+
+    private void t(String s) {
+        TraceSink ts = trace;
+        if (ts == null) return;
+        if (traceTsEnabled && s != null) {
+            if (s.startsWith("TX:") || s.startsWith("RX:") || s.startsWith("↳")) {
+                ts.onTrace("[IO " + traceTs() + "] " + s);
+                return;
+            }
+        }
+        ts.onTrace(s);
+    }
 
     public static final byte SYNC = 0x7E;
     private static final byte ESC = 0x1B;
@@ -169,6 +190,7 @@ public final class LcpLink {
 
         final byte origMsg = (payload != null && payload.length > 0) ? payload[0] : 0;
         byte[] txFrame = encodeFrame(payload);
+
         traceFrame(true, txFrame, payload);
 
         synchronized (PORT_LOCK) {
@@ -179,6 +201,7 @@ public final class LcpLink {
         long deadline = System.currentTimeMillis() + timeoutMs;
         boolean queued = false;
         final int queuedWindowMs = queuedWindowFor(origMsg, timeoutMs);
+
         long nextCheckAt = 0L;
         int checkDelayMs = 220;
         final int checkDelayMax = 700;
@@ -189,11 +212,14 @@ public final class LcpLink {
             if (queued && System.currentTimeMillis() >= nextCheckAt) {
                 byte[] chkPayload = new byte[]{ MSG_CHECK_REQUEST };
                 byte[] chkFrame = encodeFrame(chkPayload);
+
                 traceFrame(true, chkFrame, chkPayload);
+
                 synchronized (PORT_LOCK) {
                     if (closed) throw new IOException("Transport closed");
                     port.write(chkFrame, 500);
                 }
+
                 checkDelayMs = Math.min(checkDelayMax, (int)(checkDelayMs * 1.35));
                 nextCheckAt = System.currentTimeMillis() + checkDelayMs;
             }
@@ -203,6 +229,7 @@ public final class LcpLink {
             if (rx.to != hostAddr) continue;
 
             lastResponderNode = rx.from;
+
             traceFrame(false, rx.rawFrame, payload);
 
             int rc0 = (rx.payload.length >= 1) ? (rx.payload[0] & 0xFF) : 0xFF;
@@ -257,6 +284,7 @@ public final class LcpLink {
 
     private byte[] encodeFrame(byte[] payload) {
         int status = nextStatusByte();
+
         byte[] var = new byte[4 + payload.length];
         var[0] = (byte) toAddr;
         var[1] = (byte) hostAddr;
@@ -276,8 +304,10 @@ public final class LcpLink {
 
         byte crc0 = (byte) (crc & 0xFF);
         byte crc1 = (byte) ((crc >> 8) & 0xFF);
+
         out.appendEscapedCrc(crc0);
         out.appendEscapedCrc(crc1);
+
         return out.toArray();
     }
 
@@ -305,6 +335,7 @@ public final class LcpLink {
 
         try {
             ByteArray rawForCrc = new ByteArray();
+
             int to = readUnescapedByte(rawForCrc, sliceTimeoutMs);
             int from = readUnescapedByte(rawForCrc, sliceTimeoutMs);
             int status = readUnescapedByte(rawForCrc, sliceTimeoutMs);
@@ -318,6 +349,7 @@ public final class LcpLink {
 
             int calc = crcLcp(rawForCrc.bytes(), 0, rawForCrc.length());
             int recv = ((crc1 & 0xFF) << 8) | (crc0 & 0xFF);
+
             if (calc != recv) return null;
 
             byte[] canonical = buildCanonicalFrame(to, from, status, payload, crc0, crc1);
@@ -344,6 +376,7 @@ public final class LcpLink {
     private int readUnescapedByte(ByteArray rawForCrc, int timeoutMs) throws IOException {
         int b = readRawByte(timeoutMs);
         if (b < 0) throw new IOException("Timeout lecture octet");
+
         if (b == (ESC & 0xFF)) {
             int nxt = readRawByte(timeoutMs);
             if (nxt < 0) throw new IOException("Timeout après ESC");
@@ -351,6 +384,7 @@ public final class LcpLink {
             rawForCrc.append((byte) nxt);
             return nxt & 0xFF;
         }
+
         rawForCrc.append((byte) b);
         return b & 0xFF;
     }
@@ -481,27 +515,34 @@ public final class LcpLink {
     private static final class ByteArray {
         private byte[] buf = new byte[256];
         private int len = 0;
+
         void append(byte b) { ensure(1); buf[len++] = b; }
+
         void appendBytes(byte[] b, int off, int l) {
             if (l > 0) { ensure(l); System.arraycopy(b, off, buf, len, l); len += l; }
         }
+
         void appendEscaped(byte b) {
             int v = b & 0xFF;
             if (v == (ESC & 0xFF) || v == (SYNC & 0xFF)) append(ESC);
             append(b);
         }
+
         void appendEscapedCrc(byte b) {
             int v = b & 0xFF;
             if (v == (ESC & 0xFF) || v == (SYNC & 0xFF)) append(ESC);
             append(b);
         }
+
         byte[] bytes() { return buf; }
         int length() { return len; }
+
         byte[] toArray() {
             byte[] out = new byte[len];
             System.arraycopy(buf, 0, out, 0, len);
             return out;
         }
+
         private void ensure(int extra) {
             if (len + extra <= buf.length) return;
             int n = Math.max(buf.length * 2, len + extra + 64);
