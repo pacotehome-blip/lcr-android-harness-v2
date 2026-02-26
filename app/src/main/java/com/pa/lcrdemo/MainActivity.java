@@ -51,15 +51,7 @@ public class MainActivity extends AppCompatActivity {
     private Button btnClearLog;
     private Button btnCopyLog;
 
-    // ✅ NOUVEAU : bouton Scroll down
-    private Button btnScrollDown;
-
-    // ✅ option existante
     private CheckBox cbTxRx;
-
-    // ✅ NOUVEAU : timestamps UI + IO
-    private CheckBox cbLogTs;
-    private boolean logTimestampsEnabled = false;
 
     private DeliveryControllerPort controller;
     private boolean suppressProductSelection = false;
@@ -135,15 +127,7 @@ public class MainActivity extends AppCompatActivity {
         logScroll = findViewById(R.id.logScroll);
         btnClearLog = findViewById(R.id.btnClearLog);
         btnCopyLog = findViewById(R.id.btnCopyLog);
-
-        // ✅ nouveau
-        btnScrollDown = findViewById(R.id.btnScrollDown);
-
-        // ✅ existant
         cbTxRx = findViewById(R.id.cbTxRx);
-
-        // ✅ nouveau
-        cbLogTs = findViewById(R.id.cbLogTs);
     }
 
     private void initUiDefaults() {
@@ -154,7 +138,6 @@ public class MainActivity extends AppCompatActivity {
         if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.GONE);
         if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
         if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
-
         List<ProductUiItem> products = new ArrayList<>();
         for (int i = 1; i <= 16; i++) products.add(new ProductUiItem(i, "Produit " + i));
         ArrayAdapter<ProductUiItem> adapter =
@@ -162,16 +145,11 @@ public class MainActivity extends AppCompatActivity {
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         spnProducts.setAdapter(adapter);
         spnProducts.setSelection(0);
-
         edtPreset.setText("50");
 
         SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
-
         boolean showTxRx = prefs.getBoolean("log_tx_rx", false);
         if (cbTxRx != null) cbTxRx.setChecked(showTxRx);
-
-        logTimestampsEnabled = prefs.getBoolean("log_ts", false);
-        if (cbLogTs != null) cbLogTs.setChecked(logTimestampsEnabled);
     }
 
     private void wireUi() {
@@ -183,10 +161,8 @@ public class MainActivity extends AppCompatActivity {
             if (e.getAction() == MotionEvent.ACTION_DOWN) userTouchedSpinner = true;
             return false;
         });
-
         spnProducts.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-            @Override
-            public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
+            @Override public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
                 if (controller == null) return;
                 if (suppressProductSelection) return;
                 if (!userTouchedSpinner) return;
@@ -198,67 +174,25 @@ public class MainActivity extends AppCompatActivity {
             @Override public void onNothingSelected(AdapterView<?> parent) {}
         });
 
-        btnA.setOnClickListener(v -> {
-            if (controller == null) return;
-            controller.alignOrRecover();
-        });
+        btnA.setOnClickListener(v -> { if (controller != null) controller.alignOrRecover(); });
+        btnB.setOnClickListener(v -> { if (controller != null) controller.requestStatus(); });
+        btnC.setOnClickListener(v -> { if (controller != null) controller.startDelivery(readProduct(), readPreset()); });
+        btnContinue.setOnClickListener(v -> { if (controller != null) controller.resumeIfPaused(); });
+        btnFinish.setOnClickListener(v -> { if (controller != null) controller.endDelivery(); });
 
-        btnB.setOnClickListener(v -> {
-            if (controller == null) return;
-            controller.requestStatus();
-        });
-
-        btnC.setOnClickListener(v -> {
-            if (controller == null) return;
-            controller.startDelivery(readProduct(), readPreset());
-        });
-
-        btnContinue.setOnClickListener(v -> {
-            if (controller != null) controller.resumeIfPaused();
-        });
-
-        btnFinish.setOnClickListener(v -> {
-            if (controller != null) controller.endDelivery();
-        });
-
-        btnClearLog.setOnClickListener(v -> {
-            logBuf.setLength(0);
-            txtLog.setText("");
-        });
-
+        btnClearLog.setOnClickListener(v -> { logBuf.setLength(0); txtLog.setText(""); });
         btnCopyLog.setOnClickListener(v -> {
             ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
             cm.setPrimaryClip(ClipData.newPlainText("log", txtLog.getText()));
             log("Log copié dans le presse-papiers");
         });
 
-        // ✅ Bouton jump en bas (sur demande)
-        if (btnScrollDown != null) {
-            btnScrollDown.setOnClickListener(v -> {
-                if (logScroll != null) {
-                    logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
-                }
-            });
-        }
-
-        // ✅ checkbox TX/RX
         if (cbTxRx != null) {
             cbTxRx.setOnCheckedChangeListener((buttonView, checked) -> {
                 SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
                 prefs.edit().putBoolean("log_tx_rx", checked).apply();
                 if (controller != null) controller.setTxRxLoggingEnabled(checked);
                 log("Option TX/RX: " + (checked ? "ON" : "OFF"));
-            });
-        }
-
-        // ✅ checkbox timestamps UI + IO
-        if (cbLogTs != null) {
-            cbLogTs.setOnCheckedChangeListener((buttonView, checked) -> {
-                SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
-                prefs.edit().putBoolean("log_ts", checked).apply();
-                logTimestampsEnabled = checked;
-                if (controller != null) controller.setLogTimestampsEnabled(checked);
-                log("Option Timestamps: " + (checked ? "ON" : "OFF"));
             });
         }
     }
@@ -285,6 +219,7 @@ public class MainActivity extends AppCompatActivity {
             log("Aucun périphérique USB sélectionné");
             return;
         }
+
         UsbDevice dev = usbDevices.get(idx);
         if (!usbManager.hasPermission(dev)) {
             PendingIntent pi = PendingIntent.getBroadcast(
@@ -294,11 +229,13 @@ public class MainActivity extends AppCompatActivity {
             usbManager.requestPermission(dev, pi);
             return;
         }
+
         UsbSerialDriver driver = UsbSerialProber.getDefaultProber().probeDevice(dev);
         if (driver == null) {
             log("Driver USB série introuvable");
             return;
         }
+
         try {
             UsbDeviceConnection conn = usbManager.openDevice(dev);
             UsbSerialPort port = driver.getPorts().get(0);
@@ -320,7 +257,8 @@ public class MainActivity extends AppCompatActivity {
     public void onUsbDetached() {
         log("USB détaché");
         if (controller != null) {
-            controller.shutdown();
+            // ✅ USB detach = fermeture transport
+            controller.shutdown(true);
             controller = null;
         }
         stopLiveTick();
@@ -335,6 +273,7 @@ public class MainActivity extends AppCompatActivity {
             log("ERR: USB non connecté");
             return;
         }
+
         int to = parseInt(edtTo.getText().toString(), 250);
         int from = parseInt(edtFrom.getText().toString(), 255);
         edtTo.setText(String.valueOf(to));
@@ -342,7 +281,8 @@ public class MainActivity extends AppCompatActivity {
         txtActiveNode.setText("Node actif : —");
 
         if (controller != null) {
-            controller.shutdown();
+            // ✅ Reconnect LCP = stop logique seulement (NE PAS fermer usbPort)
+            controller.shutdown(false);
             controller = null;
         }
         if (pendingInitRunnable != null) ui.removeCallbacks(pendingInitRunnable);
@@ -351,12 +291,8 @@ public class MainActivity extends AppCompatActivity {
         controller = new DeliveryController(link);
 
         SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
-
         boolean showTxRx = prefs.getBoolean("log_tx_rx", false);
         controller.setTxRxLoggingEnabled(showTxRx);
-
-        // Appliquer l’option timestamps à la connexion
-        controller.setLogTimestampsEnabled(logTimestampsEnabled);
 
         controller.setListener(new DeliveryControllerPort.Listener() {
             @Override
@@ -365,7 +301,6 @@ public class MainActivity extends AppCompatActivity {
                     boolean stableOff = (controller != null) && controller.isFlowOffStable();
                     txtLive.setText("LIVE: " + state);
                     updateButtons(state, stableOff);
-
                     if (state == DeliveryState.RUNNING_FLOWING) {
                         startLiveTickIfNeeded();
                         if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
@@ -377,10 +312,7 @@ public class MainActivity extends AppCompatActivity {
                 });
             }
 
-            @Override
-            public void onLiveStatus(String liveText) {
-                ui.post(() -> txtLive.setText(liveText));
-            }
+            @Override public void onLiveStatus(String liveText) { ui.post(() -> txtLive.setText(liveText)); }
 
             @Override
             public void onLiveQty(double net, double gross) {
@@ -409,9 +341,7 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onLog(String msg) {
                 log(msg);
-                if (msg.startsWith("Node actif")) {
-                    ui.post(() -> txtActiveNode.setText(msg));
-                }
+                if (msg.startsWith("Node actif")) ui.post(() -> txtActiveNode.setText(msg));
             }
 
             @Override
@@ -434,14 +364,11 @@ public class MainActivity extends AppCompatActivity {
         boolean connected = (state == DeliveryState.CONNECTED);
         boolean paused = (state == DeliveryState.RUNNING_PAUSED);
         boolean flowing = (state == DeliveryState.RUNNING_FLOWING);
-
         btnA.setEnabled(connected);
         btnC.setEnabled(connected);
-
         boolean allow = paused && stableOff && !flowing;
         btnContinue.setEnabled(allow);
         btnFinish.setEnabled(allow);
-
         btnB.setEnabled(true);
     }
 
@@ -455,38 +382,20 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private double readPreset() {
-        try {
-            return Double.parseDouble(edtPreset.getText().toString());
-        } catch (Exception e) {
-            return 0.0;
-        }
+        try { return Double.parseDouble(edtPreset.getText().toString()); }
+        catch (Exception e) { return 0.0; }
     }
 
     private int parseInt(String s, int def) {
-        try {
-            return Integer.parseInt(s.trim());
-        } catch (Exception e) {
-            return def;
-        }
-    }
-
-    private String uiTs() {
-        long now = System.currentTimeMillis();
-        java.text.SimpleDateFormat df =
-                new java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.CANADA_FRENCH);
-        return df.format(new java.util.Date(now));
+        try { return Integer.parseInt(s.trim()); }
+        catch (Exception e) { return def; }
     }
 
     private void log(String s) {
         ui.post(() -> {
-            String line = s;
-            if (logTimestampsEnabled) {
-                line = "[UI " + uiTs() + "] " + line;
-            }
-            logBuf.append(line).append('\n');
+            logBuf.append(s).append('\n');
             txtLog.setText(logBuf.toString());
-
-            // ✅ AUCUN AUTO-SCROLL ici (scroll manuel + bouton seulement)
+            logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
         });
     }
 }

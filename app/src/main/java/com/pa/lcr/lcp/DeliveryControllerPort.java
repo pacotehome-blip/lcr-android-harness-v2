@@ -17,7 +17,20 @@ public interface DeliveryControllerPort {
 
     /* ===== Cycle de vie ===== */
     void initialize();
+
+    /**
+     * Shutdown historique: ferme le transport (comportement actuel).
+     */
     void shutdown();
+
+    /**
+     * ✅ Nouveau: shutdown contrôlé
+     * - closeTransport=true : ferme le transport (UsbSerialPort)
+     * - closeTransport=false: stoppe seulement la logique (thread/controller) sans fermer le port
+     *
+     * Default => conserve le comportement historique.
+     */
+    default void shutdown(boolean closeTransport) { shutdown(); }
 
     /* ===== Produits ===== */
     void refreshProducts(); // NO-OP volontaire (contrat Java)
