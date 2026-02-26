@@ -282,27 +282,6 @@
 
     </LinearLayout>
 
-
-    <!-- ===================== LOG ===================== -->
-    <ScrollView
-        android:id="@+id/logScroll"
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
-        android:fillViewport="true"
-        android:background="#111111">
-
-        <TextView
-            android:id="@+id/txtLog"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:typeface="monospace"
-            android:textIsSelectable="true"
-            android:textSize="12sp"
-            android:textColor="#00FF00"
-            android:padding="6dp" />
-    </ScrollView>
-
     <!-- ===================== LOG ACTIONS ===================== -->
     <LinearLayout
         android:layout_width="match_parent"
@@ -346,5 +325,25 @@
             android:layout_marginTop="6dp"/>
 
     </LinearLayout>
+    
+    <!-- ===================== LOG ===================== -->
+    <ScrollView
+        android:id="@+id/logScroll"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:fillViewport="true"
+        android:background="#111111">
 
+        <TextView
+            android:id="@+id/txtLog"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:typeface="monospace"
+            android:textIsSelectable="true"
+            android:textSize="12sp"
+            android:textColor="#00FF00"
+            android:padding="6dp" />
+    </ScrollView>
+    
 </LinearLayout>
