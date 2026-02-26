@@ -61,7 +61,6 @@ public interface DeliveryControllerPort {
     DeliveryState getState();
     boolean isDeliveryActive();
     boolean isPaused();
-
     default boolean isFlowOffStable() { return true; }
     default long getFlowOffAgeMs() { return 0L; }
 
