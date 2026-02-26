@@ -17,19 +17,9 @@ public interface DeliveryControllerPort {
 
     /* ===== Cycle de vie ===== */
     void initialize();
-
-    /**
-     * Shutdown historique: ferme le transport (comportement actuel).
-     */
     void shutdown();
 
-    /**
-     * ✅ Nouveau: shutdown contrôlé
-     * - closeTransport=true : ferme le transport (UsbSerialPort)
-     * - closeTransport=false: stoppe seulement la logique (thread/controller) sans fermer le port
-     *
-     * Default => conserve le comportement historique.
-     */
+    /** ✅ Compat: MainActivity appelle shutdown(true/false) */
     default void shutdown(boolean closeTransport) { shutdown(); }
 
     /* ===== Produits ===== */
@@ -37,33 +27,12 @@ public interface DeliveryControllerPort {
     void selectProduct(int product1to16);
 
     /* ===== Livraison ===== */
-
-    /**
-     * C = intention de démarrer une NOUVELLE livraison.
-     * Le controller valide 0x28:
-     * - si clean -> START immédiat
-     * - sinon -> alignOrRecover + START auto quand clean
-     */
     void startDelivery(int product1to16, double presetNet);
 
-    /**
-     * A = aligner / recover (ticket pending, reprise après crash), sans intention start.
-     */
     default void alignOrRecover() { /* no-op (compat) */ }
 
-    /**
-     * Continuer (resume) si une livraison est pausée (RUNNING_PAUSED).
-     */
     void resumeIfPaused();
-
-    /**
-     * Terminer livraison (END). Réservé au bouton "Terminer" (pas A).
-     */
     void endDelivery();
-
-    /**
-     * B = Diagnostic global (action utilisateur)
-     */
     void requestStatus();
 
     /* ===== LIVE ===== */
@@ -77,10 +46,8 @@ public interface DeliveryControllerPort {
     default boolean isFlowOffStable() { return true; }
     default long getFlowOffAgeMs() { return 0L; }
 
-    /* ===== Option support: afficher TX/RX ===== */
+    /* ===== Options ===== */
     default void setTxRxLoggingEnabled(boolean enabled) { /* no-op (compat) */ }
-
-    /* ===== Option support: timestamps IO ===== */
     default void setLogTimestampsEnabled(boolean enabled) { /* no-op (compat) */ }
 
     /* ===== Events UI ===== */
@@ -94,11 +61,7 @@ public interface DeliveryControllerPort {
 
         default void onLiveQty(double net, double gross) { /* no-op */ }
         default void onFlowStability(boolean flowActive, boolean flowOffStable, long flowOffAgeMs) { /* no-op */ }
-
-        /**
-         * ✅ Ajout: texte Live métier (CONNECTED — Ticket_pending (recovering), CONNECTED — Prêt à livrer, etc.)
-         * Default no-op pour compatibilité.
-         */
         default void onLiveStatus(String liveText) { /* no-op */ }
     }
 }
+

@@ -23,11 +23,9 @@ public final class DeliveryController implements DeliveryControllerPort {
     private static final int DC_FLOW_ACTIVE = 0x0004;
     private static final int DC_DELIVERY_ACTIVE = 0x0008;
 
-    // Aligné terrain : le script peut aller jusqu’à 60s pour clear ticket
     private static final long TICKET_TIMEOUT_MS = 60_000;
     private static final long TICKET_POLL_MS = 250;
 
-    // ✅ no_flow_prompt terrain (10s demandé)
     private static final long NO_FLOW_CONFIRM_MS = 10_000;
 
     private final LcpLink link;
@@ -35,10 +33,8 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     private Listener listener;
     private volatile DeliveryState state = DeliveryState.DISCONNECTED;
-
     private volatile int cachedDigits = -1;
 
-    // Flow stability basée sur stagnation des compteurs (#44/#45)
     private volatile boolean flowOffStable = false;
     private volatile long lastCountsChangeMs = 0L;
     private volatile int lastGrossRaw = -1;
@@ -47,24 +43,18 @@ public final class DeliveryController implements DeliveryControllerPort {
     private final ThreadLocal<Boolean> inLiveSample = new ThreadLocal<>();
     private volatile boolean txRxEnabled = false;
 
-    // pendingStart = intention utilisateur (C) => auto-start quand clean (même appui)
     private volatile boolean pendingStart = false;
     private volatile int pendingProduct1to16 = 1;
     private volatile double pendingPresetNet = 0.0;
     private volatile boolean startInProgress = false;
 
-    // resync throttle
     private volatile long lastResyncMs = 0L;
-
-    // stop global
     private volatile boolean stopped = false;
 
-    // timeouts (soft)
     private volatile int consecutiveTimeouts = 0;
     private volatile long lastTimeoutMs = 0L;
     private static final long TIMEOUT_WINDOW_MS = 10_000;
 
-    // ✅ timestamps IO (activables par UI)
     private volatile boolean logTsEnabled = false;
     private static final ThreadLocal<SimpleDateFormat> IO_DF =
             ThreadLocal.withInitial(() -> new SimpleDateFormat("HH:mm:ss.SSS", Locale.CANADA_FRENCH));
@@ -73,6 +63,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         this.link = link;
     }
 
+    /** ✅ Correctif obligatoire */
     private boolean isStopped() {
         return stopped || link.isClosed();
     }
@@ -130,29 +121,17 @@ public final class DeliveryController implements DeliveryControllerPort {
         });
     }
 
-    /**
-     * Shutdown historique : ferme le transport.
-     */
     @Override
     public void shutdown() {
         shutdown(true);
     }
 
-    /**
-     * ✅ Nouveau : shutdown contrôlé (logic vs transport)
-     * closeTransport=false : stop logique, NE FERME PAS le UsbSerialPort
-     * closeTransport=true  : stop + ferme le port via link.close()
-     */
+    /** ✅ Correctif obligatoire: closeTransport=false → softClose */
     @Override
     public void shutdown(boolean closeTransport) {
         stopped = true;
-
-        // couper trace/logs immédiatement
         try { link.setTraceSink(null); } catch (Exception ignored) {}
-
-        // arrêter le thread
         try { io.shutdownNow(); } catch (Exception ignored) {}
-
         setState(DeliveryState.DISCONNECTED);
 
         if (listener != null) {
@@ -162,9 +141,10 @@ public final class DeliveryController implements DeliveryControllerPort {
                     : "[LINK] Controller stopped (logic only)");
         }
 
-        // fermer le transport seulement si demandé
         if (closeTransport) {
             try { link.close(); } catch (Exception ignored) {}
+        } else {
+            try { link.softClose(); } catch (Exception ignored) {}
         }
     }
 
@@ -206,7 +186,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         io.execute(() -> {
             if (isStopped()) return;
             try {
-                pendingStart = false; // A = jamais d'intention start
+                pendingStart = false;
                 emitLog("[A] Align / recover requested");
                 doAlignOrRecover();
                 markIoSuccess();
@@ -223,10 +203,8 @@ public final class DeliveryController implements DeliveryControllerPort {
             try {
                 if (state == DeliveryState.PRESTART || state == DeliveryState.ENDING) return;
                 if (startInProgress) return;
-
                 startInProgress = true;
 
-                // Intention utilisateur (C)
                 pendingStart = true;
                 pendingProduct1to16 = product1to16;
                 pendingPresetNet = presetNet;
@@ -240,25 +218,19 @@ public final class DeliveryController implements DeliveryControllerPort {
                     return;
                 }
 
-                // Si une livraison est déjà active -> refuser un nouveau START
                 if (st.deliveryActive) {
                     pendingStart = false;
                     startInProgress = false;
-                    if (listener != null) {
-                        listener.onLiveStatus(st.flowActive
-                                ? "LIVE: RUNNING_FLOWING (recovered)"
-                                : "LIVE: RUNNING_PAUSED (recovered)");
-                    }
+                    if (listener != null) listener.onLiveStatus(st.flowActive
+                            ? "LIVE: RUNNING_FLOWING (recovered)"
+                            : "LIVE: RUNNING_PAUSED (recovered)");
                     emitLog("[C] Delivery active -> refusing START (recover state)");
                     setState(st.flowActive ? DeliveryState.RUNNING_FLOWING : DeliveryState.RUNNING_PAUSED);
                     return;
                 }
 
-                // Ticket pending -> délégation à A (clear ticket) + auto-start quand clean (même appui)
                 if (st.ticketPending) {
-                    if (listener != null) {
-                        listener.onLiveStatus("LIVE: CONNECTED — Ticket_pending (recovering)");
-                    }
+                    if (listener != null) listener.onLiveStatus("LIVE: CONNECTED — Ticket_pending (recovering)");
                     emitLog("[C] Ticket pending -> align/recover (A logic), then auto-start when clean");
                     doAlignOrRecover();
                     startInProgress = false;
@@ -275,9 +247,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                     return;
                 }
 
-                if (listener != null) {
-                    listener.onLiveStatus("LIVE: CONNECTED — Alignement en cours");
-                }
+                if (listener != null) listener.onLiveStatus("LIVE: CONNECTED — Alignement en cours");
                 emitLog("[C] Register NOT ready -> align/recover");
                 doAlignOrRecover();
 
@@ -297,14 +267,11 @@ public final class DeliveryController implements DeliveryControllerPort {
             if (isStopped()) return;
             try {
                 if (state != DeliveryState.RUNNING_PAUSED) return;
-
                 link.opIssueCommand(CMD_RUN);
                 markIoSuccess();
-
                 long now = System.currentTimeMillis();
                 lastCountsChangeMs = now;
                 flowOffStable = false;
-
                 if (listener != null) listener.onLiveStatus("LIVE: RUNNING_PAUSED (Flow OFF)");
             } catch (Exception e) {
                 handleIoFailure("resumeIfPaused", e);
@@ -322,7 +289,6 @@ public final class DeliveryController implements DeliveryControllerPort {
 
                 setState(DeliveryState.ENDING);
                 emitLog("[END] Issue END (0x02)");
-
                 link.opIssueCommand(CMD_END);
                 markIoSuccess();
 
@@ -445,7 +411,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         });
     }
 
-    /* ===================== Align/recover core ===================== */
+    /* ===== Core align/recover ===== */
 
     private void doAlignOrRecover() throws Exception {
         DeliveryStatus st = readStatusWithResync("A/0x28");
@@ -487,7 +453,6 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     private void doStartNewDelivery(int product1to16, double presetNet) throws Exception {
         if (isStopped()) return;
-
         setState(DeliveryState.PRESTART);
         emitLog("[PRESTART] internal");
 
@@ -523,7 +488,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         return false;
     }
 
-    /* ===================== Helpers ===================== */
+    /* ===== Helpers ===== */
 
     private static final class DeliveryStatus {
         final int delStatus;
@@ -669,12 +634,10 @@ public final class DeliveryController implements DeliveryControllerPort {
         boolean isTimeout = msg.contains("Timeout waiting LCP response");
 
         if (hardFatal) {
-            // hard fatal => arrêt logique ET fermeture transport
             shutdown(true);
             return;
         }
 
-        // Timeout: SOFT seulement (pas de STOP automatique)
         if (isTimeout) {
             long now = System.currentTimeMillis();
             if (now - lastTimeoutMs > TIMEOUT_WINDOW_MS) {

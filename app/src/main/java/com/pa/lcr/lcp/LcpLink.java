@@ -12,6 +12,7 @@ public final class LcpLink {
 
     public interface TraceSink { void onTrace(String line); }
     private volatile TraceSink trace;
+
     public void setTraceSink(TraceSink sink) { this.trace = sink; }
     private void t(String s) { TraceSink ts = trace; if (ts != null) ts.onTrace(s); }
 
@@ -42,16 +43,22 @@ public final class LcpLink {
     private volatile Integer lastResponderNode = null;
     public Integer getLastResponderNode() { return lastResponderNode; }
 
-    // ✅ Ajout : état “transport fermé”
+    // état “transport fermé”
     private volatile boolean closed = false;
     public boolean isClosed() { return closed; }
 
-    /** ✅ Ajout : fermer proprement la session */
+    /** Hard close : stoppe la session ET ferme physiquement le port USB */
     public synchronized void close() {
         closed = true;
         try {
             synchronized (PORT_LOCK) { port.close(); }
         } catch (Exception ignored) { }
+    }
+
+    /** ✅ Soft close : stoppe la session LCP SANS fermer le port USB */
+    public synchronized void softClose() {
+        closed = true;
+        // IMPORTANT: ne pas appeler port.close() ici
     }
 
     public LcpLink(UsbSerialPort port, int toAddr, int hostAddr, boolean syncFirstEnabled) {
@@ -105,9 +112,7 @@ public final class LcpLink {
     /* ============================================================
      * API opérations — timeouts augmentés (éviter faux “Transport down”)
      * ============================================================ */
-
     public byte[] opGetField(int field) throws IOException {
-        // avant: 3000ms dans ta version actuelle [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LcpLink.java)
         Response r = sendRecv(buildPayload(MSG_GET_FIELD, new byte[]{(byte) field}), 5000);
         ensureOk(r, "GET_FIELD #" + field);
         if (r.payload.length < 2) throw new IOException("GET_FIELD payload trop court");
@@ -117,7 +122,6 @@ public final class LcpLink {
     }
 
     public void opSetField(int field, byte[] value) throws IOException {
-        // avant: 3000ms dans ta version actuelle [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LcpLink.java)
         byte[] pl = new byte[2 + (value == null ? 0 : value.length)];
         pl[0] = MSG_SET_FIELD;
         pl[1] = (byte) field;
@@ -164,19 +168,17 @@ public final class LcpLink {
         if (closed) throw new IOException("Transport closed");
 
         final byte origMsg = (payload != null && payload.length > 0) ? payload[0] : 0;
-
         byte[] txFrame = encodeFrame(payload);
         traceFrame(true, txFrame, payload);
+
         synchronized (PORT_LOCK) {
             if (closed) throw new IOException("Transport closed");
             port.write(txFrame, 500);
         }
 
         long deadline = System.currentTimeMillis() + timeoutMs;
-
         boolean queued = false;
         final int queuedWindowMs = queuedWindowFor(origMsg, timeoutMs);
-
         long nextCheckAt = 0L;
         int checkDelayMs = 220;
         final int checkDelayMax = 700;
@@ -217,7 +219,6 @@ public final class LcpLink {
             }
 
             if (queued && rc0 == RC_NO_REQUEST_ACTIVE) continue;
-
             if (rc0 == RC_REQUEST_ABORTED) throw new IOException("Queued aborted (rc=0x28)");
 
             // unwrap only if signature [OK, OK, ...]
@@ -277,7 +278,6 @@ public final class LcpLink {
         byte crc1 = (byte) ((crc >> 8) & 0xFF);
         out.appendEscapedCrc(crc0);
         out.appendEscapedCrc(crc1);
-
         return out.toArray();
     }
 
@@ -481,7 +481,6 @@ public final class LcpLink {
     private static final class ByteArray {
         private byte[] buf = new byte[256];
         private int len = 0;
-
         void append(byte b) { ensure(1); buf[len++] = b; }
         void appendBytes(byte[] b, int off, int l) {
             if (l > 0) { ensure(l); System.arraycopy(b, off, buf, len, l); len += l; }
