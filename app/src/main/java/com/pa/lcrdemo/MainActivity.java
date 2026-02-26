@@ -37,8 +37,8 @@ public class MainActivity extends AppCompatActivity {
     private EditText edtTo;
     private EditText edtFrom;
     private TextView txtActiveNode;
-    private Button btnConnect;
 
+    private Button btnConnect;
     private Spinner spnProducts;
     private EditText edtProduct;
     private EditText edtPreset;
@@ -56,7 +56,6 @@ public class MainActivity extends AppCompatActivity {
     private Button btnClearLog;
     private Button btnCopyLog;
 
-    // ✅ nouvelle option
     private CheckBox cbTxRx;
 
     private DeliveryControllerPort controller;
@@ -68,6 +67,8 @@ public class MainActivity extends AppCompatActivity {
     private final Handler ui = new Handler(Looper.getMainLooper());
 
     private boolean liveTickRunning = false;
+    private int liveTickPeriodMs = 300;
+
     private double lastNet = Double.NaN;
     private double lastGross = Double.NaN;
 
@@ -76,22 +77,31 @@ public class MainActivity extends AppCompatActivity {
     private final Runnable liveTick = new Runnable() {
         @Override
         public void run() {
-            if (controller == null) { liveTickRunning = false; return; }
-            if (controller.getState() != DeliveryState.RUNNING_FLOWING) {
+            if (controller == null) {
                 liveTickRunning = false;
                 return;
             }
+
+            DeliveryState st = controller.getState();
+
+            // ✅ live loop en FLOWING ou PAUSED (pour no_flow_prompt / stagnation)
+            if (st != DeliveryState.RUNNING_FLOWING && st != DeliveryState.RUNNING_PAUSED) {
+                liveTickRunning = false;
+                return;
+            }
+
             controller.requestLiveSample();
-            ui.postDelayed(this, 300);
+            ui.postDelayed(this, liveTickPeriodMs);
         }
     };
 
-    private void startLiveTickIfNeeded() {
+    private void startLiveTickIfNeeded(int periodMs) {
         if (controller == null) return;
+        liveTickPeriodMs = periodMs;
         if (liveTickRunning) return;
         liveTickRunning = true;
         ui.removeCallbacks(liveTick);
-        ui.postDelayed(liveTick, 300);
+        ui.postDelayed(liveTick, liveTickPeriodMs);
     }
 
     private void stopLiveTick() {
@@ -103,13 +113,10 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
-
         usbManager = (UsbManager) getSystemService(USB_SERVICE);
-
         bindUi();
         wireUi();
         initUiDefaults();
-
         log("UI prête — Scan USB requis");
     }
 
@@ -117,34 +124,26 @@ public class MainActivity extends AppCompatActivity {
         btnScanUsb = findViewById(R.id.btnScanUsb);
         btnPingUsb = findViewById(R.id.btnPingUsb);
         spnUsbDevices = findViewById(R.id.spnUsbDevices);
-
         edtTo = findViewById(R.id.edtTo);
         edtFrom = findViewById(R.id.edtFrom);
         txtActiveNode = findViewById(R.id.txtActiveNode);
         btnConnect = findViewById(R.id.btnConnect);
-
         spnProducts = findViewById(R.id.spnProducts);
         edtProduct = findViewById(R.id.edtProduct);
         edtPreset = findViewById(R.id.edtPreset);
-
         btnA = findViewById(R.id.btnA);
         btnB = findViewById(R.id.btnB);
         btnC = findViewById(R.id.btnC);
-
         btnContinue = findViewById(R.id.btnContinue);
         btnFinish = findViewById(R.id.btnFinish);
-
         txtLive = findViewById(R.id.txtLive);
         liveQtyPanel = findViewById(R.id.liveQtyPanel);
         txtQtyNet = findViewById(R.id.txtQtyNet);
         txtQtyGross = findViewById(R.id.txtQtyGross);
-
         txtLog = findViewById(R.id.txtLog);
         logScroll = findViewById(R.id.logScroll);
         btnClearLog = findViewById(R.id.btnClearLog);
         btnCopyLog = findViewById(R.id.btnCopyLog);
-
-        // ✅ checkbox ajoutée dans XML
         cbTxRx = findViewById(R.id.cbTxRx);
     }
 
@@ -153,13 +152,13 @@ public class MainActivity extends AppCompatActivity {
         edtFrom.setText("255");
         txtActiveNode.setText("Node actif : —");
         txtLive.setText("LIVE: (en attente)");
-
         if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.GONE);
         if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
         if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
 
         List<ProductUiItem> products = new ArrayList<>();
         for (int i = 1; i <= 16; i++) products.add(new ProductUiItem(i, "Produit " + i));
+
         ArrayAdapter<ProductUiItem> adapter =
                 new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, products);
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
@@ -168,17 +167,14 @@ public class MainActivity extends AppCompatActivity {
 
         edtPreset.setText("50");
 
-        // ✅ TX/RX OFF par défaut (persisté)
         SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
         boolean showTxRx = prefs.getBoolean("log_tx_rx", false);
         if (cbTxRx != null) cbTxRx.setChecked(showTxRx);
     }
 
     private void wireUi() {
-
         btnScanUsb.setOnClickListener(v -> scanUsb());
         btnPingUsb.setOnClickListener(v -> openSelectedUsb());
-
         btnConnect.setOnClickListener(v -> connectLcp());
 
         spnProducts.setOnTouchListener((v, e) -> {
@@ -193,6 +189,7 @@ public class MainActivity extends AppCompatActivity {
                 if (suppressProductSelection) return;
                 if (!userTouchedSpinner) return;
                 userTouchedSpinner = false;
+
                 ProductUiItem it = (ProductUiItem) spnProducts.getSelectedItem();
                 controller.selectProduct(it.product1);
                 edtProduct.setText(String.valueOf(it.product1));
@@ -200,7 +197,7 @@ public class MainActivity extends AppCompatActivity {
             @Override public void onNothingSelected(AdapterView<?> parent) {}
         });
 
-        // ✅ A = alignOrRecover (pas END)
+        // A = alignOrRecover
         btnA.setOnClickListener(v -> {
             if (controller == null) return;
             controller.alignOrRecover();
@@ -212,7 +209,7 @@ public class MainActivity extends AppCompatActivity {
             controller.requestStatus();
         });
 
-        // ✅ C = new delivery intent (validate + align + auto-start)
+        // C = new delivery intent
         btnC.setOnClickListener(v -> {
             if (controller == null) return;
             controller.startDelivery(readProduct(), readPreset());
@@ -222,7 +219,6 @@ public class MainActivity extends AppCompatActivity {
             if (controller != null) controller.resumeIfPaused();
         });
 
-        // Terminer = END
         btnFinish.setOnClickListener(v -> {
             if (controller != null) controller.endDelivery();
         });
@@ -238,7 +234,6 @@ public class MainActivity extends AppCompatActivity {
             log("Log copié dans le presse-papiers");
         });
 
-        // ✅ checkbox TX/RX
         if (cbTxRx != null) {
             cbTxRx.setOnCheckedChangeListener((buttonView, checked) -> {
                 SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
@@ -253,6 +248,7 @@ public class MainActivity extends AppCompatActivity {
         usbDevices.clear();
         usbDevices.addAll(usbManager.getDeviceList().values());
         log("Scan USB: " + usbDevices.size() + " périphérique(s)");
+
         List<String> labels = new ArrayList<>();
         for (UsbDevice d : usbDevices) {
             String m = d.getManufacturerName();
@@ -262,6 +258,7 @@ public class MainActivity extends AppCompatActivity {
             labels.add(m + " - " + p);
             log(String.format(" - %s - %s (VID=%04X PID=%04X)", m, p, d.getVendorId(), d.getProductId()));
         }
+
         spnUsbDevices.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, labels));
     }
 
@@ -271,6 +268,7 @@ public class MainActivity extends AppCompatActivity {
             log("Aucun périphérique USB sélectionné");
             return;
         }
+
         UsbDevice dev = usbDevices.get(idx);
         if (!usbManager.hasPermission(dev)) {
             PendingIntent pi = PendingIntent.getBroadcast(
@@ -281,11 +279,13 @@ public class MainActivity extends AppCompatActivity {
             usbManager.requestPermission(dev, pi);
             return;
         }
+
         UsbSerialDriver driver = UsbSerialProber.getDefaultProber().probeDevice(dev);
         if (driver == null) {
             log("Driver USB série introuvable");
             return;
         }
+
         try {
             UsbDeviceConnection conn = usbManager.openDevice(dev);
             UsbSerialPort port = driver.getPorts().get(0);
@@ -334,13 +334,11 @@ public class MainActivity extends AppCompatActivity {
             controller.shutdown();
             controller = null;
         }
-
         if (pendingInitRunnable != null) ui.removeCallbacks(pendingInitRunnable);
 
         LcpLink link = new LcpLink(usbPort, to, from, true);
         controller = new DeliveryController(link);
 
-        // Appliquer l’option TX/RX courante
         SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
         boolean showTxRx = prefs.getBoolean("log_tx_rx", false);
         controller.setTxRxLoggingEnabled(showTxRx);
@@ -351,19 +349,35 @@ public class MainActivity extends AppCompatActivity {
             public void onStateChanged(DeliveryState state) {
                 ui.post(() -> {
                     boolean stableOff = (controller != null) && controller.isFlowOffStable();
+                    long offAge = (controller != null) ? controller.getFlowOffAgeMs() : 0L;
 
-                    // Fallback affichage basé sur state (si aucun onLiveStatus)
-                    txtLive.setText("LIVE: " + state);
+                    // ✅ PRESTART interne : affichage “connecté” sans exposer PRESTART
+                    if (state == DeliveryState.PRESTART) {
+                        txtLive.setText("LIVE: CONNECTED — Démarrage…");
+                    } else if (state == DeliveryState.ENDING) {
+                        txtLive.setText("LIVE: CONNECTED — Fin en cours…");
+                    } else {
+                        txtLive.setText("LIVE: " + state);
+                    }
 
                     updateButtons(state, stableOff);
 
                     if (state == DeliveryState.RUNNING_FLOWING) {
-                        startLiveTickIfNeeded();
+                        startLiveTickIfNeeded(300);
+                        if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
+                    } else if (state == DeliveryState.RUNNING_PAUSED) {
+                        // ✅ garder un tick (plus lent) pour confirmer OFF (10–30s) et détecter reprise
+                        startLiveTickIfNeeded(500);
+                        if (controller != null) controller.requestLiveSnapshot();
                         if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
                     } else {
                         stopLiveTick();
-                        if (controller != null) controller.requestLiveSnapshot();
                         if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.GONE);
+                    }
+
+                    // Optionnel debug:
+                    if (stableOff && offAge > 0) {
+                        log("FlowOffAge=" + offAge + "ms (stable)");
                     }
                 });
             }
@@ -418,29 +432,24 @@ public class MainActivity extends AppCompatActivity {
 
         log("Connect LCP appliqué");
         stopLiveTick();
-
         if (controller != null) controller.requestLiveSnapshot();
     }
 
+    /**
+     * ✅ Règle demandée: A/B/C ne sont pas auto-activés/désactivés selon l'état.
+     * Ils restent disponibles dès que le controller existe.
+     * Continue/Finish restent conditionnels (pause + flowOffStable).
+     */
     private void updateButtons(DeliveryState state, boolean stableOff) {
+        boolean has = (controller != null);
 
-        boolean connected = (state == DeliveryState.CONNECTED);
-        boolean paused = (state == DeliveryState.RUNNING_PAUSED);
-        boolean flowing = (state == DeliveryState.RUNNING_FLOWING);
+        btnA.setEnabled(has);
+        btnB.setEnabled(has);
+        btnC.setEnabled(has);
 
-        // A = align/recover : seulement connecté
-        btnA.setEnabled(connected);
-
-        // C = start intent : seulement connecté (interdit pendant delivery)
-        btnC.setEnabled(connected);
-
-        // Terminer/Continuer : seulement paused + stableOff
-        boolean allow = paused && stableOff && !flowing;
-        btnContinue.setEnabled(allow);
-        btnFinish.setEnabled(allow);
-
-        // B toujours disponible
-        btnB.setEnabled(true);
+        boolean allowEnd = has && (state == DeliveryState.RUNNING_PAUSED) && stableOff;
+        btnContinue.setEnabled(allowEnd);
+        btnFinish.setEnabled(allowEnd);
     }
 
     private int readProduct() {
