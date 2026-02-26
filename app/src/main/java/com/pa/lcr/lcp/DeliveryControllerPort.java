@@ -67,6 +67,9 @@ public interface DeliveryControllerPort {
     /* ===== Option support: afficher TX/RX ===== */
     default void setTxRxLoggingEnabled(boolean enabled) { /* no-op (compat) */ }
 
+    /* ===== Option support: timestamps IO ===== */
+    default void setLogTimestampsEnabled(boolean enabled) { /* no-op (compat) */ }
+
     /* ===== Events UI ===== */
     void setListener(Listener listener);
 

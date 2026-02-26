@@ -1,6 +1,9 @@
 
 package com.pa.lcr.lcp;
 
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -61,12 +64,34 @@ public final class DeliveryController implements DeliveryControllerPort {
     private volatile long lastTimeoutMs = 0L;
     private static final long TIMEOUT_WINDOW_MS = 10_000;
 
+    // ✅ timestamps IO (activables par UI)
+    private volatile boolean logTsEnabled = false;
+    private static final ThreadLocal<SimpleDateFormat> IO_DF =
+            ThreadLocal.withInitial(() -> new SimpleDateFormat("HH:mm:ss.SSS", Locale.CANADA_FRENCH));
+
     public DeliveryController(LcpLink link) {
         this.link = link;
     }
 
+    // ✅ Correctif: || manquant (bloquant)
     private boolean isStopped() {
         return stopped || link.isClosed();
+    }
+
+    @Override
+    public void setLogTimestampsEnabled(boolean enabled) {
+        io.execute(() -> logTsEnabled = enabled);
+    }
+
+    private String ioTs() {
+        return IO_DF.get().format(new Date(System.currentTimeMillis()));
+    }
+
+    private void emitLog(String line) {
+        Listener l = this.listener;
+        if (l == null) return;
+        if (logTsEnabled) l.onLog("[IO " + ioTs() + "] " + line);
+        else l.onLog(line);
     }
 
     @Override
@@ -83,7 +108,7 @@ public final class DeliveryController implements DeliveryControllerPort {
             if (Boolean.TRUE.equals(inLiveSample.get())) {
                 if (line.startsWith("TX:") || line.startsWith("RX:") || line.startsWith("↳")) return;
             }
-            listener.onLog(line);
+            emitLog(line);
         });
     }
 
@@ -92,7 +117,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         io.execute(() -> {
             if (isStopped()) return;
             txRxEnabled = enabled;
-            if (listener != null) listener.onLog("[LOG] TX/RX " + (enabled ? "ON" : "OFF"));
+            emitLog("[LOG] TX/RX " + (enabled ? "ON" : "OFF"));
         });
     }
 
@@ -101,7 +126,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         io.execute(() -> {
             if (isStopped()) return;
             setState(DeliveryState.CONNECTED);
-            if (listener != null) listener.onLog("LCP prêt (sans refresh automatique)");
+            emitLog("LCP prêt (sans refresh automatique)");
             refreshConnectedLive("INIT");
         });
     }
@@ -114,12 +139,13 @@ public final class DeliveryController implements DeliveryControllerPort {
         setState(DeliveryState.DISCONNECTED);
         if (listener != null) {
             listener.onLiveStatus("LIVE: DISCONNECTED");
-            listener.onLog("[LINK] Controller stopped / transport closed");
         }
+        emitLog("[LINK] Controller stopped / transport closed");
     }
 
-    @Override public void refreshProducts() {
-        if (listener != null) listener.onLog("refreshProducts ignoré");
+    @Override
+    public void refreshProducts() {
+        emitLog("refreshProducts ignoré");
     }
 
     @Override
@@ -136,16 +162,19 @@ public final class DeliveryController implements DeliveryControllerPort {
         });
     }
 
-    @Override public DeliveryState getState() { return state; }
+    @Override
+    public DeliveryState getState() { return state; }
 
     @Override
     public boolean isDeliveryActive() {
         return state == DeliveryState.RUNNING_FLOWING || state == DeliveryState.RUNNING_PAUSED;
     }
 
-    @Override public boolean isPaused() { return state == DeliveryState.RUNNING_PAUSED; }
+    @Override
+    public boolean isPaused() { return state == DeliveryState.RUNNING_PAUSED; }
 
-    @Override public boolean isFlowOffStable() { return flowOffStable; }
+    @Override
+    public boolean isFlowOffStable() { return flowOffStable; }
 
     @Override
     public long getFlowOffAgeMs() {
@@ -160,7 +189,7 @@ public final class DeliveryController implements DeliveryControllerPort {
             if (isStopped()) return;
             try {
                 pendingStart = false; // A = jamais d'intention start
-                if (listener != null) listener.onLog("[A] Align / recover requested");
+                emitLog("[A] Align / recover requested");
                 doAlignOrRecover();
                 markIoSuccess();
             } catch (Exception e) {
@@ -184,7 +213,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                 pendingProduct1to16 = product1to16;
                 pendingPresetNet = presetNet;
 
-                if (listener != null) listener.onLog("[C] New delivery requested");
+                emitLog("[C] New delivery requested");
 
                 DeliveryStatus st = readStatusWithResync("C/precheck");
                 if (st == null) {
@@ -198,11 +227,11 @@ public final class DeliveryController implements DeliveryControllerPort {
                     pendingStart = false;
                     startInProgress = false;
                     if (listener != null) {
-                        listener.onLog("[C] Delivery active -> refusing START (recover state)");
                         listener.onLiveStatus(st.flowActive
                                 ? "LIVE: RUNNING_FLOWING (recovered)"
                                 : "LIVE: RUNNING_PAUSED (recovered)");
                     }
+                    emitLog("[C] Delivery active -> refusing START (recover state)");
                     setState(st.flowActive ? DeliveryState.RUNNING_FLOWING : DeliveryState.RUNNING_PAUSED);
                     return;
                 }
@@ -211,8 +240,8 @@ public final class DeliveryController implements DeliveryControllerPort {
                 if (st.ticketPending) {
                     if (listener != null) {
                         listener.onLiveStatus("LIVE: CONNECTED — Ticket_pending (recovering)");
-                        listener.onLog("[C] Ticket pending -> align/recover (A logic), then auto-start when clean");
                     }
+                    emitLog("[C] Ticket pending -> align/recover (A logic), then auto-start when clean");
                     doAlignOrRecover();
                     startInProgress = false;
                     markIoSuccess();
@@ -220,7 +249,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                 }
 
                 if (isReadyToStart(st)) {
-                    if (listener != null) listener.onLog("[C] Register ready -> START now");
+                    emitLog("[C] Register ready -> START now");
                     pendingStart = false;
                     doStartNewDelivery(pendingProduct1to16, pendingPresetNet);
                     startInProgress = false;
@@ -230,13 +259,12 @@ public final class DeliveryController implements DeliveryControllerPort {
 
                 if (listener != null) {
                     listener.onLiveStatus("LIVE: CONNECTED — Alignement en cours");
-                    listener.onLog("[C] Register NOT ready -> align/recover");
                 }
-
+                emitLog("[C] Register NOT ready -> align/recover");
                 doAlignOrRecover();
+
                 startInProgress = false;
                 markIoSuccess();
-
             } catch (Exception e) {
                 startInProgress = false;
                 handleIoFailure("startDelivery(C-intent)", e);
@@ -250,6 +278,7 @@ public final class DeliveryController implements DeliveryControllerPort {
             if (isStopped()) return;
             try {
                 if (state != DeliveryState.RUNNING_PAUSED) return;
+
                 link.opIssueCommand(CMD_RUN);
                 markIoSuccess();
 
@@ -274,7 +303,8 @@ public final class DeliveryController implements DeliveryControllerPort {
                 if (!flowOffStable) return;
 
                 setState(DeliveryState.ENDING);
-                if (listener != null) listener.onLog("[END] Issue END (0x02)");
+                emitLog("[END] Issue END (0x02)");
+
                 link.opIssueCommand(CMD_END);
                 markIoSuccess();
 
@@ -288,7 +318,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                 // Si ticket pending après la fin -> issue #6 (print last ticket) pour clear
                 DeliveryStatus after = readStatusWithResync("END/after");
                 if (after != null && after.ticketPending) {
-                    if (listener != null) listener.onLog("[END] Ticket pending -> Issue #6 to clear");
+                    emitLog("[END] Ticket pending -> Issue #6 to clear");
                     clearTicketPending();
                 }
 
@@ -340,9 +370,9 @@ public final class DeliveryController implements DeliveryControllerPort {
                 int netRaw = beI32(link.opGetField(FIELD_NET_COUNT));
                 double scale = Math.pow(10, cachedDigits);
 
-                updateFlowStability(grossRaw, netRaw, st.flowActive);
-
+                // ✅ Correctif: calculer moved AVANT updateFlowStability (sinon toujours faux)
                 boolean moved = hasCountersMoved(grossRaw, netRaw);
+                updateFlowStability(grossRaw, netRaw, st.flowActive);
 
                 if (listener != null) {
                     listener.onLiveQty(netRaw / scale, grossRaw / scale);
@@ -362,7 +392,6 @@ public final class DeliveryController implements DeliveryControllerPort {
                 }
 
                 markIoSuccess();
-
             } catch (Exception e) {
                 handleIoFailure("requestLiveSample", e);
             } finally {
@@ -398,7 +427,6 @@ public final class DeliveryController implements DeliveryControllerPort {
                 }
                 setState(DeliveryState.RUNNING_PAUSED);
                 markIoSuccess();
-
             } catch (Exception e) {
                 handleIoFailure("requestLiveSnapshot", e);
             }
@@ -414,8 +442,8 @@ public final class DeliveryController implements DeliveryControllerPort {
         if (st.ticketPending) {
             if (listener != null) {
                 listener.onLiveStatus("LIVE: CONNECTED — Ticket_pending (recovering)");
-                listener.onLog("[A] Ticket pending -> Issue #6");
             }
+            emitLog("[A] Ticket pending -> Issue #6");
             boolean ok = clearTicketPending();
             if (!ok) return;
             st = readStatusWithResync("A/0x28-after-ticket");
@@ -434,13 +462,15 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
 
         setState(DeliveryState.CONNECTED);
-        if (listener != null) listener.onLiveStatus(st.ticketPending
-                ? "LIVE: CONNECTED — Ticket pending"
-                : "LIVE: CONNECTED — Prêt à livrer");
+        if (listener != null) {
+            listener.onLiveStatus(st.ticketPending
+                    ? "LIVE: CONNECTED — Ticket pending"
+                    : "LIVE: CONNECTED — Prêt à livrer");
+        }
 
         // Auto-start si intention C en attente et registre clean
         if (pendingStart && isReadyToStart(st)) {
-            if (listener != null) listener.onLog("[AUTO] Alignment complete -> START");
+            emitLog("[AUTO] Alignment complete -> START");
             pendingStart = false;
             doStartNewDelivery(pendingProduct1to16, pendingPresetNet);
         }
@@ -450,7 +480,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         if (isStopped()) return;
 
         setState(DeliveryState.PRESTART);
-        if (listener != null) listener.onLog("[PRESTART] internal");
+        emitLog("[PRESTART] internal");
 
         int idx0 = product1to16 - 1;
         link.opSetField(FIELD_ACTIVE_PRODUCT, new byte[]{(byte) idx0});
@@ -463,6 +493,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         setState(DeliveryState.RUNNING_PAUSED);
         flowOffStable = false;
         lastCountsChangeMs = System.currentTimeMillis();
+
         if (listener != null) listener.onLiveStatus("LIVE: RUNNING_PAUSED (Flow OFF)");
     }
 
@@ -601,7 +632,6 @@ public final class DeliveryController implements DeliveryControllerPort {
         if (lastGrossRaw >= 0 && lastNetRaw >= 0) {
             moved = (grossRaw != lastGrossRaw) || (netRaw != lastNetRaw);
         }
-
         if (moved) {
             lastCountsChangeMs = now;
         }
@@ -609,6 +639,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         long age = now - lastCountsChangeMs;
         flowOffStable = age >= NO_FLOW_CONFIRM_MS;
 
+        // Mise à jour des derniers compteurs
         lastGrossRaw = grossRaw;
         lastNetRaw = netRaw;
 
@@ -647,10 +678,7 @@ public final class DeliveryController implements DeliveryControllerPort {
             }
             lastTimeoutMs = now;
             consecutiveTimeouts++;
-
-            if (listener != null) {
-                listener.onLog("[WARN] Timeout (" + consecutiveTimeouts + ") ctx=" + ctx);
-            }
+            emitLog("[WARN] Timeout (" + consecutiveTimeouts + ") ctx=" + ctx);
             softResync("timeout/" + ctx);
         }
     }
@@ -670,7 +698,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         setState(DeliveryState.DISCONNECTED);
         if (listener != null) {
             listener.onLiveStatus("LIVE: DISCONNECTED");
-            listener.onLog("[LINK] Controller stopped (" + why + ") ctx=" + ctx);
         }
+        emitLog("[LINK] Controller stopped (" + why + ") ctx=" + ctx);
     }
 }
