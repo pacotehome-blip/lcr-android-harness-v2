@@ -222,66 +222,28 @@
             android:layout_height="wrap_content"
             android:text="-" />
 
-        <Spinner
-            android:id="@+id/spnTicketRequired"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content" />
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="6dp">
-
-            <Button
-                android:id="@+id/btnRefreshTicket"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="Refresh Ticket" />
-
-            <Button
-                android:id="@+id/btnClearShift"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginStart="8dp"
-                android:text="Clear Shift" />
-        </LinearLayout>
+    </LinearLayout>
+    
+    <!-- ===================== LOG ===================== -->
+    <ScrollView
+        android:id="@+id/logScroll"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:fillViewport="true"
+        android:background="#111111">
 
         <TextView
-            android:id="@+id/txtPrinterStatus"
+            android:id="@+id/txtLog"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Imprimante: (non connecté / non lu)"
-            android:layout_marginTop="6dp"
-            android:background="#EEEEEE"
+            android:typeface="monospace"
+            android:textIsSelectable="true"
+            android:textSize="12sp"
+            android:textColor="#00FF00"
             android:padding="6dp" />
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="6dp">
-
-            <Button
-                android:id="@+id/btnRefreshPrinter"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="Refresh Printer" />
-
-            <Button
-                android:id="@+id/btnPrintPending"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginStart="8dp"
-                android:text="Print Pending" />
-        </LinearLayout>
-
-    </LinearLayout>
-
+    </ScrollView>
+    
     <!-- ===================== LOG ACTIONS ===================== -->
     <LinearLayout
         android:layout_width="match_parent"
@@ -325,25 +287,5 @@
             android:layout_marginTop="6dp"/>
 
     </LinearLayout>
-    
-    <!-- ===================== LOG ===================== -->
-    <ScrollView
-        android:id="@+id/logScroll"
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
-        android:fillViewport="true"
-        android:background="#111111">
 
-        <TextView
-            android:id="@+id/txtLog"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:typeface="monospace"
-            android:textIsSelectable="true"
-            android:textSize="12sp"
-            android:textColor="#00FF00"
-            android:padding="6dp" />
-    </ScrollView>
-    
 </LinearLayout>
