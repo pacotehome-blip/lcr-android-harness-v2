@@ -50,8 +50,11 @@ public class MainActivity extends AppCompatActivity {
     private ScrollView logScroll;
     private Button btnClearLog;
     private Button btnCopyLog;
+    private Button btnScrollDown;
 
     private CheckBox cbTxRx;
+    private CheckBox cbLogTs;
+    private boolean logTsEnabled = false;
 
     private DeliveryControllerPort controller;
     private boolean suppressProductSelection = false;
@@ -127,7 +130,9 @@ public class MainActivity extends AppCompatActivity {
         logScroll = findViewById(R.id.logScroll);
         btnClearLog = findViewById(R.id.btnClearLog);
         btnCopyLog = findViewById(R.id.btnCopyLog);
+        btnScrollDown = findViewById(R.id.btnScrollDown);
         cbTxRx = findViewById(R.id.cbTxRx);
+        cbLogTs = findViewById(R.id.cbLogTs);
     }
 
     private void initUiDefaults() {
@@ -150,6 +155,9 @@ public class MainActivity extends AppCompatActivity {
         SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
         boolean showTxRx = prefs.getBoolean("log_tx_rx", false);
         if (cbTxRx != null) cbTxRx.setChecked(showTxRx);
+        boolean ts = prefs.getBoolean("log_ts", false);
+        logTsEnabled = ts;
+        if (cbLogTs != null) cbLogTs.setChecked(ts);
     }
 
     private void wireUi() {
@@ -186,6 +194,9 @@ public class MainActivity extends AppCompatActivity {
             cm.setPrimaryClip(ClipData.newPlainText("log", txtLog.getText()));
             log("Log copié dans le presse-papiers");
         });
+        if (btnScrollDown != null) {
+            btnScrollDown.setOnClickListener(v -> logScroll.fullScroll(View.FOCUS_DOWN));
+        }
 
         if (cbTxRx != null) {
             cbTxRx.setOnCheckedChangeListener((buttonView, checked) -> {
@@ -195,6 +206,16 @@ public class MainActivity extends AppCompatActivity {
                 log("Option TX/RX: " + (checked ? "ON" : "OFF"));
             });
         }
+
+if (cbLogTs != null) {
+    cbLogTs.setOnCheckedChangeListener((buttonView, checked) -> {
+        SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
+        prefs.edit().putBoolean("log_ts", checked).apply();
+        logTsEnabled = checked;
+        if (controller != null) controller.setLogTimestampsEnabled(checked);
+        log("Option timestamps (UI+IO): " + (checked ? "ON" : "OFF"));
+    });
+}
     }
 
     private void scanUsb() {
@@ -296,21 +317,22 @@ public class MainActivity extends AppCompatActivity {
 
         controller.setListener(new DeliveryControllerPort.Listener() {
             @Override
-            public void onStateChanged(DeliveryState state) {
-                ui.post(() -> {
-                    boolean stableOff = (controller != null) && controller.isFlowOffStable();
-                    txtLive.setText("LIVE: " + state);
-                    updateButtons(state, stableOff);
-                    if (state == DeliveryState.RUNNING_FLOWING) {
-                        startLiveTickIfNeeded();
-                        if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
-                    } else {
-                        stopLiveTick();
-                        if (controller != null) controller.requestLiveSnapshot();
-                        if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.GONE);
-                    }
-                });
-            }
+            
+public void onStateChanged(DeliveryState state) {
+    ui.post(() -> {
+        boolean stableOff = (controller != null) && controller.isFlowOffStable();
+        updateButtons(state, stableOff);
+
+        // LIVE tick: seulement pendant RUNNING_FLOWING (après Continuer)
+        if (state == DeliveryState.RUNNING_FLOWING) {
+            startLiveTickIfNeeded();
+            if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
+        } else {
+            stopLiveTick();
+            if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.GONE);
+        }
+    });
+}
 
             @Override public void onLiveStatus(String liveText) { ui.post(() -> txtLive.setText(liveText)); }
 
@@ -357,7 +379,6 @@ public class MainActivity extends AppCompatActivity {
 
         log("Connect LCP appliqué");
         stopLiveTick();
-        if (controller != null) controller.requestLiveSnapshot();
     }
 
     private void updateButtons(DeliveryState state, boolean stableOff) {
@@ -366,9 +387,8 @@ public class MainActivity extends AppCompatActivity {
         boolean flowing = (state == DeliveryState.RUNNING_FLOWING);
         btnA.setEnabled(connected);
         btnC.setEnabled(connected);
-        boolean allow = paused && stableOff && !flowing;
-        btnContinue.setEnabled(allow);
-        btnFinish.setEnabled(allow);
+        btnContinue.setEnabled(paused);
+        btnFinish.setEnabled(paused && stableOff);
         btnB.setEnabled(true);
     }
 
@@ -391,9 +411,14 @@ public class MainActivity extends AppCompatActivity {
         catch (Exception e) { return def; }
     }
 
+    private String uiTs() {
+        java.text.SimpleDateFormat df = new java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.CANADA_FRENCH);
+        return df.format(new java.util.Date(System.currentTimeMillis()));
+    }
     private void log(String s) {
         ui.post(() -> {
-            logBuf.append(s).append('\n');
+            String line = logTsEnabled ? ("[UI " + uiTs() + "] " + s) : s;
+            logBuf.append(line).append('\n');
             txtLog.setText(logBuf.toString());
             logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
         });

@@ -36,6 +36,8 @@ public final class DeliveryController implements DeliveryControllerPort {
     private volatile int cachedDigits = -1;
 
     private volatile boolean flowOffStable = false;
+    private volatile boolean sawFlowOnOnce = false;
+    private volatile long flowOffStartMs = 0L;
     private volatile long lastCountsChangeMs = 0L;
     private volatile int lastGrossRaw = -1;
     private volatile int lastNetRaw = -1;
@@ -175,11 +177,13 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     @Override public boolean isFlowOffStable() { return flowOffStable; }
 
-    @Override public long getFlowOffAgeMs() {
-        long now = System.currentTimeMillis();
-        if (lastCountsChangeMs <= 0L) return 0L;
-        return Math.max(0L, now - lastCountsChangeMs);
-    }
+    @Override
+public long getFlowOffAgeMs() {
+    if (!sawFlowOnOnce) return 0L;
+    if (flowOffStartMs <= 0L) return 0L;
+    long now = System.currentTimeMillis();
+    return Math.max(0L, now - flowOffStartMs);
+}
 
     @Override
     public void alignOrRecover() {
@@ -262,22 +266,28 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     @Override
-    public void resumeIfPaused() {
-        io.execute(() -> {
-            if (isStopped()) return;
-            try {
-                if (state != DeliveryState.RUNNING_PAUSED) return;
-                link.opIssueCommand(CMD_RUN);
-                markIoSuccess();
-                long now = System.currentTimeMillis();
-                lastCountsChangeMs = now;
-                flowOffStable = false;
-                if (listener != null) listener.onLiveStatus("LIVE: RUNNING_PAUSED (Flow OFF)");
-            } catch (Exception e) {
-                handleIoFailure("resumeIfPaused", e);
-            }
-        });
-    }
+public void resumeIfPaused() {
+    io.execute(() -> {
+        if (isStopped()) return;
+        try {
+            if (state != DeliveryState.RUNNING_PAUSED) return;
+
+            // Continuer: on lance RUN puis on entre en contexte LIVE (Flow OFF -> attente Flow ON).
+            link.opIssueCommand(CMD_RUN);
+            markIoSuccess();
+
+            // Au début (avant FLOW ON), pas de timer de confirmation.
+            flowOffStable = false;
+            flowOffStartMs = 0L;
+
+            setState(DeliveryState.RUNNING_FLOWING);
+            if (listener != null) listener.onLiveStatus("LIVE: RUNNING_FLOWING (Flow OFF — attente Flow ON)");
+
+        } catch (Exception e) {
+            handleIoFailure("resumeIfPaused", e);
+        }
+    });
+}
 
     @Override
     public void endDelivery() {
@@ -285,7 +295,7 @@ public final class DeliveryController implements DeliveryControllerPort {
             if (isStopped()) return;
             try {
                 if (state != DeliveryState.RUNNING_PAUSED) return;
-                if (!flowOffStable) return;
+                if (!flowOffStable || !sawFlowOnOnce) return;
 
                 setState(DeliveryState.ENDING);
                 emitLog("[END] Issue END (0x02)");
@@ -329,87 +339,109 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     @Override
-    public void requestLiveSample() {
-        io.execute(() -> {
-            if (isStopped()) return;
-            inLiveSample.set(true);
-            try {
-                DeliveryStatus st = readStatusWithResync("LIVE/0x28");
-                if (st == null) return;
+public void requestLiveSample() {
+    io.execute(() -> {
+        if (isStopped()) return;
+        // LIVE tick: appelé uniquement après action opérateur (Continuer).
+        inLiveSample.set(true);
+        try {
+            DeliveryStatus st = readStatusWithResync("LIVE/0x28");
+            if (st == null) return;
 
-                if (!st.deliveryActive) {
-                    setState(DeliveryState.CONNECTED);
-                    refreshConnectedLive("LIVE/inactive");
-                    lastGrossRaw = -1;
-                    lastNetRaw = -1;
-                    lastCountsChangeMs = 0L;
-                    flowOffStable = false;
-                    return;
-                }
+            // Livraison terminée -> retour CONNECTED qualifié.
+            if (!st.deliveryActive) {
+                setState(DeliveryState.CONNECTED);
+                refreshConnectedLive("LIVE/inactive");
+                lastGrossRaw = -1;
+                lastNetRaw = -1;
+                flowOffStable = false;
+                sawFlowOnOnce = false;
+                flowOffStartMs = 0L;
+                lastCountsChangeMs = 0L;
+                return;
+            }
 
+            // Livraison active.
+            // Règle: lecture #44/#45 UNIQUEMENT si FLOW_ACTIVE=1.
+            // - Avant le premier FLOW ON observé: Flow OFF = attente Flow ON (sans timer)
+            // - Après FLOW ON observé: si Flow OFF, timer 10s puis retour RUNNING_PAUSED
+
+            if (st.flowActive) {
                 ensureDigits();
                 int grossRaw = beI32(link.opGetField(FIELD_GROSS_COUNT));
                 int netRaw = beI32(link.opGetField(FIELD_NET_COUNT));
                 double scale = Math.pow(10, cachedDigits);
 
                 boolean moved = hasCountersMoved(grossRaw, netRaw);
-                updateFlowStability(grossRaw, netRaw, st.flowActive);
-
-                if (listener != null) listener.onLiveQty(netRaw / scale, grossRaw / scale);
-
                 if (moved) {
-                    if (listener != null) listener.onLiveStatus("LIVE: RUNNING_FLOWING (FLOW ON)");
-                    setState(DeliveryState.RUNNING_FLOWING);
-                } else {
-                    if (listener != null) {
-                        listener.onLiveStatus(flowOffStable
-                                ? "LIVE: RUNNING_PAUSED (FLOW OFF confirmé)"
-                                : "LIVE: RUNNING_PAUSED (FLOW OFF)");
-                    }
-                    setState(DeliveryState.RUNNING_PAUSED);
+                    sawFlowOnOnce = true;
+                    lastCountsChangeMs = System.currentTimeMillis();
                 }
 
-                markIoSuccess();
-            } catch (Exception e) {
-                handleIoFailure("requestLiveSample", e);
-            } finally {
-                inLiveSample.remove();
-            }
-        });
-    }
-
-    @Override
-    public void requestLiveSnapshot() {
-        io.execute(() -> {
-            if (isStopped()) return;
-            try {
-                DeliveryStatus st = readStatusWithResync("SNAP/0x28");
-                if (st == null) return;
-
-                if (!st.deliveryActive) {
-                    setState(DeliveryState.CONNECTED);
-                    refreshConnectedLive("SNAP/inactive");
-                    return;
-                }
-
-                ensureDigits();
-                int grossRaw = beI32(link.opGetField(FIELD_GROSS_COUNT));
-                int netRaw = beI32(link.opGetField(FIELD_NET_COUNT));
-                double scale = Math.pow(10, cachedDigits);
-
-                updateFlowStability(grossRaw, netRaw, st.flowActive);
+                // Flow ON -> reset confirmation OFF
+                flowOffStable = false;
+                flowOffStartMs = 0L;
+                lastGrossRaw = grossRaw;
+                lastNetRaw = netRaw;
 
                 if (listener != null) {
                     listener.onLiveQty(netRaw / scale, grossRaw / scale);
-                    listener.onLiveStatus("LIVE: RUNNING_PAUSED (snapshot)");
+                    listener.onFlowStability(true, false, 0L);
+                    listener.onLiveStatus("LIVE: RUNNING_FLOWING (FLOW ON)");
                 }
-                setState(DeliveryState.RUNNING_PAUSED);
+                setState(DeliveryState.RUNNING_FLOWING);
                 markIoSuccess();
-            } catch (Exception e) {
-                handleIoFailure("requestLiveSnapshot", e);
+                return;
             }
-        });
-    }
+
+            // FLOW_ACTIVE=0
+            if (!sawFlowOnOnce) {
+                // Phase initiale: attente du premier FLOW ON (aucun timer)
+                if (listener != null) {
+                    listener.onFlowStability(false, false, 0L);
+                    listener.onLiveStatus("LIVE: RUNNING_FLOWING (Flow OFF — attente Flow ON)");
+                }
+                setState(DeliveryState.RUNNING_FLOWING);
+                markIoSuccess();
+                return;
+            }
+
+            // Post FLOW ON: confirmer FLOW OFF après 10s
+            long now = System.currentTimeMillis();
+            if (flowOffStartMs == 0L) flowOffStartMs = now;
+            long age = Math.max(0L, now - flowOffStartMs);
+            flowOffStable = age >= NO_FLOW_CONFIRM_MS;
+
+            if (listener != null) {
+                listener.onFlowStability(false, flowOffStable, age);
+                listener.onLiveStatus(flowOffStable
+                        ? "LIVE: RUNNING_PAUSED (FLOW OFF confirmé)"
+                        : "LIVE: RUNNING_FLOWING (FLOW OFF — confirmation...)"
+                );
+            }
+
+            if (flowOffStable) setState(DeliveryState.RUNNING_PAUSED);
+            else setState(DeliveryState.RUNNING_FLOWING);
+
+            markIoSuccess();
+
+        } catch (Exception e) {
+            handleIoFailure("requestLiveSample", e);
+        } finally {
+            inLiveSample.remove();
+        }
+    });
+}
+
+    @Override
+public void requestLiveSnapshot() {
+    // Snapshot registre: valide 0x28 et rafraîchit le libellé CONNECTED.
+    // Ne doit jamais basculer l'état vers RUNNING_* sans action opérateur.
+    io.execute(() -> {
+        if (isStopped()) return;
+        refreshConnectedLive("SNAP");
+    });
+}
 
     /* ===== Core align/recover ===== */
 

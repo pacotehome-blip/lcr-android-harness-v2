@@ -3,14 +3,14 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:padding="10dp">
+    android:padding="6dp">
 
     <!-- ===================== USB ===================== -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
-        android:layout_marginTop="6dp">
+        android:layout_marginTop="4dp">
 
         <Button
             android:id="@+id/btnScanUsb"
@@ -32,14 +32,14 @@
         android:id="@+id/spnUsbDevices"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp" />
+        android:layout_marginTop="4dp" />
 
     <!-- ===================== LCP (ÉTAT ÉDITABLE) ===================== -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
-        android:layout_marginTop="6dp">
+        android:layout_marginTop="4dp">
 
         <EditText
             android:id="@+id/edtTo"
@@ -75,14 +75,14 @@
         android:id="@+id/spnProducts"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="6dp" />
+        android:layout_marginTop="4dp" />
 
     <!-- ===================== PRODUIT / PRESET ===================== -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
-        android:layout_marginTop="6dp">
+        android:layout_marginTop="4dp">
 
         <EditText
             android:id="@+id/edtProduct"
@@ -110,14 +110,14 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="Connect (LCP)"
-        android:layout_marginTop="6dp" />
+        android:layout_marginTop="4dp" />
 
     <!-- ===================== ACTIONS ===================== -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
-        android:layout_marginTop="6dp">
+        android:layout_marginTop="4dp">
 
         <Button
             android:id="@+id/btnA"
@@ -148,7 +148,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
-        android:layout_marginTop="6dp">
+        android:layout_marginTop="4dp">
 
         <Button
             android:id="@+id/btnContinue"
@@ -173,14 +173,14 @@
         android:layout_height="wrap_content"
         android:text="LIVE: (en attente)"
         android:textStyle="bold"
-        android:layout_marginTop="8dp" />
+        android:layout_marginTop="4dp" />
     <!-- ===================== NET / GROSS ===================== -->
     <LinearLayout
         android:id="@+id/liveQtyPanel"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:layout_marginTop="6dp"
+        android:layout_marginTop="4dp"
         android:padding="8dp"
         android:background="#F2F2F2">
 
@@ -208,7 +208,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:layout_marginTop="8dp">
+        android:layout_marginTop="4dp">
 
         <TextView
             android:layout_width="match_parent"
@@ -244,48 +244,68 @@
             android:padding="6dp" />
     </ScrollView>
     
+    
     <!-- ===================== LOG ACTIONS ===================== -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="end"
-        android:layout_marginTop="6dp">
+        android:orientation="vertical"
+        android:layout_marginTop="4dp">
 
-    <!-- ===================== LOG OPTIONS ===================== -->
-        <Button
-            android:id="@+id/btnClearLog"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Clear log" />
-
-        <Button
-            android:id="@+id/btnCopyLog"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:text="Copy log" />
-        <Button
-            android:id="@+id/btnScrollDown"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:text="Scroll down" />
-        <CheckBox
-            android:id="@+id/cbTxRx"
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Afficher TX / RX"
-            android:checked="false"
-            android:layout_marginTop="6dp"/>
-        <CheckBox
-            android:id="@+id/cbLogTs"
+            android:orientation="horizontal"
+            android:gravity="end">
+
+            <Button
+                android:id="@+id/btnClearLog"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Clear log" />
+
+            <Button
+                android:id="@+id/btnCopyLog"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="Copy log" />
+
+            <Button
+                android:id="@+id/btnScrollDown"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="Scroll down" />
+        </LinearLayout>
+
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Timestamps UI + IO"
-            android:checked="false"
-            android:layout_marginTop="6dp"/>
+            android:orientation="horizontal"
+            android:layout_marginTop="2dp">
+
+            <CheckBox
+                android:id="@+id/cbTxRx"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Afficher TX / RX"
+                android:checked="false"
+                android:minHeight="0dp"
+                android:paddingTop="0dp"
+                android:paddingBottom="0dp"/>
+
+            <CheckBox
+                android:id="@+id/cbLogTs"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:text="Timestamps UI + IO"
+                android:checked="false"
+                android:minHeight="0dp"
+                android:paddingTop="0dp"
+                android:paddingBottom="0dp"/>
+        </LinearLayout>
 
     </LinearLayout>
-
 </LinearLayout>
