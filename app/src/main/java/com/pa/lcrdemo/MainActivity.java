@@ -33,33 +33,26 @@ public class MainActivity extends AppCompatActivity {
     private Spinner spnUsbDevices;
     private Button btnScanUsb;
     private Button btnPingUsb;
-
     private EditText edtTo;
     private EditText edtFrom;
     private TextView txtActiveNode;
-
     private Button btnConnect;
     private Spinner spnProducts;
     private EditText edtProduct;
     private EditText edtPreset;
-
     private Button btnA, btnB, btnC;
     private Button btnContinue, btnFinish;
-
     private TextView txtLive;
     private View liveQtyPanel;
     private TextView txtQtyNet;
     private TextView txtQtyGross;
-
     private TextView txtLog;
     private ScrollView logScroll;
     private Button btnClearLog;
     private Button btnCopyLog;
-
     private CheckBox cbTxRx;
 
     private DeliveryControllerPort controller;
-
     private boolean suppressProductSelection = false;
     private boolean userTouchedSpinner = false;
 
@@ -67,41 +60,33 @@ public class MainActivity extends AppCompatActivity {
     private final Handler ui = new Handler(Looper.getMainLooper());
 
     private boolean liveTickRunning = false;
-    private int liveTickPeriodMs = 300;
-
     private double lastNet = Double.NaN;
     private double lastGross = Double.NaN;
-
     private Runnable pendingInitRunnable = null;
 
     private final Runnable liveTick = new Runnable() {
         @Override
         public void run() {
-            if (controller == null) {
-                liveTickRunning = false;
-                return;
-            }
+            if (controller == null) { liveTickRunning = false; return; }
 
+            // ✅ IMPORTANT: tick en FLOWING ou PAUSED (pour confirmer Flow OFF après 10s)
             DeliveryState st = controller.getState();
-
-            // ✅ live loop en FLOWING ou PAUSED (pour no_flow_prompt / stagnation)
             if (st != DeliveryState.RUNNING_FLOWING && st != DeliveryState.RUNNING_PAUSED) {
                 liveTickRunning = false;
                 return;
             }
 
             controller.requestLiveSample();
-            ui.postDelayed(this, liveTickPeriodMs);
+            ui.postDelayed(this, (st == DeliveryState.RUNNING_FLOWING) ? 300 : 500);
         }
     };
 
-    private void startLiveTickIfNeeded(int periodMs) {
+    private void startLiveTickIfNeeded() {
         if (controller == null) return;
-        liveTickPeriodMs = periodMs;
         if (liveTickRunning) return;
         liveTickRunning = true;
         ui.removeCallbacks(liveTick);
-        ui.postDelayed(liveTick, liveTickPeriodMs);
+        ui.postDelayed(liveTick, 300);
     }
 
     private void stopLiveTick() {
@@ -158,7 +143,6 @@ public class MainActivity extends AppCompatActivity {
 
         List<ProductUiItem> products = new ArrayList<>();
         for (int i = 1; i <= 16; i++) products.add(new ProductUiItem(i, "Produit " + i));
-
         ArrayAdapter<ProductUiItem> adapter =
                 new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, products);
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
@@ -197,19 +181,16 @@ public class MainActivity extends AppCompatActivity {
             @Override public void onNothingSelected(AdapterView<?> parent) {}
         });
 
-        // A = alignOrRecover
         btnA.setOnClickListener(v -> {
             if (controller == null) return;
             controller.alignOrRecover();
         });
 
-        // B = status
         btnB.setOnClickListener(v -> {
             if (controller == null) return;
             controller.requestStatus();
         });
 
-        // C = new delivery intent
         btnC.setOnClickListener(v -> {
             if (controller == null) return;
             controller.startDelivery(readProduct(), readPreset());
@@ -349,35 +330,17 @@ public class MainActivity extends AppCompatActivity {
             public void onStateChanged(DeliveryState state) {
                 ui.post(() -> {
                     boolean stableOff = (controller != null) && controller.isFlowOffStable();
-                    long offAge = (controller != null) ? controller.getFlowOffAgeMs() : 0L;
 
-                    // ✅ PRESTART interne : affichage “connecté” sans exposer PRESTART
-                    if (state == DeliveryState.PRESTART) {
-                        txtLive.setText("LIVE: CONNECTED — Démarrage…");
-                    } else if (state == DeliveryState.ENDING) {
-                        txtLive.setText("LIVE: CONNECTED — Fin en cours…");
-                    } else {
-                        txtLive.setText("LIVE: " + state);
-                    }
-
+                    txtLive.setText("LIVE: " + state);
                     updateButtons(state, stableOff);
 
-                    if (state == DeliveryState.RUNNING_FLOWING) {
-                        startLiveTickIfNeeded(300);
-                        if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
-                    } else if (state == DeliveryState.RUNNING_PAUSED) {
-                        // ✅ garder un tick (plus lent) pour confirmer OFF (10–30s) et détecter reprise
-                        startLiveTickIfNeeded(500);
+                    if (state == DeliveryState.RUNNING_FLOWING || state == DeliveryState.RUNNING_PAUSED) {
+                        startLiveTickIfNeeded();
                         if (controller != null) controller.requestLiveSnapshot();
                         if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
                     } else {
                         stopLiveTick();
                         if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.GONE);
-                    }
-
-                    // Optionnel debug:
-                    if (stableOff && offAge > 0) {
-                        log("FlowOffAge=" + offAge + "ms (stable)");
                     }
                 });
             }
@@ -435,21 +398,21 @@ public class MainActivity extends AppCompatActivity {
         if (controller != null) controller.requestLiveSnapshot();
     }
 
-    /**
-     * ✅ Règle demandée: A/B/C ne sont pas auto-activés/désactivés selon l'état.
-     * Ils restent disponibles dès que le controller existe.
-     * Continue/Finish restent conditionnels (pause + flowOffStable).
-     */
     private void updateButtons(DeliveryState state, boolean stableOff) {
-        boolean has = (controller != null);
+        boolean connected = (state == DeliveryState.CONNECTED);
+        boolean paused = (state == DeliveryState.RUNNING_PAUSED);
+        boolean flowing = (state == DeliveryState.RUNNING_FLOWING);
 
-        btnA.setEnabled(has);
-        btnB.setEnabled(has);
-        btnC.setEnabled(has);
+        // A/C actifs selon état (auto enable/disable OK — tu as confirmé que le point (1) concerne seulement l'auto-click)
+        btnA.setEnabled(connected);
+        btnC.setEnabled(connected);
 
-        boolean allowEnd = has && (state == DeliveryState.RUNNING_PAUSED) && stableOff;
-        btnContinue.setEnabled(allowEnd);
-        btnFinish.setEnabled(allowEnd);
+        // Continuer/Terminer : seulement paused + stableOff
+        boolean allow = paused && stableOff && !flowing;
+        btnContinue.setEnabled(allow);
+        btnFinish.setEnabled(allow);
+
+        btnB.setEnabled(true);
     }
 
     private int readProduct() {
