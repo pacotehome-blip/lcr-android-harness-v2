@@ -6,6 +6,7 @@ import java.util.Date;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class DeliveryController implements DeliveryControllerPort {
 
@@ -15,15 +16,20 @@ public final class DeliveryController implements DeliveryControllerPort {
     private static final int FIELD_GROSS_COUNT = 44;
     private static final int FIELD_NET_COUNT = 45;
 
+    private static final int FIELD_GROSS_TOTAL = 17; // (utilisable plus tard pour FINISH host print)
+    private static final int FIELD_NET_TOTAL   = 18;
+
     private static final int CMD_RUN = 0x00;
     private static final int CMD_END = 0x02;
     private static final int CMD_PRINT_LAST_TICKET = 0x06;
 
-    private static final int DC_TICKET_PENDING = 0x0001;
-    private static final int DC_FLOW_ACTIVE = 0x0004;
-    private static final int DC_DELIVERY_ACTIVE = 0x0008;
+    // Bits delCode
+    private static final int DC_TICKET_PENDING   = 0x0001;
+    private static final int DC_FLOW_ACTIVE      = 0x0004;
+    private static final int DC_DELIVERY_ACTIVE  = 0x0008;
 
     private static final long TICKET_TIMEOUT_MS = 60_000;
+    private static final long TICKET_DEVICE_LOOP_MS = 30_000; // équivalent Python: boucle ~30s pour clear ticket
     private static final long TICKET_POLL_MS = 250;
 
     // ✅ Conservateur: stableOff après 10s de stagnation
@@ -37,12 +43,13 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     private volatile int cachedDigits = -1;
 
+    // Python parity: stableOff basé sur stagnation d==0
     private volatile boolean flowOffStable = false;
 
-    // ✅ “ON réel observé” = on a déjà vu une progression (d>0) au moins une fois
+    // Python parity: on a déjà vu une progression réelle (d>0) au moins une fois
     private volatile boolean sawFlowOnOnce = false;
 
-    // Début du OFF (pour age affichable) après avoir vu ON réel
+    // âge de OFF (à afficher) après ON réel
     private volatile long flowOffStartMs = 0L;
 
     // “last_change” Python: dernier moment où d>0
@@ -69,6 +76,9 @@ public final class DeliveryController implements DeliveryControllerPort {
     private static final long TIMEOUT_WINDOW_MS = 10_000;
 
     private volatile boolean logTsEnabled = false;
+
+    // ✅ Python parity: pas de chevauchement LIVE (évite la file d’attente / “trames sales”)
+    private final AtomicBoolean liveInFlight = new AtomicBoolean(false);
 
     private static final ThreadLocal<SimpleDateFormat> IO_DF =
             ThreadLocal.withInitial(() -> new SimpleDateFormat("HH:mm:ss.SSS", Locale.CANADA_FRENCH));
@@ -237,9 +247,10 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     /**
-     * Cas C (validé): START normal uniquement si aucune livraison active ET pas de ticket pending.
-     * Si ticket_pending=1 sans livraison active -> A manuellement (C affiche CONNECTED — Ticket pending).
-     * Si livraison active -> A manuellement (C affiche CONNECTED — Ticket pending ou Livraison active).
+     * Cas C (validé):
+     * - START normal seulement si aucune livraison active ET pas de ticket pending.
+     * - Si ticket_pending=1 sans livraison active -> A manuellement (C affiche CONNECTED — Ticket pending).
+     * - Si livraison active -> A manuellement (C affiche CONNECTED — Ticket pending ou Livraison active).
      */
     @Override
     public void startDelivery(int product1to16, double presetNet) {
@@ -256,14 +267,14 @@ public final class DeliveryController implements DeliveryControllerPort {
 
                 emitLog("[C] New delivery requested");
 
-                DeliveryStatus st = readStatusWithResync("C/precheck");
+                DeliveryStatus st = readDeliveryStatusWithResync("C/precheck");
                 if (st == null) {
                     startInProgress = false;
                     refreshConnectedLive("C/precheck-null");
                     return;
                 }
 
-                // Si livraison active: pas de START, visibilité ticket_pending pour action A manuelle
+                // Livraison active -> ne pas START, montrer état (ticket pending visible)
                 if (st.deliveryActive) {
                     pendingStart = false;
                     startInProgress = false;
@@ -279,7 +290,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                     return;
                 }
 
-                // Ticket pending sans livraison active: A manuellement
+                // Ticket pending sans livraison active -> A manuellement
                 if (st.ticketPending) {
                     pendingStart = false;
                     startInProgress = false;
@@ -302,7 +313,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                     return;
                 }
 
-                // Registre pas prêt -> align (reste cohérent avec ton baseline)
+                // Registre pas prêt -> align (baseline)
                 if (listener != null) listener.onLiveStatus("LIVE: CONNECTED — Alignement en cours");
                 emitLog("[C] Register NOT ready -> align/recover");
                 doAlignOrRecover();
@@ -328,7 +339,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                 link.opIssueCommand(CMD_RUN);
                 markIoSuccess();
 
-                // On repart en contexte LIVE; la décision FLOW ON/OFF sera faite par progression compteurs (Python parity)
+                // Python parity: la décision ON/OFF sera faite par progression des compteurs (d)
                 setState(DeliveryState.RUNNING_FLOWING);
                 if (listener != null) listener.onLiveStatus("LIVE: RUNNING_FLOWING (Flow OFF — attente progression)");
 
@@ -349,22 +360,28 @@ public final class DeliveryController implements DeliveryControllerPort {
                 if (!flowOffStable || !sawFlowOnOnce) return;
 
                 setState(DeliveryState.ENDING);
-
                 emitLog("[END] Issue END (0x02)");
                 link.opIssueCommand(CMD_END);
                 markIoSuccess();
 
+                // Attendre fin via machine status (Python-like)
                 long deadline = System.currentTimeMillis() + 15_000;
                 while (!isStopped() && System.currentTimeMillis() < deadline) {
-                    DeliveryStatus st = readStatusWithResync("END/poll");
-                    if (st != null && !st.deliveryActive && !st.flowActive) break;
+                    LcpLink.MachineStatus ms = tryGetMachineStatus();
+                    if (ms != null) {
+                        boolean active = (ms.delCode & DC_DELIVERY_ACTIVE) != 0;
+                        boolean flow   = (ms.delCode & DC_FLOW_ACTIVE) != 0;
+                        if (!active && !flow) break;
+                    }
                     try { Thread.sleep(250); } catch (InterruptedException ignored) {}
                 }
 
-                DeliveryStatus after = readStatusWithResync("END/after");
-                if (after != null && after.ticketPending) {
-                    emitLog("[END] Ticket pending -> Issue #6 to clear");
-                    clearTicketPending();
+                // Ticket clear (Python-like, boucle 30s) si pending
+                LcpLink.MachineStatus msAfter = tryGetMachineStatus();
+                boolean ticketPending = (msAfter != null) && ((msAfter.delCode & DC_TICKET_PENDING) != 0);
+                if (ticketPending) {
+                    emitLog("[END] Ticket pending -> clear via #6 loop");
+                    clearTicketPendingLoop();
                 }
 
                 setState(DeliveryState.CONNECTED);
@@ -390,29 +407,36 @@ public final class DeliveryController implements DeliveryControllerPort {
         });
     }
 
-    // --- Python parity LIVE: d = abs(g-lg)+abs(n-ln), ON réel => d>0, OFF => stagnation, stableOff => 10s ---
+    /**
+     * LIVE Python parity:
+     * - pas de chevauchement (liveInFlight)
+     * - source = MachineStatus (0x23) pour flow/active
+     * - compteurs toujours lus (fallback)
+     * - FLOW ON = d>0, sinon stagnation -> stableOff après 10s (si on a déjà vu ON réel)
+     */
     @Override
     public void requestLiveSample() {
         io.execute(() -> {
             if (isStopped()) return;
 
+            // ✅ Python parity: pas de LIVE concurrent
+            if (!liveInFlight.compareAndSet(false, true)) return;
+
             inLiveSample.set(true);
             try {
-                // Source de vérité LIVE (proche Python): machine status full
                 LcpLink.MachineStatus ms = link.opGetMachineStatus(); // 0x23
                 markIoSuccess();
 
                 boolean flowBit = (ms.delCode & DC_FLOW_ACTIVE) != 0;
                 boolean active  = (ms.delCode & DC_DELIVERY_ACTIVE) != 0;
 
-                // Si pas de livraison active -> CONNECTED qualifié
+                // Pas de livraison active -> CONNECTED qualifié
                 if (!active) {
                     setState(DeliveryState.CONNECTED);
                     refreshConnectedLive("LIVE/inactive");
 
                     lastGrossRaw = -1;
                     lastNetRaw = -1;
-
                     flowOffStable = false;
                     sawFlowOnOnce = false;
                     flowOffStartMs = 0L;
@@ -441,7 +465,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                     d = Math.abs(g - lastGrossRaw) + Math.abs(n - lastNetRaw);
                 }
 
-                // Toujours publier les quantités (comme Python les imprime régulièrement)
+                // Publier quantités
                 if (listener != null) listener.onLiveQty(n / scale, g / scale);
 
                 if (d > 0) {
@@ -469,7 +493,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                 long age = now - lastCountsChangeMs;
 
                 if (!sawFlowOnOnce) {
-                    // Avant toute progression: on reste en attente (pas de timer stableOff)
+                    // Avant toute progression: attente progression (pas de timer stableOff)
                     flowOffStable = false;
                     flowOffStartMs = 0L;
 
@@ -484,7 +508,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                     return;
                 }
 
-                // Après avoir vu ON réel: stableOff après 10s de stagnation
+                // Après ON réel: stableOff après 10s de stagnation
                 if (flowOffStartMs == 0L) flowOffStartMs = lastCountsChangeMs;
                 flowOffStable = age >= NO_FLOW_CONFIRM_MS;
 
@@ -505,12 +529,14 @@ public final class DeliveryController implements DeliveryControllerPort {
                 handleIoFailure("requestLiveSample", e);
             } finally {
                 inLiveSample.remove();
+                liveInFlight.set(false);
             }
         });
     }
 
     @Override
     public void requestLiveSnapshot() {
+        // Snapshot registre: CONNECTED qualifié seulement
         io.execute(() -> {
             if (isStopped()) return;
             refreshConnectedLive("SNAP");
@@ -520,17 +546,15 @@ public final class DeliveryController implements DeliveryControllerPort {
     /* ===== Core align/recover ===== */
 
     private void doAlignOrRecover() throws Exception {
-        DeliveryStatus st = readStatusWithResync("A/0x28");
+        DeliveryStatus st = readDeliveryStatusWithResync("A/0x28");
         if (st == null) return;
 
         if (st.ticketPending) {
             if (listener != null) listener.onLiveStatus("LIVE: CONNECTED — Ticket_pending (recovering)");
-            emitLog("[A] Ticket pending -> Issue #6");
+            emitLog("[A] Ticket pending -> clear via #6 loop");
+            clearTicketPendingLoop();
 
-            boolean ok = clearTicketPending();
-            if (!ok) return;
-
-            st = readStatusWithResync("A/0x28-after-ticket");
+            st = readDeliveryStatusWithResync("A/0x28-after-ticket");
             if (st == null) return;
         }
 
@@ -566,6 +590,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         setState(DeliveryState.PRESTART);
         emitLog("[PRESTART] internal");
 
+        // reset session (Python parity)
         flowOffStable = false;
         sawFlowOnOnce = false;
         flowOffStartMs = 0L;
@@ -582,27 +607,34 @@ public final class DeliveryController implements DeliveryControllerPort {
         link.opIssueCommand(CMD_RUN);
 
         setState(DeliveryState.RUNNING_PAUSED);
-
         if (listener != null) listener.onLiveStatus("LIVE: RUNNING_PAUSED (Flow OFF)");
     }
 
-    private boolean clearTicketPending() {
-        final long deadline = System.currentTimeMillis() + TICKET_TIMEOUT_MS;
-
-        try {
-            link.opIssueCommand(CMD_PRINT_LAST_TICKET);
-            markIoSuccess();
-        } catch (Exception e) {
-            handleIoFailure("TICKET/issue6", e);
-            return false;
-        }
+    // Python-like: boucle de clear ticket (~30s)
+    private void clearTicketPendingLoop() {
+        long deadline = System.currentTimeMillis() + TICKET_DEVICE_LOOP_MS;
 
         while (!isStopped() && System.currentTimeMillis() < deadline) {
-            DeliveryStatus st = readStatusWithResync("TICKET/0x28");
-            if (st != null && !st.ticketPending) return true;
-            try { Thread.sleep(TICKET_POLL_MS); } catch (InterruptedException ignored) {}
+            try {
+                link.opIssueCommand(CMD_PRINT_LAST_TICKET); // #6
+                markIoSuccess();
+            } catch (Exception e) {
+                // tolérant: on continue, avec resync doux
+                softResync("ticket/issue6");
+            }
+
+            try { Thread.sleep(200); } catch (InterruptedException ignored) {}
+
+            LcpLink.MachineStatus ms = tryGetMachineStatus();
+            if (ms == null) continue;
+
+            boolean pending = (ms.delCode & DC_TICKET_PENDING) != 0;
+            if (!pending) {
+                emitLog("[TICKET] cleared");
+                return;
+            }
         }
-        return false;
+        emitLog("[TICKET] clear timeout");
     }
 
     /* ===== Helpers ===== */
@@ -627,7 +659,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         return !st.ticketPending && !st.deliveryActive && !st.flowActive;
     }
 
-    private DeliveryStatus readStatusWithResync(String reason) {
+    private DeliveryStatus readDeliveryStatusWithResync(String reason) {
         if (isStopped()) return null;
         try {
             int[] st = link.opDeliveryStatus(); // 0x28
@@ -639,8 +671,21 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
     }
 
+    private LcpLink.MachineStatus tryGetMachineStatus() {
+        if (isStopped()) return null;
+        try {
+            LcpLink.MachineStatus ms = link.opGetMachineStatus(); // 0x23
+            markIoSuccess();
+            return ms;
+        } catch (Exception e) {
+            handleIoFailure("0x23/ms", e);
+            return null;
+        }
+    }
+
     private void refreshConnectedLive(String tag) {
-        DeliveryStatus st = readStatusWithResync("LIVE/" + tag);
+        // CONNECTED qualifié via 0x28 (comme avant)
+        DeliveryStatus st = readDeliveryStatusWithResync("LIVE/" + tag);
         if (listener == null) return;
 
         if (st == null) {

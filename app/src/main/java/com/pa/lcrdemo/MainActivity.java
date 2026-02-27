@@ -65,9 +65,7 @@ public class MainActivity extends AppCompatActivity {
     private boolean logTsEnabled = false;
 
     private DeliveryControllerPort controller;
-
-    // ✅ EB-2: garder la référence transport pour reconfigurer les timestamps TX/RX à chaud
-    private LcpLink link = null;
+    private LcpLink link = null; // pour timestamps transport à chaud
 
     private boolean suppressProductSelection = false;
     private boolean userTouchedSpinner = false;
@@ -81,6 +79,9 @@ public class MainActivity extends AppCompatActivity {
 
     private Runnable pendingInitRunnable = null;
 
+    // ✅ Python parity: poll = 0.2s
+    private static final int LIVE_POLL_MS = 200;
+
     private final Runnable liveTick = new Runnable() {
         @Override
         public void run() {
@@ -90,7 +91,7 @@ public class MainActivity extends AppCompatActivity {
                 return;
             }
             controller.requestLiveSample();
-            ui.postDelayed(this, 300);
+            ui.postDelayed(this, LIVE_POLL_MS);
         }
     };
 
@@ -99,7 +100,7 @@ public class MainActivity extends AppCompatActivity {
         if (liveTickRunning) return;
         liveTickRunning = true;
         ui.removeCallbacks(liveTick);
-        ui.postDelayed(liveTick, 300);
+        ui.postDelayed(liveTick, LIVE_POLL_MS);
     }
 
     private void stopLiveTick() {
@@ -251,10 +252,7 @@ public class MainActivity extends AppCompatActivity {
 
                 logTsEnabled = checked;
 
-                // ✅ Timestamp IO au niveau controller
                 if (controller != null) controller.setLogTimestampsEnabled(checked);
-
-                // ✅ EB-2: Timestamp IO au niveau transport (TX/RX) à chaud
                 if (link != null) link.setTraceTimestampsEnabled(checked);
 
                 log("Option timestamps (UI+IO): " + (checked ? "ON" : "OFF"));
@@ -325,12 +323,9 @@ public class MainActivity extends AppCompatActivity {
         log("USB détaché");
 
         if (controller != null) {
-            // ✅ USB detach = fermeture transport
             controller.shutdown(true);
             controller = null;
         }
-
-        // ✅ EB-2: le lien transport n'existe plus
         link = null;
 
         stopLiveTick();
@@ -339,7 +334,6 @@ public class MainActivity extends AppCompatActivity {
         txtActiveNode.setText("Node actif : —");
         txtLive.setText("LIVE: (en attente)");
 
-        // ✅ NET/GROSS toujours affichés
         if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
         if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
         if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
@@ -359,27 +353,21 @@ public class MainActivity extends AppCompatActivity {
         txtActiveNode.setText("Node actif : —");
 
         if (controller != null) {
-            // ✅ Reconnect LCP = stop logique seulement (NE PAS fermer usbPort)
             controller.shutdown(false);
             controller = null;
         }
-
-        // On remplace aussi le link transport
         link = null;
 
         if (pendingInitRunnable != null) ui.removeCallbacks(pendingInitRunnable);
 
-        // Création transport
         link = new LcpLink(usbPort, to, from, true);
 
         SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
         boolean showTxRx = prefs.getBoolean("log_tx_rx", false);
         boolean ts = prefs.getBoolean("log_ts", false);
 
-        // ✅ Timestamp IO au niveau transport (TX/RX)
         link.setTraceTimestampsEnabled(ts);
 
-        // Création controller
         controller = new DeliveryController(link);
         controller.setTxRxLoggingEnabled(showTxRx);
         controller.setLogTimestampsEnabled(ts);
@@ -395,11 +383,9 @@ public class MainActivity extends AppCompatActivity {
                     boolean stableOff = (controller != null) && controller.isFlowOffStable();
                     updateButtons(state, stableOff);
 
-                    // LIVE tick: seulement pendant RUNNING_FLOWING (après Continuer)
                     if (state == DeliveryState.RUNNING_FLOWING) startLiveTickIfNeeded();
                     else stopLiveTick();
 
-                    // ✅ NET/GROSS toujours affichés
                     if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
                 });
             }
@@ -463,7 +449,6 @@ public class MainActivity extends AppCompatActivity {
         btnA.setEnabled(connected);
         btnC.setEnabled(connected);
 
-        // RUNNING_PAUSED: Continuer toujours disponible; Terminer seulement si FLOW OFF confirmé.
         btnContinue.setEnabled(paused);
         btnFinish.setEnabled(paused && stableOff);
 
@@ -497,7 +482,6 @@ public class MainActivity extends AppCompatActivity {
 
     private void log(String s) {
         ui.post(() -> {
-            // ✅ Ne pas polluer les lignes IO (TX/RX/↳ ou déjà [IO ...]) avec un timestamp UI
             boolean isIoLine = s.startsWith("[IO ") || s.startsWith("TX:") || s.startsWith("RX:") || s.startsWith("↳");
             String line = (logTsEnabled && !isIoLine) ? ("[UI " + uiTs() + "] " + s) : s;
 
