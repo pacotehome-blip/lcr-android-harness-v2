@@ -53,6 +53,9 @@ public final class LcpLink {
     private static final byte MSG_GET_DELIVERY_STATUS = 0x28;
     private static final byte MSG_CHECK_REQUEST = 0x7D;
 
+    // Python-equivalent pacing
+    private static final int QP_MS = 200; // qp=0.2s (CHECK_REQUEST cadence fixe)
+
     private final UsbSerialPort port;
     private final int toAddr;
     private final int hostAddr;
@@ -131,7 +134,7 @@ public final class LcpLink {
     }
 
     /* ============================================================
-     * API opérations — timeouts augmentés
+     * API opérations
      * ============================================================ */
     public byte[] opGetField(int field) throws IOException {
         Response r = sendRecv(buildPayload(MSG_GET_FIELD, new byte[]{(byte) field}), 5000);
@@ -183,13 +186,11 @@ public final class LcpLink {
     }
 
     /* ============================================================
-     * send/recv queued aware + 0x7D — Python-equivalent pacing
+     * send/recv queued aware + 0x7D — Python-equivalent “via 7D”
      *
-     * - Si RC=0x26 (queued): on passe en mode queued:
-     *   - CHECK_REQUEST (0x7D) toutes les ~200ms (qp=0.2s) (fixe)
-     *   - fenêtre longue qt=30s pour messages lourds (comme Python LONG_QT)
-     * - Tant que rc=0x26 ou rc=0x27: on continue
-     * - Dès qu’un rc != 0x26/0x27 arrive (souvent rc=0x00): on retourne
+     * - timeoutMs = qt total (comme Python qt)
+     * - qp = 0.2s fixe (CHECK_REQUEST cadence fixe)
+     * - Si timeout alors qu’on a vu queued: "Queued timeout, last=26"
      * ============================================================ */
     private synchronized Response sendRecv(byte[] payload, int timeoutMs) throws IOException {
         if (closed) throw new IOException("Transport closed");
@@ -203,20 +204,16 @@ public final class LcpLink {
             port.write(txFrame, 500);
         }
 
-        long deadline = System.currentTimeMillis() + timeoutMs;
-
-        // Python-equivalent: qp fixe 200ms quand queued
-        final int qpMs = 200;
+        final long deadline = System.currentTimeMillis() + timeoutMs;
 
         boolean queued = false;
-        final int queuedWindowMs = queuedWindowFor(origMsg, timeoutMs);
-
+        int lastQueuedRc = -1;
         long nextCheckAt = 0L;
 
         while (System.currentTimeMillis() < deadline) {
             if (closed) throw new IOException("Transport closed");
 
-            // En mode queued, on envoie 0x7D à qp fixe (0.2s)
+            // En mode queued, on envoie 0x7D à qp fixe
             if (queued && System.currentTimeMillis() >= nextCheckAt) {
                 byte[] chkPayload = new byte[]{ MSG_CHECK_REQUEST };
                 byte[] chkFrame = encodeFrame(chkPayload);
@@ -227,7 +224,7 @@ public final class LcpLink {
                     if (closed) throw new IOException("Transport closed");
                     port.write(chkFrame, 500);
                 }
-                nextCheckAt = System.currentTimeMillis() + qpMs;
+                nextCheckAt = System.currentTimeMillis() + QP_MS;
             }
 
             Frame rx = readFrame(250);
@@ -242,21 +239,15 @@ public final class LcpLink {
             int rc0 = (rx.payload.length >= 1) ? (rx.payload[0] & 0xFF) : 0xFF;
 
             if (rc0 == RC_REQUEST_QUEUED) {
-                if (!queued) {
-                    queued = true;
-
-                    // Python-equivalent: passage en fenêtre longue (qt=30s) quand queued
-                    long qd = System.currentTimeMillis() + queuedWindowMs;
-                    deadline = Math.max(deadline, qd);
-
-                    nextCheckAt = System.currentTimeMillis() + qpMs;
-                    t("↳ QUEUED: fenêtre étendue à " + queuedWindowMs + " ms (msg=" + explainMsg(origMsg) + ")");
-                }
+                queued = true;
+                lastQueuedRc = RC_REQUEST_QUEUED;
+                if (nextCheckAt == 0L) nextCheckAt = System.currentTimeMillis() + QP_MS;
                 continue;
             }
 
-            // Python-equivalent: rc=0x27 => continuer à attendre (queue pas encore prête)
             if (queued && rc0 == RC_NO_REQUEST_ACTIVE) {
+                lastQueuedRc = RC_NO_REQUEST_ACTIVE;
+                if (nextCheckAt == 0L) nextCheckAt = System.currentTimeMillis() + QP_MS;
                 continue;
             }
 
@@ -264,7 +255,7 @@ public final class LcpLink {
                 throw new IOException("Queued aborted (rc=0x28)");
             }
 
-            // (Optionnel) unwrap si l’équipement renvoie une double signature [OK, OK, ...]
+            // unwrap only if signature [OK, OK, ...]
             if (queued && rc0 == RC_OK && rx.payload.length >= 3 && ((rx.payload[1] & 0xFF) == RC_OK)) {
                 byte[] norm = new byte[rx.payload.length - 1];
                 System.arraycopy(rx.payload, 1, norm, 0, norm.length);
@@ -276,21 +267,11 @@ public final class LcpLink {
 
         t("RX: <timeout>");
         t("↳ Aucun octet reçu / réponse valide avant expiration (msg=" + explainMsg(origMsg) + ")");
-        throw new IOException("Timeout waiting LCP response");
-    }
 
-    private static int queuedWindowFor(byte origMsg, int baseTimeoutMs) {
-        int base = Math.max(baseTimeoutMs, 6000);
-        int longWin = 30000;
-        switch (origMsg & 0xFF) {
-            case 0x28:
-            case 0x23:
-            case 0x24:
-            case 0x21:
-                return Math.max(base, longWin);
-            default:
-                return Math.max(base, 12000);
+        if (queued) {
+            throw new IOException("Queued timeout, last=0x" + hex2(lastQueuedRc) + " msg=" + explainMsg(origMsg));
         }
+        throw new IOException("Timeout waiting LCP response");
     }
 
     private void ensureOk(Response r, String ctx) throws IOException {
