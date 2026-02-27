@@ -39,7 +39,7 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     private volatile boolean flowOffStable = false;
 
-    // “timer 10s” seulement après avoir vu FLOW ON au moins une fois
+    // ✅ “timer 10s” seulement après avoir vu FLOW ON au moins une fois
     private volatile boolean sawFlowOnOnce = false;
     private volatile long flowOffStartMs = 0L;
 
@@ -73,7 +73,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         this.link = link;
     }
 
-    /** Correctif obligatoire */
+    /** ✅ Correctif obligatoire */
     private boolean isStopped() {
         return stopped || link.isClosed();
     }
@@ -91,29 +91,13 @@ public final class DeliveryController implements DeliveryControllerPort {
         Listener l = this.listener;
         if (l == null) return;
 
-        // Anti-double [IO ...] si LcpLink timestamp déjà TX/RX
+        // ✅ Anti-double préfixe: si le transport (LcpLink) a déjà mis [IO ...], on ne remet pas un 2e [IO ...]
         if (logTsEnabled) {
             if (line != null && line.startsWith("[IO ")) l.onLog(line);
             else l.onLog("[IO " + ioTs() + "] " + line);
         } else {
             l.onLog(line);
         }
-    }
-
-    // ✅ EB-1: normaliser une ligne potentiellement préfixée par [IO ...]
-    private static String stripIoPrefix(String s) {
-        if (s == null) return "";
-        if (!s.startsWith("[IO ")) return s;
-
-        int idx = s.indexOf("] ");
-        if (idx > 0 && idx + 2 <= s.length()) {
-            return s.substring(idx + 2);
-        }
-        return s;
-    }
-
-    private static boolean isTxRxLine(String raw) {
-        return raw.startsWith("TX:") || raw.startsWith("RX:") || raw.startsWith("↳");
     }
 
     @Override
@@ -126,15 +110,16 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
 
         link.setTraceSink(line -> {
-            // ✅ EB-1: filtrer sur la version “raw” (sans préfixe [IO ...])
-            String raw = stripIoPrefix(line);
-
+            // Filtrage TX/RX/↳ si l’option n’est pas activée
             if (!txRxEnabled) {
-                if (isTxRxLine(raw)) return;
+                // NOTE: si LcpLink préfixe avec [IO ...], le startsWith("TX:") ne matchera pas.
+                // Dans ton dernier correctif EB-1, on normalise ici. Si tu veux, je te remets la version stripIoPrefix.
+                if (line.startsWith("TX:") || line.startsWith("RX:") || line.startsWith("↳")) return;
             }
 
+            // Option: on évite de spammer le log pendant le tick live
             if (Boolean.TRUE.equals(inLiveSample.get())) {
-                if (isTxRxLine(raw)) return;
+                if (line.startsWith("TX:") || line.startsWith("RX:") || line.startsWith("↳")) return;
             }
 
             emitLog(line);
@@ -165,7 +150,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         shutdown(true);
     }
 
-    /** Correctif obligatoire: closeTransport=false → softClose */
+    /** ✅ Correctif obligatoire: closeTransport=false → softClose */
     @Override
     public void shutdown(boolean closeTransport) {
         stopped = true;
@@ -238,6 +223,8 @@ public final class DeliveryController implements DeliveryControllerPort {
         });
     }
 
+    // ✅ CAS C: START normal seulement si aucune livraison active.
+    // ✅ Si livraison active: on n'applique PAS A automatiquement, mais on doit afficher CONNECTED — Ticket pending si présent.
     @Override
     public void startDelivery(int product1to16, double presetNet) {
         io.execute(() -> {
@@ -247,7 +234,6 @@ public final class DeliveryController implements DeliveryControllerPort {
                 if (startInProgress) return;
 
                 startInProgress = true;
-
                 pendingStart = true;
                 pendingProduct1to16 = product1to16;
                 pendingPresetNet = presetNet;
@@ -261,38 +247,51 @@ public final class DeliveryController implements DeliveryControllerPort {
                     return;
                 }
 
-                // Livraison déjà active -> refuse START et expose recovered
+                // ✅ Si livraison active: on n'essaie pas de START. On informe et on laisse l'opérateur faire A.
                 if (st.deliveryActive) {
                     pendingStart = false;
                     startInProgress = false;
-                    if (listener != null) listener.onLiveStatus(st.flowActive
-                            ? "LIVE: RUNNING_FLOWING (recovered)"
-                            : "LIVE: RUNNING_PAUSED (recovered)");
-                    emitLog("[C] Delivery active -> refusing START (recover state)");
-                    setState(st.flowActive ? DeliveryState.RUNNING_FLOWING : DeliveryState.RUNNING_PAUSED);
+
+                    setState(DeliveryState.CONNECTED);
+
+                    if (listener != null) {
+                        if (st.ticketPending) {
+                            listener.onLiveStatus("LIVE: CONNECTED — Ticket pending");
+                        } else {
+                            listener.onLiveStatus("LIVE: CONNECTED — Livraison active (utiliser A)");
+                        }
+                    }
+
+                    emitLog(st.ticketPending
+                            ? "[C] Delivery active + ticket pending -> use A manually"
+                            : "[C] Delivery active -> use A manually");
                     return;
                 }
 
-                // Ticket pending -> align/recover puis auto-start
+                // ✅ Si pas active, mais ticket pending: on NE fait pas A automatiquement (selon ton choix Cas C).
                 if (st.ticketPending) {
-                    if (listener != null) listener.onLiveStatus("LIVE: CONNECTED — Ticket_pending (recovering)");
-                    emitLog("[C] Ticket pending -> align/recover (A logic), then auto-start when clean");
-                    doAlignOrRecover();
+                    pendingStart = false;
                     startInProgress = false;
-                    markIoSuccess();
+
+                    setState(DeliveryState.CONNECTED);
+                    if (listener != null) listener.onLiveStatus("LIVE: CONNECTED — Ticket pending");
+                    emitLog("[C] Ticket pending -> use A manually");
                     return;
                 }
 
-                // Registre prêt
+                // ✅ START normal
                 if (isReadyToStart(st)) {
                     emitLog("[C] Register ready -> START now");
                     pendingStart = false;
+
                     doStartNewDelivery(pendingProduct1to16, pendingPresetNet);
+
                     startInProgress = false;
                     markIoSuccess();
                     return;
                 }
 
+                // Sinon align/recover (A) ? — Pour Cas C, on garde ton comportement existant (align si registre pas prêt)
                 if (listener != null) listener.onLiveStatus("LIVE: CONNECTED — Alignement en cours");
                 emitLog("[C] Register NOT ready -> align/recover");
                 doAlignOrRecover();
@@ -314,7 +313,6 @@ public final class DeliveryController implements DeliveryControllerPort {
             try {
                 if (state != DeliveryState.RUNNING_PAUSED) return;
 
-                // Continuer: RUN -> contexte LIVE (Flow OFF -> attente Flow ON)
                 link.opIssueCommand(CMD_RUN);
                 markIoSuccess();
 
@@ -336,7 +334,6 @@ public final class DeliveryController implements DeliveryControllerPort {
             if (isStopped()) return;
             try {
                 if (state != DeliveryState.RUNNING_PAUSED) return;
-
                 if (!flowOffStable || !sawFlowOnOnce) return;
 
                 setState(DeliveryState.ENDING);
@@ -529,7 +526,6 @@ public final class DeliveryController implements DeliveryControllerPort {
         setState(DeliveryState.PRESTART);
         emitLog("[PRESTART] internal");
 
-        // reset flow session flags
         flowOffStable = false;
         sawFlowOnOnce = false;
         flowOffStartMs = 0L;
@@ -640,7 +636,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         int scale = (int) Math.pow(10, digits);
         int value = (int) Math.round(preset * scale);
 
-        byte[] buf = new byte[]{
+        byte[] buf = new byte[] {
                 (byte) (value >> 24),
                 (byte) (value >> 16),
                 (byte) (value >> 8),
