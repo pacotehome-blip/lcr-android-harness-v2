@@ -26,7 +26,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     private static final long TICKET_TIMEOUT_MS = 60_000;
     private static final long TICKET_POLL_MS = 250;
 
-    // Confirmation FLOW OFF uniquement après ON→OFF
+    // ✅ Conservateur: stableOff après 10s de stagnation
     private static final long NO_FLOW_CONFIRM_MS = 10_000;
 
     private final LcpLink link;
@@ -39,11 +39,15 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     private volatile boolean flowOffStable = false;
 
-    // ✅ “timer 10s” seulement après avoir vu FLOW ON au moins une fois
+    // ✅ “ON réel observé” = on a déjà vu une progression (d>0) au moins une fois
     private volatile boolean sawFlowOnOnce = false;
+
+    // Début du OFF (pour age affichable) après avoir vu ON réel
     private volatile long flowOffStartMs = 0L;
 
+    // “last_change” Python: dernier moment où d>0
     private volatile long lastCountsChangeMs = 0L;
+
     private volatile int lastGrossRaw = -1;
     private volatile int lastNetRaw = -1;
 
@@ -91,13 +95,26 @@ public final class DeliveryController implements DeliveryControllerPort {
         Listener l = this.listener;
         if (l == null) return;
 
-        // ✅ Anti-double préfixe: si le transport (LcpLink) a déjà mis [IO ...], on ne remet pas un 2e [IO ...]
+        // ✅ Anti-double [IO ...] si LcpLink timestamp déjà TX/RX
         if (logTsEnabled) {
             if (line != null && line.startsWith("[IO ")) l.onLog(line);
             else l.onLog("[IO " + ioTs() + "] " + line);
         } else {
             l.onLog(line);
         }
+    }
+
+    // --- EB-1: normaliser les lignes si LcpLink préfixe [IO ...] ---
+    private static String stripIoPrefix(String s) {
+        if (s == null) return "";
+        if (!s.startsWith("[IO ")) return s;
+        int idx = s.indexOf("] ");
+        if (idx > 0 && idx + 2 <= s.length()) return s.substring(idx + 2);
+        return s;
+    }
+
+    private static boolean isTxRxLine(String raw) {
+        return raw.startsWith("TX:") || raw.startsWith("RX:") || raw.startsWith("↳");
     }
 
     @Override
@@ -110,18 +127,14 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
 
         link.setTraceSink(line -> {
-            // Filtrage TX/RX/↳ si l’option n’est pas activée
+            String raw = stripIoPrefix(line);
+
             if (!txRxEnabled) {
-                // NOTE: si LcpLink préfixe avec [IO ...], le startsWith("TX:") ne matchera pas.
-                // Dans ton dernier correctif EB-1, on normalise ici. Si tu veux, je te remets la version stripIoPrefix.
-                if (line.startsWith("TX:") || line.startsWith("RX:") || line.startsWith("↳")) return;
+                if (isTxRxLine(raw)) return;
             }
-
-            // Option: on évite de spammer le log pendant le tick live
             if (Boolean.TRUE.equals(inLiveSample.get())) {
-                if (line.startsWith("TX:") || line.startsWith("RX:") || line.startsWith("↳")) return;
+                if (isTxRxLine(raw)) return;
             }
-
             emitLog(line);
         });
     }
@@ -223,8 +236,11 @@ public final class DeliveryController implements DeliveryControllerPort {
         });
     }
 
-    // ✅ CAS C: START normal seulement si aucune livraison active.
-    // ✅ Si livraison active: on n'applique PAS A automatiquement, mais on doit afficher CONNECTED — Ticket pending si présent.
+    /**
+     * Cas C (validé): START normal uniquement si aucune livraison active ET pas de ticket pending.
+     * Si ticket_pending=1 sans livraison active -> A manuellement (C affiche CONNECTED — Ticket pending).
+     * Si livraison active -> A manuellement (C affiche CONNECTED — Ticket pending ou Livraison active).
+     */
     @Override
     public void startDelivery(int product1to16, double presetNet) {
         io.execute(() -> {
@@ -247,28 +263,23 @@ public final class DeliveryController implements DeliveryControllerPort {
                     return;
                 }
 
-                // ✅ Si livraison active: on n'essaie pas de START. On informe et on laisse l'opérateur faire A.
+                // Si livraison active: pas de START, visibilité ticket_pending pour action A manuelle
                 if (st.deliveryActive) {
                     pendingStart = false;
                     startInProgress = false;
 
                     setState(DeliveryState.CONNECTED);
-
                     if (listener != null) {
-                        if (st.ticketPending) {
-                            listener.onLiveStatus("LIVE: CONNECTED — Ticket pending");
-                        } else {
-                            listener.onLiveStatus("LIVE: CONNECTED — Livraison active (utiliser A)");
-                        }
+                        if (st.ticketPending) listener.onLiveStatus("LIVE: CONNECTED — Ticket pending");
+                        else listener.onLiveStatus("LIVE: CONNECTED — Livraison active (utiliser A)");
                     }
-
                     emitLog(st.ticketPending
                             ? "[C] Delivery active + ticket pending -> use A manually"
                             : "[C] Delivery active -> use A manually");
                     return;
                 }
 
-                // ✅ Si pas active, mais ticket pending: on NE fait pas A automatiquement (selon ton choix Cas C).
+                // Ticket pending sans livraison active: A manuellement
                 if (st.ticketPending) {
                     pendingStart = false;
                     startInProgress = false;
@@ -279,7 +290,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                     return;
                 }
 
-                // ✅ START normal
+                // START normal
                 if (isReadyToStart(st)) {
                     emitLog("[C] Register ready -> START now");
                     pendingStart = false;
@@ -291,7 +302,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                     return;
                 }
 
-                // Sinon align/recover (A) ? — Pour Cas C, on garde ton comportement existant (align si registre pas prêt)
+                // Registre pas prêt -> align (reste cohérent avec ton baseline)
                 if (listener != null) listener.onLiveStatus("LIVE: CONNECTED — Alignement en cours");
                 emitLog("[C] Register NOT ready -> align/recover");
                 doAlignOrRecover();
@@ -313,14 +324,13 @@ public final class DeliveryController implements DeliveryControllerPort {
             try {
                 if (state != DeliveryState.RUNNING_PAUSED) return;
 
+                // Continuer: RUN -> contexte LIVE
                 link.opIssueCommand(CMD_RUN);
                 markIoSuccess();
 
-                flowOffStable = false;
-                flowOffStartMs = 0L;
-
+                // On repart en contexte LIVE; la décision FLOW ON/OFF sera faite par progression compteurs (Python parity)
                 setState(DeliveryState.RUNNING_FLOWING);
-                if (listener != null) listener.onLiveStatus("LIVE: RUNNING_FLOWING (Flow OFF — attente Flow ON)");
+                if (listener != null) listener.onLiveStatus("LIVE: RUNNING_FLOWING (Flow OFF — attente progression)");
 
             } catch (Exception e) {
                 handleIoFailure("resumeIfPaused", e);
@@ -334,6 +344,8 @@ public final class DeliveryController implements DeliveryControllerPort {
             if (isStopped()) return;
             try {
                 if (state != DeliveryState.RUNNING_PAUSED) return;
+
+                // Conservateur: Terminer seulement après stableOff ET après avoir vu une progression au moins une fois
                 if (!flowOffStable || !sawFlowOnOnce) return;
 
                 setState(DeliveryState.ENDING);
@@ -378,6 +390,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         });
     }
 
+    // --- Python parity LIVE: d = abs(g-lg)+abs(n-ln), ON réel => d>0, OFF => stagnation, stableOff => 10s ---
     @Override
     public void requestLiveSample() {
         io.execute(() -> {
@@ -385,10 +398,15 @@ public final class DeliveryController implements DeliveryControllerPort {
 
             inLiveSample.set(true);
             try {
-                DeliveryStatus st = readStatusWithResync("LIVE/0x28");
-                if (st == null) return;
+                // Source de vérité LIVE (proche Python): machine status full
+                LcpLink.MachineStatus ms = link.opGetMachineStatus(); // 0x23
+                markIoSuccess();
 
-                if (!st.deliveryActive) {
+                boolean flowBit = (ms.delCode & DC_FLOW_ACTIVE) != 0;
+                boolean active  = (ms.delCode & DC_DELIVERY_ACTIVE) != 0;
+
+                // Si pas de livraison active -> CONNECTED qualifié
+                if (!active) {
                     setState(DeliveryState.CONNECTED);
                     refreshConnectedLive("LIVE/inactive");
 
@@ -402,64 +420,86 @@ public final class DeliveryController implements DeliveryControllerPort {
                     return;
                 }
 
-                if (st.flowActive) {
-                    ensureDigits();
+                ensureDigits();
+                double scale = Math.pow(10, cachedDigits);
 
-                    int grossRaw = beI32(link.opGetField(FIELD_GROSS_COUNT));
-                    int netRaw = beI32(link.opGetField(FIELD_NET_COUNT));
-                    double scale = Math.pow(10, cachedDigits);
-
-                    boolean moved = hasCountersMoved(grossRaw, netRaw);
-                    if (moved) {
-                        sawFlowOnOnce = true;
-                        lastCountsChangeMs = System.currentTimeMillis();
-                    }
-
-                    flowOffStable = false;
-                    flowOffStartMs = 0L;
-
-                    lastGrossRaw = grossRaw;
-                    lastNetRaw = netRaw;
-
-                    if (listener != null) {
-                        listener.onLiveQty(netRaw / scale, grossRaw / scale);
-                        listener.onFlowStability(true, false, 0L);
-                        listener.onLiveStatus("LIVE: RUNNING_FLOWING (FLOW ON)");
-                    }
-
-                    setState(DeliveryState.RUNNING_FLOWING);
-                    markIoSuccess();
-                    return;
-                }
-
-                if (!sawFlowOnOnce) {
-                    if (listener != null) {
-                        listener.onFlowStability(false, false, 0L);
-                        listener.onLiveStatus("LIVE: RUNNING_FLOWING (Flow OFF — attente Flow ON)");
-                    }
-                    setState(DeliveryState.RUNNING_FLOWING);
-                    markIoSuccess();
-                    return;
+                // Python parity: lire toujours les compteurs, fallback sur derniers connus
+                int g, n;
+                try {
+                    g = beI32(link.opGetField(FIELD_GROSS_COUNT));
+                    n = beI32(link.opGetField(FIELD_NET_COUNT));
+                } catch (Exception ex) {
+                    g = (lastGrossRaw >= 0) ? lastGrossRaw : 0;
+                    n = (lastNetRaw >= 0) ? lastNetRaw : 0;
                 }
 
                 long now = System.currentTimeMillis();
-                if (flowOffStartMs == 0L) flowOffStartMs = now;
 
-                long age = Math.max(0L, now - flowOffStartMs);
+                // d = abs(g-lg)+abs(n-ln)
+                int d = 0;
+                if (lastGrossRaw >= 0 && lastNetRaw >= 0) {
+                    d = Math.abs(g - lastGrossRaw) + Math.abs(n - lastNetRaw);
+                }
+
+                // Toujours publier les quantités (comme Python les imprime régulièrement)
+                if (listener != null) listener.onLiveQty(n / scale, g / scale);
+
+                if (d > 0) {
+                    // ✅ FLOW ON réel (progression observée)
+                    sawFlowOnOnce = true;
+                    lastCountsChangeMs = now;
+
+                    // reset OFF
+                    flowOffStable = false;
+                    flowOffStartMs = 0L;
+
+                    lastGrossRaw = g;
+                    lastNetRaw = n;
+
+                    if (listener != null) {
+                        listener.onFlowStability(true, false, 0L);
+                        listener.onLiveStatus("LIVE: RUNNING_FLOWING (FLOW ON)");
+                    }
+                    setState(DeliveryState.RUNNING_FLOWING);
+                    return;
+                }
+
+                // d == 0 => stagnation
+                if (lastCountsChangeMs == 0L) lastCountsChangeMs = now;
+                long age = now - lastCountsChangeMs;
+
+                if (!sawFlowOnOnce) {
+                    // Avant toute progression: on reste en attente (pas de timer stableOff)
+                    flowOffStable = false;
+                    flowOffStartMs = 0L;
+
+                    if (listener != null) {
+                        listener.onFlowStability(false, false, 0L);
+                        listener.onLiveStatus("LIVE: RUNNING_FLOWING (Flow OFF — attente progression)");
+                    }
+                    setState(DeliveryState.RUNNING_FLOWING);
+
+                    lastGrossRaw = g;
+                    lastNetRaw = n;
+                    return;
+                }
+
+                // Après avoir vu ON réel: stableOff après 10s de stagnation
+                if (flowOffStartMs == 0L) flowOffStartMs = lastCountsChangeMs;
                 flowOffStable = age >= NO_FLOW_CONFIRM_MS;
 
                 if (listener != null) {
-                    listener.onFlowStability(false, flowOffStable, age);
+                    listener.onFlowStability(flowBit, flowOffStable, age);
                     listener.onLiveStatus(flowOffStable
                             ? "LIVE: RUNNING_PAUSED (FLOW OFF confirmé)"
-                            : "LIVE: RUNNING_FLOWING (FLOW OFF — confirmation...)"
-                    );
+                            : "LIVE: RUNNING_FLOWING (FLOW OFF — confirmation...)");
                 }
 
                 if (flowOffStable) setState(DeliveryState.RUNNING_PAUSED);
                 else setState(DeliveryState.RUNNING_FLOWING);
 
-                markIoSuccess();
+                lastGrossRaw = g;
+                lastNetRaw = n;
 
             } catch (Exception e) {
                 handleIoFailure("requestLiveSample", e);
@@ -529,6 +569,9 @@ public final class DeliveryController implements DeliveryControllerPort {
         flowOffStable = false;
         sawFlowOnOnce = false;
         flowOffStartMs = 0L;
+        lastCountsChangeMs = 0L;
+        lastGrossRaw = -1;
+        lastNetRaw = -1;
 
         int idx0 = product1to16 - 1;
         link.opSetField(FIELD_ACTIVE_PRODUCT, new byte[]{(byte) idx0});
@@ -539,7 +582,6 @@ public final class DeliveryController implements DeliveryControllerPort {
         link.opIssueCommand(CMD_RUN);
 
         setState(DeliveryState.RUNNING_PAUSED);
-        lastCountsChangeMs = System.currentTimeMillis();
 
         if (listener != null) listener.onLiveStatus("LIVE: RUNNING_PAUSED (Flow OFF)");
     }
@@ -588,7 +630,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     private DeliveryStatus readStatusWithResync(String reason) {
         if (isStopped()) return null;
         try {
-            int[] st = link.opDeliveryStatus();
+            int[] st = link.opDeliveryStatus(); // 0x28
             markIoSuccess();
             return new DeliveryStatus(st[0], st[1]);
         } catch (Exception e) {
@@ -669,11 +711,6 @@ public final class DeliveryController implements DeliveryControllerPort {
         if (state == s) return;
         state = s;
         if (listener != null) listener.onStateChanged(s);
-    }
-
-    private boolean hasCountersMoved(int grossRaw, int netRaw) {
-        if (lastGrossRaw < 0 || lastNetRaw < 0) return true;
-        return (grossRaw != lastGrossRaw) || (netRaw != lastNetRaw);
     }
 
     private void markIoSuccess() {
