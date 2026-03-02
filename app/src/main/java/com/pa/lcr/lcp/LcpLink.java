@@ -15,12 +15,12 @@ import java.util.Locale;
  * ✅ API publique strictement compatible DeliveryController
  *
  * Correctifs:
- * 1) CRC/RX: calcul CRC sur les octets RAW (incluant ESC) du segment variable (comme Python et doc LCP)
- * 2) RC=0x26/0x27: queued via 0x7D UNIQUEMENT pour commandes modifiantes (0x21/0x24).
- *    Sur GET_* (0x20/0x23/0x28): RC=0x26/0x27 = "busy/skip" -> pas de 0x7D.
- *
- * Ajustement demandé:
- * - timeouts des opérations queueables (SET_FIELD / ISSUE_COMMAND) -> 30s
+ * 1) CRC/RX: CRC calculé sur la partie variable RAW (incluant ESC), comme Python et doc LCP
+ * 2) RC=0x26/0x27: queued via 0x7D UNIQUEMENT pour commandes modifiantes (0x21/0x24)
+ *    Sur GET_* (0x20/0x23/0x28): RC=0x26/0x27 = busy/skip -> pas de 0x7D
+ * 3) Timeouts queueables: opSetField/opIssueCommand -> 30s
+ * 4) sendRecv(): lecture en tranches (slice) pour ne pas bloquer l’envoi des 0x7D
+ * 5) 0x7D immédiat après RC=0x26 sur commande queueable (comme Python)
  */
 public final class LcpLink {
 
@@ -40,10 +40,14 @@ public final class LcpLink {
     private static final byte MSG_GET_DELIVERY_STATUS = 0x28;
     private static final byte MSG_CHECK_REQUEST = 0x7D;
 
+    // Cadence du CHECK_REQUEST
     private static final int QP_MS = 200;
 
-    // ✅ 30s (alignement "queued long" Python) pour ops modifiantes
+    // Timeout "queued long" pour opérations modifiantes (SET_FIELD / ISSUE_COMMAND)
     private static final int OP_QUEUEABLE_TIMEOUT_MS = 30_000;
+
+    // Slice de lecture pour permettre l'interleaving TX 0x7D / RX
+    private static final int RX_SLICE_MS = 250;
 
     // ===================== PORT =====================
     private static final Object PORT_LOCK = new Object();
@@ -151,7 +155,7 @@ public final class LcpLink {
         );
     }
 
-    /** ✅ Méthode attendue par DeliveryController (timeout 30s) */
+    /** Timeout 30s pour commande queueable */
     public void opIssueCommand(int cmd) throws IOException {
         Response r = sendRecv(
                 buildPayload(MSG_ISSUE_COMMAND, new byte[]{(byte) cmd}),
@@ -168,7 +172,7 @@ public final class LcpLink {
         return out;
     }
 
-    /** ✅ Timeout 30s pour SET_FIELD (queueable) */
+    /** Timeout 30s pour SET_FIELD queueable */
     public void opSetField(int field, byte[] value) throws IOException {
         byte[] pl = new byte[2 + (value == null ? 0 : value.length)];
         pl[0] = MSG_SET_FIELD;
@@ -190,9 +194,10 @@ public final class LcpLink {
     // ===================== SEND / RECV =====================
     private synchronized Response sendRecv(byte[] payload, int timeoutMs) throws IOException {
         if (closed) throw new IOException("Transport closed");
+
         final byte msg = (payload != null && payload.length > 0) ? payload[0] : 0;
 
-        // ✅ Python-like: queued via 0x7D UNIQUEMENT pour commandes modifiantes
+        // queued via 0x7D uniquement pour commandes modifiantes (Python-like)
         final boolean queueable = (msg == MSG_SET_FIELD) || (msg == MSG_ISSUE_COMMAND);
 
         byte[] frame = encodeFrame(payload);
@@ -204,10 +209,11 @@ public final class LcpLink {
         long deadline = System.currentTimeMillis() + timeoutMs;
         boolean queued = false;
         int lastQueued = -1;
-        long nextCheck = 0;
+        long nextCheck = 0L;
 
         while (System.currentTimeMillis() < deadline) {
 
+            // 1) Envoi périodique 0x7D si queued
             if (queued && System.currentTimeMillis() >= nextCheck) {
                 byte[] chk = encodeFrame(new byte[]{MSG_CHECK_REQUEST});
                 t("TX: " + hexDump(chk));
@@ -217,20 +223,29 @@ public final class LcpLink {
                 nextCheck = System.currentTimeMillis() + QP_MS;
             }
 
-            Frame f = readFrameUntil(deadline);
-            if (f == null) break;
+            // 2) Lire en tranches courtes pour ne pas bloquer l’envoi des 0x7D
+            long sliceDeadline = Math.min(deadline, System.currentTimeMillis() + RX_SLICE_MS);
+            Frame f = readFrameUntil(sliceDeadline);
+
+            if (f == null) {
+                // Si queued, on continue: cela permet de continuer d’émettre des 0x7D
+                if (queued) continue;
+                break;
+            }
 
             t("RX: " + hexDump(f.raw));
             int rc = (f.payload.length > 0) ? (f.payload[0] & 0xFF) : 0xFF;
 
+            // 3) Busy/queued handling
             if (rc == RC_REQUEST_QUEUED || rc == RC_NO_REQUEST_ACTIVE) {
                 if (!queueable) {
-                    // ✅ Alignement Python: sur GET_* => busy/skip, pas de 0x7D
+                    // GET_* : busy/skip, pas de 0x7D
                     return new Response(rc, f.payload);
                 }
+                // Commande queueable : on passe en mode queued et on envoie 0x7D ASAP (comme Python)
                 queued = true;
                 lastQueued = rc;
-                if (nextCheck == 0) nextCheck = System.currentTimeMillis() + QP_MS;
+                nextCheck = System.currentTimeMillis(); // 0x7D immédiat
                 continue;
             }
 
@@ -238,6 +253,7 @@ public final class LcpLink {
                 throw new IOException("Queued aborted");
             }
 
+            // 4) Unwrap réponse queued: [OK, OK, ...] -> on enlève le 1er byte
             if (queued && rc == RC_OK && f.payload.length >= 2 && (f.payload[1] & 0xFF) == RC_OK) {
                 byte[] norm = new byte[f.payload.length - 1];
                 System.arraycopy(f.payload, 1, norm, 0, norm.length);
@@ -253,7 +269,7 @@ public final class LcpLink {
         throw new IOException("Timeout waiting LCP response");
     }
 
-    // ===================== RX CONFORME =====================
+    // ===================== RX =====================
     private void rxReadSome(int timeoutMs) throws IOException {
         byte[] tmp = new byte[64];
         int n;
@@ -284,16 +300,15 @@ public final class LcpLink {
     }
 
     /**
-     * ✅ Correctif CRC/RX:
+     * CRC/RX robuste:
      * - calcule le CRC sur le flux RAW "variable part" (incluant ESC), comme Python (raw_hdr+raw_data).
      */
     private Frame tryParseFrame(ByteArray b) {
         try {
             if (b.len < 6) return null;
 
-            int rawIdx = 2;
+            IntRef idx = new IntRef(2); // après "~~"
             ByteArray rawForCrc = new ByteArray();
-            IntRef idx = new IntRef(rawIdx);
 
             int to = readUnescapedAndCaptureRaw(b, rawForCrc, idx);
             int from = readUnescapedAndCaptureRaw(b, rawForCrc, idx);
@@ -316,9 +331,9 @@ public final class LcpLink {
                 return null;
             }
 
-            int frameRawLen = idx.v;
-            byte[] raw = b.extract(frameRawLen);
-            b.drop(frameRawLen);
+            int rawLen = idx.v;
+            byte[] raw = b.extract(rawLen);
+            b.drop(rawLen);
 
             return new Frame(to, from, status, payload, raw);
 
@@ -365,6 +380,7 @@ public final class LcpLink {
     // ===================== FRAMING / CRC =====================
     private byte[] encodeFrame(byte[] payload) {
         int status = nextStatusByte();
+
         ByteArray var = new ByteArray();
         var.append((byte) toAddr);
         var.append((byte) hostAddr);
