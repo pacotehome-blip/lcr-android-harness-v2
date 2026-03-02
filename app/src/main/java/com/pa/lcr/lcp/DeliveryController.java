@@ -27,7 +27,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     private static final int DC_FLOW_ACTIVE = 0x0004;
     private static final int DC_DELIVERY_ACTIVE = 0x0008;
 
-    // OFF conservateur
+    // OFF conservateur (détection stagnation)
     private static final long NO_FLOW_CONFIRM_MS = 10_000;
 
     // START retry: équivalent --start-timeout 20, --poll 0.2
@@ -38,9 +38,13 @@ public final class DeliveryController implements DeliveryControllerPort {
     private static final long TICKET_DEVICE_LOOP_MS = 30_000;
 
     // LIVE backoff (A)
-    private static final long LIVE_BASE_MS = 200;     // nominal
-    private static final long LIVE_MAX_MS  = 2000;    // plafond backoff
+    private static final long LIVE_BASE_MS = 200;          // nominal
+    private static final long LIVE_MAX_MS = 2000;          // plafond
     private static final long LIVE_LOG_THROTTLE_MS = 1000; // max 1 log/sec en mode skip
+
+    // CONTINUER: fenêtre de grâce 30s (UNIQUEMENT après clic Continuer)
+    private static final long CONTINUE_GRACE_MS = 30_000;
+    private static final long CONTINUE_DEBOUNCE_MS = 1500;
 
     private final LcpLink link;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
@@ -71,8 +75,13 @@ public final class DeliveryController implements DeliveryControllerPort {
     private volatile long liveNextAllowedMs = 0L;
     private volatile long liveLastSkipLogMs = 0L;
 
+    // (CONTINUER) Grâce 30s uniquement après clic Continuer
+    private volatile long continueGraceUntilMs = 0L; // 0 => inactif
+    private volatile long lastContinueClickMs = 0L;
+
     private static final ThreadLocal<SimpleDateFormat> IO_DF =
-            ThreadLocal.withInitial(() -> new SimpleDateFormat("HH:mm:ss.SSS", Locale.CANADA_FRENCH));
+            ThreadLocal.withInitial(() ->
+                    new SimpleDateFormat("HH:mm:ss.SSS", Locale.CANADA_FRENCH));
 
     public DeliveryController(LcpLink link) {
         this.link = link;
@@ -316,6 +325,9 @@ public final class DeliveryController implements DeliveryControllerPort {
         liveNextAllowedMs = 0L;
         liveLastSkipLogMs = 0L;
 
+        // NOTE: on NE touche PAS au run initial; continueGraceUntilMs reste inchangé ici
+        continueGraceUntilMs = 0L;
+
         retryUntilDeadline(deadlineMs, "SET_FIELD#0", () -> {
             int idx0 = product1to16 - 1;
             link.opSetField(FIELD_ACTIVE_PRODUCT, new byte[]{(byte) idx0});
@@ -351,10 +363,37 @@ public final class DeliveryController implements DeliveryControllerPort {
             if (isStopped()) return;
             try {
                 if (state != DeliveryState.RUNNING_PAUSED) return;
+
+                long now = System.currentTimeMillis();
+
+                // debounce anti double-clic
+                if ((now - lastContinueClickMs) < CONTINUE_DEBOUNCE_MS) {
+                    emitLog("[CONTINUE] Ignored (debounce)");
+                    return;
+                }
+                lastContinueClickMs = now;
+
+                // si déjà dans la fenêtre de grâce 30s -> on ne renvoie pas RUN
+                if (continueGraceUntilMs > now) {
+                    long left = (continueGraceUntilMs - now) / 1000;
+                    emitLog("[CONTINUE] Already waiting LIVE (" + left + "s left)");
+                    return;
+                }
+
+                emitLog("[CONTINUE] RUN requested — grace 30s (LIVE working)");
                 link.opIssueCommand(CMD_RUN);
+
+                // fenêtre de grâce 30s (UNIQUEMENT après Continuer)
+                continueGraceUntilMs = now + CONTINUE_GRACE_MS;
+
                 setState(DeliveryState.RUNNING_FLOWING);
-                if (listener != null) listener.onLiveStatus("LIVE: RUNNING_FLOWING (Flow OFF — attente progression)");
+                if (listener != null) {
+                    listener.onLiveStatus("LIVE: RUNNING_FLOWING (Flow OFF — attente progression)");
+                }
+
             } catch (Exception e) {
+                // en cas d'échec, désarmer la grâce pour autoriser un nouvel essai
+                continueGraceUntilMs = 0L;
                 handleIoFailure("resumeIfPaused", e);
             }
         });
@@ -394,9 +433,10 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     // =========================
-    // LIVE — A+B
+    // LIVE — A+B + Continuer grace (sans toucher FLOW ON)
     // A) Backoff + log throttle sur busy/timeout
-    // B) LIVE basé sur 0x28 (delivery status), pas 0x23
+    // B) LIVE basé sur 0x28
+    // + Grâce 30s après Continuer: ne pas "retomber" en PAUSED pendant la fenêtre
     // =========================
     @Override
     public void requestLiveSample() {
@@ -444,11 +484,13 @@ public final class DeliveryController implements DeliveryControllerPort {
                     sawFlowOnOnce = false;
                     flowOffStartMs = 0L;
                     lastCountsChangeMs = 0L;
+
+                    // si livraison terminée, on enlève la grâce
+                    continueGraceUntilMs = 0L;
                     return;
                 }
 
                 // Delivery active: tenter lecture compteurs
-                // ensureDigits() throws -> best-effort
                 try {
                     ensureDigits();
                 } catch (Exception e) {
@@ -463,10 +505,8 @@ public final class DeliveryController implements DeliveryControllerPort {
                     g = beI32(link.opGetField(FIELD_GROSS_COUNT));
                     n = beI32(link.opGetField(FIELD_NET_COUNT));
                 } catch (Exception ex) {
-                    // best effort: garder les derniers si dispo
                     g = (lastGrossRaw >= 0) ? lastGrossRaw : 0;
                     n = (lastNetRaw >= 0) ? lastNetRaw : 0;
-                    // et on considère ça comme un "soft skip partiel" -> backoff léger
                     liveBackoffStep("[LIVE] soft-skip counters");
                 }
 
@@ -481,7 +521,11 @@ public final class DeliveryController implements DeliveryControllerPort {
 
                 if (listener != null) listener.onLiveQty(n / scale, g / scale);
 
+                // ======== FLOW ON detection: INCHANGÉE ========
                 if (d > 0) {
+                    // FLOW ON observé : on sort naturellement de la grâce Continuer
+                    continueGraceUntilMs = 0L;
+
                     sawFlowOnOnce = true;
                     lastCountsChangeMs = t;
                     flowOffStable = false;
@@ -503,6 +547,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                 if (!sawFlowOnOnce) {
                     flowOffStable = false;
                     flowOffStartMs = 0L;
+
                     if (listener != null) {
                         listener.onFlowStability(flowBit, false, 0L);
                         listener.onLiveStatus("LIVE: RUNNING_FLOWING (Flow OFF — attente progression)");
@@ -516,6 +561,21 @@ public final class DeliveryController implements DeliveryControllerPort {
                 if (flowOffStartMs == 0L) flowOffStartMs = lastCountsChangeMs;
                 flowOffStable = age >= NO_FLOW_CONFIRM_MS;
 
+                // ===== CONTINUER grace: ne pas retomber en PAUSED pendant 30s après Continuer =====
+                long now2 = System.currentTimeMillis();
+                if (continueGraceUntilMs > now2) {
+                    // on laisse LIVE travailler, sans changer la détection FLOW ON
+                    if (listener != null) {
+                        listener.onFlowStability(flowBit, false, age);
+                        listener.onLiveStatus("LIVE: RUNNING_FLOWING (Flow OFF — attente progression)");
+                    }
+                    setState(DeliveryState.RUNNING_FLOWING);
+                    lastGrossRaw = g;
+                    lastNetRaw = n;
+                    return;
+                }
+
+                // comportement normal (hors grâce)
                 if (listener != null) {
                     listener.onFlowStability(flowBit, flowOffStable, age);
                     listener.onLiveStatus(flowOffStable
@@ -543,11 +603,9 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     private void liveBackoffStep(String reason) {
         long now = System.currentTimeMillis();
-        // Backoff exponentiel
         liveBackoffMs = Math.min(LIVE_MAX_MS, Math.max(LIVE_BASE_MS, liveBackoffMs * 2));
         liveNextAllowedMs = now + liveBackoffMs;
 
-        // throttle logs
         if (now - liveLastSkipLogMs >= LIVE_LOG_THROTTLE_MS) {
             emitLog(reason + " (backoff=" + liveBackoffMs + "ms)");
             liveLastSkipLogMs = now;
@@ -556,7 +614,6 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     private void liveSoftSkip(String opName, Exception e) {
         String m = (e.getMessage() != null) ? e.getMessage() : "";
-        // backoff et log throttle
         liveBackoffStep("[LIVE] soft-skip " + opName + ": " + m);
     }
 
@@ -738,7 +795,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         if (b == null || b.length < 4) return 0;
         return ((b[0] & 0xFF) << 24) |
                ((b[1] & 0xFF) << 16) |
-               ((b[2] & 0xFF) << 8) |
+               ((b[2] & 0xFF) << 8)  |
                (b[3] & 0xFF);
     }
 
@@ -766,7 +823,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                 msg.contains("Timeout waiting LCP response") ||
                 msg.contains("Queued timeout");
 
-        // ✅ LIVE: jamais de resync/stop (requestLiveSample gère déjà son best-effort)
+        // LIVE: jamais de resync/stop (best-effort)
         if ("requestLiveSample".equals(ctx)) {
             emitLog("[WARN] " + ctx + " (soft): " + msg);
             return;
