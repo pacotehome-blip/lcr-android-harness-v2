@@ -37,6 +37,11 @@ public final class DeliveryController implements DeliveryControllerPort {
     // Ticket loop (Python-like)
     private static final long TICKET_DEVICE_LOOP_MS = 30_000;
 
+    // LIVE backoff (A)
+    private static final long LIVE_BASE_MS = 200;     // nominal
+    private static final long LIVE_MAX_MS  = 2000;    // plafond backoff
+    private static final long LIVE_LOG_THROTTLE_MS = 1000; // max 1 log/sec en mode skip
+
     private final LcpLink link;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
 
@@ -57,9 +62,14 @@ public final class DeliveryController implements DeliveryControllerPort {
     private volatile boolean logTsEnabled = false;
     private volatile long lastResyncMs = 0L;
 
-    // ✅ Pas de chevauchement LIVE (python-style loop)
+    // ✅ Pas de chevauchement LIVE
     private final AtomicBoolean liveInFlight = new AtomicBoolean(false);
     private final ThreadLocal<Boolean> inLiveSample = new ThreadLocal<>();
+
+    // (A) Backoff state
+    private volatile long liveBackoffMs = LIVE_BASE_MS;
+    private volatile long liveNextAllowedMs = 0L;
+    private volatile long liveLastSkipLogMs = 0L;
 
     private static final ThreadLocal<SimpleDateFormat> IO_DF =
             ThreadLocal.withInitial(() -> new SimpleDateFormat("HH:mm:ss.SSS", Locale.CANADA_FRENCH));
@@ -75,14 +85,10 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     // ====== Méthodes obligatoires de DeliveryControllerPort ======
     @Override
-    public DeliveryState getState() {
-        return state;
-    }
+    public DeliveryState getState() { return state; }
 
     @Override
-    public boolean isPaused() {
-        return state == DeliveryState.RUNNING_PAUSED;
-    }
+    public boolean isPaused() { return state == DeliveryState.RUNNING_PAUSED; }
 
     @Override
     public boolean isDeliveryActive() {
@@ -90,9 +96,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     @Override
-    public boolean isFlowOffStable() {
-        return flowOffStable;
-    }
+    public boolean isFlowOffStable() { return flowOffStable; }
 
     @Override
     public long getFlowOffAgeMs() {
@@ -178,9 +182,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     @Override
-    public void shutdown() {
-        shutdown(true);
-    }
+    public void shutdown() { shutdown(true); }
 
     @Override
     public void shutdown(boolean closeTransport) {
@@ -207,9 +209,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     // A / B / C
     // =========================
     @Override
-    public void refreshProducts() {
-        emitLog("refreshProducts ignoré");
-    }
+    public void refreshProducts() { emitLog("refreshProducts ignoré"); }
 
     @Override
     public void selectProduct(int product1to16) {
@@ -311,6 +311,11 @@ public final class DeliveryController implements DeliveryControllerPort {
         lastGrossRaw = -1;
         lastNetRaw = -1;
 
+        // reset LIVE backoff on new start attempt
+        liveBackoffMs = LIVE_BASE_MS;
+        liveNextAllowedMs = 0L;
+        liveLastSkipLogMs = 0L;
+
         retryUntilDeadline(deadlineMs, "SET_FIELD#0", () -> {
             int idx0 = product1to16 - 1;
             link.opSetField(FIELD_ACTIVE_PRODUCT, new byte[]{(byte) idx0});
@@ -389,44 +394,50 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     // =========================
-    // LIVE — Best-effort (Python-like)
+    // LIVE — A+B
+    // A) Backoff + log throttle sur busy/timeout
+    // B) LIVE basé sur 0x28 (delivery status), pas 0x23
     // =========================
     @Override
     public void requestLiveSample() {
         io.execute(() -> {
             if (isStopped()) return;
-            if (!liveInFlight.compareAndSet(false, true)) return;
 
+            long now = System.currentTimeMillis();
+            if (now < liveNextAllowedMs) return; // backoff gate
+
+            if (!liveInFlight.compareAndSet(false, true)) return;
             inLiveSample.set(true);
+
             try {
-                // Python-like: LIVE best-effort (skip sur busy/timeout/queued)
-                LcpLink.MachineStatus ms;
+                // ===== B) Delivery-first: lire 0x28 =====
+                int delStatus;
+                int delCode;
+
                 try {
-                    ms = link.opGetMachineStatus();
+                    int[] ds = link.opDeliveryStatus(); // 0x28 -> [delStatus, delCode]
+                    delStatus = ds[0];
+                    delCode = ds[1];
                 } catch (Exception e) {
-                    String m = (e.getMessage() != null) ? e.getMessage() : "";
-                    if (m.contains("Queued timeout") ||
-                        m.contains("Timeout waiting") ||
-                        m.contains("0x26") ||
-                        m.contains("REQUEST_QUEUED")) {
-                        emitLog("[LIVE] soft-skip: " + m);
-                        return;
-                    }
-                    if (listener != null) listener.onError("requestLiveSample", e);
+                    liveSoftSkip("GET_DELIVERY_STATUS", e);
                     return;
                 }
 
-                boolean active = (ms.delCode & DC_DELIVERY_ACTIVE) != 0;
-                boolean flowBit = (ms.delCode & DC_FLOW_ACTIVE) != 0;
-                boolean ticket = (ms.delCode & DC_TICKET_PENDING) != 0;
+                boolean ticket = (delCode & DC_TICKET_PENDING) != 0;
+                boolean flowBit = (delCode & DC_FLOW_ACTIVE) != 0;
+                boolean active = (delCode & DC_DELIVERY_ACTIVE) != 0;
 
                 if (!active) {
+                    // reset backoff on success
+                    liveResetBackoff();
+
                     setState(DeliveryState.CONNECTED);
                     if (listener != null) {
                         listener.onLiveStatus(ticket ? "LIVE: CONNECTED — Ticket pending"
                                 : "LIVE: CONNECTED — Prêt à livrer");
                         listener.onFlowStability(false, false, 0L);
                     }
+
                     lastGrossRaw = -1;
                     lastNetRaw = -1;
                     flowOffStable = false;
@@ -436,11 +447,12 @@ public final class DeliveryController implements DeliveryControllerPort {
                     return;
                 }
 
-                // ✅ FIX COMPILATION: ensureDigits() throws Exception -> catch locally (LIVE soft-skip)
+                // Delivery active: tenter lecture compteurs
+                // ensureDigits() throws -> best-effort
                 try {
                     ensureDigits();
                 } catch (Exception e) {
-                    emitLog("[LIVE] soft-skip ensureDigits: " + (e.getMessage() != null ? e.getMessage() : ""));
+                    liveSoftSkip("ensureDigits", e);
                     return;
                 }
 
@@ -451,11 +463,17 @@ public final class DeliveryController implements DeliveryControllerPort {
                     g = beI32(link.opGetField(FIELD_GROSS_COUNT));
                     n = beI32(link.opGetField(FIELD_NET_COUNT));
                 } catch (Exception ex) {
+                    // best effort: garder les derniers si dispo
                     g = (lastGrossRaw >= 0) ? lastGrossRaw : 0;
                     n = (lastNetRaw >= 0) ? lastNetRaw : 0;
+                    // et on considère ça comme un "soft skip partiel" -> backoff léger
+                    liveBackoffStep("[LIVE] soft-skip counters");
                 }
 
-                long now = System.currentTimeMillis();
+                // reset backoff on success (au moins del status OK)
+                liveResetBackoff();
+
+                long t = System.currentTimeMillis();
                 int d = 0;
                 if (lastGrossRaw >= 0 && lastNetRaw >= 0) {
                     d = Math.abs(g - lastGrossRaw) + Math.abs(n - lastNetRaw);
@@ -465,27 +483,28 @@ public final class DeliveryController implements DeliveryControllerPort {
 
                 if (d > 0) {
                     sawFlowOnOnce = true;
-                    lastCountsChangeMs = now;
+                    lastCountsChangeMs = t;
                     flowOffStable = false;
                     flowOffStartMs = 0L;
                     lastGrossRaw = g;
                     lastNetRaw = n;
+
                     if (listener != null) {
-                        listener.onFlowStability(true, false, 0L);
+                        listener.onFlowStability(flowBit, false, 0L);
                         listener.onLiveStatus("LIVE: RUNNING_FLOWING (FLOW ON)");
                     }
                     setState(DeliveryState.RUNNING_FLOWING);
                     return;
                 }
 
-                if (lastCountsChangeMs == 0L) lastCountsChangeMs = now;
-                long age = now - lastCountsChangeMs;
+                if (lastCountsChangeMs == 0L) lastCountsChangeMs = t;
+                long age = t - lastCountsChangeMs;
 
                 if (!sawFlowOnOnce) {
                     flowOffStable = false;
                     flowOffStartMs = 0L;
                     if (listener != null) {
-                        listener.onFlowStability(false, false, 0L);
+                        listener.onFlowStability(flowBit, false, 0L);
                         listener.onLiveStatus("LIVE: RUNNING_FLOWING (Flow OFF — attente progression)");
                     }
                     setState(DeliveryState.RUNNING_FLOWING);
@@ -517,6 +536,30 @@ public final class DeliveryController implements DeliveryControllerPort {
         });
     }
 
+    private void liveResetBackoff() {
+        liveBackoffMs = LIVE_BASE_MS;
+        liveNextAllowedMs = 0L;
+    }
+
+    private void liveBackoffStep(String reason) {
+        long now = System.currentTimeMillis();
+        // Backoff exponentiel
+        liveBackoffMs = Math.min(LIVE_MAX_MS, Math.max(LIVE_BASE_MS, liveBackoffMs * 2));
+        liveNextAllowedMs = now + liveBackoffMs;
+
+        // throttle logs
+        if (now - liveLastSkipLogMs >= LIVE_LOG_THROTTLE_MS) {
+            emitLog(reason + " (backoff=" + liveBackoffMs + "ms)");
+            liveLastSkipLogMs = now;
+        }
+    }
+
+    private void liveSoftSkip(String opName, Exception e) {
+        String m = (e.getMessage() != null) ? e.getMessage() : "";
+        // backoff et log throttle
+        liveBackoffStep("[LIVE] soft-skip " + opName + ": " + m);
+    }
+
     @Override
     public void requestLiveSnapshot() {
         io.execute(() -> {
@@ -534,7 +577,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     // =========================
-    // Full status = 0x23 + 0x28 (Python parity)
+    // Full status = 0x23 + 0x28
     // =========================
     private static final class FullStatus {
         final int devStatus;
@@ -723,7 +766,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                 msg.contains("Timeout waiting LCP response") ||
                 msg.contains("Queued timeout");
 
-        // ✅ LIVE: jamais de resync/stop
+        // ✅ LIVE: jamais de resync/stop (requestLiveSample gère déjà son best-effort)
         if ("requestLiveSample".equals(ctx)) {
             emitLog("[WARN] " + ctx + " (soft): " + msg);
             return;
