@@ -69,7 +69,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         this.link = link;
     }
 
-    /** état “stoppé” */
+    // état “stoppé”
     private boolean isStopped() {
         return stopped || link.isClosed();
     }
@@ -124,7 +124,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
     }
 
-    // --- EB-1: normaliser les lignes si LcpLink préfixe [IO ...] ---
+    // --- normaliser les lignes si LcpLink préfixe [IO ...] ---
     private static String stripIoPrefix(String s) {
         if (s == null) return "";
         if (!s.startsWith("[IO ")) return s;
@@ -321,6 +321,7 @@ public final class DeliveryController implements DeliveryControllerPort {
             return null;
         });
 
+        // Point 1 (pas maintenant) : on conserve preset net #6 comme avant
         retryUntilDeadline(deadlineMs, "SET_FIELD#6", () -> {
             writePresetNet_WithCacheOrFallback(presetNet);
             return null;
@@ -388,7 +389,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     // =========================
-    // LIVE (Python-like, best-effort)
+    // LIVE — Best-effort (Python-like)
     // =========================
     @Override
     public void requestLiveSample() {
@@ -398,115 +399,109 @@ public final class DeliveryController implements DeliveryControllerPort {
 
             inLiveSample.set(true);
             try {
-                // ✅ Python parity: LIVE best-effort
-                // - RC=0x26 / queued timeout / timeout => skip (pas de resync)
+                // Python-like: LIVE best-effort (skip sur busy/timeout/queued)
+                LcpLink.MachineStatus ms;
                 try {
-                    LcpLink.MachineStatus ms = link.opGetMachineStatus(); // 0x23
-
-                    boolean active = (ms.delCode & DC_DELIVERY_ACTIVE) != 0;
-                    boolean flowBit = (ms.delCode & DC_FLOW_ACTIVE) != 0;
-                    boolean ticket = (ms.delCode & DC_TICKET_PENDING) != 0;
-
-                    if (!active) {
-                        setState(DeliveryState.CONNECTED);
-                        if (listener != null) {
-                            listener.onLiveStatus(ticket ? "LIVE: CONNECTED — Ticket pending"
-                                    : "LIVE: CONNECTED — Prêt à livrer");
-                            listener.onFlowStability(false, false, 0L);
-                        }
-                        lastGrossRaw = -1;
-                        lastNetRaw = -1;
-                        flowOffStable = false;
-                        sawFlowOnOnce = false;
-                        flowOffStartMs = 0L;
-                        lastCountsChangeMs = 0L;
-                        return;
-                    }
-
-                    ensureDigits();
-                    double scale = Math.pow(10, cachedDigits);
-
-                    int g, n;
-                    try {
-                        g = beI32(link.opGetField(FIELD_GROSS_COUNT));
-                        n = beI32(link.opGetField(FIELD_NET_COUNT));
-                    } catch (Exception ex) {
-                        g = (lastGrossRaw >= 0) ? lastGrossRaw : 0;
-                        n = (lastNetRaw >= 0) ? lastNetRaw : 0;
-                    }
-
-                    long now = System.currentTimeMillis();
-                    int d = 0;
-                    if (lastGrossRaw >= 0 && lastNetRaw >= 0) {
-                        d = Math.abs(g - lastGrossRaw) + Math.abs(n - lastNetRaw);
-                    }
-
-                    if (listener != null) listener.onLiveQty(n / scale, g / scale);
-
-                    if (d > 0) {
-                        sawFlowOnOnce = true;
-                        lastCountsChangeMs = now;
-                        flowOffStable = false;
-                        flowOffStartMs = 0L;
-                        lastGrossRaw = g;
-                        lastNetRaw = n;
-                        if (listener != null) {
-                            listener.onFlowStability(true, false, 0L);
-                            listener.onLiveStatus("LIVE: RUNNING_FLOWING (FLOW ON)");
-                        }
-                        setState(DeliveryState.RUNNING_FLOWING);
-                        return;
-                    }
-
-                    if (lastCountsChangeMs == 0L) lastCountsChangeMs = now;
-                    long age = now - lastCountsChangeMs;
-
-                    if (!sawFlowOnOnce) {
-                        flowOffStable = false;
-                        flowOffStartMs = 0L;
-                        if (listener != null) {
-                            listener.onFlowStability(false, false, 0L);
-                            listener.onLiveStatus("LIVE: RUNNING_FLOWING (Flow OFF — attente progression)");
-                        }
-                        setState(DeliveryState.RUNNING_FLOWING);
-                        lastGrossRaw = g;
-                        lastNetRaw = n;
-                        return;
-                    }
-
-                    if (flowOffStartMs == 0L) flowOffStartMs = lastCountsChangeMs;
-                    flowOffStable = age >= NO_FLOW_CONFIRM_MS;
-
-                    if (listener != null) {
-                        listener.onFlowStability(flowBit, flowOffStable, age);
-                        listener.onLiveStatus(flowOffStable
-                                ? "LIVE: RUNNING_PAUSED (FLOW OFF confirmé)"
-                                : "LIVE: RUNNING_FLOWING (FLOW OFF — confirmation...)");
-                    }
-
-                    if (flowOffStable) setState(DeliveryState.RUNNING_PAUSED);
-                    else setState(DeliveryState.RUNNING_FLOWING);
-
-                    lastGrossRaw = g;
-                    lastNetRaw = n;
-
-                } catch (Exception liveEx) {
-                    // ✅ Python: on skip, sans resync destructeur
-                    String m = (liveEx.getMessage() != null) ? liveEx.getMessage() : "";
-                    boolean soft =
-                            m.contains("Queued timeout") ||
-                            m.contains("Timeout waiting LCP response") ||
-                            m.contains("rc=0x26") ||
-                            m.contains("0x26");
-
-                    if (soft) {
+                    ms = link.opGetMachineStatus();
+                } catch (Exception e) {
+                    String m = (e.getMessage() != null) ? e.getMessage() : "";
+                    if (m.contains("Queued timeout") ||
+                        m.contains("Timeout waiting") ||
+                        m.contains("0x26") ||
+                        m.contains("REQUEST_QUEUED")) {
                         emitLog("[LIVE] soft-skip: " + m);
                         return;
                     }
-
-                    // Autres erreurs: log + onError (mais pas de resync)
-                    if (listener != null) listener.onError("requestLiveSample", liveEx);
+                    if (listener != null) listener.onError("requestLiveSample", e);
+                    return;
                 }
+
+                boolean active = (ms.delCode & DC_DELIVERY_ACTIVE) != 0;
+                boolean flowBit = (ms.delCode & DC_FLOW_ACTIVE) != 0;
+                boolean ticket = (ms.delCode & DC_TICKET_PENDING) != 0;
+
+                if (!active) {
+                    setState(DeliveryState.CONNECTED);
+                    if (listener != null) {
+                        listener.onLiveStatus(ticket ? "LIVE: CONNECTED — Ticket pending"
+                                : "LIVE: CONNECTED — Prêt à livrer");
+                        listener.onFlowStability(false, false, 0L);
+                    }
+                    lastGrossRaw = -1;
+                    lastNetRaw = -1;
+                    flowOffStable = false;
+                    sawFlowOnOnce = false;
+                    flowOffStartMs = 0L;
+                    lastCountsChangeMs = 0L;
+                    return;
+                }
+
+                ensureDigits();
+                double scale = Math.pow(10, cachedDigits);
+
+                int g, n;
+                try {
+                    g = beI32(link.opGetField(FIELD_GROSS_COUNT));
+                    n = beI32(link.opGetField(FIELD_NET_COUNT));
+                } catch (Exception ex) {
+                    g = (lastGrossRaw >= 0) ? lastGrossRaw : 0;
+                    n = (lastNetRaw >= 0) ? lastNetRaw : 0;
+                }
+
+                long now = System.currentTimeMillis();
+                int d = 0;
+                if (lastGrossRaw >= 0 && lastNetRaw >= 0) {
+                    d = Math.abs(g - lastGrossRaw) + Math.abs(n - lastNetRaw);
+                }
+
+                if (listener != null) listener.onLiveQty(n / scale, g / scale);
+
+                if (d > 0) {
+                    sawFlowOnOnce = true;
+                    lastCountsChangeMs = now;
+                    flowOffStable = false;
+                    flowOffStartMs = 0L;
+                    lastGrossRaw = g;
+                    lastNetRaw = n;
+                    if (listener != null) {
+                        listener.onFlowStability(true, false, 0L);
+                        listener.onLiveStatus("LIVE: RUNNING_FLOWING (FLOW ON)");
+                    }
+                    setState(DeliveryState.RUNNING_FLOWING);
+                    return;
+                }
+
+                if (lastCountsChangeMs == 0L) lastCountsChangeMs = now;
+                long age = now - lastCountsChangeMs;
+
+                if (!sawFlowOnOnce) {
+                    flowOffStable = false;
+                    flowOffStartMs = 0L;
+                    if (listener != null) {
+                        listener.onFlowStability(false, false, 0L);
+                        listener.onLiveStatus("LIVE: RUNNING_FLOWING (Flow OFF — attente progression)");
+                    }
+                    setState(DeliveryState.RUNNING_FLOWING);
+                    lastGrossRaw = g;
+                    lastNetRaw = n;
+                    return;
+                }
+
+                if (flowOffStartMs == 0L) flowOffStartMs = lastCountsChangeMs;
+                flowOffStable = age >= NO_FLOW_CONFIRM_MS;
+
+                if (listener != null) {
+                    listener.onFlowStability(flowBit, flowOffStable, age);
+                    listener.onLiveStatus(flowOffStable
+                            ? "LIVE: RUNNING_PAUSED (FLOW OFF confirmé)"
+                            : "LIVE: RUNNING_FLOWING (FLOW OFF — confirmation...)");
+                }
+
+                if (flowOffStable) setState(DeliveryState.RUNNING_PAUSED);
+                else setState(DeliveryState.RUNNING_FLOWING);
+
+                lastGrossRaw = g;
+                lastNetRaw = n;
 
             } finally {
                 inLiveSample.remove();
@@ -602,12 +597,10 @@ public final class DeliveryController implements DeliveryControllerPort {
             try {
                 link.opIssueCommand(CMD_PRINT_LAST_TICKET);
             } catch (Exception e) {
-                // Python: on ne force pas resync dans cette boucle
+                // Python-like: ne pas resync agressif ici
                 emitLog("[TICKET] issue6 retry: " + (e.getMessage() != null ? e.getMessage() : ""));
             }
-
             try { Thread.sleep(200); } catch (InterruptedException ignored) {}
-
             try {
                 LcpLink.MachineStatus ms = link.opGetMachineStatus();
                 if ((ms.delCode & DC_TICKET_PENDING) == 0) {
@@ -620,7 +613,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     // =========================
-    // Retry helper (queued/timeout) – 20s, poll 0.2s
+    // Retry helper
     // =========================
     private interface IoSupplier<T> { T get() throws Exception; }
 
@@ -647,7 +640,6 @@ public final class DeliveryController implements DeliveryControllerPort {
                 if (!retryable) throw e;
 
                 emitLog("[RETRY] " + step + " (" + (queuedTimeout ? "queued" : "timeout") + ")");
-                // ⚠️ on conserve softResync pour START (pas LIVE)
                 softResync("retry/" + step);
 
                 try { Thread.sleep(START_RETRY_POLL_MS); } catch (InterruptedException ignored) {}
@@ -672,11 +664,11 @@ public final class DeliveryController implements DeliveryControllerPort {
         if (digits < 0) digits = 1;
         int scale = (int) Math.pow(10, digits);
         int value = (int) Math.round(preset * scale);
-        byte[] buf = new byte[] {
+        byte[] buf = new byte[]{
                 (byte) (value >> 24),
                 (byte) (value >> 16),
                 (byte) (value >> 8),
-                (byte) (value)
+                (byte) value
         };
         link.opSetField(FIELD_PRESET_NET, buf);
     }
@@ -695,7 +687,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         if (b == null || b.length < 4) return 0;
         return ((b[0] & 0xFF) << 24) |
                ((b[1] & 0xFF) << 16) |
-               ((b[2] & 0xFF) << 8)  |
+               ((b[2] & 0xFF) << 8) |
                (b[3] & 0xFF);
     }
 
@@ -706,7 +698,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     // =========================
-    // Error handling / resync (START only)
+    // Error handling / resync
     // =========================
     private void handleIoFailure(String ctx, Exception e) {
         if (listener != null) listener.onError(ctx, e);
@@ -723,7 +715,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                 msg.contains("Timeout waiting LCP response") ||
                 msg.contains("Queued timeout");
 
-        // ✅ Python parity: LIVE ne doit jamais déclencher resync/stop
+        // ✅ LIVE: jamais de resync/stop
         if ("requestLiveSample".equals(ctx)) {
             emitLog("[WARN] " + ctx + " (soft): " + msg);
             return;
@@ -746,7 +738,6 @@ public final class DeliveryController implements DeliveryControllerPort {
         if (now - lastResyncMs < 1500) return;
         lastResyncMs = now;
 
-        // si LcpLink implémente drain/forceSyncNext, ça s'applique ici (START)
         link.drainInput(250);
         link.forceSyncNext(reason);
     }
