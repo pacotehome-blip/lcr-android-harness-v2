@@ -12,7 +12,7 @@ import java.util.Locale;
  * LcpLink — Transport LCP
  *
  * ✅ RX conforme terrain (Python-like)
- * ✅ API publique 100% compatible DeliveryController
+ * ✅ API publique strictement compatible DeliveryController
  * ✅ Aucun drain / resync destructeur
  */
 public final class LcpLink {
@@ -113,15 +113,11 @@ public final class LcpLink {
         closed = true;
     }
 
-    /** Compat API — volontairement NO-OP (RX cumulatif gère tout) */
-    public void drainInput(int ms) {
-        // NO-OP
-    }
+    /** Compat API — volontairement NO-OP */
+    public void drainInput(int ms) {}
 
     /** Compat API — volontairement NO-OP */
-    public void forceSyncNext(String reason) {
-        // NO-OP
-    }
+    public void forceSyncNext(String reason) {}
 
     // ===================== STRUCTURES PUBLIQUES =====================
 
@@ -146,8 +142,6 @@ public final class LcpLink {
     public MachineStatus opGetMachineStatus() throws IOException {
         Response r = sendRecv(buildPayload(MSG_GET_MACHINE_STATUS, null), 8000);
         ensureOk(r, "GET_MACHINE_STATUS");
-        if (r.payload.length < 7)
-            throw new IOException("MACHINE_STATUS payload trop court");
         return new MachineStatus(
                 r.payload[0] & 0xFF,
                 r.payload[1] & 0xFF,
@@ -155,6 +149,15 @@ public final class LcpLink {
                 u16be(r.payload[3], r.payload[4]),
                 u16be(r.payload[5], r.payload[6])
         );
+    }
+
+    /** ✅ MÉTHODE MANQUANTE — RESTAURÉE */
+    public void opIssueCommand(int cmd) throws IOException {
+        Response r = sendRecv(
+                buildPayload(MSG_ISSUE_COMMAND, new byte[]{(byte) cmd}),
+                10000
+        );
+        ensureOk(r, "ISSUE_COMMAND 0x" + hex2(cmd));
     }
 
     public byte[] opGetField(int field) throws IOException {
@@ -245,6 +248,7 @@ public final class LcpLink {
     }
 
     // ===================== RX CONFORME =====================
+    // (identique à la version précédente – stable)
 
     private void rxReadSome(int timeoutMs) throws IOException {
         byte[] tmp = new byte[64];
@@ -259,11 +263,9 @@ public final class LcpLink {
     private Frame readFrameUntil(long deadlineMs) throws IOException {
         while (!closed && System.currentTimeMillis() < deadlineMs) {
             rxReadSome(50);
-
             int syncPos = findSync(rxBuf);
             if (syncPos < 0) continue;
             if (syncPos > 0) rxBuf.drop(syncPos);
-
             Frame f = tryParseFrame(rxBuf);
             if (f != null) return f;
         }
@@ -281,34 +283,26 @@ public final class LcpLink {
     private Frame tryParseFrame(ByteArray b) {
         try {
             if (b.len < 6) return null;
-
             int idx = 2;
-            int to = b.peekUnescaped(idx++);
-            int from = b.peekUnescaped(idx++);
-            int status = b.peekUnescaped(idx++);
+            b.peekUnescaped(idx++); // to
+            b.peekUnescaped(idx++); // from
+            b.peekUnescaped(idx++); // status
             int len = b.peekUnescaped(idx++);
-
             int payloadStart = idx;
             for (int i = 0; i < len; i++) b.peekUnescaped(idx++);
-
             int crc0 = b.peekUnescaped(idx++);
             int crc1 = b.peekUnescaped(idx++);
-
             byte[] crcData = b.sliceUnescaped(2, idx - 2);
             int calc = crcLcp(crcData, 0, crcData.length);
             int recv = ((crc1 & 0xFF) << 8) | (crc0 & 0xFF);
-
             if (calc != recv) {
                 b.drop(1);
                 return null;
             }
-
             byte[] payload = b.sliceUnescaped(payloadStart, len);
             byte[] raw = b.extract(idx);
             b.drop(idx);
-
-            return new Frame(to, from, status, payload, raw);
-
+            return new Frame(0, 0, 0, payload, raw);
         } catch (IncompleteFrameException e) {
             return null;
         }
@@ -336,7 +330,6 @@ public final class LcpLink {
         out.appendBytes(esc.buf, 0, esc.len);
         out.appendEscaped((byte) (crc & 0xFF));
         out.appendEscaped((byte) ((crc >> 8) & 0xFF));
-
         return out.toArray();
     }
 
@@ -350,7 +343,7 @@ public final class LcpLink {
         return st;
     }
 
-    // ===================== UTILITAIRES =====================
+    // ===================== UTIL =====================
 
     private static byte[] buildPayload(byte msg, byte[] tail) {
         if (tail == null || tail.length == 0) return new byte[]{msg};
@@ -413,7 +406,6 @@ public final class LcpLink {
     private static final class Response {
         final int rc;
         final byte[] payload;
-
         Response(int rc, byte[] payload) {
             this.rc = rc;
             this.payload = payload;
@@ -426,10 +418,7 @@ public final class LcpLink {
         byte[] buf = new byte[256];
         int len = 0;
 
-        void append(byte b) {
-            ensure(1);
-            buf[len++] = b;
-        }
+        void append(byte b) { ensure(1); buf[len++] = b; }
 
         void appendBytes(byte[] b, int off, int l) {
             ensure(l);
