@@ -2,7 +2,6 @@
 package com.pa.lcr.lcp;
 
 import com.hoho.android.usbserial.driver.UsbSerialPort;
-
 import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
@@ -14,11 +13,16 @@ import java.util.Locale;
  * ✅ RX conforme terrain (Python-like)
  * ✅ API publique strictement compatible DeliveryController
  * ✅ Aucun drain / resync destructeur
+ *
+ * Correctif Python-parity (RC=0x26):
+ * - Le "queued via 0x7D" ne s'applique qu'aux commandes modifiantes:
+ *     * SET_FIELD (0x21)
+ *     * ISSUE_COMMAND (0x24)
+ * - Sur un GET_* (0x20/0x23/0x28), RC=0x26/0x27 = "busy, skip" (pas de 0x7D)
  */
 public final class LcpLink {
 
     // ===================== CONSTANTES =====================
-
     public static final byte SYNC = 0x7E;
     private static final byte ESC = 0x1B;
 
@@ -37,7 +41,6 @@ public final class LcpLink {
     private static final int QP_MS = 200;
 
     // ===================== PORT =====================
-
     private static final Object PORT_LOCK = new Object();
     private final UsbSerialPort port;
     private final int toAddr;
@@ -46,7 +49,6 @@ public final class LcpLink {
     private volatile boolean closed = false;
 
     // ===================== TRACE =====================
-
     public interface TraceSink {
         void onTrace(String line);
     }
@@ -77,16 +79,13 @@ public final class LcpLink {
     }
 
     // ===================== RX BUFFER =====================
-
     private final ByteArray rxBuf = new ByteArray();
 
     // ===================== SESSION =====================
-
     private int msgIdBit = 0;
     private boolean syncUsed = false;
 
     // ===================== CTOR =====================
-
     public LcpLink(UsbSerialPort port, int toAddr, int hostAddr, boolean syncFirst) {
         this.port = port;
         this.toAddr = toAddr & 0xFF;
@@ -94,7 +93,6 @@ public final class LcpLink {
     }
 
     // ===================== LIFECYCLE =====================
-
     public boolean isClosed() {
         return closed;
     }
@@ -120,7 +118,6 @@ public final class LcpLink {
     public void forceSyncNext(String reason) {}
 
     // ===================== STRUCTURES PUBLIQUES =====================
-
     public static final class MachineStatus {
         public final int rc;
         public final int devStatus;
@@ -138,7 +135,6 @@ public final class LcpLink {
     }
 
     // ===================== OPS PUBLIQUES =====================
-
     public MachineStatus opGetMachineStatus() throws IOException {
         Response r = sendRecv(buildPayload(MSG_GET_MACHINE_STATUS, null), 8000);
         ensureOk(r, "GET_MACHINE_STATUS");
@@ -187,9 +183,13 @@ public final class LcpLink {
     }
 
     // ===================== SEND / RECV =====================
-
     private synchronized Response sendRecv(byte[] payload, int timeoutMs) throws IOException {
         if (closed) throw new IOException("Transport closed");
+
+        final byte msg = (payload != null && payload.length > 0) ? payload[0] : 0;
+
+        // ✅ Python parity: queued via 0x7D UNIQUEMENT pour commandes modifiantes
+        final boolean queueable = (msg == MSG_SET_FIELD) || (msg == MSG_ISSUE_COMMAND);
 
         byte[] frame = encodeFrame(payload);
         t("TX: " + hexDump(frame));
@@ -221,7 +221,14 @@ public final class LcpLink {
 
             int rc = (f.payload.length > 0) ? (f.payload[0] & 0xFF) : 0xFF;
 
+            // ✅ Correctif: RC=0x26/0x27 sur GET_* = busy, pas de 0x7D
             if (rc == RC_REQUEST_QUEUED || rc == RC_NO_REQUEST_ACTIVE) {
+                if (!queueable) {
+                    // Alignement Python: "pas maintenant" → caller décidera (skip/retry later)
+                    return new Response(rc, f.payload);
+                }
+
+                // Queueable: traiter via 0x7D
                 queued = true;
                 lastQueued = rc;
                 if (nextCheck == 0) nextCheck = System.currentTimeMillis() + QP_MS;
@@ -244,12 +251,11 @@ public final class LcpLink {
         if (queued) {
             throw new IOException("Queued timeout last=0x" + hex2(lastQueued));
         }
+
         throw new IOException("Timeout waiting LCP response");
     }
 
     // ===================== RX CONFORME =====================
-    // (identique à la version précédente – stable)
-
     private void rxReadSome(int timeoutMs) throws IOException {
         byte[] tmp = new byte[64];
         int n;
@@ -288,30 +294,37 @@ public final class LcpLink {
             b.peekUnescaped(idx++); // from
             b.peekUnescaped(idx++); // status
             int len = b.peekUnescaped(idx++);
+
             int payloadStart = idx;
             for (int i = 0; i < len; i++) b.peekUnescaped(idx++);
+
             int crc0 = b.peekUnescaped(idx++);
             int crc1 = b.peekUnescaped(idx++);
+
             byte[] crcData = b.sliceUnescaped(2, idx - 2);
             int calc = crcLcp(crcData, 0, crcData.length);
             int recv = ((crc1 & 0xFF) << 8) | (crc0 & 0xFF);
+
             if (calc != recv) {
                 b.drop(1);
                 return null;
             }
+
             byte[] payload = b.sliceUnescaped(payloadStart, len);
             byte[] raw = b.extract(idx);
             b.drop(idx);
+
             return new Frame(0, 0, 0, payload, raw);
+
         } catch (IncompleteFrameException e) {
             return null;
         }
     }
 
     // ===================== FRAMING / CRC =====================
-
     private byte[] encodeFrame(byte[] payload) {
         int status = nextStatusByte();
+
         ByteArray var = new ByteArray();
         var.append((byte) toAddr);
         var.append((byte) hostAddr);
@@ -336,7 +349,7 @@ public final class LcpLink {
     private int nextStatusByte() {
         int st = msgIdBit & 1;
         if (!syncUsed) {
-            st |= 0x02;
+            st = 0x02;
             syncUsed = true;
         }
         msgIdBit ^= 1;
@@ -344,7 +357,6 @@ public final class LcpLink {
     }
 
     // ===================== UTIL =====================
-
     private static byte[] buildPayload(byte msg, byte[] tail) {
         if (tail == null || tail.length == 0) return new byte[]{msg};
         byte[] out = new byte[1 + tail.length];
@@ -388,7 +400,6 @@ public final class LcpLink {
     }
 
     // ===================== STRUCTURES INTERNES =====================
-
     private static final class Frame {
         final int to, from, status;
         final byte[] payload;
@@ -406,6 +417,7 @@ public final class LcpLink {
     private static final class Response {
         final int rc;
         final byte[] payload;
+
         Response(int rc, byte[] payload) {
             this.rc = rc;
             this.payload = payload;
