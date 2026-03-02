@@ -53,7 +53,6 @@ public final class DeliveryController implements DeliveryControllerPort {
     private volatile int lastNetRaw = -1;
 
     private volatile boolean stopped = false;
-
     private volatile boolean txRxEnabled = false;
     private volatile boolean logTsEnabled = false;
     private volatile long lastResyncMs = 0L;
@@ -189,12 +188,14 @@ public final class DeliveryController implements DeliveryControllerPort {
         try { link.setTraceSink(null); } catch (Exception ignored) {}
         try { io.shutdownNow(); } catch (Exception ignored) {}
         setState(DeliveryState.DISCONNECTED);
+
         if (listener != null) {
             listener.onLiveStatus("LIVE: DISCONNECTED");
             listener.onLog(closeTransport
                     ? "[LINK] Controller stopped / transport closed"
                     : "[LINK] Controller stopped (logic only)");
         }
+
         if (closeTransport) {
             try { link.close(); } catch (Exception ignored) {}
         } else {
@@ -381,7 +382,6 @@ public final class DeliveryController implements DeliveryControllerPort {
 
                 setState(DeliveryState.CONNECTED);
                 if (listener != null) listener.onLiveStatus("LIVE: CONNECTED — Prêt à livrer");
-
             } catch (Exception e) {
                 handleIoFailure("endDelivery", e);
             }
@@ -436,7 +436,14 @@ public final class DeliveryController implements DeliveryControllerPort {
                     return;
                 }
 
-                ensureDigits();
+                // ✅ FIX COMPILATION: ensureDigits() throws Exception -> catch locally (LIVE soft-skip)
+                try {
+                    ensureDigits();
+                } catch (Exception e) {
+                    emitLog("[LIVE] soft-skip ensureDigits: " + (e.getMessage() != null ? e.getMessage() : ""));
+                    return;
+                }
+
                 double scale = Math.pow(10, cachedDigits);
 
                 int g, n;
@@ -597,10 +604,11 @@ public final class DeliveryController implements DeliveryControllerPort {
             try {
                 link.opIssueCommand(CMD_PRINT_LAST_TICKET);
             } catch (Exception e) {
-                // Python-like: ne pas resync agressif ici
                 emitLog("[TICKET] issue6 retry: " + (e.getMessage() != null ? e.getMessage() : ""));
             }
+
             try { Thread.sleep(200); } catch (InterruptedException ignored) {}
+
             try {
                 LcpLink.MachineStatus ms = link.opGetMachineStatus();
                 if ((ms.delCode & DC_TICKET_PENDING) == 0) {
