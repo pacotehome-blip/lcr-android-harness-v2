@@ -10,15 +10,13 @@ import java.util.Locale;
 /**
  * LcpLink — Transport LCP
  *
- * ✅ RX conforme terrain (Python-like)
+ * ✅ RX cumulatif (Python-like)
  * ✅ API publique strictement compatible DeliveryController
- * ✅ Aucun drain / resync destructeur
  *
- * Correctif Python-parity (RC=0x26):
- * - Le "queued via 0x7D" ne s'applique qu'aux commandes modifiantes:
- *     * SET_FIELD (0x21)
- *     * ISSUE_COMMAND (0x24)
- * - Sur un GET_* (0x20/0x23/0x28), RC=0x26/0x27 = "busy, skip" (pas de 0x7D)
+ * Correctifs:
+ * 1) CRC/RX: calcul CRC sur les octets RAW (incluant ESC) du segment variable (comme Python et doc LCP)
+ * 2) RC=0x26/0x27: queued via 0x7D UNIQUEMENT pour commandes modifiantes (0x21/0x24).
+ *    Sur GET_* (0x20/0x23/0x28): RC=0x26/0x27 = "busy/skip" -> pas de 0x7D.
  */
 public final class LcpLink {
 
@@ -71,7 +69,9 @@ public final class LcpLink {
     private void t(String s) {
         TraceSink ts = trace;
         if (ts == null) return;
-        if (traceTsEnabled && (s.startsWith("TX:") || s.startsWith("RX:") || s.startsWith("↳"))) {
+        if (traceTsEnabled && (s.startsWith("TX:") ||
+                               s.startsWith("RX:") ||
+                               s.startsWith("↳"))) {
             ts.onTrace("[IO " + TRACE_DF.get().format(new Date()) + "] " + s);
         } else {
             ts.onTrace(s);
@@ -147,7 +147,7 @@ public final class LcpLink {
         );
     }
 
-    /** ✅ MÉTHODE MANQUANTE — RESTAURÉE */
+    /** ✅ Méthode attendue par DeliveryController */
     public void opIssueCommand(int cmd) throws IOException {
         Response r = sendRecv(
                 buildPayload(MSG_ISSUE_COMMAND, new byte[]{(byte) cmd}),
@@ -188,7 +188,7 @@ public final class LcpLink {
 
         final byte msg = (payload != null && payload.length > 0) ? payload[0] : 0;
 
-        // ✅ Python parity: queued via 0x7D UNIQUEMENT pour commandes modifiantes
+        // ✅ Python-like: queued via 0x7D UNIQUEMENT pour commandes modifiantes
         final boolean queueable = (msg == MSG_SET_FIELD) || (msg == MSG_ISSUE_COMMAND);
 
         byte[] frame = encodeFrame(payload);
@@ -221,14 +221,12 @@ public final class LcpLink {
 
             int rc = (f.payload.length > 0) ? (f.payload[0] & 0xFF) : 0xFF;
 
-            // ✅ Correctif: RC=0x26/0x27 sur GET_* = busy, pas de 0x7D
             if (rc == RC_REQUEST_QUEUED || rc == RC_NO_REQUEST_ACTIVE) {
                 if (!queueable) {
-                    // Alignement Python: "pas maintenant" → caller décidera (skip/retry later)
+                    // ✅ Alignement Python: sur GET_* => busy/skip, pas de 0x7D
                     return new Response(rc, f.payload);
                 }
-
-                // Queueable: traiter via 0x7D
+                // Queueable: on passe via 0x7D
                 queued = true;
                 lastQueued = rc;
                 if (nextCheck == 0) nextCheck = System.currentTimeMillis() + QP_MS;
@@ -251,7 +249,6 @@ public final class LcpLink {
         if (queued) {
             throw new IOException("Queued timeout last=0x" + hex2(lastQueued));
         }
-
         throw new IOException("Timeout waiting LCP response");
     }
 
@@ -286,38 +283,107 @@ public final class LcpLink {
         return -1;
     }
 
+    /**
+     * ✅ Correctif CRC/RX:
+     * - calcule le CRC sur le flux RAW "variable part" (incluant ESC), comme Python (raw_hdr+raw_data).
+     * - ne confond plus index RAW (avec ESC) et longueur "unescaped".
+     */
     private Frame tryParseFrame(ByteArray b) {
         try {
-            if (b.len < 6) return null;
-            int idx = 2;
-            b.peekUnescaped(idx++); // to
-            b.peekUnescaped(idx++); // from
-            b.peekUnescaped(idx++); // status
-            int len = b.peekUnescaped(idx++);
+            if (b.len < 6) return null; // ~~ + hdr minimal
 
-            int payloadStart = idx;
-            for (int i = 0; i < len; i++) b.peekUnescaped(idx++);
+            int rawIdx = 2; // index RAW après "~~"
+            ByteArray rawForCrc = new ByteArray();
 
-            int crc0 = b.peekUnescaped(idx++);
-            int crc1 = b.peekUnescaped(idx++);
+            // Lire to/from/status/len (unescaped) en capturant le RAW (incluant ESC)
+            int to = readUnescapedAndCaptureRaw(b, rawForCrc, idxRef(rawIdx));
+            rawIdx = idxRefValue;
+            int from = readUnescapedAndCaptureRaw(b, rawForCrc, idxRef(rawIdx));
+            rawIdx = idxRefValue;
+            int status = readUnescapedAndCaptureRaw(b, rawForCrc, idxRef(rawIdx));
+            rawIdx = idxRefValue;
+            int len = readUnescapedAndCaptureRaw(b, rawForCrc, idxRef(rawIdx));
+            rawIdx = idxRefValue;
 
-            byte[] crcData = b.sliceUnescaped(2, idx - 2);
-            int calc = crcLcp(crcData, 0, crcData.length);
+            // Lire payload len octets (unescaped) en capturant RAW
+            byte[] payload = new byte[len];
+            for (int i = 0; i < len; i++) {
+                payload[i] = (byte) readUnescapedAndCaptureRaw(b, rawForCrc, idxRef(rawIdx));
+                rawIdx = idxRefValue;
+            }
+
+            // Lire CRC0/CRC1 (unescaped) SANS les ajouter à rawForCrc
+            int crc0 = readCrcByte(b, idxRef(rawIdx));
+            rawIdx = idxRefValue;
+            int crc1 = readCrcByte(b, idxRef(rawIdx));
+            rawIdx = idxRefValue;
+
             int recv = ((crc1 & 0xFF) << 8) | (crc0 & 0xFF);
+            int calc = crcLcp(rawForCrc.buf, 0, rawForCrc.len);
 
             if (calc != recv) {
-                b.drop(1);
+                b.drop(1); // resync doux
                 return null;
             }
 
-            byte[] payload = b.sliceUnescaped(payloadStart, len);
-            byte[] raw = b.extract(idx);
-            b.drop(idx);
+            byte[] raw = b.extract(rawIdx);
+            b.drop(rawIdx);
 
-            return new Frame(0, 0, 0, payload, raw);
+            return new Frame(to, from, status, payload, raw);
 
         } catch (IncompleteFrameException e) {
             return null;
+        }
+    }
+
+    // ---- helpers tryParseFrame ----
+    // NOTE: ces helpers sont volontairement "minimaux" pour éviter d'impacter le reste.
+
+    // Hack simple "pass-by-ref" sans ajouter de classe : on utilise un champ temporaire
+    private int idxRefValue = 0;
+
+    private int[] idxRef(int v) {
+        idxRefValue = v;
+        return new int[]{v};
+    }
+
+    private int readUnescapedAndCaptureRaw(ByteArray b, ByteArray rawForCrc, int[] idxRef) throws IncompleteFrameException {
+        int idx = idxRef[0];
+        if (idx >= b.len) throw new IncompleteFrameException();
+        int v = b.buf[idx] & 0xFF;
+
+        if (v == (ESC & 0xFF)) {
+            if (idx + 1 >= b.len) throw new IncompleteFrameException();
+            // CRC inclut ESC + byte échappé (RAW)
+            rawForCrc.append(b.buf[idx]);
+            rawForCrc.append(b.buf[idx + 1]);
+            int unesc = b.buf[idx + 1] & 0xFF;
+            idx += 2;
+            idxRefValue = idx;
+            return unesc;
+        } else {
+            rawForCrc.append(b.buf[idx]);
+            idx += 1;
+            idxRefValue = idx;
+            return v;
+        }
+    }
+
+    private int readCrcByte(ByteArray b, int[] idxRef) throws IncompleteFrameException {
+        int idx = idxRef[0];
+        if (idx >= b.len) throw new IncompleteFrameException();
+        int v = b.buf[idx] & 0xFF;
+
+        if (v == (ESC & 0xFF)) {
+            if (idx + 1 >= b.len) throw new IncompleteFrameException();
+            int unesc = b.buf[idx + 1] & 0xFF;
+            idx += 2;
+            idxRefValue = idx;
+            return unesc;
+        } else {
+            idx += 1;
+            idxRefValue = idx;
+            return v;
         }
     }
 
