@@ -16,7 +16,9 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.widget.*;
 
+import com.google.android.material.tabs.TabLayout;
 import com.hoho.android.usbserial.driver.*;
+
 import com.pa.lcr.lcp.*;
 
 import java.util.ArrayList;
@@ -30,35 +32,48 @@ public class MainActivity extends AppCompatActivity {
     private final List<UsbDevice> usbDevices = new ArrayList<>();
     private UsbSerialPort usbPort;
 
+    // ===== Tabs / Pages =====
+    private TabLayout tabLayout;
+    private View pageMain;
+    private View pageApiFace;
+
+    // ===== API-Face UI (layout fragment_api_face.xml inclus dans pageApiFace) =====
+    private TextView txtApiStatus;
+    private TextView txtApiUrl;
+    private TextView txtApiTrace;
+    private ScrollView apiTraceScroll;
+    private Button btnApiStart;
+    private Button btnApiStop;
+    private Button btnApiClearTrace;
+    private Button btnApiCopyCurl;
+
+    // ===== API runtime =====
+    private static final int API_PORT = 8765;
+    private ApiTraceBuffer apiTrace;
+    private ApiServer apiServer;
+
+    // UI refs (pageMain)
     private Spinner spnUsbDevices;
     private Button btnScanUsb;
     private Button btnPingUsb;
-
     private EditText edtTo;
     private EditText edtFrom;
     private TextView txtActiveNode;
-
     private Button btnConnect;
-
     private Spinner spnProducts;
     private EditText edtProduct;
     private EditText edtPreset;
-
     private Button btnA, btnB, btnC;
     private Button btnContinue, btnFinish;
-
     private TextView txtLive;
-
     private View liveQtyPanel;
     private TextView txtQtyNet;
     private TextView txtQtyGross;
-
     private TextView txtLog;
     private ScrollView logScroll;
     private Button btnClearLog;
     private Button btnCopyLog;
     private Button btnScrollDown;
-
     private CheckBox cbTxRx;
     private CheckBox cbLogTs;
 
@@ -119,10 +134,30 @@ public class MainActivity extends AppCompatActivity {
         wireUi();
         initUiDefaults();
 
+        // ✅ Tabs en haut (MAIN + API-Face)
+        setupTabs();
+
+        // ✅ API runtime init
+        apiTrace = new ApiTraceBuffer(500);
+        refreshApiStatus();
+
         log("UI prête — Scan USB requis");
     }
 
+    @Override
+    protected void onDestroy() {
+        // Stop server proprement si l’activité se ferme
+        stopApiServer("Activity destroyed");
+        super.onDestroy();
+    }
+
     private void bindUi() {
+        // Tabs / pages
+        tabLayout = findViewById(R.id.tabLayout);
+        pageMain = findViewById(R.id.pageMain);
+        pageApiFace = findViewById(R.id.pageApiFace);
+
+        // Main page controls
         btnScanUsb = findViewById(R.id.btnScanUsb);
         btnPingUsb = findViewById(R.id.btnPingUsb);
         spnUsbDevices = findViewById(R.id.spnUsbDevices);
@@ -160,12 +195,26 @@ public class MainActivity extends AppCompatActivity {
 
         cbTxRx = findViewById(R.id.cbTxRx);
         cbLogTs = findViewById(R.id.cbLogTs);
+
+        // API-Face controls (included layout)
+        txtApiStatus = findViewById(R.id.txtApiStatus);
+        txtApiUrl = findViewById(R.id.txtApiUrl);
+        txtApiTrace = findViewById(R.id.txtApiTrace);
+        apiTraceScroll = findViewById(R.id.apiTraceScroll);
+
+        btnApiStart = findViewById(R.id.btnApiStart);
+        btnApiStop = findViewById(R.id.btnApiStop);
+        btnApiClearTrace = findViewById(R.id.btnApiClearTrace);
+        btnApiCopyCurl = findViewById(R.id.btnApiCopyCurl);
+
+        if (txtApiUrl != null) {
+            txtApiUrl.setText("http://127.0.0.1:" + API_PORT);
+        }
     }
 
     private void initUiDefaults() {
         edtTo.setText("250");
         edtFrom.setText("255");
-
         txtActiveNode.setText("Node actif : —");
         txtLive.setText("LIVE: (en attente)");
 
@@ -209,7 +258,6 @@ public class MainActivity extends AppCompatActivity {
                 if (suppressProductSelection) return;
                 if (!userTouchedSpinner) return;
                 userTouchedSpinner = false;
-
                 ProductUiItem it = (ProductUiItem) spnProducts.getSelectedItem();
                 controller.selectProduct(it.product1);
                 edtProduct.setText(String.valueOf(it.product1));
@@ -249,17 +297,191 @@ public class MainActivity extends AppCompatActivity {
             cbLogTs.setOnCheckedChangeListener((buttonView, checked) -> {
                 SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
                 prefs.edit().putBoolean("log_ts", checked).apply();
-
                 logTsEnabled = checked;
-
                 if (controller != null) controller.setLogTimestampsEnabled(checked);
                 if (link != null) link.setTraceTimestampsEnabled(checked);
-
                 log("Option timestamps (UI+IO): " + (checked ? "ON" : "OFF"));
             });
         }
+
+        // ===== API-Face wiring =====
+        if (btnApiStart != null) {
+            btnApiStart.setOnClickListener(v -> startApiServer());
+        }
+        if (btnApiStop != null) {
+            btnApiStop.setOnClickListener(v -> stopApiServer("Stop button"));
+        }
+        if (btnApiClearTrace != null) {
+            btnApiClearTrace.setOnClickListener(v -> {
+                if (apiTrace != null) apiTrace.clear();
+                refreshApiTrace();
+                toast("Trace API effacée");
+            });
+        }
+        if (btnApiCopyCurl != null) {
+            btnApiCopyCurl.setOnClickListener(v -> copyCurlExamples());
+        }
     }
 
+    // =========================
+    // Tabs
+    // =========================
+    private void setupTabs() {
+        if (tabLayout == null) return;
+
+        tabLayout.removeAllTabs();
+        tabLayout.addTab(tabLayout.newTab().setText("MAIN"), true);
+        tabLayout.addTab(tabLayout.newTab().setText("API-Face"), false);
+
+        showPage(0);
+
+        tabLayout.addOnTabSelectedListener(new TabLayout.OnTabSelectedListener() {
+            @Override public void onTabSelected(TabLayout.Tab tab) {
+                showPage(tab.getPosition());
+            }
+            @Override public void onTabUnselected(TabLayout.Tab tab) {}
+            @Override public void onTabReselected(TabLayout.Tab tab) {}
+        });
+    }
+
+    private void showPage(int index) {
+        if (pageMain != null) pageMain.setVisibility(index == 0 ? View.VISIBLE : View.GONE);
+        if (pageApiFace != null) pageApiFace.setVisibility(index == 1 ? View.VISIBLE : View.GONE);
+
+        if (index == 1) {
+            // when opening API-Face tab, refresh status + trace
+            refreshApiStatus();
+            refreshApiTrace();
+        }
+    }
+
+    // =========================
+    // API Server control (no start if controller == null)
+    // =========================
+    private void startApiServer() {
+        // Strict requirement: no start if controller == null
+        if (controller == null) {
+            apiTraceAdd("[API] START REFUSED: controller==null (Connect LCP requis)");
+            refreshApiStatus();
+            refreshApiTrace();
+            toast("Start API refusé: Connect LCP requis");
+            return;
+        }
+        if (!(controller instanceof DeliveryController)) {
+            apiTraceAdd("[API] START REFUSED: controller type incompatible");
+            refreshApiStatus();
+            refreshApiTrace();
+            toast("Start API refusé: controller incompatible");
+            return;
+        }
+        if (apiServer != null && apiServer.isRunning()) {
+            apiTraceAdd("[API] déjà RUNNING");
+            refreshApiStatus();
+            refreshApiTrace();
+            return;
+        }
+
+        try {
+            DeliveryController dc = (DeliveryController) controller;
+            ApiFacade facade = new DeliveryApiFacadeImpl(dc);
+
+            apiServer = new ApiServer(facade, apiTrace, API_PORT);
+            apiServer.start();
+
+            apiTraceAdd("[API] START OK on http://127.0.0.1:" + API_PORT);
+            refreshApiStatus();
+            refreshApiTrace();
+            toast("API démarrée (127.0.0.1:" + API_PORT + ")");
+
+        } catch (Exception e) {
+            apiTraceAdd("[API] START FAIL: " + safeMsg(e));
+            refreshApiStatus();
+            refreshApiTrace();
+            toast("API start error: " + safeMsg(e));
+        }
+    }
+
+    private void stopApiServer(String reason) {
+        try {
+            if (apiServer != null && apiServer.isRunning()) {
+                apiServer.stop();
+                apiTraceAdd("[API] STOP (" + reason + ")");
+            }
+        } catch (Exception ignored) {
+        } finally {
+            apiServer = null;
+            refreshApiStatus();
+            refreshApiTrace();
+        }
+    }
+
+    private void refreshApiStatus() {
+        if (txtApiStatus == null) return;
+
+        boolean running = (apiServer != null && apiServer.isRunning());
+        String s = "Status: " + (running ? "RUNNING (loopback only)" : "STOPPED");
+        txtApiStatus.setText(s);
+
+        // Enable/disable buttons for clarity
+        if (btnApiStart != null) btnApiStart.setEnabled(!running);
+        if (btnApiStop != null) btnApiStop.setEnabled(running);
+    }
+
+    private void refreshApiTrace() {
+        if (txtApiTrace == null || apiTrace == null) return;
+
+        List<String> lines = apiTrace.snapshot();
+        if (lines.isEmpty()) {
+            txtApiTrace.setText("(trace vide)");
+            return;
+        }
+
+        StringBuilder sb = new StringBuilder(lines.size() * 64);
+        for (String l : lines) sb.append(l).append('\n');
+        txtApiTrace.setText(sb.toString());
+
+        if (apiTraceScroll != null) {
+            apiTraceScroll.post(() -> apiTraceScroll.fullScroll(View.FOCUS_DOWN));
+        }
+    }
+
+    private void apiTraceAdd(String line) {
+        if (apiTrace == null) return;
+        apiTrace.add(line);
+        ui.post(this::refreshApiTrace);
+    }
+
+    private void copyCurlExamples() {
+        String base = "http://127.0.0.1:" + API_PORT;
+        String examples =
+                "adb reverse tcp:" + API_PORT + " tcp:" + API_PORT + "\n\n" +
+                "curl " + base + "/v1/ping\n" +
+                "curl " + base + "/v1/usb/scan\n" +
+                "curl -X POST " + base + "/v1/usb/open-ping\n" +
+                "curl -X POST " + base + "/v1/lcp/connect\n\n" +
+                "curl -X POST " + base + "/v1/delivery/C \\\n" +
+                " -H \"Content-Type: application/json\" \\\n" +
+                " -d '{\"product1to16\":1,\"presetNet\":50.0}'\n\n" +
+                "curl " + base + "/v1/delivery/job/<jobId>\n";
+
+        ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        cm.setPrimaryClip(ClipData.newPlainText("curl", examples));
+        toast("Exemples curl copiés");
+    }
+
+    private void toast(String s) {
+        ui.post(() -> Toast.makeText(this, s, Toast.LENGTH_SHORT).show());
+    }
+
+    private static String safeMsg(Exception e) {
+        if (e == null) return "";
+        String m = e.getMessage();
+        return (m == null) ? e.getClass().getSimpleName() : m;
+    }
+
+    // =========================
+    // USB
+    // =========================
     private void scanUsb() {
         usbDevices.clear();
         usbDevices.addAll(usbManager.getDeviceList().values());
@@ -322,34 +544,42 @@ public class MainActivity extends AppCompatActivity {
     public void onUsbDetached() {
         log("USB détaché");
 
+        // Stop API if running (session is gone)
+        stopApiServer("USB detached");
+
         if (controller != null) {
             controller.shutdown(true);
             controller = null;
         }
-        link = null;
 
+        link = null;
         stopLiveTick();
         usbPort = null;
 
         txtActiveNode.setText("Node actif : —");
         txtLive.setText("LIVE: (en attente)");
-
         if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
         if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
         if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
     }
 
+    // =========================
+    // LCP Connect
+    // =========================
     private void connectLcp() {
         if (usbPort == null) {
             log("ERR: USB non connecté");
             return;
         }
 
+        // If switching session, stop API (facade must bind to current controller)
+        stopApiServer("Connect LCP (new session)");
+
         int to = parseInt(edtTo.getText().toString(), 250);
         int from = parseInt(edtFrom.getText().toString(), 255);
-
         edtTo.setText(String.valueOf(to));
         edtFrom.setText(String.valueOf(from));
+
         txtActiveNode.setText("Node actif : —");
 
         if (controller != null) {
@@ -373,6 +603,7 @@ public class MainActivity extends AppCompatActivity {
         controller.setLogTimestampsEnabled(ts);
 
         logTsEnabled = ts;
+
         if (cbTxRx != null) cbTxRx.setChecked(showTxRx);
         if (cbLogTs != null) cbLogTs.setChecked(ts);
 
@@ -382,10 +613,8 @@ public class MainActivity extends AppCompatActivity {
                 ui.post(() -> {
                     boolean stableOff = (controller != null) && controller.isFlowOffStable();
                     updateButtons(state, stableOff);
-
                     if (state == DeliveryState.RUNNING_FLOWING) startLiveTickIfNeeded();
                     else stopLiveTick();
-
                     if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
                 });
             }
@@ -438,23 +667,25 @@ public class MainActivity extends AppCompatActivity {
 
         log("Connect LCP appliqué");
         stopLiveTick();
-
         if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
+
+        // API-Face status refresh (Start is still blocked until user presses it)
+        refreshApiStatus();
     }
 
     private void updateButtons(DeliveryState state, boolean stableOff) {
         boolean connected = (state == DeliveryState.CONNECTED);
         boolean paused = (state == DeliveryState.RUNNING_PAUSED);
-
         btnA.setEnabled(connected);
         btnC.setEnabled(connected);
-
         btnContinue.setEnabled(paused);
         btnFinish.setEnabled(paused && stableOff);
-
         btnB.setEnabled(true);
     }
 
+    // =========================
+    // Helpers
+    // =========================
     private int readProduct() {
         try {
             int v = Integer.parseInt(edtProduct.getText().toString());
@@ -482,9 +713,13 @@ public class MainActivity extends AppCompatActivity {
 
     private void log(String s) {
         ui.post(() -> {
-            boolean isIoLine = s.startsWith("[IO ") || s.startsWith("TX:") || s.startsWith("RX:") || s.startsWith("↳");
-            String line = (logTsEnabled && !isIoLine) ? ("[UI " + uiTs() + "] " + s) : s;
+            boolean isIoLine =
+                    s.startsWith("[IO ")
+                            || s.startsWith("TX:")
+                            || s.startsWith("RX:")
+                            || s.startsWith("↳");
 
+            String line = (logTsEnabled && !isIoLine) ? ("[UI " + uiTs() + "] " + s) : s;
             logBuf.append(line).append('\n');
             txtLog.setText(logBuf.toString());
             logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));

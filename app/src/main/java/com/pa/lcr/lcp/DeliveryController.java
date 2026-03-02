@@ -1,9 +1,14 @@
 
 package com.pa.lcr.lcp;
 
+import org.json.JSONObject;
+
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
+import java.util.Map;
+import java.util.HashMap;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -38,8 +43,8 @@ public final class DeliveryController implements DeliveryControllerPort {
     private static final long TICKET_DEVICE_LOOP_MS = 30_000;
 
     // LIVE backoff (A)
-    private static final long LIVE_BASE_MS = 200;          // nominal
-    private static final long LIVE_MAX_MS = 2000;          // plafond
+    private static final long LIVE_BASE_MS = 200;   // nominal
+    private static final long LIVE_MAX_MS = 2000;   // plafond
     private static final long LIVE_LOG_THROTTLE_MS = 1000; // max 1 log/sec en mode skip
 
     // CONTINUER: fenêtre de grâce 30s (UNIQUEMENT après clic Continuer)
@@ -48,8 +53,8 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     private final LcpLink link;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
-
     private Listener listener;
+
     private volatile DeliveryState state = DeliveryState.DISCONNECTED;
     private volatile int cachedDigits = -1;
 
@@ -83,6 +88,28 @@ public final class DeliveryController implements DeliveryControllerPort {
             ThreadLocal.withInitial(() ->
                     new SimpleDateFormat("HH:mm:ss.SSS", Locale.CANADA_FRENCH));
 
+    // =========================
+    // API-Face (jobs + cache)
+    // =========================
+    private static final class ApiJob {
+        final String id;
+        final long startedAtMs;
+        volatile boolean done = false;
+        volatile String state; // PENDING/RUNNING/DONE/ERROR
+        volatile double net;
+        volatile double gross;
+        volatile int decimals;
+        volatile String err;
+
+        ApiJob(String id) {
+            this.id = id;
+            this.startedAtMs = System.currentTimeMillis();
+            this.state = "PENDING";
+        }
+    }
+
+    private final Map<String, ApiJob> apiJobs = new HashMap<>();
+
     public DeliveryController(LcpLink link) {
         this.link = link;
     }
@@ -101,7 +128,8 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     @Override
     public boolean isDeliveryActive() {
-        return state == DeliveryState.RUNNING_FLOWING || state == DeliveryState.RUNNING_PAUSED;
+        return state == DeliveryState.RUNNING_FLOWING
+                || state == DeliveryState.RUNNING_PAUSED;
     }
 
     @Override
@@ -146,7 +174,9 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     private static boolean isTxRxLine(String raw) {
-        return raw.startsWith("TX:") || raw.startsWith("RX:") || raw.startsWith("↳");
+        return raw.startsWith("TX:")
+                || raw.startsWith("RX:")
+                || raw.startsWith("↳");
     }
 
     @Override
@@ -199,14 +229,12 @@ public final class DeliveryController implements DeliveryControllerPort {
         try { link.setTraceSink(null); } catch (Exception ignored) {}
         try { io.shutdownNow(); } catch (Exception ignored) {}
         setState(DeliveryState.DISCONNECTED);
-
         if (listener != null) {
             listener.onLiveStatus("LIVE: DISCONNECTED");
             listener.onLog(closeTransport
                     ? "[LINK] Controller stopped / transport closed"
                     : "[LINK] Controller stopped (logic only)");
         }
-
         if (closeTransport) {
             try { link.close(); } catch (Exception ignored) {}
         } else {
@@ -265,13 +293,10 @@ public final class DeliveryController implements DeliveryControllerPort {
         io.execute(() -> {
             if (isStopped()) return;
             if (state == DeliveryState.PRESTART || state == DeliveryState.ENDING) return;
-
             emitLog("[C] New delivery requested");
             final long deadline = System.currentTimeMillis() + START_RETRY_WINDOW_MS;
-
             try {
                 FullStatus fs = retryUntilDeadline(deadline, "C/full-precheck", () -> readFullStatus("C/full"));
-
                 if (fs.deliveryActive) {
                     setState(DeliveryState.CONNECTED);
                     if (listener != null) {
@@ -283,24 +308,20 @@ public final class DeliveryController implements DeliveryControllerPort {
                             : "[C] Delivery active -> use A manually");
                     return;
                 }
-
                 if (fs.ticketPending) {
                     setState(DeliveryState.CONNECTED);
                     if (listener != null) listener.onLiveStatus("LIVE: CONNECTED — Ticket pending");
                     emitLog("[C] Ticket pending -> use A manually");
                     return;
                 }
-
                 if (fs.flowActive) {
                     setState(DeliveryState.CONNECTED);
                     if (listener != null) listener.onLiveStatus("LIVE: CONNECTED — Flow actif (utiliser A)");
                     emitLog("[C] Flow active at precheck -> use A manually");
                     return;
                 }
-
                 emitLog("[C] Register ready -> START now");
                 doStartNewDeliveryWithRetry(deadline, product1to16, presetNet);
-
             } catch (Exception e) {
                 handleIoFailure("startDelivery(C-intent)", e);
             }
@@ -309,7 +330,6 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     private void doStartNewDeliveryWithRetry(long deadlineMs, int product1to16, double presetNet) throws Exception {
         if (isStopped()) return;
-
         setState(DeliveryState.PRESTART);
         emitLog("[PRESTART] internal");
 
@@ -339,7 +359,6 @@ public final class DeliveryController implements DeliveryControllerPort {
             return null;
         });
 
-        // Point 1 (pas maintenant) : on conserve preset net #6 comme avant
         retryUntilDeadline(deadlineMs, "SET_FIELD#6", () -> {
             writePresetNet_WithCacheOrFallback(presetNet);
             return null;
@@ -363,7 +382,6 @@ public final class DeliveryController implements DeliveryControllerPort {
             if (isStopped()) return;
             try {
                 if (state != DeliveryState.RUNNING_PAUSED) return;
-
                 long now = System.currentTimeMillis();
 
                 // debounce anti double-clic
@@ -390,7 +408,6 @@ public final class DeliveryController implements DeliveryControllerPort {
                 if (listener != null) {
                     listener.onLiveStatus("LIVE: RUNNING_FLOWING (Flow OFF — attente progression)");
                 }
-
             } catch (Exception e) {
                 // en cas d'échec, désarmer la grâce pour autoriser un nouvel essai
                 continueGraceUntilMs = 0L;
@@ -442,21 +459,15 @@ public final class DeliveryController implements DeliveryControllerPort {
     public void requestLiveSample() {
         io.execute(() -> {
             if (isStopped()) return;
-
             long now = System.currentTimeMillis();
             if (now < liveNextAllowedMs) return; // backoff gate
-
             if (!liveInFlight.compareAndSet(false, true)) return;
             inLiveSample.set(true);
-
             try {
                 // ===== B) Delivery-first: lire 0x28 =====
-                int delStatus;
                 int delCode;
-
                 try {
                     int[] ds = link.opDeliveryStatus(); // 0x28 -> [delStatus, delCode]
-                    delStatus = ds[0];
                     delCode = ds[1];
                 } catch (Exception e) {
                     liveSoftSkip("GET_DELIVERY_STATUS", e);
@@ -470,21 +481,18 @@ public final class DeliveryController implements DeliveryControllerPort {
                 if (!active) {
                     // reset backoff on success
                     liveResetBackoff();
-
                     setState(DeliveryState.CONNECTED);
                     if (listener != null) {
                         listener.onLiveStatus(ticket ? "LIVE: CONNECTED — Ticket pending"
                                 : "LIVE: CONNECTED — Prêt à livrer");
                         listener.onFlowStability(false, false, 0L);
                     }
-
                     lastGrossRaw = -1;
                     lastNetRaw = -1;
                     flowOffStable = false;
                     sawFlowOnOnce = false;
                     flowOffStartMs = 0L;
                     lastCountsChangeMs = 0L;
-
                     // si livraison terminée, on enlève la grâce
                     continueGraceUntilMs = 0L;
                     return;
@@ -499,7 +507,6 @@ public final class DeliveryController implements DeliveryControllerPort {
                 }
 
                 double scale = Math.pow(10, cachedDigits);
-
                 int g, n;
                 try {
                     g = beI32(link.opGetField(FIELD_GROSS_COUNT));
@@ -525,14 +532,12 @@ public final class DeliveryController implements DeliveryControllerPort {
                 if (d > 0) {
                     // FLOW ON observé : on sort naturellement de la grâce Continuer
                     continueGraceUntilMs = 0L;
-
                     sawFlowOnOnce = true;
                     lastCountsChangeMs = t;
                     flowOffStable = false;
                     flowOffStartMs = 0L;
                     lastGrossRaw = g;
                     lastNetRaw = n;
-
                     if (listener != null) {
                         listener.onFlowStability(flowBit, false, 0L);
                         listener.onLiveStatus("LIVE: RUNNING_FLOWING (FLOW ON)");
@@ -547,7 +552,6 @@ public final class DeliveryController implements DeliveryControllerPort {
                 if (!sawFlowOnOnce) {
                     flowOffStable = false;
                     flowOffStartMs = 0L;
-
                     if (listener != null) {
                         listener.onFlowStability(flowBit, false, 0L);
                         listener.onLiveStatus("LIVE: RUNNING_FLOWING (Flow OFF — attente progression)");
@@ -582,7 +586,6 @@ public final class DeliveryController implements DeliveryControllerPort {
                             ? "LIVE: RUNNING_PAUSED (FLOW OFF confirmé)"
                             : "LIVE: RUNNING_FLOWING (FLOW OFF — confirmation...)");
                 }
-
                 if (flowOffStable) setState(DeliveryState.RUNNING_PAUSED);
                 else setState(DeliveryState.RUNNING_FLOWING);
 
@@ -605,7 +608,6 @@ public final class DeliveryController implements DeliveryControllerPort {
         long now = System.currentTimeMillis();
         liveBackoffMs = Math.min(LIVE_MAX_MS, Math.max(LIVE_BASE_MS, liveBackoffMs * 2));
         liveNextAllowedMs = now + liveBackoffMs;
-
         if (now - liveLastSkipLogMs >= LIVE_LOG_THROTTLE_MS) {
             emitLog(reason + " (backoff=" + liveBackoffMs + "ms)");
             liveLastSkipLogMs = now;
@@ -706,9 +708,7 @@ public final class DeliveryController implements DeliveryControllerPort {
             } catch (Exception e) {
                 emitLog("[TICKET] issue6 retry: " + (e.getMessage() != null ? e.getMessage() : ""));
             }
-
             try { Thread.sleep(200); } catch (InterruptedException ignored) {}
-
             try {
                 LcpLink.MachineStatus ms = link.opGetMachineStatus();
                 if ((ms.delCode & DC_TICKET_PENDING) == 0) {
@@ -739,17 +739,16 @@ public final class DeliveryController implements DeliveryControllerPort {
                 boolean retryable = queuedTimeout || timeout;
 
                 boolean hardFatal =
-                        m.contains("Transport closed") ||
-                        m.contains("Error writing") ||
-                        m.contains("rc=-1") ||
-                        m.contains("Connection closed");
+                        m.contains("Transport closed")
+                                || m.contains("Error writing")
+                                || m.contains("rc=-1")
+                                || m.contains("Connection closed");
 
                 if (hardFatal) throw e;
                 if (!retryable) throw e;
 
                 emitLog("[RETRY] " + step + " (" + (queuedTimeout ? "queued" : "timeout") + ")");
                 softResync("retry/" + step);
-
                 try { Thread.sleep(START_RETRY_POLL_MS); } catch (InterruptedException ignored) {}
             }
         }
@@ -772,7 +771,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         if (digits < 0) digits = 1;
         int scale = (int) Math.pow(10, digits);
         int value = (int) Math.round(preset * scale);
-        byte[] buf = new byte[]{
+        byte[] buf = new byte[] {
                 (byte) (value >> 24),
                 (byte) (value >> 16),
                 (byte) (value >> 8),
@@ -793,10 +792,10 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     private int beI32(byte[] b) {
         if (b == null || b.length < 4) return 0;
-        return ((b[0] & 0xFF) << 24) |
-               ((b[1] & 0xFF) << 16) |
-               ((b[2] & 0xFF) << 8)  |
-               (b[3] & 0xFF);
+        return ((b[0] & 0xFF) << 24)
+                | ((b[1] & 0xFF) << 16)
+                | ((b[2] & 0xFF) << 8)
+                | (b[3] & 0xFF);
     }
 
     private void setState(DeliveryState s) {
@@ -810,18 +809,17 @@ public final class DeliveryController implements DeliveryControllerPort {
     // =========================
     private void handleIoFailure(String ctx, Exception e) {
         if (listener != null) listener.onError(ctx, e);
-
         String msg = (e != null && e.getMessage() != null) ? e.getMessage() : "";
 
         boolean hardFatal =
-                msg.contains("Transport closed") ||
-                msg.contains("Error writing") ||
-                msg.contains("rc=-1") ||
-                msg.contains("Connection closed");
+                msg.contains("Transport closed")
+                        || msg.contains("Error writing")
+                        || msg.contains("rc=-1")
+                        || msg.contains("Connection closed");
 
         boolean retryish =
-                msg.contains("Timeout waiting LCP response") ||
-                msg.contains("Queued timeout");
+                msg.contains("Timeout waiting LCP response")
+                        || msg.contains("Queued timeout");
 
         // LIVE: jamais de resync/stop (best-effort)
         if ("requestLiveSample".equals(ctx)) {
@@ -845,8 +843,170 @@ public final class DeliveryController implements DeliveryControllerPort {
         long now = System.currentTimeMillis();
         if (now - lastResyncMs < 1500) return;
         lastResyncMs = now;
-
         link.drainInput(250);
         link.forceSyncNext(reason);
+    }
+
+    // =========================================================
+    // ========================= API-Face =======================
+    // =========================================================
+
+    /**
+     * Scan USB (logique): avec l’architecture actuelle, le controller existe seulement si USB+LcpLink existent.
+     * => Si link fermé: Scan USB: 0
+     */
+    public ApiResult api_scanUsb() {
+        if (link == null || link.isClosed()) {
+            return ApiResult.fail(
+                    "Scan USB: 0 - Aucun registre détecté. Valide tes connexions au registre (câble/OTG/USB-C).",
+                    "NO_DEVICE"
+            );
+        }
+        return ApiResult.ok("Scan USB: 1 - Registre détecté");
+    }
+
+    /**
+     * Open / Ping USB (logique): l’ouverture série est faite par MainActivity.
+     * Ici on valide juste que le transport est prêt (link ouvert).
+     */
+    public ApiResult api_openPingUsb() {
+        if (link == null || link.isClosed()) {
+            return ApiResult.fail(
+                    "Open/Ping USB: 0 - USB non prêt. Vérifie câble/permission.",
+                    "USB_NOT_READY"
+            );
+        }
+        return ApiResult.ok("Open/Ping USB: 1 - USB prêt");
+    }
+
+    /**
+     * Connect LCP: décision A/C basée UNIQUEMENT sur 0x28 (source de vérité).
+     * - READY_FOR_C si DELIVERY_ACTIVE=0 et pas de ticket pending
+     * - sinon NEED_A
+     */
+    public ApiResult api_connectLcp() {
+        if (link == null || link.isClosed()) {
+            return ApiResult.fail(
+                    "Connect LCP: 0 - USB non connecté.",
+                    "NO_TRANSPORT"
+            );
+        }
+        try {
+            int[] ds = link.opDeliveryStatus(); // 0x28 => [delStatus, delCode]
+            int delCode = ds[1];
+
+            boolean ticketPending  = (delCode & DC_TICKET_PENDING) != 0;
+            boolean flowActive     = (delCode & DC_FLOW_ACTIVE) != 0;
+            boolean deliveryActive = (delCode & DC_DELIVERY_ACTIVE) != 0;
+
+            JSONObject data = new JSONObject();
+            data.put("deliveryActive", deliveryActive ? 1 : 0);
+            data.put("flowActive", flowActive ? 1 : 0);
+            data.put("ticketPending", ticketPending ? 1 : 0);
+
+            if (!deliveryActive && !ticketPending) {
+                data.put("next", "C");
+                return ApiResult.ok("Connect LCP: 1 - CONNECTED prêt à livrer (Faire C)", data);
+            }
+
+            data.put("next", "A");
+            return ApiResult.ok("Connect LCP: 1 - CONNECTED livraison en attente (Faire A)", data);
+
+        } catch (Exception e) {
+            String m = (e.getMessage() != null) ? e.getMessage() : "";
+            JSONObject d = new JSONObject();
+            try { d.put("detail", m); } catch (Exception ignore) {}
+            return ApiResult.fail(
+                    "Connect LCP: 0 - Impossible de valider l'état (0x28).",
+                    "STATE28_FAIL",
+                    d
+            );
+        }
+    }
+
+    /**
+     * Start livraison via API: utilise EXACTEMENT la logique C existante.
+     * - crée un jobId
+     * - lance startDelivery() (qui applique toutes tes règles)
+     */
+    public ApiResult api_deliveryStartC(int product1to16, double presetNet) {
+        if (state == DeliveryState.PRESTART || state == DeliveryState.ENDING) {
+            JSONObject d = new JSONObject();
+            try { d.put("state", state.name()); } catch (Exception ignore) {}
+            return ApiResult.fail(
+                    "Delivery C: 0 - Action refusée (préstart/ending).",
+                    "BUSY_STATE",
+                    d
+            );
+        }
+
+        if (state != DeliveryState.CONNECTED) {
+            JSONObject d = new JSONObject();
+            try { d.put("state", state.name()); } catch (Exception ignore) {}
+            return ApiResult.fail(
+                    "Delivery C: 0 - Registre non prêt. Faire A d'abord.",
+                    "NOT_READY_FOR_C",
+                    d
+            );
+        }
+
+        String jobId = UUID.randomUUID().toString();
+        ApiJob job = new ApiJob(jobId);
+        apiJobs.put(jobId, job);
+
+        startDelivery(product1to16, presetNet);
+
+        JSONObject data = new JSONObject();
+        try { data.put("jobId", jobId); } catch (Exception ignore) {}
+        return ApiResult.ok("Delivery C: 1 - Démarrée", data);
+    }
+
+    /**
+     * Poll job: renvoie RUNNING/DONE et les compteurs NET/GROSS (44/45 + decimals 39).
+     * Fin = DELIVERY_ACTIVE=0 (0x28).
+     */
+    public ApiResult api_deliveryJobGet(String jobId) {
+        ApiJob job = apiJobs.get(jobId);
+        if (job == null) {
+            return ApiResult.fail("Job: 0 - Inconnu", "JOB_NOT_FOUND");
+        }
+
+        try {
+            int[] ds = link.opDeliveryStatus();
+            int delCode = ds[1];
+            boolean deliveryActive = (delCode & DC_DELIVERY_ACTIVE) != 0;
+
+            ensureDigits();
+            double scale = Math.pow(10, cachedDigits);
+            int g = beI32(link.opGetField(FIELD_GROSS_COUNT));
+            int n = beI32(link.opGetField(FIELD_NET_COUNT));
+
+            job.net = n / scale;
+            job.gross = g / scale;
+            job.decimals = cachedDigits;
+
+            JSONObject data = new JSONObject();
+            data.put("net", job.net);
+            data.put("gross", job.gross);
+            data.put("decimals", job.decimals);
+
+            if (!deliveryActive) {
+                job.state = "DONE";
+                job.done = true;
+                data.put("state", "DONE");
+                return ApiResult.ok("Job: 1 - DONE", data);
+            } else {
+                job.state = "RUNNING";
+                data.put("state", "RUNNING");
+                return ApiResult.ok("Job: 1 - RUNNING", data);
+            }
+
+        } catch (Exception e) {
+            job.state = "ERROR";
+            job.err = (e.getMessage() != null) ? e.getMessage() : "";
+            JSONObject d = new JSONObject();
+            try { d.put("detail", job.err); } catch (Exception ignore) {}
+            return ApiResult.fail("Job: 0 - Erreur lecture livraison", "JOB_READ_FAIL", d);
+        }
     }
 }

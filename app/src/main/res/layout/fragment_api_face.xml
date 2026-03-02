@@ -1,0 +1,114 @@
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/apiFaceRoot"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="12dp">
+
+    <TextView
+        android:id="@+id/txtApiTitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="API-Face"
+        android:textStyle="bold"
+        android:textSize="18sp"/>
+
+    <TextView
+        android:id="@+id/txtApiStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Status: STOPPED"
+        android:textStyle="bold"
+        android:paddingTop="6dp"/>
+
+    <TextView
+        android:id="@+id/txtApiUrl"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="http://127.0.0.1:8765"
+        android:textIsSelectable="true"
+        android:paddingTop="4dp"/>
+
+    <!-- Start/Stop -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingTop="10dp">
+
+        <Button
+            android:id="@+id/btnApiStart"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Start API"/>
+
+        <Button
+            android:id="@+id/btnApiStop"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="8dp"
+            android:text="Stop API"/>
+    </LinearLayout>
+
+    <!-- Trace actions -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingTop="6dp">
+
+        <Button
+            android:id="@+id/btnApiClearTrace"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Clear trace"/>
+
+        <Button
+            android:id="@+id/btnApiCopyCurl"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="8dp"
+            android:text="Copy curl"/>
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/txtApiHowTo"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingTop="10dp"
+        android:text="Workflow attendu:\n1) GET /v1/usb/scan\n2) POST /v1/usb/open-ping\n3) POST /v1/lcp/connect (next=C ou A)\n4) POST /v1/delivery/C\n5) GET /v1/delivery/job/{id}\n\nRègles:\n- Start API refusé si pas de controller (pas de Connect LCP)\n- API locale seulement (127.0.0.1)"
+        android:textSize="13sp"/>
+
+    <TextView
+        android:id="@+id/txtApiTraceTitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Trace API (REQ/RESP):"
+        android:textStyle="bold"
+        android:paddingTop="10dp"/>
+
+    <ScrollView
+        android:id="@+id/apiTraceScroll"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:fillViewport="true"
+        android:background="#111111"
+        android:padding="6dp">
+
+        <TextView
+            android:id="@+id/txtApiTrace"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:typeface="monospace"
+            android:textSize="12sp"
+            android:textColor="#00FF00"
+            android:textIsSelectable="true"
+            android:text="(trace vide)"/>
+    </ScrollView>
+
+</LinearLayout>
