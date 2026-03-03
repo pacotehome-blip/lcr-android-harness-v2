@@ -91,6 +91,13 @@
         android:textStyle="bold"
         android:paddingTop="10dp"/>
 
+    <Button
+        android:id="@+id/apiTraceScrollDown"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="8dp"
+        android:text="Scroll down" />
+        
     <ScrollView
         android:id="@+id/apiTraceScroll"
         android:layout_width="match_parent"

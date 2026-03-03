@@ -1,8 +1,10 @@
 
 package com.pa.lcr.lcp;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
@@ -15,12 +17,24 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class DeliveryController implements DeliveryControllerPort {
 
-    // Champs LCR
+    // Champs LCR (déjà existants)
     private static final int FIELD_ACTIVE_PRODUCT = 0;
     private static final int FIELD_PRESET_NET = 6;
     private static final int FIELD_DECIMALS = 39;
     private static final int FIELD_GROSS_COUNT = 44;
     private static final int FIELD_NET_COUNT = 45;
+
+    // Champs LCR (API / reporting)
+    // Référence script Python + décisions terrain:
+    // - #17/#18 = totaux cumulatifs (depuis dernière calibration)
+    // - #22 = saleNumber
+    // - #23 = ticketNumber
+    // - #80 = serial_id
+    private static final int FIELD_GROSS_TOTAL = 17;
+    private static final int FIELD_NET_TOTAL = 18;
+    private static final int FIELD_SALE_NUMBER = 22;
+    private static final int FIELD_TICKET_NUMBER = 23;
+    private static final int FIELD_SERIAL_ID = 80;
 
     // Commands
     private static final int CMD_RUN = 0x00;
@@ -77,9 +91,9 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     // (A) Ticket pending: anti-réimpression (UNIQUEMENT pour le bouton A)
     // Empêche toute réémission de 0x06 tant que le ticket n'est pas clear ou qu'un timeout est atteint.
-    private final java.util.concurrent.atomic.AtomicBoolean ticketPrintInFlight = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private final java.util.concurrent.atomic.AtomicBoolean ticketPrintInFlight =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
     private volatile long ticketPrintStartMs = 0L;
-
 
     // (A) Backoff state
     private volatile long liveBackoffMs = LIVE_BASE_MS;
@@ -100,12 +114,48 @@ public final class DeliveryController implements DeliveryControllerPort {
     private static final class ApiJob {
         final String id;
         final long startedAtMs;
+
+        // état job API
         volatile boolean done = false;
         volatile String state; // PENDING/RUNNING/DONE/ERROR
+
+        // Exposition (poll)
         volatile double net;
         volatile double gross;
         volatile int decimals;
+
+        // Erreur éventuelle
         volatile String err;
+
+        // ----- Contexte métier / MSD -----
+        volatile String numeroLivraison;     // fourni
+        volatile String deliveryUid;         // numeroLivraison-ticket_no
+        volatile String compartment;         // optionnel
+        volatile int productNumber;          // 1..16
+        volatile double presetNetL;          // en litres (ou unité UI)
+
+        // ----- Identifiants registre -----
+        volatile String saleNo;              // field #22
+        volatile String ticketNo;            // field #23 (stable avant start)
+        volatile String serialId;            // field #80
+
+        // ----- Timing -----
+        volatile long startMs = 0L;
+        volatile long endMs = 0L;
+
+        // ----- Compteurs (bruts) -----
+        volatile int grossStartRaw = 0;
+        volatile int netStartRaw = 0;
+        volatile int grossEndRaw = 0;
+        volatile int netEndRaw = 0;
+
+        // Totaux cumulatifs (depuis dernière calibration)
+        volatile int grossTotalRaw = 0; // field #17
+        volatile int netTotalRaw = 0;   // field #18
+
+        // ----- Fichier / impression / inventaire -----
+        volatile Object inventoryWritten = null;  // doit rester null
+        volatile boolean hostPrinted = false;     // true dès que workflow fin
 
         ApiJob(String id) {
             this.id = id;
@@ -299,8 +349,10 @@ public final class DeliveryController implements DeliveryControllerPort {
         io.execute(() -> {
             if (isStopped()) return;
             if (state == DeliveryState.PRESTART || state == DeliveryState.ENDING) return;
+
             emitLog("[C] New delivery requested");
             final long deadline = System.currentTimeMillis() + START_RETRY_WINDOW_MS;
+
             try {
                 FullStatus fs = retryUntilDeadline(deadline, "C/full-precheck", () -> readFullStatus("C/full"));
                 if (fs.deliveryActive) {
@@ -314,20 +366,24 @@ public final class DeliveryController implements DeliveryControllerPort {
                             : "[C] Delivery active -> use A manually");
                     return;
                 }
+
                 if (fs.ticketPending) {
                     setState(DeliveryState.CONNECTED);
                     if (listener != null) listener.onLiveStatus("LIVE: CONNECTED — Ticket pending");
                     emitLog("[C] Ticket pending -> use A manually");
                     return;
                 }
+
                 if (fs.flowActive) {
                     setState(DeliveryState.CONNECTED);
                     if (listener != null) listener.onLiveStatus("LIVE: CONNECTED — Flow actif (utiliser A)");
                     emitLog("[C] Flow active at precheck -> use A manually");
                     return;
                 }
+
                 emitLog("[C] Register ready -> START now");
                 doStartNewDeliveryWithRetry(deadline, product1to16, presetNet);
+
             } catch (Exception e) {
                 handleIoFailure("startDelivery(C-intent)", e);
             }
@@ -336,6 +392,7 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     private void doStartNewDeliveryWithRetry(long deadlineMs, int product1to16, double presetNet) throws Exception {
         if (isStopped()) return;
+
         setState(DeliveryState.PRESTART);
         emitLog("[PRESTART] internal");
 
@@ -388,6 +445,7 @@ public final class DeliveryController implements DeliveryControllerPort {
             if (isStopped()) return;
             try {
                 if (state != DeliveryState.RUNNING_PAUSED) return;
+
                 long now = System.currentTimeMillis();
 
                 // debounce anti double-clic
@@ -414,6 +472,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                 if (listener != null) {
                     listener.onLiveStatus("LIVE: RUNNING_FLOWING (Flow OFF — attente progression)");
                 }
+
             } catch (Exception e) {
                 // en cas d'échec, désarmer la grâce pour autoriser un nouvel essai
                 continueGraceUntilMs = 0L;
@@ -449,6 +508,7 @@ public final class DeliveryController implements DeliveryControllerPort {
 
                 setState(DeliveryState.CONNECTED);
                 if (listener != null) listener.onLiveStatus("LIVE: CONNECTED — Prêt à livrer");
+
             } catch (Exception e) {
                 handleIoFailure("endDelivery", e);
             }
@@ -465,10 +525,12 @@ public final class DeliveryController implements DeliveryControllerPort {
     public void requestLiveSample() {
         io.execute(() -> {
             if (isStopped()) return;
+
             long now = System.currentTimeMillis();
             if (now < liveNextAllowedMs) return; // backoff gate
             if (!liveInFlight.compareAndSet(false, true)) return;
             inLiveSample.set(true);
+
             try {
                 // ===== B) Delivery-first: lire 0x28 =====
                 int delCode;
@@ -493,12 +555,14 @@ public final class DeliveryController implements DeliveryControllerPort {
                                 : "LIVE: CONNECTED — Prêt à livrer");
                         listener.onFlowStability(false, false, 0L);
                     }
+
                     lastGrossRaw = -1;
                     lastNetRaw = -1;
                     flowOffStable = false;
                     sawFlowOnOnce = false;
                     flowOffStartMs = 0L;
                     lastCountsChangeMs = 0L;
+
                     // si livraison terminée, on enlève la grâce
                     continueGraceUntilMs = 0L;
                     return;
@@ -538,16 +602,20 @@ public final class DeliveryController implements DeliveryControllerPort {
                 if (d > 0) {
                     // FLOW ON observé : on sort naturellement de la grâce Continuer
                     continueGraceUntilMs = 0L;
+
                     sawFlowOnOnce = true;
                     lastCountsChangeMs = t;
                     flowOffStable = false;
                     flowOffStartMs = 0L;
+
                     lastGrossRaw = g;
                     lastNetRaw = n;
+
                     if (listener != null) {
                         listener.onFlowStability(flowBit, false, 0L);
                         listener.onLiveStatus("LIVE: RUNNING_FLOWING (FLOW ON)");
                     }
+
                     setState(DeliveryState.RUNNING_FLOWING);
                     return;
                 }
@@ -574,7 +642,6 @@ public final class DeliveryController implements DeliveryControllerPort {
                 // ===== CONTINUER grace: ne pas retomber en PAUSED pendant 30s après Continuer =====
                 long now2 = System.currentTimeMillis();
                 if (continueGraceUntilMs > now2) {
-                    // on laisse LIVE travailler, sans changer la détection FLOW ON
                     if (listener != null) {
                         listener.onFlowStability(flowBit, false, age);
                         listener.onLiveStatus("LIVE: RUNNING_FLOWING (Flow OFF — attente progression)");
@@ -592,6 +659,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                             ? "LIVE: RUNNING_PAUSED (FLOW OFF confirmé)"
                             : "LIVE: RUNNING_FLOWING (FLOW OFF — confirmation...)");
                 }
+
                 if (flowOffStable) setState(DeliveryState.RUNNING_PAUSED);
                 else setState(DeliveryState.RUNNING_FLOWING);
 
@@ -870,6 +938,14 @@ public final class DeliveryController implements DeliveryControllerPort {
                 | (b[3] & 0xFF);
     }
 
+    private String decodeAzString(byte[] b) {
+        if (b == null || b.length == 0) return "";
+        String s = new String(b, StandardCharsets.UTF_8);
+        int nul = s.indexOf('\0');
+        if (nul >= 0) s = s.substring(0, nul);
+        return s.trim();
+    }
+
     private void setState(DeliveryState s) {
         if (state == s) return;
         state = s;
@@ -967,8 +1043,8 @@ public final class DeliveryController implements DeliveryControllerPort {
             int[] ds = link.opDeliveryStatus(); // 0x28 => [delStatus, delCode]
             int delCode = ds[1];
 
-            boolean ticketPending  = (delCode & DC_TICKET_PENDING) != 0;
-            boolean flowActive     = (delCode & DC_FLOW_ACTIVE) != 0;
+            boolean ticketPending = (delCode & DC_TICKET_PENDING) != 0;
+            boolean flowActive = (delCode & DC_FLOW_ACTIVE) != 0;
             boolean deliveryActive = (delCode & DC_DELIVERY_ACTIVE) != 0;
 
             JSONObject data = new JSONObject();
@@ -994,6 +1070,203 @@ public final class DeliveryController implements DeliveryControllerPort {
                     d
             );
         }
+    }
+
+    /**
+     * START one-shot API:
+     * - reçoit numero_livraison + product + preset + compartment
+     * - valide USB, lit 0x28 (source vérité)
+     * - lit ticket_no (#23) immédiatement (stable avant START)
+     * - construit delivery_uid = numero_livraison-ticket_no
+     * - si prêt: démarre via logique C (startDelivery)
+     * - NE FAIT PAS CONTINUER automatiquement (comme l'APK)
+     */
+    public ApiResult api_deliveryOneShotStart(String numero_livraison, int product1to16, double presetNetL, String compartment) {
+        if (link == null || link.isClosed()) {
+            return ApiResult.fail(
+                    "Delivery OneShot: 0 - USB non prêt. Ouvrir le port USB puis réessayer.",
+                    "USB_NOT_READY"
+            );
+        }
+
+        try {
+            // 1) état protocole (0x28)
+            int[] ds = link.opDeliveryStatus();
+            int delCode = ds[1];
+
+            boolean ticketPending = (delCode & DC_TICKET_PENDING) != 0;
+            boolean flowActive = (delCode & DC_FLOW_ACTIVE) != 0;
+            boolean deliveryActive = (delCode & DC_DELIVERY_ACTIVE) != 0;
+
+            // 2) lire ticket/sale/serial tout de suite
+            String ticketNo = decodeAzString(link.opGetField(FIELD_TICKET_NUMBER));
+            String saleNo = decodeAzString(link.opGetField(FIELD_SALE_NUMBER));
+            String serialId = decodeAzString(link.opGetField(FIELD_SERIAL_ID));
+
+            String deliveryUid = (numero_livraison == null ? "" : numero_livraison) + "-" + (ticketNo == null ? "" : ticketNo);
+
+            // 3) si livraison déjà active -> informer + actions
+            if (deliveryActive) {
+                // mettre à jour l'état interne en suivant la logique LIVE (pour refléter comme APK)
+                updateStateFromProtocolSnapshot(deliveryActive, flowActive);
+
+                JSONObject data = new JSONObject();
+                data.put("numero_livraison", numero_livraison);
+                data.put("ticket_no", ticketNo);
+                data.put("sale_no", saleNo);
+                data.put("serial_id", serialId);
+                data.put("delivery_uid", deliveryUid);
+
+                data.put("deliveryActive", 1);
+                data.put("flowActive", flowActive ? 1 : 0);
+                data.put("ticketPending", ticketPending ? 1 : 0);
+
+                // champs APK-like
+                long now = System.currentTimeMillis();
+                long graceRem = (continueGraceUntilMs > now) ? (continueGraceUntilMs - now) : 0L;
+                data.put("state", state.name());
+                data.put("continue_grace_remaining_ms", graceRem);
+                data.put("flow_off_stable", flowOffStable ? 1 : 0);
+                data.put("flow_off_age_ms", getFlowOffAgeMs());
+                data.put("live_status", buildLiveStatusForApi(deliveryActive, ticketPending, graceRem));
+
+                data.put("available_actions", buildAvailableActionsForApi());
+
+                return ApiResult.ok("Delivery OneShot: 1 - Livraison déjà active", data);
+            }
+
+            // 4) ticket pending (besoin A)
+            if (ticketPending) {
+                JSONObject data = new JSONObject();
+                data.put("numero_livraison", numero_livraison);
+                data.put("ticket_no", ticketNo);
+                data.put("sale_no", saleNo);
+                data.put("serial_id", serialId);
+                data.put("delivery_uid", deliveryUid);
+
+                data.put("deliveryActive", 0);
+                data.put("flowActive", 0);
+                data.put("ticketPending", 1);
+
+                data.put("state", DeliveryState.CONNECTED.name());
+                data.put("continue_grace_remaining_ms", 0);
+                data.put("flow_off_stable", 0);
+                data.put("flow_off_age_ms", 0);
+                data.put("live_status", "LIVE: CONNECTED — Ticket pending");
+
+                JSONArray actions = new JSONArray();
+                actions.put("ALIGN_A");
+                data.put("available_actions", actions);
+
+                return ApiResult.ok("Delivery OneShot: 1 - Ticket pending (Faire A)", data);
+            }
+
+            // 5) registre prêt: créer job + capturer start_ms + g0/n0 + lancer C
+            String jobId = UUID.randomUUID().toString();
+            ApiJob job = new ApiJob(jobId);
+            job.numeroLivraison = numero_livraison;
+            job.ticketNo = ticketNo;
+            job.saleNo = saleNo;
+            job.serialId = serialId;
+            job.deliveryUid = deliveryUid;
+            job.compartment = compartment;
+            job.productNumber = product1to16;
+            job.presetNetL = presetNetL;
+
+            job.startMs = System.currentTimeMillis();
+
+            // Capturer baseline compteurs (deltas)
+            try {
+                ensureDigits();
+                job.decimals = cachedDigits;
+                job.grossStartRaw = beI32(link.opGetField(FIELD_GROSS_COUNT));
+                job.netStartRaw = beI32(link.opGetField(FIELD_NET_COUNT));
+            } catch (Exception ignored) {
+                // best-effort
+            }
+
+            synchronized (apiJobs) {
+                apiJobs.put(jobId, job);
+            }
+
+            // Démarrer via logique C existante (sans auto-continue)
+            startDelivery(product1to16, presetNetL);
+
+            // refléter l'état attendu après start (APK: RUNNING_PAUSED Flow OFF)
+            setState(DeliveryState.RUNNING_PAUSED);
+
+            JSONObject data = new JSONObject();
+            data.put("jobId", jobId);
+            data.put("numero_livraison", numero_livraison);
+            data.put("ticket_no", ticketNo);
+            data.put("sale_no", saleNo);
+            data.put("serial_id", serialId);
+            data.put("delivery_uid", deliveryUid);
+
+            data.put("state", DeliveryState.RUNNING_PAUSED.name());
+            data.put("continue_grace_remaining_ms", 0);
+            data.put("flow_off_stable", 0);
+            data.put("flow_off_age_ms", 0);
+            data.put("live_status", "LIVE: RUNNING_PAUSED (Flow OFF)");
+
+            JSONArray actions = new JSONArray();
+            actions.put("CONTINUER");
+            data.put("available_actions", actions);
+
+            return ApiResult.ok("Delivery OneShot: 1 - STARTED", data);
+
+        } catch (Exception e) {
+            String m = (e.getMessage() != null) ? e.getMessage() : "";
+            JSONObject d = new JSONObject();
+            try { d.put("detail", m); } catch (Exception ignore) {}
+            return ApiResult.fail(
+                    "Delivery OneShot: 0 - Erreur pendant l'orchestration.",
+                    "ONESHOT_FAIL",
+                    d
+            );
+        }
+    }
+
+    /**
+     * Bouton CONTINUER via API (doit reproduire l'APK)
+     */
+    public ApiResult api_deliveryContinue(String jobId) {
+        ApiJob job;
+        synchronized (apiJobs) {
+            job = apiJobs.get(jobId);
+        }
+        if (job == null) {
+            return ApiResult.fail("Continue: 0 - Job inconnu", "JOB_NOT_FOUND");
+        }
+        resumeIfPaused();
+        JSONObject data = new JSONObject();
+        data.put("jobId", jobId);
+        data.put("numero_livraison", job.numeroLivraison);
+        data.put("ticket_no", job.ticketNo);
+        data.put("delivery_uid", job.deliveryUid);
+        data.put("live_status", "LIVE: RUNNING_FLOWING (Flow OFF — attente progression)");
+        return ApiResult.ok("Continue: 1 - RUN sent", data);
+    }
+
+    /**
+     * Bouton TERMINER via API (doit reproduire l'APK)
+     */
+    public ApiResult api_deliveryTerminate(String jobId) {
+        ApiJob job;
+        synchronized (apiJobs) {
+            job = apiJobs.get(jobId);
+        }
+        if (job == null) {
+            return ApiResult.fail("Terminate: 0 - Job inconnu", "JOB_NOT_FOUND");
+        }
+        endDelivery();
+        JSONObject data = new JSONObject();
+        data.put("jobId", jobId);
+        data.put("numero_livraison", job.numeroLivraison);
+        data.put("ticket_no", job.ticketNo);
+        data.put("delivery_uid", job.deliveryUid);
+        data.put("live_status", "LIVE: ENDING");
+        return ApiResult.ok("Terminate: 1 - END sent", data);
     }
 
     /**
@@ -1024,7 +1297,9 @@ public final class DeliveryController implements DeliveryControllerPort {
 
         String jobId = UUID.randomUUID().toString();
         ApiJob job = new ApiJob(jobId);
-        apiJobs.put(jobId, job);
+        synchronized (apiJobs) {
+            apiJobs.put(jobId, job);
+        }
 
         startDelivery(product1to16, presetNet);
 
@@ -1036,20 +1311,34 @@ public final class DeliveryController implements DeliveryControllerPort {
     /**
      * Poll job: renvoie RUNNING/DONE et les compteurs NET/GROSS (44/45 + decimals 39).
      * Fin = DELIVERY_ACTIVE=0 (0x28).
+     *
+     * Enrichi:
+     * - retourne live_status (mêmes formulations APK)
+     * - retourne continue_grace_remaining_ms
+     * - retourne available_actions (CONTINUER/TERMINER) selon les mêmes préconditions APK
+     * - à DONE: retourne result = DeliveryRecord complet (modèle Python) + numero_livraison + delivery_uid
      */
     public ApiResult api_deliveryJobGet(String jobId) {
-        ApiJob job = apiJobs.get(jobId);
+        ApiJob job;
+        synchronized (apiJobs) {
+            job = apiJobs.get(jobId);
+        }
         if (job == null) {
             return ApiResult.fail("Job: 0 - Inconnu", "JOB_NOT_FOUND");
         }
 
         try {
+            // état protocole (0x28)
             int[] ds = link.opDeliveryStatus();
             int delCode = ds[1];
             boolean deliveryActive = (delCode & DC_DELIVERY_ACTIVE) != 0;
+            boolean flowActive = (delCode & DC_FLOW_ACTIVE) != 0;
+            boolean ticketPending = (delCode & DC_TICKET_PENDING) != 0;
 
+            // digits + compteurs
             ensureDigits();
             double scale = Math.pow(10, cachedDigits);
+
             int g = beI32(link.opGetField(FIELD_GROSS_COUNT));
             int n = beI32(link.opGetField(FIELD_NET_COUNT));
 
@@ -1057,19 +1346,114 @@ public final class DeliveryController implements DeliveryControllerPort {
             job.gross = g / scale;
             job.decimals = cachedDigits;
 
+            // Mettre à jour l'état interne (comme LIVE) pour que Terminer/Continuer suivent l'APK
+            updateLiveLikeFromCounts(deliveryActive, flowActive, g, n);
+
+            long now = System.currentTimeMillis();
+            long graceRem = (continueGraceUntilMs > now) ? (continueGraceUntilMs - now) : 0L;
+
             JSONObject data = new JSONObject();
+            data.put("jobId", jobId);
+
+            // Contexte MSD
+            if (job.numeroLivraison != null) data.put("numero_livraison", job.numeroLivraison);
+            if (job.ticketNo != null) data.put("ticket_no", job.ticketNo);
+            if (job.deliveryUid != null) data.put("delivery_uid", job.deliveryUid);
+
+            // Protocole
+            data.put("deliveryActive", deliveryActive ? 1 : 0);
+            data.put("flowActive", flowActive ? 1 : 0);
+            data.put("ticketPending", ticketPending ? 1 : 0);
+
+            // Quantités
             data.put("net", job.net);
             data.put("gross", job.gross);
             data.put("decimals", job.decimals);
 
+            // État APK-like
+            data.put("state", state.name());
+            data.put("continue_grace_remaining_ms", graceRem);
+            data.put("flow_off_stable", flowOffStable ? 1 : 0);
+            data.put("flow_off_age_ms", getFlowOffAgeMs());
+            data.put("live_status", buildLiveStatusForApi(deliveryActive, ticketPending, graceRem));
+            data.put("available_actions", buildAvailableActionsForApi());
+
             if (!deliveryActive) {
+                // DONE -> construire record final (modèle Python)
                 job.state = "DONE";
                 job.done = true;
-                data.put("state", "DONE");
+                job.endMs = now;
+                job.grossEndRaw = g;
+                job.netEndRaw = n;
+
+                // Totaux cumulatifs (depuis dernière calibration)
+                try {
+                    job.grossTotalRaw = beI32(link.opGetField(FIELD_GROSS_TOTAL));
+                    job.netTotalRaw = beI32(link.opGetField(FIELD_NET_TOTAL));
+                } catch (Exception ignored) {}
+
+                // Identité / tickets (stables)
+                try {
+                    job.ticketNo = decodeAzString(link.opGetField(FIELD_TICKET_NUMBER));
+                    job.saleNo = decodeAzString(link.opGetField(FIELD_SALE_NUMBER));
+                    job.serialId = decodeAzString(link.opGetField(FIELD_SERIAL_ID));
+                } catch (Exception ignored) {}
+
+                // host_printed = true dès que workflow fin exécuté (décision fixée)
+                job.hostPrinted = true;
+                job.inventoryWritten = null;
+
+                // si on n'a pas de baseline, best-effort: prendre start=0
+                int gd = job.grossEndRaw - job.grossStartRaw;
+                int nd = job.netEndRaw - job.netStartRaw;
+
+                JSONObject result = new JSONObject();
+                result.put("numero_livraison", job.numeroLivraison);
+                result.put("ticket_no", job.ticketNo);
+                result.put("serial_id", job.serialId);
+                result.put("compartment", job.compartment == null ? JSONObject.NULL : job.compartment);
+                result.put("product_number", job.productNumber);
+
+                // UID unique MSD
+                String uid = (job.numeroLivraison == null ? "" : job.numeroLivraison) + "-" + (job.ticketNo == null ? "" : job.ticketNo);
+                job.deliveryUid = uid;
+                result.put("delivery_uid", uid);
+
+                // Timing
+                result.put("start_ms", job.startMs);
+                result.put("end_ms", job.endMs);
+
+                // Deltas bruts
+                result.put("gross_delta", gd);
+                result.put("net_delta", nd);
+
+                // Totaux bruts (cumulatifs calibration)
+                result.put("gross_total", job.grossTotalRaw);
+                result.put("net_total", job.netTotalRaw);
+
+                // Inventaire / impression
+                result.put("inventory_written", JSONObject.NULL);
+                result.put("host_printed", true);
+
+                // Litres
+                double gdL = gd / scale;
+                double ndL = nd / scale;
+                double gtL = job.grossTotalRaw / scale;
+                double ntL = job.netTotalRaw / scale;
+
+                result.put("gross_delta_l", gdL);
+                result.put("net_delta_l", ndL);
+                result.put("gross_total_l", gtL);
+                result.put("net_total_l", ntL);
+
+                data.put("state_job", "DONE");
+                data.put("result", result);
+
                 return ApiResult.ok("Job: 1 - DONE", data);
+
             } else {
                 job.state = "RUNNING";
-                data.put("state", "RUNNING");
+                data.put("state_job", "RUNNING");
                 return ApiResult.ok("Job: 1 - RUNNING", data);
             }
 
@@ -1080,5 +1464,124 @@ public final class DeliveryController implements DeliveryControllerPort {
             try { d.put("detail", job.err); } catch (Exception ignore) {}
             return ApiResult.fail("Job: 0 - Erreur lecture livraison", "JOB_READ_FAIL", d);
         }
+    }
+
+    // =========================
+    // Helpers API: état + messages + actions (APK-like)
+    // =========================
+
+    private void updateStateFromProtocolSnapshot(boolean deliveryActive, boolean flowActive) {
+        if (!deliveryActive) {
+            setState(DeliveryState.CONNECTED);
+            return;
+        }
+        if (flowActive) setState(DeliveryState.RUNNING_FLOWING);
+        else setState(DeliveryState.RUNNING_PAUSED);
+    }
+
+    /**
+     * Met à jour les variables internes comme le LIVE:
+     * - d>0 => FLOW ON réel
+     * - sinon, gère stagnation, flowOffStable et grâce
+     * Objectif: que l'API reflète exactement l'APK, car endDelivery/resumeIfPaused dépendent de ces flags.
+     */
+    private void updateLiveLikeFromCounts(boolean deliveryActive, boolean flowBit, int g, int n) {
+        long t = System.currentTimeMillis();
+
+        if (!deliveryActive) {
+            setState(DeliveryState.CONNECTED);
+            lastGrossRaw = -1;
+            lastNetRaw = -1;
+            flowOffStable = false;
+            sawFlowOnOnce = false;
+            flowOffStartMs = 0L;
+            lastCountsChangeMs = 0L;
+            continueGraceUntilMs = 0L;
+            return;
+        }
+
+        int d = 0;
+        if (lastGrossRaw >= 0 && lastNetRaw >= 0) {
+            d = Math.abs(g - lastGrossRaw) + Math.abs(n - lastNetRaw);
+        }
+
+        if (d > 0) {
+            // FLOW ON observé => sortir de la grâce
+            continueGraceUntilMs = 0L;
+
+            sawFlowOnOnce = true;
+            lastCountsChangeMs = t;
+            flowOffStable = false;
+            flowOffStartMs = 0L;
+
+            lastGrossRaw = g;
+            lastNetRaw = n;
+
+            setState(DeliveryState.RUNNING_FLOWING);
+            return;
+        }
+
+        if (lastCountsChangeMs == 0L) lastCountsChangeMs = t;
+        long age = t - lastCountsChangeMs;
+
+        if (!sawFlowOnOnce) {
+            flowOffStable = false;
+            flowOffStartMs = 0L;
+            lastGrossRaw = g;
+            lastNetRaw = n;
+            setState(DeliveryState.RUNNING_FLOWING);
+            return;
+        }
+
+        if (flowOffStartMs == 0L) flowOffStartMs = lastCountsChangeMs;
+        flowOffStable = age >= NO_FLOW_CONFIRM_MS;
+
+        // Grâce Continuer: ne pas retomber en PAUSED pendant la fenêtre
+        if (continueGraceUntilMs > t) {
+            lastGrossRaw = g;
+            lastNetRaw = n;
+            setState(DeliveryState.RUNNING_FLOWING);
+            return;
+        }
+
+        if (flowOffStable) setState(DeliveryState.RUNNING_PAUSED);
+        else setState(DeliveryState.RUNNING_FLOWING);
+
+        lastGrossRaw = g;
+        lastNetRaw = n;
+    }
+
+    private String buildLiveStatusForApi(boolean deliveryActive, boolean ticketPending, long graceRemainingMs) {
+        if (!deliveryActive) {
+            return ticketPending ? "LIVE: CONNECTED — Ticket pending"
+                    : "LIVE: CONNECTED — Prêt à livrer";
+        }
+
+        // Delivery active:
+        // - si state=PAUSED confirmé => message confirmé
+        // - si grâce active => attente progression
+        // - sinon => confirmation...
+        if (state == DeliveryState.RUNNING_PAUSED) {
+            return "LIVE: RUNNING_PAUSED (FLOW OFF confirmé)";
+        }
+        if (graceRemainingMs > 0) {
+            return "LIVE: RUNNING_FLOWING (Flow OFF — attente progression)";
+        }
+        // si on est FLOWING mais sans progression, hors grâce:
+        return flowOffStable
+                ? "LIVE: RUNNING_PAUSED (FLOW OFF confirmé)"
+                : "LIVE: RUNNING_FLOWING (FLOW OFF — confirmation...)";
+    }
+
+    private JSONArray buildAvailableActionsForApi() {
+        JSONArray a = new JSONArray();
+        if (state == DeliveryState.RUNNING_PAUSED) {
+            a.put("CONTINUER");
+            // Terminer uniquement si conditions APK satisfaites
+            if (flowOffStable && sawFlowOnOnce) {
+                a.put("TERMINER");
+            }
+        }
+        return a;
     }
 }
