@@ -1121,11 +1121,11 @@ public final class DeliveryController implements DeliveryControllerPort {
                 updateStateFromProtocolSnapshot(deliveryActive, flowActive);
 
                 JSONObject data = new JSONObject();
-                data.put("numero_livraison", numero_livraison);
-                data.put("ticket_no", ticketNo);
+                safeJsonPut(data, "numero_livraison", numero_livraison);
+                safeJsonPut(data, "ticket_no", ticketNo);
                 data.put("sale_no", saleNo);
                 data.put("serial_id", serialId);
-                data.put("delivery_uid", deliveryUid);
+                safeJsonPut(data, "delivery_uid", deliveryUid);
 
                 data.put("deliveryActive", 1);
                 data.put("flowActive", flowActive ? 1 : 0);
@@ -1148,11 +1148,11 @@ public final class DeliveryController implements DeliveryControllerPort {
             // 4) ticket pending (besoin A)
             if (ticketPending) {
                 JSONObject data = new JSONObject();
-                data.put("numero_livraison", numero_livraison);
-                data.put("ticket_no", ticketNo);
+                safeJsonPut(data, "numero_livraison", numero_livraison);
+                safeJsonPut(data, "ticket_no", ticketNo);
                 data.put("sale_no", saleNo);
                 data.put("serial_id", serialId);
-                data.put("delivery_uid", deliveryUid);
+                safeJsonPut(data, "delivery_uid", deliveryUid);
 
                 data.put("deliveryActive", 0);
                 data.put("flowActive", 0);
@@ -1206,12 +1206,12 @@ public final class DeliveryController implements DeliveryControllerPort {
             setState(DeliveryState.RUNNING_PAUSED);
 
             JSONObject data = new JSONObject();
-            data.put("jobId", jobId);
-            data.put("numero_livraison", numero_livraison);
-            data.put("ticket_no", ticketNo);
+            safeJsonPut(data, "jobId", jobId);
+            safeJsonPut(data, "numero_livraison", numero_livraison);
+            safeJsonPut(data, "ticket_no", ticketNo);
             data.put("sale_no", saleNo);
             data.put("serial_id", serialId);
-            data.put("delivery_uid", deliveryUid);
+            safeJsonPut(data, "delivery_uid", deliveryUid);
 
             data.put("state", DeliveryState.RUNNING_PAUSED.name());
             data.put("continue_grace_remaining_ms", 0);
@@ -1250,10 +1250,10 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
         resumeIfPaused();
         JSONObject data = new JSONObject();
-        data.put("jobId", jobId);
-        data.put("numero_livraison", job.numeroLivraison);
-        data.put("ticket_no", job.ticketNo);
-        data.put("delivery_uid", job.deliveryUid);
+        safeJsonPut(data, "jobId", jobId);
+        safeJsonPut(data, "numero_livraison", job.numeroLivraison);
+        safeJsonPut(data, "ticket_no", job.ticketNo);
+        safeJsonPut(data, "delivery_uid", job.deliveryUid);
         safeJsonPut(data, "live_status", "LIVE: RUNNING_FLOWING (Flow OFF — attente progression)");
         return ApiResult.ok("Continue: 1 - RUN sent", data);
     }
@@ -1271,10 +1271,10 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
         endDelivery();
         JSONObject data = new JSONObject();
-        data.put("jobId", jobId);
-        data.put("numero_livraison", job.numeroLivraison);
-        data.put("ticket_no", job.ticketNo);
-        data.put("delivery_uid", job.deliveryUid);
+        safeJsonPut(data, "jobId", jobId);
+        safeJsonPut(data, "numero_livraison", job.numeroLivraison);
+        safeJsonPut(data, "ticket_no", job.ticketNo);
+        safeJsonPut(data, "delivery_uid", job.deliveryUid);
         safeJsonPut(data, "live_status", "LIVE: ENDING");
         return ApiResult.ok("Terminate: 1 - END sent", data);
     }
@@ -1314,7 +1314,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         startDelivery(product1to16, presetNet);
 
         JSONObject data = new JSONObject();
-        try { data.put("jobId", jobId); } catch (Exception ignore) {}
+        try { safeJsonPut(data, "jobId", jobId); } catch (Exception ignore) {}
         return ApiResult.ok("Delivery C: 1 - Démarrée", data);
     }
 
@@ -1363,12 +1363,12 @@ public final class DeliveryController implements DeliveryControllerPort {
             long graceRem = (continueGraceUntilMs > now) ? (continueGraceUntilMs - now) : 0L;
 
             JSONObject data = new JSONObject();
-            data.put("jobId", jobId);
+            safeJsonPut(data, "jobId", jobId);
 
             // Contexte MSD
-            if (job.numeroLivraison != null) data.put("numero_livraison", job.numeroLivraison);
-            if (job.ticketNo != null) data.put("ticket_no", job.ticketNo);
-            if (job.deliveryUid != null) data.put("delivery_uid", job.deliveryUid);
+            if (job.numeroLivraison != null) safeJsonPut(data, "numero_livraison", job.numeroLivraison);
+            if (job.ticketNo != null) safeJsonPut(data, "ticket_no", job.ticketNo);
+            if (job.deliveryUid != null) safeJsonPut(data, "delivery_uid", job.deliveryUid);
 
             // Protocole
             data.put("deliveryActive", deliveryActive ? 1 : 0);
