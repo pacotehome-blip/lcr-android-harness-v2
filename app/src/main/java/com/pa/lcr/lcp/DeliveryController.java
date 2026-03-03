@@ -1,4 +1,3 @@
-
 package com.pa.lcr.lcp;
 
 import org.json.JSONObject;
@@ -74,6 +73,12 @@ public final class DeliveryController implements DeliveryControllerPort {
     // ✅ Pas de chevauchement LIVE
     private final AtomicBoolean liveInFlight = new AtomicBoolean(false);
     private final ThreadLocal<Boolean> inLiveSample = new ThreadLocal<>();
+
+    // (A) Ticket pending: anti-réimpression (UNIQUEMENT pour le bouton A)
+    // Empêche toute réémission de 0x06 tant que le ticket n'est pas clear ou qu'un timeout est atteint.
+    private final java.util.concurrent.atomic.AtomicBoolean ticketPrintInFlight = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private volatile long ticketPrintStartMs = 0L;
+
 
     // (A) Backoff state
     private volatile long liveBackoffMs = LIVE_BASE_MS;
@@ -676,8 +681,8 @@ public final class DeliveryController implements DeliveryControllerPort {
 
         if (fs.ticketPending) {
             if (listener != null) listener.onLiveStatus("LIVE: CONNECTED — Ticket_pending (recovering)");
-            emitLog("[A] Ticket pending -> clear via #6 loop");
-            clearTicketPendingLoop();
+            emitLog("[A] Ticket pending -> clear via #6 SAFE (single print)");
+            clearTicketPendingSafeForAlign();
             fs = readFullStatus("A/full-after-ticket");
         }
 
@@ -698,6 +703,72 @@ public final class DeliveryController implements DeliveryControllerPort {
             listener.onLiveStatus(fs.ticketPending ? "LIVE: CONNECTED — Ticket pending"
                     : "LIVE: CONNECTED — Prêt à livrer");
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // SAFE ticket clear for A (Align / Recover)
+    // Règle terrain: 1 ticket = 1 seule impression déclenchée par A.
+    // - Envoie 0x06 UNE seule fois (si pas déjà in-flight)
+    // - Attend passivement que DC_TICKET_PENDING tombe (poll)
+    // - Ne réémet jamais 0x06 pendant l'attente
+    // - Déverrouille sur clear ou sur timeout
+    // NOTE: clearTicketPendingLoop() reste inchangée et peut être utilisée ailleurs (ex: END).
+    // ---------------------------------------------------------------------
+    private void clearTicketPendingSafeForAlign() throws Exception {
+        // 1) Vérifier l'état courant (si déjà clear, sortir sans rien envoyer)
+        try {
+            LcpLink.MachineStatus ms0 = link.opGetMachineStatus();
+            if ((ms0.delCode & DC_TICKET_PENDING) == 0) {
+                ticketPrintInFlight.set(false);
+                ticketPrintStartMs = 0L;
+                emitLog("[A/TICKET] already cleared");
+                return;
+            }
+        } catch (Exception ignored) {
+            // best-effort: on continue
+        }
+
+        long now = System.currentTimeMillis();
+
+        // 2) Envoyer 0x06 une seule fois (si pas déjà en vol)
+        if (ticketPrintInFlight.compareAndSet(false, true)) {
+            ticketPrintStartMs = now;
+            emitLog("[A/TICKET] issue #6 once (in-flight)");
+            try {
+                link.opIssueCommand(CMD_PRINT_LAST_TICKET);
+            } catch (Exception e) {
+                // ne jamais rester verrouillé en cas d'échec d'envoi
+                ticketPrintInFlight.set(false);
+                ticketPrintStartMs = 0L;
+                throw e;
+            }
+        } else {
+            // déjà in-flight (ex: A relancé pendant attente) -> ne rien renvoyer
+            if (ticketPrintStartMs <= 0L) ticketPrintStartMs = now;
+            emitLog("[A/TICKET] print already in-flight; waiting clear");
+        }
+
+        // 3) Attendre passivement le clear (poll)
+        long deadline = ticketPrintStartMs + TICKET_DEVICE_LOOP_MS;
+        while (!isStopped() && System.currentTimeMillis() < deadline) {
+            try { Thread.sleep(200); } catch (InterruptedException ignored) {}
+            try {
+                LcpLink.MachineStatus ms = link.opGetMachineStatus();
+                if ((ms.delCode & DC_TICKET_PENDING) == 0) {
+                    emitLog("[A/TICKET] cleared");
+                    ticketPrintInFlight.set(false);
+                    ticketPrintStartMs = 0L;
+                    return;
+                }
+            } catch (Exception ignored) {
+                // best-effort: on continue jusqu'au timeout
+            }
+        }
+
+        // 4) Timeout: on déverrouille (aucune réimpression automatique)
+        emitLog("[A/TICKET] clear timeout (no reprint)");
+        ticketPrintInFlight.set(false);
+        ticketPrintStartMs = 0L;
     }
 
     private void clearTicketPendingLoop() {
