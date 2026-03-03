@@ -17,6 +17,16 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class DeliveryController implements DeliveryControllerPort {
 
+    private static void safeJsonPut(org.json.JSONObject o, String k, Object v) {
+        if (o == null) return;
+        try {
+            o.put(k, v);
+        } catch (org.json.JSONException ignore) {
+            // best-effort
+        }
+    }
+
+
     // Champs LCR (déjà existants)
     private static final int FIELD_ACTIVE_PRODUCT = 0;
     private static final int FIELD_PRESET_NET = 6;
@@ -108,17 +118,7 @@ public final class DeliveryController implements DeliveryControllerPort {
             ThreadLocal.withInitial(() ->
                     new SimpleDateFormat("HH:mm:ss.SSS", Locale.CANADA_FRENCH));
 
-    
-    private static void safeJsonPut(JSONObject o, String k, Object v) {
-        if (o == null) return;
-        try {
-            o.put(k, v);
-        } catch (org.json.JSONException ignore) {
-            // best-effort: ignore JSON failures to keep API stable
-        }
-    }
-
-// =========================
+    // =========================
     // API-Face (jobs + cache)
     // =========================
     private static final class ApiJob {
@@ -1058,22 +1058,22 @@ public final class DeliveryController implements DeliveryControllerPort {
             boolean deliveryActive = (delCode & DC_DELIVERY_ACTIVE) != 0;
 
             JSONObject data = new JSONObject();
-            safeJsonPut(data, "deliveryActive", deliveryActive ? 1 : 0);
-            safeJsonPut(data, "flowActive", flowActive ? 1 : 0);
-            safeJsonPut(data, "ticketPending", ticketPending ? 1 : 0);
+            data.put("deliveryActive", deliveryActive ? 1 : 0);
+            data.put("flowActive", flowActive ? 1 : 0);
+            data.put("ticketPending", ticketPending ? 1 : 0);
 
             if (!deliveryActive && !ticketPending) {
-                safeJsonPut(data, "next", "C");
+                data.put("next", "C");
                 return ApiResult.ok("Connect LCP: 1 - CONNECTED prêt à livrer (Faire C)", data);
             }
 
-            safeJsonPut(data, "next", "A");
+            data.put("next", "A");
             return ApiResult.ok("Connect LCP: 1 - CONNECTED livraison en attente (Faire A)", data);
 
         } catch (Exception e) {
             String m = (e.getMessage() != null) ? e.getMessage() : "";
             JSONObject d = new JSONObject();
-            try { safeJsonPut(d, "detail", m); } catch (Exception ignore) {}
+            try { d.put("detail", m); } catch (Exception ignore) {}
             return ApiResult.fail(
                     "Connect LCP: 0 - Impossible de valider l'état (0x28).",
                     "STATE28_FAIL",
@@ -1121,24 +1121,24 @@ public final class DeliveryController implements DeliveryControllerPort {
                 updateStateFromProtocolSnapshot(deliveryActive, flowActive);
 
                 JSONObject data = new JSONObject();
-                safeJsonPut(data, "numero_livraison", numero_livraison);
-                safeJsonPut(data, "ticket_no", ticketNo);
-                safeJsonPut(data, "sale_no", saleNo);
-                safeJsonPut(data, "serial_id", serialId);
-                safeJsonPut(data, "delivery_uid", deliveryUid);
+                data.put("numero_livraison", numero_livraison);
+                data.put("ticket_no", ticketNo);
+                data.put("sale_no", saleNo);
+                data.put("serial_id", serialId);
+                data.put("delivery_uid", deliveryUid);
 
-                safeJsonPut(data, "deliveryActive", 1);
-                safeJsonPut(data, "flowActive", flowActive ? 1 : 0);
-                safeJsonPut(data, "ticketPending", ticketPending ? 1 : 0);
+                data.put("deliveryActive", 1);
+                data.put("flowActive", flowActive ? 1 : 0);
+                data.put("ticketPending", ticketPending ? 1 : 0);
 
                 // champs APK-like
                 long now = System.currentTimeMillis();
                 long graceRem = (continueGraceUntilMs > now) ? (continueGraceUntilMs - now) : 0L;
                 data.put("state", state.name());
-                safeJsonPut(data, "continue_grace_remaining_ms", graceRem);
-                safeJsonPut(data, "flow_off_stable", flowOffStable ? 1 : 0);
+                data.put("continue_grace_remaining_ms", graceRem);
+                data.put("flow_off_stable", flowOffStable ? 1 : 0);
                 data.put("flow_off_age_ms", getFlowOffAgeMs());
-                data.put("live_status", buildLiveStatusForApi(deliveryActive, ticketPending, graceRem));
+                safeJsonPut(data, "live_status", buildLiveStatusForApi(deliveryActive, ticketPending, graceRem));
 
                 data.put("available_actions", buildAvailableActionsForApi());
 
@@ -1148,25 +1148,25 @@ public final class DeliveryController implements DeliveryControllerPort {
             // 4) ticket pending (besoin A)
             if (ticketPending) {
                 JSONObject data = new JSONObject();
-                safeJsonPut(data, "numero_livraison", numero_livraison);
-                safeJsonPut(data, "ticket_no", ticketNo);
-                safeJsonPut(data, "sale_no", saleNo);
-                safeJsonPut(data, "serial_id", serialId);
-                safeJsonPut(data, "delivery_uid", deliveryUid);
+                data.put("numero_livraison", numero_livraison);
+                data.put("ticket_no", ticketNo);
+                data.put("sale_no", saleNo);
+                data.put("serial_id", serialId);
+                data.put("delivery_uid", deliveryUid);
 
-                safeJsonPut(data, "deliveryActive", 0);
-                safeJsonPut(data, "flowActive", 0);
-                safeJsonPut(data, "ticketPending", 1);
+                data.put("deliveryActive", 0);
+                data.put("flowActive", 0);
+                data.put("ticketPending", 1);
 
                 data.put("state", DeliveryState.CONNECTED.name());
-                safeJsonPut(data, "continue_grace_remaining_ms", 0);
-                safeJsonPut(data, "flow_off_stable", 0);
-                safeJsonPut(data, "flow_off_age_ms", 0);
+                data.put("continue_grace_remaining_ms", 0);
+                data.put("flow_off_stable", 0);
+                data.put("flow_off_age_ms", 0);
                 safeJsonPut(data, "live_status", "LIVE: CONNECTED — Ticket pending");
 
                 JSONArray actions = new JSONArray();
                 actions.put("ALIGN_A");
-                safeJsonPut(data, "available_actions", actions);
+                data.put("available_actions", actions);
 
                 return ApiResult.ok("Delivery OneShot: 1 - Ticket pending (Faire A)", data);
             }
@@ -1206,29 +1206,29 @@ public final class DeliveryController implements DeliveryControllerPort {
             setState(DeliveryState.RUNNING_PAUSED);
 
             JSONObject data = new JSONObject();
-            safeJsonPut(data, "jobId", jobId);
-            safeJsonPut(data, "numero_livraison", numero_livraison);
-            safeJsonPut(data, "ticket_no", ticketNo);
-            safeJsonPut(data, "sale_no", saleNo);
-            safeJsonPut(data, "serial_id", serialId);
-            safeJsonPut(data, "delivery_uid", deliveryUid);
+            data.put("jobId", jobId);
+            data.put("numero_livraison", numero_livraison);
+            data.put("ticket_no", ticketNo);
+            data.put("sale_no", saleNo);
+            data.put("serial_id", serialId);
+            data.put("delivery_uid", deliveryUid);
 
             data.put("state", DeliveryState.RUNNING_PAUSED.name());
-            safeJsonPut(data, "continue_grace_remaining_ms", 0);
-            safeJsonPut(data, "flow_off_stable", 0);
-            safeJsonPut(data, "flow_off_age_ms", 0);
-            data.put("live_status", "LIVE: RUNNING_PAUSED (Flow OFF)");
+            data.put("continue_grace_remaining_ms", 0);
+            data.put("flow_off_stable", 0);
+            data.put("flow_off_age_ms", 0);
+            safeJsonPut(data, "live_status", "LIVE: RUNNING_PAUSED (Flow OFF)");
 
             JSONArray actions = new JSONArray();
             actions.put("CONTINUER");
-            safeJsonPut(data, "available_actions", actions);
+            data.put("available_actions", actions);
 
             return ApiResult.ok("Delivery OneShot: 1 - STARTED", data);
 
         } catch (Exception e) {
             String m = (e.getMessage() != null) ? e.getMessage() : "";
             JSONObject d = new JSONObject();
-            try { safeJsonPut(d, "detail", m); } catch (Exception ignore) {}
+            try { d.put("detail", m); } catch (Exception ignore) {}
             return ApiResult.fail(
                     "Delivery OneShot: 0 - Erreur pendant l'orchestration.",
                     "ONESHOT_FAIL",
@@ -1250,11 +1250,11 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
         resumeIfPaused();
         JSONObject data = new JSONObject();
-        safeJsonPut(data, "jobId", jobId);
-        safeJsonPut(data, "numero_livraison", job.numeroLivraison);
-        safeJsonPut(data, "ticket_no", job.ticketNo);
-        safeJsonPut(data, "delivery_uid", job.deliveryUid);
-        data.put("live_status", "LIVE: RUNNING_FLOWING (Flow OFF — attente progression)");
+        data.put("jobId", jobId);
+        data.put("numero_livraison", job.numeroLivraison);
+        data.put("ticket_no", job.ticketNo);
+        data.put("delivery_uid", job.deliveryUid);
+        safeJsonPut(data, "live_status", "LIVE: RUNNING_FLOWING (Flow OFF — attente progression)");
         return ApiResult.ok("Continue: 1 - RUN sent", data);
     }
 
@@ -1271,10 +1271,10 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
         endDelivery();
         JSONObject data = new JSONObject();
-        safeJsonPut(data, "jobId", jobId);
-        safeJsonPut(data, "numero_livraison", job.numeroLivraison);
-        safeJsonPut(data, "ticket_no", job.ticketNo);
-        safeJsonPut(data, "delivery_uid", job.deliveryUid);
+        data.put("jobId", jobId);
+        data.put("numero_livraison", job.numeroLivraison);
+        data.put("ticket_no", job.ticketNo);
+        data.put("delivery_uid", job.deliveryUid);
         safeJsonPut(data, "live_status", "LIVE: ENDING");
         return ApiResult.ok("Terminate: 1 - END sent", data);
     }
@@ -1314,7 +1314,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         startDelivery(product1to16, presetNet);
 
         JSONObject data = new JSONObject();
-        try { safeJsonPut(data, "jobId", jobId); } catch (Exception ignore) {}
+        try { data.put("jobId", jobId); } catch (Exception ignore) {}
         return ApiResult.ok("Delivery C: 1 - Démarrée", data);
     }
 
@@ -1363,29 +1363,29 @@ public final class DeliveryController implements DeliveryControllerPort {
             long graceRem = (continueGraceUntilMs > now) ? (continueGraceUntilMs - now) : 0L;
 
             JSONObject data = new JSONObject();
-            safeJsonPut(data, "jobId", jobId);
+            data.put("jobId", jobId);
 
             // Contexte MSD
-            if (job.numeroLivraison != null) safeJsonPut(data, "numero_livraison", job.numeroLivraison);
-            if (job.ticketNo != null) safeJsonPut(data, "ticket_no", job.ticketNo);
-            if (job.deliveryUid != null) safeJsonPut(data, "delivery_uid", job.deliveryUid);
+            if (job.numeroLivraison != null) data.put("numero_livraison", job.numeroLivraison);
+            if (job.ticketNo != null) data.put("ticket_no", job.ticketNo);
+            if (job.deliveryUid != null) data.put("delivery_uid", job.deliveryUid);
 
             // Protocole
-            safeJsonPut(data, "deliveryActive", deliveryActive ? 1 : 0);
-            safeJsonPut(data, "flowActive", flowActive ? 1 : 0);
-            safeJsonPut(data, "ticketPending", ticketPending ? 1 : 0);
+            data.put("deliveryActive", deliveryActive ? 1 : 0);
+            data.put("flowActive", flowActive ? 1 : 0);
+            data.put("ticketPending", ticketPending ? 1 : 0);
 
             // Quantités
-            safeJsonPut(data, "net", job.net);
-            safeJsonPut(data, "gross", job.gross);
-            safeJsonPut(data, "decimals", job.decimals);
+            data.put("net", job.net);
+            data.put("gross", job.gross);
+            data.put("decimals", job.decimals);
 
             // État APK-like
             data.put("state", state.name());
-            safeJsonPut(data, "continue_grace_remaining_ms", graceRem);
-            safeJsonPut(data, "flow_off_stable", flowOffStable ? 1 : 0);
+            data.put("continue_grace_remaining_ms", graceRem);
+            data.put("flow_off_stable", flowOffStable ? 1 : 0);
             data.put("flow_off_age_ms", getFlowOffAgeMs());
-            data.put("live_status", buildLiveStatusForApi(deliveryActive, ticketPending, graceRem));
+            safeJsonPut(data, "live_status", buildLiveStatusForApi(deliveryActive, ticketPending, graceRem));
             data.put("available_actions", buildAvailableActionsForApi());
 
             if (!deliveryActive) {
@@ -1418,32 +1418,32 @@ public final class DeliveryController implements DeliveryControllerPort {
                 int nd = job.netEndRaw - job.netStartRaw;
 
                 JSONObject result = new JSONObject();
-                safeJsonPut(result, "numero_livraison", job.numeroLivraison);
-                safeJsonPut(result, "ticket_no", job.ticketNo);
-                safeJsonPut(result, "serial_id", job.serialId);
-                safeJsonPut(result, "compartment", job.compartment == null ? JSONObject.NULL : job.compartment);
-                safeJsonPut(result, "product_number", job.productNumber);
+                result.put("numero_livraison", job.numeroLivraison);
+                result.put("ticket_no", job.ticketNo);
+                result.put("serial_id", job.serialId);
+                result.put("compartment", job.compartment == null ? JSONObject.NULL : job.compartment);
+                result.put("product_number", job.productNumber);
 
                 // UID unique MSD
                 String uid = (job.numeroLivraison == null ? "" : job.numeroLivraison) + "-" + (job.ticketNo == null ? "" : job.ticketNo);
                 job.deliveryUid = uid;
-                safeJsonPut(result, "delivery_uid", uid);
+                result.put("delivery_uid", uid);
 
                 // Timing
-                safeJsonPut(result, "start_ms", job.startMs);
-                safeJsonPut(result, "end_ms", job.endMs);
+                result.put("start_ms", job.startMs);
+                result.put("end_ms", job.endMs);
 
                 // Deltas bruts
-                safeJsonPut(result, "gross_delta", gd);
-                safeJsonPut(result, "net_delta", nd);
+                result.put("gross_delta", gd);
+                result.put("net_delta", nd);
 
                 // Totaux bruts (cumulatifs calibration)
-                safeJsonPut(result, "gross_total", job.grossTotalRaw);
-                safeJsonPut(result, "net_total", job.netTotalRaw);
+                result.put("gross_total", job.grossTotalRaw);
+                result.put("net_total", job.netTotalRaw);
 
                 // Inventaire / impression
-                safeJsonPut(result, "inventory_written", JSONObject.NULL);
-                safeJsonPut(result, "host_printed", true);
+                result.put("inventory_written", JSONObject.NULL);
+                result.put("host_printed", true);
 
                 // Litres
                 double gdL = gd / scale;
@@ -1451,19 +1451,19 @@ public final class DeliveryController implements DeliveryControllerPort {
                 double gtL = job.grossTotalRaw / scale;
                 double ntL = job.netTotalRaw / scale;
 
-                safeJsonPut(result, "gross_delta_l", gdL);
-                safeJsonPut(result, "net_delta_l", ndL);
-                safeJsonPut(result, "gross_total_l", gtL);
-                safeJsonPut(result, "net_total_l", ntL);
+                result.put("gross_delta_l", gdL);
+                result.put("net_delta_l", ndL);
+                result.put("gross_total_l", gtL);
+                result.put("net_total_l", ntL);
 
-                safeJsonPut(data, "state_job", "DONE");
-                safeJsonPut(data, "result", result);
+                data.put("state_job", "DONE");
+                data.put("result", result);
 
                 return ApiResult.ok("Job: 1 - DONE", data);
 
             } else {
                 job.state = "RUNNING";
-                safeJsonPut(data, "state_job", "RUNNING");
+                data.put("state_job", "RUNNING");
                 return ApiResult.ok("Job: 1 - RUNNING", data);
             }
 
@@ -1471,7 +1471,7 @@ public final class DeliveryController implements DeliveryControllerPort {
             job.state = "ERROR";
             job.err = (e.getMessage() != null) ? e.getMessage() : "";
             JSONObject d = new JSONObject();
-            try { safeJsonPut(d, "detail", job.err); } catch (Exception ignore) {}
+            try { d.put("detail", job.err); } catch (Exception ignore) {}
             return ApiResult.fail("Job: 0 - Erreur lecture livraison", "JOB_READ_FAIL", d);
         }
     }
