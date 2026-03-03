@@ -148,7 +148,7 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="A" />
+                    android:text="Restore" />
 
                 <Button
                     android:id="@+id/btnB"
@@ -156,7 +156,7 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:layout_marginStart="8dp"
-                    android:text="B" />
+                    android:text="Initialize" />
 
                 <Button
                     android:id="@+id/btnC"
@@ -164,7 +164,7 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:layout_marginStart="8dp"
-                    android:text="C" />
+                    android:text="New Delivery" />
             </LinearLayout>
 
             <!-- ===================== CONTINUER / FIN ===================== -->
