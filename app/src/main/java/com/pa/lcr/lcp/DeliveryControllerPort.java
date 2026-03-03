@@ -28,9 +28,7 @@ public interface DeliveryControllerPort {
 
     /* ===== Livraison ===== */
     void startDelivery(int product1to16, double presetNet);
-
     default void alignOrRecover() { /* no-op (compat) */ }
-
     void resumeIfPaused();
     void endDelivery();
     void requestStatus();
@@ -64,4 +62,3 @@ public interface DeliveryControllerPort {
         default void onLiveStatus(String liveText) { /* no-op */ }
     }
 }
-
