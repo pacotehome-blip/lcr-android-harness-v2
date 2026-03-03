@@ -1208,9 +1208,10 @@ public final class DeliveryController implements DeliveryControllerPort {
             data.put("flow_off_stable", 0);
             data.put("flow_off_age_ms", 0);
             data.put("live_status", "LIVE: RUNNING_PAUSED (Flow OFF)");
+            data.put("note", "WAIT: attendre le 1er poll pour actions");
 
             JSONArray actions = new JSONArray();
-            actions.put("CONTINUER");
+            actions.put("WAIT");
             data.put("available_actions", actions);
 
             return ApiResult.ok("Delivery OneShot: 1 - STARTED", data);
@@ -1562,7 +1563,9 @@ public final class DeliveryController implements DeliveryControllerPort {
         // - si grâce active => attente progression
         // - sinon => confirmation...
         if (state == DeliveryState.RUNNING_PAUSED) {
-            return "LIVE: RUNNING_PAUSED (FLOW OFF confirmé)";
+            return flowOffStable
+                    ? "LIVE: RUNNING_PAUSED (FLOW OFF confirmé)"
+                    : "LIVE: RUNNING_PAUSED (Flow OFF)";
         }
         if (graceRemainingMs > 0) {
             return "LIVE: RUNNING_FLOWING (Flow OFF — attente progression)";
