@@ -12,7 +12,7 @@ public class UsbReceiver extends BroadcastReceiver {
 
     public static final String ACTION_USB_PERMISSION = "com.pa.lcrdemo.USB_PERMISSION";
 
-    // ✅ Nouveaux événements internes (app-only)
+    // ✅ événements internes (app-only)
     public static final String ACTION_USB_READY = "com.pa.lcrdemo.USB_READY";
     public static final String ACTION_USB_DETACHED = "com.pa.lcrdemo.USB_DETACHED";
 
@@ -69,10 +69,16 @@ public class UsbReceiver extends BroadcastReceiver {
         UsbSerialPort port = driver.getPorts().get(0);
 
         try {
+            // ✅ R1: éviter double-open si une session est déjà active
+            if (UsbSession.getPort() != null) {
+                try { conn.close(); } catch (Exception ignore) {}
+                return;
+            }
+
             port.open(conn);
             port.setParameters(19200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
 
-            // ✅ Stocker la session en mémoire + notifier l’app
+            // ✅ stocker la session + notifier l'app
             UsbSession.set(device, port);
 
             Intent ready = new Intent(ACTION_USB_READY);
@@ -89,7 +95,7 @@ public class UsbReceiver extends BroadcastReceiver {
         UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
         if (device == null) return;
 
-        // ✅ Clear session + notifier l’app
+        // ✅ clear session + notifier l'app
         UsbSession.clear();
 
         Intent det = new Intent(ACTION_USB_DETACHED);

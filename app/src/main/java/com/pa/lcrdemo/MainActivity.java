@@ -38,7 +38,7 @@ public class MainActivity extends AppCompatActivity {
     private View pageMain;
     private View pageApiFace;
 
-    // ===== API-Face UI (layout fragment_api_face.xml inclus dans pageApiFace) =====
+    // ===== API-Face UI =====
     private TextView txtApiStatus;
     private TextView txtApiUrl;
     private TextView txtApiTrace;
@@ -81,7 +81,7 @@ public class MainActivity extends AppCompatActivity {
     private boolean logTsEnabled = false;
 
     private DeliveryControllerPort controller;
-    private LcpLink link = null; // pour timestamps transport à chaud
+    private LcpLink link = null;
 
     private boolean suppressProductSelection = false;
     private boolean userTouchedSpinner = false;
@@ -120,7 +120,7 @@ public class MainActivity extends AppCompatActivity {
         public void run() {
             if (controller == null) { liveTickRunning = false; return; }
 
-            // ✅ Poll en RUNNING_FLOWING ET RUNNING_PAUSED
+            // ✅ Poll en RUNNING_FLOWING ET RUNNING_PAUSED (pas seulement FLOWING)
             DeliveryState st = controller.getState();
             boolean shouldPoll =
                     (st == DeliveryState.RUNNING_FLOWING) ||
@@ -190,10 +190,8 @@ public class MainActivity extends AppCompatActivity {
         wireUi();
         initUiDefaults();
 
-        // ✅ Tabs en haut (MAIN + API-Face)
         setupTabs();
 
-        // ✅ API runtime init
         apiTrace = new ApiTraceBuffer(500);
         refreshApiStatus();
 
@@ -202,18 +200,15 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
-        // Stop server proprement si l’activité se ferme
         stopApiServer("Activity destroyed");
         super.onDestroy();
     }
 
     private void bindUi() {
-        // Tabs / pages
         tabLayout = findViewById(R.id.tabLayout);
         pageMain = findViewById(R.id.pageMain);
         pageApiFace = findViewById(R.id.pageApiFace);
 
-        // Main page controls
         btnScanUsb = findViewById(R.id.btnScanUsb);
         btnPingUsb = findViewById(R.id.btnPingUsb);
         spnUsbDevices = findViewById(R.id.spnUsbDevices);
@@ -221,27 +216,31 @@ public class MainActivity extends AppCompatActivity {
         edtFrom = findViewById(R.id.edtFrom);
         txtActiveNode = findViewById(R.id.txtActiveNode);
         btnConnect = findViewById(R.id.btnConnect);
+
         spnProducts = findViewById(R.id.spnProducts);
         edtProduct = findViewById(R.id.edtProduct);
         edtPreset = findViewById(R.id.edtPreset);
+
         btnA = findViewById(R.id.btnA);
         btnB = findViewById(R.id.btnB);
         btnC = findViewById(R.id.btnC);
         btnContinue = findViewById(R.id.btnContinue);
         btnFinish = findViewById(R.id.btnFinish);
+
         txtLive = findViewById(R.id.txtLive);
         liveQtyPanel = findViewById(R.id.liveQtyPanel);
         txtQtyNet = findViewById(R.id.txtQtyNet);
         txtQtyGross = findViewById(R.id.txtQtyGross);
+
         txtLog = findViewById(R.id.txtLog);
         logScroll = findViewById(R.id.logScroll);
         btnClearLog = findViewById(R.id.btnClearLog);
         btnCopyLog = findViewById(R.id.btnCopyLog);
         btnScrollDown = findViewById(R.id.btnScrollDown);
+
         cbTxRx = findViewById(R.id.cbTxRx);
         cbLogTs = findViewById(R.id.cbLogTs);
 
-        // API-Face controls (included layout)
         txtApiStatus = findViewById(R.id.txtApiStatus);
         txtApiUrl = findViewById(R.id.txtApiUrl);
         txtApiTrace = findViewById(R.id.txtApiTrace);
@@ -262,7 +261,6 @@ public class MainActivity extends AppCompatActivity {
         txtActiveNode.setText("Node actif : —");
         txtLive.setText("LIVE: (en attente)");
 
-        // ✅ Exigence: NET/GROSS toujours affichés
         if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
         if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
         if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
@@ -349,13 +347,9 @@ public class MainActivity extends AppCompatActivity {
             });
         }
 
-        // ===== API-Face wiring =====
-        if (btnApiStart != null) {
-            btnApiStart.setOnClickListener(v -> startApiServer());
-        }
-        if (btnApiStop != null) {
-            btnApiStop.setOnClickListener(v -> stopApiServer("Stop button"));
-        }
+        if (btnApiStart != null) btnApiStart.setOnClickListener(v -> startApiServer());
+        if (btnApiStop != null) btnApiStop.setOnClickListener(v -> stopApiServer("Stop button"));
+
         if (btnApiClearTrace != null) {
             btnApiClearTrace.setOnClickListener(v -> {
                 if (apiTrace != null) apiTrace.clear();
@@ -363,6 +357,7 @@ public class MainActivity extends AppCompatActivity {
                 toast("Trace API effacée");
             });
         }
+
         if (btnApiCopyCurl != null) {
             btnApiCopyCurl.setOnClickListener(v -> copyCurlExamples());
         }
@@ -389,7 +384,6 @@ public class MainActivity extends AppCompatActivity {
     private void showPage(int index) {
         if (pageMain != null) pageMain.setVisibility(index == 0 ? View.VISIBLE : View.GONE);
         if (pageApiFace != null) pageApiFace.setVisibility(index == 1 ? View.VISIBLE : View.GONE);
-
         if (index == 1) {
             refreshApiStatus();
             refreshApiTrace();
@@ -397,7 +391,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // =========================
-    // API Server control (no start if controller == null)
+    // API Server
     // =========================
     private void startApiServer() {
         if (controller == null) {
@@ -454,8 +448,7 @@ public class MainActivity extends AppCompatActivity {
     private void refreshApiStatus() {
         if (txtApiStatus == null) return;
         boolean running = (apiServer != null && apiServer.isRunning());
-        String s = "Status: " + (running ? "RUNNING (loopback only)" : "STOPPED");
-        txtApiStatus.setText(s);
+        txtApiStatus.setText("Status: " + (running ? "RUNNING (loopback only)" : "STOPPED"));
         if (btnApiStart != null) btnApiStart.setEnabled(!running);
         if (btnApiStop != null) btnApiStop.setEnabled(running);
     }
@@ -528,7 +521,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void openSelectedUsb() {
-        // ✅ R1: si un port est déjà ouvert (auto-attach ou manuel), ne pas ré-ouvrir
+        // ✅ R1: si un port est déjà ouvert, ne pas ré-ouvrir
         if (usbPort != null) {
             log("USB déjà prêt (port déjà ouvert)");
             return;
@@ -544,7 +537,6 @@ public class MainActivity extends AppCompatActivity {
         if (!usbManager.hasPermission(dev)) {
             PendingIntent pi = PendingIntent.getBroadcast(
                     this, 0, new Intent(ACTION_USB_PERMISSION),
-                    // ✅ FIX: OR des flags
                     PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE
             );
             usbManager.requestPermission(dev, pi);
@@ -571,7 +563,7 @@ public class MainActivity extends AppCompatActivity {
     public void onUsbPortReady(UsbSerialPort port) {
         if (port == null) return;
 
-        // ✅ R1: si on a déjà un port actif, éviter port "orphelin"
+        // ✅ R1: éviter port orphelin si déjà prêt
         if (usbPort != null) {
             try { port.close(); } catch (Exception ignore) {}
             return;
@@ -584,18 +576,16 @@ public class MainActivity extends AppCompatActivity {
     public void onUsbDetached() {
         log("USB détaché");
 
-        // ✅ sécurité: clear session en mémoire aussi
         try { UsbSession.clear(); } catch (Exception ignore) {}
 
-        // Stop API if running (session is gone)
         stopApiServer("USB detached");
 
         if (controller != null) {
             controller.shutdown(true);
             controller = null;
         }
-
         link = null;
+
         stopLiveTick();
         usbPort = null;
 
@@ -615,7 +605,6 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
-        // If switching session, stop API (facade must bind to current controller)
         stopApiServer("Connect LCP (new session)");
 
         int to = parseInt(edtTo.getText().toString(), 250);
@@ -630,7 +619,6 @@ public class MainActivity extends AppCompatActivity {
             controller.shutdown(false);
             controller = null;
         }
-
         link = null;
 
         if (pendingInitRunnable != null) ui.removeCallbacks(pendingInitRunnable);
@@ -666,13 +654,11 @@ public class MainActivity extends AppCompatActivity {
                 });
             }
 
-            @Override
-            public void onLiveStatus(String liveText) {
+            @Override public void onLiveStatus(String liveText) {
                 ui.post(() -> txtLive.setText(liveText));
             }
 
-            @Override
-            public void onLiveQty(double net, double gross) {
+            @Override public void onLiveQty(double net, double gross) {
                 ui.post(() -> {
                     if (Double.compare(net, lastNet) != 0) {
                         if (txtQtyNet != null) txtQtyNet.setText(String.format("NET: %.3f", net));
@@ -686,8 +672,7 @@ public class MainActivity extends AppCompatActivity {
                 });
             }
 
-            @Override
-            public void onProductsUpdated(List<ProductUiItem> ignored, int idx0) {
+            @Override public void onProductsUpdated(List<ProductUiItem> ignored, int idx0) {
                 ui.post(() -> {
                     suppressProductSelection = true;
                     spnProducts.setSelection(idx0);
@@ -695,14 +680,12 @@ public class MainActivity extends AppCompatActivity {
                 });
             }
 
-            @Override
-            public void onLog(String msg) {
+            @Override public void onLog(String msg) {
                 log(msg);
                 if (msg.startsWith("Node actif")) ui.post(() -> txtActiveNode.setText(msg));
             }
 
-            @Override
-            public void onError(String ctx, Throwable e) {
+            @Override public void onError(String ctx, Throwable e) {
                 log("ERR[" + ctx + "] " + e.getMessage());
             }
         });
@@ -717,7 +700,6 @@ public class MainActivity extends AppCompatActivity {
         stopLiveTick();
         if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
 
-        // API-Face status refresh (Start is still blocked until user presses it)
         refreshApiStatus();
     }
 
@@ -732,9 +714,6 @@ public class MainActivity extends AppCompatActivity {
         btnB.setEnabled(true);
     }
 
-    // =========================
-    // Helpers
-    // =========================
     private int readProduct() {
         try {
             int v = Integer.parseInt(edtProduct.getText().toString());
