@@ -2,7 +2,6 @@
 package com.pa.lcr.lcp;
 
 import org.json.JSONObject;
-
 import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
@@ -15,6 +14,7 @@ import java.util.Date;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * API-Face HTTP Server
@@ -25,12 +25,12 @@ import java.util.concurrent.Executors;
  * - Calls: via ApiFacade (bridge vers DeliveryController)
  *
  * Endpoints:
- * GET  /v1/ping
- * GET  /v1/usb/scan
+ * GET /v1/ping
+ * GET /v1/usb/scan
  * POST /v1/usb/open-ping
  * POST /v1/lcp/connect
  * POST /v1/delivery/C
- * GET  /v1/delivery/job/{jobId}
+ * GET /v1/delivery/job/{jobId}
  *
  * + (NOUVEAU)
  * POST /v1/delivery/oneshot/start
@@ -46,8 +46,11 @@ public final class ApiServer {
     private ServerSocket serverSocket;
     private ExecutorService acceptor;
     private ExecutorService workers;
+
     private volatile boolean running = false;
-    private volatile int ridSeq = 0;
+
+    // ✅ Thread-safe RID sequence (pool workers)
+    private final AtomicInteger ridSeq = new AtomicInteger(0);
 
     // Un seul appel à la fois vers le registre (évite chevauchements côté LCP)
     private final Object lcpLock = new Object();
@@ -64,12 +67,17 @@ public final class ApiServer {
 
     public synchronized void start() throws Exception {
         if (running) return;
+
         InetAddress loopback = InetAddress.getByName("127.0.0.1");
         serverSocket = new ServerSocket(port, 50, loopback);
+
         workers = Executors.newFixedThreadPool(4);
         acceptor = Executors.newSingleThreadExecutor();
+
         running = true;
+
         t("[API] START http://127.0.0.1:" + port);
+
         acceptor.execute(() -> {
             while (running) {
                 try {
@@ -97,7 +105,11 @@ public final class ApiServer {
         int rid = nextRid();
         String remote = String.valueOf(s.getInetAddress());
         long t0 = System.currentTimeMillis();
+
         try {
+            // ✅ Evite worker bloqué sur clients mal formés
+            try { s.setSoTimeout(10_000); } catch (Exception ignored) {}
+
             // Double verrou: n'accepte que loopback
             if (s.getInetAddress() == null || !s.getInetAddress().isLoopbackAddress()) {
                 t(ts() + " [API][RID=" + rid + "] REJECT remote=" + remote);
@@ -107,6 +119,7 @@ public final class ApiServer {
 
             BufferedInputStream in = new BufferedInputStream(s.getInputStream());
             OutputStream out = s.getOutputStream();
+
             HttpReq req = readHttpRequest(in);
 
             t(ts() + " [API][RID=" + rid + "] REQ " + req.method + " " + req.path + " body=" + shrink(req.body));
@@ -174,8 +187,7 @@ public final class ApiServer {
             return facade.api_deliveryStartC(product, presetNet);
         }
 
-        // Delivery OneShot (numero_livraison + product + preset + compartment)
-        // POST /v1/delivery/oneshot/start
+        // Delivery OneShot
         if ("POST".equals(req.method) && "/v1/delivery/oneshot/start".equals(req.path)) {
             JSONObject body = req.jsonBody();
             String numero = body.optString("numero_livraison", body.optString("numeroLivraison", ""));
@@ -190,7 +202,6 @@ public final class ApiServer {
         }
 
         // Delivery controls
-        // POST /v1/delivery/job/continue  body: {"jobId":"..."}
         if ("POST".equals(req.method) && "/v1/delivery/job/continue".equals(req.path)) {
             JSONObject body = req.jsonBody();
             String jobId = body.optString("jobId", "").trim();
@@ -198,7 +209,6 @@ public final class ApiServer {
             return facade.api_deliveryContinue(jobId);
         }
 
-        // POST /v1/delivery/job/terminate  body: {"jobId":"..."}
         if ("POST".equals(req.method) && "/v1/delivery/job/terminate".equals(req.path)) {
             JSONObject body = req.jsonBody();
             String jobId = body.optString("jobId", "").trim();
@@ -227,14 +237,17 @@ public final class ApiServer {
 
     private void writeJson(OutputStream out, int status, JSONObject json) throws Exception {
         byte[] body = json.toString().getBytes(StandardCharsets.UTF_8);
+
         String statusText = (status == 200) ? "OK" :
                 (status == 403) ? "Forbidden" :
                         (status == 404) ? "Not Found" : "Internal Server Error";
+
         String headers =
                 "HTTP/1.1 " + status + " " + statusText + "\r\n" +
                         "Content-Type: application/json; charset=utf-8\r\n" +
                         "Content-Length: " + body.length + "\r\n" +
                         "Connection: close\r\n\r\n";
+
         out.write(headers.getBytes(StandardCharsets.UTF_8));
         out.write(body);
         out.flush();
@@ -268,6 +281,7 @@ public final class ApiServer {
         ByteArrayOutputStream headerOut = new ByteArrayOutputStream();
         int b;
         int state = 0;
+
         // read headers until CRLFCRLF
         while ((b = in.read()) != -1) {
             headerOut.write(b);
@@ -276,14 +290,22 @@ public final class ApiServer {
             else if (state == 2 && b == '\r') state = 3;
             else if (state == 3 && b == '\n') break;
             else state = 0;
+
             if (headerOut.size() > 16_384) break;
         }
+
         String header = headerOut.toString(StandardCharsets.UTF_8.name());
         String[] lines = header.split("\r\n");
         if (lines.length == 0) throw new Exception("bad request");
+
         String[] first = lines[0].split(" ");
         String method = (first.length > 0) ? first[0].trim() : "GET";
         String path = (first.length > 1) ? first[1].trim() : "/";
+
+        // ✅ Strip query string (baseline-safe)
+        int q = path.indexOf('?');
+        if (q >= 0) path = path.substring(0, q);
+
         int contentLength = 0;
         for (String line : lines) {
             String ll = line.toLowerCase(Locale.ROOT);
@@ -292,6 +314,7 @@ public final class ApiServer {
                 try { contentLength = Integer.parseInt(v); } catch (Exception ignored) {}
             }
         }
+
         byte[] body = new byte[0];
         if (contentLength > 0) {
             body = new byte[contentLength];
@@ -302,6 +325,7 @@ public final class ApiServer {
                 read += r;
             }
         }
+
         return new HttpReq(method, path, body);
     }
 
@@ -313,9 +337,7 @@ public final class ApiServer {
     }
 
     private int nextRid() {
-        int v = ridSeq + 1;
-        ridSeq = v;
-        return v;
+        return ridSeq.incrementAndGet();
     }
 
     private static String ts() {

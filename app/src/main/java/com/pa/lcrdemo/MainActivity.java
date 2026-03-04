@@ -4,9 +4,11 @@ package com.pa.lcrdemo;
 import androidx.appcompat.app.AppCompatActivity;
 
 import android.app.PendingIntent;
+import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.hardware.usb.*;
 import android.os.Bundle;
@@ -18,7 +20,6 @@ import android.widget.*;
 
 import com.google.android.material.tabs.TabLayout;
 import com.hoho.android.usbserial.driver.*;
-
 import com.pa.lcr.lcp.*;
 
 import java.util.ArrayList;
@@ -97,14 +98,39 @@ public class MainActivity extends AppCompatActivity {
     // ✅ Python parity: poll = 0.2s
     private static final int LIVE_POLL_MS = 200;
 
+    // ===== USB auto-attach notification (via broadcast interne) =====
+    private final BroadcastReceiver usbUiReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(android.content.Context context, Intent intent) {
+            if (intent == null) return;
+            String a = intent.getAction();
+            if (a == null) return;
+
+            if (UsbReceiver.ACTION_USB_READY.equals(a)) {
+                UsbSerialPort p = UsbSession.getPort();
+                if (p != null) onUsbPortReady(p);
+            } else if (UsbReceiver.ACTION_USB_DETACHED.equals(a)) {
+                onUsbDetached();
+            }
+        }
+    };
+
     private final Runnable liveTick = new Runnable() {
         @Override
         public void run() {
             if (controller == null) { liveTickRunning = false; return; }
-            if (controller.getState() != DeliveryState.RUNNING_FLOWING) {
+
+            // ✅ Poll en RUNNING_FLOWING ET RUNNING_PAUSED
+            DeliveryState st = controller.getState();
+            boolean shouldPoll =
+                    (st == DeliveryState.RUNNING_FLOWING) ||
+                    (st == DeliveryState.RUNNING_PAUSED);
+
+            if (!shouldPoll) {
                 liveTickRunning = false;
                 return;
             }
+
             controller.requestLiveSample();
             ui.postDelayed(this, LIVE_POLL_MS);
         }
@@ -113,6 +139,14 @@ public class MainActivity extends AppCompatActivity {
     private void startLiveTickIfNeeded() {
         if (controller == null) return;
         if (liveTickRunning) return;
+
+        DeliveryState st = controller.getState();
+        boolean shouldPoll =
+                (st == DeliveryState.RUNNING_FLOWING) ||
+                (st == DeliveryState.RUNNING_PAUSED);
+
+        if (!shouldPoll) return;
+
         liveTickRunning = true;
         ui.removeCallbacks(liveTick);
         ui.postDelayed(liveTick, LIVE_POLL_MS);
@@ -121,6 +155,28 @@ public class MainActivity extends AppCompatActivity {
     private void stopLiveTick() {
         liveTickRunning = false;
         ui.removeCallbacks(liveTick);
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+
+        IntentFilter f = new IntentFilter();
+        f.addAction(UsbReceiver.ACTION_USB_READY);
+        f.addAction(UsbReceiver.ACTION_USB_DETACHED);
+        registerReceiver(usbUiReceiver, f);
+
+        // ✅ R2: rattrapage si USB READY est arrivé pendant que l'activité était stoppée
+        UsbSerialPort p = UsbSession.getPort();
+        if (p != null && usbPort == null) {
+            onUsbPortReady(p);
+        }
+    }
+
+    @Override
+    protected void onStop() {
+        try { unregisterReceiver(usbUiReceiver); } catch (Exception ignored) {}
+        super.onStop();
     }
 
     @Override
@@ -161,38 +217,27 @@ public class MainActivity extends AppCompatActivity {
         btnScanUsb = findViewById(R.id.btnScanUsb);
         btnPingUsb = findViewById(R.id.btnPingUsb);
         spnUsbDevices = findViewById(R.id.spnUsbDevices);
-
         edtTo = findViewById(R.id.edtTo);
         edtFrom = findViewById(R.id.edtFrom);
-
         txtActiveNode = findViewById(R.id.txtActiveNode);
-
         btnConnect = findViewById(R.id.btnConnect);
-
         spnProducts = findViewById(R.id.spnProducts);
         edtProduct = findViewById(R.id.edtProduct);
         edtPreset = findViewById(R.id.edtPreset);
-
         btnA = findViewById(R.id.btnA);
         btnB = findViewById(R.id.btnB);
         btnC = findViewById(R.id.btnC);
-
         btnContinue = findViewById(R.id.btnContinue);
         btnFinish = findViewById(R.id.btnFinish);
-
         txtLive = findViewById(R.id.txtLive);
-
         liveQtyPanel = findViewById(R.id.liveQtyPanel);
         txtQtyNet = findViewById(R.id.txtQtyNet);
         txtQtyGross = findViewById(R.id.txtQtyGross);
-
         txtLog = findViewById(R.id.txtLog);
         logScroll = findViewById(R.id.logScroll);
-
         btnClearLog = findViewById(R.id.btnClearLog);
         btnCopyLog = findViewById(R.id.btnCopyLog);
         btnScrollDown = findViewById(R.id.btnScrollDown);
-
         cbTxRx = findViewById(R.id.cbTxRx);
         cbLogTs = findViewById(R.id.cbLogTs);
 
@@ -201,7 +246,6 @@ public class MainActivity extends AppCompatActivity {
         txtApiUrl = findViewById(R.id.txtApiUrl);
         txtApiTrace = findViewById(R.id.txtApiTrace);
         apiTraceScroll = findViewById(R.id.apiTraceScroll);
-
         btnApiStart = findViewById(R.id.btnApiStart);
         btnApiStop = findViewById(R.id.btnApiStop);
         btnApiClearTrace = findViewById(R.id.btnApiClearTrace);
@@ -257,6 +301,7 @@ public class MainActivity extends AppCompatActivity {
                 if (controller == null) return;
                 if (suppressProductSelection) return;
                 if (!userTouchedSpinner) return;
+
                 userTouchedSpinner = false;
                 ProductUiItem it = (ProductUiItem) spnProducts.getSelectedItem();
                 controller.selectProduct(it.product1);
@@ -328,7 +373,6 @@ public class MainActivity extends AppCompatActivity {
     // =========================
     private void setupTabs() {
         if (tabLayout == null) return;
-
         tabLayout.removeAllTabs();
         tabLayout.addTab(tabLayout.newTab().setText("MAIN"), true);
         tabLayout.addTab(tabLayout.newTab().setText("API-Face"), false);
@@ -336,9 +380,7 @@ public class MainActivity extends AppCompatActivity {
         showPage(0);
 
         tabLayout.addOnTabSelectedListener(new TabLayout.OnTabSelectedListener() {
-            @Override public void onTabSelected(TabLayout.Tab tab) {
-                showPage(tab.getPosition());
-            }
+            @Override public void onTabSelected(TabLayout.Tab tab) { showPage(tab.getPosition()); }
             @Override public void onTabUnselected(TabLayout.Tab tab) {}
             @Override public void onTabReselected(TabLayout.Tab tab) {}
         });
@@ -349,7 +391,6 @@ public class MainActivity extends AppCompatActivity {
         if (pageApiFace != null) pageApiFace.setVisibility(index == 1 ? View.VISIBLE : View.GONE);
 
         if (index == 1) {
-            // when opening API-Face tab, refresh status + trace
             refreshApiStatus();
             refreshApiTrace();
         }
@@ -359,7 +400,6 @@ public class MainActivity extends AppCompatActivity {
     // API Server control (no start if controller == null)
     // =========================
     private void startApiServer() {
-        // Strict requirement: no start if controller == null
         if (controller == null) {
             apiTraceAdd("[API] START REFUSED: controller==null (Connect LCP requis)");
             refreshApiStatus();
@@ -380,19 +420,15 @@ public class MainActivity extends AppCompatActivity {
             refreshApiTrace();
             return;
         }
-
         try {
             DeliveryController dc = (DeliveryController) controller;
             ApiFacade facade = new DeliveryApiFacadeImpl(dc);
-
             apiServer = new ApiServer(facade, apiTrace, API_PORT);
             apiServer.start();
-
             apiTraceAdd("[API] START OK on http://127.0.0.1:" + API_PORT);
             refreshApiStatus();
             refreshApiTrace();
             toast("API démarrée (127.0.0.1:" + API_PORT + ")");
-
         } catch (Exception e) {
             apiTraceAdd("[API] START FAIL: " + safeMsg(e));
             refreshApiStatus();
@@ -417,29 +453,23 @@ public class MainActivity extends AppCompatActivity {
 
     private void refreshApiStatus() {
         if (txtApiStatus == null) return;
-
         boolean running = (apiServer != null && apiServer.isRunning());
         String s = "Status: " + (running ? "RUNNING (loopback only)" : "STOPPED");
         txtApiStatus.setText(s);
-
-        // Enable/disable buttons for clarity
         if (btnApiStart != null) btnApiStart.setEnabled(!running);
         if (btnApiStop != null) btnApiStop.setEnabled(running);
     }
 
     private void refreshApiTrace() {
         if (txtApiTrace == null || apiTrace == null) return;
-
         List<String> lines = apiTrace.snapshot();
         if (lines.isEmpty()) {
             txtApiTrace.setText("(trace vide)");
             return;
         }
-
         StringBuilder sb = new StringBuilder(lines.size() * 64);
         for (String l : lines) sb.append(l).append('\n');
         txtApiTrace.setText(sb.toString());
-
         if (apiTraceScroll != null) {
             apiTraceScroll.post(() -> apiTraceScroll.fullScroll(View.FOCUS_DOWN));
         }
@@ -463,7 +493,6 @@ public class MainActivity extends AppCompatActivity {
                 " -H \"Content-Type: application/json\" \\\n" +
                 " -d '{\"product1to16\":1,\"presetNet\":50.0}'\n\n" +
                 "curl " + base + "/v1/delivery/job/<jobId>\n";
-
         ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
         cm.setPrimaryClip(ClipData.newPlainText("curl", examples));
         toast("Exemples curl copiés");
@@ -486,7 +515,6 @@ public class MainActivity extends AppCompatActivity {
         usbDevices.clear();
         usbDevices.addAll(usbManager.getDeviceList().values());
         log("Scan USB: " + usbDevices.size() + " périphérique(s)");
-
         List<String> labels = new ArrayList<>();
         for (UsbDevice d : usbDevices) {
             String m = d.getManufacturerName();
@@ -500,17 +528,23 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void openSelectedUsb() {
+        // ✅ R1: si un port est déjà ouvert (auto-attach ou manuel), ne pas ré-ouvrir
+        if (usbPort != null) {
+            log("USB déjà prêt (port déjà ouvert)");
+            return;
+        }
+
         int idx = spnUsbDevices.getSelectedItemPosition();
         if (idx < 0 || idx >= usbDevices.size()) {
             log("Aucun périphérique USB sélectionné");
             return;
         }
-
         UsbDevice dev = usbDevices.get(idx);
 
         if (!usbManager.hasPermission(dev)) {
             PendingIntent pi = PendingIntent.getBroadcast(
                     this, 0, new Intent(ACTION_USB_PERMISSION),
+                    // ✅ FIX: OR des flags
                     PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE
             );
             usbManager.requestPermission(dev, pi);
@@ -522,7 +556,6 @@ public class MainActivity extends AppCompatActivity {
             log("Driver USB série introuvable");
             return;
         }
-
         try {
             UsbDeviceConnection conn = usbManager.openDevice(dev);
             UsbSerialPort port = driver.getPorts().get(0);
@@ -536,13 +569,23 @@ public class MainActivity extends AppCompatActivity {
     }
 
     public void onUsbPortReady(UsbSerialPort port) {
-        if (usbPort != null) return;
+        if (port == null) return;
+
+        // ✅ R1: si on a déjà un port actif, éviter port "orphelin"
+        if (usbPort != null) {
+            try { port.close(); } catch (Exception ignore) {}
+            return;
+        }
+
         usbPort = port;
         log("USB prêt (receiver)");
     }
 
     public void onUsbDetached() {
         log("USB détaché");
+
+        // ✅ sécurité: clear session en mémoire aussi
+        try { UsbSession.clear(); } catch (Exception ignore) {}
 
         // Stop API if running (session is gone)
         stopApiServer("USB detached");
@@ -577,6 +620,7 @@ public class MainActivity extends AppCompatActivity {
 
         int to = parseInt(edtTo.getText().toString(), 250);
         int from = parseInt(edtFrom.getText().toString(), 255);
+
         edtTo.setText(String.valueOf(to));
         edtFrom.setText(String.valueOf(from));
 
@@ -586,6 +630,7 @@ public class MainActivity extends AppCompatActivity {
             controller.shutdown(false);
             controller = null;
         }
+
         link = null;
 
         if (pendingInitRunnable != null) ui.removeCallbacks(pendingInitRunnable);
@@ -603,7 +648,6 @@ public class MainActivity extends AppCompatActivity {
         controller.setLogTimestampsEnabled(ts);
 
         logTsEnabled = ts;
-
         if (cbTxRx != null) cbTxRx.setChecked(showTxRx);
         if (cbLogTs != null) cbLogTs.setChecked(ts);
 
@@ -613,8 +657,11 @@ public class MainActivity extends AppCompatActivity {
                 ui.post(() -> {
                     boolean stableOff = (controller != null) && controller.isFlowOffStable();
                     updateButtons(state, stableOff);
-                    if (state == DeliveryState.RUNNING_FLOWING) startLiveTickIfNeeded();
+
+                    // ✅ Start LIVE tick en FLOWING ou PAUSED
+                    if (state == DeliveryState.RUNNING_FLOWING || state == DeliveryState.RUNNING_PAUSED) startLiveTickIfNeeded();
                     else stopLiveTick();
+
                     if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
                 });
             }
@@ -666,6 +713,7 @@ public class MainActivity extends AppCompatActivity {
         ui.postDelayed(pendingInitRunnable, 300);
 
         log("Connect LCP appliqué");
+
         stopLiveTick();
         if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
 
@@ -676,6 +724,7 @@ public class MainActivity extends AppCompatActivity {
     private void updateButtons(DeliveryState state, boolean stableOff) {
         boolean connected = (state == DeliveryState.CONNECTED);
         boolean paused = (state == DeliveryState.RUNNING_PAUSED);
+
         btnA.setEnabled(connected);
         btnC.setEnabled(connected);
         btnContinue.setEnabled(paused);
@@ -714,13 +763,14 @@ public class MainActivity extends AppCompatActivity {
     private void log(String s) {
         ui.post(() -> {
             boolean isIoLine =
-                    s.startsWith("[IO ")
-                            || s.startsWith("TX:")
-                            || s.startsWith("RX:")
-                            || s.startsWith("↳");
+                    s.startsWith("[IO ") ||
+                    s.startsWith("TX:") ||
+                    s.startsWith("RX:") ||
+                    s.startsWith("↳");
 
             String line = (logTsEnabled && !isIoLine) ? ("[UI " + uiTs() + "] " + s) : s;
             logBuf.append(line).append('\n');
+
             txtLog.setText(logBuf.toString());
             logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
         });
