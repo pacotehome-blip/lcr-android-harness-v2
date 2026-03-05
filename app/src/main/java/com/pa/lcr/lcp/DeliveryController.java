@@ -997,6 +997,47 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
     }
 
+    /**
+     * API: Align / Recover (A)
+     *
+     * - Clear ticket pending (PRINT_LAST_TICKET loop)
+     * - Resync state (RUNNING_FLOWING/RUNNING_PAUSED/CONNECTED)
+     *
+     * Retourne un snapshot (0x28) + next=C/A.
+     */
+    public ApiResult api_deliveryAlignA() {
+        if (link == null || link.isClosed()) {
+            return ApiResult.fail("Align A: 0 - USB non pret.", "USB_NOT_READY");
+        }
+        try {
+            doAlignOrRecoverFull();
+
+            int[] ds = link.opDeliveryStatus();
+            int delCode = ds[1];
+            boolean ticketPending = (delCode & DC_TICKET_PENDING) != 0;
+            boolean flowActive = (delCode & DC_FLOW_ACTIVE) != 0;
+            boolean deliveryActive = (delCode & DC_DELIVERY_ACTIVE) != 0;
+
+            JSONObject data = new JSONObject();
+            safeJsonPut(data, "deliveryActive", deliveryActive ? 1 : 0);
+            safeJsonPut(data, "flowActive", flowActive ? 1 : 0);
+            safeJsonPut(data, "ticketPending", ticketPending ? 1 : 0);
+            safeJsonPut(data, "next", (!deliveryActive && !ticketPending) ? "C" : "A");
+            safeJsonPut(data, "state", state.name());
+            safeJsonPut(data, "live_status", (!deliveryActive && !ticketPending)
+                    ? "LIVE: CONNECTED - Ready"
+                    : (ticketPending ? "LIVE: CONNECTED - Ticket pending" : "LIVE: CONNECTED - Delivery/Flow active"));
+
+            return ApiResult.ok("Align A: 1 - Align/Recover executed", data);
+
+        } catch (Exception e) {
+            JSONObject d = new JSONObject();
+            safeJsonPut(d, "detail", (e.getMessage() != null) ? e.getMessage() : "");
+            return ApiResult.fail("Align A: 0 - Failed", "ALIGN_FAIL", d);
+        }
+    }
+
+
 
     // ------- ARMED helpers -------
     private JSONArray actionsContinueTerminate() {
