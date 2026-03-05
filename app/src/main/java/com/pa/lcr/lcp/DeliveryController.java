@@ -238,6 +238,13 @@ public final class DeliveryController implements DeliveryControllerPort {
         return s;
     }
 
+    private static String msToUtcIso(long ms) {
+        SimpleDateFormat df = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.ROOT);
+        df.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+        return df.format(new Date(ms));
+    }
+
+
     private static boolean isTxRxLine(String raw) {
         return raw.startsWith("TX:") ||
                 raw.startsWith("RX:") ||
@@ -1363,6 +1370,11 @@ public final class DeliveryController implements DeliveryControllerPort {
 
                 safeJsonPut(result, "start_ms", job.startMs);
                 safeJsonPut(result, "end_ms", job.endMs);
+
+                safeJsonPut(result, "start_utc", msToUtcIso(job.startMs));
+                safeJsonPut(result, "end_utc", msToUtcIso(job.endMs));
+                safeJsonPut(result, "duration_ms", (job.endMs - job.startMs));
+                safeJsonPut(result, "duration_s", (job.endMs - job.startMs) / 1000.0);
 
                 safeJsonPut(result, "gross_delta", gdU);
                 safeJsonPut(result, "net_delta", ndU);

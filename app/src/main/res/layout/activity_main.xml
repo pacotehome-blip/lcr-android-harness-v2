@@ -345,7 +345,14 @@
         android:visibility="gone">
 
         <!-- On inclut le layout de l’onglet API-Face -->
-        <include layout="@layout/fragment_api_face" />
+        <Button
+ android:id="@+id/btnDbBackup"
+ android:layout_width="match_parent"
+ android:layout_height="wrap_content"
+ android:text="Backup DB (Downloads)"
+ android:layout_margin="8dp" />
+
+ <include layout="@layout/fragment_api_face" />
     </LinearLayout>
 
 </LinearLayout>

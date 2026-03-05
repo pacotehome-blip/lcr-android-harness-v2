@@ -21,7 +21,12 @@ import android.widget.*;
 import com.google.android.material.tabs.TabLayout;
 import com.hoho.android.usbserial.driver.*;
 import com.pa.lcr.lcp.*;
+import com.pa.lcr.lcp.storage.DeliveryLogStore;
 
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
+import java.util.TimeZone;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -47,11 +52,13 @@ public class MainActivity extends AppCompatActivity {
     private Button btnApiStop;
     private Button btnApiClearTrace;
     private Button btnApiCopyCurl;
+ private Button btnDbBackup;
 
     // ===== API runtime =====
     private static final int API_PORT = 8765;
     private ApiTraceBuffer apiTrace;
     private ApiServer apiServer;
+ private DeliveryLogStore deliveryStore;
 
     // UI refs (pageMain)
     private Spinner spnUsbDevices;
@@ -193,6 +200,8 @@ public class MainActivity extends AppCompatActivity {
         setupTabs();
 
         apiTrace = new ApiTraceBuffer(500);
+ deliveryStore = new DeliveryLogStore(this);
+ deliveryStore.purgeOlderThanDaysAsync(7);
         refreshApiStatus();
 
         log("UI prête — Scan USB requis");
@@ -249,6 +258,7 @@ public class MainActivity extends AppCompatActivity {
         btnApiStop = findViewById(R.id.btnApiStop);
         btnApiClearTrace = findViewById(R.id.btnApiClearTrace);
         btnApiCopyCurl = findViewById(R.id.btnApiCopyCurl);
+ btnDbBackup = findViewById(R.id.btnDbBackup);
 
         if (txtApiUrl != null) {
             txtApiUrl.setText("http://127.0.0.1:" + API_PORT);
@@ -416,7 +426,7 @@ public class MainActivity extends AppCompatActivity {
         }
         try {
             DeliveryController dc = (DeliveryController) controller;
-            ApiFacade facade = new DeliveryApiFacadeImpl(dc);
+            ApiFacade facade = new DeliveryApiFacadeImpl(dc, this);
             apiServer = new ApiServer(facade, apiTrace, API_PORT);
             apiServer.start();
             apiTraceAdd("[API] START OK on http://127.0.0.1:" + API_PORT);
@@ -491,7 +501,25 @@ public class MainActivity extends AppCompatActivity {
         toast("Exemples curl copiés");
     }
 
-    private void toast(String s) {
+    private void doBackupDb() {
+ if (deliveryStore == null) {
+ toast("Backup DB impossible: store absent");
+ return;
+ }
+ String name = "lcr_delivery_" + utcStamp() + ".db";
+ deliveryStore.backupDbToDownloadsAsync(this, name, (ok, fileName, detail) -> {
+ if (ok) toast("Backup OK: " + fileName);
+ else toast("Backup FAIL: " + fileName + " " + detail);
+ });
+ }
+
+ private static String utcStamp() {
+ SimpleDateFormat df = new SimpleDateFormat("yyyy-MM-dd'T'HH-mm-ss'Z'", Locale.ROOT);
+ df.setTimeZone(TimeZone.getTimeZone("UTC"));
+ return df.format(new Date());
+ }
+
+private void toast(String s) {
         ui.post(() -> Toast.makeText(this, s, Toast.LENGTH_SHORT).show());
     }
 
