@@ -5,6 +5,7 @@ import android.content.Context;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteOpenHelper;
+import android.util.Log;
 
 /**
  * SQLite DB for delivery traceability (API + UI).
@@ -19,6 +20,8 @@ public class DeliveryDb extends SQLiteOpenHelper {
     // v2: add time columns to delivery_summary + index
     public static final int DB_VERSION = 2;
 
+    private static final String TAG = "DeliveryDb";
+
     public DeliveryDb(Context context) {
         super(context, DB_NAME, null, DB_VERSION);
     }
@@ -26,14 +29,30 @@ public class DeliveryDb extends SQLiteOpenHelper {
     @Override
     public void onConfigure(SQLiteDatabase db) {
         super.onConfigure(db);
+
+        // Enforce FK constraints (needed for cascade deletes)
         db.setForeignKeyConstraintsEnabled(true);
+
+        // ✅ IMPORTANT (Android 9 safe): set WAL here (before any transaction)
+        try {
+            db.execSQL("PRAGMA journal_mode=WAL;");
+        } catch (Exception e) {
+            // Best-effort fallback: if WAL fails on some devices, DB still works in default mode
+            Log.w(TAG, "WAL not enabled (fallback to default journal mode)", e);
+        }
+
+        // Optional (redundant with setForeignKeyConstraintsEnabled but harmless)
+        try {
+            db.execSQL("PRAGMA foreign_keys=ON;");
+        } catch (Exception e) {
+            Log.w(TAG, "PRAGMA foreign_keys=ON failed (FK may still be enabled)", e);
+        }
     }
 
     @Override
     public void onCreate(SQLiteDatabase db) {
-        db.execSQL("PRAGMA journal_mode=WAL;");
-        db.execSQL("PRAGMA foreign_keys=ON;");
-
+        // ❌ IMPORTANT: do NOT set PRAGMA journal_mode here (Android 9 crash)
+        // Tables
         db.execSQL(
                 "CREATE TABLE IF NOT EXISTS delivery_summary (" +
                         "serial_id TEXT NOT NULL," +
