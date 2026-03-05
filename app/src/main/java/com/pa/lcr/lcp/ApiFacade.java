@@ -17,6 +17,9 @@ public interface ApiFacade {
     // LCP (décision A/C basée sur 0x28)
     ApiResult api_connectLcp();
 
+    // ✅ NOUVEAU: Align / Recover (A)
+    ApiResult api_deliveryAlignA();
+
     // Delivery (C + job polling)
     ApiResult api_deliveryStartC(int product1to16, double presetNet);
     ApiResult api_deliveryJobGet(String jobId);
@@ -25,5 +28,4 @@ public interface ApiFacade {
     ApiResult api_deliveryOneShotStart(String numero_livraison, int product1to16, double presetNetL, String compartment);
     ApiResult api_deliveryContinue(String jobId);
     ApiResult api_deliveryTerminate(String jobId);
-
 }
