@@ -1,7 +1,8 @@
 
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools">
+    xmlns:tools="http://schemas.android.com/tools"
+    package="com.pa.lcrdemo">
 
     <uses-feature
         android:name="android.hardware.usb.host"
@@ -12,8 +13,7 @@
         tools:ignore="ProtectedPermissions" />
 
     <!-- ✅ Nécessaire pour ServerSocket (API locale 127.0.0.1:8765) -->
-    <uses-permission
-        android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:allowBackup="true"
@@ -21,30 +21,24 @@
         android:label="Filgo Registre"
         android:icon="@mipmap/logoenergie1"
         android:roundIcon="@mipmap/logoiconeernergie"
-
-        <!-- ✅ Thème Filgo ÉNERGIE -->
         android:theme="@style/Theme.LcrFilgoEnergie">
 
         <activity
             android:name="com.pa.lcrdemo.MainActivity"
             android:exported="true">
-
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-
         </activity>
 
         <receiver
             android:name="com.pa.lcrdemo.UsbReceiver"
             android:exported="true">
-
             <intent-filter>
                 <action android:name="com.pa.lcrdemo.USB_PERMISSION" />
                 <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
             </intent-filter>
-
         </receiver>
 
         <meta-data
