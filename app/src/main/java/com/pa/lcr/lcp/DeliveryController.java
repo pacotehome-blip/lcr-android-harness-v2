@@ -1,7 +1,9 @@
 
 package com.pa.lcr.lcp;
+
 import org.json.JSONArray;
 import org.json.JSONObject;
+
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.Date;
@@ -25,9 +27,15 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * - ticket_no DOIT etre le TicketNumber du registre (#23) et donc lu en U32 (4 bytes).
  * - sale_no DOIT etre le SaleNumber du registre (#22) et donc lu en U32 (4 bytes).
  *
- * FIX OPTION 1 (concordance compteur/UI vs API/Field Service):
+ * FIX (concordance compteur/UI vs API/Field Service):
  * - Quantité envoyée = compteurs affichés (#44/#45) scaled avec #39.
  * - AUCUNE baseline dépendante du timing de polling.
+ *
+ * AJOUT (API "UI-like"):
+ * - Pause WAIT_FLOW_ON qui se désactive dès que la progression démarre.
+ * - Pause FLOW_OFF_CONFIRMING/FLOW_OFF_CONFIRMED basée sur stagnation >= 10s (NO_FLOW_CONFIRM_MS).
+ * - Si FLOW_OFF_CONFIRMED et preset non atteint => demande CONTINUER ou TERMINER.
+ * - Throttling JobGet pour éviter le polling trop rapide (cache + next_poll_ms).
  */
 public final class DeliveryController implements DeliveryControllerPort {
 
@@ -49,8 +57,8 @@ public final class DeliveryController implements DeliveryControllerPort {
   // Champs LCR (API / reporting)
   private static final int FIELD_GROSS_TOTAL = 17;
   private static final int FIELD_NET_TOTAL = 18;
-  private static final int FIELD_SALE_NUMBER = 22;   // U32
-  private static final int FIELD_TICKET_NUMBER = 23; // U32
+  private static final int FIELD_SALE_NUMBER = 22;   // U32 (selon ta demande "go")
+  private static final int FIELD_TICKET_NUMBER = 23; // U32 (TicketNumber = index de livraison)
   private static final int FIELD_SERIAL_ID = 80;
 
   // Commands
@@ -63,7 +71,7 @@ public final class DeliveryController implements DeliveryControllerPort {
   private static final int DC_FLOW_ACTIVE = 0x0004;
   private static final int DC_DELIVERY_ACTIVE = 0x0008;
 
-  // OFF conservateur (détection stagnation)
+  // OFF conservateur (détection stagnation) - UI reference
   private static final long NO_FLOW_CONFIRM_MS = 10_000;
 
   // START retry
@@ -78,9 +86,13 @@ public final class DeliveryController implements DeliveryControllerPort {
   private static final long LIVE_MAX_MS = 2000;
   private static final long LIVE_LOG_THROTTLE_MS = 1000;
 
-  // CONTINUER: fenêtre de grâce 30s
+  // CONTINUER: fenêtre de grâce 30s (UI reference)
   private static final long CONTINUE_GRACE_MS = 30_000;
   private static final long CONTINUE_DEBOUNCE_MS = 1500;
+
+  // API JobGet throttling (évite polling plus rapide que le registre)
+  private static final long API_JOB_MIN_POLL_MS = 900;      // recommandé: ~0.9s
+  private static final long API_JOB_BACKOFF_ON_FAIL_MS = 1200;
 
   private final LcpLink link;
   private final ExecutorService io = Executors.newSingleThreadExecutor();
@@ -150,18 +162,17 @@ public final class DeliveryController implements DeliveryControllerPort {
     // Identifiants registre
     volatile String saleNo;   // #22 U32 string
     volatile String ticketNo; // #23 U32 string
-    volatile String serialId; // #80
+    volatile String serialId; // #80 (string/ASCII chez toi)
 
     // Timing
     volatile long startMs = 0L;
     volatile long endMs = 0L;
 
-    // Counters baseline
-    // NOTE: baselineCaptured sert à signaler "début confirmé" côté API.
+    // Counters baseline (Option 1: baseline = 0, mais on garde flags)
     volatile boolean sawDeliveryActiveOnce = false;
     volatile boolean baselineCaptured = false;
-    volatile int grossStartRaw = Integer.MIN_VALUE;
-    volatile int netStartRaw = Integer.MIN_VALUE;
+    volatile int grossStartRaw = 0;
+    volatile int netStartRaw = 0;
 
     // End
     volatile int grossEndRaw = 0;
@@ -170,6 +181,18 @@ public final class DeliveryController implements DeliveryControllerPort {
     // Totaux
     volatile int grossTotalRaw = 0;
     volatile int netTotalRaw = 0;
+
+    // --- API pause tracking (job-level) ---
+    volatile int lastGrossSeen = Integer.MIN_VALUE;
+    volatile int lastNetSeen = Integer.MIN_VALUE;
+    volatile long lastCountsChangeMs = 0L;
+    volatile boolean sawFlowOnOnceJob = false;
+    volatile long continueGraceUntilMs = 0L;
+
+    // --- API JobGet throttling ---
+    volatile long nextAllowedReadMs = 0L;
+    volatile JSONObject lastOkData = null;
+    volatile String lastOkMsg = null;
 
     ApiJob(String id) {
       this.id = id;
@@ -342,8 +365,6 @@ public final class DeliveryController implements DeliveryControllerPort {
         FullStatus fs = readFullStatus("status/full");
         emitLog(String.format("[STATUS] dev=0x%02X prn=0x%02X ds=0x%04X dc=0x%04X",
             fs.devStatus, fs.prnStatus, fs.delStatus, fs.delCode));
-
-        // B=Status doit aussi rafraichir NET et GROSS (valeurs affichees par le registre)
         ensureDigits();
         double scale = Math.pow(10, cachedDigits);
         int gRaw = beI32(link.opGetField(FIELD_GROSS_COUNT));
@@ -376,11 +397,9 @@ public final class DeliveryController implements DeliveryControllerPort {
       if (isStopped()) return;
       if (state == DeliveryState.PRESTART || state == DeliveryState.ENDING) return;
       emitLog("[C] New delivery requested");
-
       final long deadline = System.currentTimeMillis() + START_RETRY_WINDOW_MS;
       try {
         FullStatus fs = retryUntilDeadline(deadline, "C/full-precheck", () -> readFullStatus("C/full"));
-
         if (fs.deliveryActive) {
           setState(DeliveryState.CONNECTED);
           if (listener != null) {
@@ -399,9 +418,7 @@ public final class DeliveryController implements DeliveryControllerPort {
           if (listener != null) listener.onLiveStatus("LIVE: CONNECTED - Flow active (use A)");
           return;
         }
-
         doStartNewDeliveryWithRetry(deadline, product1to16, presetNet);
-
       } catch (Exception e) {
         handleIoFailure("startDelivery(C-intent)", e);
       }
@@ -410,7 +427,6 @@ public final class DeliveryController implements DeliveryControllerPort {
 
   private void doStartNewDeliveryWithRetry(long deadlineMs, int product1to16, double presetNet) throws Exception {
     if (isStopped()) return;
-
     setState(DeliveryState.PRESTART);
 
     flowOffStable = false;
@@ -419,11 +435,9 @@ public final class DeliveryController implements DeliveryControllerPort {
     lastCountsChangeMs = 0L;
     lastGrossRaw = -1;
     lastNetRaw = -1;
-
     liveBackoffMs = LIVE_BASE_MS;
     liveNextAllowedMs = 0L;
     liveLastSkipLogMs = 0L;
-
     continueGraceUntilMs = 0L;
 
     retryUntilDeadline(deadlineMs, "SET_FIELD#0", () -> {
@@ -432,20 +446,11 @@ public final class DeliveryController implements DeliveryControllerPort {
       return null;
     });
 
-    retryUntilDeadline(deadlineMs, "GET_FIELD#39", () -> {
-      ensureDigits();
-      return null;
-    });
+    retryUntilDeadline(deadlineMs, "GET_FIELD#39", () -> { ensureDigits(); return null; });
 
-    retryUntilDeadline(deadlineMs, "SET_FIELD#6", () -> {
-      writePresetNet_WithCacheOrFallback(presetNet);
-      return null;
-    });
+    retryUntilDeadline(deadlineMs, "SET_FIELD#6", () -> { writePresetNet_WithCacheOrFallback(presetNet); return null; });
 
-    retryUntilDeadline(deadlineMs, "RUN(0x00)", () -> {
-      link.opIssueCommand(CMD_RUN);
-      return null;
-    });
+    retryUntilDeadline(deadlineMs, "RUN(0x00)", () -> { link.opIssueCommand(CMD_RUN); return null; });
 
     setState(DeliveryState.RUNNING_PAUSED);
     if (listener != null) listener.onLiveStatus("LIVE: RUNNING_PAUSED (Flow OFF)");
@@ -460,7 +465,6 @@ public final class DeliveryController implements DeliveryControllerPort {
       if (isStopped()) return;
       try {
         if (state != DeliveryState.RUNNING_PAUSED) return;
-
         long now = System.currentTimeMillis();
         if ((now - lastContinueClickMs) < CONTINUE_DEBOUNCE_MS) return;
         lastContinueClickMs = now;
@@ -468,11 +472,8 @@ public final class DeliveryController implements DeliveryControllerPort {
 
         link.opIssueCommand(CMD_RUN);
         continueGraceUntilMs = now + CONTINUE_GRACE_MS;
-
         setState(DeliveryState.RUNNING_FLOWING);
-        if (listener != null) {
-          listener.onLiveStatus("LIVE: RUNNING_FLOWING (Flow OFF - waiting progression)");
-        }
+        if (listener != null) listener.onLiveStatus("LIVE: RUNNING_FLOWING (Flow OFF - waiting progression)");
       } catch (Exception e) {
         continueGraceUntilMs = 0L;
         handleIoFailure("resumeIfPaused", e);
@@ -487,7 +488,6 @@ public final class DeliveryController implements DeliveryControllerPort {
       try {
         if (state != DeliveryState.RUNNING_PAUSED) return;
         if (!flowOffStable && !sawFlowOnOnce) return;
-
         setState(DeliveryState.ENDING);
         link.opIssueCommand(CMD_END);
 
@@ -505,7 +505,6 @@ public final class DeliveryController implements DeliveryControllerPort {
 
         setState(DeliveryState.CONNECTED);
         if (listener != null) listener.onLiveStatus("LIVE: CONNECTED - Ready");
-
       } catch (Exception e) {
         handleIoFailure("endDelivery", e);
       }
@@ -513,13 +512,12 @@ public final class DeliveryController implements DeliveryControllerPort {
   }
 
   // =========================
-  // LIVE sample
+  // LIVE sample (UI logic unchanged)
   // =========================
   @Override
   public void requestLiveSample() {
     io.execute(() -> {
       if (isStopped()) return;
-
       long now = System.currentTimeMillis();
       if (now < liveNextAllowedMs) return;
       if (!liveInFlight.compareAndSet(false, true)) return;
@@ -557,10 +555,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
 
         try { ensureDigits(); }
-        catch (Exception e) {
-          liveSoftSkip("ensureDigits", e);
-          return;
-        }
+        catch (Exception e) { liveSoftSkip("ensureDigits", e); return; }
 
         double scale = Math.pow(10, cachedDigits);
         int g, n;
@@ -865,12 +860,6 @@ public final class DeliveryController implements DeliveryControllerPort {
         (b[3] & 0xFF);
   }
 
-  private long u32delta(int endRaw, int startRaw) {
-    long e = endRaw & 0xFFFFFFFFL;
-    long s = startRaw & 0xFFFFFFFFL;
-    return (e - s) & 0xFFFFFFFFL;
-  }
-
   private String decodeAzString(byte[] b) {
     if (b == null || b.length == 0) return "";
     String s = new String(b, StandardCharsets.UTF_8);
@@ -986,13 +975,11 @@ public final class DeliveryController implements DeliveryControllerPort {
       safeJsonPut(data, "flowActive", flowActive0 ? 1 : 0);
       safeJsonPut(data, "ticketPending", ticketPending0 ? 1 : 0);
 
-      // Not ready for C -> instruct A
       if (deliveryActive0 || ticketPending0 || flowActive0) {
         safeJsonPut(data, "next", "A");
         return ApiResult.ok("Delivery StartC: 1 - Not ready for C (use A)", data);
       }
 
-      // Launch C sequence (async)
       startDelivery(product1to16, presetNet);
       safeJsonPut(data, "next", "POLL");
       return ApiResult.ok("Delivery StartC: 1 - Start requested", data);
@@ -1010,7 +997,6 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
     try {
       doAlignOrRecoverFull();
-
       int[] ds = link.opDeliveryStatus();
       int delCode = ds[1];
       boolean ticketPending = (delCode & DC_TICKET_PENDING) != 0;
@@ -1026,7 +1012,6 @@ public final class DeliveryController implements DeliveryControllerPort {
       safeJsonPut(data, "live_status", (!deliveryActive && !ticketPending)
           ? "LIVE: CONNECTED - Ready"
           : (ticketPending ? "LIVE: CONNECTED - Ticket pending" : "LIVE: CONNECTED - Delivery/Flow active"));
-
       return ApiResult.ok("Align A: 1 - Align/Recover executed", data);
 
     } catch (Exception e) {
@@ -1053,19 +1038,16 @@ public final class DeliveryController implements DeliveryControllerPort {
       return ApiResult.fail("Delivery OneShot: 0 - USB not ready.", "USB_NOT_READY");
     }
     try {
-      // 0x28
       int[] ds0 = link.opDeliveryStatus();
       int delCode0 = ds0[1];
       boolean ticketPending0 = (delCode0 & DC_TICKET_PENDING) != 0;
       boolean deliveryActive0 = (delCode0 & DC_DELIVERY_ACTIVE) != 0;
 
-      // FIX #23/#22
       String ticketNo = readTicketNo23();
       String saleNo = readSaleNo22();
       String serialId = decodeAzString(link.opGetField(FIELD_SERIAL_ID));
       String deliveryUid = (numero_livraison == null ? "" : numero_livraison) + "-" + ticketNo;
 
-      // If already active
       if (deliveryActive0) {
         JSONObject data = new JSONObject();
         safeJsonPut(data, "numero_livraison", numero_livraison);
@@ -1082,7 +1064,6 @@ public final class DeliveryController implements DeliveryControllerPort {
         return ApiResult.ok("Delivery OneShot: 1 - Delivery already active", data);
       }
 
-      // Auto-A if ticket pending
       boolean autoAAttempted = false;
       boolean autoASuccess = false;
       if (ticketPending0) {
@@ -1113,7 +1094,6 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
       }
 
-      // ARM (product + preset confirm)
       ensureDigits();
       double scale = Math.pow(10, cachedDigits);
 
@@ -1123,8 +1103,8 @@ public final class DeliveryController implements DeliveryControllerPort {
 
       long presetRawU = beI32(link.opGetField(FIELD_PRESET_NET)) & 0xFFFFFFFFL;
       double presetApplied = presetRawU / scale;
-      double tol = 1.0 / scale;
 
+      double tol = 1.0 / scale;
       if (Math.abs(presetApplied - presetNetL) > (tol * 1.5)) {
         JSONObject d = new JSONObject();
         safeJsonPut(d, "preset_requested", presetNetL);
@@ -1144,7 +1124,7 @@ public final class DeliveryController implements DeliveryControllerPort {
       job.compartment = compartment;
       job.productNumber = product1to16;
       job.presetNetL_requested = presetNetL;
-      job.presetNetL_applied = presetApplied;
+      job.presetNetL_applied = presetApplied;  // UI reference: compare vs applied
       job.presetRawU32 = presetRawU;
       job.decimals = cachedDigits;
       job.startMs = System.currentTimeMillis();
@@ -1153,7 +1133,6 @@ public final class DeliveryController implements DeliveryControllerPort {
         apiJobs.put(jobId, job);
       }
 
-      // NO state side effects: remain CONNECTED
       setState(DeliveryState.CONNECTED);
 
       JSONObject data = new JSONObject();
@@ -1191,10 +1170,13 @@ public final class DeliveryController implements DeliveryControllerPort {
     try {
       link.opIssueCommand(CMD_RUN);
       long now = System.currentTimeMillis();
+
+      // UI reference: grace window after Continue
       continueGraceUntilMs = now + CONTINUE_GRACE_MS;
+      job.continueGraceUntilMs = now + CONTINUE_GRACE_MS;
+
       setState(DeliveryState.RUNNING_FLOWING);
 
-      // refresh ticket/sale (best-effort)
       try { job.ticketNo = readTicketNo23(); } catch (Exception ignored) {}
       try { job.saleNo = readSaleNo22(); } catch (Exception ignored) {}
 
@@ -1224,7 +1206,6 @@ public final class DeliveryController implements DeliveryControllerPort {
     if (job == null) return ApiResult.fail("Terminate: 0 - Job unknown", "JOB_NOT_FOUND");
     try { link.opIssueCommand(CMD_END); } catch (Exception ignore) {}
 
-    // refresh ticket/sale (best-effort)
     try { job.ticketNo = readTicketNo23(); } catch (Exception ignored) {}
     try { job.saleNo = readSaleNo22(); } catch (Exception ignored) {}
 
@@ -1240,14 +1221,28 @@ public final class DeliveryController implements DeliveryControllerPort {
   }
 
   /**
-   * Job polling:
-   * - If deliveryActive=0 and never active => PENDING + armed=1 + state CONNECTED + live_status ARMED.
-   * - DONE only after sawDeliveryActiveOnce then deliveryActive=0.
+   * Job polling (API):
+   * - Throttle: return cached if polled too fast.
+   * - Pause WAIT_FLOW_ON until counts actually move.
+   * - Flow OFF confirmation: stagnation >= 10s after flow seen once (UI reference).
+   * - If flow off confirmed and preset not reached => prompt Continue/Terminate.
+   * - Quantities match UI/counter: #44/#45 scaled.
    */
   public ApiResult api_deliveryJobGet(String jobId) {
     ApiJob job;
     synchronized (apiJobs) { job = apiJobs.get(jobId); }
     if (job == null) return ApiResult.fail("Job: 0 - Unknown", "JOB_NOT_FOUND");
+
+    final long now = System.currentTimeMillis();
+
+    // --- Throttle (avoid too fast polling) ---
+    if (job.lastOkData != null && now < job.nextAllowedReadMs) {
+      JSONObject data = new JSONObject(job.lastOkData.toString());
+      safeJsonPut(data, "stale", true);
+      safeJsonPut(data, "stale_reason", "RATE_LIMIT");
+      safeJsonPut(data, "next_poll_ms", Math.max(0L, job.nextAllowedReadMs - now));
+      return ApiResult.ok(job.lastOkMsg != null ? job.lastOkMsg : "Job: 1 - RUNNING", data);
+    }
 
     // ensure ticket/sale always present (best-effort)
     if (job.ticketNo == null || job.ticketNo.trim().isEmpty()) {
@@ -1269,23 +1264,68 @@ public final class DeliveryController implements DeliveryControllerPort {
 
       ensureDigits();
       double scale = Math.pow(10, cachedDigits);
+      double tol = 1.0 / scale; // UI-like tolerance based on decimals
 
       int g = beI32(link.opGetField(FIELD_GROSS_COUNT));
       int n = beI32(link.opGetField(FIELD_NET_COUNT));
 
-      // ============================================================
-      // ✅ FIX OPTION 1: ne plus dépendre du timing de polling
-      // Baseline fixe = 0 pour matcher EXACTEMENT l'affichage compteur/UI.
-      // ============================================================
+      // ✅ Quantités = affichage compteur/UI
+      double netL = (n & 0xFFFFFFFFL) / scale;
+      double grossL = (g & 0xFFFFFFFFL) / scale;
+
+      // Baseline stable (Option 1): just marks "we started seeing active"
       if (deliveryActive && !job.baselineCaptured) {
         job.baselineCaptured = true;
         job.grossStartRaw = 0;
         job.netStartRaw = 0;
       }
 
-      // delivered_net doit être identique au compteur (NET_COUNT #45)
-      Double deliveredNet = deliveryActive ? ((n & 0xFFFFFFFFL) / scale) : null;
+      // ---- Job-level progression detection (UI-like) ----
+      int d = 0;
+      if (job.lastGrossSeen != Integer.MIN_VALUE && job.lastNetSeen != Integer.MIN_VALUE) {
+        d = Math.abs(g - job.lastGrossSeen) + Math.abs(n - job.lastNetSeen);
+      }
 
+      // Update last seen always (so next delta is meaningful)
+      job.lastGrossSeen = g;
+      job.lastNetSeen = n;
+
+      if (d > 0) {
+        job.sawFlowOnOnceJob = true;
+        job.lastCountsChangeMs = now;
+      } else {
+        if (job.lastCountsChangeMs == 0L) job.lastCountsChangeMs = now;
+      }
+
+      long offAge = job.sawFlowOnOnceJob ? Math.max(0L, now - job.lastCountsChangeMs) : 0L;
+      boolean inGrace = (job.continueGraceUntilMs > now);
+      boolean flowOffConfirmed = job.sawFlowOnOnceJob && !inGrace && (offAge >= NO_FLOW_CONFIRM_MS);
+
+      // ---- Pause state (API-only) ----
+      boolean pauseActive = false;
+      String pauseReason = null;
+      String needsAction = null;
+
+      if (deliveryActive) {
+        if (!job.sawFlowOnOnceJob) {
+          // We are active but haven't seen progression yet => WAIT_FLOW_ON
+          pauseActive = true;
+          pauseReason = "WAIT_FLOW_ON";
+        } else if (d == 0) {
+          if (inGrace) {
+            pauseActive = true;
+            pauseReason = "WAIT_PROGRESS_GRACE";
+          } else if (flowOffConfirmed) {
+            pauseActive = true;
+            pauseReason = "FLOW_OFF_CONFIRMED";
+          } else {
+            pauseActive = true;
+            pauseReason = "FLOW_OFF_CONFIRMING";
+          }
+        }
+      }
+
+      // ---- Build response ----
       JSONObject data = new JSONObject();
       safeJsonPut(data, "jobId", jobId);
       safeJsonPut(data, "numero_livraison", job.numeroLivraison);
@@ -1297,16 +1337,27 @@ public final class DeliveryController implements DeliveryControllerPort {
       safeJsonPut(data, "flowActive", flowActive ? 1 : 0);
       safeJsonPut(data, "ticketPending", ticketPending ? 1 : 0);
 
-      // valeurs affichées par le registre
-      safeJsonPut(data, "net", (n & 0xFFFFFFFFL) / scale);
-      safeJsonPut(data, "gross", (g & 0xFFFFFFFFL) / scale);
-
+      safeJsonPut(data, "net", netL);
+      safeJsonPut(data, "gross", grossL);
       safeJsonPut(data, "decimals", cachedDigits);
+
       safeJsonPut(data, "preset_requested", job.presetNetL_requested);
       safeJsonPut(data, "preset_applied", job.presetNetL_applied);
-      safeJsonPut(data, "delivered_net", (deliveredNet == null) ? JSONObject.NULL : deliveredNet);
 
-      // PENDING/ARMED
+      // delivered_net shown like UI/counter, but keep null when not active yet (ARMED)
+      safeJsonPut(data, "delivered_net", deliveryActive ? netL : JSONObject.NULL);
+
+      // Pause diagnostics
+      safeJsonPut(data, "pause_active", pauseActive ? 1 : 0);
+      safeJsonPut(data, "pause_reason", (pauseReason == null) ? JSONObject.NULL : pauseReason);
+      safeJsonPut(data, "flow_off_age_ms", offAge);
+      safeJsonPut(data, "flow_off_confirmed", flowOffConfirmed ? 1 : 0);
+      safeJsonPut(data, "continue_grace_ms_left", Math.max(0L, job.continueGraceUntilMs - now));
+
+      // Suggest poll cadence
+      safeJsonPut(data, "next_poll_ms", API_JOB_MIN_POLL_MS);
+
+      // PENDING/ARMED (same as before)
       if (!deliveryActive && !job.sawDeliveryActiveOnce) {
         job.state = "PENDING";
         safeJsonPut(data, "state_job", "PENDING");
@@ -1314,18 +1365,23 @@ public final class DeliveryController implements DeliveryControllerPort {
         safeJsonPut(data, "state", DeliveryState.CONNECTED.name());
         safeJsonPut(data, "live_status", liveStatusArmed());
         safeJsonPut(data, "available_actions", actionsContinueTerminate());
+
+        // cache it
+        job.lastOkData = new JSONObject(data.toString());
+        job.lastOkMsg = "Job: 1 - PENDING";
+        job.nextAllowedReadMs = now + API_JOB_MIN_POLL_MS;
+
         return ApiResult.ok("Job: 1 - PENDING", data);
       }
 
-      // DONE
+      // DONE (same logic as before, but delta litres = counts finaux)
       if (!deliveryActive && job.sawDeliveryActiveOnce) {
-        // re-read ticket/sale at DONE (best-effort, authoritative)
         try { job.ticketNo = readTicketNo23(); } catch (Exception ignored) {}
         try { job.saleNo = readSaleNo22(); } catch (Exception ignored) {}
 
         job.state = "DONE";
         job.done = true;
-        job.endMs = System.currentTimeMillis();
+        job.endMs = now;
 
         job.grossEndRaw = g;
         job.netEndRaw = n;
@@ -1337,7 +1393,6 @@ public final class DeliveryController implements DeliveryControllerPort {
 
         JSONObject result = new JSONObject();
 
-        // ✅ OPTION 1: delta litres == compteurs finaux (#44/#45)
         long gdU = (job.grossEndRaw & 0xFFFFFFFFL);
         long ndU = (job.netEndRaw & 0xFFFFFFFFL);
 
@@ -1380,6 +1435,11 @@ public final class DeliveryController implements DeliveryControllerPort {
         safeJsonPut(data, "available_actions", new JSONArray());
         safeJsonPut(data, "result", result);
 
+        // cache it
+        job.lastOkData = new JSONObject(data.toString());
+        job.lastOkMsg = "Job: 1 - DONE";
+        job.nextAllowedReadMs = now + API_JOB_MIN_POLL_MS;
+
         return ApiResult.ok("Job: 1 - DONE", data);
       }
 
@@ -1388,25 +1448,52 @@ public final class DeliveryController implements DeliveryControllerPort {
       safeJsonPut(data, "state_job", "RUNNING");
       safeJsonPut(data, "armed", 0);
       safeJsonPut(data, "state", state.name());
+
+      // Decide action prompt when FLOW OFF confirmed and preset not reached (UI reference)
+      boolean presetReached = (netL >= (job.presetNetL_applied - tol));
+      if (flowOffConfirmed && !presetReached) {
+        needsAction = "PROMPT_CONTINUE_OR_TERMINATE";
+        safeJsonPut(data, "needs_action", needsAction);
+      }
+
       JSONArray a = new JSONArray();
       a.put("CONTINUER");
       a.put("TERMINER");
       safeJsonPut(data, "available_actions", a);
-      safeJsonPut(data, "live_status", (state == DeliveryState.RUNNING_PAUSED)
-          ? "LIVE: RUNNING_PAUSED (FLOW OFF confirmed)"
-          : "LIVE: RUNNING_FLOWING");
+
+      // live_status aligned with UI semantics
+      if (pauseActive && "WAIT_FLOW_ON".equals(pauseReason)) {
+        safeJsonPut(data, "live_status", "LIVE: RUNNING_FLOWING (Flow OFF - waiting progression)");
+      } else if (pauseActive && "FLOW_OFF_CONFIRMING".equals(pauseReason)) {
+        safeJsonPut(data, "live_status", "LIVE: RUNNING_FLOWING (FLOW OFF - confirming...)");
+      } else if (pauseActive && "FLOW_OFF_CONFIRMED".equals(pauseReason)) {
+        safeJsonPut(data, "live_status", presetReached
+            ? "LIVE: RUNNING_PAUSED (FLOW OFF confirmed)"
+            : "LIVE: RUNNING_PAUSED (FLOW OFF confirmed - preset not reached)");
+      } else {
+        safeJsonPut(data, "live_status", "LIVE: RUNNING_FLOWING");
+      }
+
+      // cache + throttle window
+      job.lastOkData = new JSONObject(data.toString());
+      job.lastOkMsg = "Job: 1 - RUNNING";
+      job.nextAllowedReadMs = now + API_JOB_MIN_POLL_MS;
 
       return ApiResult.ok("Job: 1 - RUNNING", data);
 
     } catch (Exception e) {
+      // On failure, return cached if available (prevents spam & reduces lag)
+      if (job.lastOkData != null) {
+        JSONObject data = new JSONObject(job.lastOkData.toString());
+        safeJsonPut(data, "stale", true);
+        safeJsonPut(data, "stale_reason", "READ_FAIL");
+        safeJsonPut(data, "next_poll_ms", API_JOB_BACKOFF_ON_FAIL_MS);
+        job.nextAllowedReadMs = now + API_JOB_BACKOFF_ON_FAIL_MS;
+        return ApiResult.ok(job.lastOkMsg != null ? job.lastOkMsg : "Job: 1 - RUNNING", data);
+      }
       JSONObject d = new JSONObject();
       safeJsonPut(d, "detail", (e.getMessage() != null) ? e.getMessage() : "");
       return ApiResult.fail("Job: 0 - Read error", "JOB_READ_FAIL", d);
     }
   }
-
-  // -------------------------------------------------------------------
-  // NOTE:
-  // Le reste des méthodes utilitaires et API/IO est inchangé.
-  // -------------------------------------------------------------------
 }
