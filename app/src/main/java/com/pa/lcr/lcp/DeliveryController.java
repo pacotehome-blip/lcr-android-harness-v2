@@ -336,20 +336,30 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     @Override
-    public void requestStatus() {
-        io.execute(() -> {
-            if (isStopped()) return;
-            try {
-                FullStatus fs = readFullStatus("status/full");
-                emitLog(String.format("[STATUS] dev=0x%02X prn=0x%02X ds=0x%04X dc=0x%04X",
-                        fs.devStatus, fs.prnStatus, fs.delStatus, fs.delCode));
-            } catch (Exception e) {
-                handleIoFailure("status", e);
-            }
-        });
-    }
+ public void requestStatus() {
+  io.execute(() -> {
+   if (isStopped()) return;
+   try {
+    FullStatus fs = readFullStatus("status/full");
+    emitLog(String.format("[STATUS] dev=0x%02X prn=0x%02X ds=0x%04X dc=0x%04X",
+      fs.devStatus, fs.prnStatus, fs.delStatus, fs.delCode));
 
-    @Override
+    // B=Status doit aussi rafraichir NET et GROSS (valeurs affichees par le registre)
+    ensureDigits();
+    double scale = Math.pow(10, cachedDigits);
+    int gRaw = beI32(link.opGetField(FIELD_GROSS_COUNT));
+    int nRaw = beI32(link.opGetField(FIELD_NET_COUNT));
+    double net = (nRaw & 0xFFFFFFFFL) / scale;
+    double gross = (gRaw & 0xFFFFFFFFL) / scale;
+    if (listener != null) listener.onLiveQty(net, gross);
+
+   } catch (Exception e) {
+    handleIoFailure("status", e);
+   }
+  });
+ }
+
+ @Override
     public void alignOrRecover() {
         io.execute(() -> {
             if (isStopped()) return;
