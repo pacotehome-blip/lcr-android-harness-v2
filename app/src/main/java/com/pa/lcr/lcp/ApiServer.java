@@ -2,6 +2,7 @@
 package com.pa.lcr.lcp;
 
 import org.json.JSONObject;
+
 import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
@@ -73,14 +74,17 @@ public final class ApiServer {
     workers = Executors.newFixedThreadPool(4);
     acceptor = Executors.newSingleThreadExecutor();
     running = true;
-    t("[API] START http://127.0.0.1:" + port);
+
+    // ✅ Format API exact
+    t("[API " + ts() + "] START http://127.0.0.1:" + port);
+
     acceptor.execute(() -> {
       while (running) {
         try {
           Socket s = serverSocket.accept();
           workers.execute(() -> handleClient(s));
         } catch (Exception e) {
-          if (running) t("[API] accept error: " + e.getMessage());
+          if (running) t("[API " + ts() + "] accept error: " + safeMsg(e));
         }
       }
     });
@@ -91,7 +95,9 @@ public final class ApiServer {
     try { if (serverSocket != null) serverSocket.close(); } catch (Exception ignored) {}
     try { if (acceptor != null) acceptor.shutdownNow(); } catch (Exception ignored) {}
     try { if (workers != null) workers.shutdownNow(); } catch (Exception ignored) {}
-    t("[API] STOP");
+
+    // ✅ Format API exact
+    t("[API " + ts() + "] STOP");
   }
 
   // =========================
@@ -104,18 +110,24 @@ public final class ApiServer {
     try {
       // ✅ Evite worker bloqué sur clients mal formés
       try { s.setSoTimeout(10_000); } catch (Exception ignored) {}
+
       // Double verrou: n'accepte que loopback
       if (s.getInetAddress() == null || !s.getInetAddress().isLoopbackAddress()) {
-        t(ts() + " [API][RID=" + rid + "] REJECT remote=" + remote);
+        t("[API " + ts() + "][RID=" + rid + "] REJECT remote=" + remote);
         writeJson(s, 403, ApiResult.fail("API: 0 - Forbidden (loopback only)", "NOT_LOOPBACK").toJson());
         return;
       }
+
       BufferedInputStream in = new BufferedInputStream(s.getInputStream());
       OutputStream out = s.getOutputStream();
       HttpReq req = readHttpRequest(in);
-      t(ts() + " [API][RID=" + rid + "] REQ " + req.method + " " + req.path + " body=" + shrink(req.body));
+
+      // ✅ Format API exact
+      t("[API " + ts() + "][RID=" + rid + "] REQ " + req.method + " " + req.path + " body=" + shrink(req.body));
+
       JSONObject resp;
       int status = 200;
+
       try {
         // Sérialise toute interaction LCP (sécurité/robustesse)
         synchronized (lcpLock) {
@@ -127,11 +139,16 @@ public final class ApiServer {
         try { d.put("detail", safeMsg(e)); } catch (Exception ignored) {}
         resp = ApiResult.fail("API: 0 - Internal error", "INTERNAL", d).toJson();
       }
+
       writeJson(out, status, resp);
+
       long dt = System.currentTimeMillis() - t0;
-      t(ts() + " [API][RID=" + rid + "] RESP " + status + " dt=" + dt + "ms json=" + shrink(resp.toString()));
+
+      // ✅ Format API exact
+      t("[API " + ts() + "][RID=" + rid + "] RESP " + status + " dt=" + dt + "ms json=" + shrink(resp.toString()));
+
     } catch (Exception e) {
-      t(ts() + " [API][RID=" + rid + "] ERROR " + safeMsg(e) + " remote=" + remote);
+      t("[API " + ts() + "][RID=" + rid + "] ERROR " + safeMsg(e) + " remote=" + remote);
       try {
         writeJson(s, 500, ApiResult.fail("API: 0 - Internal error", "INTERNAL").toJson());
       } catch (Exception ignored) {}
@@ -149,22 +166,25 @@ public final class ApiServer {
       d.put("port", port);
       return ApiResult.ok("PING: 1 - OK", d);
     }
+
     // USB
     if ("GET".equals(req.method) && "/v1/usb/scan".equals(req.path)) {
       return facade.api_scanUsb();
     }
     if ("POST".equals(req.method) && "/v1/usb/open-ping".equals(req.path)) {
-      // Body optionnel, pas requis dans ton architecture (MainActivity fait l'open)
       return facade.api_openPingUsb();
     }
+
     // LCP connect (A/C basé sur 0x28)
     if ("POST".equals(req.method) && "/v1/lcp/connect".equals(req.path)) {
       return facade.api_connectLcp();
     }
+
     // DB dump (JSON -> Downloads)
     if ("POST".equals(req.method) && "/v1/db/dump".equals(req.path)) {
       return facade.api_dbDump();
     }
+
     // Delivery C -> job
     if ("POST".equals(req.method) && "/v1/delivery/C".equals(req.path)) {
       JSONObject body = req.jsonBody();
@@ -172,6 +192,7 @@ public final class ApiServer {
       double presetNet = body.optDouble("presetNet", 0.0);
       return facade.api_deliveryStartC(product, presetNet);
     }
+
     // Delivery OneShot
     if ("POST".equals(req.method) && "/v1/delivery/oneshot/start".equals(req.path)) {
       JSONObject body = req.jsonBody();
@@ -185,6 +206,7 @@ public final class ApiServer {
       } catch (Exception ignored) {}
       return facade.api_deliveryOneShotStart(numero, product, preset, compartment);
     }
+
     // Delivery controls
     if ("POST".equals(req.method) && "/v1/delivery/job/continue".equals(req.path)) {
       JSONObject body = req.jsonBody();
@@ -198,12 +220,14 @@ public final class ApiServer {
       if (jobId.isEmpty()) return ApiResult.fail("Terminate: 0 - Job invalide", "JOB_ID_EMPTY");
       return facade.api_deliveryTerminate(jobId);
     }
+
     // Job
     if ("GET".equals(req.method) && req.path.startsWith("/v1/delivery/job/")) {
       String jobId = req.path.substring("/v1/delivery/job/".length()).trim();
       if (jobId.isEmpty()) return ApiResult.fail("Job: 0 - Invalide", "JOB_ID_EMPTY");
       return facade.api_deliveryJobGet(jobId);
     }
+
     JSONObject d = new JSONObject();
     try { d.put("path", req.path).put("method", req.method); } catch (Exception ignored) {}
     return ApiResult.fail("API: 0 - Not found", "NOT_FOUND", d);
@@ -220,12 +244,12 @@ public final class ApiServer {
     byte[] body = json.toString().getBytes(StandardCharsets.UTF_8);
     String statusText = (status == 200) ? "OK" :
         (status == 403) ? "Forbidden" :
-        (status == 404) ? "Not Found" : "Internal Server Error";
+            (status == 404) ? "Not Found" : "Internal Server Error";
     String headers =
         "HTTP/1.1 " + status + " " + statusText + "\r\n" +
-        "Content-Type: application/json; charset=utf-8\r\n" +
-        "Content-Length: " + body.length + "\r\n" +
-        "Connection: close\r\n\r\n";
+            "Content-Type: application/json; charset=utf-8\r\n" +
+            "Content-Length: " + body.length + "\r\n" +
+            "Connection: close\r\n\r\n";
     out.write(headers.getBytes(StandardCharsets.UTF_8));
     out.write(body);
     out.flush();
@@ -248,7 +272,14 @@ public final class ApiServer {
     JSONObject jsonBody() {
       try {
         if (body.length == 0) return new JSONObject();
-        return new JSONObject(new String(body, StandardCharsets.UTF_8));
+        String s = new String(body, StandardCharsets.UTF_8);
+
+        // ✅ Strip UTF-8 BOM (U+FEFF) si présent
+        if (!s.isEmpty() && s.charAt(0) == '\uFEFF') {
+          s = s.substring(1);
+        }
+
+        return new JSONObject(s);
       } catch (Exception e) {
         return new JSONObject();
       }
@@ -259,6 +290,7 @@ public final class ApiServer {
     ByteArrayOutputStream headerOut = new ByteArrayOutputStream();
     int b;
     int state = 0;
+
     // read headers until CRLFCRLF
     while ((b = in.read()) != -1) {
       headerOut.write(b);
@@ -269,12 +301,15 @@ public final class ApiServer {
       else state = 0;
       if (headerOut.size() > 16_384) break;
     }
+
     String header = headerOut.toString(StandardCharsets.UTF_8.name());
     String[] lines = header.split("\r\n");
     if (lines.length == 0) throw new Exception("bad request");
+
     String[] first = lines[0].split(" ");
     String method = (first.length > 0) ? first[0].trim() : "GET";
     String path = (first.length > 1) ? first[1].trim() : "/";
+
     // ✅ Strip query string (baseline-safe)
     int q = path.indexOf('?');
     if (q >= 0) path = path.substring(0, q);
@@ -287,6 +322,7 @@ public final class ApiServer {
         try { contentLength = Integer.parseInt(v); } catch (Exception ignored) {}
       }
     }
+
     byte[] body = new byte[0];
     if (contentLength > 0) {
       body = new byte[contentLength];
@@ -297,6 +333,7 @@ public final class ApiServer {
         read += r;
       }
     }
+
     return new HttpReq(method, path, body);
   }
 

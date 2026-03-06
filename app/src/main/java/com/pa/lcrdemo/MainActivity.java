@@ -12,10 +12,10 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.hardware.usb.*;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.net.Uri;
 import android.view.MotionEvent;
 import android.view.View;
 import android.widget.*;
@@ -26,11 +26,8 @@ import com.pa.lcr.lcp.*;
 import com.pa.lcr.lcp.storage.DeliveryLogStore;
 
 import java.text.SimpleDateFormat;
-import java.util.Date;
-import java.util.Locale;
-import java.util.TimeZone;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -54,7 +51,6 @@ public class MainActivity extends AppCompatActivity {
 
   // ===== API runtime =====
   private static final int API_PORT = 8765;
-  private ApiTraceBuffer apiTrace; // buffer court optionnel
   private ApiServer apiServer;
   private DeliveryLogStore deliveryStore;
 
@@ -75,6 +71,7 @@ public class MainActivity extends AppCompatActivity {
   private View liveQtyPanel;
   private TextView txtQtyNet;
   private TextView txtQtyGross;
+
   private TextView txtLog;
   private ScrollView logScroll;
   private Button btnClearLog;
@@ -82,6 +79,7 @@ public class MainActivity extends AppCompatActivity {
   private Button btnScrollDown;
   private CheckBox cbTxRx;
   private CheckBox cbLogTs;
+
   private boolean logTsEnabled = false;
 
   private DeliveryControllerPort controller;
@@ -90,7 +88,6 @@ public class MainActivity extends AppCompatActivity {
   private boolean suppressProductSelection = false;
   private boolean userTouchedSpinner = false;
 
-  // Log principal
   private final StringBuilder logBuf = new StringBuilder(32768);
   private final Handler ui = new Handler(Looper.getMainLooper());
 
@@ -105,6 +102,52 @@ public class MainActivity extends AppCompatActivity {
   // Backup (SAF folder picker)
   private static final int REQ_PICK_BACKUP_DIR = 9102;
   private static final String PREF_BACKUP_DIR_URI = "backup_dir_uri";
+
+  // =========================================================
+  // ✅ API log filtering for polling: first + last only
+  // =========================================================
+  private final Map<Integer, String> apiRidToPath = new ConcurrentHashMap<>();
+  private final Set<Integer> apiFirstJobRid = Collections.newSetFromMap(new ConcurrentHashMap<>());
+  private final Set<String> apiJobSeen = Collections.newSetFromMap(new ConcurrentHashMap<>());
+
+  private static Integer parseRid(String line) {
+    try {
+      int i = line.indexOf("[RID=");
+      if (i < 0) return null;
+      int j = line.indexOf("]", i);
+      if (j < 0) return null;
+      String n = line.substring(i + 5, j).trim();
+      return Integer.parseInt(n);
+    } catch (Exception e) {
+      return null;
+    }
+  }
+
+  private static String parseReqPath(String line) {
+    // Format attendu: [API ts][RID=n] REQ <METHOD> <PATH> body=...
+    try {
+      int k = line.indexOf(" REQ ");
+      if (k < 0) return null;
+      String tail = line.substring(k + 5);
+      String[] parts = tail.split(" ");
+      if (parts.length < 2) return null;
+      return parts[1].trim();
+    } catch (Exception e) {
+      return null;
+    }
+  }
+
+  private static String extractJobIdFromPath(String path) {
+    if (path == null) return null;
+    String pfx = "/v1/delivery/job/";
+    if (!path.startsWith(pfx)) return null;
+    return path.substring(pfx.length()).trim();
+  }
+
+  private static boolean isJobDoneRespLine(String line) {
+    // Basé sur le JSON renvoyé dans resp log (msg: "Job: 1 - DONE")
+    return line != null && line.contains("\"msg\":\"Job: 1 - DONE\"");
+  }
 
   // ===== USB auto-attach notification (via broadcast interne) =====
   private final BroadcastReceiver usbUiReceiver = new BroadcastReceiver() {
@@ -126,12 +169,10 @@ public class MainActivity extends AppCompatActivity {
     @Override
     public void run() {
       if (controller == null) { liveTickRunning = false; return; }
-      // ✅ Poll en RUNNING_FLOWING ET RUNNING_PAUSED
+      // ✅ Poll en RUNNING_FLOWING ET RUNNING_PAUSED (pas seulement FLOWING)
       DeliveryState st = controller.getState();
       boolean shouldPoll =
-          (st == DeliveryState.RUNNING_FLOWING)
-              || (st == DeliveryState.RUNNING_PAUSED);
-
+          (st == DeliveryState.RUNNING_FLOWING) || (st == DeliveryState.RUNNING_PAUSED);
       if (!shouldPoll) {
         liveTickRunning = false;
         return;
@@ -146,8 +187,7 @@ public class MainActivity extends AppCompatActivity {
     if (liveTickRunning) return;
     DeliveryState st = controller.getState();
     boolean shouldPoll =
-        (st == DeliveryState.RUNNING_FLOWING)
-            || (st == DeliveryState.RUNNING_PAUSED);
+        (st == DeliveryState.RUNNING_FLOWING) || (st == DeliveryState.RUNNING_PAUSED);
     if (!shouldPoll) return;
     liveTickRunning = true;
     ui.removeCallbacks(liveTick);
@@ -186,7 +226,8 @@ public class MainActivity extends AppCompatActivity {
     f.addAction(UsbReceiver.ACTION_USB_READY);
     f.addAction(UsbReceiver.ACTION_USB_DETACHED);
     registerReceiver(usbUiReceiver, f);
-    // ✅ Rattrapage si USB READY est arrivé pendant l'activité stoppée
+
+    // ✅ rattrapage si USB READY est arrivé pendant que l'activité était stoppée
     UsbSerialPort p = UsbSession.getPort();
     if (p != null && usbPort == null) {
       onUsbPortReady(p);
@@ -203,14 +244,13 @@ public class MainActivity extends AppCompatActivity {
   protected void onCreate(Bundle savedInstanceState) {
     super.onCreate(savedInstanceState);
     setContentView(R.layout.activity_main);
+
     usbManager = (UsbManager) getSystemService(USB_SERVICE);
 
     bindUi();
     wireUi();
     initUiDefaults();
     setupTabs();
-
-    apiTrace = new ApiTraceBuffer(500);
 
     deliveryStore = new DeliveryLogStore(this);
     deliveryStore.purgeOlderThanDaysAsync(7);
@@ -281,6 +321,7 @@ public class MainActivity extends AppCompatActivity {
     edtFrom.setText("255");
     txtActiveNode.setText("Node actif : —");
     txtLive.setText("LIVE: (en attente)");
+
     if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
     if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
     if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
@@ -320,6 +361,7 @@ public class MainActivity extends AppCompatActivity {
         if (suppressProductSelection) return;
         if (!userTouchedSpinner) return;
         userTouchedSpinner = false;
+
         ProductUiItem it = (ProductUiItem) spnProducts.getSelectedItem();
         controller.selectProduct(it.product1);
         edtProduct.setText(String.valueOf(it.product1));
@@ -397,9 +439,7 @@ public class MainActivity extends AppCompatActivity {
   private void showPage(int index) {
     if (pageMain != null) pageMain.setVisibility(index == 0 ? View.VISIBLE : View.GONE);
     if (pageApiFace != null) pageApiFace.setVisibility(index == 1 ? View.VISIBLE : View.GONE);
-    if (index == 1) {
-      refreshApiStatus();
-    }
+    if (index == 1) refreshApiStatus();
   }
 
   // =========================
@@ -407,32 +447,34 @@ public class MainActivity extends AppCompatActivity {
   // =========================
   private void startApiServer() {
     if (controller == null) {
-      apiTraceAddToMainLog("[API] START REFUSED: controller==null (Connect LCP requis)");
+      log("[API " + uiTs() + "] START REFUSED: controller==null (Connect LCP requis)");
       refreshApiStatus();
       toast("Start API refusé: Connect LCP requis");
       return;
     }
     if (!(controller instanceof DeliveryController)) {
-      apiTraceAddToMainLog("[API] START REFUSED: controller type incompatible");
+      log("[API " + uiTs() + "] START REFUSED: controller type incompatible");
       refreshApiStatus();
       toast("Start API refusé: controller incompatible");
       return;
     }
     if (apiServer != null && apiServer.isRunning()) {
-      apiTraceAddToMainLog("[API] déjà RUNNING");
+      log("[API " + uiTs() + "] déjà RUNNING");
       refreshApiStatus();
       return;
     }
     try {
       DeliveryController dc = (DeliveryController) controller;
       ApiFacade facade = new DeliveryApiFacadeImpl(dc, this);
-      apiServer = new ApiServer(facade, this::apiTraceAddToMainLog, API_PORT);
+
+      // ✅ ApiServer pousse déjà des lignes au format [API ts][RID=..] REQ/RESP
+      apiServer = new ApiServer(facade, this::onApiLine, API_PORT);
       apiServer.start();
-      apiTraceAddToMainLog("[API] START OK on http://127.0.0.1:" + API_PORT);
+
       refreshApiStatus();
       toast("API démarrée (127.0.0.1:" + API_PORT + ")");
     } catch (Exception e) {
-      apiTraceAddToMainLog("[API] START FAIL: " + safeMsg(e));
+      log("[API " + uiTs() + "] START FAIL: " + safeMsg(e));
       refreshApiStatus();
       toast("API start error: " + safeMsg(e));
     }
@@ -442,7 +484,8 @@ public class MainActivity extends AppCompatActivity {
     try {
       if (apiServer != null && apiServer.isRunning()) {
         apiServer.stop();
-        apiTraceAddToMainLog("[API] STOP (" + reason + ")");
+        // stop() log déjà via ApiServer; on ajoute une note locale
+        log("[API " + uiTs() + "] STOP (" + reason + ")");
       }
     } catch (Exception ignored) {
     } finally {
@@ -459,58 +502,59 @@ public class MainActivity extends AppCompatActivity {
     if (btnApiStop != null) btnApiStop.setEnabled(running);
   }
 
-  // =========================
-  // API trace (REQ/RESP) -> log principal
-  // - Format actuel conserve
-  // - Timestamps API option 1
-  // - Throttle REQ/RESP (batch flush 250ms)
-  // =========================
-  private static final int API_TRACE_THROTTLE_MS = 250;
-  private final Object apiThrottleLock = new Object();
-  private final StringBuilder apiThrottleBuf = new StringBuilder(8192);
-  private boolean apiFlushScheduled = false;
-
-  private final Runnable apiFlushRunnable = new Runnable() {
-    @Override public void run() {
-      final String batch;
-      synchronized (apiThrottleLock) {
-        batch = apiThrottleBuf.toString();
-        apiThrottleBuf.setLength(0);
-        apiFlushScheduled = false;
-      }
-      if (batch == null || batch.isEmpty()) return;
-      ui.post(() -> {
-        logBuf.append(batch);
-        txtLog.setText(logBuf.toString());
-        logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
-      });
-    }
-  };
-
-  private void apiTraceAddToMainLog(String line) {
+  // ✅ Sink API : filtre le polling /delivery/job/* => première + DONE seulement
+  private void onApiLine(String line) {
     if (line == null) return;
-    if (apiTrace != null) apiTrace.add(line);
 
-    // Timestamps API (option 1): "[API] X" -> "[API <ts>] X"
-    if (logTsEnabled && line.startsWith("[API]")) {
-      String tail = line.substring("[API]".length()).trim();
-      line = "[API " + uiTs() + "] " + tail;
-    }
+    Integer rid = parseRid(line);
+    boolean isReq = line.contains("] REQ ");
+    boolean isResp = line.contains("] RESP ");
 
-    // Throttle uniquement pour REQ/RESP (lag vient du API polling)
-    boolean isReqResp = line.contains(" [API][RID=") && (line.contains("] REQ ") || line.contains("] RESP "));
-    if (isReqResp) {
-      synchronized (apiThrottleLock) {
-        apiThrottleBuf.append(line).append('\n');
-        if (!apiFlushScheduled) {
-          apiFlushScheduled = true;
-          ui.postDelayed(apiFlushRunnable, API_TRACE_THROTTLE_MS);
-        }
+    if (rid != null && isReq) {
+      String path = parseReqPath(line);
+      if (path != null) apiRidToPath.put(rid, path);
+
+      String jobId = extractJobIdFromPath(path);
+      if (jobId != null) {
+        // si déjà vu, on drop les polls suivants
+        if (apiJobSeen.contains(jobId)) return;
+
+        // première fois -> on laisse passer REQ et on marque le rid pour laisser passer le RESP associé
+        apiJobSeen.add(jobId);
+        apiFirstJobRid.add(rid);
+        log(line);
+        return;
       }
+
+      // Non job poll -> log normal
+      log(line);
       return;
     }
 
-    // Non REQ/RESP: log immédiat
+    if (rid != null && isResp) {
+      String path = apiRidToPath.remove(rid);
+      String jobId = extractJobIdFromPath(path);
+
+      if (jobId != null) {
+        // 1) on laisse passer le RESP associé au tout premier REQ
+        if (apiFirstJobRid.remove(rid)) {
+          log(line);
+          return;
+        }
+
+        // 2) on laisse passer uniquement DONE ensuite
+        if (isJobDoneRespLine(line)) {
+          log(line);
+        }
+        return;
+      }
+
+      // Non job poll -> log normal
+      log(line);
+      return;
+    }
+
+    // Autres lignes API (START/STOP/ERROR sans RID): log normal
     log(line);
   }
 
@@ -522,11 +566,13 @@ public class MainActivity extends AppCompatActivity {
       toast("Backup DB impossible: store absent");
       return;
     }
+
     Uri savedDir = getSavedBackupDirUri();
     if (savedDir != null) {
       backupDbToChosenDir(savedDir);
       return;
     }
+
     if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
       String name = "lcr_delivery_" + utcStamp() + ".db";
       deliveryStore.backupDbToDownloadsAsync(this, name, (ok, fileName, detail) -> {
@@ -569,7 +615,6 @@ public class MainActivity extends AppCompatActivity {
       }
 
       String name = "lcr_delivery_" + utcStamp() + ".db";
-
       DocumentFile dir = DocumentFile.fromTreeUri(this, dirUri);
       if (dir == null || !dir.canWrite()) {
         toast("Backup FAIL: dossier non accessible en écriture");
@@ -690,6 +735,7 @@ public class MainActivity extends AppCompatActivity {
     log("USB détaché");
     try { UsbSession.clear(); } catch (Exception ignore) {}
     stopApiServer("USB detached");
+
     if (controller != null) {
       controller.shutdown(true);
       controller = null;
@@ -697,6 +743,7 @@ public class MainActivity extends AppCompatActivity {
     link = null;
     stopLiveTick();
     usbPort = null;
+
     txtActiveNode.setText("Node actif : —");
     txtLive.setText("LIVE: (en attente)");
     if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
@@ -712,17 +759,21 @@ public class MainActivity extends AppCompatActivity {
       log("ERR: USB non connecté");
       return;
     }
+
     stopApiServer("Connect LCP (new session)");
+
     int to = parseInt(edtTo.getText().toString(), 250);
     int from = parseInt(edtFrom.getText().toString(), 255);
     edtTo.setText(String.valueOf(to));
     edtFrom.setText(String.valueOf(from));
+
     txtActiveNode.setText("Node actif : —");
 
     if (controller != null) {
       controller.shutdown(false);
       controller = null;
     }
+
     link = null;
     if (pendingInitRunnable != null) ui.removeCallbacks(pendingInitRunnable);
 
@@ -748,8 +799,10 @@ public class MainActivity extends AppCompatActivity {
         ui.post(() -> {
           boolean stableOff = (controller != null) && controller.isFlowOffStable();
           updateButtons(state, stableOff);
+
           if (state == DeliveryState.RUNNING_FLOWING || state == DeliveryState.RUNNING_PAUSED) startLiveTickIfNeeded();
           else stopLiveTick();
+
           if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
         });
       }
@@ -790,13 +843,13 @@ public class MainActivity extends AppCompatActivity {
       }
     });
 
-    pendingInitRunnable = () -> {
-      if (controller != null) controller.initialize();
-    };
+    pendingInitRunnable = () -> { if (controller != null) controller.initialize(); };
     ui.postDelayed(pendingInitRunnable, 300);
+
     log("Connect LCP appliqué");
     stopLiveTick();
     if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
+
     refreshApiStatus();
   }
 
@@ -842,10 +895,8 @@ public class MainActivity extends AppCompatActivity {
               || s.startsWith("TX:")
               || s.startsWith("RX:")
               || s.startsWith("↳")
-
-              // API: ne pas préfixer avec [UI ...] (format inchangé)
-              || s.startsWith("[API")
-              || s.contains(" [API][RID=");
+              // ✅ API au format exact -> ne pas préfixer avec [UI ...]
+              || s.startsWith("[API ");
 
       String line = (logTsEnabled && !isIoLine) ? ("[UI " + uiTs() + "] " + s) : s;
       logBuf.append(line).append('\n');
