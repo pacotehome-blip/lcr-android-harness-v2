@@ -15,7 +15,9 @@
     <application
         android:allowBackup="true"
         android:supportsRtl="true"
-        android:label="LCR Harness V2"
+        android:label="Filgo Registre"
+        android:icon="@mipmap/logo-energie1"
+        android:roundIcon="@mipmap/logo-icone-ernergie"
         android:theme="@style/Theme.Material3.DayNight.NoActionBar">
 
         <activity
