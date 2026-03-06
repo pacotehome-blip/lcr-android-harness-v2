@@ -5,30 +5,6 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical">
-
-    <!-- ===================== TABS (en haut) ===================== -->
-    <com.google.android.material.tabs.TabLayout
-        android:id="@+id/tabLayout"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        app:tabMode="fixed"
-        app:tabGravity="fill" />
-
-    <!-- ===================== PAGE 1: UI EXISTANTE ===================== -->
-    <LinearLayout
-        android:id="@+id/pageMain"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:orientation="vertical">
-
-        <!-- ======== ICI: ton ancien activity_main.xml, inchangé ======== -->
-        <LinearLayout
-            android:id="@+id/root"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:orientation="vertical"
-            android:padding="6dp">
-
         <!-- ===================== HEADER (Filgo + Livraison) ===================== -->
         <LinearLayout
                 android:id="@+id/headerFilgo"
@@ -57,6 +33,30 @@
                 android:textSize="20sp" />
 
         </LinearLayout>
+
+    <!-- ===================== TABS (en haut) ===================== -->
+    <com.google.android.material.tabs.TabLayout
+        android:id="@+id/tabLayout"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        app:tabMode="fixed"
+        app:tabGravity="fill" />
+
+    <!-- ===================== PAGE 1: UI EXISTANTE ===================== -->
+    <LinearLayout
+        android:id="@+id/pageMain"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical">
+
+        <!-- ======== ICI: ton ancien activity_main.xml, inchangé ======== -->
+        <LinearLayout
+            android:id="@+id/root"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:padding="6dp">
+
 
             <!-- ===================== USB ===================== -->
             <LinearLayout
