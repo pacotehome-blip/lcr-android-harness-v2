@@ -565,12 +565,96 @@ public class MainActivity extends AppCompatActivity {
  }
 
  private void backupDbToChosenDir(Uri dirUri) {
-  try {
-   java.io.File dbFile = getDatabasePath(com.pa.lcr.lcp.storage.DeliveryDb.DB_NAME);
-   if (dbFile == null || !dbFile.exists()) {
-    toast("Backup FAIL: DB introuvable (" + com.pa.lcr.lcp.storage.DeliveryDb.DB_NAME + ")");
-    return;
-   }
+    try {
+      java.io.File dbFile = getDatabasePath(com.pa.lcr.lcp.storage.DeliveryDb.DB_NAME);
+      if (dbFile == null || !dbFile.exists()) {
+        toast("Backup FAIL: DB introuvable (" + com.pa.lcr.lcp.storage.DeliveryDb.DB_NAME + ")");
+        return;
+      }
+
+      // IMPORTANT (SQLite journal/WAL):
+      // Sur Android, le fichier principal .db peut ne pas contenir les dernieres donnees si un journal est present.
+      // Pour un backup fiable (support/terrain), on copie aussi les fichiers sidecar si existants:
+      //   - .db-journal (mode rollback)
+      //   - .db-wal / .db-shm (mode WAL)
+      // Ainsi, l'analyse sur PC retrouvera les donnees correctement.
+
+      DocumentFile dir = DocumentFile.fromTreeUri(this, dirUri);
+      if (dir == null || !dir.canWrite()) {
+        toast("Backup FAIL: dossier non accessible en ecriture");
+        return;
+      }
+
+      String baseName = "lcr_delivery_" + utcStamp() + ".db";
+
+      // Copie fichier principal
+      boolean okMain = copyLocalFileToDocumentFile(dbFile, dir, baseName, "application/x-sqlite3");
+      if (!okMain) return;
+
+      // Copie sidecars (si presents)
+      java.io.File journal = new java.io.File(dbFile.getAbsolutePath() + "-journal");
+      java.io.File wal     = new java.io.File(dbFile.getAbsolutePath() + "-wal");
+      java.io.File shm     = new java.io.File(dbFile.getAbsolutePath() + "-shm");
+
+      // On copie si le fichier existe ET a une taille > 0 (utile, evite un -wal vide)
+      if (journal.exists() && journal.length() > 0) {
+        copyLocalFileToDocumentFile(journal, dir, baseName + "-journal", "application/octet-stream");
+      }
+      if (shm.exists() && shm.length() > 0) {
+        copyLocalFileToDocumentFile(shm, dir, baseName + "-shm", "application/octet-stream");
+      }
+      if (wal.exists() && wal.length() > 0) {
+        copyLocalFileToDocumentFile(wal, dir, baseName + "-wal", "application/octet-stream");
+      }
+
+      toast("Backup OK (dossier choisi): " + baseName);
+
+    } catch (Exception e) {
+      toast("Backup FAIL: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
+    }
+  }
+
+  /**
+   * Copie un fichier local (sandbox app) vers un fichier SAF (DocumentFile) dans un dossier cible.
+   * Ecrase un fichier existant de meme nom.
+   * Retourne true si succes, false si echec (avec toast explicite).
+   */
+  private boolean copyLocalFileToDocumentFile(java.io.File srcFile, DocumentFile dir, String outName, String mime) {
+    try {
+      if (srcFile == null || !srcFile.exists()) return false;
+      if (dir == null || !dir.canWrite()) return false;
+
+      // Supprimer si deja present
+      DocumentFile existing = dir.findFile(outName);
+      if (existing != null) {
+        try { existing.delete(); } catch (Exception ignore) {}
+      }
+
+      DocumentFile target = dir.createFile(mime, outName);
+      if (target == null || target.getUri() == null) {
+        toast("Backup FAIL: creation fichier impossible: " + outName);
+        return false;
+      }
+
+      Uri outUri = target.getUri();
+      try (java.io.InputStream in = new java.io.FileInputStream(srcFile);
+           java.io.OutputStream out = getContentResolver().openOutputStream(outUri)) {
+        if (out == null) {
+          toast("Backup FAIL: output stream null: " + outName);
+          return false;
+        }
+        byte[] buf = new byte[64 * 1024];
+        int r;
+        while ((r = in.read(buf)) > 0) out.write(buf, 0, r);
+        out.flush();
+      }
+      return true;
+
+    } catch (Exception e) {
+      toast("Backup FAIL: " + outName + " - " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
+      return false;
+    }
+  }
 
    String name = "lcr_delivery_" + utcStamp() + ".db";
 
