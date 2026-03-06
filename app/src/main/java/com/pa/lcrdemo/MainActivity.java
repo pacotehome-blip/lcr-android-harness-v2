@@ -1,6 +1,6 @@
 
 package com.pa.lcrdemo;
-import androidx.appcompat.app.AppCompatActivity; 
+import androidx.appcompat.app.AppCompatActivity;
 import androidx.documentfile.provider.DocumentFile;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
@@ -572,129 +572,85 @@ public class MainActivity extends AppCompatActivity {
         return;
       }
 
-      // IMPORTANT (SQLite journal/WAL):
-      // Sur Android, le fichier principal .db peut ne pas contenir les dernieres donnees si un journal est present.
-      // Pour un backup fiable (support/terrain), on copie aussi les fichiers sidecar si existants:
-      //   - .db-journal (mode rollback)
-      //   - .db-wal / .db-shm (mode WAL)
-      // Ainsi, l'analyse sur PC retrouvera les donnees correctement.
+      // IMPORTANT: SQLite peut utiliser des fichiers auxiliaires (-journal / -wal / -shm).
+      // Si on copie seulement le .db pendant que la base est active, le backup peut paraitre vide sur PC.
+      // Pour un backup fiable (support/terrain), on copie aussi les sidecars s'ils existent et sont non vides.
 
+      String name = "lcr_delivery_" + utcStamp() + ".db";
       DocumentFile dir = DocumentFile.fromTreeUri(this, dirUri);
       if (dir == null || !dir.canWrite()) {
-        toast("Backup FAIL: dossier non accessible en ecriture");
+        toast("Backup FAIL: dossier non accessible en écriture");
         return;
       }
 
-      String baseName = "lcr_delivery_" + utcStamp() + ".db";
+      // Helper inline: copie 1 fichier local vers DocumentFile dans le dossier
+      java.util.function.BiConsumer<java.io.File, String> copyOne = (src, outName) -> {
+        try {
+          if (src == null || !src.exists() || src.length() <= 0) return;
+          DocumentFile existing = dir.findFile(outName);
+          if (existing != null) { try { existing.delete(); } catch (Exception ignore) {} }
+          DocumentFile target = dir.createFile("application/octet-stream", outName);
+          if (target == null || target.getUri() == null) {
+            toast("Backup FAIL: création du fichier impossible: " + outName);
+            return;
+          }
+          Uri outUri = target.getUri();
+          try (java.io.InputStream in = new java.io.FileInputStream(src);
+               java.io.OutputStream out = getContentResolver().openOutputStream(outUri)) {
+            if (out == null) {
+              toast("Backup FAIL: output stream null: " + outName);
+              return;
+            }
+            byte[] buf = new byte[64 * 1024];
+            int r;
+            while ((r = in.read(buf)) > 0) out.write(buf, 0, r);
+            out.flush();
+          }
+        } catch (Exception e) {
+          toast("Backup FAIL: " + outName + " " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
+        }
+      };
 
-      // Copie fichier principal
-      boolean okMain = copyLocalFileToDocumentFile(dbFile, dir, baseName, "application/x-sqlite3");
-      if (!okMain) return;
+      // 1) Copier DB principale (mime sqlite)
+      try {
+        DocumentFile existing = dir.findFile(name);
+        if (existing != null) { try { existing.delete(); } catch (Exception ignore) {} }
+        DocumentFile target = dir.createFile("application/x-sqlite3", name);
+        if (target == null || target.getUri() == null) {
+          toast("Backup FAIL: création du fichier impossible");
+          return;
+        }
+        Uri outUri = target.getUri();
+        try (java.io.InputStream in = new java.io.FileInputStream(dbFile);
+             java.io.OutputStream out = getContentResolver().openOutputStream(outUri)) {
+          if (out == null) {
+            toast("Backup FAIL: output stream null");
+            return;
+          }
+          byte[] buf = new byte[64 * 1024];
+          int r;
+          while ((r = in.read(buf)) > 0) out.write(buf, 0, r);
+          out.flush();
+        }
+      } catch (Exception e) {
+        toast("Backup FAIL: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
+        return;
+      }
 
-      // Copie sidecars (si presents)
+      // 2) Copier sidecars (si existants et non vides)
       java.io.File journal = new java.io.File(dbFile.getAbsolutePath() + "-journal");
-      java.io.File wal     = new java.io.File(dbFile.getAbsolutePath() + "-wal");
-      java.io.File shm     = new java.io.File(dbFile.getAbsolutePath() + "-shm");
+      java.io.File wal = new java.io.File(dbFile.getAbsolutePath() + "-wal");
+      java.io.File shm = new java.io.File(dbFile.getAbsolutePath() + "-shm");
+      copyOne.accept(journal, name + "-journal");
+      copyOne.accept(shm, name + "-shm");
+      copyOne.accept(wal, name + "-wal");
 
-      // On copie si le fichier existe ET a une taille > 0 (utile, evite un -wal vide)
-      if (journal.exists() && journal.length() > 0) {
-        copyLocalFileToDocumentFile(journal, dir, baseName + "-journal", "application/octet-stream");
-      }
-      if (shm.exists() && shm.length() > 0) {
-        copyLocalFileToDocumentFile(shm, dir, baseName + "-shm", "application/octet-stream");
-      }
-      if (wal.exists() && wal.length() > 0) {
-        copyLocalFileToDocumentFile(wal, dir, baseName + "-wal", "application/octet-stream");
-      }
-
-      toast("Backup OK (dossier choisi): " + baseName);
+      toast("Backup OK (dossier choisi): " + name);
 
     } catch (Exception e) {
       toast("Backup FAIL: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
     }
   }
-
-  /**
-   * Copie un fichier local (sandbox app) vers un fichier SAF (DocumentFile) dans un dossier cible.
-   * Ecrase un fichier existant de meme nom.
-   * Retourne true si succes, false si echec (avec toast explicite).
-   */
-  private boolean copyLocalFileToDocumentFile(java.io.File srcFile, DocumentFile dir, String outName, String mime) {
-    try {
-      if (srcFile == null || !srcFile.exists()) return false;
-      if (dir == null || !dir.canWrite()) return false;
-
-      // Supprimer si deja present
-      DocumentFile existing = dir.findFile(outName);
-      if (existing != null) {
-        try { existing.delete(); } catch (Exception ignore) {}
-      }
-
-      DocumentFile target = dir.createFile(mime, outName);
-      if (target == null || target.getUri() == null) {
-        toast("Backup FAIL: creation fichier impossible: " + outName);
-        return false;
-      }
-
-      Uri outUri = target.getUri();
-      try (java.io.InputStream in = new java.io.FileInputStream(srcFile);
-           java.io.OutputStream out = getContentResolver().openOutputStream(outUri)) {
-        if (out == null) {
-          toast("Backup FAIL: output stream null: " + outName);
-          return false;
-        }
-        byte[] buf = new byte[64 * 1024];
-        int r;
-        while ((r = in.read(buf)) > 0) out.write(buf, 0, r);
-        out.flush();
-      }
-      return true;
-
-    } catch (Exception e) {
-      toast("Backup FAIL: " + outName + " - " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
-      return false;
-    }
-  }
-
-   String name = "lcr_delivery_" + utcStamp() + ".db";
-
-   DocumentFile dir = DocumentFile.fromTreeUri(this, dirUri);
-   if (dir == null || !dir.canWrite()) {
-    toast("Backup FAIL: dossier non accessible en écriture");
-    return;
-   }
-
-   DocumentFile existing = dir.findFile(name);
-   if (existing != null) { try { existing.delete(); } catch (Exception ignore) {} }
-
-   DocumentFile target = dir.createFile("application/x-sqlite3", name);
-   if (target == null || target.getUri() == null) {
-    toast("Backup FAIL: création du fichier impossible");
-    return;
-   }
-
-   Uri outUri = target.getUri();
-
-   try (java.io.InputStream in = new java.io.FileInputStream(dbFile);
-        java.io.OutputStream out = getContentResolver().openOutputStream(outUri)) {
-
-    if (out == null) {
-     toast("Backup FAIL: output stream null");
-     return;
-    }
-
-    byte[] buf = new byte[64 * 1024];
-    int r;
-    while ((r = in.read(buf)) > 0) out.write(buf, 0, r);
-    out.flush();
-   }
-
-   toast("Backup OK (dossier choisi): " + name);
-
-  } catch (Exception e) {
-   toast("Backup FAIL: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
-  }
- }
 
  private static String utcStamp() {
   SimpleDateFormat df = new SimpleDateFormat("yyyy-MM-dd'T'HH-mm-ss'Z'", Locale.ROOT);
