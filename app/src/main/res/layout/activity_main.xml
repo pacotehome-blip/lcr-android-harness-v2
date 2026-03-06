@@ -323,7 +323,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginStart="12dp"
-                        android:text="Timestamps UI + IO"
+                        android:text="Timestamps UI + IO + API"
                         android:checked="false"
                         android:minHeight="0dp"
                         android:paddingTop="0dp"

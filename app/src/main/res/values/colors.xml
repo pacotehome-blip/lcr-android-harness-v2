@@ -1,0 +1,30 @@
+
+<resources>
+
+    <!-- Filgo ÉNERGIE -->
+    <color name="filgo_green">#024B3C</color>        <!-- principal -->
+    <color name="filgo_green_dark">#01372C</color>   <!-- actions / pressed -->
+    <color name="filgo_green_light">#0B6B55</color>  <!-- focus / accent doux -->
+
+    <!-- Backgrounds -->
+    <color name="bg_app">#F7F8F8</color>
+    <color name="surface">#FFFFFF</color>
+
+    <!-- Textes -->
+    <color name="text_primary">#111111</color>
+    <color name="text_secondary">#3A3A3A</color>
+    <color name="text_on_green">#FFFFFF</color>
+
+    <!-- Cadres / outlines -->
+    <color name="outline">#D5DBD9</color>
+    <color name="outline_focus">@color/filgo_green</color>
+
+    <!-- Boutons -->
+    <color name="btn_primary_bg">@color/filgo_green</color>
+    <color name="btn_primary_text">@color/text_on_green</color>
+
+    <!-- Bouton danger (optionnel, garde si tu veux) -->
+    <color name="btn_danger_bg">#B3261E</color>
+    <color name="btn_danger_text">#FFFFFF</color>
+
+</resources>

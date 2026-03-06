@@ -1,0 +1,25 @@
+
+<resources>
+
+    <!-- Bouton standard Filgo Énergie -->
+    <style name="FilgoButton" parent="Widget.AppCompat.Button">
+        <item name="android:backgroundTint">@color/btn_primary_bg</item>
+        <item name="android:textColor">@color/btn_primary_text</item>
+        <item name="android:textAllCaps">false</item>
+    </style>
+
+    <!-- Bouton danger (Stop / Terminer) -->
+    <style name="FilgoButton.Danger" parent="Widget.AppCompat.Button">
+        <item name="android:backgroundTint">@color/btn_danger_bg</item>
+        <item name="android:textColor">@color/btn_danger_text</item>
+        <item name="android:textAllCaps">false</item>
+    </style>
+
+    <!-- Champs texte -->
+    <style name="FilgoEditText" parent="Widget.AppCompat.EditText">
+        <item name="android:textColor">@color/text_primary</item>
+        <item name="android:textColorHint">@color/text_secondary</item>
+        <item name="android:padding">10dp</item>
+    </style>
+
+</resources>

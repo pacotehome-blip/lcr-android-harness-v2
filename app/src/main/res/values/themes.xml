@@ -1,0 +1,25 @@
+
+<resources>
+
+    <style name="Theme.LcrFilgoEnergie"
+           parent="Theme.AppCompat.Light.NoActionBar">
+
+        <!-- Couleurs système -->
+        <item name="colorPrimary">@color/filgo_green</item>
+        <item name="colorPrimaryDark">@color/filgo_green_dark</item>
+        <item name="colorAccent">@color/filgo_green_light</item>
+
+        <!-- Champs / contrôles -->
+        <item name="colorControlNormal">@color/outline</item>
+        <item name="colorControlActivated">@color/outline_focus</item>
+
+        <!-- Background général -->
+        <item name="android:windowBackground">@color/bg_app</item>
+
+        <!-- Styles par défaut -->
+        <item name="buttonStyle">@style/FilgoButton</item>
+        <item name="editTextStyle">@style/FilgoEditText</item>
+
+    </style>
+
+</resources>
