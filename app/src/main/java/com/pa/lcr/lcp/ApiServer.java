@@ -21,16 +21,16 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * - Bind strict: 127.0.0.1 only (no LAN)
  * - Port: 8765 (ou configurable plus tard)
- * - Trace: REQ/RESP (format actuel) -> envoyé au log principal via ApiLogSink
+ * - Trace: REQ/RESP dans le log principal (via ApiLogSink)
  * - Calls: via ApiFacade (bridge vers DeliveryController)
  *
  * Endpoints:
- * GET  /v1/ping
- * GET  /v1/usb/scan
+ * GET /v1/ping
+ * GET /v1/usb/scan
  * POST /v1/usb/open-ping
  * POST /v1/lcp/connect
  * POST /v1/delivery/C
- * GET  /v1/delivery/job/{jobId}
+ * GET /v1/delivery/job/{jobId}
  *
  * + (NOUVEAU)
  * POST /v1/delivery/oneshot/start
@@ -39,10 +39,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public final class ApiServer {
 
-  /** Sink de log (REQ/RESP) vers le log principal (un seul endroit). */
-  public interface ApiLogSink {
-    void onApiLine(String line);
-  }
+  public interface ApiLogSink { void onApiLine(String line); }
 
   private final ApiFacade facade;
   private final ApiLogSink trace;
@@ -116,7 +113,6 @@ public final class ApiServer {
       BufferedInputStream in = new BufferedInputStream(s.getInputStream());
       OutputStream out = s.getOutputStream();
       HttpReq req = readHttpRequest(in);
-      // FORMAT ACTUEL CONSERVE
       t(ts() + " [API][RID=" + rid + "] REQ " + req.method + " " + req.path + " body=" + shrink(req.body));
       JSONObject resp;
       int status = 200;
@@ -133,7 +129,6 @@ public final class ApiServer {
       }
       writeJson(out, status, resp);
       long dt = System.currentTimeMillis() - t0;
-      // FORMAT ACTUEL CONSERVE
       t(ts() + " [API][RID=" + rid + "] RESP " + status + " dt=" + dt + "ms json=" + shrink(resp.toString()));
     } catch (Exception e) {
       t(ts() + " [API][RID=" + rid + "] ERROR " + safeMsg(e) + " remote=" + remote);
@@ -225,12 +220,12 @@ public final class ApiServer {
     byte[] body = json.toString().getBytes(StandardCharsets.UTF_8);
     String statusText = (status == 200) ? "OK" :
         (status == 403) ? "Forbidden" :
-            (status == 404) ? "Not Found" : "Internal Server Error";
+        (status == 404) ? "Not Found" : "Internal Server Error";
     String headers =
         "HTTP/1.1 " + status + " " + statusText + "\r\n" +
-            "Content-Type: application/json; charset=utf-8\r\n" +
-            "Content-Length: " + body.length + "\r\n" +
-            "Connection: close\r\n\r\n";
+        "Content-Type: application/json; charset=utf-8\r\n" +
+        "Content-Length: " + body.length + "\r\n" +
+        "Connection: close\r\n\r\n";
     out.write(headers.getBytes(StandardCharsets.UTF_8));
     out.write(body);
     out.flush();

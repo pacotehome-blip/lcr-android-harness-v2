@@ -54,7 +54,7 @@ public class MainActivity extends AppCompatActivity {
 
   // ===== API runtime =====
   private static final int API_PORT = 8765;
-  private ApiTraceBuffer apiTrace; // buffer court (optionnel)
+  private ApiTraceBuffer apiTrace; // buffer court optionnel
   private ApiServer apiServer;
   private DeliveryLogStore deliveryStore;
 
@@ -69,21 +69,17 @@ public class MainActivity extends AppCompatActivity {
   private Spinner spnProducts;
   private EditText edtProduct;
   private EditText edtPreset;
-
   private Button btnA, btnB, btnC;
   private Button btnContinue, btnFinish;
-
   private TextView txtLive;
   private View liveQtyPanel;
   private TextView txtQtyNet;
   private TextView txtQtyGross;
-
   private TextView txtLog;
   private ScrollView logScroll;
   private Button btnClearLog;
   private Button btnCopyLog;
   private Button btnScrollDown;
-
   private CheckBox cbTxRx;
   private CheckBox cbLogTs;
   private boolean logTsEnabled = false;
@@ -94,13 +90,13 @@ public class MainActivity extends AppCompatActivity {
   private boolean suppressProductSelection = false;
   private boolean userTouchedSpinner = false;
 
+  // Log principal
   private final StringBuilder logBuf = new StringBuilder(32768);
   private final Handler ui = new Handler(Looper.getMainLooper());
 
   private boolean liveTickRunning = false;
   private double lastNet = Double.NaN;
   private double lastGross = Double.NaN;
-
   private Runnable pendingInitRunnable = null;
 
   // ✅ Python parity: poll = 0.2s
@@ -130,11 +126,12 @@ public class MainActivity extends AppCompatActivity {
     @Override
     public void run() {
       if (controller == null) { liveTickRunning = false; return; }
-      // ✅ Poll en RUNNING_FLOWING ET RUNNING_PAUSED (pas seulement FLOWING)
+      // ✅ Poll en RUNNING_FLOWING ET RUNNING_PAUSED
       DeliveryState st = controller.getState();
       boolean shouldPoll =
           (st == DeliveryState.RUNNING_FLOWING)
               || (st == DeliveryState.RUNNING_PAUSED);
+
       if (!shouldPoll) {
         liveTickRunning = false;
         return;
@@ -189,7 +186,7 @@ public class MainActivity extends AppCompatActivity {
     f.addAction(UsbReceiver.ACTION_USB_READY);
     f.addAction(UsbReceiver.ACTION_USB_DETACHED);
     registerReceiver(usbUiReceiver, f);
-    // ✅ R2: rattrapage si USB READY est arrivé pendant que l'activité était stoppée
+    // ✅ Rattrapage si USB READY est arrivé pendant l'activité stoppée
     UsbSerialPort p = UsbSession.getPort();
     if (p != null && usbPort == null) {
       onUsbPortReady(p);
@@ -207,12 +204,12 @@ public class MainActivity extends AppCompatActivity {
     super.onCreate(savedInstanceState);
     setContentView(R.layout.activity_main);
     usbManager = (UsbManager) getSystemService(USB_SERVICE);
+
     bindUi();
     wireUi();
     initUiDefaults();
     setupTabs();
 
-    // Buffer court optionnel (conserve l’idée “ApiTraceBuffer”)
     apiTrace = new ApiTraceBuffer(500);
 
     deliveryStore = new DeliveryLogStore(this);
@@ -372,8 +369,6 @@ public class MainActivity extends AppCompatActivity {
     if (btnApiStart != null) btnApiStart.setOnClickListener(v -> startApiServer());
     if (btnApiStop != null) btnApiStop.setOnClickListener(v -> stopApiServer("Stop button"));
 
-    // Backup DB: tap = use saved dir if any; else auto Downloads (10+) or pick dir (<=9)
-    // long-press = choose dir (SAF)
     if (btnDbBackup != null) {
       btnDbBackup.setOnClickListener(v -> doBackupDb());
       btnDbBackup.setOnLongClickListener(v -> {
@@ -408,16 +403,6 @@ public class MainActivity extends AppCompatActivity {
   }
 
   // =========================
-  // API trace (REQ/RESP) -> log principal
-  // =========================
-  private void apiTraceAddToMainLog(String line) {
-    if (line == null) return;
-    if (apiTrace != null) apiTrace.add(line); // buffer court optionnel
-    // IMPORTANT: format actuel inchangé
-    log(line);
-  }
-
-  // =========================
   // API Server
   // =========================
   private void startApiServer() {
@@ -441,10 +426,7 @@ public class MainActivity extends AppCompatActivity {
     try {
       DeliveryController dc = (DeliveryController) controller;
       ApiFacade facade = new DeliveryApiFacadeImpl(dc, this);
-
-      // ✅ traces REQ/RESP -> log principal (format actuel)
       apiServer = new ApiServer(facade, this::apiTraceAddToMainLog, API_PORT);
-
       apiServer.start();
       apiTraceAddToMainLog("[API] START OK on http://127.0.0.1:" + API_PORT);
       refreshApiStatus();
@@ -478,6 +460,61 @@ public class MainActivity extends AppCompatActivity {
   }
 
   // =========================
+  // API trace (REQ/RESP) -> log principal
+  // - Format actuel conserve
+  // - Timestamps API option 1
+  // - Throttle REQ/RESP (batch flush 250ms)
+  // =========================
+  private static final int API_TRACE_THROTTLE_MS = 250;
+  private final Object apiThrottleLock = new Object();
+  private final StringBuilder apiThrottleBuf = new StringBuilder(8192);
+  private boolean apiFlushScheduled = false;
+
+  private final Runnable apiFlushRunnable = new Runnable() {
+    @Override public void run() {
+      final String batch;
+      synchronized (apiThrottleLock) {
+        batch = apiThrottleBuf.toString();
+        apiThrottleBuf.setLength(0);
+        apiFlushScheduled = false;
+      }
+      if (batch == null || batch.isEmpty()) return;
+      ui.post(() -> {
+        logBuf.append(batch);
+        txtLog.setText(logBuf.toString());
+        logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
+      });
+    }
+  };
+
+  private void apiTraceAddToMainLog(String line) {
+    if (line == null) return;
+    if (apiTrace != null) apiTrace.add(line);
+
+    // Timestamps API (option 1): "[API] X" -> "[API <ts>] X"
+    if (logTsEnabled && line.startsWith("[API]")) {
+      String tail = line.substring("[API]".length()).trim();
+      line = "[API " + uiTs() + "] " + tail;
+    }
+
+    // Throttle uniquement pour REQ/RESP (lag vient du API polling)
+    boolean isReqResp = line.contains(" [API][RID=") && (line.contains("] REQ ") || line.contains("] RESP "));
+    if (isReqResp) {
+      synchronized (apiThrottleLock) {
+        apiThrottleBuf.append(line).append('\n');
+        if (!apiFlushScheduled) {
+          apiFlushScheduled = true;
+          ui.postDelayed(apiFlushRunnable, API_TRACE_THROTTLE_MS);
+        }
+      }
+      return;
+    }
+
+    // Non REQ/RESP: log immédiat
+    log(line);
+  }
+
+  // =========================
   // Backup DB
   // =========================
   private void doBackupDb() {
@@ -485,15 +522,11 @@ public class MainActivity extends AppCompatActivity {
       toast("Backup DB impossible: store absent");
       return;
     }
-    // Choix: si un dossier SAF est déjà choisi -> écrire dedans
     Uri savedDir = getSavedBackupDirUri();
     if (savedDir != null) {
       backupDbToChosenDir(savedDir);
       return;
     }
-    // Sinon fallback:
-    // - Android 10+ : auto Downloads (MediaStore.Downloads)
-    // - Android <= 9 : demander dossier (MediaStore.Downloads non dispo)
     if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
       String name = "lcr_delivery_" + utcStamp() + ".db";
       deliveryStore.backupDbToDownloadsAsync(this, name, (ok, fileName, detail) -> {
@@ -526,7 +559,7 @@ public class MainActivity extends AppCompatActivity {
     prefs.edit().putString(PREF_BACKUP_DIR_URI, uri.toString()).apply();
   }
 
-  // ✅ Backup .db seulement (comme tu le veux)
+  // ✅ Backup .db seulement
   private void backupDbToChosenDir(Uri dirUri) {
     try {
       java.io.File dbFile = getDatabasePath(com.pa.lcr.lcp.storage.DeliveryDb.DB_NAME);
@@ -536,6 +569,7 @@ public class MainActivity extends AppCompatActivity {
       }
 
       String name = "lcr_delivery_" + utcStamp() + ".db";
+
       DocumentFile dir = DocumentFile.fromTreeUri(this, dirUri);
       if (dir == null || !dir.canWrite()) {
         toast("Backup FAIL: dossier non accessible en écriture");
@@ -607,7 +641,6 @@ public class MainActivity extends AppCompatActivity {
   }
 
   private void openSelectedUsb() {
-    // ✅ R1: si un port est déjà ouvert, ne pas ré-ouvrir
     if (usbPort != null) {
       log("USB déjà prêt (port déjà ouvert)");
       return;
@@ -645,7 +678,6 @@ public class MainActivity extends AppCompatActivity {
 
   public void onUsbPortReady(UsbSerialPort port) {
     if (port == null) return;
-    // ✅ R1: éviter port orphelin si déjà prêt
     if (usbPort != null) {
       try { port.close(); } catch (Exception ignore) {}
       return;
@@ -716,7 +748,6 @@ public class MainActivity extends AppCompatActivity {
         ui.post(() -> {
           boolean stableOff = (controller != null) && controller.isFlowOffStable();
           updateButtons(state, stableOff);
-          // ✅ Start LIVE tick en FLOWING ou PAUSED
           if (state == DeliveryState.RUNNING_FLOWING || state == DeliveryState.RUNNING_PAUSED) startLiveTickIfNeeded();
           else stopLiveTick();
           if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
@@ -811,7 +842,8 @@ public class MainActivity extends AppCompatActivity {
               || s.startsWith("TX:")
               || s.startsWith("RX:")
               || s.startsWith("↳")
-              // ✅ IMPORTANT: garder le format API intact (pas de prefix [UI ...])
+
+              // API: ne pas préfixer avec [UI ...] (format inchangé)
               || s.startsWith("[API")
               || s.contains(" [API][RID=");
 
