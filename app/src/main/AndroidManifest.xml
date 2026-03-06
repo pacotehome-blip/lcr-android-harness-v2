@@ -16,8 +16,8 @@
         android:allowBackup="true"
         android:supportsRtl="true"
         android:label="Filgo Registre"
-        android:icon="@mipmap/logo-energie1"
-        android:roundIcon="@mipmap/logo-icone-ernergie"
+        android:icon="@mipmap/logoenergie1"
+        android:roundIcon="@mipmap/logoiconeernergie"
         android:theme="@style/Theme.Material3.DayNight.NoActionBar">
 
         <activity
