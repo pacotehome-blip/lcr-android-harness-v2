@@ -104,6 +104,7 @@ public class DeliveryLogStore {
         cv.put("last_ts", now);
         cv.put("result_json", resultJson);
         cv.put("error_json", errorJson);
+
         db.insertWithOnConflict("delivery_summary", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
     }
 
@@ -137,6 +138,7 @@ public class DeliveryLogStore {
         if (endUtc != null) cv.put("end_utc", endUtc);
         if (durationMs != null) cv.put("duration_ms", durationMs);
         if (cv.size() == 0) return;
+
         db.update("delivery_summary", cv, "serial_id=? AND ticket_no=?", new String[]{serialId, ticketNo});
     }
 
@@ -202,6 +204,20 @@ public class DeliveryLogStore {
     }
 
     // =========================================================
+    // ✅ NEW: WAL-safe single-file backup helper
+    // =========================================================
+    public void checkpointWalBestEffort() {
+        try {
+            SQLiteDatabase db = helper.getWritableDatabase();
+            // Force WAL pages into the main db file so a single .db works on PC
+            db.execSQL("PRAGMA wal_checkpoint(FULL);");
+        } catch (Throwable t) {
+            android.util.Log.w("DeliveryLogStore",
+                    "WAL checkpoint failed (backup may be incomplete)", t);
+        }
+    }
+
+    // =========================================================
     // UI: Backup DB to Downloads
     // API: Dump JSON to Downloads
     // =========================================================
@@ -228,14 +244,20 @@ public class DeliveryLogStore {
         if (dbFile == null || !dbFile.exists()) {
             throw new Exception("DB file not found: " + DeliveryDb.DB_NAME);
         }
+
+        // ✅ NEW: consolidate WAL into main file so PC sees tables/data in ONE file
+        checkpointWalBestEffort();
+
         ContentValues values = new ContentValues();
         values.put(MediaStore.Downloads.DISPLAY_NAME, fileName);
         values.put(MediaStore.Downloads.MIME_TYPE, "application/x-sqlite3");
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             values.put(MediaStore.Downloads.IS_PENDING, 1);
         }
+
         Uri uri = ctx.getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
         if (uri == null) throw new Exception("MediaStore insert failed");
+
         try (InputStream in = new java.io.FileInputStream(dbFile);
              OutputStream out = ctx.getContentResolver().openOutputStream(uri)) {
             if (out == null) throw new Exception("openOutputStream failed");
@@ -244,6 +266,7 @@ public class DeliveryLogStore {
             while ((r = in.read(buf)) > 0) out.write(buf, 0, r);
             out.flush();
         }
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             ContentValues done = new ContentValues();
             done.put(MediaStore.Downloads.IS_PENDING, 0);
@@ -270,13 +293,16 @@ public class DeliveryLogStore {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             values.put(MediaStore.Downloads.IS_PENDING, 1);
         }
+
         Uri uri = ctx.getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
         if (uri == null) throw new Exception("MediaStore insert failed");
+
         try (OutputStream out = ctx.getContentResolver().openOutputStream(uri)) {
             if (out == null) throw new Exception("openOutputStream failed");
             out.write(bytes);
             out.flush();
         }
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             ContentValues done = new ContentValues();
             done.put(MediaStore.Downloads.IS_PENDING, 0);
