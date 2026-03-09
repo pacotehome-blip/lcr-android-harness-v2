@@ -1,6 +1,8 @@
 
 package com.pa.lcr.lcp;
 
+import com.pa.lcr.lcp.storage.DeliveryLogStore;
+
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -38,11 +40,27 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * - Si FLOW_OFF_CONFIRMED et preset non atteint => demande CONTINUER ou TERMINER.
  * - Throttling JobGet pour éviter le polling trop rapide (cache + next_poll_ms).
  *
- * ✅ Correctifs ajoutés (2026-03-09):
+ * ✅ Correctifs ajoutés:
  * - Évite "Continue 2 fois" : après Continue, on met à jour lastOkData pour servir RUNNING sous RATE_LIMIT.
  * - LCP lock global UI+API : sérialise les transactions LCP et réduit les rc=0x26 liés aux chevauchements.
+ * - Cache "ENDING" immédiat lors de Terminate pour stabilité sous RATE_LIMIT.
+ * - Filet "startingAfterContinue" dans JobGet (RUN demandé mais deliveryActive pas encore monté).
+ *
+ * ✅ SQLite transactions (optionnel, baseline-safe):
+ * - Inscriptions dans delivery_summary / delivery_attempt / delivery_event via DeliveryLogStore.
+ * - Si store non injecté: no-op (aucun impact).
  */
 public final class DeliveryController implements DeliveryControllerPort {
+
+    // =========================================================
+    // OPTIONAL SQLite store (injected)
+    // =========================================================
+    private volatile DeliveryLogStore logStore;
+
+    /** Injection optionnelle. Si non appelé => aucune écriture DB (baseline-safe). */
+    public void setLogStore(DeliveryLogStore store) {
+        this.logStore = store;
+    }
 
     // -------------------------
     // JSON safe put / safe copy
@@ -75,34 +93,20 @@ public final class DeliveryController implements DeliveryControllerPort {
     private interface LcpOp<T> { T run() throws Exception; }
 
     private <T> T withLcpLock(LcpOp<T> op) throws Exception {
-        synchronized (lcpOpLock) {
-            return op.run();
-        }
+        synchronized (lcpOpLock) { return op.run(); }
     }
 
     private void withLcpLockVoid(LcpOp<Void> op) throws Exception {
-        synchronized (lcpOpLock) {
-            op.run();
-        }
+        synchronized (lcpOpLock) { op.run(); }
     }
 
     // Wrappers LCP
-    private int[] lcpDeliveryStatus() throws Exception {
-        return withLcpLock(() -> link.opDeliveryStatus());
-    }
-
-    private LcpLink.MachineStatus lcpMachineStatus() throws Exception {
-        return withLcpLock(() -> link.opGetMachineStatus());
-    }
-
-    private byte[] lcpGetField(int field) throws Exception {
-        return withLcpLock(() -> link.opGetField(field));
-    }
-
+    private int[] lcpDeliveryStatus() throws Exception { return withLcpLock(() -> link.opDeliveryStatus()); }
+    private LcpLink.MachineStatus lcpMachineStatus() throws Exception { return withLcpLock(() -> link.opGetMachineStatus()); }
+    private byte[] lcpGetField(int field) throws Exception { return withLcpLock(() -> link.opGetField(field)); }
     private void lcpSetField(int field, byte[] value) throws Exception {
         withLcpLockVoid(() -> { link.opSetField(field, value); return null; });
     }
-
     private void lcpIssueCommand(int cmd) throws Exception {
         withLcpLockVoid(() -> { link.opIssueCommand(cmd); return null; });
     }
@@ -204,6 +208,9 @@ public final class DeliveryController implements DeliveryControllerPort {
         volatile String state; // PENDING/RUNNING/DONE/ERROR
         volatile String err;
 
+        // trace attempt id (SQLite)
+        volatile long attemptId = 0L;
+
         // Contexte
         volatile String numeroLivraison;
         volatile String deliveryUid;
@@ -217,15 +224,15 @@ public final class DeliveryController implements DeliveryControllerPort {
         volatile int decimals;
 
         // Identifiants registre
-        volatile String saleNo;   // #22 U32 string
-        volatile String ticketNo; // #23 U32 string
+        volatile String saleNo;   // #22 U32
+        volatile String ticketNo; // #23 U32
         volatile String serialId; // #80
 
         // Timing
         volatile long startMs = 0L;
         volatile long endMs = 0L;
 
-        // Baseline (Option 1: baseline=0, on garde flags)
+        // Baseline flags
         volatile boolean sawDeliveryActiveOnce = false;
         volatile boolean baselineCaptured = false;
         volatile int grossStartRaw = 0;
@@ -239,14 +246,14 @@ public final class DeliveryController implements DeliveryControllerPort {
         volatile int grossTotalRaw = 0;
         volatile int netTotalRaw = 0;
 
-        // --- API pause tracking (job-level) ---
+        // Pause tracking
         volatile int lastGrossSeen = Integer.MIN_VALUE;
         volatile int lastNetSeen = Integer.MIN_VALUE;
         volatile long lastCountsChangeMs = 0L;
         volatile boolean sawFlowOnOnceJob = false;
         volatile long continueGraceUntilMs = 0L;
 
-        // --- API JobGet throttling ---
+        // JobGet throttling
         volatile long nextAllowedReadMs = 0L;
         volatile JSONObject lastOkData = null;
         volatile String lastOkMsg = null;
@@ -269,20 +276,12 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     // ====== DeliveryControllerPort ======
-    @Override
-    public DeliveryState getState() { return state; }
-
-    @Override
-    public boolean isPaused() { return state == DeliveryState.RUNNING_PAUSED; }
-
-    @Override
-    public boolean isDeliveryActive() {
-        return state == DeliveryState.RUNNING_FLOWING ||
-                state == DeliveryState.RUNNING_PAUSED;
+    @Override public DeliveryState getState() { return state; }
+    @Override public boolean isPaused() { return state == DeliveryState.RUNNING_PAUSED; }
+    @Override public boolean isDeliveryActive() {
+        return state == DeliveryState.RUNNING_FLOWING || state == DeliveryState.RUNNING_PAUSED;
     }
-
-    @Override
-    public boolean isFlowOffStable() { return flowOffStable; }
+    @Override public boolean isFlowOffStable() { return flowOffStable; }
 
     @Override
     public long getFlowOffAgeMs() {
@@ -328,9 +327,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     private static boolean isTxRxLine(String raw) {
-        return raw.startsWith("TX:") ||
-                raw.startsWith("RX:") ||
-                raw.startsWith("↳");
+        return raw.startsWith("TX:") || raw.startsWith("RX:") || raw.startsWith("↳");
     }
 
     @Override
@@ -370,8 +367,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         });
     }
 
-    @Override
-    public void shutdown() { shutdown(true); }
+    @Override public void shutdown() { shutdown(true); }
 
     @Override
     public void shutdown(boolean closeTransport) {
@@ -381,8 +377,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         setState(DeliveryState.DISCONNECTED);
         if (listener != null) {
             listener.onLiveStatus("LIVE: DISCONNECTED");
-            listener.onLog(closeTransport
-                    ? "[LINK] Controller stopped / transport closed"
+            listener.onLog(closeTransport ? "[LINK] Controller stopped / transport closed"
                     : "[LINK] Controller stopped (logic only)");
         }
         if (closeTransport) {
@@ -401,8 +396,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     // =========================
     // A / B / C (UI)
     // =========================
-    @Override
-    public void refreshProducts() { emitLog("refreshProducts ignore"); }
+    @Override public void refreshProducts() { emitLog("refreshProducts ignore"); }
 
     @Override
     public void selectProduct(int product1to16) {
@@ -455,8 +449,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     public void startDelivery(int product1to16, double presetNet) {
         io.execute(() -> {
             if (isStopped()) return;
-            if (state == DeliveryState.PRESTART ||
-                    state == DeliveryState.ENDING) return;
+            if (state == DeliveryState.PRESTART || state == DeliveryState.ENDING) return;
             emitLog("[C] New delivery requested");
             final long deadline = System.currentTimeMillis() + START_RETRY_WINDOW_MS;
             try {
@@ -488,17 +481,19 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     private void doStartNewDeliveryWithRetry(long deadlineMs, int product1to16, double presetNet) throws Exception {
         if (isStopped()) return;
-
         setState(DeliveryState.PRESTART);
+
         flowOffStable = false;
         sawFlowOnOnce = false;
         flowOffStartMs = 0L;
         lastCountsChangeMs = 0L;
         lastGrossRaw = -1;
         lastNetRaw = -1;
+
         liveBackoffMs = LIVE_BASE_MS;
         liveNextAllowedMs = 0L;
         liveLastSkipLogMs = 0L;
+
         continueGraceUntilMs = 0L;
 
         retryUntilDeadline(deadlineMs, "SET_FIELD#0", () -> {
@@ -592,6 +587,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                     liveSoftSkip("GET_DELIVERY_STATUS", e);
                     return;
                 }
+
                 boolean ticket = (delCode & DC_TICKET_PENDING) != 0;
                 boolean flowBit = (delCode & DC_FLOW_ACTIVE) != 0;
                 boolean active = (delCode & DC_DELIVERY_ACTIVE) != 0;
@@ -635,7 +631,6 @@ public final class DeliveryController implements DeliveryControllerPort {
                 if (lastGrossRaw >= 0 && lastNetRaw >= 0) {
                     d = Math.abs(g - lastGrossRaw) + Math.abs(n - lastNetRaw);
                 }
-
                 if (listener != null) listener.onLiveQty(n / scale, g / scale);
 
                 if (d > 0) {
@@ -750,6 +745,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         final boolean ticketPending;
         final boolean flowActive;
         final boolean deliveryActive;
+
         FullStatus(LcpLink.MachineStatus ms, int delStatus, int delCode) {
             this.devStatus = ms.devStatus;
             this.prnStatus = ms.prnStatus;
@@ -861,13 +857,12 @@ public final class DeliveryController implements DeliveryControllerPort {
             } catch (Exception e) {
                 last = e;
                 String m = (e.getMessage() != null) ? e.getMessage() : "";
-                boolean retryable = m.contains("Queued timeout") ||
-                        m.contains("Timeout waiting LCP response");
+                boolean retryable = m.contains("Queued timeout") || m.contains("Timeout waiting LCP response");
                 boolean hardFatal =
                         m.contains("Transport closed") ||
-                                m.contains("Error writing") ||
-                                m.contains("rc=-1") ||
-                                m.contains("Connection closed");
+                        m.contains("Error writing") ||
+                        m.contains("rc=-1") ||
+                        m.contains("Connection closed");
                 if (hardFatal) throw e;
                 if (!retryable) throw e;
                 softResync("retry/" + step);
@@ -915,9 +910,9 @@ public final class DeliveryController implements DeliveryControllerPort {
     private int beI32(byte[] b) {
         if (b == null || b.length < 4) return 0;
         return ((b[0] & 0xFF) << 24) |
-                ((b[1] & 0xFF) << 16) |
-                ((b[2] & 0xFF) << 8) |
-                (b[3] & 0xFF);
+               ((b[1] & 0xFF) << 16) |
+               ((b[2] & 0xFF) << 8) |
+               (b[3] & 0xFF);
     }
 
     private String decodeAzString(byte[] b) {
@@ -933,14 +928,8 @@ public final class DeliveryController implements DeliveryControllerPort {
         long u = beI32(lcpGetField(field)) & 0xFFFFFFFFL;
         return String.valueOf(u);
     }
-
-    private String readTicketNo23() throws Exception {
-        return readU32FieldAsDecString(FIELD_TICKET_NUMBER);
-    }
-
-    private String readSaleNo22() throws Exception {
-        return readU32FieldAsDecString(FIELD_SALE_NUMBER);
-    }
+    private String readTicketNo23() throws Exception { return readU32FieldAsDecString(FIELD_TICKET_NUMBER); }
+    private String readSaleNo22() throws Exception { return readU32FieldAsDecString(FIELD_SALE_NUMBER); }
 
     // =========================
     // Error handling / resync
@@ -950,12 +939,12 @@ public final class DeliveryController implements DeliveryControllerPort {
         String msg = (e != null && e.getMessage() != null) ? e.getMessage() : "";
         boolean hardFatal =
                 msg.contains("Transport closed") ||
-                        msg.contains("Error writing") ||
-                        msg.contains("rc=-1") ||
-                        msg.contains("Connection closed");
+                msg.contains("Error writing") ||
+                msg.contains("rc=-1") ||
+                msg.contains("Connection closed");
         boolean retryish =
                 msg.contains("Timeout waiting LCP response") ||
-                        msg.contains("Queued timeout");
+                msg.contains("Queued timeout");
         if ("requestLiveSample".equals(ctx)) return;
         if (hardFatal) { shutdown(true); return; }
         if (retryish) softResync("timeout/" + ctx);
@@ -1014,36 +1003,6 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
     }
 
-    public ApiResult api_deliveryStartC(int product1to16, double presetNet) {
-        if (link == null || link.isClosed()) {
-            return ApiResult.fail("Delivery StartC: 0 - USB not ready.", "USB_NOT_READY");
-        }
-        try {
-            int[] ds0 = lcpDeliveryStatus();
-            int delCode0 = ds0[1];
-            boolean ticketPending0 = (delCode0 & DC_TICKET_PENDING) != 0;
-            boolean flowActive0 = (delCode0 & DC_FLOW_ACTIVE) != 0;
-            boolean deliveryActive0 = (delCode0 & DC_DELIVERY_ACTIVE) != 0;
-            JSONObject data = new JSONObject();
-            safeJsonPut(data, "product", product1to16);
-            safeJsonPut(data, "preset_net", presetNet);
-            safeJsonPut(data, "deliveryActive", deliveryActive0 ? 1 : 0);
-            safeJsonPut(data, "flowActive", flowActive0 ? 1 : 0);
-            safeJsonPut(data, "ticketPending", ticketPending0 ? 1 : 0);
-            if (deliveryActive0 || ticketPending0 || flowActive0) {
-                safeJsonPut(data, "next", "A");
-                return ApiResult.ok("Delivery StartC: 1 - Not ready for C (use A)", data);
-            }
-            startDelivery(product1to16, presetNet);
-            safeJsonPut(data, "next", "POLL");
-            return ApiResult.ok("Delivery StartC: 1 - Start requested", data);
-        } catch (Exception e) {
-            JSONObject d = new JSONObject();
-            safeJsonPut(d, "detail", (e.getMessage() != null) ? e.getMessage() : "");
-            return ApiResult.fail("Delivery StartC: 0 - orchestration error", "STARTC_FAIL", d);
-        }
-    }
-
     public ApiResult api_deliveryAlignA() {
         if (link == null || link.isClosed()) {
             return ApiResult.fail("Align A: 0 - USB non pret.", "USB_NOT_READY");
@@ -1069,6 +1028,39 @@ public final class DeliveryController implements DeliveryControllerPort {
             JSONObject d = new JSONObject();
             safeJsonPut(d, "detail", (e.getMessage() != null) ? e.getMessage() : "");
             return ApiResult.fail("Align A: 0 - Failed", "ALIGN_FAIL", d);
+        }
+    }
+
+    public ApiResult api_deliveryStartC(int product1to16, double presetNet) {
+        if (link == null || link.isClosed()) {
+            return ApiResult.fail("Delivery StartC: 0 - USB not ready.", "USB_NOT_READY");
+        }
+        try {
+            int[] ds0 = lcpDeliveryStatus();
+            int delCode0 = ds0[1];
+            boolean ticketPending0 = (delCode0 & DC_TICKET_PENDING) != 0;
+            boolean flowActive0 = (delCode0 & DC_FLOW_ACTIVE) != 0;
+            boolean deliveryActive0 = (delCode0 & DC_DELIVERY_ACTIVE) != 0;
+
+            JSONObject data = new JSONObject();
+            safeJsonPut(data, "product", product1to16);
+            safeJsonPut(data, "preset_net", presetNet);
+            safeJsonPut(data, "deliveryActive", deliveryActive0 ? 1 : 0);
+            safeJsonPut(data, "flowActive", flowActive0 ? 1 : 0);
+            safeJsonPut(data, "ticketPending", ticketPending0 ? 1 : 0);
+
+            if (deliveryActive0 || ticketPending0 || flowActive0) {
+                safeJsonPut(data, "next", "A");
+                return ApiResult.ok("Delivery StartC: 1 - Not ready for C (use A)", data);
+            }
+
+            startDelivery(product1to16, presetNet);
+            safeJsonPut(data, "next", "POLL");
+            return ApiResult.ok("Delivery StartC: 1 - Start requested", data);
+        } catch (Exception e) {
+            JSONObject d = new JSONObject();
+            safeJsonPut(d, "detail", (e.getMessage() != null) ? e.getMessage() : "");
+            return ApiResult.fail("Delivery StartC: 0 - orchestration error", "STARTC_FAIL", d);
         }
     }
 
@@ -1116,11 +1108,9 @@ public final class DeliveryController implements DeliveryControllerPort {
 
             boolean autoAAttempted = false;
             boolean autoASuccess = false;
-
             if (ticketPending0) {
                 autoAAttempted = true;
                 try { doAlignOrRecoverFull(); } catch (Exception ignore) {}
-
                 int[] dsA = lcpDeliveryStatus();
                 int delCodeA = dsA[1];
                 boolean ticketPendingA = (delCodeA & DC_TICKET_PENDING) != 0;
@@ -1143,6 +1133,12 @@ public final class DeliveryController implements DeliveryControllerPort {
                     JSONArray a = new JSONArray();
                     a.put("ALIGN_A");
                     safeJsonPut(data, "available_actions", a);
+
+                    // DB: summary update
+                    DeliveryLogStore store = this.logStore;
+                    if (store != null && serialId != null && !serialId.isEmpty() && ticketNo != null && !ticketNo.isEmpty()) {
+                        store.upsertSummaryAsync(serialId, ticketNo, saleNo, "TICKET_PENDING", DeliveryLogStore.SOURCE_API, null, null, null);
+                    }
                     return ApiResult.ok("Delivery OneShot: 1 - Ticket pending (auto-A attempted)", data);
                 }
             }
@@ -1169,6 +1165,7 @@ public final class DeliveryController implements DeliveryControllerPort {
 
             String jobId = UUID.randomUUID().toString();
             ApiJob job = new ApiJob(jobId);
+
             job.numeroLivraison = numero_livraison;
             job.ticketNo = ticketNo;
             job.saleNo = saleNo;
@@ -1184,6 +1181,14 @@ public final class DeliveryController implements DeliveryControllerPort {
 
             synchronized (apiJobs) {
                 apiJobs.put(jobId, job);
+            }
+
+            // ✅ SQLite: upsert summary + open attempt (async)
+            DeliveryLogStore store = this.logStore;
+            if (store != null && serialId != null && !serialId.trim().isEmpty() && ticketNo != null && !ticketNo.trim().isEmpty()) {
+                store.upsertSummaryAsync(serialId, ticketNo, saleNo, "ARMED", DeliveryLogStore.SOURCE_API, jobId, null, null);
+                store.openAttemptAsync(serialId, ticketNo, DeliveryLogStore.SOURCE_API, jobId, attemptId -> job.attemptId = attemptId);
+                // event (attempt may not be ready yet; safe to skip if attemptId==0)
             }
 
             setState(DeliveryState.CONNECTED);
@@ -1213,11 +1218,12 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
     }
 
-    // ✅ Correctif "Continue 2 fois": cache RUNNING immédiat
+    // ✅ Correctif "Continue 2 fois": cache RUNNING immédiat + DB event
     public ApiResult api_deliveryContinue(String jobId) {
         ApiJob job;
         synchronized (apiJobs) { job = apiJobs.get(jobId); }
         if (job == null) return ApiResult.fail("Continue: 0 - Job unknown", "JOB_NOT_FOUND");
+
         try {
             lcpIssueCommand(CMD_RUN);
 
@@ -1226,6 +1232,7 @@ public final class DeliveryController implements DeliveryControllerPort {
             job.continueGraceUntilMs = now + CONTINUE_GRACE_MS;
             setState(DeliveryState.RUNNING_FLOWING);
 
+            // refresh identifiers best-effort
             try { job.ticketNo = readTicketNo23(); } catch (Exception ignored) {}
             try { job.saleNo = readSaleNo22(); } catch (Exception ignored) {}
 
@@ -1268,6 +1275,15 @@ public final class DeliveryController implements DeliveryControllerPort {
                 job.nextAllowedReadMs = now + API_JOB_MIN_POLL_MS;
             } catch (Exception ignored) {}
 
+            // SQLite
+            DeliveryLogStore store = this.logStore;
+            if (store != null && job.serialId != null && !job.serialId.isEmpty() && job.ticketNo != null && !job.ticketNo.isEmpty()) {
+                store.upsertSummaryAsync(job.serialId, job.ticketNo, job.saleNo, "RUN_SENT", DeliveryLogStore.SOURCE_API, jobId, null, null);
+                if (job.attemptId > 0) {
+                    store.addEventAsync(job.attemptId, DeliveryLogStore.LEVEL_INFO, "CONTINUE_RUN_SENT", "RUN sent", null);
+                }
+            }
+
             JSONObject data = new JSONObject();
             safeJsonPut(data, "jobId", jobId);
             safeJsonPut(data, "numero_livraison", job.numeroLivraison);
@@ -1279,6 +1295,11 @@ public final class DeliveryController implements DeliveryControllerPort {
             return ApiResult.ok("Continue: 1 - RUN sent", data);
 
         } catch (Exception e) {
+            DeliveryLogStore store = this.logStore;
+            if (store != null && job.attemptId > 0) {
+                store.addEventAsync(job.attemptId, DeliveryLogStore.LEVEL_ERROR, "CONTINUE_RUN_FAIL",
+                        "RUN failed: " + safeMsg(e), null);
+            }
             JSONObject d = new JSONObject();
             safeJsonPut(d, "detail", (e.getMessage() != null) ? e.getMessage() : "");
             return ApiResult.fail("Continue: 0 - RUN failed", "RUN_FAIL", d);
@@ -1292,28 +1313,35 @@ public final class DeliveryController implements DeliveryControllerPort {
 
         try { lcpIssueCommand(CMD_END); } catch (Exception ignore) {}
 
+        // refresh identifiers best-effort
         try { job.ticketNo = readTicketNo23(); } catch (Exception ignored) {}
         try { job.saleNo = readSaleNo22(); } catch (Exception ignored) {}
 
-        // (Optionnel mais utile) : cache "ENDING" immédiat pour éviter un vieux cache RUNNING sous RATE_LIMIT
+        // Cache "ENDING" immédiat pour stabilité sous RATE_LIMIT
         try {
             long now = System.currentTimeMillis();
             JSONObject cached = (job.lastOkData != null) ? safeJsonCopy(job.lastOkData) : new JSONObject();
             if (cached == null) cached = new JSONObject();
-
             safeJsonPut(cached, "jobId", jobId);
             safeJsonPut(cached, "numero_livraison", job.numeroLivraison);
             safeJsonPut(cached, "ticket_no", job.ticketNo);
             safeJsonPut(cached, "sale_no", job.saleNo);
             safeJsonPut(cached, "delivery_uid", job.deliveryUid);
-
             safeJsonPut(cached, "armed", 0);
             safeJsonPut(cached, "live_status", "LIVE: ENDING");
-
             job.lastOkData = safeJsonCopy(cached);
             job.lastOkMsg = (job.lastOkMsg != null) ? job.lastOkMsg : "Job: 1 - RUNNING";
             job.nextAllowedReadMs = now + API_JOB_MIN_POLL_MS;
         } catch (Exception ignored) {}
+
+        // SQLite
+        DeliveryLogStore store = this.logStore;
+        if (store != null && job.serialId != null && !job.serialId.isEmpty() && job.ticketNo != null && !job.ticketNo.isEmpty()) {
+            store.upsertSummaryAsync(job.serialId, job.ticketNo, job.saleNo, "END_SENT", DeliveryLogStore.SOURCE_API, jobId, null, null);
+            if (job.attemptId > 0) {
+                store.addEventAsync(job.attemptId, DeliveryLogStore.LEVEL_INFO, "TERMINATE_END_SENT", "END sent", null);
+            }
+        }
 
         JSONObject data = new JSONObject();
         safeJsonPut(data, "jobId", jobId);
@@ -1395,7 +1423,6 @@ public final class DeliveryController implements DeliveryControllerPort {
 
             boolean pauseActive = false;
             String pauseReason = null;
-
             if (deliveryActive) {
                 if (!job.sawFlowOnOnceJob) {
                     pauseActive = true;
@@ -1441,8 +1468,7 @@ public final class DeliveryController implements DeliveryControllerPort {
             safeJsonPut(data, "continue_grace_ms_left", Math.max(0L, job.continueGraceUntilMs - now));
             safeJsonPut(data, "next_poll_ms", API_JOB_MIN_POLL_MS);
 
-            // ✅ filet de sécurité: si RUN demandé mais deliveryActive pas encore monté (fenêtre de grâce),
-            // renvoyer RUNNING + WAIT_FLOW_ON (même si on n'est pas encore "active").
+            // ✅ Filet "startingAfterContinue": RUN demandé mais deliveryActive pas encore monté
             boolean startingAfterContinue = (job.continueGraceUntilMs > now) && !deliveryActive && !job.sawDeliveryActiveOnce;
             if (startingAfterContinue) {
                 job.state = "RUNNING";
@@ -1463,6 +1489,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                 return ApiResult.ok("Job: 1 - RUNNING", data);
             }
 
+            // PENDING (ARMED)
             if (!deliveryActive && !job.sawDeliveryActiveOnce) {
                 job.state = "PENDING";
                 safeJsonPut(data, "state_job", "PENDING");
@@ -1477,6 +1504,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                 return ApiResult.ok("Job: 1 - PENDING", data);
             }
 
+            // DONE
             if (!deliveryActive && job.sawDeliveryActiveOnce) {
                 try { job.ticketNo = readTicketNo23(); } catch (Exception ignored) {}
                 try { job.saleNo = readSaleNo22(); } catch (Exception ignored) {}
@@ -1533,12 +1561,29 @@ public final class DeliveryController implements DeliveryControllerPort {
                 safeJsonPut(data, "available_actions", new JSONArray());
                 safeJsonPut(data, "result", result);
 
+                // ✅ SQLite: finalise attempt + summary + times
+                DeliveryLogStore store = this.logStore;
+                if (store != null && job.serialId != null && !job.serialId.isEmpty() && job.ticketNo != null && !job.ticketNo.isEmpty()) {
+                    store.upsertSummaryAsync(job.serialId, job.ticketNo, job.saleNo, "DONE", DeliveryLogStore.SOURCE_API, jobId, result.toString(), null);
+                    store.updateSummaryTimesAsync(
+                            job.serialId, job.ticketNo,
+                            job.startMs, job.endMs,
+                            msToUtcIso(job.startMs), msToUtcIso(job.endMs),
+                            (job.endMs - job.startMs)
+                    );
+                    if (job.attemptId > 0) {
+                        store.addEventAsync(job.attemptId, DeliveryLogStore.LEVEL_INFO, "DONE", "Delivery completed", result.toString());
+                        store.closeAttemptAsync(job.attemptId, "DONE", result.toString(), null);
+                    }
+                }
+
                 job.lastOkData = safeJsonCopy(data);
                 job.lastOkMsg = "Job: 1 - DONE";
                 job.nextAllowedReadMs = now + API_JOB_MIN_POLL_MS;
                 return ApiResult.ok("Job: 1 - DONE", data);
             }
 
+            // RUNNING (normal)
             job.state = "RUNNING";
             safeJsonPut(data, "state_job", "RUNNING");
             safeJsonPut(data, "armed", 0);
@@ -1572,6 +1617,10 @@ public final class DeliveryController implements DeliveryControllerPort {
             return ApiResult.ok("Job: 1 - RUNNING", data);
 
         } catch (Exception e) {
+            DeliveryLogStore store = this.logStore;
+            if (store != null && job.attemptId > 0) {
+                store.addEventAsync(job.attemptId, DeliveryLogStore.LEVEL_WARN, "JOBGET_READ_FAIL", safeMsg(e), null);
+            }
             if (job.lastOkData != null) {
                 JSONObject data = safeJsonCopy(job.lastOkData);
                 if (data == null) data = new JSONObject();
@@ -1585,5 +1634,14 @@ public final class DeliveryController implements DeliveryControllerPort {
             safeJsonPut(d, "detail", (e.getMessage() != null) ? e.getMessage() : "");
             return ApiResult.fail("Job: 0 - Read error", "JOB_READ_FAIL", d);
         }
+    }
+
+    // ------------------------------------
+    // helpers
+    // ------------------------------------
+    private static String safeMsg(Exception e) {
+        if (e == null) return "";
+        String m = e.getMessage();
+        return (m == null) ? e.getClass().getSimpleName() : m;
     }
 }
