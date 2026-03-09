@@ -25,10 +25,10 @@ import java.util.concurrent.Executors;
 public class DeliveryLogStore {
 
     public static final String SOURCE_API = "API";
-    public static final String SOURCE_UI = "UI";
+    public static final String SOURCE_UI  = "UI";
 
-    public static final String LEVEL_INFO = "INFO";
-    public static final String LEVEL_WARN = "WARN";
+    public static final String LEVEL_INFO  = "INFO";
+    public static final String LEVEL_WARN  = "WARN";
     public static final String LEVEL_ERROR = "ERROR";
 
     private final DeliveryDb helper;
@@ -69,6 +69,16 @@ public class DeliveryLogStore {
         io.execute(() -> upsertSummary(serialId, ticketNo, saleNo, lastState, source, jobId, resultJson, errorJson));
     }
 
+    /**
+     * ✅ FIX: Do NOT use CONFLICT_REPLACE on delivery_summary.
+     * REPLACE in SQLite is implemented as DELETE + INSERT, which triggers FK ON DELETE CASCADE
+     * and wipes delivery_attempt / delivery_event rows.
+     *
+     * Strategy:
+     *  1) Keep first_ts stable by reading existing row if present
+     *  2) UPDATE existing row
+     *  3) If no row updated => INSERT
+     */
     public void upsertSummary(
             String serialId,
             String ticketNo,
@@ -94,8 +104,7 @@ public class DeliveryLogStore {
         }
 
         ContentValues cv = new ContentValues();
-        cv.put("serial_id", serialId);
-        cv.put("ticket_no", ticketNo);
+        // NOTE: do NOT update PK columns in update payload; keep them for insert only.
         cv.put("sale_no", saleNo);
         cv.put("last_state", lastState);
         cv.put("last_source", source);
@@ -105,7 +114,30 @@ public class DeliveryLogStore {
         cv.put("result_json", resultJson);
         cv.put("error_json", errorJson);
 
-        db.insertWithOnConflict("delivery_summary", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
+        // 1) UPDATE first (no DELETE => no cascade wipe)
+        int rows = db.update(
+                "delivery_summary",
+                cv,
+                "serial_id=? AND ticket_no=?",
+                new String[]{serialId, ticketNo}
+        );
+
+        if (rows <= 0) {
+            // 2) INSERT if missing
+            ContentValues ins = new ContentValues();
+            ins.put("serial_id", serialId);
+            ins.put("ticket_no", ticketNo);
+            ins.put("sale_no", saleNo);
+            ins.put("last_state", lastState);
+            ins.put("last_source", source);
+            ins.put("last_job_id", jobId);
+            ins.put("first_ts", firstTs);
+            ins.put("last_ts", now);
+            ins.put("result_json", resultJson);
+            ins.put("error_json", errorJson);
+
+            db.insert("delivery_summary", null, ins);
+        }
     }
 
     // ✅ NEW (v2): update time columns in delivery_summary
@@ -204,16 +236,14 @@ public class DeliveryLogStore {
     }
 
     // =========================================================
-    // ✅ NEW: WAL-safe single-file backup helper
+    // Backup helpers (WAL-safe single-file backups)
     // =========================================================
     public void checkpointWalBestEffort() {
         try {
             SQLiteDatabase db = helper.getWritableDatabase();
-            // Force WAL pages into the main db file so a single .db works on PC
             db.execSQL("PRAGMA wal_checkpoint(FULL);");
         } catch (Throwable t) {
-            android.util.Log.w("DeliveryLogStore",
-                    "WAL checkpoint failed (backup may be incomplete)", t);
+            android.util.Log.w("DeliveryLogStore", "WAL checkpoint failed (backup may be incomplete)", t);
         }
     }
 
@@ -245,7 +275,7 @@ public class DeliveryLogStore {
             throw new Exception("DB file not found: " + DeliveryDb.DB_NAME);
         }
 
-        // ✅ NEW: consolidate WAL into main file so PC sees tables/data in ONE file
+        // WAL-safe single-file backup
         checkpointWalBestEffort();
 
         ContentValues values = new ContentValues();
