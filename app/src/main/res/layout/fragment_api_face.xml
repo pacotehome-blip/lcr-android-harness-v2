@@ -59,4 +59,5 @@
         android:paddingTop="10dp"
         android:text="Workflow attendu:\n1) GET /v1/usb/scan\n2) POST /v1/usb/open-ping\n3) POST /v1/lcp/connect (next=C ou A)\n4) POST /v1/register/validate (Registre prêt)\n5a) POST /v1/delivery/oneshot/start (nouveau)\n5b) POST /v1/delivery/C (legacy)\n6) GET /v1/delivery/job/{jobId}\n7) POST /v1/delivery/job/continue (nouveau)\n8) POST /v1/delivery/job/terminate (nouveau)\n\nRègles:\n- API locale seulement (127.0.0.1)\n- Start API possible sans \"Connect LCP\" (headless)\n- /v1/register/validate retourne ticketPending, ticket_no et delivery_uid si numero_livraison fourni"
         android:textSize="13sp"/>
+
 </LinearLayout>
