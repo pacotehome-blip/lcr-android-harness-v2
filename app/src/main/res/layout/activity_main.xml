@@ -94,6 +94,14 @@
                 android:orientation="horizontal"
                 android:layout_marginTop="4dp">
 
+                <TextView
+                android:id="@+id/txtActiveNode"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="LCP Node : "
+                android:textStyle="bold"
+                android:layout_marginTop="4dp" />
+
                 <EditText
                     android:id="@+id/edtTo"
                     android:layout_width="0dp"
@@ -102,6 +110,14 @@
                     android:hint="TO (ex: 250)"
                     android:inputType="number"
                     android:singleLine="true" />
+
+            <TextView
+                android:id="@+id/txtActiveNode"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="From : "
+                android:textStyle="bold"
+                android:layout_marginTop="4dp" />
 
                 <EditText
                     android:id="@+id/edtFrom"
@@ -112,16 +128,7 @@
                     android:hint="FROM (ex: 255)"
                     android:inputType="number"
                     android:singleLine="true" />
-            </LinearLayout>
-
-            <!-- ===================== DIAGNOSTIC ===================== -->
-            <TextView
-                android:id="@+id/txtActiveNode"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Node actif : —"
-                android:textStyle="bold"
-                android:layout_marginTop="4dp" />
+            </LinearLayout>        
 
             <!-- ===================== PRODUITS ===================== -->
             <Spinner
@@ -145,6 +152,13 @@
                     android:hint="Produit (#)"
                     android:inputType="number"
                     android:singleLine="true" />
+            <TextView
+                android:id="@+id/txtActiveNode"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Preset : "
+                android:textStyle="bold"
+                android:layout_marginTop="4dp" />
 
                 <EditText
                     android:id="@+id/edtPreset"
