@@ -8,7 +8,7 @@ import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
-import android.content.Context; // ✅ FIX: required for HeadlessApiFacade
+import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
@@ -79,8 +79,7 @@ public class MainActivity extends AppCompatActivity {
     private TextView txtQtyGross;
 
     private TextView txtTicketNumber;
-    // ✅ NEW: Delivery UID (affiché même si null -> "-")
-    private TextView txtDeliveryUid;
+    private TextView txtDeliveryUid; // affiché même si null -> "-"
 
     private TextView txtLog;
     private ScrollView logScroll;
@@ -137,7 +136,6 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private static String parseReqPath(String line) {
-        // Format attendu: [API ts][RID=n] REQ <METHOD> <PATH> body=...
         try {
             int k = line.indexOf(" REQ ");
             if (k < 0) return null;
@@ -158,7 +156,6 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private static boolean isJobDoneRespLine(String line) {
-        // Basé sur le JSON renvoyé dans resp log (msg: "Job: 1 - DONE")
         return line != null && line.contains("\"msg\":\"Job: 1 - DONE\"");
     }
 
@@ -186,7 +183,6 @@ public class MainActivity extends AppCompatActivity {
                 liveTickRunning = false;
                 return;
             }
-            // ✅ Poll en RUNNING_FLOWING ET RUNNING_PAUSED (pas seulement FLOWING)
             DeliveryState st = controller.getState();
             boolean shouldPoll =
                     (st == DeliveryState.RUNNING_FLOWING) ||
@@ -208,7 +204,6 @@ public class MainActivity extends AppCompatActivity {
         boolean shouldPoll =
                 (st == DeliveryState.RUNNING_FLOWING) ||
                 (st == DeliveryState.RUNNING_PAUSED);
-
         if (!shouldPoll) return;
         liveTickRunning = true;
         ui.removeCallbacks(liveTick);
@@ -251,7 +246,6 @@ public class MainActivity extends AppCompatActivity {
         f.addAction(UsbReceiver.ACTION_USB_DETACHED);
         registerReceiver(usbUiReceiver, f);
 
-        // ✅ rattrapage si USB READY est arrivé pendant que l'activité était stoppée
         UsbSerialPort p = UsbSession.getPort();
         if (p != null && usbPort == null) {
             onUsbPortReady(p);
@@ -276,7 +270,6 @@ public class MainActivity extends AppCompatActivity {
         initUiDefaults();
         setupTabs();
 
-        // Store unique pour lcr_delivery.db
         deliveryStore = new DeliveryLogStore(this);
         deliveryStore.purgeOlderThanDaysAsync(7);
 
@@ -322,7 +315,6 @@ public class MainActivity extends AppCompatActivity {
         txtQtyGross = findViewById(R.id.txtQtyGross);
 
         txtTicketNumber = findViewById(R.id.txtTicketNumber);
-        // ✅ NEW: may be null if xml not updated yet
         try { txtDeliveryUid = findViewById(R.id.txtDeliveryUid); } catch (Exception ignored) {}
 
         txtLog = findViewById(R.id.txtLog);
@@ -335,7 +327,6 @@ public class MainActivity extends AppCompatActivity {
         cbTxRx = findViewById(R.id.cbTxRx);
         cbLogTs = findViewById(R.id.cbLogTs);
 
-        // API tab (sans trace UI)
         txtApiStatus = findViewById(R.id.txtApiStatus);
         txtApiUrl = findViewById(R.id.txtApiUrl);
         btnApiStart = findViewById(R.id.btnApiStart);
@@ -483,7 +474,6 @@ public class MainActivity extends AppCompatActivity {
     // API Server
     // =========================
     private void startApiServer() {
-        // ✅ NEW: L'API peut démarrer même si controller==null (headless)
         if (apiServer != null && apiServer.isRunning()) {
             log("[API " + uiTs() + "] déjà RUNNING");
             refreshApiStatus();
@@ -531,7 +521,6 @@ public class MainActivity extends AppCompatActivity {
         if (btnApiStop != null) btnApiStop.setEnabled(running);
     }
 
-    // ✅ Sink API : filtre le polling /delivery/job/* => première + DONE seulement
     private void onApiLine(String line) {
         if (line == null) return;
 
@@ -585,7 +574,6 @@ public class MainActivity extends AppCompatActivity {
 
         HeadlessApiFacade(Context ctx) {
             this.appCtx = ctx.getApplicationContext();
-            // ✅ FIX: use Context.USB_SERVICE inside static nested class
             this.usbManager = (UsbManager) this.appCtx.getSystemService(Context.USB_SERVICE);
             this.store = new DeliveryLogStore(this.appCtx);
             this.store.purgeOlderThanDaysAsync(7);
@@ -676,11 +664,49 @@ public class MainActivity extends AppCompatActivity {
             return ApiResult.fail("Terminate: 0 - Non disponible sans controller UI (headless minimal).", "NO_CONTROLLER");
         }
 
+        // =========================================================
+        // ✅ COMMIT 3: headless validateRegister (utilise RegisterValidator)
+        // =========================================================
         @Override
-        public ApiResult api_registerValidate(String numero_livraison, Integer expected_lcrnode_dec,
-                                             String expected_serial_id, Integer expected_product_number,
+        public ApiResult api_registerValidate(String numero_livraison,
+                                             Integer expected_lcrnode_dec,
+                                             String expected_serial_id,
+                                             Integer expected_product_number,
                                              String expected_compartment) {
-            return ApiResult.fail("Validate: 0 - Endpoint non implémenté dans commit 1.", "NOT_IMPLEMENTED");
+
+            // 1) Média présent ?
+            int n = 0;
+            try { n = (usbManager != null) ? usbManager.getDeviceList().size() : 0; } catch (Exception ignored) {}
+            if (n <= 0) {
+                JSONObject d = new JSONObject();
+                try { d.put("usb_devices", 0); } catch (Exception ignored) {}
+                return ApiResult.fail("Validate: 0 - Média RS-232 absent (aucun USB device).",
+                        RegisterValidator.Codes.ERR_LCP_CONNECT_FAILED, d);
+            }
+
+            // 2) Port prêt ?
+            UsbSerialPort p = UsbSession.getPort();
+            if (p == null) {
+                return ApiResult.fail("Validate: 0 - USB non prêt (port null).",
+                        RegisterValidator.Codes.ERR_USB_PORT_NOT_READY);
+            }
+
+            // 3) TO / FROM
+            int to = (expected_lcrnode_dec != null && expected_lcrnode_dec >= 1 && expected_lcrnode_dec <= 250)
+                    ? expected_lcrnode_dec
+                    : 250;
+            int from = 255;
+
+            // 4) Validation LCP (0x28 + #23 + #80 + #0 + delivery_uid)
+            return RegisterValidator.validateLcp(
+                    p,
+                    to,
+                    from,
+                    numero_livraison,
+                    expected_serial_id,
+                    expected_product_number,
+                    expected_compartment
+            );
         }
 
         private static String utcStamp() {
