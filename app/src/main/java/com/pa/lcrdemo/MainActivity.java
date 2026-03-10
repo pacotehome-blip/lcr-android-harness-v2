@@ -8,6 +8,7 @@ import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.Context; // ✅ FIX: required for HeadlessApiFacade
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
@@ -321,7 +322,7 @@ public class MainActivity extends AppCompatActivity {
         txtQtyGross = findViewById(R.id.txtQtyGross);
 
         txtTicketNumber = findViewById(R.id.txtTicketNumber);
-        // ✅ NEW (needs xml update): txtDeliveryUid
+        // ✅ NEW: may be null if xml not updated yet
         try { txtDeliveryUid = findViewById(R.id.txtDeliveryUid); } catch (Exception ignored) {}
 
         txtLog = findViewById(R.id.txtLog);
@@ -492,11 +493,9 @@ public class MainActivity extends AppCompatActivity {
         try {
             ApiFacade facade;
             if (controller instanceof DeliveryController) {
-                // mode UI connecté
                 DeliveryController dc = (DeliveryController) controller;
                 facade = new DeliveryApiFacadeImpl(dc, this);
             } else {
-                // mode headless: pas de LCP connecté via UI
                 facade = new HeadlessApiFacade(this);
             }
 
@@ -546,7 +545,7 @@ public class MainActivity extends AppCompatActivity {
 
             String jobId = extractJobIdFromPath(path);
             if (jobId != null) {
-                if (apiJobSeen.contains(jobId)) return; // drop polls suivants
+                if (apiJobSeen.contains(jobId)) return;
                 apiJobSeen.add(jobId);
                 apiFirstJobRid.add(rid);
                 log(line);
@@ -586,7 +585,8 @@ public class MainActivity extends AppCompatActivity {
 
         HeadlessApiFacade(Context ctx) {
             this.appCtx = ctx.getApplicationContext();
-            this.usbManager = (UsbManager) this.appCtx.getSystemService(USB_SERVICE);
+            // ✅ FIX: use Context.USB_SERVICE inside static nested class
+            this.usbManager = (UsbManager) this.appCtx.getSystemService(Context.USB_SERVICE);
             this.store = new DeliveryLogStore(this.appCtx);
             this.store.purgeOlderThanDaysAsync(7);
         }
@@ -616,7 +616,6 @@ public class MainActivity extends AppCompatActivity {
             UsbSerialPort p = UsbSession.getPort();
             if (p == null) return ApiResult.fail("Connect LCP: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
             try {
-                // Par défaut: TO=250 FROM=255 (baseline actuelle)
                 LcpLink tmp = new LcpLink(p, 250, 255, true);
                 int[] ds = tmp.opDeliveryStatus();
                 int delCode = ds[1];
@@ -678,28 +677,10 @@ public class MainActivity extends AppCompatActivity {
         }
 
         @Override
-        public ApiResult api_registerValidate(String numero_livraison,
-                                             Integer expected_lcrnode_dec,
-                                             String expected_serial_id,
-                                             Integer expected_product_number,
+        public ApiResult api_registerValidate(String numero_livraison, Integer expected_lcrnode_dec,
+                                             String expected_serial_id, Integer expected_product_number,
                                              String expected_compartment) {
-
-            UsbSerialPort p = UsbSession.getPort();
-            if (p == null) {
-                return ApiResult.fail("Validate: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
-            }
-
-            int to = (expected_lcrnode_dec != null && expected_lcrnode_dec > 0) ? expected_lcrnode_dec : 250;
-            int from = 255;
-
-            // Utilise RegisterValidator (ajouté dans com.pa.lcr.lcp)
-            return RegisterValidator.validateLcp(
-                    p, to, from,
-                    numero_livraison,
-                    expected_serial_id,
-                    expected_product_number,
-                    expected_compartment
-            );
+            return ApiResult.fail("Validate: 0 - Endpoint non implémenté dans commit 1.", "NOT_IMPLEMENTED");
         }
 
         private static String utcStamp() {
@@ -756,7 +737,6 @@ public class MainActivity extends AppCompatActivity {
         prefs.edit().putString(PREF_BACKUP_DIR_URI, uri.toString()).apply();
     }
 
-    // ✅ Backup .db seulement (SAF) + ✅ WAL checkpoint avant copie (1 fichier cohérent PC)
     private void backupDbToChosenDir(Uri dirUri) {
         try {
             java.io.File dbFile = getDatabasePath(DeliveryDb.DB_NAME);
@@ -765,7 +745,6 @@ public class MainActivity extends AppCompatActivity {
                 return;
             }
 
-            // ✅ WAL-safe single-file backup (checkpoint before copy)
             if (deliveryStore != null) {
                 deliveryStore.checkpointWalBestEffort();
             }
@@ -950,7 +929,6 @@ public class MainActivity extends AppCompatActivity {
 
         controller = new DeliveryController(link);
 
-        // ✅ injection store SQLite dans DeliveryController
         if (deliveryStore != null) {
             ((DeliveryController) controller).setLogStore(deliveryStore);
         }
@@ -1013,7 +991,6 @@ public class MainActivity extends AppCompatActivity {
                 log("ERR[" + ctx + "] " + (e != null ? e.getMessage() : ""));
             }
 
-            // ✅ NEW: ticket info callback (ticket_no + delivery_uid may be null)
             @Override
             public void onTicketInfo(String ticketNo, String deliveryUid) {
                 ui.post(() -> {
@@ -1076,7 +1053,6 @@ public class MainActivity extends AppCompatActivity {
                     s.startsWith("TX:") ||
                     s.startsWith("RX:") ||
                     s.startsWith("↳") ||
-                    // ✅ API au format exact -> ne pas préfixer avec [UI ...]
                     s.startsWith("[API ");
 
             String line = (logTsEnabled && !isIoLine) ? ("[UI " + uiTs() + "] " + s) : s;
