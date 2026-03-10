@@ -79,7 +79,9 @@ public final class LcpLink {
     private void t(String s) {
         TraceSink ts = trace;
         if (ts == null) return;
-        if (traceTsEnabled && (s.startsWith("TX:") || s.startsWith("RX:") || s.startsWith("↳"))) {
+        if (traceTsEnabled && (s.startsWith("TX:")
+                || s.startsWith("RX:")
+                || s.startsWith("↳"))) {
             ts.onTrace("[IO " + TRACE_DF.get().format(new Date()) + "] " + s);
         } else {
             ts.onTrace(s);
@@ -104,6 +106,10 @@ public final class LcpLink {
     public boolean isClosed() {
         return closed;
     }
+
+    // ✅ NEW: exposer les adresses (utile pour validate / logs / UI)
+    public int getToAddr() { return toAddr; }
+    public int getHostAddr() { return hostAddr; }
 
     public synchronized void close() {
         closed = true;
@@ -194,7 +200,6 @@ public final class LcpLink {
     // ===================== SEND / RECV =====================
     private synchronized Response sendRecv(byte[] payload, int timeoutMs) throws IOException {
         if (closed) throw new IOException("Transport closed");
-
         final byte msg = (payload != null && payload.length > 0) ? payload[0] : 0;
 
         // queued via 0x7D uniquement pour commandes modifiantes (Python-like)
@@ -202,6 +207,7 @@ public final class LcpLink {
 
         byte[] frame = encodeFrame(payload);
         t("TX: " + hexDump(frame));
+
         synchronized (PORT_LOCK) {
             port.write(frame, 500);
         }
@@ -226,7 +232,6 @@ public final class LcpLink {
             // 2) Lire en tranches courtes pour ne pas bloquer l’envoi des 0x7D
             long sliceDeadline = Math.min(deadline, System.currentTimeMillis() + RX_SLICE_MS);
             Frame f = readFrameUntil(sliceDeadline);
-
             if (f == null) {
                 // Si queued, on continue: cela permet de continuer d’émettre des 0x7D
                 if (queued) continue;
@@ -306,37 +311,28 @@ public final class LcpLink {
     private Frame tryParseFrame(ByteArray b) {
         try {
             if (b.len < 6) return null;
-
             IntRef idx = new IntRef(2); // après "~~"
             ByteArray rawForCrc = new ByteArray();
-
             int to = readUnescapedAndCaptureRaw(b, rawForCrc, idx);
             int from = readUnescapedAndCaptureRaw(b, rawForCrc, idx);
             int status = readUnescapedAndCaptureRaw(b, rawForCrc, idx);
             int len = readUnescapedAndCaptureRaw(b, rawForCrc, idx);
-
             byte[] payload = new byte[len];
             for (int i = 0; i < len; i++) {
                 payload[i] = (byte) readUnescapedAndCaptureRaw(b, rawForCrc, idx);
             }
-
             int crc0 = readCrcByte(b, idx);
             int crc1 = readCrcByte(b, idx);
-
             int recv = ((crc1 & 0xFF) << 8) | (crc0 & 0xFF);
             int calc = crcLcp(rawForCrc.buf, 0, rawForCrc.len);
-
             if (calc != recv) {
                 b.drop(1);
                 return null;
             }
-
             int rawLen = idx.v;
             byte[] raw = b.extract(rawLen);
             b.drop(rawLen);
-
             return new Frame(to, from, status, payload, raw);
-
         } catch (IncompleteFrameException e) {
             return null;
         }
@@ -344,10 +340,10 @@ public final class LcpLink {
 
     private static final class IntRef { int v; IntRef(int v) { this.v = v; } }
 
-    private int readUnescapedAndCaptureRaw(ByteArray b, ByteArray rawForCrc, IntRef idx) throws IncompleteFrameException {
+    private int readUnescapedAndCaptureRaw(ByteArray b, ByteArray rawForCrc, IntRef idx)
+            throws IncompleteFrameException {
         if (idx.v >= b.len) throw new IncompleteFrameException();
         int v = b.buf[idx.v] & 0xFF;
-
         if (v == (ESC & 0xFF)) {
             if (idx.v + 1 >= b.len) throw new IncompleteFrameException();
             rawForCrc.append(b.buf[idx.v]);
@@ -365,7 +361,6 @@ public final class LcpLink {
     private int readCrcByte(ByteArray b, IntRef idx) throws IncompleteFrameException {
         if (idx.v >= b.len) throw new IncompleteFrameException();
         int v = b.buf[idx.v] & 0xFF;
-
         if (v == (ESC & 0xFF)) {
             if (idx.v + 1 >= b.len) throw new IncompleteFrameException();
             int unesc = b.buf[idx.v + 1] & 0xFF;
@@ -380,7 +375,6 @@ public final class LcpLink {
     // ===================== FRAMING / CRC =====================
     private byte[] encodeFrame(byte[] payload) {
         int status = nextStatusByte();
-
         ByteArray var = new ByteArray();
         var.append((byte) toAddr);
         var.append((byte) hostAddr);

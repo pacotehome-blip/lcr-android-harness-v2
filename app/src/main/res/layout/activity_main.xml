@@ -1,38 +1,38 @@
 
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:app="http://schemas.android.com/apk/res-auto" 
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/rootTabs"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical">
-        <!-- ===================== HEADER (Filgo + Livraison) ===================== -->
-        <LinearLayout
-                android:id="@+id/headerFilgo"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:paddingTop="6dp"
-                android:paddingBottom="6dp">
 
-            <ImageView
-                android:id="@+id/imgFilgo"
-                android:layout_width="28dp"
-                android:layout_height="28dp"
-                android:src="@mipmap/logoenergie1"
-                android:contentDescription="Filgo"
-                android:scaleType="fitCenter" />
+    <!-- ===================== HEADER (Filgo + Livraison) ===================== -->
+    <LinearLayout
+        android:id="@+id/headerFilgo"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingTop="6dp"
+        android:paddingBottom="6dp">
 
-            <TextView
-                android:id="@+id/txtHeaderLivraison"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="10dp"
-                android:text="Livraison"
-                android:textStyle="bold"
-                android:textSize="20sp" />
+        <ImageView
+            android:id="@+id/imgFilgo"
+            android:layout_width="28dp"
+            android:layout_height="28dp"
+            android:src="@mipmap/logoenergie1"
+            android:contentDescription="Filgo"
+            android:scaleType="fitCenter" />
 
-        </LinearLayout>
+        <TextView
+            android:id="@+id/txtHeaderLivraison"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="10dp"
+            android:text="Livraison"
+            android:textStyle="bold"
+            android:textSize="20sp" />
+    </LinearLayout>
 
     <!-- ===================== TABS (en haut) ===================== -->
     <com.google.android.material.tabs.TabLayout
@@ -56,7 +56,6 @@
             android:layout_height="match_parent"
             android:orientation="vertical"
             android:padding="6dp">
-
 
             <!-- ===================== USB ===================== -->
             <LinearLayout
@@ -95,6 +94,7 @@
                 android:text="LCP Node : "
                 android:textStyle="bold"
                 android:layout_marginTop="4dp" />
+
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -120,7 +120,7 @@
                     android:hint="FROM (ex: 255)"
                     android:inputType="number"
                     android:singleLine="true" />
-            </LinearLayout>        
+            </LinearLayout>
 
             <!-- ===================== PRODUITS ===================== -->
             <Spinner
@@ -144,13 +144,14 @@
                     android:hint="Produit (#)"
                     android:inputType="number"
                     android:singleLine="true" />
-            <TextView
-                android:id="@+id/txtActiveNode"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Preset : "
-                android:textStyle="bold"
-                android:layout_marginTop="4dp" />
+
+                <TextView
+                    android:id="@+id/txtActiveNode"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Preset : "
+                    android:textStyle="bold"
+                    android:layout_marginTop="4dp" />
 
                 <EditText
                     android:id="@+id/edtPreset"
@@ -281,6 +282,13 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:text="-" />
+
+                <!-- ✅ NEW: delivery_uid affiché (peut rester '-') -->
+                <TextView
+                    android:id="@+id/txtDeliveryUid"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="-" />
             </LinearLayout>
 
             <!-- ===================== LOG ===================== -->
@@ -366,28 +374,28 @@
                 </LinearLayout>
             </LinearLayout>
 
+            <!-- ======== FIN de ton ancien activity_main ======== -->
         </LinearLayout>
-        <!-- ======== FIN de ton ancien activity_main ======== -->
+
+        <!-- ===================== PAGE 2: API-Face ===================== -->
+        <LinearLayout
+            android:id="@+id/pageApiFace"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <!-- Backup DB (Downloads) -->
+            <Button
+                android:id="@+id/btnDbBackup"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Backup DB (Downloads)"
+                android:layout_margin="8dp" />
+
+            <!-- On inclut le layout de l’onglet API-Face -->
+            <include layout="@layout/fragment_api_face" />
+        </LinearLayout>
 
     </LinearLayout>
-
-    <!-- ===================== PAGE 2: API-Face ===================== -->
-    <LinearLayout
-        android:id="@+id/pageApiFace"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:orientation="vertical"
-        android:visibility="gone">
-
-        <!-- On inclut le layout de l’onglet API-Face -->
-        <Button
- android:id="@+id/btnDbBackup"
- android:layout_width="match_parent"
- android:layout_height="wrap_content"
- android:text="Backup DB (Downloads)"
- android:layout_margin="8dp" />
-
- <include layout="@layout/fragment_api_face" />
-    </LinearLayout>
-
 </LinearLayout>

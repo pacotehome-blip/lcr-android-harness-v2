@@ -26,6 +26,8 @@ import com.pa.lcr.lcp.*;
 import com.pa.lcr.lcp.storage.DeliveryDb;
 import com.pa.lcr.lcp.storage.DeliveryLogStore;
 
+import org.json.JSONObject;
+
 import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -66,30 +68,41 @@ public class MainActivity extends AppCompatActivity {
     private Spinner spnProducts;
     private EditText edtProduct;
     private EditText edtPreset;
+
     private Button btnA, btnB, btnC;
     private Button btnContinue, btnFinish;
+
     private TextView txtLive;
     private View liveQtyPanel;
     private TextView txtQtyNet;
     private TextView txtQtyGross;
+
+    private TextView txtTicketNumber;
+    // ✅ NEW: Delivery UID (affiché même si null -> "-")
+    private TextView txtDeliveryUid;
+
     private TextView txtLog;
     private ScrollView logScroll;
+
     private Button btnClearLog;
     private Button btnCopyLog;
     private Button btnScrollDown;
+
     private CheckBox cbTxRx;
     private CheckBox cbLogTs;
 
     private boolean logTsEnabled = false;
+
     private DeliveryControllerPort controller;
     private LcpLink link = null;
+
     private boolean suppressProductSelection = false;
     private boolean userTouchedSpinner = false;
 
     private final StringBuilder logBuf = new StringBuilder(32768);
     private final Handler ui = new Handler(Looper.getMainLooper());
-
     private boolean liveTickRunning = false;
+
     private double lastNet = Double.NaN;
     private double lastGross = Double.NaN;
 
@@ -155,6 +168,7 @@ public class MainActivity extends AppCompatActivity {
             if (intent == null) return;
             String a = intent.getAction();
             if (a == null) return;
+
             if (UsbReceiver.ACTION_USB_READY.equals(a)) {
                 UsbSerialPort p = UsbSession.getPort();
                 if (p != null) onUsbPortReady(p);
@@ -167,8 +181,10 @@ public class MainActivity extends AppCompatActivity {
     private final Runnable liveTick = new Runnable() {
         @Override
         public void run() {
-            if (controller == null) { liveTickRunning = false; return; }
-
+            if (controller == null) {
+                liveTickRunning = false;
+                return;
+            }
             // ✅ Poll en RUNNING_FLOWING ET RUNNING_PAUSED (pas seulement FLOWING)
             DeliveryState st = controller.getState();
             boolean shouldPoll =
@@ -179,7 +195,6 @@ public class MainActivity extends AppCompatActivity {
                 liveTickRunning = false;
                 return;
             }
-
             controller.requestLiveSample();
             ui.postDelayed(this, LIVE_POLL_MS);
         }
@@ -188,14 +203,12 @@ public class MainActivity extends AppCompatActivity {
     private void startLiveTickIfNeeded() {
         if (controller == null) return;
         if (liveTickRunning) return;
-
         DeliveryState st = controller.getState();
         boolean shouldPoll =
                 (st == DeliveryState.RUNNING_FLOWING) ||
                 (st == DeliveryState.RUNNING_PAUSED);
 
         if (!shouldPoll) return;
-
         liveTickRunning = true;
         ui.removeCallbacks(liveTick);
         ui.postDelayed(liveTick, LIVE_POLL_MS);
@@ -214,13 +227,11 @@ public class MainActivity extends AppCompatActivity {
                 toast("Backup: sélection de dossier annulée");
                 return;
             }
-
             Uri dirUri = data.getData();
             final int takeFlags = data.getFlags() & (
                     Intent.FLAG_GRANT_READ_URI_PERMISSION |
                     Intent.FLAG_GRANT_WRITE_URI_PERMISSION
             );
-
             try {
                 getContentResolver().takePersistableUriPermission(dirUri, takeFlags);
             } catch (Exception ignored) {}
@@ -289,8 +300,8 @@ public class MainActivity extends AppCompatActivity {
 
         edtTo = findViewById(R.id.edtTo);
         edtFrom = findViewById(R.id.edtFrom);
-
         txtActiveNode = findViewById(R.id.txtActiveNode);
+
         btnConnect = findViewById(R.id.btnConnect);
 
         spnProducts = findViewById(R.id.spnProducts);
@@ -305,10 +316,13 @@ public class MainActivity extends AppCompatActivity {
         btnFinish = findViewById(R.id.btnFinish);
 
         txtLive = findViewById(R.id.txtLive);
-
         liveQtyPanel = findViewById(R.id.liveQtyPanel);
         txtQtyNet = findViewById(R.id.txtQtyNet);
         txtQtyGross = findViewById(R.id.txtQtyGross);
+
+        txtTicketNumber = findViewById(R.id.txtTicketNumber);
+        // ✅ NEW (needs xml update): txtDeliveryUid
+        try { txtDeliveryUid = findViewById(R.id.txtDeliveryUid); } catch (Exception ignored) {}
 
         txtLog = findViewById(R.id.txtLog);
         logScroll = findViewById(R.id.logScroll);
@@ -335,13 +349,16 @@ public class MainActivity extends AppCompatActivity {
     private void initUiDefaults() {
         edtTo.setText("250");
         edtFrom.setText("255");
-        txtActiveNode.setText("Node actif : —");
 
+        txtActiveNode.setText("Node actif : —");
         txtLive.setText("LIVE: (en attente)");
 
         if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
         if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
         if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
+
+        if (txtTicketNumber != null) txtTicketNumber.setText("-");
+        if (txtDeliveryUid != null) txtDeliveryUid.setText("-");
 
         List<ProductUiItem> products = new ArrayList<>();
         for (int i = 1; i <= 16; i++) products.add(new ProductUiItem(i, "Produit " + i));
@@ -378,8 +395,8 @@ public class MainActivity extends AppCompatActivity {
                 if (controller == null) return;
                 if (suppressProductSelection) return;
                 if (!userTouchedSpinner) return;
-
                 userTouchedSpinner = false;
+
                 ProductUiItem it = (ProductUiItem) spnProducts.getSelectedItem();
                 controller.selectProduct(it.product1);
                 edtProduct.setText(String.valueOf(it.product1));
@@ -390,6 +407,7 @@ public class MainActivity extends AppCompatActivity {
         btnA.setOnClickListener(v -> { if (controller != null) controller.alignOrRecover(); });
         btnB.setOnClickListener(v -> { if (controller != null) controller.requestStatus(); });
         btnC.setOnClickListener(v -> { if (controller != null) controller.startDelivery(readProduct(), readPreset()); });
+
         btnContinue.setOnClickListener(v -> { if (controller != null) controller.resumeIfPaused(); });
         btnFinish.setOnClickListener(v -> { if (controller != null) controller.endDelivery(); });
 
@@ -464,26 +482,24 @@ public class MainActivity extends AppCompatActivity {
     // API Server
     // =========================
     private void startApiServer() {
-        if (controller == null) {
-            log("[API " + uiTs() + "] START REFUSED: controller==null (Connect LCP requis)");
-            refreshApiStatus();
-            toast("Start API refusé: Connect LCP requis");
-            return;
-        }
-        if (!(controller instanceof DeliveryController)) {
-            log("[API " + uiTs() + "] START REFUSED: controller type incompatible");
-            refreshApiStatus();
-            toast("Start API refusé: controller incompatible");
-            return;
-        }
+        // ✅ NEW: L'API peut démarrer même si controller==null (headless)
         if (apiServer != null && apiServer.isRunning()) {
             log("[API " + uiTs() + "] déjà RUNNING");
             refreshApiStatus();
             return;
         }
+
         try {
-            DeliveryController dc = (DeliveryController) controller;
-            ApiFacade facade = new DeliveryApiFacadeImpl(dc, this);
+            ApiFacade facade;
+            if (controller instanceof DeliveryController) {
+                // mode UI connecté
+                DeliveryController dc = (DeliveryController) controller;
+                facade = new DeliveryApiFacadeImpl(dc, this);
+            } else {
+                // mode headless: pas de LCP connecté via UI
+                facade = new HeadlessApiFacade(this);
+            }
+
             apiServer = new ApiServer(facade, this::onApiLine, API_PORT);
             apiServer.start();
             refreshApiStatus();
@@ -530,7 +546,7 @@ public class MainActivity extends AppCompatActivity {
 
             String jobId = extractJobIdFromPath(path);
             if (jobId != null) {
-                if (apiJobSeen.contains(jobId)) return;  // drop polls suivants
+                if (apiJobSeen.contains(jobId)) return; // drop polls suivants
                 apiJobSeen.add(jobId);
                 apiFirstJobRid.add(rid);
                 log(line);
@@ -543,7 +559,6 @@ public class MainActivity extends AppCompatActivity {
         if (rid != null && isResp) {
             String path = apiRidToPath.remove(rid);
             String jobId = extractJobIdFromPath(path);
-
             if (jobId != null) {
                 if (apiFirstJobRid.remove(rid)) {
                     log(line);
@@ -554,12 +569,144 @@ public class MainActivity extends AppCompatActivity {
                 }
                 return;
             }
-
             log(line);
             return;
         }
 
         log(line);
+    }
+
+    // =========================
+    // Headless API facade (no controller required)
+    // =========================
+    private static final class HeadlessApiFacade implements ApiFacade {
+        private final Context appCtx;
+        private final UsbManager usbManager;
+        private final DeliveryLogStore store;
+
+        HeadlessApiFacade(Context ctx) {
+            this.appCtx = ctx.getApplicationContext();
+            this.usbManager = (UsbManager) this.appCtx.getSystemService(USB_SERVICE);
+            this.store = new DeliveryLogStore(this.appCtx);
+            this.store.purgeOlderThanDaysAsync(7);
+        }
+
+        @Override public ApiResult api_scanUsb() {
+            try {
+                int n = (usbManager != null) ? usbManager.getDeviceList().size() : 0;
+                JSONObject d = new JSONObject();
+                d.put("usb_devices", n);
+                return (n > 0)
+                        ? ApiResult.ok("Scan USB: 1 - Registre détecté (USB device présent)", d)
+                        : ApiResult.fail("Scan USB: 0 - Aucun périphérique USB détecté.", "ERR_MEDIA_NOT_PRESENT", d);
+            } catch (Exception e) {
+                return ApiResult.fail("Scan USB: 0 - Failed", "ERR_MEDIA_NOT_PRESENT");
+            }
+        }
+
+        @Override public ApiResult api_openPingUsb() {
+            UsbSerialPort p = UsbSession.getPort();
+            if (p == null) {
+                return ApiResult.fail("Open/Ping USB: 0 - USB non prêt (port null).", "ERR_USB_PORT_NOT_READY");
+            }
+            return ApiResult.ok("Open/Ping USB: 1 - USB prêt (port ouvert)");
+        }
+
+        @Override public ApiResult api_connectLcp() {
+            UsbSerialPort p = UsbSession.getPort();
+            if (p == null) return ApiResult.fail("Connect LCP: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
+            try {
+                // Par défaut: TO=250 FROM=255 (baseline actuelle)
+                LcpLink tmp = new LcpLink(p, 250, 255, true);
+                int[] ds = tmp.opDeliveryStatus();
+                int delCode = ds[1];
+                boolean ticketPending = (delCode & 0x0001) != 0;
+                boolean flowActive = (delCode & 0x0004) != 0;
+                boolean deliveryActive = (delCode & 0x0008) != 0;
+
+                JSONObject data = new JSONObject();
+                data.put("deliveryActive", deliveryActive ? 1 : 0);
+                data.put("flowActive", flowActive ? 1 : 0);
+                data.put("ticketPending", ticketPending ? 1 : 0);
+                data.put("next", (!deliveryActive && !ticketPending) ? "C" : "A");
+
+                return ApiResult.ok("Connect LCP: 1 - CONNECTED (headless)", data);
+            } catch (Exception e) {
+                JSONObject d = new JSONObject();
+                try { d.put("detail", (e.getMessage() != null) ? e.getMessage() : ""); } catch (Exception ignored) {}
+                return ApiResult.fail("Connect LCP: 0 - Failed", "ERR_LCP_CONNECT_FAILED", d);
+            }
+        }
+
+        @Override public ApiResult api_deliveryAlignA() {
+            return ApiResult.fail("Align A: 0 - Non disponible sans controller UI (headless minimal).", "NO_CONTROLLER");
+        }
+
+        @Override public ApiResult api_dbDump() {
+            try {
+                String name = "lcr_delivery_" + utcStamp() + ".json";
+                boolean ok = store.dumpJsonToDownloads(appCtx, name);
+                if (!ok) return ApiResult.fail("DB Dump: 0 - Failed", "DB_DUMP_FAIL");
+                JSONObject d = new JSONObject();
+                d.put("fileName", name);
+                return ApiResult.ok("DB Dump: 1 - OK", d);
+            } catch (Exception e) {
+                JSONObject d = new JSONObject();
+                try { d.put("detail", (e.getMessage() != null) ? e.getMessage() : ""); } catch (Exception ignored) {}
+                return ApiResult.fail("DB Dump: 0 - Failed", "DB_DUMP_FAIL", d);
+            }
+        }
+
+        @Override public ApiResult api_deliveryStartC(int product1to16, double presetNet) {
+            return ApiResult.fail("Delivery C: 0 - Non disponible sans controller UI (headless minimal).", "NO_CONTROLLER");
+        }
+
+        @Override public ApiResult api_deliveryJobGet(String jobId) {
+            return ApiResult.fail("Job: 0 - Non disponible sans controller UI (headless minimal).", "NO_CONTROLLER");
+        }
+
+        @Override public ApiResult api_deliveryOneShotStart(String numero_livraison, int product1to16, double presetNetL, String compartment) {
+            return ApiResult.fail("OneShot: 0 - Non disponible sans controller UI (headless minimal).", "NO_CONTROLLER");
+        }
+
+        @Override public ApiResult api_deliveryContinue(String jobId) {
+            return ApiResult.fail("Continue: 0 - Non disponible sans controller UI (headless minimal).", "NO_CONTROLLER");
+        }
+
+        @Override public ApiResult api_deliveryTerminate(String jobId) {
+            return ApiResult.fail("Terminate: 0 - Non disponible sans controller UI (headless minimal).", "NO_CONTROLLER");
+        }
+
+        @Override
+        public ApiResult api_registerValidate(String numero_livraison,
+                                             Integer expected_lcrnode_dec,
+                                             String expected_serial_id,
+                                             Integer expected_product_number,
+                                             String expected_compartment) {
+
+            UsbSerialPort p = UsbSession.getPort();
+            if (p == null) {
+                return ApiResult.fail("Validate: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
+            }
+
+            int to = (expected_lcrnode_dec != null && expected_lcrnode_dec > 0) ? expected_lcrnode_dec : 250;
+            int from = 255;
+
+            // Utilise RegisterValidator (ajouté dans com.pa.lcr.lcp)
+            return RegisterValidator.validateLcp(
+                    p, to, from,
+                    numero_livraison,
+                    expected_serial_id,
+                    expected_product_number,
+                    expected_compartment
+            );
+        }
+
+        private static String utcStamp() {
+            SimpleDateFormat df = new SimpleDateFormat("yyyy-MM-dd'T'HH-mm-ss'Z'", Locale.ROOT);
+            df.setTimeZone(TimeZone.getTimeZone("UTC"));
+            return df.format(new Date());
+        }
     }
 
     // =========================
@@ -618,13 +765,12 @@ public class MainActivity extends AppCompatActivity {
                 return;
             }
 
-            // ✅ NEW: WAL-safe single-file backup (checkpoint before copy)
+            // ✅ WAL-safe single-file backup (checkpoint before copy)
             if (deliveryStore != null) {
                 deliveryStore.checkpointWalBestEffort();
             }
 
             String name = "lcr_delivery_" + utcStamp() + ".db";
-
             DocumentFile dir = DocumentFile.fromTreeUri(this, dirUri);
             if (dir == null || !dir.canWrite()) {
                 toast("Backup FAIL: dossier non accessible en écriture");
@@ -684,7 +830,6 @@ public class MainActivity extends AppCompatActivity {
     private void scanUsb() {
         usbDevices.clear();
         usbDevices.addAll(usbManager.getDeviceList().values());
-
         log("Scan USB: " + usbDevices.size() + " périphérique(s)");
 
         List<String> labels = new ArrayList<>();
@@ -696,7 +841,6 @@ public class MainActivity extends AppCompatActivity {
             labels.add(m + " - " + p);
             log(String.format(" - %s - %s (VID=%04X PID=%04X)", m, p, d.getVendorId(), d.getProductId()));
         }
-
         spnUsbDevices.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, labels));
     }
 
@@ -711,6 +855,7 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         UsbDevice dev = usbDevices.get(idx);
+
         if (!usbManager.hasPermission(dev)) {
             PendingIntent pi = PendingIntent.getBroadcast(
                     this, 0, new Intent(ACTION_USB_PERMISSION),
@@ -752,7 +897,6 @@ public class MainActivity extends AppCompatActivity {
         log("USB détaché");
         try { UsbSession.clear(); } catch (Exception ignore) {}
         stopApiServer("USB detached");
-
         if (controller != null) {
             controller.shutdown(true);
             controller = null;
@@ -760,12 +904,13 @@ public class MainActivity extends AppCompatActivity {
         link = null;
         stopLiveTick();
         usbPort = null;
-
         txtActiveNode.setText("Node actif : —");
         txtLive.setText("LIVE: (en attente)");
         if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
         if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
         if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
+        if (txtTicketNumber != null) txtTicketNumber.setText("-");
+        if (txtDeliveryUid != null) txtDeliveryUid.setText("-");
     }
 
     // =========================
@@ -791,8 +936,8 @@ public class MainActivity extends AppCompatActivity {
             controller.shutdown(false);
             controller = null;
         }
-        link = null;
 
+        link = null;
         if (pendingInitRunnable != null) ui.removeCallbacks(pendingInitRunnable);
 
         link = new LcpLink(usbPort, to, from, true);
@@ -805,7 +950,7 @@ public class MainActivity extends AppCompatActivity {
 
         controller = new DeliveryController(link);
 
-        // ✅ NEW: injection store SQLite dans DeliveryController
+        // ✅ injection store SQLite dans DeliveryController
         if (deliveryStore != null) {
             ((DeliveryController) controller).setLogStore(deliveryStore);
         }
@@ -829,7 +974,6 @@ public class MainActivity extends AppCompatActivity {
                     } else {
                         stopLiveTick();
                     }
-
                     if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
                 });
             }
@@ -866,7 +1010,16 @@ public class MainActivity extends AppCompatActivity {
             }
 
             @Override public void onError(String ctx, Throwable e) {
-                log("ERR[" + ctx + "] " + e.getMessage());
+                log("ERR[" + ctx + "] " + (e != null ? e.getMessage() : ""));
+            }
+
+            // ✅ NEW: ticket info callback (ticket_no + delivery_uid may be null)
+            @Override
+            public void onTicketInfo(String ticketNo, String deliveryUid) {
+                ui.post(() -> {
+                    if (txtTicketNumber != null) txtTicketNumber.setText(ticketNo == null ? "-" : ticketNo);
+                    if (txtDeliveryUid != null) txtDeliveryUid.setText(deliveryUid == null ? "-" : deliveryUid);
+                });
             }
         });
 
@@ -887,6 +1040,7 @@ public class MainActivity extends AppCompatActivity {
         btnC.setEnabled(connected);
         btnContinue.setEnabled(paused);
         btnFinish.setEnabled(paused && stableOff);
+
         btnB.setEnabled(true);
     }
 
@@ -895,6 +1049,7 @@ public class MainActivity extends AppCompatActivity {
             int v = Integer.parseInt(edtProduct.getText().toString());
             if (v >= 1 && v <= 16) return v;
         } catch (Exception ignore) {}
+
         ProductUiItem it = (ProductUiItem) spnProducts.getSelectedItem();
         return it.product1;
     }
@@ -910,9 +1065,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private String uiTs() {
-        java.text.SimpleDateFormat df =
-                new java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.CANADA_FRENCH);
-        return df.format(new java.util.Date(System.currentTimeMillis()));
+        SimpleDateFormat df = new SimpleDateFormat("HH:mm:ss.SSS", Locale.CANADA_FRENCH);
+        return df.format(new Date(System.currentTimeMillis()));
     }
 
     private void log(String s) {

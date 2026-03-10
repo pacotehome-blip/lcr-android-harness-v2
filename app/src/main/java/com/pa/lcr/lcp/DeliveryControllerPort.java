@@ -60,5 +60,14 @@ public interface DeliveryControllerPort {
         default void onLiveQty(double net, double gross) { /* no-op */ }
         default void onFlowStability(boolean flowActive, boolean flowOffStable, long flowOffAgeMs) { /* no-op */ }
         default void onLiveStatus(String liveText) { /* no-op */ }
+
+        /**
+         * ✅ NEW (baseline-safe): Ticket info.
+         * - ticketNo: TicketNumber registre (#23) en décimal (U32) si disponible, sinon null.
+         * - deliveryUid: numero_livraison + "-" + ticketNo si disponible, sinon null.
+         *
+         * UI: afficher même si null (ex: "-"), sans bloquer.
+         */
+        default void onTicketInfo(String ticketNo, String deliveryUid) { /* no-op */ }
     }
 }
