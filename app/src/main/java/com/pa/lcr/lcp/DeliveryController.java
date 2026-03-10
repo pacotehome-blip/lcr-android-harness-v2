@@ -421,6 +421,11 @@ public final class DeliveryController implements DeliveryControllerPort {
                 double net = (nRaw & 0xFFFFFFFFL) / scale;
                 double gross = (gRaw & 0xFFFFFFFFL) / scale;
                 if (listener != null) listener.onLiveQty(net, gross);
+            // ✅ Ticket info (UI): ticket_no (#23). delivery_uid est inconnu ici => null
+            try {
+                String tno = readTicketNo23();
+                if (listener != null) listener.onTicketInfo(tno, null);
+            } catch (Exception ignored) {}
             } catch (Exception e) {
                 handleIoFailure("status", e);
             }
@@ -998,7 +1003,165 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
     }
 
-    public ApiResult api_deliveryAlignA() {
+    
+    // =========================================================
+    // ✅ COMMIT 2: Registre prêt / validateRegister
+    // - Valide ticket_pending + delivery_active via 0x28
+    // - Lit ticket_no (#23 U32) + serial_id (#80)
+    // - Construit delivery_uid = numero_livraison + "-" + ticket_no (si numero_livraison fourni)
+    // - Valide produit actif (#0) si attendu
+    // - Compartiment: validation de présence (champ non lisible LCP dans cette base)
+    // - Log SQLite (summary/attempt/event) si store injecté
+    // - Notifie UI via listener.onTicketInfo(ticketNo, deliveryUid)
+    // =========================================================
+    public ApiResult api_registerValidate(
+            String numero_livraison,
+            Integer expected_lcrnode_dec,
+            String expected_serial_id,
+            Integer expected_product_number,
+            String expected_compartment
+    ) {
+        if (link == null || link.isClosed()) {
+            return ApiResult.fail("Validate: 0 - USB not ready.", RegisterValidator.Codes.ERR_USB_PORT_NOT_READY);
+        }
+
+        // Vérification optionnelle du node attendu (si fourni)
+        if (expected_lcrnode_dec != null) {
+            try {
+                int cur = link.getToAddr();
+                if ((cur & 0xFF) != (expected_lcrnode_dec & 0xFF)) {
+                    JSONObject d = new JSONObject();
+                    safeJsonPut(d, "current_lcrnode_dec", cur & 0xFF);
+                    safeJsonPut(d, "current_lcrnode_hex", String.format("0x%02X", cur & 0xFF));
+                    safeJsonPut(d, "expected_lcrnode_dec", expected_lcrnode_dec & 0xFF);
+                    safeJsonPut(d, "expected_lcrnode_hex", String.format("0x%02X", expected_lcrnode_dec & 0xFF));
+                    return ApiResult.fail("Validate: 0 - LCR node mismatch", RegisterValidator.Codes.ERR_LCP_CONNECT_FAILED, d);
+                }
+            } catch (Exception ignored) {}
+        }
+
+        try {
+            FullStatus fs = readFullStatus("VALIDATE/full");
+
+            // Identifiants registre
+            String ticketNo = readTicketNo23();
+            String saleNo = readSaleNo22();
+            String serialId = decodeAzString(lcpGetField(FIELD_SERIAL_ID));
+
+            // Produit actif (si lisible)
+            Integer activeProduct1to16 = null;
+            try {
+                byte[] p = lcpGetField(FIELD_ACTIVE_PRODUCT);
+                if (p != null && p.length >= 1) {
+                    activeProduct1to16 = (p[0] & 0xFF) + 1;
+                }
+            } catch (Exception ignored) {}
+
+            // delivery_uid (peut être null)
+            String deliveryUid = null;
+            if (numero_livraison != null && !numero_livraison.trim().isEmpty()
+                    && ticketNo != null && !ticketNo.trim().isEmpty()) {
+                deliveryUid = numero_livraison + "-" + ticketNo;
+            }
+
+            // Validations
+            boolean serialMatch = true;
+            if (expected_serial_id != null && !expected_serial_id.trim().isEmpty()) {
+                serialMatch = expected_serial_id.trim().equalsIgnoreCase(serialId);
+            }
+
+            boolean productOk = true;
+            if (expected_product_number != null && activeProduct1to16 != null) {
+                productOk = expected_product_number.intValue() == activeProduct1to16.intValue();
+            }
+
+            boolean compartmentOk = true;
+            if (expected_compartment != null) {
+                // Non lisible sur LCP ici: validation présence
+                compartmentOk = !expected_compartment.trim().isEmpty();
+            }
+
+            JSONObject data = new JSONObject();
+            safeJsonPut(data, "numero_livraison", numero_livraison == null ? JSONObject.NULL : numero_livraison);
+            safeJsonPut(data, "lcrnode_dec", link.getToAddr() & 0xFF);
+            safeJsonPut(data, "lcrnode_hex", String.format("0x%02X", link.getToAddr() & 0xFF));
+            safeJsonPut(data, "from_dec", link.getHostAddr() & 0xFF);
+            safeJsonPut(data, "from_hex", String.format("0x%02X", link.getHostAddr() & 0xFF));
+
+            safeJsonPut(data, "deliveryActive", fs.deliveryActive ? 1 : 0);
+            safeJsonPut(data, "flowActive", fs.flowActive ? 1 : 0);
+            safeJsonPut(data, "ticketPending", fs.ticketPending ? 1 : 0);
+
+            safeJsonPut(data, "ticket_no", ticketNo);
+            safeJsonPut(data, "sale_no", saleNo);
+            safeJsonPut(data, "serial_id", serialId);
+            safeJsonPut(data, "delivery_uid", deliveryUid == null ? JSONObject.NULL : deliveryUid);
+
+            safeJsonPut(data, "active_product", activeProduct1to16 == null ? JSONObject.NULL : activeProduct1to16);
+            safeJsonPut(data, "expected_product_number", expected_product_number == null ? JSONObject.NULL : expected_product_number);
+            safeJsonPut(data, "expected_compartment", expected_compartment == null ? JSONObject.NULL : expected_compartment);
+
+            safeJsonPut(data, "serial_match", serialMatch ? 1 : 0);
+            safeJsonPut(data, "product_ok", productOk ? 1 : 0);
+            safeJsonPut(data, "compartment_ok", compartmentOk ? 1 : 0);
+
+            // READY = toutes conditions OK + pas ticket pending + pas delivery active
+            boolean ready = (!fs.ticketPending && !fs.deliveryActive && serialMatch && productOk && compartmentOk);
+            safeJsonPut(data, "ready", ready ? 1 : 0);
+
+            // UI callback: afficher ticket_no et delivery_uid (deliveryUid peut être null)
+            try {
+                if (listener != null) listener.onTicketInfo(ticketNo, deliveryUid);
+            } catch (Exception ignored) {}
+
+            // SQLite logs (best-effort)
+            DeliveryLogStore store = this.logStore;
+            if (store != null && serialId != null && !serialId.isEmpty()
+                    && ticketNo != null && !ticketNo.isEmpty()) {
+                String stateTxt = ready ? "VALIDATE_READY" : "VALIDATE_BLOCKED";
+                if (fs.ticketPending) stateTxt = "TICKET_PENDING";
+                else if (fs.deliveryActive) stateTxt = "DELIVERY_ACTIVE";
+                else if (!serialMatch) stateTxt = "SERIAL_MISMATCH";
+                else if (!productOk) stateTxt = "PRODUCT_MISMATCH";
+                else if (!compartmentOk) stateTxt = "COMPARTMENT_MISMATCH";
+
+                store.upsertSummaryAsync(serialId, ticketNo, saleNo, stateTxt, DeliveryLogStore.SOURCE_API, null,
+                        data.toString(), null);
+
+                store.openAttemptAsync(serialId, ticketNo, DeliveryLogStore.SOURCE_API, null, attemptId -> {
+                    store.addEventAsync(attemptId, DeliveryLogStore.LEVEL_INFO, "REGISTER_VALIDATE",
+                            "Validate register", data.toString());
+                    store.closeAttemptAsync(attemptId, ready ? "READY" : "BLOCKED", data.toString(), null);
+                });
+            }
+
+            // Décisions bloquantes
+            if (fs.ticketPending) {
+                return ApiResult.fail("Validate: 0 - Ticket pending.", RegisterValidator.Codes.ERR_TICKET_PENDING, data);
+            }
+            if (fs.deliveryActive) {
+                return ApiResult.fail("Validate: 0 - Delivery active.", RegisterValidator.Codes.ERR_DELIVERY_ACTIVE, data);
+            }
+            if (!serialMatch) {
+                return ApiResult.fail("Validate: 0 - Serial mismatch.", RegisterValidator.Codes.ERR_SERIAL_ID_MISMATCH, data);
+            }
+            if (!productOk) {
+                return ApiResult.fail("Validate: 0 - Product mismatch.", RegisterValidator.Codes.ERR_PRODUCT_MISMATCH, data);
+            }
+            if (!compartmentOk) {
+                return ApiResult.fail("Validate: 0 - Compartment mismatch.", RegisterValidator.Codes.ERR_COMPARTMENT_MISMATCH, data);
+            }
+
+            return ApiResult.ok("Validate: 1 - READY", data);
+
+        } catch (Exception e) {
+            JSONObject d = new JSONObject();
+            safeJsonPut(d, "detail", safeMsg(e));
+            return ApiResult.fail("Validate: 0 - LCP error.", RegisterValidator.Codes.ERR_LCP_CONNECT_FAILED, d);
+        }
+    }
+
+public ApiResult api_deliveryAlignA() {
         if (link == null || link.isClosed()) {
             return ApiResult.fail("Align A: 0 - USB non pret.", "USB_NOT_READY");
         }
