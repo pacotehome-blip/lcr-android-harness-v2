@@ -2,11 +2,14 @@
 <resources>
 
     <style name="Theme.LcrFilgoEnergie"
-           parent="Theme.AppCompat.Light.NoActionBar">
+        parent="Theme.MaterialComponents.DayNight.NoActionBar">
 
         <!-- Couleurs système -->
         <item name="colorPrimary">@color/filgo_green</item>
         <item name="colorPrimaryDark">@color/filgo_green_dark</item>
+        <item name="colorSecondary">@color/filgo_green_light</item>
+
+        <!-- Compat: certains vieux usages lisent colorAccent -->
         <item name="colorAccent">@color/filgo_green_light</item>
 
         <!-- Champs / contrôles -->
