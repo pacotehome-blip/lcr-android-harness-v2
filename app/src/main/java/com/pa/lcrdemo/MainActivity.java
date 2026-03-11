@@ -27,10 +27,9 @@ import android.widget.*;
 import com.google.android.material.tabs.TabLayout;
 import com.hoho.android.usbserial.driver.*;
 import com.pa.lcr.lcp.*;
+import com.pa.lcr.lcp.log.LogBus;
 import com.pa.lcr.lcp.storage.DeliveryDb;
 import com.pa.lcr.lcp.storage.DeliveryLogStore;
-
-import org.json.JSONObject;
 
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
@@ -64,16 +63,17 @@ public class MainActivity extends AppCompatActivity {
     private ApiServer apiServer;
     private DeliveryLogStore deliveryStore;
 
-    // ===================== MAIN UI (USB + Manuel) =====================
+    // ===================== MAIN UI (USB + Scan) =====================
     private Spinner spnUsbDevices;
     private Button btnScanUsb;
     private Button btnPingUsb;
+
     private EditText edtTo;
     private EditText edtFrom;
     private TextView txtActiveNode;
-    private Button btnConnect;
+    private Button btnAddRegisterTab;
 
-    // ===================== Commit 4: Scan registres Option B =====================
+    // ===================== Scan registres Option B (autoritaire) =====================
     private Button btnScanNodes;
     private Spinner spnNodesFound;
     private TextView txtNodesSummary;
@@ -82,29 +82,15 @@ public class MainActivity extends AppCompatActivity {
     private final List<NodeScanItem> nodeItems = new ArrayList<>();
     private final ExecutorService scanExec = Executors.newSingleThreadExecutor();
 
-    // ===================== Commit 4: Tabs registres =====================
+    // ===================== Tabs registres =====================
     private TabLayout tabRegisters;
     private View registerContainer;
-    private Button btnAddRegisterTab;
 
     // Unicité: 1 tab par lcrnode
     private final LinkedHashMap<Integer, Integer> regNodeToFrom = new LinkedHashMap<>(); // node -> from
     private int currentRegNode = -1;
 
-    // ===================== UI existante (conservée) =====================
-    private Spinner spnProducts;
-    private EditText edtProduct;
-    private EditText edtPreset;
-    private Button btnA, btnB, btnC;
-    private Button btnContinue, btnFinish;
-    private TextView txtLive;
-    private View liveQtyPanel;
-    private TextView txtQtyNet;
-    private TextView txtQtyGross;
-    private TextView txtTicketNumber;
-    private TextView txtDeliveryUid;
-
-    // ===== LOG UI (commit 4) =====
+    // ===== LOG GLOBAL (MAIN) =====
     private CheckBox cbShowLog;
     private View logPanel;
     private TextView txtLog;
@@ -116,27 +102,9 @@ public class MainActivity extends AppCompatActivity {
     private CheckBox cbLogTs;
 
     private boolean logTsEnabled = false;
+    private long mainLogViewSinceMs = 0L;
 
-    // ===== Controller "manuel" (conservé) =====
-    private DeliveryControllerPort controller;
-    private LcpLink link = null;
-
-    private boolean suppressProductSelection = false;
-    private boolean userTouchedSpinner = false;
-
-    private final StringBuilder logBuf = new StringBuilder(32768);
     private final Handler ui = new Handler(Looper.getMainLooper());
-    private boolean liveTickRunning = false;
-
-    private double lastNet = Double.NaN;
-    private double lastGross = Double.NaN;
-
-    private Runnable pendingInitRunnable = null;
-    private static final int LIVE_POLL_MS = 200;
-
-    // Backup
-    private static final int REQ_PICK_BACKUP_DIR = 9102;
-    private static final String PREF_BACKUP_DIR_URI = "backup_dir_uri";
 
     // =========================================================
     // ✅ API log filtering for polling: first + last only
@@ -145,43 +113,6 @@ public class MainActivity extends AppCompatActivity {
     private final Set<Integer> apiFirstJobRid = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private final Set<String> apiJobSeen = Collections.newSetFromMap(new ConcurrentHashMap<>());
 
-    private static Integer parseRid(String line) {
-        try {
-            int i = line.indexOf("[RID=");
-            if (i < 0) return null;
-            int j = line.indexOf("]", i);
-            if (j < 0) return null;
-            String n = line.substring(i + 5, j).trim();
-            return Integer.parseInt(n);
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    private static String parseReqPath(String line) {
-        try {
-            int k = line.indexOf(" REQ ");
-            if (k < 0) return null;
-            String tail = line.substring(k + 5);
-            String[] parts = tail.split(" ");
-            if (parts.length < 2) return null;
-            return parts[1].trim();
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    private static String extractJobIdFromPath(String path) {
-        if (path == null) return null;
-        String pfx = "/v1/delivery/job/";
-        if (!path.startsWith(pfx)) return null;
-        return path.substring(pfx.length()).trim();
-    }
-
-    private static boolean isJobDoneRespLine(String line) {
-        return line != null && line.contains("\"msg\":\"Job: 1 - DONE\"");
-    }
-
     // ===== USB auto-attach notification (via broadcast interne) =====
     private final BroadcastReceiver usbUiReceiver = new BroadcastReceiver() {
         @Override
@@ -189,7 +120,6 @@ public class MainActivity extends AppCompatActivity {
             if (intent == null) return;
             String a = intent.getAction();
             if (a == null) return;
-
             if (UsbReceiver.ACTION_USB_READY.equals(a)) {
                 UsbSerialPort p = UsbSession.getPort();
                 if (p != null) onUsbPortReady(p);
@@ -199,89 +129,12 @@ public class MainActivity extends AppCompatActivity {
         }
     };
 
-    private final Runnable liveTick = new Runnable() {
-        @Override
-        public void run() {
-            if (controller == null) {
-                liveTickRunning = false;
-                return;
-            }
-            DeliveryState st = controller.getState();
-            boolean shouldPoll =
-                    (st == DeliveryState.RUNNING_FLOWING) ||
-                    (st == DeliveryState.RUNNING_PAUSED);
+    // ===== LogBus listener (rafraîchit la vue log global MAIN) =====
+    private final LogBus.Listener mainLogListener = e -> refreshGlobalLogView();
 
-            if (!shouldPoll) {
-                liveTickRunning = false;
-                return;
-            }
-            controller.requestLiveSample();
-            ui.postDelayed(this, LIVE_POLL_MS);
-        }
-    };
-
-    private void startLiveTickIfNeeded() {
-        if (controller == null) return;
-        if (liveTickRunning) return;
-        DeliveryState st = controller.getState();
-        boolean shouldPoll =
-                (st == DeliveryState.RUNNING_FLOWING) ||
-                (st == DeliveryState.RUNNING_PAUSED);
-
-        if (!shouldPoll) return;
-        liveTickRunning = true;
-        ui.removeCallbacks(liveTick);
-        ui.postDelayed(liveTick, LIVE_POLL_MS);
-    }
-
-    private void stopLiveTick() {
-        liveTickRunning = false;
-        ui.removeCallbacks(liveTick);
-    }
-
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == REQ_PICK_BACKUP_DIR) {
-            if (resultCode != RESULT_OK || data == null || data.getData() == null) {
-                toast("Backup: sélection de dossier annulée");
-                return;
-            }
-            Uri dirUri = data.getData();
-            final int takeFlags = data.getFlags() & (
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION |
-                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            );
-            try {
-                getContentResolver().takePersistableUriPermission(dirUri, takeFlags);
-            } catch (Exception ignored) {}
-
-            saveBackupDirUri(dirUri);
-            toast("Backup: dossier enregistré");
-            backupDbToChosenDir(dirUri);
-        }
-    }
-
-    @Override
-    protected void onStart() {
-        super.onStart();
-        IntentFilter f = new IntentFilter();
-        f.addAction(UsbReceiver.ACTION_USB_READY);
-        f.addAction(UsbReceiver.ACTION_USB_DETACHED);
-        registerReceiver(usbUiReceiver, f);
-
-        UsbSerialPort p = UsbSession.getPort();
-        if (p != null && usbPort == null) {
-            onUsbPortReady(p);
-        }
-    }
-
-    @Override
-    protected void onStop() {
-        try { unregisterReceiver(usbUiReceiver); } catch (Exception ignored) {}
-        super.onStop();
-    }
-
+    // =========================
+    // Lifecycle
+    // =========================
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -298,7 +151,32 @@ public class MainActivity extends AppCompatActivity {
         deliveryStore.purgeOlderThanDaysAsync(7);
 
         refreshApiStatus();
-        log("UI prête — Scan USB requis");
+        logUi(null, "UI prête — Scan USB requis");
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+
+        IntentFilter f = new IntentFilter();
+        f.addAction(UsbReceiver.ACTION_USB_READY);
+        f.addAction(UsbReceiver.ACTION_USB_DETACHED);
+        registerReceiver(usbUiReceiver, f);
+
+        LogBus.addListener(mainLogListener);
+
+        UsbSerialPort p = UsbSession.getPort();
+        if (p != null && usbPort == null) {
+            onUsbPortReady(p);
+        }
+        refreshGlobalLogView();
+    }
+
+    @Override
+    protected void onStop() {
+        try { unregisterReceiver(usbUiReceiver); } catch (Exception ignored) {}
+        LogBus.removeListener(mainLogListener);
+        super.onStop();
     }
 
     @Override
@@ -308,6 +186,9 @@ public class MainActivity extends AppCompatActivity {
         super.onDestroy();
     }
 
+    // =========================
+    // UI binding
+    // =========================
     private void bindUi() {
         tabLayout = findViewById(R.id.tabLayout);
         pageMain = findViewById(R.id.pageMain);
@@ -320,38 +201,15 @@ public class MainActivity extends AppCompatActivity {
         edtTo = findViewById(R.id.edtTo);
         edtFrom = findViewById(R.id.edtFrom);
         txtActiveNode = findViewById(R.id.txtActiveNode);
-        btnConnect = findViewById(R.id.btnConnect);
+        btnAddRegisterTab = findViewById(R.id.btnAddRegisterTab);
 
-        // Scan registres Option B
         btnScanNodes = findViewById(R.id.btnScanNodes);
         spnNodesFound = findViewById(R.id.spnNodesFound);
         txtNodesSummary = findViewById(R.id.txtNodesSummary);
 
-        // Tabs registres
         tabRegisters = findViewById(R.id.tabRegisters);
         registerContainer = findViewById(R.id.registerContainer);
-        btnAddRegisterTab = findViewById(R.id.btnAddRegisterTab);
 
-        // UI existante (conservée)
-        spnProducts = findViewById(R.id.spnProducts);
-        edtProduct = findViewById(R.id.edtProduct);
-        edtPreset = findViewById(R.id.edtPreset);
-
-        btnA = findViewById(R.id.btnA);
-        btnB = findViewById(R.id.btnB);
-        btnC = findViewById(R.id.btnC);
-        btnContinue = findViewById(R.id.btnContinue);
-        btnFinish = findViewById(R.id.btnFinish);
-
-        txtLive = findViewById(R.id.txtLive);
-        liveQtyPanel = findViewById(R.id.liveQtyPanel);
-        txtQtyNet = findViewById(R.id.txtQtyNet);
-        txtQtyGross = findViewById(R.id.txtQtyGross);
-
-        txtTicketNumber = findViewById(R.id.txtTicketNumber);
-        try { txtDeliveryUid = findViewById(R.id.txtDeliveryUid); } catch (Exception ignored) {}
-
-        // Log global (optionnel)
         cbShowLog = findViewById(R.id.cbShowLog);
         logPanel = findViewById(R.id.logPanel);
         txtLog = findViewById(R.id.txtLog);
@@ -362,7 +220,7 @@ public class MainActivity extends AppCompatActivity {
         cbTxRx = findViewById(R.id.cbTxRx);
         cbLogTs = findViewById(R.id.cbLogTs);
 
-        // API tab
+        // API-Face (fragment_api_face.xml est inclus dans pageApiFace)
         txtApiStatus = findViewById(R.id.txtApiStatus);
         txtApiUrl = findViewById(R.id.txtApiUrl);
         btnApiStart = findViewById(R.id.btnApiStart);
@@ -377,33 +235,12 @@ public class MainActivity extends AppCompatActivity {
     private void initUiDefaults() {
         edtTo.setText("250");
         edtFrom.setText("255");
-
         if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : —");
-
-        txtActiveNode.setText("LCP Node : ");
-        txtLive.setText("LIVE: (en attente)");
-
-        if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
-        if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
-        if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
-
-        if (txtTicketNumber != null) txtTicketNumber.setText("-");
-        if (txtDeliveryUid != null) txtDeliveryUid.setText("-");
+        if (txtActiveNode != null) txtActiveNode.setText("Node actif : —");
 
         // Log global caché par défaut
         if (cbShowLog != null) cbShowLog.setChecked(false);
         if (logPanel != null) logPanel.setVisibility(View.GONE);
-
-        // Products main
-        List<ProductUiItem> products = new ArrayList<>();
-        for (int i = 1; i <= 16; i++) products.add(new ProductUiItem(i, "Produit " + i));
-        ArrayAdapter<ProductUiItem> adapter =
-                new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, products);
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        spnProducts.setAdapter(adapter);
-        spnProducts.setSelection(0);
-
-        edtPreset.setText("50");
 
         SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
         boolean showTxRx = prefs.getBoolean("log_tx_rx", false);
@@ -413,58 +250,35 @@ public class MainActivity extends AppCompatActivity {
         logTsEnabled = ts;
         if (cbLogTs != null) cbLogTs.setChecked(ts);
 
-        // Init nodes spinner (défaut 250)
+        // Spinner nodes found (défaut 250 placeholder)
         nodeItems.clear();
         nodeItems.add(NodeScanItem.default250());
         nodeAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, nodeItems);
         nodeAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         if (spnNodesFound != null) spnNodesFound.setAdapter(nodeAdapter);
 
-        // ✅ B2 + Option A: TAB registre par défaut 250 + sélection + fragment affiché
+        // Tab par défaut 250 (placeholder)
         ensureRegisterTab(250, 255, true);
+
+        mainLogViewSinceMs = 0L;
+        refreshGlobalLogView();
     }
 
     private void wireUi() {
         btnScanUsb.setOnClickListener(v -> scanUsb());
         btnPingUsb.setOnClickListener(v -> openSelectedUsb());
-        btnConnect.setOnClickListener(v -> connectLcp()); // mode manuel conservé
 
-        // Toggle log global (optionnel)
-        if (cbShowLog != null) {
-            cbShowLog.setOnCheckedChangeListener((buttonView, checked) -> {
-                if (logPanel != null) logPanel.setVisibility(checked ? View.VISIBLE : View.GONE);
-                log("Option Afficher log: " + (checked ? "ON" : "OFF"));
+        // Ajouter / Focus TAB depuis TO manuel
+        if (btnAddRegisterTab != null) {
+            btnAddRegisterTab.setOnClickListener(v -> {
+                int to = parseInt(edtTo.getText().toString(), 250);
+                int from = parseInt(edtFrom.getText().toString(), 255);
+                ensureRegisterTab(to, from, true);
             });
         }
 
-        // Log global actions
-        if (btnClearLog != null) btnClearLog.setOnClickListener(v -> { logBuf.setLength(0); if (txtLog != null) txtLog.setText(""); });
-        if (btnCopyLog != null) btnCopyLog.setOnClickListener(v -> {
-            ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-            cm.setPrimaryClip(ClipData.newPlainText("log", txtLog != null ? txtLog.getText() : ""));
-            log("Log copié dans le presse-papiers");
-        });
-        if (btnScrollDown != null) btnScrollDown.setOnClickListener(v -> { if (logScroll != null) logScroll.fullScroll(View.FOCUS_DOWN); });
-
-        if (cbTxRx != null) {
-            cbTxRx.setOnCheckedChangeListener((buttonView, checked) -> {
-                SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
-                prefs.edit().putBoolean("log_tx_rx", checked).apply();
-                if (controller != null) controller.setTxRxLoggingEnabled(checked);
-                log("Option TX/RX: " + (checked ? "ON" : "OFF"));
-            });
-        }
-
-        if (cbLogTs != null) {
-            cbLogTs.setOnCheckedChangeListener((buttonView, checked) -> {
-                SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
-                prefs.edit().putBoolean("log_ts", checked).apply();
-                logTsEnabled = checked;
-                if (controller != null) controller.setLogTimestampsEnabled(checked);
-                if (link != null) link.setTraceTimestampsEnabled(checked);
-                log("Option timestamps (UI+IO+API): " + (checked ? "ON" : "OFF"));
-            });
-        }
+        // Scan registres (autoritaire)
+        if (btnScanNodes != null) btnScanNodes.setOnClickListener(v -> scanRegistersOptionB());
 
         // Spinner nodes scan: sélection -> remplit edtTo (sans auto-connect)
         if (spnNodesFound != null) {
@@ -479,25 +293,13 @@ public class MainActivity extends AppCompatActivity {
                     NodeScanItem it = (NodeScanItem) spnNodesFound.getSelectedItem();
                     if (it == null) return;
                     edtTo.setText(String.valueOf(it.lcrnode));
-                    log("TO sélectionné via scan: " + it.lcrnode + " (cliquer Ajouter/Fokus TAB ou Connect LCP)");
+                    logUi(null, "TO sélectionné via scan: " + it.lcrnode + " (cliquer Ajouter/Focus TAB)");
                 }
                 @Override public void onNothingSelected(AdapterView<?> parent) {}
             });
         }
 
-        // Scan registres option B
-        if (btnScanNodes != null) btnScanNodes.setOnClickListener(v -> scanRegistersOptionB());
-
-        // Ajouter / Focus TAB depuis TO manuel
-        if (btnAddRegisterTab != null) {
-            btnAddRegisterTab.setOnClickListener(v -> {
-                int to = parseInt(edtTo.getText().toString(), 250);
-                int from = parseInt(edtFrom.getText().toString(), 255);
-                ensureRegisterTab(to, from, true);
-            });
-        }
-
-        // Tabs registres: sélection -> afficher fragment
+        // Tabs registres: sélection -> afficher fragment + maj “Node actif”
         if (tabRegisters != null) {
             tabRegisters.addOnTabSelectedListener(new TabLayout.OnTabSelectedListener() {
                 @Override public void onTabSelected(TabLayout.Tab tab) {
@@ -518,31 +320,56 @@ public class MainActivity extends AppCompatActivity {
             });
         }
 
-        // UI main products
-        spnProducts.setOnTouchListener((v, e) -> {
-            if (e.getAction() == MotionEvent.ACTION_DOWN) userTouchedSpinner = true;
-            return false;
-        });
-        spnProducts.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-            @Override public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
-                if (controller == null) return;
-                if (suppressProductSelection) return;
-                if (!userTouchedSpinner) return;
-                userTouchedSpinner = false;
+        // Log global toggle
+        if (cbShowLog != null) {
+            cbShowLog.setOnCheckedChangeListener((buttonView, checked) -> {
+                if (logPanel != null) logPanel.setVisibility(checked ? View.VISIBLE : View.GONE);
+                logUi(null, "Option Afficher log global: " + (checked ? "ON" : "OFF"));
+                if (checked) refreshGlobalLogView();
+            });
+        }
 
-                ProductUiItem it = (ProductUiItem) spnProducts.getSelectedItem();
-                controller.selectProduct(it.product1);
-                edtProduct.setText(String.valueOf(it.product1));
-            }
-            @Override public void onNothingSelected(AdapterView<?> parent) {}
-        });
+        // Log global actions (clear = clear vue MAIN seulement)
+        if (btnClearLog != null) {
+            btnClearLog.setOnClickListener(v -> {
+                mainLogViewSinceMs = System.currentTimeMillis();
+                if (txtLog != null) txtLog.setText("");
+                logUi(null, "Clear log (vue MAIN)");
+            });
+        }
 
-        // Boutons UI main (conservés)
-        btnA.setOnClickListener(v -> { if (controller != null) controller.alignOrRecover(); });
-        btnB.setOnClickListener(v -> { if (controller != null) controller.requestStatus(); });
-        btnC.setOnClickListener(v -> { if (controller != null) controller.startDelivery(readProduct(), readPreset()); });
-        btnContinue.setOnClickListener(v -> { if (controller != null) controller.resumeIfPaused(); });
-        btnFinish.setOnClickListener(v -> { if (controller != null) controller.endDelivery(); });
+        if (btnCopyLog != null) {
+            btnCopyLog.setOnClickListener(v -> {
+                ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                cm.setPrimaryClip(ClipData.newPlainText("log", txtLog != null ? txtLog.getText() : ""));
+                logUi(null, "Log copié dans le presse-papiers");
+            });
+        }
+
+        if (btnScrollDown != null) {
+            btnScrollDown.setOnClickListener(v -> {
+                if (logScroll != null) logScroll.fullScroll(View.FOCUS_DOWN);
+            });
+        }
+
+        if (cbTxRx != null) {
+            cbTxRx.setOnCheckedChangeListener((buttonView, checked) -> {
+                SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
+                prefs.edit().putBoolean("log_tx_rx", checked).apply();
+                logUi(null, "Option TX/RX (vue MAIN): " + (checked ? "ON" : "OFF"));
+                refreshGlobalLogView();
+            });
+        }
+
+        if (cbLogTs != null) {
+            cbLogTs.setOnCheckedChangeListener((buttonView, checked) -> {
+                SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
+                prefs.edit().putBoolean("log_ts", checked).apply();
+                logTsEnabled = checked;
+                logUi(null, "Option timestamps (UI+IO+API): " + (checked ? "ON" : "OFF"));
+                refreshGlobalLogView();
+            });
+        }
 
         // API tab buttons
         if (btnApiStart != null) btnApiStart.setOnClickListener(v -> startApiServer());
@@ -554,23 +381,44 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    // =========================================================
-    // ===== Register Tabs: create/focus unique tab by node =====
-    // =========================================================
+    // =========================
+    // Tabs TOP (MAIN / API-Face)
+    // =========================
+    private void setupTabsTop() {
+        if (tabLayout == null) return;
+        tabLayout.removeAllTabs();
+        tabLayout.addTab(tabLayout.newTab().setText("MAIN"), true);
+        tabLayout.addTab(tabLayout.newTab().setText("API-Face"), false);
+        showPage(0);
+        tabLayout.addOnTabSelectedListener(new TabLayout.OnTabSelectedListener() {
+            @Override public void onTabSelected(TabLayout.Tab tab) { showPage(tab.getPosition()); }
+            @Override public void onTabUnselected(TabLayout.Tab tab) {}
+            @Override public void onTabReselected(TabLayout.Tab tab) {}
+        });
+    }
+
+    private void showPage(int index) {
+        if (pageMain != null) pageMain.setVisibility(index == 0 ? View.VISIBLE : View.GONE);
+        if (pageApiFace != null) pageApiFace.setVisibility(index == 1 ? View.VISIBLE : View.GONE);
+        if (index == 1) refreshApiStatus();
+    }
+
+    // =========================
+    // Register tabs helpers
+    // =========================
     private void ensureRegisterTab(int node, int from, boolean focus) {
         if (node < 1 || node > 250) {
-            log("TAB registre: node invalide: " + node);
+            logUi(null, "TAB registre: node invalide: " + node);
             return;
         }
         if (from < 0 || from > 255) from = 255;
 
-        // Unicité: si déjà présent, ne pas dupliquer
         if (!regNodeToFrom.containsKey(node)) {
             regNodeToFrom.put(node, from);
             addRegisterTabUi(node);
-            log("TAB registre ajouté: " + node);
+            logUi(null, "TAB registre ajouté: " + node);
         } else {
-            log("TAB registre déjà présent: " + node + " (focus)");
+            logUi(null, "TAB registre déjà présent: " + node + " (focus)");
         }
 
         if (focus) {
@@ -607,9 +455,12 @@ public class MainActivity extends AppCompatActivity {
         currentRegNode = node;
         int from = regNodeToFrom.containsKey(node) ? regNodeToFrom.get(node) : 255;
 
+        if (txtActiveNode != null) {
+            txtActiveNode.setText("Node actif : " + node);
+        }
+
         FragmentManager fm = getSupportFragmentManager();
         String tag = "regtab_" + node;
-
         Fragment existing = fm.findFragmentByTag(tag);
         Fragment f = (existing != null) ? existing : RegisterTabFragment.newInstance(node, from);
 
@@ -619,13 +470,39 @@ public class MainActivity extends AppCompatActivity {
         tx.commitAllowingStateLoss();
     }
 
-    // =========================================================
-    // ===== Scan registres Option B (0x28 + #80 + #23) =====
-    // =========================================================
+    /**
+     * Scan toujours autoritaire: purge tabs + mapping + fragments regtab_*,
+     * puis rebuild uniquement à partir des nodes détectés.
+     */
+    private void clearAllRegisterTabsAndFragments() {
+        regNodeToFrom.clear();
+        currentRegNode = -1;
+
+        if (tabRegisters != null) {
+            tabRegisters.removeAllTabs();
+        }
+
+        try {
+            FragmentManager fm = getSupportFragmentManager();
+            FragmentTransaction tx = fm.beginTransaction();
+            for (Fragment f : fm.getFragments()) {
+                if (f == null) continue;
+                String tag = f.getTag();
+                if (tag != null && tag.startsWith("regtab_")) {
+                    tx.remove(f);
+                }
+            }
+            tx.commitAllowingStateLoss();
+        } catch (Exception ignored) {}
+    }
+
+    // =========================
+    // Scan registres Option B (0x28 + #80 + #23) - AUTORITAIRE
+    // =========================
     private void scanRegistersOptionB() {
         final UsbSerialPort p = (usbPort != null) ? usbPort : UsbSession.getPort();
         if (p == null) {
-            log("Scan registres: USB non prêt (port null). Utilise Ouvrir/Ping USB ou auto-attach.");
+            logUi(null, "Scan registres: USB non prêt (port null). Utilise Ouvrir/Ping USB ou auto-attach.");
             toast("Scan registres: USB non prêt");
             return;
         }
@@ -635,14 +512,12 @@ public class MainActivity extends AppCompatActivity {
 
         scanExec.execute(() -> {
             LinkedHashMap<Integer, NodeScanItem> found = new LinkedHashMap<>();
-
             final int T28 = 300; // nécessite overload LcpLink.opDeliveryStatus(timeout)
-            final int TF  = 300; // nécessite overload LcpLink.opGetField(field, timeout)
+            final int TF = 300;  // nécessite overload LcpLink.opGetField(field, timeout)
 
             for (int node = 1; node <= 250; node++) {
                 try {
                     LcpLink tmp = new LcpLink(p, node, 255, true);
-
                     int[] ds = tmp.opDeliveryStatus(T28);
                     int delCode = ds[1];
 
@@ -663,30 +538,56 @@ public class MainActivity extends AppCompatActivity {
                 try {
                     nodeItems.clear();
 
-                    if (found.isEmpty()) {
-                        nodeItems.add(NodeScanItem.default250());
-                        if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : aucun (défaut 250)");
-                    } else {
-                        if (found.containsKey(250)) {
-                            nodeItems.add(found.get(250).asDefault());
-                            found.remove(250);
-                        } else {
-                            nodeItems.add(NodeScanItem.default250());
-                        }
-                        for (NodeScanItem it : found.values()) nodeItems.add(it);
+                    // ✅ Scan toujours autoritaire: reset complet avant d'appliquer les résultats
+                    clearAllRegisterTabsAndFragments();
 
-                        int countFound = Math.max(0, nodeItems.size() - 1);
-                        if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : " + countFound);
+                    if (found.isEmpty()) {
+                        // fallback 250
+                        NodeScanItem def = NodeScanItem.default250();
+                        nodeItems.add(def);
+
+                        if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : aucun (défaut 250)");
+                        if (nodeAdapter != null) nodeAdapter.notifyDataSetChanged();
+
+                        ensureRegisterTab(250, 255, true);
+                        edtTo.setText("250");
+                        if (txtActiveNode != null) txtActiveNode.setText("Node actif : 250");
+
+                        logUi(null, "Scan registres: aucun trouvé -> reset + fallback tab 250");
+                        return;
                     }
 
+                    // default = 250 si présent, sinon premier trouvé (ordre scan 1..250)
+                    NodeScanItem defaultItem;
+                    if (found.containsKey(250)) {
+                        defaultItem = found.get(250).asDefault();
+                        found.remove(250);
+                    } else {
+                        Map.Entry<Integer, NodeScanItem> first = found.entrySet().iterator().next();
+                        defaultItem = first.getValue().asDefault();
+                        found.remove(first.getKey());
+                    }
+
+                    nodeItems.add(defaultItem);
+                    for (NodeScanItem it : found.values()) nodeItems.add(it);
+
+                    if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : " + nodeItems.size());
                     if (nodeAdapter != null) nodeAdapter.notifyDataSetChanged();
 
-                    // ✅ Alimenter automatiquement les tabs registres (unicité)
+                    int defaultNode = defaultItem.lcrnode;
+
+                    // Focus default, puis ajouter le reste
+                    ensureRegisterTab(defaultNode, 255, true);
                     for (NodeScanItem it : nodeItems) {
-                        if (!it.isDefault) ensureRegisterTab(it.lcrnode, 255, false);
+                        if (it.lcrnode != defaultNode) ensureRegisterTab(it.lcrnode, 255, false);
                     }
 
-                    log("Scan registres terminé: " + Math.max(0, nodeItems.size() - 1) + " node(s) détecté(s)");
+                    edtTo.setText(String.valueOf(defaultNode));
+                    if (txtActiveNode != null) txtActiveNode.setText("Node actif : " + defaultNode);
+
+                    logUi(null, "Scan registres terminé: " + nodeItems.size()
+                            + " node(s), default=" + defaultNode + " (scan autoritaire)");
+
                 } finally {
                     if (btnScanNodes != null) btnScanNodes.setEnabled(true);
                 }
@@ -751,26 +652,94 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // =========================
-    // Tabs TOP (MAIN / API-Face)
+    // USB
     // =========================
-    private void setupTabsTop() {
-        if (tabLayout == null) return;
-        tabLayout.removeAllTabs();
-        tabLayout.addTab(tabLayout.newTab().setText("MAIN"), true);
-        tabLayout.addTab(tabLayout.newTab().setText("API-Face"), false);
-        showPage(0);
+    private void scanUsb() {
+        usbDevices.clear();
+        usbDevices.addAll(usbManager.getDeviceList().values());
+        logUi(null, "Scan USB: " + usbDevices.size() + " périphérique(s)");
 
-        tabLayout.addOnTabSelectedListener(new TabLayout.OnTabSelectedListener() {
-            @Override public void onTabSelected(TabLayout.Tab tab) { showPage(tab.getPosition()); }
-            @Override public void onTabUnselected(TabLayout.Tab tab) {}
-            @Override public void onTabReselected(TabLayout.Tab tab) {}
-        });
+        List<String> labels = new ArrayList<>();
+        for (UsbDevice d : usbDevices) {
+            String m = d.getManufacturerName();
+            String p = d.getProductName();
+            if (m == null) m = "Unknown";
+            if (p == null) p = "Device";
+            labels.add(m + " - " + p);
+            logUi(null, String.format(Locale.ROOT, " - %s - %s (VID=%04X PID=%04X)", m, p, d.getVendorId(), d.getProductId()));
+        }
+        spnUsbDevices.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, labels));
     }
 
-    private void showPage(int index) {
-        if (pageMain != null) pageMain.setVisibility(index == 0 ? View.VISIBLE : View.GONE);
-        if (pageApiFace != null) pageApiFace.setVisibility(index == 1 ? View.VISIBLE : View.GONE);
-        if (index == 1) refreshApiStatus();
+    private void openSelectedUsb() {
+        if (usbPort != null) {
+            logUi(null, "USB déjà prêt (port déjà ouvert)");
+            return;
+        }
+        int idx = spnUsbDevices.getSelectedItemPosition();
+        if (idx < 0 || idx >= usbDevices.size()) {
+            logUi(null, "Aucun périphérique USB sélectionné");
+            return;
+        }
+
+        UsbDevice dev = usbDevices.get(idx);
+        if (!usbManager.hasPermission(dev)) {
+            PendingIntent pi = PendingIntent.getBroadcast(
+                    this, 0, new Intent(ACTION_USB_PERMISSION),
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE
+            );
+            usbManager.requestPermission(dev, pi);
+            return;
+        }
+
+        UsbSerialDriver driver = UsbSerialProber.getDefaultProber().probeDevice(dev);
+        if (driver == null) {
+            logUi(null, "Driver USB série introuvable");
+            return;
+        }
+
+        try {
+            UsbDeviceConnection conn = usbManager.openDevice(dev);
+            UsbSerialPort port = driver.getPorts().get(0);
+            port.open(conn);
+            port.setParameters(19200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
+            usbPort = port;
+            logUi(null, "USB prêt");
+        } catch (Exception e) {
+            logErr(null, "Open USB ERR: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
+        }
+    }
+
+    public void onUsbPortReady(UsbSerialPort port) {
+        if (port == null) return;
+        if (usbPort != null) {
+            try { port.close(); } catch (Exception ignore) {}
+            return;
+        }
+        usbPort = port;
+        logUi(null, "USB prêt (receiver)");
+    }
+
+    public void onUsbDetached() {
+        logUi(null, "USB détaché");
+
+        try { UsbSession.clear(); } catch (Exception ignore) {}
+        stopApiServer("USB detached");
+
+        // clear sessions multi-node (UI+API)
+        try { RegisterSessionManager.get(this).clearAll(true); } catch (Exception ignored) {}
+
+        usbPort = null;
+
+        // Reset UI nodes list + tabs
+        nodeItems.clear();
+        nodeItems.add(NodeScanItem.default250());
+        if (nodeAdapter != null) nodeAdapter.notifyDataSetChanged();
+        if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : —");
+
+        clearAllRegisterTabsAndFragments();
+        ensureRegisterTab(250, 255, true);
+        if (txtActiveNode != null) txtActiveNode.setText("Node actif : 250");
     }
 
     // =========================
@@ -778,21 +747,18 @@ public class MainActivity extends AppCompatActivity {
     // =========================
     private void startApiServer() {
         if (apiServer != null && apiServer.isRunning()) {
-            log("[API " + uiTs() + "] déjà RUNNING");
+            logApi(null, "[API] déjà RUNNING");
             refreshApiStatus();
             return;
         }
-
         try {
-            // ✅ B2: multi-registre autonome
             ApiFacade facade = new MultiRegisterApiFacadeImpl(this);
-
             apiServer = new ApiServer(facade, this::onApiLine, API_PORT);
             apiServer.start();
             refreshApiStatus();
             toast("API démarrée (127.0.0.1:" + API_PORT + ")");
         } catch (Exception e) {
-            log("[API " + uiTs() + "] START FAIL: " + safeMsg(e));
+            logApi(null, "[API] START FAIL: " + safeMsg(e));
             refreshApiStatus();
             toast("API start error: " + safeMsg(e));
         }
@@ -802,7 +768,7 @@ public class MainActivity extends AppCompatActivity {
         try {
             if (apiServer != null && apiServer.isRunning()) {
                 apiServer.stop();
-                log("[API " + uiTs() + "] STOP (" + reason + ")");
+                logApi(null, "[API] STOP (" + reason + ")");
             }
         } catch (Exception ignored) {
         } finally {
@@ -830,41 +796,103 @@ public class MainActivity extends AppCompatActivity {
             String path = parseReqPath(line);
             if (path != null) apiRidToPath.put(rid, path);
 
+            Integer node = extractNodeFromPath(path);
+            if (node == null && currentRegNode > 0) node = currentRegNode;
+
             String jobId = extractJobIdFromPath(path);
             if (jobId != null) {
                 if (apiJobSeen.contains(jobId)) return;
                 apiJobSeen.add(jobId);
                 apiFirstJobRid.add(rid);
-                log(line);
+                logApi(node, line);
                 return;
             }
-            log(line);
+            logApi(node, line);
             return;
         }
 
         if (rid != null && isResp) {
             String path = apiRidToPath.remove(rid);
+
+            Integer node = extractNodeFromPath(path);
+            if (node == null && currentRegNode > 0) node = currentRegNode;
+
             String jobId = extractJobIdFromPath(path);
             if (jobId != null) {
                 if (apiFirstJobRid.remove(rid)) {
-                    log(line);
+                    logApi(node, line);
                     return;
                 }
                 if (isJobDoneRespLine(line)) {
-                    log(line);
+                    logApi(node, line);
                 }
                 return;
             }
-            log(line);
+            logApi(node, line);
             return;
         }
 
-        log(line);
+        logApi((currentRegNode > 0 ? currentRegNode : null), line);
+    }
+
+    private static Integer parseRid(String line) {
+        try {
+            int i = line.indexOf("[RID=");
+            if (i < 0) return null;
+            int j = line.indexOf("]", i);
+            if (j < 0) return null;
+            String n = line.substring(i + 5, j).trim();
+            return Integer.parseInt(n);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static String parseReqPath(String line) {
+        try {
+            int k = line.indexOf(" REQ ");
+            if (k < 0) return null;
+            String tail = line.substring(k + 5);
+            String[] parts = tail.split(" ");
+            if (parts.length < 2) return null;
+            return parts[1].trim();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static String extractJobIdFromPath(String path) {
+        if (path == null) return null;
+        String pfx = "/v1/delivery/job/";
+        if (!path.startsWith(pfx)) return null;
+        return path.substring(pfx.length()).trim();
+    }
+
+    private static boolean isJobDoneRespLine(String line) {
+        return line != null && line.contains("\"msg\":\"Job: 1 - DONE\"");
+    }
+
+    private static Integer extractNodeFromPath(String path) {
+        if (path == null) return null;
+        int k = path.indexOf("lcrnode_dec=");
+        if (k < 0) return null;
+        int start = k + "lcrnode_dec=".length();
+        int end = start;
+        while (end < path.length()) {
+            char c = path.charAt(end);
+            if (c < '0' || c > '9') break;
+            end++;
+        }
+        try { return Integer.parseInt(path.substring(start, end)); }
+        catch (Exception ignore) { return null; }
     }
 
     // =========================
     // Backup DB (inchangé)
     // =========================
+    private static final int REQ_PICK_BACKUP_DIR = 9102;
+    private static final String PREF_BACKUP_DIR_URI = "backup_dir_uri";
+
     private void doBackupDb() {
         if (deliveryStore == null) {
             toast("Backup DB impossible: store absent");
@@ -897,6 +925,25 @@ public class MainActivity extends AppCompatActivity {
         startActivityForResult(i, REQ_PICK_BACKUP_DIR);
     }
 
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_PICK_BACKUP_DIR) {
+            if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+                toast("Backup: sélection de dossier annulée");
+                return;
+            }
+            Uri dirUri = data.getData();
+            final int takeFlags = data.getFlags() & (
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            );
+            try { getContentResolver().takePersistableUriPermission(dirUri, takeFlags); } catch (Exception ignored) {}
+            saveBackupDirUri(dirUri);
+            toast("Backup: dossier enregistré");
+            backupDbToChosenDir(dirUri);
+        }
+    }
+
     private Uri getSavedBackupDirUri() {
         SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
         String s = prefs.getString(PREF_BACKUP_DIR_URI, null);
@@ -916,10 +963,7 @@ public class MainActivity extends AppCompatActivity {
                 toast("Backup FAIL: DB introuvable (" + DeliveryDb.DB_NAME + ")");
                 return;
             }
-
-            if (deliveryStore != null) {
-                deliveryStore.checkpointWalBestEffort();
-            }
+            if (deliveryStore != null) deliveryStore.checkpointWalBestEffort();
 
             String name = "lcr_delivery_" + utcStamp() + ".db";
             DocumentFile dir = DocumentFile.fromTreeUri(this, dirUri);
@@ -940,12 +984,10 @@ public class MainActivity extends AppCompatActivity {
             Uri outUri = target.getUri();
             try (java.io.InputStream in = new java.io.FileInputStream(dbFile);
                  java.io.OutputStream out = getContentResolver().openOutputStream(outUri)) {
-
                 if (out == null) {
                     toast("Backup FAIL: output stream null");
                     return;
                 }
-
                 byte[] buf = new byte[64 * 1024];
                 int r;
                 while ((r = in.read(buf)) > 0) out.write(buf, 0, r);
@@ -965,6 +1007,54 @@ public class MainActivity extends AppCompatActivity {
         return df.format(new Date());
     }
 
+    // =========================
+    // Log principal via LogBus
+    // =========================
+    private void refreshGlobalLogView() {
+        if (txtLog == null) return;
+        if (cbShowLog != null && !cbShowLog.isChecked()) return;
+
+        boolean includeIo = (cbTxRx != null && cbTxRx.isChecked());
+        String text = LogBus.buildText(LogBus.filterGlobalUIIOAPI(includeIo, mainLogViewSinceMs), 1400);
+        txtLog.setText(text);
+    }
+
+    private void logUi(Integer node, String msg) {
+        if (msg == null) return;
+        LogBus.ui(node, maybeUiTimestamp(msg));
+    }
+
+    private void logApi(Integer node, String msg) {
+        if (msg == null) return;
+        LogBus.api(node, msg);
+    }
+
+    private void logErr(Integer node, String msg) {
+        if (msg == null) return;
+        LogBus.err(node, msg);
+    }
+
+    private String maybeUiTimestamp(String line) {
+        if (!logTsEnabled) return line;
+        boolean isIoLine = line.startsWith("[IO ") || line.startsWith("TX:") || line.startsWith("RX:") || line.startsWith("↳");
+        boolean isApiLine = line.startsWith("[API ") || line.startsWith("[API]");
+        if (isIoLine || isApiLine) return line;
+        return "[UI " + uiTs() + "] " + line;
+    }
+
+    private String uiTs() {
+        SimpleDateFormat df = new SimpleDateFormat("HH:mm:ss.SSS", Locale.CANADA_FRENCH);
+        return df.format(new Date(System.currentTimeMillis()));
+    }
+
+    // =========================
+    // Utils
+    // =========================
+    private int parseInt(String s, int def) {
+        try { return Integer.parseInt(s.trim()); }
+        catch (Exception e) { return def; }
+    }
+
     private void toast(String s) {
         ui.post(() -> Toast.makeText(this, s, Toast.LENGTH_SHORT).show());
     }
@@ -973,280 +1063,5 @@ public class MainActivity extends AppCompatActivity {
         if (e == null) return "";
         String m = e.getMessage();
         return (m == null) ? e.getClass().getSimpleName() : m;
-    }
-
-    // =========================
-    // USB (inchangé + B2 clear sessions on detach)
-    // =========================
-    private void scanUsb() {
-        usbDevices.clear();
-        usbDevices.addAll(usbManager.getDeviceList().values());
-        log("Scan USB: " + usbDevices.size() + " périphérique(s)");
-
-        List<String> labels = new ArrayList<>();
-        for (UsbDevice d : usbDevices) {
-            String m = d.getManufacturerName();
-            String p = d.getProductName();
-            if (m == null) m = "Unknown";
-            if (p == null) p = "Device";
-            labels.add(m + " - " + p);
-            log(String.format(Locale.ROOT, " - %s - %s (VID=%04X PID=%04X)", m, p, d.getVendorId(), d.getProductId()));
-        }
-        spnUsbDevices.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, labels));
-    }
-
-    private void openSelectedUsb() {
-        if (usbPort != null) {
-            log("USB déjà prêt (port déjà ouvert)");
-            return;
-        }
-        int idx = spnUsbDevices.getSelectedItemPosition();
-        if (idx < 0 || idx >= usbDevices.size()) {
-            log("Aucun périphérique USB sélectionné");
-            return;
-        }
-        UsbDevice dev = usbDevices.get(idx);
-
-        if (!usbManager.hasPermission(dev)) {
-            PendingIntent pi = PendingIntent.getBroadcast(
-                    this, 0, new Intent(ACTION_USB_PERMISSION),
-                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE
-            );
-            usbManager.requestPermission(dev, pi);
-            return;
-        }
-
-        UsbSerialDriver driver = UsbSerialProber.getDefaultProber().probeDevice(dev);
-        if (driver == null) {
-            log("Driver USB série introuvable");
-            return;
-        }
-
-        try {
-            UsbDeviceConnection conn = usbManager.openDevice(dev);
-            UsbSerialPort port = driver.getPorts().get(0);
-            port.open(conn);
-            port.setParameters(19200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
-            usbPort = port;
-            log("USB prêt");
-        } catch (Exception e) {
-            log("Open USB ERR: " + e.getMessage());
-        }
-    }
-
-    public void onUsbPortReady(UsbSerialPort port) {
-        if (port == null) return;
-        if (usbPort != null) {
-            try { port.close(); } catch (Exception ignore) {}
-            return;
-        }
-        usbPort = port;
-        log("USB prêt (receiver)");
-    }
-
-    public void onUsbDetached() {
-        log("USB détaché");
-        try { UsbSession.clear(); } catch (Exception ignore) {}
-        stopApiServer("USB detached");
-
-        // ✅ B2: clear multi-node sessions (UI+API)
-        try { RegisterSessionManager.get(this).clearAll(true); } catch (Exception ignored) {}
-
-        if (controller != null) {
-            controller.shutdown(true);
-            controller = null;
-        }
-        link = null;
-        stopLiveTick();
-        usbPort = null;
-
-        txtActiveNode.setText("LCP Node : ");
-        txtLive.setText("LIVE: (en attente)");
-        if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
-        if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
-        if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
-        if (txtTicketNumber != null) txtTicketNumber.setText("-");
-        if (txtDeliveryUid != null) txtDeliveryUid.setText("-");
-
-        nodeItems.clear();
-        nodeItems.add(NodeScanItem.default250());
-        if (nodeAdapter != null) nodeAdapter.notifyDataSetChanged();
-        if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : —");
-
-        regNodeToFrom.clear();
-        currentRegNode = -1;
-
-        // recrée tab 250 par défaut
-        ensureRegisterTab(250, 255, true);
-    }
-
-    // =========================
-    // Manual connect (inchangé - ton impl existante était longue; garde-la si tu l'utilises)
-    // =========================
-    private void connectLcp() {
-        if (usbPort == null) {
-            log("ERR: USB non connecté");
-            return;
-        }
-
-        stopApiServer("Connect LCP (new session)");
-
-        int to = parseInt(edtTo.getText().toString(), 250);
-        int from = parseInt(edtFrom.getText().toString(), 255);
-
-        edtTo.setText(String.valueOf(to));
-        edtFrom.setText(String.valueOf(from));
-
-        txtActiveNode.setText("Node actif : —");
-
-        if (controller != null) {
-            controller.shutdown(false);
-            controller = null;
-        }
-
-        link = null;
-        if (pendingInitRunnable != null) ui.removeCallbacks(pendingInitRunnable);
-
-        link = new LcpLink(usbPort, to, from, true);
-
-        SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
-        boolean showTxRx = prefs.getBoolean("log_tx_rx", false);
-        boolean ts = prefs.getBoolean("log_ts", false);
-
-        link.setTraceTimestampsEnabled(ts);
-
-        controller = new DeliveryController(link);
-
-        if (deliveryStore != null) {
-            ((DeliveryController) controller).setLogStore(deliveryStore);
-        }
-
-        controller.setTxRxLoggingEnabled(showTxRx);
-        controller.setLogTimestampsEnabled(ts);
-
-        logTsEnabled = ts;
-        if (cbTxRx != null) cbTxRx.setChecked(showTxRx);
-        if (cbLogTs != null) cbLogTs.setChecked(ts);
-
-        controller.setListener(new DeliveryControllerPort.Listener() {
-            @Override
-            public void onStateChanged(DeliveryState state) {
-                ui.post(() -> {
-                    boolean stableOff = (controller != null) && controller.isFlowOffStable();
-                    updateButtons(state, stableOff);
-
-                    if (state == DeliveryState.RUNNING_FLOWING || state == DeliveryState.RUNNING_PAUSED) {
-                        startLiveTickIfNeeded();
-                    } else {
-                        stopLiveTick();
-                    }
-                    if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
-                });
-            }
-
-            @Override public void onLiveStatus(String liveText) {
-                ui.post(() -> txtLive.setText(liveText));
-            }
-
-            @Override public void onLiveQty(double net, double gross) {
-                ui.post(() -> {
-                    if (Double.compare(net, lastNet) != 0) {
-                        if (txtQtyNet != null) txtQtyNet.setText(String.format(Locale.ROOT, "NET: %.3f", net));
-                        lastNet = net;
-                    }
-                    if (Double.compare(gross, lastGross) != 0) {
-                        if (txtQtyGross != null) txtQtyGross.setText(String.format(Locale.ROOT, "GROSS: %.3f", gross));
-                        lastGross = gross;
-                    }
-                    if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
-                });
-            }
-
-            @Override public void onProductsUpdated(List<ProductUiItem> ignored, int idx0) {
-                ui.post(() -> {
-                    suppressProductSelection = true;
-                    spnProducts.setSelection(idx0);
-                    suppressProductSelection = false;
-                });
-            }
-
-            @Override public void onLog(String msg) {
-                log(msg);
-                if (msg.startsWith("Node actif")) ui.post(() -> txtActiveNode.setText(msg));
-            }
-
-            @Override public void onError(String ctx, Throwable e) {
-                log("ERR[" + ctx + "] " + (e != null ? e.getMessage() : ""));
-            }
-
-            @Override
-            public void onTicketInfo(String ticketNo, String deliveryUid) {
-                ui.post(() -> {
-                    if (txtTicketNumber != null) txtTicketNumber.setText(ticketNo == null ? "-" : ticketNo);
-                    if (txtDeliveryUid != null) txtDeliveryUid.setText(deliveryUid == null ? "-" : deliveryUid);
-                });
-            }
-        });
-
-        pendingInitRunnable = () -> { if (controller != null) controller.initialize(); };
-        ui.postDelayed(pendingInitRunnable, 300);
-
-        log("Connect LCP appliqué");
-        stopLiveTick();
-        if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
-        refreshApiStatus();
-    }
-
-    private void updateButtons(DeliveryState state, boolean stableOff) {
-        boolean connected = (state == DeliveryState.CONNECTED);
-        boolean paused = (state == DeliveryState.RUNNING_PAUSED);
-
-        btnA.setEnabled(connected);
-        btnC.setEnabled(connected);
-        btnContinue.setEnabled(paused);
-        btnFinish.setEnabled(paused && stableOff);
-
-        btnB.setEnabled(true);
-    }
-
-    private int readProduct() {
-        try {
-            int v = Integer.parseInt(edtProduct.getText().toString());
-            if (v >= 1 && v <= 16) return v;
-        } catch (Exception ignore) {}
-
-        ProductUiItem it = (ProductUiItem) spnProducts.getSelectedItem();
-        return it.product1;
-    }
-
-    private double readPreset() {
-        try { return Double.parseDouble(edtPreset.getText().toString()); }
-        catch (Exception e) { return 0.0; }
-    }
-
-    private int parseInt(String s, int def) {
-        try { return Integer.parseInt(s.trim()); }
-        catch (Exception e) { return def; }
-    }
-
-    private String uiTs() {
-        SimpleDateFormat df = new SimpleDateFormat("HH:mm:ss.SSS", Locale.CANADA_FRENCH);
-        return df.format(new Date(System.currentTimeMillis()));
-    }
-
-    private void log(String s) {
-        ui.post(() -> {
-            boolean isIoLine =
-                    s.startsWith("[IO ") ||
-                    s.startsWith("TX:") ||
-                    s.startsWith("RX:") ||
-                    s.startsWith("↳") ||
-                    s.startsWith("[API ");
-
-            String line = (logTsEnabled && !isIoLine) ? ("[UI " + uiTs() + "] " + s) : s;
-            logBuf.append(line).append('\n');
-            if (txtLog != null) txtLog.setText(logBuf.toString());
-            // ✅ PAS d'auto-scroll (bouton Scroll down uniquement)
-        });
     }
 }

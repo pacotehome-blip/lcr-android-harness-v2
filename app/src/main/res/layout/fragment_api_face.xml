@@ -1,63 +1,143 @@
 
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:id="@+id/apiFaceRoot"
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/apiFaceRootScroll"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
+    android:fillViewport="true"
     android:padding="12dp">
 
-    <TextView
-        android:id="@+id/txtApiTitle"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="API-FACE"
-        android:textStyle="bold"
-        android:textSize="20sp" />
-
-    <TextView
-        android:id="@+id/txtApiStatus"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Status: STOPPED"
-        android:textStyle="bold"
-        android:paddingTop="6dp" />
-
-    <TextView
-        android:id="@+id/txtApiUrl"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="http://127.0.0.1:8765"
-        android:textIsSelectable="true"
-        android:paddingTop="4dp" />
-
     <LinearLayout
+        android:id="@+id/apiFaceRoot"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:paddingTop="10dp">
+        android:orientation="vertical">
 
-        <Button
-            android:id="@+id/btnApiStart"
-            android:layout_width="0dp"
+        <!-- ===================== CARD: API SERVER ===================== -->
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="Start API" />
+            app:cardUseCompatPadding="true"
+            app:cardCornerRadius="14dp"
+            app:strokeWidth="1dp"
+            app:strokeColor="#22000000">
 
-        <Button
-            android:id="@+id/btnApiStop"
-            android:layout_width="0dp"
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="12dp">
+
+                <TextView
+                    android:id="@+id/txtApiTitle"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="API‑Face"
+                    android:textStyle="bold"
+                    android:textSize="18sp" />
+
+                <!-- Status (gros + lisible) -->
+                <TextView
+                    android:id="@+id/txtApiStatus"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Status: STOPPED"
+                    android:textStyle="bold"
+                    android:textSize="14sp"
+                    android:layout_marginTop="8dp"
+                    android:padding="10dp"
+                    android:background="#0F000000" />
+
+                <!-- URL -->
+                <TextView
+                    android:id="@+id/txtApiUrl"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="http://127.0.0.1:8765"
+                    android:textIsSelectable="true"
+                    android:textSize="13sp"
+                    android:layout_marginTop="8dp" />
+
+                <!-- Actions -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:layout_marginTop="10dp">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnApiStart"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Start API" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnApiStop"
+                        style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:layout_marginStart="8dp"
+                        android:text="Stop API" />
+                </LinearLayout>
+
+                <!-- Indications / help -->
+                <TextView
+                    android:id="@+id/txtApiHowTo"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="Workflow API : voir documentation interne / README."
+                    android:textSize="13sp" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- ===================== CARD: DATABASE (OPTIONNEL) ===================== -->
+        <!--
+             Recommandé: déplacer le bouton Backup DB ici pour que la page API-Face
+             soit autosuffisante et plus cohérente visuellement.
+             NOTE: si tu gardes btnDbBackup dans activity_main.xml, tu peux laisser cette card commentée.
+        -->
+        <!--
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:layout_marginStart="8dp"
-            android:text="Stop API" />
+            android:layout_marginTop="10dp"
+            app:cardUseCompatPadding="true"
+            app:cardCornerRadius="14dp"
+            app:strokeWidth="1dp"
+            app:strokeColor="#22000000">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="12dp">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Base de données"
+                    android:textStyle="bold"
+                    android:textSize="14sp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnDbBackup"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="Backup DB (Downloads)" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+        -->
+
+        <!-- Spacer bas -->
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="16dp" />
+
     </LinearLayout>
-
-    <TextView
-        android:id="@+id/txtApiHowTo"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:paddingTop="10dp"
-        android:text="Workflow API : voir documentation interne / README."
-        android:textSize="13sp" />
-
-</LinearLayout>
+</androidx.core.widget.NestedScrollView>

@@ -1,289 +1,465 @@
 
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/regRootScroll"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:fillViewport="true">
+    android:fillViewport="true"
+    android:padding="12dp">
 
     <LinearLayout
         android:id="@+id/regRoot"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:padding="10dp">
+        android:orientation="vertical">
 
-        <!-- ===== Header / Identité ===== -->
-        <TextView
-            android:id="@+id/txtRegHeader"
+        <!-- ===================== HEADER / IDENTITÉ (Card) ===================== -->
+        <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Registre"
-            android:textStyle="bold"
-            android:textSize="18sp" />
+            app:cardUseCompatPadding="true"
+            app:cardCornerRadius="14dp"
+            app:strokeWidth="1dp"
+            app:strokeColor="#22000000">
 
-        <TextView
-            android:id="@+id/txtLcrNode"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="LCR Node : —" />
-
-        <TextView
-            android:id="@+id/txtFrom"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="From : —" />
-
-        <TextView
-            android:id="@+id/txtSerialId"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="#Série : —" />
-
-        <TextView
-            android:id="@+id/txtTicketNo"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Ticket Number : —" />
-
-        <TextView
-            android:id="@+id/txtTicketPending"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Ticket pending : —"
-            android:textStyle="bold"
-            android:paddingTop="4dp" />
-
-        <!-- ===== Produit / Preset ===== -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="8dp">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Produit : "
-                android:textStyle="bold"
-                android:layout_gravity="center_vertical"/>
-
-            <Spinner
-                android:id="@+id/spnProduct"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginStart="6dp"/>
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Preset : "
-                android:textStyle="bold"
-                android:layout_marginStart="10dp"
-                android:layout_gravity="center_vertical"/>
-
-            <EditText
-                android:id="@+id/edtPreset"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginStart="6dp"
-                android:hint="Preset"
-                android:inputType="numberDecimal"
-                android:singleLine="true"/>
-        </LinearLayout>
-
-        <!-- ===== Actions ===== -->
-        <Button
-            android:id="@+id/btnConnectTab"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Connect LCP (ce registre)"
-            android:layout_marginTop="8dp"/>
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="6dp">
-
-            <Button
-                android:id="@+id/btnA"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="A (Resolve)" />
-
-            <Button
-                android:id="@+id/btnB"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginStart="8dp"
-                android:text="B (Status)" />
-
-            <Button
-                android:id="@+id/btnC"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginStart="8dp"
-                android:text="C (New)" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="6dp">
-
-            <Button
-                android:id="@+id/btnContinue"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="Continuer" />
-
-            <Button
-                android:id="@+id/btnFinish"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginStart="8dp"
-                android:text="Terminer" />
-        </LinearLayout>
-
-        <!-- ===== LIVE + Net/Gross ===== -->
-        <TextView
-            android:id="@+id/txtLive"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="LIVE: (en attente)"
-            android:textStyle="bold"
-            android:layout_marginTop="8dp" />
-
-        <LinearLayout
-            android:id="@+id/liveQtyPanel"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:layout_marginTop="4dp"
-            android:padding="8dp"
-            android:background="#F2F2F2">
-
-            <TextView
-                android:id="@+id/txtQtyNet"
+            <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="NET: 0.0"
-                android:textStyle="bold"
-                android:textSize="20sp"
-                android:textColor="#000000" />
-
-            <TextView
-                android:id="@+id/txtQtyGross"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="GROSS: 0.0"
-                android:textStyle="bold"
-                android:textSize="16sp"
-                android:textColor="#222222" />
-        </LinearLayout>
-
-        <!-- ===== Delivery UID ===== -->
-        <TextView
-            android:id="@+id/txtDeliveryUid"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Delivery UID : —"
-            android:layout_marginTop="6dp" />
-
-        <!-- ===== LOG (caché par défaut) ===== -->
-        <CheckBox
-            android:id="@+id/cbShowLog"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
-            android:text="Afficher log"
-            android:checked="false" />
-
-        <LinearLayout
-            android:id="@+id/logPanel"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:visibility="gone"
-            android:layout_marginTop="6dp">
-
-            <ScrollView
-                android:id="@+id/logScroll"
-                android:layout_width="match_parent"
-                android:layout_height="180dp"
-                android:fillViewport="true"
-                android:background="#111111">
+                android:orientation="vertical"
+                android:padding="12dp">
 
                 <TextView
-                    android:id="@+id/txtLog"
+                    android:id="@+id/txtRegHeader"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:typeface="monospace"
-                    android:textIsSelectable="true"
-                    android:textSize="12sp"
-                    android:textColor="#00FF00"
-                    android:padding="6dp" />
-            </ScrollView>
+                    android:text="Registre"
+                    android:textStyle="bold"
+                    android:textSize="18sp" />
+
+                <!-- Ligne Node/From -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:layout_marginTop="6dp">
+
+                    <TextView
+                        android:id="@+id/txtLcrNode"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="LCR Node : —"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/txtFrom"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:gravity="end"
+                        android:text="From : —" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/txtSerialId"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="#Série : —"
+                    android:layout_marginTop="4dp" />
+
+                <TextView
+                    android:id="@+id/txtTicketNo"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Ticket Number : —"
+                    android:layout_marginTop="2dp" />
+
+                <!-- Ticket pending en évidence -->
+                <TextView
+                    android:id="@+id/txtTicketPending"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Ticket pending : —"
+                    android:textStyle="bold"
+                    android:layout_marginTop="6dp"
+                    android:padding="8dp"
+                    android:background="#0F000000" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- ===================== PRODUIT / PRESET (Card) ===================== -->
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            app:cardUseCompatPadding="true"
+            app:cardCornerRadius="14dp"
+            app:strokeWidth="1dp"
+            app:strokeColor="#22000000">
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="end"
-                android:layout_marginTop="4dp">
+                android:orientation="vertical"
+                android:padding="12dp">
 
-                <Button
-                    android:id="@+id/btnClearLog"
-                    android:layout_width="wrap_content"
+                <TextView
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="Clear log" />
+                    android:text="Produit & Preset"
+                    android:textStyle="bold"
+                    android:textSize="14sp" />
 
-                <Button
-                    android:id="@+id/btnCopyLog"
-                    android:layout_width="wrap_content"
+                <LinearLayout
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginStart="8dp"
-                    android:text="Copy log" />
+                    android:orientation="horizontal"
+                    android:layout_marginTop="8dp">
 
-                <Button
-                    android:id="@+id/btnScrollDown"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="8dp"
-                    android:text="Scroll down" />
+                    <!-- Produit -->
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Produit"
+                            android:textStyle="bold"
+                            android:textSize="12sp" />
+
+                        <Spinner
+                            android:id="@+id/spnProduct"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp" />
+                    </LinearLayout>
+
+                    <!-- Preset -->
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical"
+                        android:layout_marginStart="10dp">
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Preset"
+                            android:textStyle="bold"
+                            android:textSize="12sp" />
+
+                        <com.google.android.material.textfield.TextInputLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            app:boxBackgroundMode="outline"
+                            app:boxCornerRadiusTopStart="10dp"
+                            app:boxCornerRadiusTopEnd="10dp"
+                            app:boxCornerRadiusBottomStart="10dp"
+                            app:boxCornerRadiusBottomEnd="10dp">
+
+                            <com.google.android.material.textfield.TextInputEditText
+                                android:id="@+id/edtPreset"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:hint="Preset"
+                                android:inputType="numberDecimal"
+                                android:singleLine="true" />
+                        </com.google.android.material.textfield.TextInputLayout>
+                    </LinearLayout>
+                </LinearLayout>
             </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- ===================== ACTIONS (Card) ===================== -->
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            app:cardUseCompatPadding="true"
+            app:cardCornerRadius="14dp"
+            app:strokeWidth="1dp"
+            app:strokeColor="#22000000">
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:layout_marginTop="2dp">
+                android:orientation="vertical"
+                android:padding="12dp">
 
-                <CheckBox
-                    android:id="@+id/cbTxRx"
-                    android:layout_width="wrap_content"
+                <TextView
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="Afficher TX / RX"
-                    android:checked="false" />
+                    android:text="Actions"
+                    android:textStyle="bold"
+                    android:textSize="14sp" />
 
-                <CheckBox
-                    android:id="@+id/cbLogTs"
-                    android:layout_width="wrap_content"
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnConnectTab"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginStart="12dp"
-                    android:text="Timestamps UI + IO + API"
-                    android:checked="false" />
+                    android:text="Connect LCP (ce registre)"
+                    android:layout_marginTop="8dp" />
+
+                <!-- A/B/C -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:layout_marginTop="8dp">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnA"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Resolve (A)" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnB"
+                        style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:layout_marginStart="8dp"
+                        android:text="Status (B)" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnC"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:layout_marginStart="8dp"
+                        android:text="New (C)" />
+                </LinearLayout>
+
+                <!-- Continue / Finish -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:layout_marginTop="8dp">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnContinue"
+                        style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Continuer" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnFinish"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:layout_marginStart="8dp"
+                        android:text="Terminer" />
+                </LinearLayout>
             </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
 
-        </LinearLayout>
+        <!-- ===================== LIVE + NET/GROSS (Card) ===================== -->
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            app:cardUseCompatPadding="true"
+            app:cardCornerRadius="14dp"
+            app:strokeWidth="1dp"
+            app:strokeColor="#22000000">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="12dp">
+
+                <TextView
+                    android:id="@+id/txtLive"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="LIVE: (en attente)"
+                    android:textStyle="bold" />
+
+                <LinearLayout
+                    android:id="@+id/liveQtyPanel"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:layout_marginTop="10dp"
+                    android:padding="10dp"
+                    android:background="#0F000000">
+
+                    <TextView
+                        android:id="@+id/txtQtyNet"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="NET: 0.0"
+                        android:textStyle="bold"
+                        android:textSize="24sp"
+                        android:textColor="#000000" />
+
+                    <TextView
+                        android:id="@+id/txtQtyGross"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="GROSS: 0.0"
+                        android:textStyle="bold"
+                        android:textSize="18sp"
+                        android:textColor="#222222"
+                        android:layout_marginTop="4dp" />
+                </LinearLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- ===================== TICKET / UID (Card) ===================== -->
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            app:cardUseCompatPadding="true"
+            app:cardCornerRadius="14dp"
+            app:strokeWidth="1dp"
+            app:strokeColor="#22000000">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="12dp">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Ticket"
+                    android:textStyle="bold"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:id="@+id/txtDeliveryUid"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Delivery UID : —"
+                    android:layout_marginTop="6dp" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- ===================== LOGS (repliable, conservé) ===================== -->
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            app:cardUseCompatPadding="true"
+            app:cardCornerRadius="14dp"
+            app:strokeWidth="1dp"
+            app:strokeColor="#22000000">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="12dp">
+
+                <CheckBox
+                    android:id="@+id/cbShowLog"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Afficher logs"
+                    android:checked="false" />
+
+                <LinearLayout
+                    android:id="@+id/logPanel"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:visibility="gone"
+                    android:layout_marginTop="8dp">
+
+                    <ScrollView
+                        android:id="@+id/logScroll"
+                        android:layout_width="match_parent"
+                        android:layout_height="200dp"
+                        android:fillViewport="true"
+                        android:background="#111111">
+
+                        <TextView
+                            android:id="@+id/txtLog"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:typeface="monospace"
+                            android:textIsSelectable="true"
+                            android:textSize="12sp"
+                            android:textColor="#00FF00"
+                            android:padding="10dp" />
+                    </ScrollView>
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="end"
+                        android:layout_marginTop="8dp">
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnClearLog"
+                            style="@style/Widget.MaterialComponents.Button.TextButton"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Clear" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnCopyLog"
+                            style="@style/Widget.MaterialComponents.Button.TextButton"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="8dp"
+                            android:text="Copy" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnScrollDown"
+                            style="@style/Widget.MaterialComponents.Button.TextButton"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="8dp"
+                            android:text="Down" />
+                    </LinearLayout>
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:layout_marginTop="4dp">
+
+                        <CheckBox
+                            android:id="@+id/cbTxRx"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Afficher TX / RX"
+                            android:checked="false" />
+
+                        <CheckBox
+                            android:id="@+id/cbLogTs"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="12dp"
+                            android:text="Timestamps UI + IO + API"
+                            android:checked="false" />
+                    </LinearLayout>
+                </LinearLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- Spacer bas -->
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="16dp" />
 
     </LinearLayout>
-</ScrollView>
+</androidx.core.widget.NestedScrollView>
