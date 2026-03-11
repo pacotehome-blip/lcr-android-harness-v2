@@ -53,7 +53,7 @@ public class RegisterTabFragment extends Fragment {
 
     private Button btnConnect, btnA, btnB, btnC, btnContinue, btnFinish;
 
-    // Log (vue filtrée par tab)
+    // Log (par tab)
     private CheckBox cbShowLog, cbTxRx, cbLogTs;
     private View logPanel;
     private TextView txtLog;
@@ -61,29 +61,93 @@ public class RegisterTabFragment extends Fragment {
     private Button btnClearLog, btnCopyLog, btnScrollDown;
 
     private boolean logTsEnabled = false;
-
-    // Clear local view (ne wipe pas le log global)
     private long logViewSinceMs = 0L;
+
+    // Ticket pending (cache)
+    private int ticketPendingFlag = -1; // -1 unknown, 0 NO, 1 YES
 
     // B2: auto-connect API-like (une seule fois par instance)
     private boolean autoConnectDone = false;
 
     private UsbManager usbManager;
     private DeliveryLogStore store;
-
     private LcpLink link;
     private DeliveryController controller;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService bg = Executors.newSingleThreadExecutor();
 
-    private final LogBus.Listener logListener = e -> {
-        // Ne rafraîchir que si notre node est concerné et que le panneau est visible
-        if (e == null) return;
-        if (e.node == null || e.node != node) return;
-        if (cbShowLog != null && !cbShowLog.isChecked()) return;
-        refreshLogView();
+    // ===== Live polling (comme l’ancien MainActivity) =====
+    private static final int LIVE_POLL_MS = 200;
+    private static final int STATUS_POLL_MS = 1000;
+
+    private boolean liveTickRunning = false;
+    private boolean statusTickRunning = false;
+
+    // “Start in progress” (pour éviter Continue/Finish au début)
+    private boolean starting = false;
+    private long startingSinceMs = 0L;
+
+    private final Runnable liveTick = new Runnable() {
+        @Override public void run() {
+            if (controller == null) { liveTickRunning = false; return; }
+            DeliveryState st = controller.getState();
+            boolean shouldPoll = (st == DeliveryState.RUNNING_FLOWING) || (st == DeliveryState.RUNNING_PAUSED);
+            if (!shouldPoll) { liveTickRunning = false; return; }
+
+            controller.requestLiveSample();
+            ui.postDelayed(this, LIVE_POLL_MS);
+        }
     };
+
+    private final Runnable statusTick = new Runnable() {
+        @Override public void run() {
+            if (controller == null) { statusTickRunning = false; return; }
+            DeliveryState st = controller.getState();
+            boolean shouldPoll = (st == DeliveryState.RUNNING_FLOWING) || (st == DeliveryState.RUNNING_PAUSED);
+            if (!shouldPoll) { statusTickRunning = false; return; }
+
+            // Le status force souvent le refresh NET/GROSS/decimals (ce que tu observes manuellement)
+            controller.requestStatus();
+            ui.postDelayed(this, STATUS_POLL_MS);
+        }
+    };
+
+    private void startLiveTickIfNeeded() {
+        if (controller == null) return;
+        if (liveTickRunning) return;
+
+        DeliveryState st = controller.getState();
+        boolean shouldPoll = (st == DeliveryState.RUNNING_FLOWING) || (st == DeliveryState.RUNNING_PAUSED);
+        if (!shouldPoll) return;
+
+        liveTickRunning = true;
+        ui.removeCallbacks(liveTick);
+        ui.postDelayed(liveTick, LIVE_POLL_MS);
+    }
+
+    private void stopLiveTick() {
+        liveTickRunning = false;
+        ui.removeCallbacks(liveTick);
+    }
+
+    private void startStatusTickIfNeeded() {
+        if (controller == null) return;
+        if (statusTickRunning) return;
+
+        DeliveryState st = controller.getState();
+        boolean shouldPoll = (st == DeliveryState.RUNNING_FLOWING) || (st == DeliveryState.RUNNING_PAUSED);
+        if (!shouldPoll) return;
+
+        statusTickRunning = true;
+        ui.removeCallbacks(statusTick);
+        ui.postDelayed(statusTick, STATUS_POLL_MS);
+    }
+
+    private void stopStatusTick() {
+        statusTickRunning = false;
+        ui.removeCallbacks(statusTick);
+    }
 
     @Override
     public void onAttach(@NonNull Context context) {
@@ -95,27 +159,13 @@ public class RegisterTabFragment extends Fragment {
         }
         usbManager = (UsbManager) context.getSystemService(Context.USB_SERVICE);
 
-        // Store unique (UI) pour tracer aussi des events TAB_AUTO_CONNECT
         store = new DeliveryLogStore(context.getApplicationContext());
         store.purgeOlderThanDaysAsync(7);
     }
 
     @Override
-    public void onStart() {
-        super.onStart();
-        LogBus.addListener(logListener);
-    }
-
-    @Override
-    public void onStop() {
-        LogBus.removeListener(logListener);
-        super.onStop();
-    }
-
-    @Override
     public void onResume() {
         super.onResume();
-        // B2: auto-connect API-like au moment où le tab devient actif (une seule fois)
         if (autoConnectDone) return;
         autoConnectDone = true;
         ui.post(this::autoConnectLikeApi);
@@ -124,6 +174,10 @@ public class RegisterTabFragment extends Fragment {
     @Override
     public void onDestroyView() {
         super.onDestroyView();
+
+        stopLiveTick();
+        stopStatusTick();
+
         try { bg.shutdownNow(); } catch (Exception ignored) {}
         try { if (controller != null) controller.shutdown(false); } catch (Exception ignored) {}
         controller = null;
@@ -178,13 +232,17 @@ public class RegisterTabFragment extends Fragment {
     private void initUi() {
         txtLcrNode.setText(String.format(Locale.ROOT, "LCR Node : %d", node));
         txtFrom.setText(String.format(Locale.ROOT, "From : %d", from));
+
         txtSerialId.setText("#Série : —");
         txtTicketNo.setText("Ticket Number : —");
         txtTicketPending.setText("Ticket pending : —");
+        ticketPendingFlag = -1;
+
         txtLive.setText("LIVE: (en attente)");
         txtQtyNet.setText("NET: 0.0");
         txtQtyGross.setText("GROSS: 0.0");
         txtDeliveryUid.setText("Delivery UID : —");
+
         edtPreset.setText("50");
 
         // produits 1..16
@@ -198,9 +256,10 @@ public class RegisterTabFragment extends Fragment {
         // log caché par défaut
         cbShowLog.setChecked(false);
         logPanel.setVisibility(View.GONE);
-
-        // baseline “clear local view”
         logViewSinceMs = 0L;
+
+        // boutons init (rien connecté)
+        updateButtons(null);
     }
 
     private void wireUi() {
@@ -213,7 +272,6 @@ public class RegisterTabFragment extends Fragment {
         btnScrollDown.setOnClickListener(v -> logScroll.fullScroll(View.FOCUS_DOWN));
 
         btnClearLog.setOnClickListener(v -> {
-            // Clear seulement cette vue (filtre depuis maintenant)
             logViewSinceMs = System.currentTimeMillis();
             if (txtLog != null) txtLog.setText("");
             logUi("[UI] Clear log (vue locale)");
@@ -231,7 +289,6 @@ public class RegisterTabFragment extends Fragment {
             if (controller != null) controller.setLogTimestampsEnabled(checked);
             if (link != null) link.setTraceTimestampsEnabled(checked);
             logUi("[UI] Timestamps: " + (checked ? "ON" : "OFF"));
-            refreshLogView();
         });
 
         cbTxRx.setOnCheckedChangeListener((b, checked) -> {
@@ -242,23 +299,100 @@ public class RegisterTabFragment extends Fragment {
 
         btnConnect.setOnClickListener(v -> connectThisRegister());
 
-        btnA.setOnClickListener(v -> { if (controller != null) controller.alignOrRecover(); });
-        btnB.setOnClickListener(v -> { if (controller != null) controller.requestStatus(); });
+        btnA.setOnClickListener(v -> {
+            if (controller != null) controller.alignOrRecover();
+        });
+
+        btnB.setOnClickListener(v -> {
+            if (controller != null) controller.requestStatus();
+        });
 
         btnC.setOnClickListener(v -> {
             if (controller == null) return;
+
+            // ✅ Gate ticket_pending
+            if (ticketPendingFlag == 1) {
+                txtLive.setText("LIVE: ticket_pending — faire Resolve (A)");
+                logUi("[UI] C bloqué: ticket_pending=1 (faire Resolve A)");
+                updateButtons(controller.getState());
+                return;
+            }
+
+            // ✅ Start delivery: disable Continue/Finish at beginning
+            starting = true;
+            startingSinceMs = System.currentTimeMillis();
+            updateButtons(controller.getState());
+            txtLive.setText("LIVE: RUNNING_FLOWING (flow off - waiting progression)");
+
             int prod = spnProduct.getSelectedItemPosition() + 1;
             double preset = parseDouble(edtPreset.getText().toString(), 0.0);
+
             controller.startDelivery(prod, preset);
+
+            // démarrer polling pour avoir Net/Gross et transitions d’état
+            startLiveTickIfNeeded();
+            startStatusTickIfNeeded();
         });
 
-        btnContinue.setOnClickListener(v -> { if (controller != null) controller.resumeIfPaused(); });
-        btnFinish.setOnClickListener(v -> { if (controller != null) controller.endDelivery(); });
+        btnContinue.setOnClickListener(v -> {
+            if (controller != null) controller.resumeIfPaused();
+        });
+
+        btnFinish.setOnClickListener(v -> {
+            if (controller != null) controller.endDelivery();
+        });
     }
 
     /**
-     * B2: auto-connect "API-like" (Scan USB -> Open/Ping -> Connect LCP -> Validate)
-     * Le but est d'avoir les mêmes logs et la même trace DB qu'un appel API.
+     * Met à jour l'état enabled/disabled des boutons selon le state + ton besoin terrain.
+     * - Continue/Finish désactivés au début du start
+     * - Finish seulement si paused + stableOff
+     */
+    private void updateButtons(DeliveryState state) {
+        boolean hasController = (controller != null);
+
+        if (!hasController) {
+            btnConnect.setEnabled(true);
+            btnA.setEnabled(false);
+            btnB.setEnabled(false);
+            btnC.setEnabled(false);
+            btnContinue.setEnabled(false);
+            btnFinish.setEnabled(false);
+            return;
+        }
+
+        DeliveryState st = (state != null) ? state : controller.getState();
+
+        boolean connected = (st == DeliveryState.CONNECTED);
+        boolean paused = (st == DeliveryState.RUNNING_PAUSED);
+        boolean flowing = (st == DeliveryState.RUNNING_FLOWING);
+
+        boolean stableOff = false;
+        try { stableOff = controller.isFlowOffStable(); } catch (Exception ignored) {}
+
+        // Boutons toujours utiles
+        btnConnect.setEnabled(true);
+        btnB.setEnabled(true);
+
+        // A utile quand connecté (et souvent aussi en running, mais on reste conservateur)
+        btnA.setEnabled(connected || paused || flowing);
+
+        // C seulement quand registre prêt (CONNECTED) + pas ticket pending
+        btnC.setEnabled(connected && ticketPendingFlag != 1);
+
+        // Continue/Finish: jamais au début d’un start
+        if (starting) {
+            btnContinue.setEnabled(false);
+            btnFinish.setEnabled(false);
+        } else {
+            btnContinue.setEnabled(paused);
+            btnFinish.setEnabled(paused && stableOff);
+        }
+    }
+
+    /**
+     * B2: auto-connect "API-like"
+     * (Scan USB -> Open/Ping -> Connect LCP -> Validate)
      */
     private void autoConnectLikeApi() {
         logApi("[API] Auto-connect TAB node=" + node + " start");
@@ -272,7 +406,7 @@ public class RegisterTabFragment extends Fragment {
         }
         logApi("[API] Scan USB: 1 - USB device présent (" + devCount + ")");
 
-        // 2) Open/Ping USB (port prêt)
+        // 2) Port prêt via UsbSession (source de vérité)
         UsbSerialPort p = UsbSession.getPort();
         if (p == null) {
             logApi("[API] Open/Ping USB: 0 - Port non prêt (UsbSession port null).");
@@ -280,36 +414,21 @@ public class RegisterTabFragment extends Fragment {
         }
         logApi("[API] Open/Ping USB: 1 - Port prêt");
 
-        // 3) Connect LCP (0x28) best effort
-        try {
-            LcpLink tmp = new LcpLink(p, node, from, true);
-            int[] ds = tmp.opDeliveryStatus();
-            int delCode = ds[1];
-            boolean ticketPending = (delCode & 0x0001) != 0;
-            boolean flowActive = (delCode & 0x0004) != 0;
-            boolean deliveryActive = (delCode & 0x0008) != 0;
-            logApi("[API] Connect LCP: 1 - CONNECTED " +
-                    "deliveryActive=" + (deliveryActive ? 1 : 0) +
-                    " flowActive=" + (flowActive ? 1 : 0) +
-                    " ticketPending=" + (ticketPending ? 1 : 0));
-        } catch (Exception e) {
-            logApi("[API] Connect LCP: 0 - Failed: " + safeMsg(e));
-            // on continue quand même
-        }
-
-        // 4) Connect TAB + validate
+        // 3) Connect TAB + validate
         connectThisRegister();
     }
 
     private void connectThisRegister() {
         UsbSerialPort p = UsbSession.getPort();
         if (p == null) {
-            logApi("[API] Open/Ping USB: 0 - USB non prêt (UsbSession port null)");
+            logApi("[API] USB non prêt (UsbSession port null)");
             Toast.makeText(requireContext(), "USB non prêt", Toast.LENGTH_SHORT).show();
             return;
         }
 
         // Stop old controller
+        stopLiveTick();
+        stopStatusTick();
         try { if (controller != null) controller.shutdown(false); } catch (Exception ignored) {}
         controller = null;
         link = null;
@@ -317,41 +436,80 @@ public class RegisterTabFragment extends Fragment {
         link = new LcpLink(p, node, from, true);
         controller = new DeliveryController(link);
 
-        // inject DB store (1 store pour tout le tab)
+        // inject DB store
         try { controller.setLogStore(store); } catch (Exception ignored) {}
 
-        // ✅ B2: enregistrer la session pour partager UI <- -> API (unicité par node)
-        try {
-            RegisterSessionManager.get(requireContext()).setController(node, controller);
-        } catch (Exception ignored) {}
+        // ✅ Partage UI<->API (unicité par node)
+        try { RegisterSessionManager.get(requireContext()).setController(node, controller); } catch (Exception ignored) {}
 
-        // listener UI
+        // Appliquer options log
+        controller.setTxRxLoggingEnabled(cbTxRx.isChecked());
+        controller.setLogTimestampsEnabled(cbLogTs.isChecked());
+        link.setTraceTimestampsEnabled(cbLogTs.isChecked());
+
+        // Listener UI
         controller.setListener(new DeliveryControllerPort.Listener() {
-            @Override public void onStateChanged(DeliveryState state) {}
 
-            @Override public void onProductsUpdated(List<ProductUiItem> products, int activeIndex0) {}
+            @Override
+            public void onStateChanged(DeliveryState state) {
+                ui.post(() -> {
+                    // Fin du mode "starting" dès qu’on voit FLOWING
+                    if (starting && state == DeliveryState.RUNNING_FLOWING) {
+                        starting = false;
+                    }
+                    // Sécurité: si start dure trop longtemps, autoriser Continue (opérateur)
+                    if (starting && (System.currentTimeMillis() - startingSinceMs) > 12000L) {
+                        starting = false;
+                    }
+
+                    // Live ticks pendant running
+                    if (state == DeliveryState.RUNNING_FLOWING || state == DeliveryState.RUNNING_PAUSED) {
+                        startLiveTickIfNeeded();
+                        startStatusTickIfNeeded();
+                    } else {
+                        stopLiveTick();
+                        stopStatusTick();
+                    }
+
+                    updateButtons(state);
+                });
+            }
+
+            @Override public void onProductsUpdated(List<ProductUiItem> products, int activeIndex0) { }
 
             @Override public void onLog(String message) {
-                // message peut contenir TX/RX / [IO] / etc selon ton impl
                 logAutoClassify(message);
+                if (cbShowLog != null && cbShowLog.isChecked()) refreshLogView();
             }
 
             @Override public void onError(String context, Throwable error) {
                 LogBus.err(node, "[ERR " + context + "] " + (error != null ? error.getMessage() : ""));
+                if (cbShowLog != null && cbShowLog.isChecked()) refreshLogView();
             }
 
-            @Override public void onLiveQty(double net, double gross) {
+            @Override
+            public void onLiveQty(double net, double gross) {
                 ui.post(() -> {
+                    // Ici on affiche tel quel (si l’ordre est mauvais, c’est en amont dans DeliveryController)
                     txtQtyNet.setText(String.format(Locale.ROOT, "NET: %.3f", net));
                     txtQtyGross.setText(String.format(Locale.ROOT, "GROSS: %.3f", gross));
                 });
             }
 
-            @Override public void onLiveStatus(String liveText) {
-                ui.post(() -> txtLive.setText(liveText));
+            @Override
+            public void onLiveStatus(String liveText) {
+                ui.post(() -> {
+                    // Pendant start, tu veux voir "RUNNING_FLOWING (flow off - waiting progression)"
+                    if (starting) {
+                        txtLive.setText("LIVE: RUNNING_FLOWING (flow off - waiting progression)");
+                    } else {
+                        txtLive.setText(liveText);
+                    }
+                });
             }
 
-            @Override public void onTicketInfo(String ticketNo, String deliveryUid) {
+            @Override
+            public void onTicketInfo(String ticketNo, String deliveryUid) {
                 ui.post(() -> {
                     txtTicketNo.setText("Ticket Number : " + (ticketNo == null ? "—" : ticketNo));
                     txtDeliveryUid.setText("Delivery UID : " + (deliveryUid == null ? "—" : deliveryUid));
@@ -359,14 +517,10 @@ public class RegisterTabFragment extends Fragment {
             }
         });
 
-        controller.setTxRxLoggingEnabled(cbTxRx.isChecked());
-        controller.setLogTimestampsEnabled(cbLogTs.isChecked());
-        link.setTraceTimestampsEnabled(cbLogTs.isChecked());
-
         controller.initialize();
         logApi("[API] Connect TAB: 1 - CONNECTED node=" + node);
 
-        // Validate header (serial/ticketPending + ticket_no) + DB trace UI/API-like
+        // Validate header (serial/ticketPending + ticket_no)
         bg.execute(() -> {
             try {
                 ApiResult r = controller.api_registerValidate(null, node, null, null, null);
@@ -376,24 +530,23 @@ public class RegisterTabFragment extends Fragment {
                     String ticketNo = j.optString("ticket_no", "");
                     int tp = j.optInt("ticketPending", -1);
 
+                    ticketPendingFlag = (tp == 1 ? 1 : (tp == 0 ? 0 : -1));
+
                     ui.post(() -> {
                         txtSerialId.setText("#Série : " + ((serial == null || serial.isEmpty()) ? "—" : serial));
-                        txtTicketPending.setText("Ticket pending : " + ((tp == 1) ? "OUI" : (tp == 0 ? "NON" : "—")));
+                        txtTicketPending.setText("Ticket pending : " + (ticketPendingFlag == 1 ? "OUI" : (ticketPendingFlag == 0 ? "NON" : "—")));
+
+                        // si ticket pending, guider immédiatement
+                        if (ticketPendingFlag == 1) {
+                            txtLive.setText("LIVE: ticket_pending — faire Resolve (A)");
+                        }
+                        updateButtons(controller != null ? controller.getState() : null);
                     });
 
-                    // ✅ SQLite: trace UI (API-like) en plus des logs internes du DeliveryController
-                    if (store != null &&
-                            serial != null && !serial.isEmpty() &&
-                            ticketNo != null && !ticketNo.isEmpty()) {
-
+                    // Trace DB UI
+                    if (store != null && serial != null && !serial.isEmpty() && ticketNo != null && !ticketNo.isEmpty()) {
                         store.upsertSummaryAsync(serial, ticketNo, j.optString("sale_no",""),
-                                "TAB_AUTO_CONNECT", DeliveryLogStore.SOURCE_UI, null, j.toString(), null);
-
-                        store.openAttemptAsync(serial, ticketNo, DeliveryLogStore.SOURCE_UI, null, attemptId -> {
-                            store.addEventAsync(attemptId, DeliveryLogStore.LEVEL_INFO, "TAB_AUTO_CONNECT",
-                                    "Auto-connect (API-like) TAB node=" + node, j.toString());
-                            store.closeAttemptAsync(attemptId, "OK", j.toString(), null);
-                        });
+                                "TAB_VALIDATE", DeliveryLogStore.SOURCE_UI, null, j.toString(), null);
                     }
                 }
             } catch (Exception e) {
@@ -402,13 +555,7 @@ public class RegisterTabFragment extends Fragment {
         });
     }
 
-    /**
-     * Rafraîchit la vue log du tab en appliquant:
-     * - node == this.node
-     * - UI + API + ERR toujours
-     * - IO seulement si cbTxRx checked
-     * - baseline "clear local view" via logViewSinceMs
-     */
+    // ---------- Logging (LogBus) + vue locale filtrée ----------
     private void refreshLogView() {
         if (txtLog == null) return;
         boolean includeIo = (cbTxRx != null && cbTxRx.isChecked());
@@ -416,48 +563,27 @@ public class RegisterTabFragment extends Fragment {
         txtLog.setText(text);
     }
 
-    // ---------- Logging helpers (centralisés) ----------
-
     private void logUi(String s) {
+        if (s == null) return;
         LogBus.ui(node, maybeUiTimestamp(s));
     }
 
     private void logApi(String s) {
-        // API lines gardent leur préfixe, pas de prefix UI timestamp
+        if (s == null) return;
         LogBus.api(node, s);
     }
 
-    private void logIo(String s) {
-        LogBus.io(node, s);
-    }
-
-    /**
-     * Classe source automatiquement selon préfixes.
-     * - [API] ... => API
-     * - [IO ...] / TX: / RX: / ↳ => IO
-     * - sinon => UI (avec timestamp optionnel)
-     */
     private void logAutoClassify(String raw) {
         if (raw == null) return;
         String s = raw.trim();
-        if (s.startsWith("[API]") || s.startsWith("[API ")) {
-            LogBus.api(node, s);
-            return;
-        }
-        if (s.startsWith("[IO ") || s.startsWith("TX:") || s.startsWith("RX:") || s.startsWith("↳")) {
-            LogBus.io(node, s);
-            return;
-        }
-        if (s.startsWith("[ERR") || s.startsWith("ERR[")) {
-            LogBus.err(node, s);
-            return;
-        }
+        if (s.startsWith("[API]") || s.startsWith("[API ")) { LogBus.api(node, s); return; }
+        if (s.startsWith("[IO ") || s.startsWith("TX:") || s.startsWith("RX:") || s.startsWith("↳")) { LogBus.io(node, s); return; }
+        if (s.startsWith("[ERR") || s.startsWith("ERR[")) { LogBus.err(node, s); return; }
         LogBus.ui(node, maybeUiTimestamp(s));
     }
 
     private String maybeUiTimestamp(String line) {
         if (!logTsEnabled) return line;
-        // évite de re-timestamp les lignes IO/API
         if (line.startsWith("[IO ") || line.startsWith("[API ")) return line;
         return "[UI " + uiTs() + "] " + line;
     }
