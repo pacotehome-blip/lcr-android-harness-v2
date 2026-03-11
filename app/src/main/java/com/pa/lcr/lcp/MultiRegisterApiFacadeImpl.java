@@ -5,7 +5,7 @@ import android.content.Context;
 import android.hardware.usb.UsbManager;
 
 import com.hoho.android.usbserial.driver.UsbSerialPort;
-import com.pa.lcrdemo.UsbSession; // ✅ FIX: adapter si le package est différent
+import com.pa.lcrdemo.UsbSession; // ✅ adapte si ton UsbSession est ailleurs
 
 import org.json.JSONObject;
 
@@ -46,7 +46,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
 
     @Override
     public ApiResult api_openPingUsb() {
-        UsbSerialPort p = UsbSession.getPort(); // ✅ FIX: UsbSession import
+        UsbSerialPort p = UsbSession.getPort();
         if (p == null) return ApiResult.fail("Open/Ping USB: 0 - USB non prêt (port null).", "ERR_USB_PORT_NOT_READY");
         return ApiResult.ok("Open/Ping USB: 1 - USB prêt (port ouvert)");
     }
@@ -69,7 +69,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     }
 
     private DeliveryController requireSession(Integer nodeDec, Integer fromDec) {
-        UsbSerialPort port = UsbSession.getPort(); // ✅ FIX: UsbSession import
+        UsbSerialPort port = UsbSession.getPort();
         if (port == null) return null;
         return sessions.getOrCreate(normNode(nodeDec), normFrom(fromDec), port);
     }
@@ -89,12 +89,62 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         Integer node = nodeDec;
         if (node == null) node = jobToNode.get(jobId);
         if (node == null) return null;
-        return requireSession(node, 255);
+        return requireSession(node, 255 /* from default */);
+    }
+
+    // =========================
+    // ✅ Legacy wrappers REQUIRED by ApiFacade (abstract methods)
+    // =========================
+
+    @Override
+    public ApiResult api_connectLcp() {
+        return api_connectLcp(null, null);
+    }
+
+    @Override
+    public ApiResult api_deliveryAlignA() {
+        return api_deliveryAlignA(null, null);
+    }
+
+    @Override
+    public ApiResult api_deliveryStartC(int product1to16, double presetNet) {
+        return api_deliveryStartC(null, null, product1to16, presetNet);
+    }
+
+    @Override
+    public ApiResult api_deliveryJobGet(String jobId) {
+        return api_deliveryJobGet(jobId, null);
+    }
+
+    @Override
+    public ApiResult api_deliveryOneShotStart(String numero_livraison, int product1to16, double presetNetL, String compartment) {
+        return api_deliveryOneShotStart(null, null, numero_livraison, product1to16, presetNetL, compartment);
+    }
+
+    @Override
+    public ApiResult api_deliveryContinue(String jobId) {
+        return api_deliveryContinue(jobId, null);
+    }
+
+    @Override
+    public ApiResult api_deliveryTerminate(String jobId) {
+        return api_deliveryTerminate(jobId, null);
+    }
+
+    @Override
+    public ApiResult api_registerValidate(String numero_livraison,
+                                         Integer expected_lcrnode_dec,
+                                         String expected_serial_id,
+                                         Integer expected_product_number,
+                                         String expected_compartment) {
+        return api_registerValidate(numero_livraison, expected_lcrnode_dec, null,
+                expected_serial_id, expected_product_number, expected_compartment);
     }
 
     // =========================
     // Node-aware operations (B2: create if missing)
     // =========================
+
     @Override
     public ApiResult api_connectLcp(Integer lcrnode_dec, Integer from_dec) {
         DeliveryController dc = requireSession(lcrnode_dec, from_dec);
@@ -151,21 +201,6 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         return dc.api_deliveryJobGet(jobId);
     }
 
-    // =========================
-    // ✅ FIX #1: implement legacy validateRegister (5 params) required by ApiFacade
-    // =========================
-    @Override
-    public ApiResult api_registerValidate(String numero_livraison,
-                                         Integer expected_lcrnode_dec,
-                                         String expected_serial_id,
-                                         Integer expected_product_number,
-                                         String expected_compartment) {
-        // Delegate to node-aware variant (from_dec null -> default 255)
-        return api_registerValidate(numero_livraison, expected_lcrnode_dec, null,
-                expected_serial_id, expected_product_number, expected_compartment);
-    }
-
-    // Node-aware validate with from_dec (B2)
     @Override
     public ApiResult api_registerValidate(String numero_livraison,
                                          Integer expected_lcrnode_dec,
