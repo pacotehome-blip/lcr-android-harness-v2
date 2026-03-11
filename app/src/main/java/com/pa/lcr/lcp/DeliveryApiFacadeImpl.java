@@ -187,4 +187,13 @@ public final class DeliveryApiFacadeImpl implements ApiFacade {
         df.setTimeZone(TimeZone.getTimeZone("UTC"));
         return df.format(new Date());
     }
+
+    // =========================================================
+    // ✅ B2: helper public pour MultiRegisterApiFacadeImpl.api_dbDump()
+    // =========================================================
+    public static String utcStampPublic() {
+        SimpleDateFormat df = new SimpleDateFormat("yyyy-MM-dd'T'HH-mm-ss'Z'", Locale.ROOT);
+        df.setTimeZone(TimeZone.getTimeZone("UTC"));
+        return df.format(new Date());
+    }
 }

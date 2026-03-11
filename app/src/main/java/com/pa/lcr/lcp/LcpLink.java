@@ -79,9 +79,7 @@ public final class LcpLink {
     private void t(String s) {
         TraceSink ts = trace;
         if (ts == null) return;
-        if (traceTsEnabled && (s.startsWith("TX:")
-                || s.startsWith("RX:")
-                || s.startsWith("↳"))) {
+        if (traceTsEnabled && (s.startsWith("TX:") || s.startsWith("RX:") || s.startsWith("↳"))) {
             ts.onTrace("[IO " + TRACE_DF.get().format(new Date()) + "] " + s);
         } else {
             ts.onTrace(s);
@@ -107,7 +105,7 @@ public final class LcpLink {
         return closed;
     }
 
-    // ✅ NEW: exposer les adresses (utile pour validate / logs / UI)
+    // ✅ getters (utiles pour validate/log/UI)
     public int getToAddr() { return toAddr; }
     public int getHostAddr() { return hostAddr; }
 
@@ -178,6 +176,15 @@ public final class LcpLink {
         return out;
     }
 
+    // ✅ COMMIT 4: overload timeout court (scan rapide)
+    public byte[] opGetField(int field, int timeoutMs) throws IOException {
+        Response r = sendRecv(buildPayload(MSG_GET_FIELD, new byte[]{(byte) field}), timeoutMs);
+        ensureOk(r, "GET_FIELD #" + field);
+        byte[] out = new byte[r.payload.length - 2];
+        System.arraycopy(r.payload, 2, out, 0, out.length);
+        return out;
+    }
+
     /** Timeout 30s pour SET_FIELD queueable */
     public void opSetField(int field, byte[] value) throws IOException {
         byte[] pl = new byte[2 + (value == null ? 0 : value.length)];
@@ -190,6 +197,16 @@ public final class LcpLink {
 
     public int[] opDeliveryStatus() throws IOException {
         Response r = sendRecv(buildPayload(MSG_GET_DELIVERY_STATUS, null), 6000);
+        ensureOk(r, "GET_DELIVERY_STATUS");
+        return new int[]{
+                u16be(r.payload[2], r.payload[3]),
+                u16be(r.payload[4], r.payload[5])
+        };
+    }
+
+    // ✅ COMMIT 4: overload timeout court (scan rapide)
+    public int[] opDeliveryStatus(int timeoutMs) throws IOException {
+        Response r = sendRecv(buildPayload(MSG_GET_DELIVERY_STATUS, null), timeoutMs);
         ensureOk(r, "GET_DELIVERY_STATUS");
         return new int[]{
                 u16be(r.payload[2], r.payload[3]),

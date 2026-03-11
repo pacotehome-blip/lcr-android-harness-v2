@@ -42,14 +42,13 @@
         app:tabMode="fixed"
         app:tabGravity="fill" />
 
-    <!-- ===================== PAGE 1: UI EXISTANTE ===================== -->
+    <!-- ===================== PAGE 1: UI (MAIN) ===================== -->
     <LinearLayout
         android:id="@+id/pageMain"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:orientation="vertical">
 
-        <!-- ======== ICI: ton ancien activity_main.xml, inchangé ======== -->
         <LinearLayout
             android:id="@+id/root"
             android:layout_width="match_parent"
@@ -86,7 +85,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp" />
 
-            <!-- ===================== LCP (ÉTAT ÉDITABLE) ===================== -->
+            <!-- ===================== LCP (ÉTAT / MANUEL) ===================== -->
             <TextView
                 android:id="@+id/txtActiveNode"
                 android:layout_width="match_parent"
@@ -111,7 +110,6 @@
                     android:singleLine="true" />
 
                 <EditText
-                    android:text="From : "
                     android:id="@+id/edtFrom"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
@@ -122,14 +120,67 @@
                     android:singleLine="true" />
             </LinearLayout>
 
-            <!-- ===================== PRODUITS ===================== -->
+            <!-- ===================== AJOUT TAB (manuel) ===================== -->
+            <Button
+                android:id="@+id/btnAddRegisterTab"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Ajouter / Focus TAB (TO)"
+                android:layout_marginTop="4dp" />
+
+            <!-- ===================== SCAN REGISTRES (Option B) ===================== -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginTop="6dp">
+
+                <Button
+                    android:id="@+id/btnScanNodes"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Scan registres (1..250)" />
+
+                <Spinner
+                    android:id="@+id/spnNodesFound"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1.2"
+                    android:layout_marginStart="8dp" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/txtNodesSummary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Nodes trouvés : —"
+                android:layout_marginTop="2dp"
+                android:textSize="12sp" />
+
+            <!-- ===================== TABS REGISTRES (1 tab par lcrnode) ===================== -->
+            <com.google.android.material.tabs.TabLayout
+                android:id="@+id/tabRegisters"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                app:tabMode="scrollable"
+                app:tabGravity="fill" />
+
+            <FrameLayout
+                android:id="@+id/registerContainer"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:layout_marginTop="6dp" />
+
+            <!-- ===================== PRODUITS / PRESET (UI MAIN existante - conservée) ===================== -->
             <Spinner
                 android:id="@+id/spnProducts"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp" />
 
-            <!-- ===================== PRODUIT / PRESET ===================== -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -145,13 +196,15 @@
                     android:inputType="number"
                     android:singleLine="true" />
 
+                <!-- ✅ FIX: cet id était dupliqué (txtActiveNode). On le remplace par txtPresetLabel. -->
                 <TextView
-                    android:id="@+id/txtActiveNode"
-                    android:layout_width="match_parent"
+                    android:id="@+id/txtPresetLabel"
+                    android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="Preset : "
                     android:textStyle="bold"
-                    android:layout_marginTop="4dp" />
+                    android:layout_marginStart="10dp"
+                    android:layout_gravity="center_vertical" />
 
                 <EditText
                     android:id="@+id/edtPreset"
@@ -164,7 +217,7 @@
                     android:singleLine="true" />
             </LinearLayout>
 
-            <!-- ===================== CONNECT ===================== -->
+            <!-- ===================== CONNECT (UI MAIN existante - conservée) ===================== -->
             <Button
                 android:id="@+id/btnConnect"
                 android:layout_width="match_parent"
@@ -172,7 +225,7 @@
                 android:text="Connect (LCP)"
                 android:layout_marginTop="4dp" />
 
-            <!-- ===================== ACTIONS ===================== -->
+            <!-- ===================== ACTIONS (UI MAIN existante - conservée) ===================== -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -283,7 +336,6 @@
                     android:layout_height="wrap_content"
                     android:text="-" />
 
-                <!-- ✅ NEW: delivery_uid affiché (peut rester '-') -->
                 <TextView
                     android:id="@+id/txtDeliveryUid"
                     android:layout_width="match_parent"
@@ -291,32 +343,45 @@
                     android:text="-" />
             </LinearLayout>
 
-            <!-- ===================== LOG ===================== -->
-            <ScrollView
-                android:id="@+id/logScroll"
-                android:layout_width="match_parent"
-                android:layout_height="0dp"
-                android:layout_weight="1"
-                android:fillViewport="true"
-                android:background="#111111">
-
-                <TextView
-                    android:id="@+id/txtLog"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:typeface="monospace"
-                    android:textIsSelectable="true"
-                    android:textSize="12sp"
-                    android:textColor="#00FF00"
-                    android:padding="6dp" />
-            </ScrollView>
-
-            <!-- ===================== LOG ACTIONS ===================== -->
-            <LinearLayout
-                android:layout_width="match_parent"
+            <!-- ===================== LOG TOGGLE (global) ===================== -->
+            <CheckBox
+                android:id="@+id/cbShowLog"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="Afficher log"
+                android:checked="false"
+                android:minHeight="0dp"
+                android:paddingTop="0dp"
+                android:paddingBottom="0dp"/>
+
+            <!-- ===================== LOG PANEL (global, hidden by default) ===================== -->
+            <LinearLayout
+                android:id="@+id/logPanel"
+                android:layout_width="match_parent"
+                android:layout_height="180dp"
                 android:orientation="vertical"
-                android:layout_marginTop="4dp">
+                android:layout_marginTop="4dp"
+                android:visibility="gone">
+
+                <ScrollView
+                    android:id="@+id/logScroll"
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1"
+                    android:fillViewport="true"
+                    android:background="#111111">
+
+                    <TextView
+                        android:id="@+id/txtLog"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:typeface="monospace"
+                        android:textIsSelectable="true"
+                        android:textSize="12sp"
+                        android:textColor="#00FF00"
+                        android:padding="6dp" />
+                </ScrollView>
 
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -374,7 +439,6 @@
                 </LinearLayout>
             </LinearLayout>
 
-            <!-- ======== FIN de ton ancien activity_main ======== -->
         </LinearLayout>
 
         <!-- ===================== PAGE 2: API-Face ===================== -->
@@ -385,7 +449,6 @@
             android:orientation="vertical"
             android:visibility="gone">
 
-            <!-- Backup DB (Downloads) -->
             <Button
                 android:id="@+id/btnDbBackup"
                 android:layout_width="match_parent"
@@ -393,7 +456,6 @@
                 android:text="Backup DB (Downloads)"
                 android:layout_margin="8dp" />
 
-            <!-- On inclut le layout de l’onglet API-Face -->
             <include layout="@layout/fragment_api_face" />
         </LinearLayout>
 

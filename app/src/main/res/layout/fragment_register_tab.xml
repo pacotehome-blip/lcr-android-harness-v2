@@ -1,0 +1,289 @@
+
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/regRootScroll"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:id="@+id/regRoot"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="10dp">
+
+        <!-- ===== Header / Identité ===== -->
+        <TextView
+            android:id="@+id/txtRegHeader"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Registre"
+            android:textStyle="bold"
+            android:textSize="18sp" />
+
+        <TextView
+            android:id="@+id/txtLcrNode"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="LCR Node : —" />
+
+        <TextView
+            android:id="@+id/txtFrom"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="From : —" />
+
+        <TextView
+            android:id="@+id/txtSerialId"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="#Série : —" />
+
+        <TextView
+            android:id="@+id/txtTicketNo"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Ticket Number : —" />
+
+        <TextView
+            android:id="@+id/txtTicketPending"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Ticket pending : —"
+            android:textStyle="bold"
+            android:paddingTop="4dp" />
+
+        <!-- ===== Produit / Preset ===== -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="8dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Produit : "
+                android:textStyle="bold"
+                android:layout_gravity="center_vertical"/>
+
+            <Spinner
+                android:id="@+id/spnProduct"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="6dp"/>
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Preset : "
+                android:textStyle="bold"
+                android:layout_marginStart="10dp"
+                android:layout_gravity="center_vertical"/>
+
+            <EditText
+                android:id="@+id/edtPreset"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="6dp"
+                android:hint="Preset"
+                android:inputType="numberDecimal"
+                android:singleLine="true"/>
+        </LinearLayout>
+
+        <!-- ===== Actions ===== -->
+        <Button
+            android:id="@+id/btnConnectTab"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Connect LCP (ce registre)"
+            android:layout_marginTop="8dp"/>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="6dp">
+
+            <Button
+                android:id="@+id/btnA"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="A (Resolve)" />
+
+            <Button
+                android:id="@+id/btnB"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="8dp"
+                android:text="B (Status)" />
+
+            <Button
+                android:id="@+id/btnC"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="8dp"
+                android:text="C (New)" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="6dp">
+
+            <Button
+                android:id="@+id/btnContinue"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Continuer" />
+
+            <Button
+                android:id="@+id/btnFinish"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="8dp"
+                android:text="Terminer" />
+        </LinearLayout>
+
+        <!-- ===== LIVE + Net/Gross ===== -->
+        <TextView
+            android:id="@+id/txtLive"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="LIVE: (en attente)"
+            android:textStyle="bold"
+            android:layout_marginTop="8dp" />
+
+        <LinearLayout
+            android:id="@+id/liveQtyPanel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginTop="4dp"
+            android:padding="8dp"
+            android:background="#F2F2F2">
+
+            <TextView
+                android:id="@+id/txtQtyNet"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="NET: 0.0"
+                android:textStyle="bold"
+                android:textSize="20sp"
+                android:textColor="#000000" />
+
+            <TextView
+                android:id="@+id/txtQtyGross"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="GROSS: 0.0"
+                android:textStyle="bold"
+                android:textSize="16sp"
+                android:textColor="#222222" />
+        </LinearLayout>
+
+        <!-- ===== Delivery UID ===== -->
+        <TextView
+            android:id="@+id/txtDeliveryUid"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Delivery UID : —"
+            android:layout_marginTop="6dp" />
+
+        <!-- ===== LOG (caché par défaut) ===== -->
+        <CheckBox
+            android:id="@+id/cbShowLog"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="Afficher log"
+            android:checked="false" />
+
+        <LinearLayout
+            android:id="@+id/logPanel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone"
+            android:layout_marginTop="6dp">
+
+            <ScrollView
+                android:id="@+id/logScroll"
+                android:layout_width="match_parent"
+                android:layout_height="180dp"
+                android:fillViewport="true"
+                android:background="#111111">
+
+                <TextView
+                    android:id="@+id/txtLog"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:typeface="monospace"
+                    android:textIsSelectable="true"
+                    android:textSize="12sp"
+                    android:textColor="#00FF00"
+                    android:padding="6dp" />
+            </ScrollView>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="end"
+                android:layout_marginTop="4dp">
+
+                <Button
+                    android:id="@+id/btnClearLog"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Clear log" />
+
+                <Button
+                    android:id="@+id/btnCopyLog"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:text="Copy log" />
+
+                <Button
+                    android:id="@+id/btnScrollDown"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:text="Scroll down" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginTop="2dp">
+
+                <CheckBox
+                    android:id="@+id/cbTxRx"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Afficher TX / RX"
+                    android:checked="false" />
+
+                <CheckBox
+                    android:id="@+id/cbLogTs"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="12dp"
+                    android:text="Timestamps UI + IO + API"
+                    android:checked="false" />
+            </LinearLayout>
+
+        </LinearLayout>
+
+    </LinearLayout>
+</ScrollView>

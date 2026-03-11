@@ -3,6 +3,9 @@ package com.pa.lcrdemo;
 
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.documentfile.provider.DocumentFile;
+import androidx.fragment.app.Fragment;
+import androidx.fragment.app.FragmentManager;
+import androidx.fragment.app.FragmentTransaction;
 
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
@@ -29,9 +32,12 @@ import com.pa.lcr.lcp.storage.DeliveryLogStore;
 
 import org.json.JSONObject;
 
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -41,12 +47,12 @@ public class MainActivity extends AppCompatActivity {
     private final List<UsbDevice> usbDevices = new ArrayList<>();
     private UsbSerialPort usbPort;
 
-    // ===== Tabs / Pages =====
+    // ===== Tabs / Pages (TOP: MAIN / API-Face) =====
     private TabLayout tabLayout;
     private View pageMain;
     private View pageApiFace;
 
-    // ===== API-Face UI (sans trace UI) =====
+    // ===== API-Face UI =====
     private TextView txtApiStatus;
     private TextView txtApiUrl;
     private Button btnApiStart;
@@ -58,7 +64,7 @@ public class MainActivity extends AppCompatActivity {
     private ApiServer apiServer;
     private DeliveryLogStore deliveryStore;
 
-    // UI refs (pageMain)
+    // ===================== MAIN UI (USB + Manuel) =====================
     private Spinner spnUsbDevices;
     private Button btnScanUsb;
     private Button btnPingUsb;
@@ -66,33 +72,52 @@ public class MainActivity extends AppCompatActivity {
     private EditText edtFrom;
     private TextView txtActiveNode;
     private Button btnConnect;
+
+    // ===================== Commit 4: Scan registres Option B =====================
+    private Button btnScanNodes;
+    private Spinner spnNodesFound;
+    private TextView txtNodesSummary;
+    private boolean nodeUserTouchedSpinner = false;
+    private ArrayAdapter<NodeScanItem> nodeAdapter;
+    private final List<NodeScanItem> nodeItems = new ArrayList<>();
+    private final ExecutorService scanExec = Executors.newSingleThreadExecutor();
+
+    // ===================== Commit 4: Tabs registres =====================
+    private TabLayout tabRegisters;
+    private View registerContainer;
+    private Button btnAddRegisterTab;
+
+    // Unicité: 1 tab par lcrnode
+    private final LinkedHashMap<Integer, Integer> regNodeToFrom = new LinkedHashMap<>(); // node -> from
+    private int currentRegNode = -1;
+
+    // ===================== UI existante (conservée) =====================
     private Spinner spnProducts;
     private EditText edtProduct;
     private EditText edtPreset;
-
     private Button btnA, btnB, btnC;
     private Button btnContinue, btnFinish;
-
     private TextView txtLive;
     private View liveQtyPanel;
     private TextView txtQtyNet;
     private TextView txtQtyGross;
-
     private TextView txtTicketNumber;
-    private TextView txtDeliveryUid; // affiché même si null -> "-"
+    private TextView txtDeliveryUid;
 
+    // ===== LOG UI (commit 4) =====
+    private CheckBox cbShowLog;
+    private View logPanel;
     private TextView txtLog;
     private ScrollView logScroll;
-
     private Button btnClearLog;
     private Button btnCopyLog;
     private Button btnScrollDown;
-
     private CheckBox cbTxRx;
     private CheckBox cbLogTs;
 
     private boolean logTsEnabled = false;
 
+    // ===== Controller "manuel" (conservé) =====
     private DeliveryControllerPort controller;
     private LcpLink link = null;
 
@@ -107,11 +132,9 @@ public class MainActivity extends AppCompatActivity {
     private double lastGross = Double.NaN;
 
     private Runnable pendingInitRunnable = null;
-
-    // ✅ Python parity: poll = 0.2s
     private static final int LIVE_POLL_MS = 200;
 
-    // Backup (SAF folder picker)
+    // Backup
     private static final int REQ_PICK_BACKUP_DIR = 9102;
     private static final String PREF_BACKUP_DIR_URI = "backup_dir_uri";
 
@@ -204,6 +227,7 @@ public class MainActivity extends AppCompatActivity {
         boolean shouldPoll =
                 (st == DeliveryState.RUNNING_FLOWING) ||
                 (st == DeliveryState.RUNNING_PAUSED);
+
         if (!shouldPoll) return;
         liveTickRunning = true;
         ui.removeCallbacks(liveTick);
@@ -268,7 +292,7 @@ public class MainActivity extends AppCompatActivity {
         bindUi();
         wireUi();
         initUiDefaults();
-        setupTabs();
+        setupTabsTop();
 
         deliveryStore = new DeliveryLogStore(this);
         deliveryStore.purgeOlderThanDaysAsync(7);
@@ -280,6 +304,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         stopApiServer("Activity destroyed");
+        try { scanExec.shutdownNow(); } catch (Exception ignored) {}
         super.onDestroy();
     }
 
@@ -295,9 +320,19 @@ public class MainActivity extends AppCompatActivity {
         edtTo = findViewById(R.id.edtTo);
         edtFrom = findViewById(R.id.edtFrom);
         txtActiveNode = findViewById(R.id.txtActiveNode);
-
         btnConnect = findViewById(R.id.btnConnect);
 
+        // Scan registres Option B
+        btnScanNodes = findViewById(R.id.btnScanNodes);
+        spnNodesFound = findViewById(R.id.spnNodesFound);
+        txtNodesSummary = findViewById(R.id.txtNodesSummary);
+
+        // Tabs registres
+        tabRegisters = findViewById(R.id.tabRegisters);
+        registerContainer = findViewById(R.id.registerContainer);
+        btnAddRegisterTab = findViewById(R.id.btnAddRegisterTab);
+
+        // UI existante (conservée)
         spnProducts = findViewById(R.id.spnProducts);
         edtProduct = findViewById(R.id.edtProduct);
         edtPreset = findViewById(R.id.edtPreset);
@@ -305,7 +340,6 @@ public class MainActivity extends AppCompatActivity {
         btnA = findViewById(R.id.btnA);
         btnB = findViewById(R.id.btnB);
         btnC = findViewById(R.id.btnC);
-
         btnContinue = findViewById(R.id.btnContinue);
         btnFinish = findViewById(R.id.btnFinish);
 
@@ -317,16 +351,18 @@ public class MainActivity extends AppCompatActivity {
         txtTicketNumber = findViewById(R.id.txtTicketNumber);
         try { txtDeliveryUid = findViewById(R.id.txtDeliveryUid); } catch (Exception ignored) {}
 
+        // Log global (optionnel)
+        cbShowLog = findViewById(R.id.cbShowLog);
+        logPanel = findViewById(R.id.logPanel);
         txtLog = findViewById(R.id.txtLog);
         logScroll = findViewById(R.id.logScroll);
-
         btnClearLog = findViewById(R.id.btnClearLog);
         btnCopyLog = findViewById(R.id.btnCopyLog);
         btnScrollDown = findViewById(R.id.btnScrollDown);
-
         cbTxRx = findViewById(R.id.cbTxRx);
         cbLogTs = findViewById(R.id.cbLogTs);
 
+        // API tab
         txtApiStatus = findViewById(R.id.txtApiStatus);
         txtApiUrl = findViewById(R.id.txtApiUrl);
         btnApiStart = findViewById(R.id.btnApiStart);
@@ -342,7 +378,9 @@ public class MainActivity extends AppCompatActivity {
         edtTo.setText("250");
         edtFrom.setText("255");
 
-        txtActiveNode.setText("Node actif : —");
+        if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : —");
+
+        txtActiveNode.setText("LCP Node : ");
         txtLive.setText("LIVE: (en attente)");
 
         if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
@@ -352,9 +390,13 @@ public class MainActivity extends AppCompatActivity {
         if (txtTicketNumber != null) txtTicketNumber.setText("-");
         if (txtDeliveryUid != null) txtDeliveryUid.setText("-");
 
+        // Log global caché par défaut
+        if (cbShowLog != null) cbShowLog.setChecked(false);
+        if (logPanel != null) logPanel.setVisibility(View.GONE);
+
+        // Products main
         List<ProductUiItem> products = new ArrayList<>();
         for (int i = 1; i <= 16; i++) products.add(new ProductUiItem(i, "Produit " + i));
-
         ArrayAdapter<ProductUiItem> adapter =
                 new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, products);
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
@@ -370,50 +412,39 @@ public class MainActivity extends AppCompatActivity {
         boolean ts = prefs.getBoolean("log_ts", false);
         logTsEnabled = ts;
         if (cbLogTs != null) cbLogTs.setChecked(ts);
+
+        // Init nodes spinner (défaut 250)
+        nodeItems.clear();
+        nodeItems.add(NodeScanItem.default250());
+        nodeAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, nodeItems);
+        nodeAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        if (spnNodesFound != null) spnNodesFound.setAdapter(nodeAdapter);
+
+        // ✅ B2 + Option A: TAB registre par défaut 250 + sélection + fragment affiché
+        ensureRegisterTab(250, 255, true);
     }
 
     private void wireUi() {
         btnScanUsb.setOnClickListener(v -> scanUsb());
         btnPingUsb.setOnClickListener(v -> openSelectedUsb());
-        btnConnect.setOnClickListener(v -> connectLcp());
+        btnConnect.setOnClickListener(v -> connectLcp()); // mode manuel conservé
 
-        spnProducts.setOnTouchListener((v, e) -> {
-            if (e.getAction() == MotionEvent.ACTION_DOWN) userTouchedSpinner = true;
-            return false;
-        });
+        // Toggle log global (optionnel)
+        if (cbShowLog != null) {
+            cbShowLog.setOnCheckedChangeListener((buttonView, checked) -> {
+                if (logPanel != null) logPanel.setVisibility(checked ? View.VISIBLE : View.GONE);
+                log("Option Afficher log: " + (checked ? "ON" : "OFF"));
+            });
+        }
 
-        spnProducts.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-            @Override public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
-                if (controller == null) return;
-                if (suppressProductSelection) return;
-                if (!userTouchedSpinner) return;
-                userTouchedSpinner = false;
-
-                ProductUiItem it = (ProductUiItem) spnProducts.getSelectedItem();
-                controller.selectProduct(it.product1);
-                edtProduct.setText(String.valueOf(it.product1));
-            }
-            @Override public void onNothingSelected(AdapterView<?> parent) {}
-        });
-
-        btnA.setOnClickListener(v -> { if (controller != null) controller.alignOrRecover(); });
-        btnB.setOnClickListener(v -> { if (controller != null) controller.requestStatus(); });
-        btnC.setOnClickListener(v -> { if (controller != null) controller.startDelivery(readProduct(), readPreset()); });
-
-        btnContinue.setOnClickListener(v -> { if (controller != null) controller.resumeIfPaused(); });
-        btnFinish.setOnClickListener(v -> { if (controller != null) controller.endDelivery(); });
-
-        btnClearLog.setOnClickListener(v -> { logBuf.setLength(0); txtLog.setText(""); });
-
-        btnCopyLog.setOnClickListener(v -> {
+        // Log global actions
+        if (btnClearLog != null) btnClearLog.setOnClickListener(v -> { logBuf.setLength(0); if (txtLog != null) txtLog.setText(""); });
+        if (btnCopyLog != null) btnCopyLog.setOnClickListener(v -> {
             ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-            cm.setPrimaryClip(ClipData.newPlainText("log", txtLog.getText()));
+            cm.setPrimaryClip(ClipData.newPlainText("log", txtLog != null ? txtLog.getText() : ""));
             log("Log copié dans le presse-papiers");
         });
-
-        if (btnScrollDown != null) {
-            btnScrollDown.setOnClickListener(v -> logScroll.fullScroll(View.FOCUS_DOWN));
-        }
+        if (btnScrollDown != null) btnScrollDown.setOnClickListener(v -> { if (logScroll != null) logScroll.fullScroll(View.FOCUS_DOWN); });
 
         if (cbTxRx != null) {
             cbTxRx.setOnCheckedChangeListener((buttonView, checked) -> {
@@ -431,26 +462,298 @@ public class MainActivity extends AppCompatActivity {
                 logTsEnabled = checked;
                 if (controller != null) controller.setLogTimestampsEnabled(checked);
                 if (link != null) link.setTraceTimestampsEnabled(checked);
-                log("Option timestamps (UI+IO): " + (checked ? "ON" : "OFF"));
+                log("Option timestamps (UI+IO+API): " + (checked ? "ON" : "OFF"));
             });
         }
 
+        // Spinner nodes scan: sélection -> remplit edtTo (sans auto-connect)
+        if (spnNodesFound != null) {
+            spnNodesFound.setOnTouchListener((v, e) -> {
+                if (e.getAction() == MotionEvent.ACTION_DOWN) nodeUserTouchedSpinner = true;
+                return false;
+            });
+            spnNodesFound.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+                @Override public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
+                    if (!nodeUserTouchedSpinner) return;
+                    nodeUserTouchedSpinner = false;
+                    NodeScanItem it = (NodeScanItem) spnNodesFound.getSelectedItem();
+                    if (it == null) return;
+                    edtTo.setText(String.valueOf(it.lcrnode));
+                    log("TO sélectionné via scan: " + it.lcrnode + " (cliquer Ajouter/Fokus TAB ou Connect LCP)");
+                }
+                @Override public void onNothingSelected(AdapterView<?> parent) {}
+            });
+        }
+
+        // Scan registres option B
+        if (btnScanNodes != null) btnScanNodes.setOnClickListener(v -> scanRegistersOptionB());
+
+        // Ajouter / Focus TAB depuis TO manuel
+        if (btnAddRegisterTab != null) {
+            btnAddRegisterTab.setOnClickListener(v -> {
+                int to = parseInt(edtTo.getText().toString(), 250);
+                int from = parseInt(edtFrom.getText().toString(), 255);
+                ensureRegisterTab(to, from, true);
+            });
+        }
+
+        // Tabs registres: sélection -> afficher fragment
+        if (tabRegisters != null) {
+            tabRegisters.addOnTabSelectedListener(new TabLayout.OnTabSelectedListener() {
+                @Override public void onTabSelected(TabLayout.Tab tab) {
+                    Object tag = tab.getTag();
+                    if (tag instanceof Integer) {
+                        int node = (Integer) tag;
+                        showRegisterFragment(node);
+                    }
+                }
+                @Override public void onTabUnselected(TabLayout.Tab tab) {}
+                @Override public void onTabReselected(TabLayout.Tab tab) {
+                    Object tag = tab.getTag();
+                    if (tag instanceof Integer) {
+                        int node = (Integer) tag;
+                        showRegisterFragment(node);
+                    }
+                }
+            });
+        }
+
+        // UI main products
+        spnProducts.setOnTouchListener((v, e) -> {
+            if (e.getAction() == MotionEvent.ACTION_DOWN) userTouchedSpinner = true;
+            return false;
+        });
+        spnProducts.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
+                if (controller == null) return;
+                if (suppressProductSelection) return;
+                if (!userTouchedSpinner) return;
+                userTouchedSpinner = false;
+
+                ProductUiItem it = (ProductUiItem) spnProducts.getSelectedItem();
+                controller.selectProduct(it.product1);
+                edtProduct.setText(String.valueOf(it.product1));
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent) {}
+        });
+
+        // Boutons UI main (conservés)
+        btnA.setOnClickListener(v -> { if (controller != null) controller.alignOrRecover(); });
+        btnB.setOnClickListener(v -> { if (controller != null) controller.requestStatus(); });
+        btnC.setOnClickListener(v -> { if (controller != null) controller.startDelivery(readProduct(), readPreset()); });
+        btnContinue.setOnClickListener(v -> { if (controller != null) controller.resumeIfPaused(); });
+        btnFinish.setOnClickListener(v -> { if (controller != null) controller.endDelivery(); });
+
+        // API tab buttons
         if (btnApiStart != null) btnApiStart.setOnClickListener(v -> startApiServer());
         if (btnApiStop != null) btnApiStop.setOnClickListener(v -> stopApiServer("Stop button"));
 
         if (btnDbBackup != null) {
             btnDbBackup.setOnClickListener(v -> doBackupDb());
-            btnDbBackup.setOnLongClickListener(v -> {
-                requestBackupDir();
-                return true;
+            btnDbBackup.setOnLongClickListener(v -> { requestBackupDir(); return true; });
+        }
+    }
+
+    // =========================================================
+    // ===== Register Tabs: create/focus unique tab by node =====
+    // =========================================================
+    private void ensureRegisterTab(int node, int from, boolean focus) {
+        if (node < 1 || node > 250) {
+            log("TAB registre: node invalide: " + node);
+            return;
+        }
+        if (from < 0 || from > 255) from = 255;
+
+        // Unicité: si déjà présent, ne pas dupliquer
+        if (!regNodeToFrom.containsKey(node)) {
+            regNodeToFrom.put(node, from);
+            addRegisterTabUi(node);
+            log("TAB registre ajouté: " + node);
+        } else {
+            log("TAB registre déjà présent: " + node + " (focus)");
+        }
+
+        if (focus) {
+            selectRegisterTab(node);
+            showRegisterFragment(node);
+        } else if (currentRegNode < 0) {
+            selectRegisterTab(node);
+            showRegisterFragment(node);
+        }
+    }
+
+    private void addRegisterTabUi(int node) {
+        if (tabRegisters == null) return;
+        TabLayout.Tab t = tabRegisters.newTab();
+        t.setText(String.valueOf(node));
+        t.setTag(node);
+        tabRegisters.addTab(t, false);
+    }
+
+    private void selectRegisterTab(int node) {
+        if (tabRegisters == null) return;
+        for (int i = 0; i < tabRegisters.getTabCount(); i++) {
+            TabLayout.Tab t = tabRegisters.getTabAt(i);
+            if (t != null && t.getTag() instanceof Integer && ((Integer) t.getTag()) == node) {
+                t.select();
+                return;
+            }
+        }
+    }
+
+    private void showRegisterFragment(int node) {
+        if (registerContainer == null) return;
+
+        currentRegNode = node;
+        int from = regNodeToFrom.containsKey(node) ? regNodeToFrom.get(node) : 255;
+
+        FragmentManager fm = getSupportFragmentManager();
+        String tag = "regtab_" + node;
+
+        Fragment existing = fm.findFragmentByTag(tag);
+        Fragment f = (existing != null) ? existing : RegisterTabFragment.newInstance(node, from);
+
+        FragmentTransaction tx = fm.beginTransaction();
+        tx.replace(R.id.registerContainer, f, tag);
+        tx.setReorderingAllowed(true);
+        tx.commitAllowingStateLoss();
+    }
+
+    // =========================================================
+    // ===== Scan registres Option B (0x28 + #80 + #23) =====
+    // =========================================================
+    private void scanRegistersOptionB() {
+        final UsbSerialPort p = (usbPort != null) ? usbPort : UsbSession.getPort();
+        if (p == null) {
+            log("Scan registres: USB non prêt (port null). Utilise Ouvrir/Ping USB ou auto-attach.");
+            toast("Scan registres: USB non prêt");
+            return;
+        }
+
+        if (btnScanNodes != null) btnScanNodes.setEnabled(false);
+        if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : scan en cours...");
+
+        scanExec.execute(() -> {
+            LinkedHashMap<Integer, NodeScanItem> found = new LinkedHashMap<>();
+
+            final int T28 = 300; // nécessite overload LcpLink.opDeliveryStatus(timeout)
+            final int TF  = 300; // nécessite overload LcpLink.opGetField(field, timeout)
+
+            for (int node = 1; node <= 250; node++) {
+                try {
+                    LcpLink tmp = new LcpLink(p, node, 255, true);
+
+                    int[] ds = tmp.opDeliveryStatus(T28);
+                    int delCode = ds[1];
+
+                    boolean ticketPending = (delCode & 0x0001) != 0;
+                    boolean flowActive = (delCode & 0x0004) != 0;
+                    boolean deliveryActive = (delCode & 0x0008) != 0;
+
+                    String serialId = decodeAz(tmp.opGetField(80, TF));
+                    String ticketNo = u32beDec(tmp.opGetField(23, TF));
+
+                    found.put(node, new NodeScanItem(node, serialId, ticketNo, ticketPending, deliveryActive, flowActive, false));
+                } catch (Exception ignored) {
+                    // node absent / timeout
+                }
+            }
+
+            ui.post(() -> {
+                try {
+                    nodeItems.clear();
+
+                    if (found.isEmpty()) {
+                        nodeItems.add(NodeScanItem.default250());
+                        if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : aucun (défaut 250)");
+                    } else {
+                        if (found.containsKey(250)) {
+                            nodeItems.add(found.get(250).asDefault());
+                            found.remove(250);
+                        } else {
+                            nodeItems.add(NodeScanItem.default250());
+                        }
+                        for (NodeScanItem it : found.values()) nodeItems.add(it);
+
+                        int countFound = Math.max(0, nodeItems.size() - 1);
+                        if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : " + countFound);
+                    }
+
+                    if (nodeAdapter != null) nodeAdapter.notifyDataSetChanged();
+
+                    // ✅ Alimenter automatiquement les tabs registres (unicité)
+                    for (NodeScanItem it : nodeItems) {
+                        if (!it.isDefault) ensureRegisterTab(it.lcrnode, 255, false);
+                    }
+
+                    log("Scan registres terminé: " + Math.max(0, nodeItems.size() - 1) + " node(s) détecté(s)");
+                } finally {
+                    if (btnScanNodes != null) btnScanNodes.setEnabled(true);
+                }
             });
+        });
+    }
+
+    private static String decodeAz(byte[] b) {
+        if (b == null || b.length == 0) return "";
+        String s = new String(b, StandardCharsets.UTF_8);
+        int nul = s.indexOf('\0');
+        if (nul >= 0) s = s.substring(0, nul);
+        return s.trim();
+    }
+
+    private static String u32beDec(byte[] be4) {
+        if (be4 == null || be4.length < 4) return "";
+        long u = ((be4[0] & 0xFFL) << 24)
+                | ((be4[1] & 0xFFL) << 16)
+                | ((be4[2] & 0xFFL) << 8)
+                | (be4[3] & 0xFFL);
+        return String.valueOf(u & 0xFFFFFFFFL);
+    }
+
+    private static final class NodeScanItem {
+        final int lcrnode;
+        final String serialId;
+        final String ticketNo;
+        final boolean ticketPending;
+        final boolean deliveryActive;
+        final boolean flowActive;
+        final boolean isDefault;
+
+        NodeScanItem(int lcrnode, String serialId, String ticketNo,
+                     boolean ticketPending, boolean deliveryActive, boolean flowActive, boolean isDefault) {
+            this.lcrnode = lcrnode;
+            this.serialId = serialId;
+            this.ticketNo = ticketNo;
+            this.ticketPending = ticketPending;
+            this.deliveryActive = deliveryActive;
+            this.flowActive = flowActive;
+            this.isDefault = isDefault;
+        }
+
+        static NodeScanItem default250() {
+            return new NodeScanItem(250, "", "", false, false, false, true);
+        }
+
+        NodeScanItem asDefault() {
+            return new NodeScanItem(lcrnode, serialId, ticketNo, ticketPending, deliveryActive, flowActive, true);
+        }
+
+        @Override
+        public String toString() {
+            String base = (isDefault ? "Défaut " : "") + lcrnode;
+            String sid = (serialId == null || serialId.isEmpty()) ? "serial=—" : ("serial=" + serialId);
+            String tno = (ticketNo == null || ticketNo.isEmpty()) ? "ticket=—" : ("ticket=" + ticketNo);
+            String pend = "pending=" + (ticketPending ? "1" : "0");
+            String act = "active=" + (deliveryActive ? "1" : "0");
+            return base + " — " + sid + " — " + tno + " — " + pend + " — " + act;
         }
     }
 
     // =========================
-    // Tabs
+    // Tabs TOP (MAIN / API-Face)
     // =========================
-    private void setupTabs() {
+    private void setupTabsTop() {
         if (tabLayout == null) return;
         tabLayout.removeAllTabs();
         tabLayout.addTab(tabLayout.newTab().setText("MAIN"), true);
@@ -471,7 +774,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // =========================
-    // API Server
+    // API Server (B2)
     // =========================
     private void startApiServer() {
         if (apiServer != null && apiServer.isRunning()) {
@@ -481,13 +784,8 @@ public class MainActivity extends AppCompatActivity {
         }
 
         try {
-            ApiFacade facade;
-            if (controller instanceof DeliveryController) {
-                DeliveryController dc = (DeliveryController) controller;
-                facade = new DeliveryApiFacadeImpl(dc, this);
-            } else {
-                facade = new HeadlessApiFacade(this);
-            }
+            // ✅ B2: multi-registre autonome
+            ApiFacade facade = new MultiRegisterApiFacadeImpl(this);
 
             apiServer = new ApiServer(facade, this::onApiLine, API_PORT);
             apiServer.start();
@@ -565,159 +863,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // =========================
-    // Headless API facade (no controller required)
-    // =========================
-    private static final class HeadlessApiFacade implements ApiFacade {
-        private final Context appCtx;
-        private final UsbManager usbManager;
-        private final DeliveryLogStore store;
-
-        HeadlessApiFacade(Context ctx) {
-            this.appCtx = ctx.getApplicationContext();
-            this.usbManager = (UsbManager) this.appCtx.getSystemService(Context.USB_SERVICE);
-            this.store = new DeliveryLogStore(this.appCtx);
-            this.store.purgeOlderThanDaysAsync(7);
-        }
-
-        @Override public ApiResult api_scanUsb() {
-            try {
-                int n = (usbManager != null) ? usbManager.getDeviceList().size() : 0;
-                JSONObject d = new JSONObject();
-                d.put("usb_devices", n);
-                return (n > 0)
-                        ? ApiResult.ok("Scan USB: 1 - Registre détecté (USB device présent)", d)
-                        : ApiResult.fail("Scan USB: 0 - Aucun périphérique USB détecté.", "ERR_MEDIA_NOT_PRESENT", d);
-            } catch (Exception e) {
-                return ApiResult.fail("Scan USB: 0 - Failed", "ERR_MEDIA_NOT_PRESENT");
-            }
-        }
-
-        @Override public ApiResult api_openPingUsb() {
-            UsbSerialPort p = UsbSession.getPort();
-            if (p == null) {
-                return ApiResult.fail("Open/Ping USB: 0 - USB non prêt (port null).", "ERR_USB_PORT_NOT_READY");
-            }
-            return ApiResult.ok("Open/Ping USB: 1 - USB prêt (port ouvert)");
-        }
-
-        @Override public ApiResult api_connectLcp() {
-            UsbSerialPort p = UsbSession.getPort();
-            if (p == null) return ApiResult.fail("Connect LCP: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
-            try {
-                LcpLink tmp = new LcpLink(p, 250, 255, true);
-                int[] ds = tmp.opDeliveryStatus();
-                int delCode = ds[1];
-                boolean ticketPending = (delCode & 0x0001) != 0;
-                boolean flowActive = (delCode & 0x0004) != 0;
-                boolean deliveryActive = (delCode & 0x0008) != 0;
-
-                JSONObject data = new JSONObject();
-                data.put("deliveryActive", deliveryActive ? 1 : 0);
-                data.put("flowActive", flowActive ? 1 : 0);
-                data.put("ticketPending", ticketPending ? 1 : 0);
-                data.put("next", (!deliveryActive && !ticketPending) ? "C" : "A");
-
-                return ApiResult.ok("Connect LCP: 1 - CONNECTED (headless)", data);
-            } catch (Exception e) {
-                JSONObject d = new JSONObject();
-                try { d.put("detail", (e.getMessage() != null) ? e.getMessage() : ""); } catch (Exception ignored) {}
-                return ApiResult.fail("Connect LCP: 0 - Failed", "ERR_LCP_CONNECT_FAILED", d);
-            }
-        }
-
-        @Override public ApiResult api_deliveryAlignA() {
-            return ApiResult.fail("Align A: 0 - Non disponible sans controller UI (headless minimal).", "NO_CONTROLLER");
-        }
-
-        @Override public ApiResult api_dbDump() {
-            try {
-                String name = "lcr_delivery_" + utcStamp() + ".json";
-                boolean ok = store.dumpJsonToDownloads(appCtx, name);
-                if (!ok) return ApiResult.fail("DB Dump: 0 - Failed", "DB_DUMP_FAIL");
-                JSONObject d = new JSONObject();
-                d.put("fileName", name);
-                return ApiResult.ok("DB Dump: 1 - OK", d);
-            } catch (Exception e) {
-                JSONObject d = new JSONObject();
-                try { d.put("detail", (e.getMessage() != null) ? e.getMessage() : ""); } catch (Exception ignored) {}
-                return ApiResult.fail("DB Dump: 0 - Failed", "DB_DUMP_FAIL", d);
-            }
-        }
-
-        @Override public ApiResult api_deliveryStartC(int product1to16, double presetNet) {
-            return ApiResult.fail("Delivery C: 0 - Non disponible sans controller UI (headless minimal).", "NO_CONTROLLER");
-        }
-
-        @Override public ApiResult api_deliveryJobGet(String jobId) {
-            return ApiResult.fail("Job: 0 - Non disponible sans controller UI (headless minimal).", "NO_CONTROLLER");
-        }
-
-        @Override public ApiResult api_deliveryOneShotStart(String numero_livraison, int product1to16, double presetNetL, String compartment) {
-            return ApiResult.fail("OneShot: 0 - Non disponible sans controller UI (headless minimal).", "NO_CONTROLLER");
-        }
-
-        @Override public ApiResult api_deliveryContinue(String jobId) {
-            return ApiResult.fail("Continue: 0 - Non disponible sans controller UI (headless minimal).", "NO_CONTROLLER");
-        }
-
-        @Override public ApiResult api_deliveryTerminate(String jobId) {
-            return ApiResult.fail("Terminate: 0 - Non disponible sans controller UI (headless minimal).", "NO_CONTROLLER");
-        }
-
-        // =========================================================
-        // ✅ COMMIT 3: headless validateRegister (utilise RegisterValidator)
-        // =========================================================
-        @Override
-        public ApiResult api_registerValidate(String numero_livraison,
-                                             Integer expected_lcrnode_dec,
-                                             String expected_serial_id,
-                                             Integer expected_product_number,
-                                             String expected_compartment) {
-
-            // 1) Média présent ?
-            int n = 0;
-            try { n = (usbManager != null) ? usbManager.getDeviceList().size() : 0; } catch (Exception ignored) {}
-            if (n <= 0) {
-                JSONObject d = new JSONObject();
-                try { d.put("usb_devices", 0); } catch (Exception ignored) {}
-                return ApiResult.fail("Validate: 0 - Média RS-232 absent (aucun USB device).",
-                        RegisterValidator.Codes.ERR_LCP_CONNECT_FAILED, d);
-            }
-
-            // 2) Port prêt ?
-            UsbSerialPort p = UsbSession.getPort();
-            if (p == null) {
-                return ApiResult.fail("Validate: 0 - USB non prêt (port null).",
-                        RegisterValidator.Codes.ERR_USB_PORT_NOT_READY);
-            }
-
-            // 3) TO / FROM
-            int to = (expected_lcrnode_dec != null && expected_lcrnode_dec >= 1 && expected_lcrnode_dec <= 250)
-                    ? expected_lcrnode_dec
-                    : 250;
-            int from = 255;
-
-            // 4) Validation LCP (0x28 + #23 + #80 + #0 + delivery_uid)
-            return RegisterValidator.validateLcp(
-                    p,
-                    to,
-                    from,
-                    numero_livraison,
-                    expected_serial_id,
-                    expected_product_number,
-                    expected_compartment
-            );
-        }
-
-        private static String utcStamp() {
-            SimpleDateFormat df = new SimpleDateFormat("yyyy-MM-dd'T'HH-mm-ss'Z'", Locale.ROOT);
-            df.setTimeZone(TimeZone.getTimeZone("UTC"));
-            return df.format(new Date());
-        }
-    }
-
-    // =========================
-    // Backup DB
+    // Backup DB (inchangé)
     // =========================
     private void doBackupDb() {
         if (deliveryStore == null) {
@@ -830,7 +976,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // =========================
-    // USB
+    // USB (inchangé + B2 clear sessions on detach)
     // =========================
     private void scanUsb() {
         usbDevices.clear();
@@ -844,7 +990,7 @@ public class MainActivity extends AppCompatActivity {
             if (m == null) m = "Unknown";
             if (p == null) p = "Device";
             labels.add(m + " - " + p);
-            log(String.format(" - %s - %s (VID=%04X PID=%04X)", m, p, d.getVendorId(), d.getProductId()));
+            log(String.format(Locale.ROOT, " - %s - %s (VID=%04X PID=%04X)", m, p, d.getVendorId(), d.getProductId()));
         }
         spnUsbDevices.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, labels));
     }
@@ -902,6 +1048,10 @@ public class MainActivity extends AppCompatActivity {
         log("USB détaché");
         try { UsbSession.clear(); } catch (Exception ignore) {}
         stopApiServer("USB detached");
+
+        // ✅ B2: clear multi-node sessions (UI+API)
+        try { RegisterSessionManager.get(this).clearAll(true); } catch (Exception ignored) {}
+
         if (controller != null) {
             controller.shutdown(true);
             controller = null;
@@ -909,17 +1059,29 @@ public class MainActivity extends AppCompatActivity {
         link = null;
         stopLiveTick();
         usbPort = null;
-        txtActiveNode.setText("Node actif : —");
+
+        txtActiveNode.setText("LCP Node : ");
         txtLive.setText("LIVE: (en attente)");
         if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
         if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
         if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
         if (txtTicketNumber != null) txtTicketNumber.setText("-");
         if (txtDeliveryUid != null) txtDeliveryUid.setText("-");
+
+        nodeItems.clear();
+        nodeItems.add(NodeScanItem.default250());
+        if (nodeAdapter != null) nodeAdapter.notifyDataSetChanged();
+        if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : —");
+
+        regNodeToFrom.clear();
+        currentRegNode = -1;
+
+        // recrée tab 250 par défaut
+        ensureRegisterTab(250, 255, true);
     }
 
     // =========================
-    // LCP Connect
+    // Manual connect (inchangé - ton impl existante était longue; garde-la si tu l'utilises)
     // =========================
     private void connectLcp() {
         if (usbPort == null) {
@@ -989,11 +1151,11 @@ public class MainActivity extends AppCompatActivity {
             @Override public void onLiveQty(double net, double gross) {
                 ui.post(() -> {
                     if (Double.compare(net, lastNet) != 0) {
-                        if (txtQtyNet != null) txtQtyNet.setText(String.format("NET: %.3f", net));
+                        if (txtQtyNet != null) txtQtyNet.setText(String.format(Locale.ROOT, "NET: %.3f", net));
                         lastNet = net;
                     }
                     if (Double.compare(gross, lastGross) != 0) {
-                        if (txtQtyGross != null) txtQtyGross.setText(String.format("GROSS: %.3f", gross));
+                        if (txtQtyGross != null) txtQtyGross.setText(String.format(Locale.ROOT, "GROSS: %.3f", gross));
                         lastGross = gross;
                     }
                     if (liveQtyPanel != null) liveQtyPanel.setVisibility(View.VISIBLE);
@@ -1083,8 +1245,8 @@ public class MainActivity extends AppCompatActivity {
 
             String line = (logTsEnabled && !isIoLine) ? ("[UI " + uiTs() + "] " + s) : s;
             logBuf.append(line).append('\n');
-            txtLog.setText(logBuf.toString());
-            logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
+            if (txtLog != null) txtLog.setText(logBuf.toString());
+            // ✅ PAS d'auto-scroll (bouton Scroll down uniquement)
         });
     }
 }

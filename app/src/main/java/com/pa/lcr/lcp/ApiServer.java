@@ -12,7 +12,9 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -21,25 +23,22 @@ import java.util.concurrent.atomic.AtomicInteger;
  * API-Face HTTP Server
  *
  * - Bind strict: 127.0.0.1 only (no LAN)
- * - Port: 8765 (ou configurable plus tard)
+ * - Port: 8765
  * - Trace: REQ/RESP dans le log principal (via ApiLogSink)
- * - Calls: via ApiFacade (bridge vers DeliveryController)
+ * - Calls: via ApiFacade
  *
  * Endpoints:
  * GET  /v1/ping
  * GET  /v1/usb/scan
  * POST /v1/usb/open-ping
- * POST /v1/lcp/connect
- * POST /v1/delivery/C
- * GET  /v1/delivery/job/{jobId}
- *
- * + (NOUVEAU)
- * POST /v1/delivery/oneshot/start
- * POST /v1/delivery/job/continue
- * POST /v1/delivery/job/terminate
- *
- * + (COMMIT 2)
- * POST /v1/register/validate
+ * POST /v1/lcp/connect                 (B2: accepte lcrnode_dec/from_dec dans body)
+ * POST /v1/register/validate            (B2: accepte lcrnode_dec/from_dec dans body)
+ * POST /v1/delivery/C                   (B2: accepte lcrnode_dec/from_dec dans body)
+ * POST /v1/delivery/oneshot/start       (B2: accepte lcrnode_dec/from_dec dans body)
+ * GET  /v1/delivery/job/{jobId}         (B2: accepte ?lcrnode_dec=250 en query)
+ * POST /v1/delivery/job/continue        (B2: accepte lcrnode_dec dans body, sinon mapping job)
+ * POST /v1/delivery/job/terminate       (B2: accepte lcrnode_dec dans body, sinon mapping job)
+ * POST /v1/db/dump
  */
 public final class ApiServer {
 
@@ -66,9 +65,7 @@ public final class ApiServer {
         this.port = port;
     }
 
-    public synchronized boolean isRunning() {
-        return running;
-    }
+    public synchronized boolean isRunning() { return running; }
 
     public synchronized void start() throws Exception {
         if (running) return;
@@ -78,10 +75,8 @@ public final class ApiServer {
 
         workers = Executors.newFixedThreadPool(4);
         acceptor = Executors.newSingleThreadExecutor();
-
         running = true;
 
-        // ✅ Format API exact
         t("[API " + ts() + "] START http://127.0.0.1:" + port);
 
         acceptor.execute(() -> {
@@ -101,7 +96,6 @@ public final class ApiServer {
         try { if (serverSocket != null) serverSocket.close(); } catch (Exception ignored) {}
         try { if (acceptor != null) acceptor.shutdownNow(); } catch (Exception ignored) {}
         try { if (workers != null) workers.shutdownNow(); } catch (Exception ignored) {}
-        // ✅ Format API exact
         t("[API " + ts() + "] STOP");
     }
 
@@ -114,7 +108,6 @@ public final class ApiServer {
         long t0 = System.currentTimeMillis();
 
         try {
-            // ✅ Evite worker bloqué sur clients mal formés
             try { s.setSoTimeout(10_000); } catch (Exception ignored) {}
 
             // Double verrou: n'accepte que loopback
@@ -129,14 +122,12 @@ public final class ApiServer {
 
             HttpReq req = readHttpRequest(in);
 
-            // ✅ Format API exact
             t("[API " + ts() + "][RID=" + rid + "] REQ " + req.method + " " + req.path + " body=" + shrink(req.body));
 
             JSONObject resp;
             int status = 200;
 
             try {
-                // Sérialise toute interaction LCP (sécurité/robustesse)
                 synchronized (lcpLock) {
                     resp = route(req).toJson();
                 }
@@ -150,8 +141,6 @@ public final class ApiServer {
             writeJson(out, status, resp);
 
             long dt = System.currentTimeMillis() - t0;
-
-            // ✅ Format API exact
             t("[API " + ts() + "][RID=" + rid + "] RESP " + status + " dt=" + dt + "ms json=" + shrink(resp.toString()));
 
         } catch (Exception e) {
@@ -164,6 +153,9 @@ public final class ApiServer {
         }
     }
 
+    // =========================
+    // Routing (B2 node-aware)
+    // =========================
     private ApiResult route(HttpReq req) throws Exception {
 
         // Health
@@ -183,26 +175,26 @@ public final class ApiServer {
             return facade.api_openPingUsb();
         }
 
-        // LCP connect (A/C basé sur 0x28)
+        // LCP connect (B2: node-aware via body)
         if ("POST".equals(req.method) && "/v1/lcp/connect".equals(req.path)) {
-            return facade.api_connectLcp();
+            JSONObject body = req.jsonBody();
+            Integer node = parseNodeDec(body);
+            Integer from = parseFromDec(body);
+            return facade.api_connectLcp(node, from);
         }
 
-        // ✅ COMMIT 2: Registre prêt / validation
+        // ✅ Registre prêt / validation (B2: node-aware via body)
         if ("POST".equals(req.method) && "/v1/register/validate".equals(req.path)) {
             JSONObject body = req.jsonBody();
 
             String numero = body.optString("numero_livraison", body.optString("numeroLivraison", ""));
             if (numero != null && numero.trim().isEmpty()) numero = null;
 
+            Integer node = parseNodeDec(body);
+            Integer from = parseFromDec(body);
+
             String expectedSerial = body.optString("expected_serial_id", body.optString("serial_id", "")).trim();
             if (expectedSerial.isEmpty()) expectedSerial = null;
-
-            Integer to = null;
-            if (body.has("expected_lcrnode_dec")) to = body.optInt("expected_lcrnode_dec", 0);
-            else if (body.has("lcrnode_dec")) to = body.optInt("lcrnode_dec", 0);
-            else if (body.has("lcrnode")) to = body.optInt("lcrnode", 0);
-            if (to != null && to == 0) to = null;
 
             Integer product = null;
             if (body.has("expected_product_number")) product = body.optInt("expected_product_number", 0);
@@ -216,25 +208,32 @@ public final class ApiServer {
                 if (c != null && c != JSONObject.NULL) compartment = String.valueOf(c);
             } catch (Exception ignored) {}
 
-            return facade.api_registerValidate(numero, to, expectedSerial, product, compartment);
+            return facade.api_registerValidate(numero, node, from, expectedSerial, product, compartment);
         }
 
-        // DB dump (JSON -> Downloads)
+        // DB dump
         if ("POST".equals(req.method) && "/v1/db/dump".equals(req.path)) {
             return facade.api_dbDump();
         }
 
-        // Delivery C -> job
+        // Delivery C (B2: node-aware)
         if ("POST".equals(req.method) && "/v1/delivery/C".equals(req.path)) {
             JSONObject body = req.jsonBody();
+            Integer node = parseNodeDec(body);
+            Integer from = parseFromDec(body);
+
             int product = body.optInt("product1to16", body.optInt("productId", 1));
             double presetNet = body.optDouble("presetNet", 0.0);
-            return facade.api_deliveryStartC(product, presetNet);
+
+            return facade.api_deliveryStartC(node, from, product, presetNet);
         }
 
-        // Delivery OneShot
+        // Delivery OneShot (B2: node-aware)
         if ("POST".equals(req.method) && "/v1/delivery/oneshot/start".equals(req.path)) {
             JSONObject body = req.jsonBody();
+            Integer node = parseNodeDec(body);
+            Integer from = parseFromDec(body);
+
             String numero = body.optString("numero_livraison", body.optString("numeroLivraison", ""));
             int product = body.optInt("product1to16", body.optInt("product", body.optInt("productId", 1)));
             double preset = body.optDouble("presetNet", body.optDouble("presetNetL", body.optDouble("preset", 0.0)));
@@ -245,34 +244,66 @@ public final class ApiServer {
                 if (c != null && c != JSONObject.NULL) compartment = String.valueOf(c);
             } catch (Exception ignored) {}
 
-            return facade.api_deliveryOneShotStart(numero, product, preset, compartment);
+            return facade.api_deliveryOneShotStart(node, from, numero, product, preset, compartment);
         }
 
-        // Delivery controls
+        // Delivery controls (B2: lcrnode_dec optionnel; facade fallback mapping job->node)
         if ("POST".equals(req.method) && "/v1/delivery/job/continue".equals(req.path)) {
             JSONObject body = req.jsonBody();
             String jobId = body.optString("jobId", "").trim();
             if (jobId.isEmpty()) return ApiResult.fail("Continue: 0 - Job invalide", "JOB_ID_EMPTY");
-            return facade.api_deliveryContinue(jobId);
+
+            Integer node = parseNodeDec(body);
+            return facade.api_deliveryContinue(jobId, node);
         }
 
         if ("POST".equals(req.method) && "/v1/delivery/job/terminate".equals(req.path)) {
             JSONObject body = req.jsonBody();
             String jobId = body.optString("jobId", "").trim();
             if (jobId.isEmpty()) return ApiResult.fail("Terminate: 0 - Job invalide", "JOB_ID_EMPTY");
-            return facade.api_deliveryTerminate(jobId);
+
+            Integer node = parseNodeDec(body);
+            return facade.api_deliveryTerminate(jobId, node);
         }
 
-        // Job
+        // Job (B2: GET with query ?lcrnode_dec=250)
         if ("GET".equals(req.method) && req.path.startsWith("/v1/delivery/job/")) {
             String jobId = req.path.substring("/v1/delivery/job/".length()).trim();
             if (jobId.isEmpty()) return ApiResult.fail("Job: 0 - Invalide", "JOB_ID_EMPTY");
-            return facade.api_deliveryJobGet(jobId);
+
+            Integer node = req.queryInt("lcrnode_dec");
+            return facade.api_deliveryJobGet(jobId, node);
         }
 
         JSONObject d = new JSONObject();
         try { d.put("path", req.path).put("method", req.method); } catch (Exception ignored) {}
         return ApiResult.fail("API: 0 - Not found", "NOT_FOUND", d);
+    }
+
+    // =========================
+    // Helpers: parse node/from from JSON body
+    // =========================
+    private static Integer parseNodeDec(JSONObject body) {
+        if (body == null) return null;
+        Integer to = null;
+
+        if (body.has("lcrnode_dec")) to = body.optInt("lcrnode_dec", 0);
+        else if (body.has("expected_lcrnode_dec")) to = body.optInt("expected_lcrnode_dec", 0);
+        else if (body.has("lcrnode")) to = body.optInt("lcrnode", 0);
+
+        if (to != null && to == 0) to = null;
+        return to;
+    }
+
+    private static Integer parseFromDec(JSONObject body) {
+        if (body == null) return null;
+        Integer f = null;
+
+        if (body.has("from_dec")) f = body.optInt("from_dec", 0);
+        else if (body.has("from")) f = body.optInt("from", 0);
+
+        if (f != null && f == 0) f = null;
+        return f;
     }
 
     // =========================
@@ -302,17 +333,30 @@ public final class ApiServer {
     }
 
     // =========================
-    // Minimal HTTP parsing
+    // Minimal HTTP parsing (avec query map)
     // =========================
     private static final class HttpReq {
         final String method;
-        final String path;
+        final String path;   // sans query
         final byte[] body;
+        final Map<String, String> query;
 
-        HttpReq(String method, String path, byte[] body) {
+        HttpReq(String method, String path, byte[] body, Map<String, String> query) {
             this.method = method;
             this.path = path;
             this.body = (body == null) ? new byte[0] : body;
+            this.query = (query == null) ? new HashMap<>() : query;
+        }
+
+        Integer queryInt(String key) {
+            try {
+                String v = query.get(key);
+                if (v == null) return null;
+                int n = Integer.parseInt(v.trim());
+                return (n == 0) ? null : n;
+            } catch (Exception e) {
+                return null;
+            }
         }
 
         JSONObject jsonBody() {
@@ -320,9 +364,7 @@ public final class ApiServer {
                 if (body.length == 0) return new JSONObject();
                 String s = new String(body, StandardCharsets.UTF_8);
                 // ✅ Strip UTF-8 BOM (U+FEFF) si présent
-                if (!s.isEmpty() && s.charAt(0) == '\uFEFF') {
-                    s = s.substring(1);
-                }
+                if (!s.isEmpty() && s.charAt(0) == '\uFEFF') s = s.substring(1);
                 return new JSONObject(s);
             } catch (Exception e) {
                 return new JSONObject();
@@ -352,11 +394,22 @@ public final class ApiServer {
 
         String[] first = lines[0].split(" ");
         String method = (first.length > 0) ? first[0].trim() : "GET";
-        String path = (first.length > 1) ? first[1].trim() : "/";
+        String rawPath = (first.length > 1) ? first[1].trim() : "/";
 
-        // ✅ Strip query string (baseline-safe)
-        int q = path.indexOf('?');
-        if (q >= 0) path = path.substring(0, q);
+        // Parse query string
+        String path = rawPath;
+        Map<String, String> query = new HashMap<>();
+        int q = rawPath.indexOf('?');
+        if (q >= 0) {
+            path = rawPath.substring(0, q);
+            String qs = rawPath.substring(q + 1);
+            for (String kv : qs.split("&")) {
+                if (kv == null || kv.trim().isEmpty()) continue;
+                int eq = kv.indexOf('=');
+                if (eq > 0) query.put(kv.substring(0, eq), kv.substring(eq + 1));
+                else query.put(kv.trim(), "1");
+            }
+        }
 
         int contentLength = 0;
         for (String line : lines) {
@@ -378,7 +431,7 @@ public final class ApiServer {
             }
         }
 
-        return new HttpReq(method, path, body);
+        return new HttpReq(method, path, body, query);
     }
 
     // =========================
