@@ -362,7 +362,7 @@
                 android:layout_height="180dp"
                 android:orientation="vertical"
                 android:layout_marginTop="4dp"
-                android:visibility="gone">
+                android:visibility="visible">
 
                 <ScrollView
                     android:id="@+id/logScroll"
@@ -447,7 +447,7 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:orientation="vertical"
-            android:visibility="gone">
+            android:visibility="visible">
 
             <Button
                 android:id="@+id/btnDbBackup"
