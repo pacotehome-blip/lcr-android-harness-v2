@@ -1,125 +1,153 @@
 
 package com.pa.lcr.lcp.log;
 
-import android.os.Handler;
-import android.os.Looper;
-
-import java.util.ArrayDeque;
-import java.util.ArrayList;
+import java.text.SimpleDateFormat;
+import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.regex.Pattern;
 
-/**
- * Log global unique + vues filtrées.
- * Affichage standard: [SRC][N=xxx] message
- *
- * SRC = UI | IO | API | ERR
- */
 public final class LogBus {
 
-    public enum Source { UI, IO, API, ERR }
+    public enum Src {
+        UI,
+        API,
+        IO_TX,
+        IO_RX
+    }
 
-    public static final class Event {
-        public final long tsMs;
-        public final Source source;
-        public final Integer node;   // null => inconnu / global
-        public final String line;    // message brut
+    public static final class LogEvent {
+        public final long ts;
+        public final int node;
+        public final Src src;
+        public final String msg;
 
-        public Event(long tsMs, Source source, Integer node, String line) {
-            this.tsMs = tsMs;
-            this.source = (source == null ? Source.UI : source);
+        LogEvent(long ts, int node, Src src, String msg) {
+            this.ts = ts;
             this.node = node;
-            this.line = (line == null ? "" : line);
+            this.src = src;
+            this.msg = msg;
         }
     }
 
+    // -------------------------
+    // Global flags (SOURCE UNIQUE)
+    // -------------------------
+    public static volatile boolean SHOW_UI  = true;
+    public static volatile boolean SHOW_API = true;
+    public static volatile boolean SHOW_IO  = false;
+    public static volatile boolean SHOW_TS  = false;
+
+    // -------------------------
+    // Buffer circulaire
+    // -------------------------
+    private static final int MAX_EVENTS = 5000;
+    private static final Deque<LogEvent> BUFFER = new ArrayDeque<>(MAX_EVENTS);
+
+    // -------------------------
+    // UI listeners
+    // -------------------------
     public interface Listener {
-        void onAppended(Event e);
+        void onLog(LogEvent e);
     }
 
-    private static final int MAX_EVENTS = 4000;
-    private static final ArrayDeque<Event> ring = new ArrayDeque<>(MAX_EVENTS + 16);
-    private static final CopyOnWriteArrayList<Listener> listeners = new CopyOnWriteArrayList<>();
-    private static final Handler main = new Handler(Looper.getMainLooper());
-
-    // évite double préfixe si la ligne commence déjà par [UI] / [API] / [IO] / [ERR]
-    private static final Pattern LEADING_TAG = Pattern.compile("^\\[(UI|API|IO|ERR)\\]\\s*");
-
-    private LogBus() {}
+    private static final CopyOnWriteArrayList<Listener> LISTENERS =
+            new CopyOnWriteArrayList<>();
 
     public static void addListener(Listener l) {
-        if (l != null) listeners.addIfAbsent(l);
+        if (l != null) LISTENERS.addIfAbsent(l);
     }
 
     public static void removeListener(Listener l) {
-        if (l != null) listeners.remove(l);
+        LISTENERS.remove(l);
     }
 
-    public static void append(Source src, Integer node, String line) {
-        String clean = (line == null) ? "" : LEADING_TAG.matcher(line.trim()).replaceFirst("");
-        final Event e = new Event(System.currentTimeMillis(), src, node, clean);
+    // -------------------------
+    // Emitters
+    // -------------------------
+    public static void ui(int node, String msg) {
+        emit(node, Src.UI, msg);
+    }
 
-        synchronized (ring) {
-            ring.addLast(e);
-            while (ring.size() > MAX_EVENTS) ring.removeFirst();
+    public static void api(int node, String msg) {
+        emit(node, Src.API, msg);
+    }
+
+    public static void ioTx(int node, String msg) {
+        emit(node, Src.IO_TX, msg);
+    }
+
+    public static void ioRx(int node, String msg) {
+        emit(node, Src.IO_RX, msg);
+    }
+
+    public static synchronized void emit(int node, Src src, String msg) {
+        if (msg == null) return;
+
+        if (BUFFER.size() >= MAX_EVENTS) {
+            BUFFER.removeFirst();
         }
 
-        main.post(() -> {
-            for (Listener l : listeners) {
-                try { l.onAppended(e); } catch (Exception ignored) {}
+        LogEvent e = new LogEvent(
+                System.currentTimeMillis(),
+                node,
+                src,
+                msg
+        );
+        BUFFER.addLast(e);
+
+        for (Listener l : LISTENERS) {
+            try { l.onLog(e); } catch (Exception ignored) {}
+        }
+    }
+
+    // -------------------------
+    // Snapshot (PAR NODE SEULEMENT)
+    // -------------------------
+    public static synchronized List<LogEvent> snapshotForNode(int node, int maxLines) {
+        ArrayList<LogEvent> out = new ArrayList<>(maxLines);
+
+        Iterator<LogEvent> it = BUFFER.descendingIterator();
+        while (it.hasNext() && out.size() < maxLines) {
+            LogEvent e = it.next();
+            if (e.node == node) {
+                out.add(e);
             }
-        });
+        }
+
+        Collections.reverse(out);
+        return out;
     }
 
-    // Helpers
-    public static void ui(Integer node, String line)  { append(Source.UI,  node, line); }
-    public static void io(Integer node, String line)  { append(Source.IO,  node, line); }
-    public static void api(Integer node, String line) { append(Source.API, node, line); }
-    public static void err(Integer node, String line) { append(Source.ERR, node, line); }
+    // -------------------------
+    // Build text UNIQUE (global + tab)
+    // -------------------------
+    public static String buildText(List<LogEvent> events) {
+        StringBuilder sb = new StringBuilder(8192);
+        SimpleDateFormat df = SHOW_TS
+                ? new SimpleDateFormat("HH:mm:ss.SSS", Locale.CANADA_FRENCH)
+                : null;
 
-    public interface Filter { boolean accept(Event e); }
+        for (LogEvent e : events) {
 
-    public static String buildText(Filter f, int maxLines) {
-        final ArrayList<Event> snap;
-        synchronized (ring) { snap = new ArrayList<>(ring); }
+            if (e.src == Src.UI && !SHOW_UI) continue;
+            if (e.src == Src.API && !SHOW_API) continue;
+            if ((e.src == Src.IO_TX || e.src == Src.IO_RX) && !SHOW_IO) continue;
 
-        StringBuilder sb = new StringBuilder(64 * 1024);
-        int n = 0;
+            if (SHOW_TS && df != null) {
+                sb.append(df.format(new Date(e.ts))).append(" ");
+            }
 
-        for (Event e : snap) {
-            if (f != null && !f.accept(e)) continue;
-            sb.append(formatPrefix(e)).append(e.line).append('\n');
-            n++;
-            if (maxLines > 0 && n >= maxLines) break;
+            switch (e.src) {
+                case IO_TX: sb.append("TX "); break;
+                case IO_RX: sb.append("RX "); break;
+                case API:   sb.append("API "); break;
+                default:    break;
+            }
+
+            sb.append(e.msg).append('\n');
         }
+
         return sb.toString();
     }
 
-    private static String formatPrefix(Event e) {
-        String node = (e.node != null) ? ("[N=" + e.node + "]") : "[N=?]";
-        return "[" + e.source.name() + "]" + node + " ";
-    }
-
-    // =========================
-    // Filtres prêts-à-l’emploi
-    // =========================
-
-    public static Filter filterNodeUIIOAPI(int node, boolean includeIO, long sinceMs) {
-        return e -> {
-            if (e == null) return false;
-            if (e.tsMs < sinceMs) return false;
-            if (e.node == null || e.node != node) return false;
-            if (e.source == Source.IO) return includeIO;
-            return true;
-        };
-    }
-
-    public static Filter filterGlobalUIIOAPI(boolean includeIO, long sinceMs) {
-        return e -> {
-            if (e == null) return false;
-            if (e.tsMs < sinceMs) return false;
-            if (e.source == Source.IO) return includeIO;
-            return true;
-        };
-    }
+    private LogBus() {}
 }
