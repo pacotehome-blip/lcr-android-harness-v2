@@ -9,7 +9,9 @@ import android.hardware.usb.UsbManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.view.*;
+import android.view.LayoutInflater;
+import android.view.View;
+import android.view.ViewGroup;
 import android.widget.*;
 
 import androidx.annotation.NonNull;
@@ -27,6 +29,15 @@ import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+/**
+ * RegisterTabFragment (node-specific)
+ *
+ * Correctifs:
+ *  - ✅ Pas de polling local (liveTick/statusTick supprimés) -> polling centralisé dans RegisterSessionManager (scheduler par node).
+ *  - ✅ UI/API tandem: controller partagé via RegisterSessionManager.getOrCreate(node, from, UsbSession.getPort()).
+ *  - ✅ Multi-listener: attach/detach du listener UI via RegisterSessionManager (pas de controller.setListener ici).
+ *  - ✅ Auto-attach: retry sur UsbReceiver.ACTION_USB_READY (USB ouvert par UI ou API).
+ */
 public class RegisterTabFragment extends Fragment {
 
     private static final String ARG_NODE = "node";
@@ -59,133 +70,82 @@ public class RegisterTabFragment extends Fragment {
     private ScrollView logScroll;
     private Button btnClearLog, btnCopyLog, btnScrollDown;
 
+    // Options UI
     private boolean logTsEnabled = false;
     private long logViewSinceMs = 0L;
 
+    // Cache ticket pending (utilisé pour gate C)
     private int ticketPendingFlag = -1; // -1 unknown, 0 NO, 1 YES
 
-    // Auto-connect: on ne veut plus “une seule chance”, on veut retry quand USB devient prêt
+    // Auto-attach lifecycle
     private boolean attemptedAutoAttachOnce = false;
+    private boolean uiListenerAttached = false;
 
     private UsbManager usbManager;
 
-    // Controller partagé UI ↔ API
+    // Controller partagé UI ↔ API (RegisterSessionManager)
     private DeliveryController controller;
-
-    // ✅ indicateur: UI listener attaché au node
-    private boolean uiListenerAttached = false;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService bg = Executors.newSingleThreadExecutor();
 
-    // Polling
-    private static final int LIVE_POLL_MS = 200;
-    private static final int STATUS_POLL_MS = 1000;
-    private boolean liveTickRunning = false;
-    private boolean statusTickRunning = false;
-
+    // Start UX
     private boolean starting = false;
     private long startingSinceMs = 0L;
 
-    private final Runnable liveTick = new Runnable() {
-        @Override public void run() {
-            if (controller == null) { liveTickRunning = false; return; }
-            DeliveryState st = controller.getState();
-            boolean shouldPoll = (st == DeliveryState.RUNNING_FLOWING) || (st == DeliveryState.RUNNING_PAUSED);
-            if (!shouldPoll) { liveTickRunning = false; return; }
-            controller.requestLiveSample();
-            ui.postDelayed(this, LIVE_POLL_MS);
-        }
-    };
-
-    private final Runnable statusTick = new Runnable() {
-        @Override public void run() {
-            if (controller == null) { statusTickRunning = false; return; }
-            DeliveryState st = controller.getState();
-            boolean shouldPoll = (st == DeliveryState.RUNNING_FLOWING) || (st == DeliveryState.RUNNING_PAUSED);
-            if (!shouldPoll) { statusTickRunning = false; return; }
-            controller.requestStatus();
-            ui.postDelayed(this, STATUS_POLL_MS);
-        }
-    };
-
-    private void startLiveTickIfNeeded() {
-        if (controller == null) return;
-        if (liveTickRunning) return;
-        DeliveryState st = controller.getState();
-        boolean shouldPoll = (st == DeliveryState.RUNNING_FLOWING) || (st == DeliveryState.RUNNING_PAUSED);
-        if (!shouldPoll) return;
-        liveTickRunning = true;
-        ui.removeCallbacks(liveTick);
-        ui.postDelayed(liveTick, LIVE_POLL_MS);
-    }
-
-    private void stopLiveTick() {
-        liveTickRunning = false;
-        ui.removeCallbacks(liveTick);
-    }
-
-    private void startStatusTickIfNeeded() {
-        if (controller == null) return;
-        if (statusTickRunning) return;
-        DeliveryState st = controller.getState();
-        boolean shouldPoll = (st == DeliveryState.RUNNING_FLOWING) || (st == DeliveryState.RUNNING_PAUSED);
-        if (!shouldPoll) return;
-        statusTickRunning = true;
-        ui.removeCallbacks(statusTick);
-        ui.postDelayed(statusTick, STATUS_POLL_MS);
-    }
-
-    private void stopStatusTick() {
-        statusTickRunning = false;
-        ui.removeCallbacks(statusTick);
-    }
-
-    // Listener UI du tab (attach/detach via RegisterSessionManager multi-listener)
+    // ----------- Listener UI (multi-listener) -----------
     private final DeliveryControllerPort.Listener uiListener = new DeliveryControllerPort.Listener() {
 
-        @Override public void onStateChanged(DeliveryState state) {
+        @Override
+        public void onStateChanged(DeliveryState state) {
             ui.post(() -> {
+                // fin "starting" dès qu'on voit FLOWING, ou timeout
                 if (starting && state == DeliveryState.RUNNING_FLOWING) starting = false;
                 if (starting && (System.currentTimeMillis() - startingSinceMs) > 12000L) starting = false;
 
-                if (state == DeliveryState.RUNNING_FLOWING || state == DeliveryState.RUNNING_PAUSED) {
-                    startLiveTickIfNeeded();
-                    startStatusTickIfNeeded();
-                } else {
-                    stopLiveTick();
-                    stopStatusTick();
-                }
                 updateButtons(state);
+
+                // refresh rapide (sans polling local)
+                try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
             });
         }
 
         @Override public void onProductsUpdated(List<ProductUiItem> products, int activeIndex0) { }
 
-        @Override public void onLog(String message) {
-            // Le sink permanent route déjà vers LogBus; ici on peut rafraîchir la vue
+        @Override
+        public void onLog(String message) {
+            // Le sink permanent (dans RegisterSessionManager) route déjà vers LogBus.
+            // Ici, on rafraîchit seulement la vue si elle est ouverte.
             if (cbShowLog != null && cbShowLog.isChecked()) refreshLogView();
         }
 
-        @Override public void onError(String context, Throwable error) {
+        @Override
+        public void onError(String context, Throwable error) {
+            // fallback (le sink permanent log déjà)
             LogBus.err(node, "ERR[" + context + "] " + (error != null ? error.getMessage() : ""));
         }
 
-        @Override public void onLiveQty(double net, double gross) {
+        @Override
+        public void onLiveQty(double net, double gross) {
             ui.post(() -> {
                 txtQtyNet.setText(String.format(Locale.ROOT, "NET: %.3f", net));
                 txtQtyGross.setText(String.format(Locale.ROOT, "GROSS: %.3f", gross));
             });
         }
 
-        @Override public void onLiveStatus(String liveText) {
+        @Override
+        public void onLiveStatus(String liveText) {
             ui.post(() -> {
-                if (starting) txtLive.setText("LIVE: RUNNING_FLOWING (flow off - waiting progression)");
-                else txtLive.setText(liveText);
+                if (starting) {
+                    txtLive.setText("LIVE: RUNNING_FLOWING (flow off - waiting progression)");
+                } else {
+                    txtLive.setText(liveText);
+                }
             });
         }
 
-        @Override public void onTicketInfo(String ticketNo, String deliveryUid) {
+        @Override
+        public void onTicketInfo(String ticketNo, String deliveryUid) {
             ui.post(() -> {
                 txtTicketNo.setText("Ticket Number : " + (ticketNo == null ? "—" : ticketNo));
                 txtDeliveryUid.setText("Delivery UID : " + (deliveryUid == null ? "—" : deliveryUid));
@@ -193,31 +153,37 @@ public class RegisterTabFragment extends Fragment {
         }
     };
 
-    // Refresh logs tab on append
+    // Rafraîchit les logs tab quand un event node arrive
     private final LogBus.Listener logListener = e -> {
         if (e == null) return;
         if (e.node == null || e.node != node) return;
         if (cbShowLog != null && cbShowLog.isChecked()) refreshLogView();
     };
 
-    // ✅ Nouveau: quand USB devient prêt, on tente l’attach au controller partagé
-    private final BroadcastReceiver usbReadyReceiver = new BroadcastReceiver() {
+    // Retry auto-attach quand USB devient prêt
+    private final BroadcastReceiver usbStateReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
             if (intent == null) return;
             String a = intent.getAction();
             if (a == null) return;
 
             if (UsbReceiver.ACTION_USB_READY.equals(a)) {
-                // USB prêt maintenant -> tenter attach si pas déjà attaché
                 attemptAttachIfPossible(false);
             } else if (UsbReceiver.ACTION_USB_DETACHED.equals(a)) {
-                // reset local UI
                 detachUiListenerSafe();
                 controller = null;
-                uiListenerAttached = false;
-                stopLiveTick();
-                stopStatusTick();
-                ui.post(() -> updateButtons(null));
+                starting = false;
+                ticketPendingFlag = -1;
+                ui.post(() -> {
+                    txtSerialId.setText("#Série : —");
+                    txtTicketPending.setText("Ticket pending : —");
+                    txtTicketNo.setText("Ticket Number : —");
+                    txtDeliveryUid.setText("Delivery UID : —");
+                    txtLive.setText("LIVE: (en attente)");
+                    txtQtyNet.setText("NET: 0.0");
+                    txtQtyGross.setText("GROSS: 0.0");
+                    updateButtons(null);
+                });
             }
         }
     };
@@ -233,43 +199,41 @@ public class RegisterTabFragment extends Fragment {
         usbManager = (UsbManager) context.getSystemService(Context.USB_SERVICE);
     }
 
-    @Override public void onStart() {
+    @Override
+    public void onStart() {
         super.onStart();
         LogBus.addListener(logListener);
 
-        // écouter USB READY/DETACHED pour retry auto
         IntentFilter f = new IntentFilter();
         f.addAction(UsbReceiver.ACTION_USB_READY);
         f.addAction(UsbReceiver.ACTION_USB_DETACHED);
-        requireContext().registerReceiver(usbReadyReceiver, f);
+        requireContext().registerReceiver(usbStateReceiver, f);
     }
 
-    @Override public void onStop() {
+    @Override
+    public void onStop() {
         detachUiListenerSafe();
         LogBus.removeListener(logListener);
-        try { requireContext().unregisterReceiver(usbReadyReceiver); } catch (Exception ignored) {}
+        try { requireContext().unregisterReceiver(usbStateReceiver); } catch (Exception ignored) {}
         super.onStop();
     }
 
-    @Override public void onResume() {
+    @Override
+    public void onResume() {
         super.onResume();
-
-        // tenter une première fois (si USB déjà prêt, ça marchera)
         if (!attemptedAutoAttachOnce) {
             attemptedAutoAttachOnce = true;
             ui.post(() -> attemptAttachIfPossible(true));
         } else {
-            // si on revient sur le tab plus tard, et qu’USB est prêt maintenant, on tente quand même
             ui.post(() -> attemptAttachIfPossible(false));
         }
     }
 
-    @Override public void onDestroyView() {
+    @Override
+    public void onDestroyView() {
         super.onDestroyView();
-        stopLiveTick();
-        stopStatusTick();
         try { bg.shutdownNow(); } catch (Exception ignored) {}
-        controller = null; // controller partagé : ne pas shutdown ici [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/RegisterSessionManager.java)
+        controller = null; // controller partagé: ne pas shutdown ici
     }
 
     @Nullable
@@ -359,7 +323,7 @@ public class RegisterTabFragment extends Fragment {
 
         btnClearLog.setOnClickListener(v -> {
             logViewSinceMs = System.currentTimeMillis();
-            txtLog.setText("");
+            if (txtLog != null) txtLog.setText("");
             LogBus.ui(node, ts("Clear log (vue locale)"));
         });
 
@@ -407,9 +371,7 @@ public class RegisterTabFragment extends Fragment {
             double preset = parseDouble(edtPreset.getText().toString(), 0.0);
 
             controller.startDelivery(prod, preset);
-
-            startLiveTickIfNeeded();
-            startStatusTickIfNeeded();
+            // ✅ Pas de tick ici : polling central dans RegisterSessionManager
         });
 
         btnContinue.setOnClickListener(v -> { if (controller != null) controller.resumeIfPaused(); });
@@ -417,17 +379,22 @@ public class RegisterTabFragment extends Fragment {
         btnFinish.setOnClickListener(v -> { if (controller != null) controller.endDelivery(); });
     }
 
-    // ✅ Auto-attach retry: utilisé par onResume et par ACTION_USB_READY
+    // ---------------------------
+    // Attach logic (no local polling)
+    // ---------------------------
+
     private void attemptAttachIfPossible(boolean verboseLog) {
         if (uiListenerAttached && controller != null) {
-            // déjà attaché -> juste sync UI si nécessaire
             syncUiFromController();
             return;
         }
-        connectThisRegister(false); // silent
-        if (verboseLog && controller == null) {
-            LogBus.api(node, "Auto-attach: USB/Controller pas encore prêt (retry sur USB_READY).");
+
+        if (UsbSession.getPort() == null) {
+            if (verboseLog) LogBus.api(node, "Auto-attach: USB/Controller pas encore prêt (retry sur USB_READY).");
+            return;
         }
+
+        connectThisRegister(false);
     }
 
     private void connectThisRegister(boolean userInitiated) {
@@ -442,7 +409,7 @@ public class RegisterTabFragment extends Fragment {
 
         RegisterSessionManager sm = RegisterSessionManager.get(requireContext());
 
-        controller = sm.getOrCreate(node, from, p); // même controller que l’API [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/RegisterSessionManager.java)
+        controller = sm.getOrCreate(node, from, p);
         if (controller == null) {
             if (userInitiated) Toast.makeText(requireContext(), "USB non prêt", Toast.LENGTH_SHORT).show();
             return;
@@ -456,11 +423,10 @@ public class RegisterTabFragment extends Fragment {
         controller.setTxRxLoggingEnabled(cbTxRx.isChecked());
         controller.setLogTimestampsEnabled(cbLogTs.isChecked());
 
-        // ✅ Sync UI immédiat
         syncUiFromController();
         validateHeaderAsync();
 
-        if (userInitiated) LogBus.api(node, "Connect TAB: 1 - CONNECTED (UI attached)");
+        if (userInitiated) LogBus.api(node, "Connect TAB: 1 - UI attached");
     }
 
     private void detachUiListenerSafe() {
@@ -471,21 +437,12 @@ public class RegisterTabFragment extends Fragment {
         uiListenerAttached = false;
     }
 
-    // ✅ Sync UI depuis controller partagé (cas API a déjà fait connect/oneshot)
     private void syncUiFromController() {
         if (controller == null) return;
         DeliveryState st = controller.getState();
-
-        // boutons cohérents
         updateButtons(st);
 
-        // si déjà running -> relancer ticks
-        if (st == DeliveryState.RUNNING_FLOWING || st == DeliveryState.RUNNING_PAUSED) {
-            startLiveTickIfNeeded();
-            startStatusTickIfNeeded();
-        }
-
-        // requestStatus force refresh live/net/gross/ticket info côté controller
+        // Force un refresh (le scheduler central fera le reste)
         try { controller.requestStatus(); } catch (Exception ignored) {}
     }
 
@@ -493,6 +450,7 @@ public class RegisterTabFragment extends Fragment {
         bg.execute(() -> {
             try {
                 if (controller == null) return;
+
                 ApiResult r = controller.api_registerValidate(null, node, null, null, null);
                 JSONObject j = r.toJson().optJSONObject("data");
                 if (j == null) return;
@@ -513,6 +471,10 @@ public class RegisterTabFragment extends Fragment {
             }
         });
     }
+
+    // ---------------------------
+    // UI state (buttons)
+    // ---------------------------
 
     private void updateButtons(DeliveryState state) {
         if (controller == null) {
@@ -536,6 +498,7 @@ public class RegisterTabFragment extends Fragment {
         btnConnect.setEnabled(true);
         btnB.setEnabled(true);
         btnA.setEnabled(connected || paused || flowing);
+
         btnC.setEnabled(connected && ticketPendingFlag != 1);
 
         if (starting) {
@@ -547,12 +510,20 @@ public class RegisterTabFragment extends Fragment {
         }
     }
 
+    // ---------------------------
+    // Log tab view
+    // ---------------------------
+
     private void refreshLogView() {
         if (txtLog == null) return;
         boolean includeIo = (cbTxRx != null && cbTxRx.isChecked());
         String text = LogBus.buildText(LogBus.filterNodeUIIOAPI(node, includeIo, logViewSinceMs), 1200);
         txtLog.setText(text);
     }
+
+    // ---------------------------
+    // Small helpers
+    // ---------------------------
 
     private String ts(String msg) {
         if (!logTsEnabled) return msg;

@@ -10,13 +10,16 @@ import com.pa.lcr.lcp.storage.DeliveryLogStore;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Session manager multi-registre (clé = lcrnode_dec).
- * - Unicité: 1 node -> 1 DeliveryController.
- * - B2: création headless à la demande si port USB prêt.
- * - Multi-listener: un seul setListener() sur le controller (MuxListener),
- *   puis N listeners UI attach/detach sans écrasement.
+ * - Unicité: 1 node -> 1 DeliveryController. [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/RegisterSessionManager.java)
+ * - B2: création headless à la demande si port USB prêt. [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/RegisterSessionManager.java)[2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/RegisterSessionManager.java)
+ * - Multi-listener: un MuxListener par node (UI tabs + sink logs).
+ * - Scheduler centralisé par node: évite collisions de poll (rc=0x26).
  */
 public final class RegisterSessionManager {
 
@@ -36,7 +39,7 @@ public final class RegisterSessionManager {
     private final Context appCtx;
     private final DeliveryLogStore store;
 
-    // node -> session (controller + mux)
+    // node -> session
     private final Map<Integer, NodeSession> sessions = new LinkedHashMap<>();
 
     private RegisterSessionManager(Context appCtx) {
@@ -69,71 +72,92 @@ public final class RegisterSessionManager {
 
         LcpLink link = new LcpLink(port, node, from, true);
         DeliveryController dc = new DeliveryController(link);
-        dc.setLogStore(store);
+        dc.setLogStore(store); // DB active pour sessions API headless [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/RegisterSessionManager.java)
 
-        // Mux + sink permanent vers LogBus
-        MuxListener mux = new MuxListener(node);
-        mux.addListener(new LogBusSink(node));
+        // Mux listener unique (multi-listener) + sink permanent + scheduler hook
+        NodeScheduler scheduler = new NodeScheduler(node);
+        MuxListener mux = new MuxListener();
+        mux.addListener(new LogBusSink(node, scheduler));  // logs + rc=0x26 backoff
+        mux.addListener(scheduler);                        // scheduler écoute les state changes
+
         dc.setListener(mux);
 
-        // init une fois
+        // init une fois (best-effort)
         try { dc.initialize(); } catch (Exception ignored) {}
 
-        sessions.put(node, new NodeSession(dc, mux));
+        NodeSession s = new NodeSession(dc, mux, scheduler);
+        sessions.put(node, s);
+
+        // Le scheduler démarre en mode idle (il s’activera dès qu’un tab s’attache ou qu’un état RUNNING apparaît)
+        scheduler.bindController(dc);
+
         return dc;
     }
 
     // ---------------------------
-    // Multi-listener UI
+    // Multi-listener UI attach/detach
     // ---------------------------
 
+    /**
+     * UI: attache un listener UI au node (sans écraser).
+     * => Active le polling UI (scheduler) pour ce node.
+     */
     public synchronized void attachUiListener(int nodeDec, DeliveryControllerPort.Listener uiListener) {
         if (uiListener == null) return;
         int node = nodeDec & 0xFF;
         NodeSession s = sessions.get(node);
         if (s == null) return;
+
         s.mux.addListener(uiListener);
+        s.scheduler.setUiSubscribed(true);
     }
 
+    /**
+     * UI: détache un listener UI.
+     * => Si plus aucun UI abonné et si pas RUNNING, le scheduler retombe en idle.
+     */
     public synchronized void detachUiListener(int nodeDec, DeliveryControllerPort.Listener uiListener) {
         if (uiListener == null) return;
         int node = nodeDec & 0xFF;
         NodeSession s = sessions.get(node);
         if (s == null) return;
+
         s.mux.removeListener(uiListener);
+        // on ne sait pas combien d’UI restent; on fait simple:
+        // UI unsubscribed global (le scheduler gardera RUNNING actif si nécessaire)
+        s.scheduler.setUiSubscribed(false);
     }
 
     /** Nettoyage best-effort (USB detach). */
     public synchronized void clearAll(boolean closeTransport) {
         for (NodeSession s : sessions.values()) {
+            try { s.scheduler.shutdown(); } catch (Exception ignored) {}
             try { s.dc.shutdown(closeTransport); } catch (Exception ignored) {}
         }
         sessions.clear();
     }
 
     // ---------------------------
-    // internal
+    // Structures internes
     // ---------------------------
 
     private static final class NodeSession {
         final DeliveryController dc;
         final MuxListener mux;
-        NodeSession(DeliveryController dc, MuxListener mux) {
+        final NodeScheduler scheduler;
+        NodeSession(DeliveryController dc, MuxListener mux, NodeScheduler scheduler) {
             this.dc = dc;
             this.mux = mux;
+            this.scheduler = scheduler;
         }
     }
 
     /**
-     * MuxListener: dispatch vers N listeners (tabs UI + sinks).
+     * MuxListener: dispatch vers N listeners (tabs UI + sinks + scheduler).
      */
     private static final class MuxListener implements DeliveryControllerPort.Listener {
-
-        private final int node;
         private final CopyOnWriteArrayList<DeliveryControllerPort.Listener> listeners =
                 new CopyOnWriteArrayList<>();
-
-        MuxListener(int node) { this.node = node; }
 
         void addListener(DeliveryControllerPort.Listener l) {
             if (l == null) return;
@@ -189,14 +213,132 @@ public final class RegisterSessionManager {
     }
 
     /**
-     * Sink permanent: route les logs/controller vers LogBus avec node.
-     * Ça permet au tab node de voir les actions API même s’il n’est pas actif.
+     * Scheduler central par node:
+     * - Un seul thread per-node (ScheduledExecutor).
+     * - Deux "cadences" : live et status.
+     * - S’adapte selon l’état et UI subscribe.
+     * - Backoff sur rc=0x26 (busy) pour éviter collisions.
+     *
+     * IMPORTANT: Les tabs ne doivent plus lancer leur propre liveTick/statusTick. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/RegisterTabFragment.java)
      */
-    private static final class LogBusSink implements DeliveryControllerPort.Listener {
+    private static final class NodeScheduler implements DeliveryControllerPort.Listener {
 
         private final int node;
+        private DeliveryController dc;
 
-        LogBusSink(int node) { this.node = node; }
+        private final ScheduledExecutorService exec = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "NodeScheduler-" + node);
+            t.setDaemon(true);
+            return t;
+        });
+
+        private volatile boolean uiSubscribed = false;
+
+        // dernières exécutions
+        private volatile long lastLiveMs = 0L;
+        private volatile long lastStatusMs = 0L;
+
+        // backoff (ms)
+        private volatile long liveBackoffMs = 0L;
+        private volatile long statusBackoffMs = 0L;
+
+        // cadence base
+        private static final long LIVE_RUNNING_MS = 500;     // au lieu de 200ms (réduit collisions)
+        private static final long STATUS_RUNNING_MS = 1500;  // status moins fréquent
+        private static final long STATUS_IDLE_MS = 2500;     // idle status pour garder UI à jour
+
+        NodeScheduler(int node) { this.node = node; }
+
+        void bindController(DeliveryController dc) {
+            this.dc = dc;
+            // boucle principale: tick toutes les 200ms, mais actions throttled à l’intérieur
+            exec.scheduleWithFixedDelay(this::tick, 200, 200, TimeUnit.MILLISECONDS);
+        }
+
+        void setUiSubscribed(boolean v) {
+            this.uiSubscribed = v;
+        }
+
+        void noteBusyRc26() {
+            // backoff progressif, cap à 2000ms
+            liveBackoffMs = Math.min(2000, Math.max(liveBackoffMs * 2, 400));
+            statusBackoffMs = Math.min(2000, Math.max(statusBackoffMs * 2, 400));
+        }
+
+        void resetBackoff() {
+            // reset quand ça redevient stable
+            liveBackoffMs = 0L;
+            statusBackoffMs = 0L;
+        }
+
+        private void tick() {
+            final DeliveryController c = dc;
+            if (c == null) return;
+
+            DeliveryState st = c.getState();
+            long now = System.currentTimeMillis();
+
+            boolean running = (st == DeliveryState.RUNNING_FLOWING) || (st == DeliveryState.RUNNING_PAUSED);
+            boolean shouldPollIdle = uiSubscribed || st == DeliveryState.CONNECTED;
+
+            // 1) LIVE sample (seulement si RUNNING)
+            if (running) {
+                long interval = LIVE_RUNNING_MS + liveBackoffMs;
+                if (now - lastLiveMs >= interval) {
+                    lastLiveMs = now;
+                    try {
+                        c.requestLiveSample();
+                        // si ça passe, on peut doucement réduire le backoff
+                        if (liveBackoffMs > 0) liveBackoffMs = Math.max(0, liveBackoffMs - 200);
+                    } catch (Exception ignored) {}
+                }
+            }
+
+            // 2) STATUS (RUNNING ou UI subscribed/CONNECTED)
+            if (running || shouldPollIdle) {
+                long base = running ? STATUS_RUNNING_MS : STATUS_IDLE_MS;
+                long interval = base + statusBackoffMs;
+                if (now - lastStatusMs >= interval) {
+                    lastStatusMs = now;
+                    try {
+                        c.requestStatus();
+                        if (statusBackoffMs > 0) statusBackoffMs = Math.max(0, statusBackoffMs - 200);
+                    } catch (Exception ignored) {}
+                }
+            }
+        }
+
+        @Override
+        public void onStateChanged(DeliveryState state) {
+            // reset backoff quand on repasse CONNECTED (souvent fin de livraison)
+            if (state == DeliveryState.CONNECTED) {
+                resetBackoff();
+            }
+        }
+
+        @Override public void onProductsUpdated(java.util.List<ProductUiItem> products, int activeIndex0) { }
+        @Override public void onLog(String message) { }
+        @Override public void onError(String context, Throwable error) { }
+        @Override public void onLiveQty(double net, double gross) { }
+        @Override public void onLiveStatus(String liveText) { }
+        @Override public void onTicketInfo(String ticketNo, String deliveryUid) { }
+
+        void shutdown() {
+            try { exec.shutdownNow(); } catch (Exception ignored) {}
+        }
+    }
+
+    /**
+     * Sink permanent vers LogBus + backoff sur rc=0x26.
+     */
+    private static final class LogBusSink implements DeliveryControllerPort.Listener {
+        private final int node;
+        private final NodeScheduler scheduler;
+
+        LogBusSink(int node, NodeScheduler scheduler) {
+            this.node = node;
+            this.scheduler = scheduler;
+        }
 
         @Override public void onStateChanged(DeliveryState state) {
             LogBus.ui(node, "STATE=" + (state != null ? state.name() : "null"));
@@ -219,7 +361,13 @@ public final class RegisterSessionManager {
         }
 
         @Override public void onError(String context, Throwable error) {
-            LogBus.err(node, "ERR[" + context + "] " + (error != null ? error.getMessage() : ""));
+            String msg = (error != null && error.getMessage() != null) ? error.getMessage() : "";
+            LogBus.err(node, "ERR[" + context + "] " + msg);
+
+            // ✅ détecte le busy rc=0x26 et augmente backoff
+            if (msg.contains("rc=0x26") || msg.contains("rc=0X26")) {
+                if (scheduler != null) scheduler.noteBusyRc26();
+            }
         }
 
         @Override public void onLiveQty(double net, double gross) { }
