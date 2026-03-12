@@ -16,11 +16,9 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Session manager multi-registre (clé = lcrnode_dec).
- *
- * Objectifs:
- *  - Unicité: 1 node -> 1 DeliveryController. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/RegisterSessionManager.java)
- *  - Multi-listener: UI tabs + sinks sans écraser.
- *  - Scheduler central par node: un seul polling Live/Status => réduit collisions (rc=0x26).
+ * - Unicité: 1 node -> 1 DeliveryController.
+ * - Multi-listener (mux).
+ * - Scheduler central par node pour réduire rc=0x26 (poll collisions).
  */
 public final class RegisterSessionManager {
 
@@ -39,8 +37,6 @@ public final class RegisterSessionManager {
 
     private final Context appCtx;
     private final DeliveryLogStore store;
-
-    // node -> session (controller + mux + scheduler)
     private final Map<Integer, NodeSession> sessions = new LinkedHashMap<>();
 
     private RegisterSessionManager(Context appCtx) {
@@ -49,68 +45,43 @@ public final class RegisterSessionManager {
         this.store.purgeOlderThanDaysAsync(7);
     }
 
-    public DeliveryLogStore getStore() {
-        return store;
-    }
+    public DeliveryLogStore getStore() { return store; }
 
-    /**
-     * Retourne le controller si la session existe déjà.
-     */
     public synchronized DeliveryController getController(int nodeDec) {
         int node = nodeDec & 0xFF;
         NodeSession s = sessions.get(node);
         return (s != null) ? s.dc : null;
     }
 
-    /**
-     * Retourne une session existante ou en crée une headless sur UsbSerialPort.
-     * - fromDec défaut: 255
-     * - node range: 1..250 (mais on conserve le masquage &0xFF comme ton code base) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/RegisterSessionManager.java)
-     */
     public synchronized DeliveryController getOrCreate(int nodeDec, int fromDec, UsbSerialPort port) {
         int node = nodeDec & 0xFF;
         int from = fromDec & 0xFF;
 
         NodeSession existing = sessions.get(node);
         if (existing != null) return existing.dc;
-
         if (port == null) return null;
 
-        // Transport + controller
         LcpLink link = new LcpLink(port, node, from, true);
         DeliveryController dc = new DeliveryController(link);
         dc.setLogStore(store);
 
-        // Scheduler central par node
         NodeScheduler scheduler = new NodeScheduler(node);
 
-        // MuxListener unique: un seul setListener() sur le controller, puis dispatch vers N listeners.
         MuxListener mux = new MuxListener();
-        mux.addListener(new LogBusSink(node, scheduler)); // sink permanent logs + backoff rc=0x26
-        mux.addListener(scheduler);                       // scheduler observe l’état (reset backoff etc.)
+        mux.addListener(new LogBusSink(node, scheduler));
+        mux.addListener(scheduler);
 
         dc.setListener(mux);
 
-        // init best-effort
         try { dc.initialize(); } catch (Exception ignored) {}
 
         NodeSession s = new NodeSession(dc, mux, scheduler);
         sessions.put(node, s);
 
-        // Démarrer la boucle scheduler (idle au départ, throttling interne)
         scheduler.bindController(dc);
-
         return dc;
     }
 
-    // ---------------------------------------------------------------------
-    // Multi-listener UI attach/detach
-    // ---------------------------------------------------------------------
-
-    /**
-     * UI: attache un listener UI au node (sans écraser).
-     * Active aussi le mode "UI subscribed" du scheduler.
-     */
     public synchronized void attachUiListener(int nodeDec, DeliveryControllerPort.Listener uiListener) {
         if (uiListener == null) return;
         int node = nodeDec & 0xFF;
@@ -121,10 +92,6 @@ public final class RegisterSessionManager {
         s.scheduler.setUiSubscribed(true);
     }
 
-    /**
-     * UI: détache un listener UI du node.
-     * On bascule uiSubscribed=false (simple); le scheduler reste actif si RUNNING.
-     */
     public synchronized void detachUiListener(int nodeDec, DeliveryControllerPort.Listener uiListener) {
         if (uiListener == null) return;
         int node = nodeDec & 0xFF;
@@ -135,9 +102,6 @@ public final class RegisterSessionManager {
         s.scheduler.setUiSubscribed(false);
     }
 
-    /**
-     * Nettoyage best-effort (USB detach).
-     */
     public synchronized void clearAll(boolean closeTransport) {
         for (NodeSession s : sessions.values()) {
             try { s.scheduler.shutdown(); } catch (Exception ignored) {}
@@ -146,9 +110,9 @@ public final class RegisterSessionManager {
         sessions.clear();
     }
 
-    // ---------------------------------------------------------------------
-    // Structures internes
-    // ---------------------------------------------------------------------
+    // -------------------------
+    // Internals
+    // -------------------------
 
     private static final class NodeSession {
         final DeliveryController dc;
@@ -162,9 +126,6 @@ public final class RegisterSessionManager {
         }
     }
 
-    /**
-     * MuxListener: dispatch vers N listeners (tabs UI + sinks + scheduler).
-     */
     private static final class MuxListener implements DeliveryControllerPort.Listener {
 
         private final CopyOnWriteArrayList<DeliveryControllerPort.Listener> listeners =
@@ -181,59 +142,37 @@ public final class RegisterSessionManager {
         }
 
         @Override public void onStateChanged(DeliveryState state) {
-            for (DeliveryControllerPort.Listener l : listeners) {
-                try { l.onStateChanged(state); } catch (Exception ignored) {}
-            }
+            for (DeliveryControllerPort.Listener l : listeners) { try { l.onStateChanged(state); } catch (Exception ignored) {} }
         }
 
         @Override public void onProductsUpdated(java.util.List<ProductUiItem> products, int activeIndex0) {
-            for (DeliveryControllerPort.Listener l : listeners) {
-                try { l.onProductsUpdated(products, activeIndex0); } catch (Exception ignored) {}
-            }
+            for (DeliveryControllerPort.Listener l : listeners) { try { l.onProductsUpdated(products, activeIndex0); } catch (Exception ignored) {} }
         }
 
         @Override public void onLog(String message) {
-            for (DeliveryControllerPort.Listener l : listeners) {
-                try { l.onLog(message); } catch (Exception ignored) {}
-            }
+            for (DeliveryControllerPort.Listener l : listeners) { try { l.onLog(message); } catch (Exception ignored) {} }
         }
 
         @Override public void onError(String context, Throwable error) {
-            for (DeliveryControllerPort.Listener l : listeners) {
-                try { l.onError(context, error); } catch (Exception ignored) {}
-            }
+            for (DeliveryControllerPort.Listener l : listeners) { try { l.onError(context, error); } catch (Exception ignored) {} }
         }
 
         @Override public void onLiveQty(double net, double gross) {
-            for (DeliveryControllerPort.Listener l : listeners) {
-                try { l.onLiveQty(net, gross); } catch (Exception ignored) {}
-            }
+            for (DeliveryControllerPort.Listener l : listeners) { try { l.onLiveQty(net, gross); } catch (Exception ignored) {} }
         }
 
         @Override public void onLiveStatus(String liveText) {
-            for (DeliveryControllerPort.Listener l : listeners) {
-                try { l.onLiveStatus(liveText); } catch (Exception ignored) {}
-            }
+            for (DeliveryControllerPort.Listener l : listeners) { try { l.onLiveStatus(liveText); } catch (Exception ignored) {} }
         }
 
         @Override public void onTicketInfo(String ticketNo, String deliveryUid) {
-            for (DeliveryControllerPort.Listener l : listeners) {
-                try { l.onTicketInfo(ticketNo, deliveryUid); } catch (Exception ignored) {}
-            }
+            for (DeliveryControllerPort.Listener l : listeners) { try { l.onTicketInfo(ticketNo, deliveryUid); } catch (Exception ignored) {} }
         }
     }
 
-    /**
-     * Scheduler central par node:
-     *  - Un seul thread per-node (ScheduledExecutorService).
-     *  - Deux cadences: Live (RUNNING) + Status (RUNNING ou UI subscribed/CONNECTED).
-     *  - Backoff progressif sur rc=0x26 (busy/collision).
-     */
     private static final class NodeScheduler implements DeliveryControllerPort.Listener {
 
         private final int node;
-
-        // ✅ FIX: exec est créé dans le constructeur APRÈS l'init de node.
         private final ScheduledExecutorService exec;
 
         private DeliveryController dc;
@@ -243,19 +182,16 @@ public final class RegisterSessionManager {
         private volatile long lastLiveMs = 0L;
         private volatile long lastStatusMs = 0L;
 
-        // backoff (ms)
         private volatile long liveBackoffMs = 0L;
         private volatile long statusBackoffMs = 0L;
 
-        // cadence base (réduites vs 200ms/1000ms)
         private static final long LIVE_RUNNING_MS = 500;
         private static final long STATUS_RUNNING_MS = 1500;
         private static final long STATUS_IDLE_MS = 2500;
 
         NodeScheduler(int node) {
             this.node = node;
-
-            final int nodeId = this.node; // capture safe
+            final int nodeId = node;
             this.exec = Executors.newSingleThreadScheduledExecutor(r -> {
                 Thread t = new Thread(r, "NodeScheduler-" + nodeId);
                 t.setDaemon(true);
@@ -265,16 +201,12 @@ public final class RegisterSessionManager {
 
         void bindController(DeliveryController dc) {
             this.dc = dc;
-            // tick rapide, throttling interne via lastX + interval + backoff
             exec.scheduleWithFixedDelay(this::tick, 200, 200, TimeUnit.MILLISECONDS);
         }
 
-        void setUiSubscribed(boolean v) {
-            this.uiSubscribed = v;
-        }
+        void setUiSubscribed(boolean v) { this.uiSubscribed = v; }
 
         void noteBusyRc26() {
-            // backoff progressif, cap à 2000ms
             liveBackoffMs = Math.min(2000, Math.max(liveBackoffMs * 2, 400));
             statusBackoffMs = Math.min(2000, Math.max(statusBackoffMs * 2, 400));
         }
@@ -294,7 +226,6 @@ public final class RegisterSessionManager {
             boolean running = (st == DeliveryState.RUNNING_FLOWING) || (st == DeliveryState.RUNNING_PAUSED);
             boolean shouldPollIdle = uiSubscribed || (st == DeliveryState.CONNECTED);
 
-            // 1) LIVE sample (RUNNING seulement)
             if (running) {
                 long interval = LIVE_RUNNING_MS + liveBackoffMs;
                 if (now - lastLiveMs >= interval) {
@@ -306,7 +237,6 @@ public final class RegisterSessionManager {
                 }
             }
 
-            // 2) STATUS (RUNNING ou UI subscribed/CONNECTED)
             if (running || shouldPollIdle) {
                 long base = running ? STATUS_RUNNING_MS : STATUS_IDLE_MS;
                 long interval = base + statusBackoffMs;
@@ -320,9 +250,7 @@ public final class RegisterSessionManager {
             }
         }
 
-        @Override
-        public void onStateChanged(DeliveryState state) {
-            // reset backoff quand on repasse CONNECTED (souvent fin de livraison)
+        @Override public void onStateChanged(DeliveryState state) {
             if (state == DeliveryState.CONNECTED) resetBackoff();
         }
 
@@ -339,8 +267,8 @@ public final class RegisterSessionManager {
     }
 
     /**
-     * Sink permanent vers LogBus + backoff sur rc=0x26 détecté dans onError().
-     * - LogBus formate [SRC][N=...] à l’affichage.
+     * Sink permanent: route les messages du controller vers LogBus (source unique).
+     * IMPORTANT: pas de LogBus.io() / LogBus.err() (inexistants). [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/RegisterSessionManager.java)
      */
     private static final class LogBusSink implements DeliveryControllerPort.Listener {
 
@@ -362,21 +290,30 @@ public final class RegisterSessionManager {
             if (message == null) return;
             String s = message.trim();
 
-            boolean isIo  = s.startsWith("[IO ") || s.startsWith("TX:") || s.startsWith("RX:") || s.startsWith("↳");
-            boolean isApi = s.startsWith("[API ") || s.startsWith("[API]");
-            boolean isErr = s.startsWith("[ERR") || s.startsWith("ERR[");
+            // IO TX/RX routing (si détectable)
+            if (s.startsWith("TX:") || s.startsWith("[TX]")) {
+                LogBus.ioTx(node, s);
+                return;
+            }
+            if (s.startsWith("RX:") || s.startsWith("[RX]")) {
+                LogBus.ioRx(node, s);
+                return;
+            }
 
-            if (isApi) LogBus.api(node, s);
-            else if (isIo) LogBus.io(node, s);
-            else if (isErr) LogBus.err(node, s);
-            else LogBus.ui(node, s);
+            // API tag
+            if (s.startsWith("[API") || s.startsWith("[API]")) {
+                LogBus.api(node, s);
+                return;
+            }
+
+            // Default
+            LogBus.ui(node, s);
         }
 
         @Override public void onError(String context, Throwable error) {
             String msg = (error != null && error.getMessage() != null) ? error.getMessage() : "";
-            LogBus.err(node, "ERR[" + context + "] " + msg);
+            LogBus.api(node, "[ERR][" + context + "] " + msg);
 
-            // backoff sur rc=0x26 (busy / collision)
             if (msg.contains("rc=0x26") || msg.contains("rc=0X26")) {
                 if (scheduler != null) scheduler.noteBusyRc26();
             }
