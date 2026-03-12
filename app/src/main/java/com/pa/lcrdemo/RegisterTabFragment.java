@@ -1,7 +1,10 @@
 
 package com.pa.lcrdemo;
 
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.hardware.usb.UsbManager;
 import android.os.Bundle;
 import android.os.Handler;
@@ -60,12 +63,17 @@ public class RegisterTabFragment extends Fragment {
     private long logViewSinceMs = 0L;
 
     private int ticketPendingFlag = -1; // -1 unknown, 0 NO, 1 YES
-    private boolean autoConnectDone = false;
+
+    // Auto-connect: on ne veut plus “une seule chance”, on veut retry quand USB devient prêt
+    private boolean attemptedAutoAttachOnce = false;
 
     private UsbManager usbManager;
 
     // Controller partagé UI ↔ API
     private DeliveryController controller;
+
+    // ✅ indicateur: UI listener attaché au node
+    private boolean uiListenerAttached = false;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService bg = Executors.newSingleThreadExecutor();
@@ -133,7 +141,7 @@ public class RegisterTabFragment extends Fragment {
         ui.removeCallbacks(statusTick);
     }
 
-    // Listener UI du tab (sera attach/detach dans RegisterSessionManager)
+    // Listener UI du tab (attach/detach via RegisterSessionManager multi-listener)
     private final DeliveryControllerPort.Listener uiListener = new DeliveryControllerPort.Listener() {
 
         @Override public void onStateChanged(DeliveryState state) {
@@ -155,7 +163,7 @@ public class RegisterTabFragment extends Fragment {
         @Override public void onProductsUpdated(List<ProductUiItem> products, int activeIndex0) { }
 
         @Override public void onLog(String message) {
-            // Le sink permanent route déjà vers LogBus; ici on peut forcer refresh view
+            // Le sink permanent route déjà vers LogBus; ici on peut rafraîchir la vue
             if (cbShowLog != null && cbShowLog.isChecked()) refreshLogView();
         }
 
@@ -192,6 +200,28 @@ public class RegisterTabFragment extends Fragment {
         if (cbShowLog != null && cbShowLog.isChecked()) refreshLogView();
     };
 
+    // ✅ Nouveau: quand USB devient prêt, on tente l’attach au controller partagé
+    private final BroadcastReceiver usbReadyReceiver = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) {
+            if (intent == null) return;
+            String a = intent.getAction();
+            if (a == null) return;
+
+            if (UsbReceiver.ACTION_USB_READY.equals(a)) {
+                // USB prêt maintenant -> tenter attach si pas déjà attaché
+                attemptAttachIfPossible(false);
+            } else if (UsbReceiver.ACTION_USB_DETACHED.equals(a)) {
+                // reset local UI
+                detachUiListenerSafe();
+                controller = null;
+                uiListenerAttached = false;
+                stopLiveTick();
+                stopStatusTick();
+                ui.post(() -> updateButtons(null));
+            }
+        }
+    };
+
     @Override
     public void onAttach(@NonNull Context context) {
         super.onAttach(context);
@@ -206,20 +236,32 @@ public class RegisterTabFragment extends Fragment {
     @Override public void onStart() {
         super.onStart();
         LogBus.addListener(logListener);
+
+        // écouter USB READY/DETACHED pour retry auto
+        IntentFilter f = new IntentFilter();
+        f.addAction(UsbReceiver.ACTION_USB_READY);
+        f.addAction(UsbReceiver.ACTION_USB_DETACHED);
+        requireContext().registerReceiver(usbReadyReceiver, f);
     }
 
     @Override public void onStop() {
-        // detach UI listener (multi-listener safe)
-        try { RegisterSessionManager.get(requireContext()).detachUiListener(node, uiListener); } catch (Exception ignored) {}
+        detachUiListenerSafe();
         LogBus.removeListener(logListener);
+        try { requireContext().unregisterReceiver(usbReadyReceiver); } catch (Exception ignored) {}
         super.onStop();
     }
 
     @Override public void onResume() {
         super.onResume();
-        if (autoConnectDone) return;
-        autoConnectDone = true;
-        ui.post(this::autoConnectLikeApi);
+
+        // tenter une première fois (si USB déjà prêt, ça marchera)
+        if (!attemptedAutoAttachOnce) {
+            attemptedAutoAttachOnce = true;
+            ui.post(() -> attemptAttachIfPossible(true));
+        } else {
+            // si on revient sur le tab plus tard, et qu’USB est prêt maintenant, on tente quand même
+            ui.post(() -> attemptAttachIfPossible(false));
+        }
     }
 
     @Override public void onDestroyView() {
@@ -227,7 +269,7 @@ public class RegisterTabFragment extends Fragment {
         stopLiveTick();
         stopStatusTick();
         try { bg.shutdownNow(); } catch (Exception ignored) {}
-        controller = null; // controller partagé (ne pas shutdown ici)
+        controller = null; // controller partagé : ne pas shutdown ici [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/RegisterSessionManager.java)
     }
 
     @Nullable
@@ -340,7 +382,7 @@ public class RegisterTabFragment extends Fragment {
             refreshLogView();
         });
 
-        btnConnect.setOnClickListener(v -> connectThisRegister());
+        btnConnect.setOnClickListener(v -> connectThisRegister(true));
 
         btnA.setOnClickListener(v -> { if (controller != null) controller.alignOrRecover(); });
 
@@ -375,31 +417,76 @@ public class RegisterTabFragment extends Fragment {
         btnFinish.setOnClickListener(v -> { if (controller != null) controller.endDelivery(); });
     }
 
-    private void connectThisRegister() {
+    // ✅ Auto-attach retry: utilisé par onResume et par ACTION_USB_READY
+    private void attemptAttachIfPossible(boolean verboseLog) {
+        if (uiListenerAttached && controller != null) {
+            // déjà attaché -> juste sync UI si nécessaire
+            syncUiFromController();
+            return;
+        }
+        connectThisRegister(false); // silent
+        if (verboseLog && controller == null) {
+            LogBus.api(node, "Auto-attach: USB/Controller pas encore prêt (retry sur USB_READY).");
+        }
+    }
+
+    private void connectThisRegister(boolean userInitiated) {
         UsbSerialPort p = UsbSession.getPort();
         if (p == null) {
-            LogBus.api(node, "USB non prêt (UsbSession port null)");
-            Toast.makeText(requireContext(), "USB non prêt", Toast.LENGTH_SHORT).show();
+            if (userInitiated) {
+                LogBus.api(node, "USB non prêt (UsbSession port null)");
+                Toast.makeText(requireContext(), "USB non prêt", Toast.LENGTH_SHORT).show();
+            }
             return;
         }
 
         RegisterSessionManager sm = RegisterSessionManager.get(requireContext());
-        controller = sm.getOrCreate(node, from, p);
+
+        controller = sm.getOrCreate(node, from, p); // même controller que l’API [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/RegisterSessionManager.java)
         if (controller == null) {
-            LogBus.api(node, "Connect TAB: 0 - USB non prêt (getOrCreate null)");
-            Toast.makeText(requireContext(), "USB non prêt", Toast.LENGTH_SHORT).show();
+            if (userInitiated) Toast.makeText(requireContext(), "USB non prêt", Toast.LENGTH_SHORT).show();
             return;
         }
 
-        // multi-listener: attache notre listener UI (sans écraser les autres)
-        sm.attachUiListener(node, uiListener);
+        if (!uiListenerAttached) {
+            sm.attachUiListener(node, uiListener);
+            uiListenerAttached = true;
+        }
 
         controller.setTxRxLoggingEnabled(cbTxRx.isChecked());
         controller.setLogTimestampsEnabled(cbLogTs.isChecked());
 
-        LogBus.api(node, "Connect TAB: 1 - CONNECTED");
+        // ✅ Sync UI immédiat
+        syncUiFromController();
         validateHeaderAsync();
-        refreshLogView();
+
+        if (userInitiated) LogBus.api(node, "Connect TAB: 1 - CONNECTED (UI attached)");
+    }
+
+    private void detachUiListenerSafe() {
+        if (!uiListenerAttached) return;
+        try {
+            RegisterSessionManager.get(requireContext()).detachUiListener(node, uiListener);
+        } catch (Exception ignored) {}
+        uiListenerAttached = false;
+    }
+
+    // ✅ Sync UI depuis controller partagé (cas API a déjà fait connect/oneshot)
+    private void syncUiFromController() {
+        if (controller == null) return;
+        DeliveryState st = controller.getState();
+
+        // boutons cohérents
+        updateButtons(st);
+
+        // si déjà running -> relancer ticks
+        if (st == DeliveryState.RUNNING_FLOWING || st == DeliveryState.RUNNING_PAUSED) {
+            startLiveTickIfNeeded();
+            startStatusTickIfNeeded();
+        }
+
+        // requestStatus force refresh live/net/gross/ticket info côté controller
+        try { controller.requestStatus(); } catch (Exception ignored) {}
     }
 
     private void validateHeaderAsync() {
@@ -458,25 +545,6 @@ public class RegisterTabFragment extends Fragment {
             btnContinue.setEnabled(paused);
             btnFinish.setEnabled(paused && stableOff);
         }
-    }
-
-    private void autoConnectLikeApi() {
-        LogBus.api(node, "Auto-connect TAB start");
-
-        int devCount = 0;
-        try { devCount = (usbManager != null) ? usbManager.getDeviceList().size() : 0; } catch (Exception ignored) {}
-        if (devCount <= 0) {
-            LogBus.api(node, "Scan USB: 0 - Aucun périphérique USB détecté.");
-            return;
-        }
-
-        UsbSerialPort p = UsbSession.getPort();
-        if (p == null) {
-            LogBus.api(node, "Open/Ping USB: 0 - Port non prêt (UsbSession port null).");
-            return;
-        }
-
-        connectThisRegister();
     }
 
     private void refreshLogView() {
