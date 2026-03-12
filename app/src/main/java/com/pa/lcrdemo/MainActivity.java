@@ -46,40 +46,51 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+/**
+ * MAIN (clean UI) = infrastructure:
+ * - Scan USB + Ouvrir/Ping USB => UNE session UsbSession
+ * - TO/FROM + Ajouter/Focus TAB
+ * - Scan registres (autoritaire) => reset tabs + rebuild
+ * - Tabs registres (RegisterTabFragment)
+ * - Log global MAIN (LogBus)
+ *
+ * API-Face => Start/Stop + Backup DB
+ */
 public class MainActivity extends AppCompatActivity {
 
     public static final String ACTION_USB_PERMISSION = "com.pa.lcrdemo.USB_PERMISSION";
 
-    // ✅ Auto-tab : broadcast émis par API (MultiRegisterApiFacadeImpl)
-    private static final String ACTION_NODE_SEEN = "com.pa.lcrdemo.ACTION_NODE_SEEN";
-
     private UsbManager usbManager;
     private final List<UsbDevice> usbDevices = new ArrayList<>();
-    private UsbSerialPort usbPort;
+    private UsbSerialPort usbPort; // cache local (la vérité = UsbSession.getPort())
 
+    // ===== Tabs / Pages (TOP: MAIN / API-Face) =====
     private TabLayout tabLayout;
     private View pageMain;
     private View pageApiFace;
 
+    // ===== API-Face UI =====
     private TextView txtApiStatus;
     private TextView txtApiUrl;
     private Button btnApiStart;
     private Button btnApiStop;
     private Button btnDbBackup;
 
+    // ===== API runtime =====
     private static final int API_PORT = 8765;
     private ApiServer apiServer;
     private DeliveryLogStore deliveryStore;
 
+    // ===================== MAIN UI (USB + Scan) =====================
     private Spinner spnUsbDevices;
     private Button btnScanUsb;
     private Button btnPingUsb;
-
     private EditText edtTo;
     private EditText edtFrom;
     private TextView txtActiveNode;
     private Button btnAddRegisterTab;
 
+    // ===================== Scan registres Option B (autoritaire) =====================
     private Button btnScanNodes;
     private Spinner spnNodesFound;
     private TextView txtNodesSummary;
@@ -88,12 +99,15 @@ public class MainActivity extends AppCompatActivity {
     private final List<NodeScanItem> nodeItems = new ArrayList<>();
     private final ExecutorService scanExec = Executors.newSingleThreadExecutor();
 
+    // ===================== Tabs registres =====================
     private TabLayout tabRegisters;
     private View registerContainer;
 
-    private final LinkedHashMap<Integer, Integer> regNodeToFrom = new LinkedHashMap<>();
+    // Unicité: 1 tab par lcrnode
+    private final LinkedHashMap<Integer, Integer> regNodeToFrom = new LinkedHashMap<>(); // node -> from
     private int currentRegNode = -1;
 
+    // ===== LOG GLOBAL (MAIN) =====
     private CheckBox cbShowLog;
     private View logPanel;
     private TextView txtLog;
@@ -109,7 +123,14 @@ public class MainActivity extends AppCompatActivity {
 
     private final Handler ui = new Handler(Looper.getMainLooper());
 
-    // API log filtering
+    // ✅ Throttle refresh log global (évite setText spam)
+    private static final long MAIN_LOG_REFRESH_MIN_MS = 250;
+    private long lastMainLogRefreshMs = 0L;
+    private boolean mainLogRefreshPending = false;
+
+    // =========================================================
+    // ✅ API log filtering for polling: first + last only
+    // =========================================================
     private final Map<Integer, String> apiRidToPath = new ConcurrentHashMap<>();
     private final Set<Integer> apiFirstJobRid = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private final Set<String> apiJobSeen = Collections.newSetFromMap(new ConcurrentHashMap<>());
@@ -162,13 +183,17 @@ public class MainActivity extends AppCompatActivity {
             if (c < '0' || c > '9') break;
             end++;
         }
-        try { return Integer.parseInt(path.substring(start, end)); }
-        catch (Exception ignore) { return null; }
+        try {
+            return Integer.parseInt(path.substring(start, end));
+        } catch (Exception ignore) {
+            return null;
+        }
     }
 
-    // USB receiver
+    // ===== USB auto-attach notification (via broadcast interne) =====
     private final BroadcastReceiver usbUiReceiver = new BroadcastReceiver() {
-        @Override public void onReceive(Context context, Intent intent) {
+        @Override
+        public void onReceive(Context context, Intent intent) {
             if (intent == null) return;
             String a = intent.getAction();
             if (a == null) return;
@@ -182,22 +207,12 @@ public class MainActivity extends AppCompatActivity {
         }
     };
 
-    // ✅ Receiver auto-tab (create only, no focus)
-    private final BroadcastReceiver nodeSeenReceiver = new BroadcastReceiver() {
-        @Override public void onReceive(Context context, Intent intent) {
-            if (intent == null) return;
-            if (!ACTION_NODE_SEEN.equals(intent.getAction())) return;
+    // ===== LogBus listener (rafraîchit la vue log global MAIN) =====
+    private final LogBus.Listener mainLogListener = e -> scheduleMainLogRefresh();
 
-            int n = intent.getIntExtra("node", -1);
-            int f = intent.getIntExtra("from", 255);
-            if (n < 1 || n > 250) return;
-
-            ensureRegisterTabPassive(n, f);
-        }
-    };
-
-    private final LogBus.Listener mainLogListener = e -> refreshGlobalLogView();
-
+    // =========================
+    // Lifecycle
+    // =========================
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -226,13 +241,13 @@ public class MainActivity extends AppCompatActivity {
         f.addAction(UsbReceiver.ACTION_USB_DETACHED);
         registerReceiver(usbUiReceiver, f);
 
-        // ✅ register auto-tab receiver
-        registerReceiver(nodeSeenReceiver, new IntentFilter(ACTION_NODE_SEEN));
-
         LogBus.addListener(mainLogListener);
 
+        // ✅ Source de vérité = UsbSession
         UsbSerialPort p = UsbSession.getPort();
-        if (p != null && usbPort == null) onUsbPortReady(p);
+        if (p != null && usbPort == null) {
+            onUsbPortReady(p);
+        }
 
         refreshGlobalLogView();
     }
@@ -240,7 +255,6 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onStop() {
         try { unregisterReceiver(usbUiReceiver); } catch (Exception ignored) {}
-        try { unregisterReceiver(nodeSeenReceiver); } catch (Exception ignored) {}
         LogBus.removeListener(mainLogListener);
         super.onStop();
     }
@@ -252,6 +266,9 @@ public class MainActivity extends AppCompatActivity {
         super.onDestroy();
     }
 
+    // =========================
+    // UI binding
+    // =========================
     private void bindUi() {
         tabLayout = findViewById(R.id.tabLayout);
         pageMain = findViewById(R.id.pageMain);
@@ -283,38 +300,48 @@ public class MainActivity extends AppCompatActivity {
         cbTxRx = findViewById(R.id.cbTxRx);
         cbLogTs = findViewById(R.id.cbLogTs);
 
+        // API-Face (fragment_api_face.xml est inclus dans pageApiFace)
         txtApiStatus = findViewById(R.id.txtApiStatus);
         txtApiUrl = findViewById(R.id.txtApiUrl);
         btnApiStart = findViewById(R.id.btnApiStart);
         btnApiStop = findViewById(R.id.btnApiStop);
         btnDbBackup = findViewById(R.id.btnDbBackup);
 
-        if (txtApiUrl != null) txtApiUrl.setText("http://127.0.0.1:" + API_PORT);
+        if (txtApiUrl != null) {
+            txtApiUrl.setText("http://127.0.0.1:" + API_PORT);
+        }
     }
 
     private void initUiDefaults() {
         edtTo.setText("250");
         edtFrom.setText("255");
+
         if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : —");
         if (txtActiveNode != null) txtActiveNode.setText("Node actif : —");
 
+        // Log global caché par défaut
         if (cbShowLog != null) cbShowLog.setChecked(false);
         if (logPanel != null) logPanel.setVisibility(View.GONE);
 
         SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
+
         boolean showTxRx = prefs.getBoolean("log_tx_rx", false);
         if (cbTxRx != null) cbTxRx.setChecked(showTxRx);
+        LogBus.SHOW_IO = showTxRx;
 
         boolean ts = prefs.getBoolean("log_ts", false);
         logTsEnabled = ts;
         if (cbLogTs != null) cbLogTs.setChecked(ts);
+        LogBus.SHOW_TS = ts;
 
+        // Spinner nodes found (défaut 250 placeholder)
         nodeItems.clear();
         nodeItems.add(NodeScanItem.default250());
         nodeAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, nodeItems);
         nodeAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         if (spnNodesFound != null) spnNodesFound.setAdapter(nodeAdapter);
 
+        // Tab par défaut 250 (placeholder)
         ensureRegisterTab(250, 255, true);
 
         mainLogViewSinceMs = 0L;
@@ -325,6 +352,7 @@ public class MainActivity extends AppCompatActivity {
         btnScanUsb.setOnClickListener(v -> scanUsb());
         btnPingUsb.setOnClickListener(v -> openSelectedUsb());
 
+        // Ajouter / Focus TAB depuis TO manuel
         if (btnAddRegisterTab != null) {
             btnAddRegisterTab.setOnClickListener(v -> {
                 int to = parseInt(edtTo.getText().toString(), 250);
@@ -333,8 +361,10 @@ public class MainActivity extends AppCompatActivity {
             });
         }
 
+        // Scan registres (autoritaire)
         if (btnScanNodes != null) btnScanNodes.setOnClickListener(v -> scanRegistersOptionB());
 
+        // Spinner nodes scan: sélection -> remplit edtTo (sans auto-connect)
         if (spnNodesFound != null) {
             spnNodesFound.setOnTouchListener((v, e) -> {
                 if (e.getAction() == MotionEvent.ACTION_DOWN) nodeUserTouchedSpinner = true;
@@ -353,6 +383,7 @@ public class MainActivity extends AppCompatActivity {
             });
         }
 
+        // Tabs registres: sélection -> afficher fragment + maj “Node actif”
         if (tabRegisters != null) {
             tabRegisters.addOnTabSelectedListener(new TabLayout.OnTabSelectedListener() {
                 @Override public void onTabSelected(TabLayout.Tab tab) {
@@ -367,6 +398,7 @@ public class MainActivity extends AppCompatActivity {
             });
         }
 
+        // Log global toggle
         if (cbShowLog != null) {
             cbShowLog.setOnCheckedChangeListener((buttonView, checked) -> {
                 if (logPanel != null) logPanel.setVisibility(checked ? View.VISIBLE : View.GONE);
@@ -375,6 +407,7 @@ public class MainActivity extends AppCompatActivity {
             });
         }
 
+        // Log global actions (clear = clear vue MAIN seulement)
         if (btnClearLog != null) {
             btnClearLog.setOnClickListener(v -> {
                 mainLogViewSinceMs = System.currentTimeMillis();
@@ -401,6 +434,10 @@ public class MainActivity extends AppCompatActivity {
             cbTxRx.setOnCheckedChangeListener((buttonView, checked) -> {
                 SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
                 prefs.edit().putBoolean("log_tx_rx", checked).apply();
+
+                // ✅ flags globaux LogBus
+                LogBus.SHOW_IO = checked;
+
                 logUi(null, "Option TX/RX (vue MAIN): " + (checked ? "ON" : "OFF"));
                 refreshGlobalLogView();
             });
@@ -410,21 +447,28 @@ public class MainActivity extends AppCompatActivity {
             cbLogTs.setOnCheckedChangeListener((buttonView, checked) -> {
                 SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
                 prefs.edit().putBoolean("log_ts", checked).apply();
+
                 logTsEnabled = checked;
+                // ✅ flags globaux LogBus
+                LogBus.SHOW_TS = checked;
+
                 logUi(null, "Option timestamps (UI+IO+API): " + (checked ? "ON" : "OFF"));
                 refreshGlobalLogView();
             });
         }
 
+        // API tab buttons
         if (btnApiStart != null) btnApiStart.setOnClickListener(v -> startApiServer());
         if (btnApiStop != null) btnApiStop.setOnClickListener(v -> stopApiServer("Stop button"));
-
         if (btnDbBackup != null) {
             btnDbBackup.setOnClickListener(v -> doBackupDb());
             btnDbBackup.setOnLongClickListener(v -> { requestBackupDir(); return true; });
         }
     }
 
+    // =========================
+    // Tabs TOP (MAIN / API-Face)
+    // =========================
     private void setupTabsTop() {
         if (tabLayout == null) return;
         tabLayout.removeAllTabs();
@@ -444,9 +488,9 @@ public class MainActivity extends AppCompatActivity {
         if (index == 1) refreshApiStatus();
     }
 
-    // -----------------------------
+    // =========================
     // Register tabs helpers
-    // -----------------------------
+    // =========================
     private void ensureRegisterTab(int node, int from, boolean focus) {
         if (node < 1 || node > 250) {
             logUi(null, "TAB registre: node invalide: " + node);
@@ -468,18 +512,6 @@ public class MainActivity extends AppCompatActivity {
         } else if (currentRegNode < 0) {
             selectRegisterTab(node);
             showRegisterFragment(node);
-        }
-    }
-
-    // ✅ create-only (no focus, no fragment)
-    private void ensureRegisterTabPassive(int node, int from) {
-        if (node < 1 || node > 250) return;
-        if (from < 0 || from > 255) from = 255;
-
-        if (!regNodeToFrom.containsKey(node)) {
-            regNodeToFrom.put(node, from);
-            addRegisterTabUi(node);
-            LogBus.api(node, "API node seen -> tab created (no focus)");
         }
     }
 
@@ -521,10 +553,13 @@ public class MainActivity extends AppCompatActivity {
         tx.commitAllowingStateLoss();
     }
 
+    /**
+     * Scan toujours autoritaire: purge tabs + mapping + fragments regtab_*,
+     * puis rebuild uniquement à partir des nodes détectés.
+     */
     private void clearAllRegisterTabsAndFragments() {
         regNodeToFrom.clear();
         currentRegNode = -1;
-
         if (tabRegisters != null) tabRegisters.removeAllTabs();
 
         try {
@@ -533,15 +568,17 @@ public class MainActivity extends AppCompatActivity {
             for (Fragment f : fm.getFragments()) {
                 if (f == null) continue;
                 String tag = f.getTag();
-                if (tag != null && tag.startsWith("regtab_")) tx.remove(f);
+                if (tag != null && tag.startsWith("regtab_")) {
+                    tx.remove(f);
+                }
             }
             tx.commitAllowingStateLoss();
         } catch (Exception ignored) {}
     }
 
-    // -----------------------------
-    // Scan registres (autoritaire)
-    // -----------------------------
+    // =========================
+    // Scan registres Option B (0x28 + #80 + #23) - AUTORITAIRE
+    // =========================
     private void scanRegistersOptionB() {
         final UsbSerialPort p = (UsbSession.getPort() != null) ? UsbSession.getPort() : usbPort;
         if (p == null) {
@@ -584,11 +621,9 @@ public class MainActivity extends AppCompatActivity {
                         nodeItems.add(NodeScanItem.default250());
                         if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : aucun (défaut 250)");
                         if (nodeAdapter != null) nodeAdapter.notifyDataSetChanged();
-
                         ensureRegisterTab(250, 255, true);
                         edtTo.setText("250");
                         if (txtActiveNode != null) txtActiveNode.setText("Node actif : 250");
-
                         logUi(null, "Scan registres: aucun trouvé -> reset + fallback tab 250");
                         return;
                     }
@@ -618,8 +653,7 @@ public class MainActivity extends AppCompatActivity {
                     edtTo.setText(String.valueOf(defaultNode));
                     if (txtActiveNode != null) txtActiveNode.setText("Node actif : " + defaultNode);
 
-                    logUi(null, "Scan registres terminé: " + nodeItems.size() +
-                            " node(s), default=" + defaultNode + " (scan autoritaire)");
+                    logUi(null, "Scan registres terminé: " + nodeItems.size() + " node(s), default=" + defaultNode + " (scan autoritaire)");
                 } finally {
                     if (btnScanNodes != null) btnScanNodes.setEnabled(true);
                 }
@@ -680,9 +714,9 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    // -----------------------------
-    // USB open/ping + publish UsbSession
-    // -----------------------------
+    // =========================
+    // USB
+    // =========================
     private void scanUsb() {
         usbDevices.clear();
         usbDevices.addAll(usbManager.getDeviceList().values());
@@ -700,13 +734,20 @@ public class MainActivity extends AppCompatActivity {
         spnUsbDevices.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, labels));
     }
 
+    /**
+     * Ouvrir/Ping USB:
+     * - Ouvre le port série
+     * - ✅ Publie le port dans UsbSession (source de vérité globale)
+     */
     private void openSelectedUsb() {
+        // Si UsbSession a déjà un port, on le considère prêt
         UsbSerialPort sessionPort = UsbSession.getPort();
         if (sessionPort != null) {
             if (usbPort == null) usbPort = sessionPort;
             logUi(null, "USB déjà prêt (UsbSession port déjà ouvert)");
             return;
         }
+
         if (usbPort != null) {
             logUi(null, "USB déjà prêt (port déjà ouvert)");
             UsbDevice dev = (usbDevices.isEmpty() ? null : getSelectedUsbDeviceSafe());
@@ -780,10 +821,12 @@ public class MainActivity extends AppCompatActivity {
         try { UsbSession.clear(); } catch (Exception ignore) {}
         stopApiServer("USB detached");
 
+        // clear sessions multi-node (UI+API)
         try { RegisterSessionManager.get(this).clearAll(true); } catch (Exception ignored) {}
 
         usbPort = null;
 
+        // Reset UI nodes list + tabs
         nodeItems.clear();
         nodeItems.add(NodeScanItem.default250());
         if (nodeAdapter != null) nodeAdapter.notifyDataSetChanged();
@@ -794,19 +837,21 @@ public class MainActivity extends AppCompatActivity {
         if (txtActiveNode != null) txtActiveNode.setText("Node actif : 250");
     }
 
-    // -----------------------------
-    // API server
-    // -----------------------------
+    // =========================
+    // API Server (B2)
+    // =========================
     private void startApiServer() {
         if (apiServer != null && apiServer.isRunning()) {
             logApi(null, "[API] déjà RUNNING");
             refreshApiStatus();
             return;
         }
+
         try {
             ApiFacade facade = new MultiRegisterApiFacadeImpl(this);
             apiServer = new ApiServer(facade, this::onApiLine, API_PORT);
             apiServer.start();
+
             refreshApiStatus();
             toast("API démarrée (127.0.0.1:" + API_PORT + ")");
         } catch (Exception e) {
@@ -859,6 +904,7 @@ public class MainActivity extends AppCompatActivity {
                 logApi(node, line);
                 return;
             }
+
             logApi(node, line);
             return;
         }
@@ -878,6 +924,7 @@ public class MainActivity extends AppCompatActivity {
                 if (isJobDoneRespLine(line)) logApi(node, line);
                 return;
             }
+
             logApi(node, line);
             return;
         }
@@ -885,9 +932,9 @@ public class MainActivity extends AppCompatActivity {
         logApi((currentRegNode > 0 ? currentRegNode : null), line);
     }
 
-    // -----------------------------
-    // Backup DB (inchangé)
-    // -----------------------------
+    // =========================
+    // Backup DB
+    // =========================
     private static final int REQ_PICK_BACKUP_DIR = 9102;
     private static final String PREF_BACKUP_DIR_URI = "backup_dir_uri";
 
@@ -931,11 +978,14 @@ public class MainActivity extends AppCompatActivity {
                 toast("Backup: sélection de dossier annulée");
                 return;
             }
+
             Uri dirUri = data.getData();
             final int takeFlags = data.getFlags() & (
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION |
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION
             );
             try { getContentResolver().takePersistableUriPermission(dirUri, takeFlags); } catch (Exception ignored) {}
+
             saveBackupDirUri(dirUri);
             toast("Backup: dossier enregistré");
             backupDbToChosenDir(dirUri);
@@ -961,6 +1011,7 @@ public class MainActivity extends AppCompatActivity {
                 toast("Backup FAIL: DB introuvable (" + DeliveryDb.DB_NAME + ")");
                 return;
             }
+
             if (deliveryStore != null) deliveryStore.checkpointWalBestEffort();
 
             String name = "lcr_delivery_" + utcStamp() + ".db";
@@ -986,6 +1037,7 @@ public class MainActivity extends AppCompatActivity {
                     toast("Backup FAIL: output stream null");
                     return;
                 }
+
                 byte[] buf = new byte[64 * 1024];
                 int r;
                 while ((r = in.read(buf)) > 0) out.write(buf, 0, r);
@@ -1005,35 +1057,62 @@ public class MainActivity extends AppCompatActivity {
         return df.format(new Date());
     }
 
-    // -----------------------------
-    // LogBus view (global)
-    // -----------------------------
+    // =========================
+    // Log principal via LogBus (NEW)
+    // =========================
+    private void scheduleMainLogRefresh() {
+        if (txtLog == null) return;
+        if (cbShowLog != null && !cbShowLog.isChecked()) return;
+
+        long now = System.currentTimeMillis();
+        long dt = now - lastMainLogRefreshMs;
+
+        if (dt >= MAIN_LOG_REFRESH_MIN_MS && !mainLogRefreshPending) {
+            lastMainLogRefreshMs = now;
+            refreshGlobalLogView();
+            return;
+        }
+
+        if (mainLogRefreshPending) return;
+        mainLogRefreshPending = true;
+
+        long delay = Math.max(0L, MAIN_LOG_REFRESH_MIN_MS - dt);
+        ui.postDelayed(() -> {
+            mainLogRefreshPending = false;
+            lastMainLogRefreshMs = System.currentTimeMillis();
+            refreshGlobalLogView();
+        }, delay);
+    }
+
     private void refreshGlobalLogView() {
         if (txtLog == null) return;
         if (cbShowLog != null && !cbShowLog.isChecked()) return;
 
-        boolean includeIo = (cbTxRx != null && cbTxRx.isChecked());
-        String text = LogBus.buildText(LogBus.filterGlobalUIIOAPI(includeIo, mainLogViewSinceMs), 1400);
-        txtLog.setText(text);
+        List<LogBus.LogEvent> events = LogBus.snapshotGlobal(1400, mainLogViewSinceMs);
+        txtLog.setText(LogBus.buildText(events));
     }
 
     private void logUi(Integer node, String msg) {
         if (msg == null) return;
-        LogBus.ui(node, maybeUiTimestamp(msg));
+        int n = (node != null ? node : 0);
+        LogBus.ui(n, maybeUiTimestamp(msg));
     }
 
     private void logApi(Integer node, String msg) {
         if (msg == null) return;
-        LogBus.api(node, msg);
+        int n = (node != null ? node : 0);
+        LogBus.api(n, msg);
     }
 
     private void logErr(Integer node, String msg) {
         if (msg == null) return;
-        LogBus.err(node, msg);
+        int n = (node != null ? node : 0);
+        LogBus.api(n, "[ERR] " + msg);
     }
 
     private String maybeUiTimestamp(String line) {
         if (!logTsEnabled) return line;
+        // On laisse LogBus.SHOW_TS gérer l’affichage; ici on timestamp seulement les logs UI “utilitaires”
         return uiTs() + " " + line;
     }
 
@@ -1042,6 +1121,9 @@ public class MainActivity extends AppCompatActivity {
         return df.format(new Date(System.currentTimeMillis()));
     }
 
+    // =========================
+    // Utils
+    // =========================
     private int parseInt(String s, int def) {
         try { return Integer.parseInt(s.trim()); } catch (Exception e) { return def; }
     }
