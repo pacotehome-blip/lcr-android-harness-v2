@@ -1,4 +1,3 @@
-
 package com.pa.lcr.lcp;
 
 import android.content.Context;
