@@ -19,6 +19,10 @@ import java.util.concurrent.TimeUnit;
  * - Unicité: 1 node -> 1 DeliveryController.
  * - Multi-listener (mux).
  * - Scheduler central par node pour réduire rc=0x26 (poll collisions).
+ *
+ * FIX terrain:
+ * - STOP polling dès que DeliveryState.DISCONNECTED (évite TX/RX + erreurs rc=-1 en boucle).
+ * - Le polling "idle" ne dépend plus de uiSubscribed (idle poll seulement si CONNECTED).
  */
 public final class RegisterSessionManager {
 
@@ -37,6 +41,8 @@ public final class RegisterSessionManager {
 
     private final Context appCtx;
     private final DeliveryLogStore store;
+
+    // node -> session
     private final Map<Integer, NodeSession> sessions = new LinkedHashMap<>();
 
     private RegisterSessionManager(Context appCtx) {
@@ -142,34 +148,55 @@ public final class RegisterSessionManager {
         }
 
         @Override public void onStateChanged(DeliveryState state) {
-            for (DeliveryControllerPort.Listener l : listeners) { try { l.onStateChanged(state); } catch (Exception ignored) {} }
+            for (DeliveryControllerPort.Listener l : listeners) {
+                try { l.onStateChanged(state); } catch (Exception ignored) {}
+            }
         }
 
         @Override public void onProductsUpdated(java.util.List<ProductUiItem> products, int activeIndex0) {
-            for (DeliveryControllerPort.Listener l : listeners) { try { l.onProductsUpdated(products, activeIndex0); } catch (Exception ignored) {} }
+            for (DeliveryControllerPort.Listener l : listeners) {
+                try { l.onProductsUpdated(products, activeIndex0); } catch (Exception ignored) {}
+            }
         }
 
         @Override public void onLog(String message) {
-            for (DeliveryControllerPort.Listener l : listeners) { try { l.onLog(message); } catch (Exception ignored) {} }
+            for (DeliveryControllerPort.Listener l : listeners) {
+                try { l.onLog(message); } catch (Exception ignored) {}
+            }
         }
 
         @Override public void onError(String context, Throwable error) {
-            for (DeliveryControllerPort.Listener l : listeners) { try { l.onError(context, error); } catch (Exception ignored) {} }
+            for (DeliveryControllerPort.Listener l : listeners) {
+                try { l.onError(context, error); } catch (Exception ignored) {}
+            }
         }
 
         @Override public void onLiveQty(double net, double gross) {
-            for (DeliveryControllerPort.Listener l : listeners) { try { l.onLiveQty(net, gross); } catch (Exception ignored) {} }
+            for (DeliveryControllerPort.Listener l : listeners) {
+                try { l.onLiveQty(net, gross); } catch (Exception ignored) {}
+            }
         }
 
         @Override public void onLiveStatus(String liveText) {
-            for (DeliveryControllerPort.Listener l : listeners) { try { l.onLiveStatus(liveText); } catch (Exception ignored) {} }
+            for (DeliveryControllerPort.Listener l : listeners) {
+                try { l.onLiveStatus(liveText); } catch (Exception ignored) {}
+            }
         }
 
         @Override public void onTicketInfo(String ticketNo, String deliveryUid) {
-            for (DeliveryControllerPort.Listener l : listeners) { try { l.onTicketInfo(ticketNo, deliveryUid); } catch (Exception ignored) {} }
+            for (DeliveryControllerPort.Listener l : listeners) {
+                try { l.onTicketInfo(ticketNo, deliveryUid); } catch (Exception ignored) {}
+            }
         }
     }
 
+    /**
+     * Scheduler central par node.
+     *
+     * FIX terrain:
+     * - STOP polling si DISCONNECTED (évite l'avalanche TX/RX après rc=-1).
+     * - Idle polling seulement si CONNECTED (uiSubscribed n'entretient plus le polling hors CONNECTED).
+     */
     private static final class NodeScheduler implements DeliveryControllerPort.Listener {
 
         private final int node;
@@ -221,10 +248,18 @@ public final class RegisterSessionManager {
             if (c == null) return;
 
             DeliveryState st = c.getState();
+
+            // ✅ FIX: stop polling entirely when disconnected
+            if (st == DeliveryState.DISCONNECTED) {
+                return;
+            }
+
             long now = System.currentTimeMillis();
 
             boolean running = (st == DeliveryState.RUNNING_FLOWING) || (st == DeliveryState.RUNNING_PAUSED);
-            boolean shouldPollIdle = uiSubscribed || (st == DeliveryState.CONNECTED);
+
+            // ✅ FIX: idle polling only if CONNECTED (do not keep polling just because UI subscribed)
+            boolean shouldPollIdle = (st == DeliveryState.CONNECTED);
 
             if (running) {
                 long interval = LIVE_RUNNING_MS + liveBackoffMs;
@@ -251,7 +286,14 @@ public final class RegisterSessionManager {
         }
 
         @Override public void onStateChanged(DeliveryState state) {
-            if (state == DeliveryState.CONNECTED) resetBackoff();
+            if (state == DeliveryState.CONNECTED) {
+                resetBackoff();
+            }
+            // ✅ Bonus safety: if disconnected, stop considering UI subscribed
+            if (state == DeliveryState.DISCONNECTED) {
+                uiSubscribed = false;
+                resetBackoff();
+            }
         }
 
         @Override public void onProductsUpdated(java.util.List<ProductUiItem> products, int activeIndex0) { }
@@ -268,7 +310,10 @@ public final class RegisterSessionManager {
 
     /**
      * Sink permanent: route les messages du controller vers LogBus (source unique).
-     * IMPORTANT: pas de LogBus.io() / LogBus.err() (inexistants). [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/RegisterSessionManager.java)
+     * - TX/RX détectables -> ioTx/ioRx
+     * - API lines -> api
+     * - Default -> ui
+     * - Errors -> api avec préfixe [ERR] + backoff rc=0x26
      */
     private static final class LogBusSink implements DeliveryControllerPort.Listener {
 
