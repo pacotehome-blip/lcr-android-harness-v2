@@ -18,6 +18,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import java.util.concurrent.ConcurrentHashMap;
 /**
  * DeliveryController
  *
@@ -469,7 +470,8 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
     }
 
-    private final Map<String, ApiJob> apiJobs = new HashMap<>();
+    // ✅ Global job registry: survive controller rebind/recreate (prevents JOB_NOT_FOUND after DONE)
+ 
 
     public DeliveryController(LcpLink link) {
         this.link = link;
@@ -855,11 +857,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                     setState(DeliveryState.CONNECTED);
 
                     if (listener != null) {
-                                                boolean printingNow = ticketPrintInFlight.get()
-                                                    && ticketPrintStartMs > 0L
-                                                    && (System.currentTimeMillis() - ticketPrintStartMs) < TICKET_DEVICE_LOOP_MS;
-                                            String msg = printingNow ? "LIVE: CONNECTED - Printing..." : "LIVE: CONNECTED - Ready";
-                                            listener.onLiveStatus(msg);
+                        listener.onLiveStatus(ticket ? "LIVE: CONNECTED - Ticket pending" : "LIVE: CONNECTED - Ready");
                         listener.onFlowStability(false, false, 0L);
                     }
 
