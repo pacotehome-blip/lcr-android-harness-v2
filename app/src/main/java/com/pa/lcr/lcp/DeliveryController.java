@@ -1,3 +1,4 @@
+
 package com.pa.lcr.lcp;
 
 import com.pa.lcr.lcp.storage.DeliveryLogStore;
@@ -470,7 +471,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
     // ✅ Global job registry: survive controller rebind/recreate (prevents JOB_NOT_FOUND after DONE)
- 
+    private static final Map<String, ApiJob> apiJobs = new ConcurrentHashMap<>();
 
     public DeliveryController(LcpLink link) {
         this.link = link;
@@ -1143,16 +1144,72 @@ public final class DeliveryController implements DeliveryControllerPort {
         ticketPrintStartMs = 0L;
     }
 
-    private void clearTicketPendingLoop() {
-        long deadline = System.currentTimeMillis() + TICKET_DEVICE_LOOP_MS;
+    // =========================
+    // ✅ SAFE PRINT helper (PRINT ONCE -> WAIT -> TIMEOUT)
+    // =========================
+    /**
+     * Envoie CMD_PRINT_LAST_TICKET UNE fois (idempotent) puis attend que DC_TICKET_PENDING retombe à 0.
+     * @return true si ticketPending cleared, false si timeout (ou transport fermé).
+     */
+    private boolean waitTicketPendingClearedOrTimeout(String ctx) {
+        if (isStopped()) return false;
+
+        // 0) Déjà clean ?
+        try {
+            LcpLink.MachineStatus ms0 = lcpMachineStatus();
+            if ((ms0.delCode & DC_TICKET_PENDING) == 0) {
+                ticketPrintInFlight.set(false);
+                ticketPrintStartMs = 0L;
+                return true;
+            }
+        } catch (Exception ignored) {}
+
+        long now = System.currentTimeMillis();
+
+        // 1) PRINT une seule fois (idempotent)
+        if (ticketPrintInFlight.compareAndSet(false, true)) {
+            ticketPrintStartMs = now;
+            try {
+                emitLog("[TICKET] PRINT_LAST_TICKET sent (ctx=" + ctx + ")");
+                lcpIssueCommand(CMD_PRINT_LAST_TICKET);
+            } catch (Exception e) {
+                ticketPrintInFlight.set(false);
+                ticketPrintStartMs = 0L;
+                emitLog("[TICKET] PRINT send failed (ctx=" + ctx + "): " + safeMsg(e));
+                return false;
+            }
+        } else {
+            // déjà en cours -> attente seulement
+            if (ticketPrintStartMs <= 0L) ticketPrintStartMs = now;
+        }
+
+        // 2) WAIT until cleared or timeout
+        long deadline = ticketPrintStartMs + TICKET_DEVICE_LOOP_MS;
+
         while (!isStopped() && System.currentTimeMillis() < deadline) {
-            try { lcpIssueCommand(CMD_PRINT_LAST_TICKET); } catch (Exception ignored) {}
-            try { Thread.sleep(200); } catch (InterruptedException ignored) {}
+            try { Thread.sleep(250); } catch (InterruptedException ignored) {}
+
             try {
                 LcpLink.MachineStatus ms = lcpMachineStatus();
-                if ((ms.delCode & DC_TICKET_PENDING) == 0) return;
+                if ((ms.delCode & DC_TICKET_PENDING) == 0) {
+                    emitLog("[TICKET] ticketPending cleared (ctx=" + ctx + ")");
+                    ticketPrintInFlight.set(false);
+                    ticketPrintStartMs = 0L;
+                    return true;
+                }
             } catch (Exception ignored) {}
         }
+
+        emitLog("[TICKET] PRINT TIMEOUT (ctx=" + ctx + ")");
+        ticketPrintInFlight.set(false);
+        // keep ticketPrintStartMs for diagnostics
+        return false;
+    }
+
+
+    private void clearTicketPendingLoop() {
+        // ✅ SAFE: PRINT ONCE then WAIT for register confirmation
+        waitTicketPendingClearedOrTimeout("legacy/clearTicketPendingLoop");
     }
 
     // =========================
@@ -2065,6 +2122,30 @@ public final class DeliveryController implements DeliveryControllerPort {
 
             // DONE
             if (!deliveryActive && job.sawDeliveryActiveOnce) {
+
+            // ✅ SAFE PRINT: si ticketPending reste à 1, attendre clear; sinon erreur API explicite
+            if (ticketPending) {
+                boolean ok = waitTicketPendingClearedOrTimeout("api/job/done");
+                if (!ok) {
+                    job.state = "ERROR";
+                    job.err = "PRINT_TIMEOUT";
+                    JSONObject dd = new JSONObject();
+                    safeJsonPut(dd, "jobId", jobId);
+                    safeJsonPut(dd, "ticketPending", 1);
+                    safeJsonPut(dd, "state_job", "ERROR");
+                    safeJsonPut(dd, "err", "PRINT_TIMEOUT");
+                    safeJsonPut(dd, "wait_ms", TICKET_DEVICE_LOOP_MS);
+                    safeJsonPut(dd, "live_status", "LIVE: CONNECTED - Ticket pending (PRINT TIMEOUT)");
+                    // cache pour cohérence sous rate-limit
+                    job.lastOkData = safeJsonCopy(dd);
+                    job.lastOkMsg = "Job: 0 - ERROR";
+                    job.nextAllowedReadMs = now + API_JOB_BACKOFF_ON_FAIL_MS;
+                    return ApiResult.fail("Job: 0 - Print timeout (ticket pending stuck)", "PRINT_TIMEOUT", dd);
+                }
+                // cleared
+                ticketPending = false;
+            }
+
                 try { job.ticketNo = readTicketNo23(); } catch (Exception ignored) {}
                 try { job.saleNo = readSaleNo22(); } catch (Exception ignored) {}
 
