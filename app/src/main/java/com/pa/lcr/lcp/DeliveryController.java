@@ -1205,13 +1205,18 @@ public final class DeliveryController implements DeliveryControllerPort {
     }
 
 
-    private void clearTicketPendingLoop() {
-        // ✅ SAFE: PRINT ONCE then WAIT for register confirmation
-        waitTicketPendingClearedOrTimeout("legacy/clearTicketPendingLoop");
 
-            } catch (Exception ignored) {}
+
+    private void clearTicketPendingLoop() {
+
+
+            // ✅ SAFE: PRINT ONCE then WAIT for register confirmation
+
+
+            waitTicketPendingClearedOrTimeout("legacy/clearTicketPendingLoop");
+
+
         }
-    }
 
     // =========================
     // Retry helper
