@@ -16,7 +16,7 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Session manager multi-registre (clé = lcrnode_dec).
- * - Unicité: 1 node -> 1 DeliveryController. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LogBus.java)
+ * - Unicité: 1 node -> 1 DeliveryController.
  * - Multi-listener (mux).
  * - Scheduler central par node pour réduire rc=0x26 (poll collisions).
  */
@@ -37,7 +37,6 @@ public final class RegisterSessionManager {
 
     private final Context appCtx;
     private final DeliveryLogStore store;
-
     private final Map<Integer, NodeSession> sessions = new LinkedHashMap<>();
 
     private RegisterSessionManager(Context appCtx) {
@@ -124,7 +123,6 @@ public final class RegisterSessionManager {
     }
 
     private static final class MuxListener implements DeliveryControllerPort.Listener {
-
         private final CopyOnWriteArrayList<DeliveryControllerPort.Listener> listeners =
                 new CopyOnWriteArrayList<>();
 
@@ -139,39 +137,59 @@ public final class RegisterSessionManager {
         }
 
         @Override public void onStateChanged(DeliveryState state) {
-            for (DeliveryControllerPort.Listener l : listeners) { try { l.onStateChanged(state); } catch (Exception ignored) {} }
+            for (DeliveryControllerPort.Listener l : listeners) {
+                try { l.onStateChanged(state); } catch (Exception ignored) {}
+            }
         }
 
         @Override public void onProductsUpdated(java.util.List<ProductUiItem> products, int activeIndex0) {
-            for (DeliveryControllerPort.Listener l : listeners) { try { l.onProductsUpdated(products, activeIndex0); } catch (Exception ignored) {} }
+            for (DeliveryControllerPort.Listener l : listeners) {
+                try { l.onProductsUpdated(products, activeIndex0); } catch (Exception ignored) {}
+            }
         }
 
         @Override public void onLog(String message) {
-            for (DeliveryControllerPort.Listener l : listeners) { try { l.onLog(message); } catch (Exception ignored) {} }
+            for (DeliveryControllerPort.Listener l : listeners) {
+                try { l.onLog(message); } catch (Exception ignored) {}
+            }
         }
 
         @Override public void onError(String context, Throwable error) {
-            for (DeliveryControllerPort.Listener l : listeners) { try { l.onError(context, error); } catch (Exception ignored) {} }
+            for (DeliveryControllerPort.Listener l : listeners) {
+                try { l.onError(context, error); } catch (Exception ignored) {}
+            }
         }
 
         @Override public void onLiveQty(double net, double gross) {
-            for (DeliveryControllerPort.Listener l : listeners) { try { l.onLiveQty(net, gross); } catch (Exception ignored) {} }
+            for (DeliveryControllerPort.Listener l : listeners) {
+                try { l.onLiveQty(net, gross); } catch (Exception ignored) {}
+            }
         }
 
         @Override public void onLiveStatus(String liveText) {
-            for (DeliveryControllerPort.Listener l : listeners) { try { l.onLiveStatus(liveText); } catch (Exception ignored) {} }
+            for (DeliveryControllerPort.Listener l : listeners) {
+                try { l.onLiveStatus(liveText); } catch (Exception ignored) {}
+            }
         }
 
         @Override public void onTicketInfo(String ticketNo, String deliveryUid) {
-            for (DeliveryControllerPort.Listener l : listeners) { try { l.onTicketInfo(ticketNo, deliveryUid); } catch (Exception ignored) {} }
+            for (DeliveryControllerPort.Listener l : listeners) {
+                try { l.onTicketInfo(ticketNo, deliveryUid); } catch (Exception ignored) {}
+            }
         }
     }
 
+    /**
+     * Scheduler central par node.
+     * ✅ FIX: après fin (state CONNECTED), ne plus poller STATUS automatiquement.
+     * - RUNNING_* : live + status
+     * - CONNECTED : rien (one-shot via UI uniquement)
+     * - DISCONNECTED : rien
+     */
     private static final class NodeScheduler implements DeliveryControllerPort.Listener {
 
         private final int node;
         private final ScheduledExecutorService exec;
-
         private DeliveryController dc;
 
         private volatile boolean uiSubscribed = false;
@@ -184,7 +202,6 @@ public final class RegisterSessionManager {
 
         private static final long LIVE_RUNNING_MS = 500;
         private static final long STATUS_RUNNING_MS = 1500;
-        private static final long STATUS_IDLE_MS = 2500;
 
         NodeScheduler(int node) {
             this.node = node;
@@ -218,11 +235,14 @@ public final class RegisterSessionManager {
             if (c == null) return;
 
             DeliveryState st = c.getState();
+
+            // ✅ STOP total en DISCONNECTED
+            if (st == DeliveryState.DISCONNECTED) return;
+
             long now = System.currentTimeMillis();
-
             boolean running = (st == DeliveryState.RUNNING_FLOWING) || (st == DeliveryState.RUNNING_PAUSED);
-            boolean shouldPollIdle = uiSubscribed || (st == DeliveryState.CONNECTED);
 
+            // ✅ LIVE uniquement en RUNNING
             if (running) {
                 long interval = LIVE_RUNNING_MS + liveBackoffMs;
                 if (now - lastLiveMs >= interval) {
@@ -234,9 +254,9 @@ public final class RegisterSessionManager {
                 }
             }
 
-            if (shouldPollStatus) {
-                long base = STATUS_RUNNING_MS;
-                long interval = base + statusBackoffMs;
+            // ✅ STATUS uniquement en RUNNING (plus de polling automatique en CONNECTED)
+            if (running) {
+                long interval = STATUS_RUNNING_MS + statusBackoffMs;
                 if (now - lastStatusMs >= interval) {
                     lastStatusMs = now;
                     try {
@@ -283,23 +303,10 @@ public final class RegisterSessionManager {
             if (message == null) return;
             String s = message.trim();
 
-            // IO TX/RX routing (si détectable)
-            if (s.startsWith("TX:") || s.startsWith("[TX]")) {
-                LogBus.ioTx(node, s);
-                return;
-            }
-            if (s.startsWith("RX:") || s.startsWith("[RX]")) {
-                LogBus.ioRx(node, s);
-                return;
-            }
+            if (s.startsWith("TX:") || s.startsWith("[TX]")) { LogBus.ioTx(node, s); return; }
+            if (s.startsWith("RX:") || s.startsWith("[RX]")) { LogBus.ioRx(node, s); return; }
+            if (s.startsWith("[API") || s.startsWith("[API]")) { LogBus.api(node, s); return; }
 
-            // API tag
-            if (s.startsWith("[API") || s.startsWith("[API]")) {
-                LogBus.api(node, s);
-                return;
-            }
-
-            // Default
             LogBus.ui(node, s);
         }
 
