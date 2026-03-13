@@ -31,14 +31,17 @@ import java.util.concurrent.atomic.AtomicInteger;
  * GET  /v1/ping
  * GET  /v1/usb/scan
  * POST /v1/usb/open-ping
- * POST /v1/lcp/connect                 (B2: accepte lcrnode_dec/from_dec dans body)
- * POST /v1/register/validate            (B2: accepte lcrnode_dec/from_dec dans body)
- * POST /v1/delivery/C                   (B2: accepte lcrnode_dec/from_dec dans body)
- * POST /v1/delivery/oneshot/start       (B2: accepte lcrnode_dec/from_dec dans body)
- * GET  /v1/delivery/job/{jobId}         (B2: accepte ?lcrnode_dec=250 en query)
- * POST /v1/delivery/job/continue        (B2: accepte lcrnode_dec dans body, sinon mapping job)
- * POST /v1/delivery/job/terminate       (B2: accepte lcrnode_dec dans body, sinon mapping job)
+ * POST /v1/lcp/connect
+ * POST /v1/register/validate
+ * POST /v1/delivery/C
+ * POST /v1/delivery/oneshot/start
+ * GET  /v1/delivery/job/{jobId}
+ * POST /v1/delivery/job/continue
+ * POST /v1/delivery/job/terminate
  * POST /v1/db/dump
+ *
+ * ✅ NEW (B+ tick push-like via polling):
+ * GET  /v1/tick/wait?lcrnode_dec=250&since_seq=123&wait_ms=25000
  */
 public final class ApiServer {
 
@@ -75,8 +78,8 @@ public final class ApiServer {
 
         workers = Executors.newFixedThreadPool(4);
         acceptor = Executors.newSingleThreadExecutor();
-        running = true;
 
+        running = true;
         t("[API " + ts() + "] START http://127.0.0.1:" + port);
 
         acceptor.execute(() -> {
@@ -108,6 +111,7 @@ public final class ApiServer {
         long t0 = System.currentTimeMillis();
 
         try {
+            // Default timeout (sera ajusté pour tick/wait après parsing)
             try { s.setSoTimeout(10_000); } catch (Exception ignored) {}
 
             // Double verrou: n'accepte que loopback
@@ -122,14 +126,27 @@ public final class ApiServer {
 
             HttpReq req = readHttpRequest(in);
 
+            // ✅ Ajuster le timeout socket pour tick/wait (long-poll)
+            if (isTickWait(req)) {
+                long waitMs = req.queryLong("wait_ms", 25_000L);
+                if (waitMs < 0) waitMs = 0;
+                if (waitMs > 30_000L) waitMs = 30_000L;
+                try { s.setSoTimeout((int) Math.min(60_000, waitMs + 8_000)); } catch (Exception ignored) {}
+            }
+
             t("[API " + ts() + "][RID=" + rid + "] REQ " + req.method + " " + req.path + " body=" + shrink(req.body));
 
             JSONObject resp;
             int status = 200;
 
             try {
-                synchronized (lcpLock) {
+                // ✅ Ne PAS lock lcpLock pour tick/wait (cache-only + wait/notify)
+                if (isTickWait(req)) {
                     resp = route(req).toJson();
+                } else {
+                    synchronized (lcpLock) {
+                        resp = route(req).toJson();
+                    }
                 }
             } catch (Exception e) {
                 status = 500;
@@ -153,6 +170,10 @@ public final class ApiServer {
         }
     }
 
+    private static boolean isTickWait(HttpReq req) {
+        return "GET".equals(req.method) && "/v1/tick/wait".equals(req.path);
+    }
+
     // =========================
     // Routing (B2 node-aware)
     // =========================
@@ -165,6 +186,16 @@ public final class ApiServer {
             d.put("bind", "127.0.0.1");
             d.put("port", port);
             return ApiResult.ok("PING: 1 - OK", d);
+        }
+
+        // ✅ NEW: Tick wait (long-poll)
+        // GET /v1/tick/wait?lcrnode_dec=250&since_seq=123&wait_ms=25000
+        if (isTickWait(req)) {
+            Integer node = req.queryInt("lcrnode_dec");
+            long sinceSeq = req.queryLong("since_seq", 0L);
+            long waitMs = req.queryLong("wait_ms", 25_000L);
+            // ApiFacade gère node default + validation
+            return facade.api_tickWait(node, sinceSeq, (int) waitMs);
         }
 
         // USB
@@ -183,10 +214,9 @@ public final class ApiServer {
             return facade.api_connectLcp(node, from);
         }
 
-        // ✅ Registre prêt / validation (B2: node-aware via body)
+        // Registre prêt / validation
         if ("POST".equals(req.method) && "/v1/register/validate".equals(req.path)) {
             JSONObject body = req.jsonBody();
-
             String numero = body.optString("numero_livraison", body.optString("numeroLivraison", ""));
             if (numero != null && numero.trim().isEmpty()) numero = null;
 
@@ -216,43 +246,37 @@ public final class ApiServer {
             return facade.api_dbDump();
         }
 
-        // Delivery C (B2: node-aware)
+        // Delivery C
         if ("POST".equals(req.method) && "/v1/delivery/C".equals(req.path)) {
             JSONObject body = req.jsonBody();
             Integer node = parseNodeDec(body);
             Integer from = parseFromDec(body);
-
             int product = body.optInt("product1to16", body.optInt("productId", 1));
             double presetNet = body.optDouble("presetNet", 0.0);
-
             return facade.api_deliveryStartC(node, from, product, presetNet);
         }
 
-        // Delivery OneShot (B2: node-aware)
+        // Delivery OneShot
         if ("POST".equals(req.method) && "/v1/delivery/oneshot/start".equals(req.path)) {
             JSONObject body = req.jsonBody();
             Integer node = parseNodeDec(body);
             Integer from = parseFromDec(body);
-
             String numero = body.optString("numero_livraison", body.optString("numeroLivraison", ""));
             int product = body.optInt("product1to16", body.optInt("product", body.optInt("productId", 1)));
             double preset = body.optDouble("presetNet", body.optDouble("presetNetL", body.optDouble("preset", 0.0)));
-
             String compartment = null;
             try {
                 Object c = body.opt("compartment");
                 if (c != null && c != JSONObject.NULL) compartment = String.valueOf(c);
             } catch (Exception ignored) {}
-
             return facade.api_deliveryOneShotStart(node, from, numero, product, preset, compartment);
         }
 
-        // Delivery controls (B2: lcrnode_dec optionnel; facade fallback mapping job->node)
+        // Delivery controls
         if ("POST".equals(req.method) && "/v1/delivery/job/continue".equals(req.path)) {
             JSONObject body = req.jsonBody();
             String jobId = body.optString("jobId", "").trim();
             if (jobId.isEmpty()) return ApiResult.fail("Continue: 0 - Job invalide", "JOB_ID_EMPTY");
-
             Integer node = parseNodeDec(body);
             return facade.api_deliveryContinue(jobId, node);
         }
@@ -261,16 +285,14 @@ public final class ApiServer {
             JSONObject body = req.jsonBody();
             String jobId = body.optString("jobId", "").trim();
             if (jobId.isEmpty()) return ApiResult.fail("Terminate: 0 - Job invalide", "JOB_ID_EMPTY");
-
             Integer node = parseNodeDec(body);
             return facade.api_deliveryTerminate(jobId, node);
         }
 
-        // Job (B2: GET with query ?lcrnode_dec=250)
+        // Job
         if ("GET".equals(req.method) && req.path.startsWith("/v1/delivery/job/")) {
             String jobId = req.path.substring("/v1/delivery/job/".length()).trim();
             if (jobId.isEmpty()) return ApiResult.fail("Job: 0 - Invalide", "JOB_ID_EMPTY");
-
             Integer node = req.queryInt("lcrnode_dec");
             return facade.api_deliveryJobGet(jobId, node);
         }
@@ -286,11 +308,9 @@ public final class ApiServer {
     private static Integer parseNodeDec(JSONObject body) {
         if (body == null) return null;
         Integer to = null;
-
         if (body.has("lcrnode_dec")) to = body.optInt("lcrnode_dec", 0);
         else if (body.has("expected_lcrnode_dec")) to = body.optInt("expected_lcrnode_dec", 0);
         else if (body.has("lcrnode")) to = body.optInt("lcrnode", 0);
-
         if (to != null && to == 0) to = null;
         return to;
     }
@@ -298,10 +318,8 @@ public final class ApiServer {
     private static Integer parseFromDec(JSONObject body) {
         if (body == null) return null;
         Integer f = null;
-
         if (body.has("from_dec")) f = body.optInt("from_dec", 0);
         else if (body.has("from")) f = body.optInt("from", 0);
-
         if (f != null && f == 0) f = null;
         return f;
     }
@@ -337,7 +355,7 @@ public final class ApiServer {
     // =========================
     private static final class HttpReq {
         final String method;
-        final String path;   // sans query
+        final String path; // sans query
         final byte[] body;
         final Map<String, String> query;
 
@@ -359,11 +377,21 @@ public final class ApiServer {
             }
         }
 
+        long queryLong(String key, long def) {
+            try {
+                String v = query.get(key);
+                if (v == null) return def;
+                return Long.parseLong(v.trim());
+            } catch (Exception e) {
+                return def;
+            }
+        }
+
         JSONObject jsonBody() {
             try {
                 if (body.length == 0) return new JSONObject();
                 String s = new String(body, StandardCharsets.UTF_8);
-                // ✅ Strip UTF-8 BOM (U+FEFF) si présent
+                // Strip UTF-8 BOM (U+FEFF) si présent
                 if (!s.isEmpty() && s.charAt(0) == '\uFEFF') s = s.substring(1);
                 return new JSONObject(s);
             } catch (Exception e) {

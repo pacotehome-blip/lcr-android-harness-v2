@@ -49,6 +49,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * ✅ SQLite transactions (optionnel, baseline-safe):
  * - Inscriptions dans delivery_summary / delivery_attempt / delivery_event via DeliveryLogStore.
  * - Si store non injecté: no-op (aucun impact).
+ *
+ * ✅ B+ TickBus (change-driven):
+ * - Incrémente un seq dès que NET/GROSS OU dev/prn OU delStatus/delCode OU state change.
+ * - Expose api_tickWait(sinceSeq, waitMs) (long-poll cache-only) pour Field Service Mobile.
  */
 public final class DeliveryController implements DeliveryControllerPort {
 
@@ -89,10 +93,13 @@ public final class DeliveryController implements DeliveryControllerPort {
     // Empêche les chevauchements de transactions LCP (source majeure de rc=0x26).
     // =========================================================
     private final Object lcpOpLock = new Object();
+
     private interface LcpOp<T> { T run() throws Exception; }
+
     private <T> T withLcpLock(LcpOp<T> op) throws Exception {
         synchronized (lcpOpLock) { return op.run(); }
     }
+
     private void withLcpLockVoid(LcpOp<Void> op) throws Exception {
         synchronized (lcpOpLock) { op.run(); }
     }
@@ -101,9 +108,11 @@ public final class DeliveryController implements DeliveryControllerPort {
     private int[] lcpDeliveryStatus() throws Exception { return withLcpLock(() -> link.opDeliveryStatus()); }
     private LcpLink.MachineStatus lcpMachineStatus() throws Exception { return withLcpLock(() -> link.opGetMachineStatus()); }
     private byte[] lcpGetField(int field) throws Exception { return withLcpLock(() -> link.opGetField(field)); }
+
     private void lcpSetField(int field, byte[] value) throws Exception {
         withLcpLockVoid(() -> { link.opSetField(field, value); return null; });
     }
+
     private void lcpIssueCommand(int cmd) throws Exception {
         withLcpLockVoid(() -> { link.opIssueCommand(cmd); return null; });
     }
@@ -118,7 +127,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     // Champs LCR (API / reporting)
     private static final int FIELD_GROSS_TOTAL = 17;
     private static final int FIELD_NET_TOTAL = 18;
-    private static final int FIELD_SALE_NUMBER = 22; // U32
+    private static final int FIELD_SALE_NUMBER = 22;  // U32
     private static final int FIELD_TICKET_NUMBER = 23; // U32
     private static final int FIELD_SERIAL_ID = 80;
 
@@ -128,8 +137,8 @@ public final class DeliveryController implements DeliveryControllerPort {
     private static final int CMD_PRINT_LAST_TICKET = 0x06;
 
     // Bits delCode (0x28)
-    private static final int DC_TICKET_PENDING = 0x0001;
-    private static final int DC_FLOW_ACTIVE = 0x0004;
+    private static final int DC_TICKET_PENDING  = 0x0001;
+    private static final int DC_FLOW_ACTIVE     = 0x0004;
     private static final int DC_DELIVERY_ACTIVE = 0x0008;
 
     // OFF conservateur (détection stagnation)
@@ -158,6 +167,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     private final LcpLink link;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private Listener listener;
+
     private volatile DeliveryState state = DeliveryState.DISCONNECTED;
     private volatile int cachedDigits = -1;
 
@@ -194,12 +204,210 @@ public final class DeliveryController implements DeliveryControllerPort {
     private static final ThreadLocal<SimpleDateFormat> IO_DF =
             ThreadLocal.withInitial(() -> new SimpleDateFormat("HH:mm:ss.SSS", Locale.CANADA_FRENCH));
 
+    // =========================================================
+    // ✅ B+ TickBus (change-driven) : net/gross OR dev/prn OR delStatus/delCode OR state
+    // =========================================================
+    private static final class LastTick {
+        final long seq;
+        final long tsMs;
+
+        final double net;
+        final double gross;
+
+        final int devStatus;
+        final int prnStatus;
+        final int delStatus;
+        final int delCode;
+
+        final String stateName; // DeliveryState.name()
+
+        LastTick(long seq, long tsMs, double net, double gross,
+                 int devStatus, int prnStatus, int delStatus, int delCode,
+                 String stateName) {
+            this.seq = seq;
+            this.tsMs = tsMs;
+            this.net = net;
+            this.gross = gross;
+            this.devStatus = devStatus;
+            this.prnStatus = prnStatus;
+            this.delStatus = delStatus;
+            this.delCode = delCode;
+            this.stateName = stateName;
+        }
+    }
+
+    // seq monotone: incrémenté uniquement sur changement
+    private final java.util.concurrent.atomic.AtomicLong tickSeq =
+            new java.util.concurrent.atomic.AtomicLong(0);
+
+    // dernier tick publié
+    private volatile LastTick lastTick = null;
+
+    // lock de synchronisation pour long-poll API (wait/notify)
+    private final Object tickLock = new Object();
+
+    // tolérance changement (litres) -> évite faux changements dûs au float
+    private static final double TICK_EPS = 0.0005; // 0.5 mL si unité=L
+
+    // dernier dev/prn connu (mis à jour quand on lit machine status)
+    private volatile int lastDevStatusKnown = -1;
+    private volatile int lastPrnStatusKnown = -1;
+
+    private static boolean changed(double a, double b) {
+        return Math.abs(a - b) > TICK_EPS;
+    }
+
+    private boolean tickChanged(LastTick prev,
+                                double net, double gross,
+                                int devStatus, int prnStatus,
+                                int delStatus, int delCode,
+                                DeliveryState st) {
+        if (prev == null) return true;
+        if (changed(prev.net, net)) return true;
+        if (changed(prev.gross, gross)) return true;
+        if (prev.devStatus != devStatus) return true;
+        if (prev.prnStatus != prnStatus) return true;
+        if (prev.delStatus != delStatus) return true;
+        if (prev.delCode != delCode) return true;
+
+        String sn = (st == null) ? "null" : st.name();
+        return !sn.equals(prev.stateName);
+    }
+
+    /**
+     * Publie un tick si (B+) net/gross OU dev/prn OU delStatus/delCode OU state change.
+     *
+     * devStatus/prnStatus : si on passe -1, on réutilise le dernier connu (ou le prev).
+     */
+    private void publishTickIfChanged(double net, double gross,
+                                      int devStatus, int prnStatus,
+                                      int delStatus, int delCode,
+                                      DeliveryState st) {
+
+        LastTick prev = lastTick;
+
+        // Normaliser dev/prn si inconnus
+        if (devStatus < 0) {
+            if (prev != null) devStatus = prev.devStatus;
+            else if (lastDevStatusKnown >= 0) devStatus = lastDevStatusKnown;
+            else devStatus = 0;
+        }
+        if (prnStatus < 0) {
+            if (prev != null) prnStatus = prev.prnStatus;
+            else if (lastPrnStatusKnown >= 0) prnStatus = lastPrnStatusKnown;
+            else prnStatus = 0;
+        }
+
+        if (!tickChanged(prev, net, gross, devStatus, prnStatus, delStatus, delCode, st)) return;
+
+        long seq = tickSeq.incrementAndGet();
+        long now = System.currentTimeMillis();
+
+        LastTick t = new LastTick(
+                seq, now,
+                net, gross,
+                devStatus, prnStatus,
+                delStatus, delCode,
+                (st == null) ? "null" : st.name()
+        );
+
+        lastTick = t;
+
+        // réveiller tout long-poll API en attente
+        synchronized (tickLock) {
+            tickLock.notifyAll();
+        }
+    }
+
+    private JSONObject buildTickJsonSnapshot() {
+        LastTick t = lastTick;
+        JSONObject d = new JSONObject();
+        if (t == null) {
+            safeJsonPut(d, "has_tick", 0);
+            safeJsonPut(d, "seq", 0);
+            return d;
+        }
+        safeJsonPut(d, "has_tick", 1);
+        safeJsonPut(d, "seq", t.seq);
+        safeJsonPut(d, "ts_ms", t.tsMs);
+        safeJsonPut(d, "tick_age_ms", Math.max(0L, System.currentTimeMillis() - t.tsMs));
+        safeJsonPut(d, "net", t.net);
+        safeJsonPut(d, "gross", t.gross);
+        safeJsonPut(d, "devStatus", t.devStatus);
+        safeJsonPut(d, "prnStatus", t.prnStatus);
+        safeJsonPut(d, "delStatus", t.delStatus);
+        safeJsonPut(d, "delCode", t.delCode);
+        safeJsonPut(d, "state", t.stateName);
+        return d;
+    }
+
+    /** API: snapshot immédiat (cache-only). */
+    public ApiResult api_tickSnapshot() {
+        JSONObject d = buildTickJsonSnapshot();
+        safeJsonPut(d, "changed", 1);
+        safeJsonPut(d, "timeout", 0);
+        return ApiResult.ok("Tick: 1 - SNAPSHOT", d);
+    }
+
+    /**
+     * API: long-poll (cache-only).
+     * sinceSeq: dernière séquence vue par le client.
+     * waitMs: max attente serveur (ex: 25000). Clamp à [0..30000].
+     */
+    public ApiResult api_tickWait(long sinceSeq, long waitMs) {
+        if (waitMs <= 0) waitMs = 25_000;
+        if (waitMs > 30_000) waitMs = 30_000;
+
+        long deadline = System.currentTimeMillis() + waitMs;
+
+        // 1) réponse immédiate si tick déjà plus récent
+        LastTick cur = lastTick;
+        if (cur != null && cur.seq > sinceSeq) {
+            JSONObject d = buildTickJsonSnapshot();
+            safeJsonPut(d, "changed", 1);
+            safeJsonPut(d, "timeout", 0);
+            safeJsonPut(d, "since_seq", sinceSeq);
+            return ApiResult.ok("Tick: 1 - CHANGED", d);
+        }
+
+        // 2) attente bloquante (sans LCP IO)
+        synchronized (tickLock) {
+            while (System.currentTimeMillis() < deadline) {
+                try {
+                    long left = deadline - System.currentTimeMillis();
+                    if (left <= 0) break;
+                    tickLock.wait(Math.min(left, 1000));
+                } catch (InterruptedException ignored) {
+                    break;
+                }
+
+                LastTick t = lastTick;
+                if (t != null && t.seq > sinceSeq) {
+                    JSONObject d = buildTickJsonSnapshot();
+                    safeJsonPut(d, "changed", 1);
+                    safeJsonPut(d, "timeout", 0);
+                    safeJsonPut(d, "since_seq", sinceSeq);
+                    return ApiResult.ok("Tick: 1 - CHANGED", d);
+                }
+            }
+        }
+
+        // 3) timeout -> retourne snapshot courant (ou empty), marqué timeout
+        JSONObject d = buildTickJsonSnapshot();
+        safeJsonPut(d, "changed", 0);
+        safeJsonPut(d, "timeout", 1);
+        safeJsonPut(d, "wait_ms", waitMs);
+        safeJsonPut(d, "since_seq", sinceSeq);
+        return ApiResult.ok("Tick: 0 - TIMEOUT", d);
+    }
+
     // =========================
     // API-Face (jobs + cache)
     // =========================
     private static final class ApiJob {
         final String id;
         final long startedAtMs;
+
         volatile boolean done = false;
         volatile String state; // PENDING/RUNNING/DONE/ERROR
         volatile String err;
@@ -274,10 +482,14 @@ public final class DeliveryController implements DeliveryControllerPort {
     // ====== DeliveryControllerPort ======
     @Override public DeliveryState getState() { return state; }
     @Override public boolean isPaused() { return state == DeliveryState.RUNNING_PAUSED; }
-    @Override public boolean isDeliveryActive() {
+
+    @Override
+    public boolean isDeliveryActive() {
         return state == DeliveryState.RUNNING_FLOWING || state == DeliveryState.RUNNING_PAUSED;
     }
+
     @Override public boolean isFlowOffStable() { return flowOffStable; }
+
     @Override
     public long getFlowOffAgeMs() {
         if (!sawFlowOnOnce) return 0L;
@@ -370,11 +582,13 @@ public final class DeliveryController implements DeliveryControllerPort {
         try { link.setTraceSink(null); } catch (Exception ignored) {}
         try { io.shutdownNow(); } catch (Exception ignored) {}
         setState(DeliveryState.DISCONNECTED);
+
         if (listener != null) {
             listener.onLiveStatus("LIVE: DISCONNECTED");
             listener.onLog(closeTransport ? "[LINK] Controller stopped / transport closed"
                     : "[LINK] Controller stopped (logic only)");
         }
+
         if (closeTransport) {
             try { link.close(); } catch (Exception ignored) {}
         } else {
@@ -385,7 +599,20 @@ public final class DeliveryController implements DeliveryControllerPort {
     private void setState(DeliveryState s) {
         if (state == s) return;
         state = s;
+
         if (listener != null) listener.onStateChanged(s);
+
+        // ✅ TickBus: publier le changement d'état immédiatement
+        try {
+            LastTick prev = lastTick;
+            double net = (prev != null) ? prev.net : 0.0;
+            double gross = (prev != null) ? prev.gross : 0.0;
+            int dev = (prev != null) ? prev.devStatus : (lastDevStatusKnown >= 0 ? lastDevStatusKnown : -1);
+            int prn = (prev != null) ? prev.prnStatus : (lastPrnStatusKnown >= 0 ? lastPrnStatusKnown : -1);
+            int ds = (prev != null) ? prev.delStatus : 0;
+            int dc = (prev != null) ? prev.delCode : 0;
+            publishTickIfChanged(net, gross, dev, prn, ds, dc, s);
+        } catch (Exception ignored) {}
     }
 
     // =========================
@@ -412,20 +639,34 @@ public final class DeliveryController implements DeliveryControllerPort {
             if (isStopped()) return;
             try {
                 FullStatus fs = readFullStatus("status/full");
+
+                // keep last known dev/prn for B+ tick bus
+                lastDevStatusKnown = fs.devStatus;
+                lastPrnStatusKnown = fs.prnStatus;
+
                 emitLog(String.format("[STATUS] dev=0x%02X prn=0x%02X ds=0x%04X dc=0x%04X",
                         fs.devStatus, fs.prnStatus, fs.delStatus, fs.delCode));
+
                 ensureDigits();
                 double scale = Math.pow(10, cachedDigits);
+
                 int gRaw = beI32(lcpGetField(FIELD_GROSS_COUNT));
                 int nRaw = beI32(lcpGetField(FIELD_NET_COUNT));
+
                 double net = (nRaw & 0xFFFFFFFFL) / scale;
                 double gross = (gRaw & 0xFFFFFFFFL) / scale;
+
                 if (listener != null) listener.onLiveQty(net, gross);
-            // ✅ Ticket info (UI): ticket_no (#23). delivery_uid est inconnu ici => null
-            try {
-                String tno = readTicketNo23();
-                if (listener != null) listener.onTicketInfo(tno, null);
-            } catch (Exception ignored) {}
+
+                // ✅ TickBus: push on change (B+ includes dev/prn/ds/dc/state)
+                publishTickIfChanged(net, gross, fs.devStatus, fs.prnStatus, fs.delStatus, fs.delCode, state);
+
+                // ✅ Ticket info (UI): ticket_no (#23). delivery_uid est inconnu ici => null
+                try {
+                    String tno = readTicketNo23();
+                    if (listener != null) listener.onTicketInfo(tno, null);
+                } catch (Exception ignored) {}
+
             } catch (Exception e) {
                 handleIoFailure("status", e);
             }
@@ -454,6 +695,20 @@ public final class DeliveryController implements DeliveryControllerPort {
             final long deadline = System.currentTimeMillis() + START_RETRY_WINDOW_MS;
             try {
                 FullStatus fs = retryUntilDeadline(deadline, "C/full-precheck", () -> readFullStatus("C/full"));
+
+                // keep last known dev/prn for B+ tick bus
+                lastDevStatusKnown = fs.devStatus;
+                lastPrnStatusKnown = fs.prnStatus;
+
+                // TickBus publish on status check
+                // (net/gross unknown here, keep prev values)
+                try {
+                    LastTick prev = lastTick;
+                    double net = (prev != null) ? prev.net : 0.0;
+                    double gross = (prev != null) ? prev.gross : 0.0;
+                    publishTickIfChanged(net, gross, fs.devStatus, fs.prnStatus, fs.delStatus, fs.delCode, state);
+                } catch (Exception ignored) {}
+
                 if (fs.deliveryActive) {
                     setState(DeliveryState.CONNECTED);
                     if (listener != null) {
@@ -482,6 +737,7 @@ public final class DeliveryController implements DeliveryControllerPort {
     private void doStartNewDeliveryWithRetry(long deadlineMs, int product1to16, double presetNet) throws Exception {
         if (isStopped()) return;
         setState(DeliveryState.PRESTART);
+
         flowOffStable = false;
         sawFlowOnOnce = false;
         flowOffStartMs = 0L;
@@ -522,10 +778,13 @@ public final class DeliveryController implements DeliveryControllerPort {
                 if ((now - lastContinueClickMs) < CONTINUE_DEBOUNCE_MS) return;
                 lastContinueClickMs = now;
                 if (continueGraceUntilMs > now) return;
+
                 lcpIssueCommand(CMD_RUN);
                 continueGraceUntilMs = now + CONTINUE_GRACE_MS;
+
                 setState(DeliveryState.RUNNING_FLOWING);
                 if (listener != null) listener.onLiveStatus("LIVE: RUNNING_FLOWING (Flow OFF - waiting progression)");
+
             } catch (Exception e) {
                 continueGraceUntilMs = 0L;
                 handleIoFailure("resumeIfPaused", e);
@@ -540,18 +799,23 @@ public final class DeliveryController implements DeliveryControllerPort {
             try {
                 if (state != DeliveryState.RUNNING_PAUSED) return;
                 if (!flowOffStable && !sawFlowOnOnce) return;
+
                 setState(DeliveryState.ENDING);
                 lcpIssueCommand(CMD_END);
+
                 long deadline = System.currentTimeMillis() + 15_000;
                 while (!isStopped() && System.currentTimeMillis() < deadline) {
                     FullStatus fs = safeReadFullStatusNoThrow();
                     if (fs != null && !fs.deliveryActive && !fs.flowActive) break;
                     try { Thread.sleep(250); } catch (InterruptedException ignored) {}
                 }
+
                 FullStatus fsAfter = safeReadFullStatusNoThrow();
                 if (fsAfter != null && fsAfter.ticketPending) clearTicketPendingLoop();
+
                 setState(DeliveryState.CONNECTED);
                 if (listener != null) listener.onLiveStatus("LIVE: CONNECTED - Ready");
+
             } catch (Exception e) {
                 handleIoFailure("endDelivery", e);
             }
@@ -571,9 +835,11 @@ public final class DeliveryController implements DeliveryControllerPort {
 
             inLiveSample.set(true);
             try {
+                int delStatus;
                 int delCode;
                 try {
                     int[] ds = lcpDeliveryStatus();
+                    delStatus = ds[0];
                     delCode = ds[1];
                 } catch (Exception e) {
                     liveSoftSkip("GET_DELIVERY_STATUS", e);
@@ -587,10 +853,12 @@ public final class DeliveryController implements DeliveryControllerPort {
                 if (!active) {
                     liveResetBackoff();
                     setState(DeliveryState.CONNECTED);
+
                     if (listener != null) {
                         listener.onLiveStatus(ticket ? "LIVE: CONNECTED - Ticket pending" : "LIVE: CONNECTED - Ready");
                         listener.onFlowStability(false, false, 0L);
                     }
+
                     lastGrossRaw = -1;
                     lastNetRaw = -1;
                     flowOffStable = false;
@@ -598,6 +866,15 @@ public final class DeliveryController implements DeliveryControllerPort {
                     flowOffStartMs = 0L;
                     lastCountsChangeMs = 0L;
                     continueGraceUntilMs = 0L;
+
+                    // ✅ TickBus: publish state/del changes even if quantities unknown
+                    try {
+                        LastTick prev = lastTick;
+                        double net = (prev != null) ? prev.net : 0.0;
+                        double gross = (prev != null) ? prev.gross : 0.0;
+                        publishTickIfChanged(net, gross, -1, -1, delStatus, delCode, state);
+                    } catch (Exception ignored) {}
+
                     return;
                 }
 
@@ -605,6 +882,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                 catch (Exception e) { liveSoftSkip("ensureDigits", e); return; }
 
                 double scale = Math.pow(10, cachedDigits);
+
                 int g, n;
                 try {
                     g = beI32(lcpGetField(FIELD_GROSS_COUNT));
@@ -622,7 +900,13 @@ public final class DeliveryController implements DeliveryControllerPort {
                     d = Math.abs(g - lastGrossRaw) + Math.abs(n - lastNetRaw);
                 }
 
-                if (listener != null) listener.onLiveQty(n / scale, g / scale);
+                double netL = n / scale;
+                double grossL = g / scale;
+
+                if (listener != null) listener.onLiveQty(netL, grossL);
+
+                // ✅ TickBus: publish on change (B+ includes delStatus/delCode + state; dev/prn best-effort via last known)
+                publishTickIfChanged(netL, grossL, -1, -1, delStatus, delCode, state);
 
                 if (d > 0) {
                     continueGraceUntilMs = 0L;
@@ -632,6 +916,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                     flowOffStartMs = 0L;
                     lastGrossRaw = g;
                     lastNetRaw = n;
+
                     if (listener != null) {
                         listener.onFlowStability(flowBit, false, 0L);
                         listener.onLiveStatus("LIVE: RUNNING_FLOWING (FLOW ON)");
@@ -646,10 +931,12 @@ public final class DeliveryController implements DeliveryControllerPort {
                 if (!sawFlowOnOnce) {
                     flowOffStable = false;
                     flowOffStartMs = 0L;
+
                     if (listener != null) {
                         listener.onFlowStability(flowBit, false, 0L);
                         listener.onLiveStatus("LIVE: RUNNING_FLOWING (Flow OFF - waiting progression)");
                     }
+
                     setState(DeliveryState.RUNNING_FLOWING);
                     lastGrossRaw = g;
                     lastNetRaw = n;
@@ -658,8 +945,8 @@ public final class DeliveryController implements DeliveryControllerPort {
 
                 if (flowOffStartMs == 0L) flowOffStartMs = lastCountsChangeMs;
                 flowOffStable = age >= NO_FLOW_CONFIRM_MS;
-                long now2 = System.currentTimeMillis();
 
+                long now2 = System.currentTimeMillis();
                 if (continueGraceUntilMs > now2) {
                     if (listener != null) {
                         listener.onFlowStability(flowBit, false, age);
@@ -717,9 +1004,23 @@ public final class DeliveryController implements DeliveryControllerPort {
             if (isStopped()) return;
             try {
                 FullStatus fs = readFullStatus("SNAP/full");
+
+                // keep last known dev/prn for B+ tick bus
+                lastDevStatusKnown = fs.devStatus;
+                lastPrnStatusKnown = fs.prnStatus;
+
                 if (listener != null) {
                     listener.onLiveStatus(fs.ticketPending ? "LIVE: CONNECTED - Ticket pending" : "LIVE: CONNECTED - Ready");
                 }
+
+                // publish state/ds/dc (net/gross unchanged)
+                try {
+                    LastTick prev = lastTick;
+                    double net = (prev != null) ? prev.net : 0.0;
+                    double gross = (prev != null) ? prev.gross : 0.0;
+                    publishTickIfChanged(net, gross, fs.devStatus, fs.prnStatus, fs.delStatus, fs.delCode, state);
+                } catch (Exception ignored) {}
+
             } catch (Exception e) {
                 handleIoFailure("requestLiveSnapshot", e);
             }
@@ -762,10 +1063,27 @@ public final class DeliveryController implements DeliveryControllerPort {
 
     private void doAlignOrRecoverFull() throws Exception {
         FullStatus fs = readFullStatus("A/full");
+
+        // keep last known dev/prn for B+ tick bus
+        lastDevStatusKnown = fs.devStatus;
+        lastPrnStatusKnown = fs.prnStatus;
+
+        // publish state/ds/dc changes quickly (net/gross unchanged here)
+        try {
+            LastTick prev = lastTick;
+            double net = (prev != null) ? prev.net : 0.0;
+            double gross = (prev != null) ? prev.gross : 0.0;
+            publishTickIfChanged(net, gross, fs.devStatus, fs.prnStatus, fs.delStatus, fs.delCode, state);
+        } catch (Exception ignored) {}
+
         if (fs.ticketPending) {
             clearTicketPendingSafeForAlign();
             fs = readFullStatus("A/full-after-ticket");
+
+            lastDevStatusKnown = fs.devStatus;
+            lastPrnStatusKnown = fs.prnStatus;
         }
+
         if (fs.deliveryActive && !fs.flowActive) {
             setState(DeliveryState.RUNNING_PAUSED);
             if (listener != null) listener.onLiveStatus("LIVE: RUNNING_PAUSED (recovered)");
@@ -776,6 +1094,7 @@ public final class DeliveryController implements DeliveryControllerPort {
             if (listener != null) listener.onLiveStatus("LIVE: RUNNING_FLOWING (recovered)");
             return;
         }
+
         setState(DeliveryState.CONNECTED);
         if (listener != null) {
             listener.onLiveStatus(fs.ticketPending ? "LIVE: CONNECTED - Ticket pending" : "LIVE: CONNECTED - Ready");
@@ -818,6 +1137,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                 }
             } catch (Exception ignored) {}
         }
+
         ticketPrintInFlight.set(false);
         ticketPrintStartMs = 0L;
     }
@@ -848,7 +1168,6 @@ public final class DeliveryController implements DeliveryControllerPort {
             } catch (Exception e) {
                 last = e;
                 String m = (e.getMessage() != null) ? e.getMessage() : "";
-
                 boolean retryable = m.contains("Queued timeout") || m.contains("Timeout waiting LCP response");
                 boolean hardFatal =
                         m.contains("Transport closed") ||
@@ -904,9 +1223,9 @@ public final class DeliveryController implements DeliveryControllerPort {
     private int beI32(byte[] b) {
         if (b == null || b.length < 4) return 0;
         return ((b[0] & 0xFF) << 24) |
-               ((b[1] & 0xFF) << 16) |
-               ((b[2] & 0xFF) << 8)  |
-               (b[3] & 0xFF);
+                ((b[1] & 0xFF) << 16) |
+                ((b[2] & 0xFF) << 8) |
+                (b[3] & 0xFF);
     }
 
     private String decodeAzString(byte[] b) {
@@ -922,6 +1241,7 @@ public final class DeliveryController implements DeliveryControllerPort {
         long u = beI32(lcpGetField(field)) & 0xFFFFFFFFL;
         return String.valueOf(u);
     }
+
     private String readTicketNo23() throws Exception { return readU32FieldAsDecString(FIELD_TICKET_NUMBER); }
     private String readSaleNo22() throws Exception { return readU32FieldAsDecString(FIELD_SALE_NUMBER); }
 
@@ -943,6 +1263,7 @@ public final class DeliveryController implements DeliveryControllerPort {
                 msg.contains("Queued timeout");
 
         if ("requestLiveSample".equals(ctx)) return;
+
         if (hardFatal) { shutdown(true); return; }
         if (retryish) softResync("timeout/" + ctx);
     }
@@ -979,7 +1300,9 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
         try {
             int[] ds = lcpDeliveryStatus();
+            int delStatus = ds[0];
             int delCode = ds[1];
+
             boolean ticketPending = (delCode & DC_TICKET_PENDING) != 0;
             boolean flowActive = (delCode & DC_FLOW_ACTIVE) != 0;
             boolean deliveryActive = (delCode & DC_DELIVERY_ACTIVE) != 0;
@@ -988,6 +1311,14 @@ public final class DeliveryController implements DeliveryControllerPort {
             safeJsonPut(data, "deliveryActive", deliveryActive ? 1 : 0);
             safeJsonPut(data, "flowActive", flowActive ? 1 : 0);
             safeJsonPut(data, "ticketPending", ticketPending ? 1 : 0);
+
+            // TickBus: publish ds/dc changes immediately
+            try {
+                LastTick prev = lastTick;
+                double net = (prev != null) ? prev.net : 0.0;
+                double gross = (prev != null) ? prev.gross : 0.0;
+                publishTickIfChanged(net, gross, -1, -1, delStatus, delCode, state);
+            } catch (Exception ignored) {}
 
             if (!deliveryActive && !ticketPending) {
                 safeJsonPut(data, "next", "C");
@@ -1003,16 +1334,8 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
     }
 
-    
     // =========================================================
-    // ✅ COMMIT 2: Registre prêt / validateRegister
-    // - Valide ticket_pending + delivery_active via 0x28
-    // - Lit ticket_no (#23 U32) + serial_id (#80)
-    // - Construit delivery_uid = numero_livraison + "-" + ticket_no (si numero_livraison fourni)
-    // - Valide produit actif (#0) si attendu
-    // - Compartiment: validation de présence (champ non lisible LCP dans cette base)
-    // - Log SQLite (summary/attempt/event) si store injecté
-    // - Notifie UI via listener.onTicketInfo(ticketNo, deliveryUid)
+    // ✅ Registre prêt / validateRegister
     // =========================================================
     public ApiResult api_registerValidate(
             String numero_livraison,
@@ -1042,6 +1365,10 @@ public final class DeliveryController implements DeliveryControllerPort {
 
         try {
             FullStatus fs = readFullStatus("VALIDATE/full");
+
+            // keep last known dev/prn for B+ tick bus
+            lastDevStatusKnown = fs.devStatus;
+            lastPrnStatusKnown = fs.prnStatus;
 
             // Identifiants registre
             String ticketNo = readTicketNo23();
@@ -1087,20 +1414,16 @@ public final class DeliveryController implements DeliveryControllerPort {
             safeJsonPut(data, "lcrnode_hex", String.format("0x%02X", link.getToAddr() & 0xFF));
             safeJsonPut(data, "from_dec", link.getHostAddr() & 0xFF);
             safeJsonPut(data, "from_hex", String.format("0x%02X", link.getHostAddr() & 0xFF));
-
             safeJsonPut(data, "deliveryActive", fs.deliveryActive ? 1 : 0);
             safeJsonPut(data, "flowActive", fs.flowActive ? 1 : 0);
             safeJsonPut(data, "ticketPending", fs.ticketPending ? 1 : 0);
-
             safeJsonPut(data, "ticket_no", ticketNo);
             safeJsonPut(data, "sale_no", saleNo);
             safeJsonPut(data, "serial_id", serialId);
             safeJsonPut(data, "delivery_uid", deliveryUid == null ? JSONObject.NULL : deliveryUid);
-
             safeJsonPut(data, "active_product", activeProduct1to16 == null ? JSONObject.NULL : activeProduct1to16);
             safeJsonPut(data, "expected_product_number", expected_product_number == null ? JSONObject.NULL : expected_product_number);
             safeJsonPut(data, "expected_compartment", expected_compartment == null ? JSONObject.NULL : expected_compartment);
-
             safeJsonPut(data, "serial_match", serialMatch ? 1 : 0);
             safeJsonPut(data, "product_ok", productOk ? 1 : 0);
             safeJsonPut(data, "compartment_ok", compartmentOk ? 1 : 0);
@@ -1109,7 +1432,15 @@ public final class DeliveryController implements DeliveryControllerPort {
             boolean ready = (!fs.ticketPending && !fs.deliveryActive && serialMatch && productOk && compartmentOk);
             safeJsonPut(data, "ready", ready ? 1 : 0);
 
-            // UI callback: afficher ticket_no et delivery_uid (deliveryUid peut être null)
+            // ✅ TickBus: publish ds/dc/dev/prn/state changes quickly
+            try {
+                LastTick prev = lastTick;
+                double net = (prev != null) ? prev.net : 0.0;
+                double gross = (prev != null) ? prev.gross : 0.0;
+                publishTickIfChanged(net, gross, fs.devStatus, fs.prnStatus, fs.delStatus, fs.delCode, state);
+            } catch (Exception ignored) {}
+
+            // UI callback
             try {
                 if (listener != null) listener.onTicketInfo(ticketNo, deliveryUid);
             } catch (Exception ignored) {}
@@ -1118,6 +1449,7 @@ public final class DeliveryController implements DeliveryControllerPort {
             DeliveryLogStore store = this.logStore;
             if (store != null && serialId != null && !serialId.isEmpty()
                     && ticketNo != null && !ticketNo.isEmpty()) {
+
                 String stateTxt = ready ? "VALIDATE_READY" : "VALIDATE_BLOCKED";
                 if (fs.ticketPending) stateTxt = "TICKET_PENDING";
                 else if (fs.deliveryActive) stateTxt = "DELIVERY_ACTIVE";
@@ -1161,15 +1493,16 @@ public final class DeliveryController implements DeliveryControllerPort {
         }
     }
 
-public ApiResult api_deliveryAlignA() {
+    public ApiResult api_deliveryAlignA() {
         if (link == null || link.isClosed()) {
             return ApiResult.fail("Align A: 0 - USB non pret.", "USB_NOT_READY");
         }
         try {
             doAlignOrRecoverFull();
-
             int[] ds = lcpDeliveryStatus();
+            int delStatus = ds[0];
             int delCode = ds[1];
+
             boolean ticketPending = (delCode & DC_TICKET_PENDING) != 0;
             boolean flowActive = (delCode & DC_FLOW_ACTIVE) != 0;
             boolean deliveryActive = (delCode & DC_DELIVERY_ACTIVE) != 0;
@@ -1183,6 +1516,14 @@ public ApiResult api_deliveryAlignA() {
             safeJsonPut(data, "live_status", (!deliveryActive && !ticketPending)
                     ? "LIVE: CONNECTED - Ready"
                     : (ticketPending ? "LIVE: CONNECTED - Ticket pending" : "LIVE: CONNECTED - Delivery/Flow active"));
+
+            // TickBus publish ds/dc change (net/gross unchanged)
+            try {
+                LastTick prev = lastTick;
+                double net = (prev != null) ? prev.net : 0.0;
+                double gross = (prev != null) ? prev.gross : 0.0;
+                publishTickIfChanged(net, gross, -1, -1, delStatus, delCode, state);
+            } catch (Exception ignored) {}
 
             return ApiResult.ok("Align A: 1 - Align/Recover executed", data);
 
@@ -1199,7 +1540,9 @@ public ApiResult api_deliveryAlignA() {
         }
         try {
             int[] ds0 = lcpDeliveryStatus();
+            int delStatus0 = ds0[0];
             int delCode0 = ds0[1];
+
             boolean ticketPending0 = (delCode0 & DC_TICKET_PENDING) != 0;
             boolean flowActive0 = (delCode0 & DC_FLOW_ACTIVE) != 0;
             boolean deliveryActive0 = (delCode0 & DC_DELIVERY_ACTIVE) != 0;
@@ -1210,6 +1553,14 @@ public ApiResult api_deliveryAlignA() {
             safeJsonPut(data, "deliveryActive", deliveryActive0 ? 1 : 0);
             safeJsonPut(data, "flowActive", flowActive0 ? 1 : 0);
             safeJsonPut(data, "ticketPending", ticketPending0 ? 1 : 0);
+
+            // TickBus publish ds/dc change (net/gross unchanged)
+            try {
+                LastTick prev = lastTick;
+                double net = (prev != null) ? prev.net : 0.0;
+                double gross = (prev != null) ? prev.gross : 0.0;
+                publishTickIfChanged(net, gross, -1, -1, delStatus0, delCode0, state);
+            } catch (Exception ignored) {}
 
             if (deliveryActive0 || ticketPending0 || flowActive0) {
                 safeJsonPut(data, "next", "A");
@@ -1244,7 +1595,9 @@ public ApiResult api_deliveryAlignA() {
         }
         try {
             int[] ds0 = lcpDeliveryStatus();
+            int delStatus0 = ds0[0];
             int delCode0 = ds0[1];
+
             boolean ticketPending0 = (delCode0 & DC_TICKET_PENDING) != 0;
             boolean deliveryActive0 = (delCode0 & DC_DELIVERY_ACTIVE) != 0;
 
@@ -1252,6 +1605,14 @@ public ApiResult api_deliveryAlignA() {
             String saleNo = readSaleNo22();
             String serialId = decodeAzString(lcpGetField(FIELD_SERIAL_ID));
             String deliveryUid = (numero_livraison == null ? "" : numero_livraison) + "-" + ticketNo;
+
+            // TickBus publish ds/dc change (net/gross unchanged)
+            try {
+                LastTick prev = lastTick;
+                double net = (prev != null) ? prev.net : 0.0;
+                double gross = (prev != null) ? prev.gross : 0.0;
+                publishTickIfChanged(net, gross, -1, -1, delStatus0, delCode0, state);
+            } catch (Exception ignored) {}
 
             if (deliveryActive0) {
                 JSONObject data = new JSONObject();
@@ -1275,12 +1636,22 @@ public ApiResult api_deliveryAlignA() {
             if (ticketPending0) {
                 autoAAttempted = true;
                 try { doAlignOrRecoverFull(); } catch (Exception ignore) {}
+
                 int[] dsA = lcpDeliveryStatus();
+                int delStatusA = dsA[0];
                 int delCodeA = dsA[1];
+
                 boolean ticketPendingA = (delCodeA & DC_TICKET_PENDING) != 0;
                 boolean deliveryActiveA = (delCodeA & DC_DELIVERY_ACTIVE) != 0;
-
                 autoASuccess = !ticketPendingA;
+
+                // TickBus publish ticket pending changes
+                try {
+                    LastTick prev = lastTick;
+                    double net = (prev != null) ? prev.net : 0.0;
+                    double gross = (prev != null) ? prev.gross : 0.0;
+                    publishTickIfChanged(net, gross, -1, -1, delStatusA, delCodeA, state);
+                } catch (Exception ignored) {}
 
                 if (ticketPendingA || deliveryActiveA) {
                     JSONObject data = new JSONObject();
@@ -1299,12 +1670,10 @@ public ApiResult api_deliveryAlignA() {
                     a.put("ALIGN_A");
                     safeJsonPut(data, "available_actions", a);
 
-                    // DB: summary update
                     DeliveryLogStore store = this.logStore;
                     if (store != null && serialId != null && !serialId.isEmpty() && ticketNo != null && !ticketNo.isEmpty()) {
                         store.upsertSummaryAsync(serialId, ticketNo, saleNo, "TICKET_PENDING", DeliveryLogStore.SOURCE_API, null, null, null);
                     }
-
                     return ApiResult.ok("Delivery OneShot: 1 - Ticket pending (auto-A attempted)", data);
                 }
             }
@@ -1314,6 +1683,7 @@ public ApiResult api_deliveryAlignA() {
 
             int idx0 = product1to16 - 1;
             lcpSetField(FIELD_ACTIVE_PRODUCT, new byte[]{(byte) idx0});
+
             writePresetNet_WithCacheOrFallback(presetNetL);
 
             long presetRawU = beI32(lcpGetField(FIELD_PRESET_NET)) & 0xFFFFFFFFL;
@@ -1348,12 +1718,10 @@ public ApiResult api_deliveryAlignA() {
                 apiJobs.put(jobId, job);
             }
 
-            // ✅ SQLite: upsert summary + open attempt (async)
+            // SQLite
             DeliveryLogStore store = this.logStore;
             if (store != null && serialId != null && !serialId.trim().isEmpty() && ticketNo != null && !ticketNo.trim().isEmpty()) {
                 store.upsertSummaryAsync(serialId, ticketNo, saleNo, "ARMED", DeliveryLogStore.SOURCE_API, jobId, null, null);
-
-                // ✅ FIX: log ONESHOT_ARMED once attemptId is known
                 store.openAttemptAsync(serialId, ticketNo, DeliveryLogStore.SOURCE_API, jobId, attemptId -> {
                     job.attemptId = attemptId;
                     if (attemptId > 0) {
@@ -1363,6 +1731,7 @@ public ApiResult api_deliveryAlignA() {
             }
 
             setState(DeliveryState.CONNECTED);
+
             JSONObject data = new JSONObject();
             safeJsonPut(data, "jobId", jobId);
             safeJsonPut(data, "numero_livraison", numero_livraison);
@@ -1401,14 +1770,14 @@ public ApiResult api_deliveryAlignA() {
             job.continueGraceUntilMs = now + CONTINUE_GRACE_MS;
             setState(DeliveryState.RUNNING_FLOWING);
 
-            // refresh identifiers best-effort
             try { job.ticketNo = readTicketNo23(); } catch (Exception ignored) {}
             try { job.saleNo = readSaleNo22(); } catch (Exception ignored) {}
 
-            // Mettre à jour le cache JobGet immédiatement pour éviter le retour PENDING/ARMED sous RATE_LIMIT
+            // Mettre à jour le cache JobGet immédiatement
             try {
                 JSONObject cached = (job.lastOkData != null) ? safeJsonCopy(job.lastOkData) : new JSONObject();
                 if (cached == null) cached = new JSONObject();
+
                 safeJsonPut(cached, "jobId", jobId);
                 safeJsonPut(cached, "numero_livraison", job.numeroLivraison);
                 safeJsonPut(cached, "ticket_no", job.ticketNo);
@@ -1427,10 +1796,12 @@ public ApiResult api_deliveryAlignA() {
                 safeJsonPut(cached, "continue_grace_ms_left", Math.max(0L, job.continueGraceUntilMs - now));
                 safeJsonPut(cached, "next_poll_ms", API_JOB_MIN_POLL_MS);
                 safeJsonPut(cached, "live_status", "LIVE: RUNNING_FLOWING (Flow OFF - waiting progression)");
+
                 JSONArray a0 = new JSONArray();
                 a0.put("CONTINUER");
                 a0.put("TERMINER");
                 safeJsonPut(cached, "available_actions", a0);
+
                 job.lastOkData = safeJsonCopy(cached);
                 job.lastOkMsg = "Job: 1 - RUNNING";
                 job.nextAllowedReadMs = now + API_JOB_MIN_POLL_MS;
@@ -1438,7 +1809,9 @@ public ApiResult api_deliveryAlignA() {
 
             // SQLite
             DeliveryLogStore store = this.logStore;
-            if (store != null && job.serialId != null && !job.serialId.isEmpty() && job.ticketNo != null && !job.ticketNo.isEmpty()) {
+            if (store != null && job.serialId != null && !job.serialId.isEmpty()
+                    && job.ticketNo != null && !job.ticketNo.isEmpty()) {
+
                 store.upsertSummaryAsync(job.serialId, job.ticketNo, job.saleNo, "RUN_SENT", DeliveryLogStore.SOURCE_API, jobId, null, null);
                 if (job.attemptId > 0) {
                     store.addEventAsync(job.attemptId, DeliveryLogStore.LEVEL_INFO, "CONTINUE_RUN_SENT", "RUN sent", null);
@@ -1453,6 +1826,7 @@ public ApiResult api_deliveryAlignA() {
             safeJsonPut(data, "delivery_uid", job.deliveryUid);
             safeJsonPut(data, "armed", 0);
             safeJsonPut(data, "live_status", "LIVE: RUNNING_FLOWING (Flow OFF - waiting progression)");
+
             return ApiResult.ok("Continue: 1 - RUN sent", data);
 
         } catch (Exception e) {
@@ -1471,17 +1845,18 @@ public ApiResult api_deliveryAlignA() {
         ApiJob job;
         synchronized (apiJobs) { job = apiJobs.get(jobId); }
         if (job == null) return ApiResult.fail("Terminate: 0 - Job unknown", "JOB_NOT_FOUND");
+
         try { lcpIssueCommand(CMD_END); } catch (Exception ignore) {}
 
-        // refresh identifiers best-effort
         try { job.ticketNo = readTicketNo23(); } catch (Exception ignored) {}
         try { job.saleNo = readSaleNo22(); } catch (Exception ignored) {}
 
-        // Cache "ENDING" immédiat pour stabilité sous RATE_LIMIT
+        // Cache "ENDING" immédiat
         try {
             long now = System.currentTimeMillis();
             JSONObject cached = (job.lastOkData != null) ? safeJsonCopy(job.lastOkData) : new JSONObject();
             if (cached == null) cached = new JSONObject();
+
             safeJsonPut(cached, "jobId", jobId);
             safeJsonPut(cached, "numero_livraison", job.numeroLivraison);
             safeJsonPut(cached, "ticket_no", job.ticketNo);
@@ -1489,6 +1864,7 @@ public ApiResult api_deliveryAlignA() {
             safeJsonPut(cached, "delivery_uid", job.deliveryUid);
             safeJsonPut(cached, "armed", 0);
             safeJsonPut(cached, "live_status", "LIVE: ENDING");
+
             job.lastOkData = safeJsonCopy(cached);
             job.lastOkMsg = (job.lastOkMsg != null) ? job.lastOkMsg : "Job: 1 - RUNNING";
             job.nextAllowedReadMs = now + API_JOB_MIN_POLL_MS;
@@ -1496,7 +1872,9 @@ public ApiResult api_deliveryAlignA() {
 
         // SQLite
         DeliveryLogStore store = this.logStore;
-        if (store != null && job.serialId != null && !job.serialId.isEmpty() && job.ticketNo != null && !job.ticketNo.isEmpty()) {
+        if (store != null && job.serialId != null && !job.serialId.isEmpty()
+                && job.ticketNo != null && !job.ticketNo.isEmpty()) {
+
             store.upsertSummaryAsync(job.serialId, job.ticketNo, job.saleNo, "END_SENT", DeliveryLogStore.SOURCE_API, jobId, null, null);
             if (job.attemptId > 0) {
                 store.addEventAsync(job.attemptId, DeliveryLogStore.LEVEL_INFO, "TERMINATE_END_SENT", "END sent", null);
@@ -1511,6 +1889,7 @@ public ApiResult api_deliveryAlignA() {
         safeJsonPut(data, "delivery_uid", job.deliveryUid);
         safeJsonPut(data, "armed", 0);
         safeJsonPut(data, "live_status", "LIVE: ENDING");
+
         return ApiResult.ok("Terminate: 1 - END sent", data);
     }
 
@@ -1518,15 +1897,24 @@ public ApiResult api_deliveryAlignA() {
         ApiJob job;
         synchronized (apiJobs) { job = apiJobs.get(jobId); }
         if (job == null) return ApiResult.fail("Job: 0 - Unknown", "JOB_NOT_FOUND");
+
         final long now = System.currentTimeMillis();
 
         // --- Throttle (avoid too fast polling) ---
         if (job.lastOkData != null && now < job.nextAllowedReadMs) {
             JSONObject data = safeJsonCopy(job.lastOkData);
             if (data == null) data = new JSONObject();
+
             safeJsonPut(data, "stale", true);
             safeJsonPut(data, "stale_reason", "RATE_LIMIT");
             safeJsonPut(data, "next_poll_ms", Math.max(0L, job.nextAllowedReadMs - now));
+
+            // ✅ Bonus: injecter le snapshot TickBus dans JobGet (pour UI FieldService)
+            try {
+                JSONObject tick = buildTickJsonSnapshot();
+                safeJsonPut(data, "tick", tick);
+            } catch (Exception ignored) {}
+
             return ApiResult.ok(job.lastOkMsg != null ? job.lastOkMsg : "Job: 1 - RUNNING", data);
         }
 
@@ -1541,6 +1929,7 @@ public ApiResult api_deliveryAlignA() {
         try {
             int[] ds = lcpDeliveryStatus();
             int delCode = ds[1];
+
             boolean deliveryActive = (delCode & DC_DELIVERY_ACTIVE) != 0;
             boolean flowActive = (delCode & DC_FLOW_ACTIVE) != 0;
             boolean ticketPending = (delCode & DC_TICKET_PENDING) != 0;
@@ -1553,6 +1942,7 @@ public ApiResult api_deliveryAlignA() {
 
             int g = beI32(lcpGetField(FIELD_GROSS_COUNT));
             int n = beI32(lcpGetField(FIELD_NET_COUNT));
+
             double netL = (n & 0xFFFFFFFFL) / scale;
             double grossL = (g & 0xFFFFFFFFL) / scale;
 
@@ -1607,23 +1997,35 @@ public ApiResult api_deliveryAlignA() {
             safeJsonPut(data, "ticket_no", job.ticketNo);
             safeJsonPut(data, "sale_no", job.saleNo);
             safeJsonPut(data, "delivery_uid", job.deliveryUid);
+
             safeJsonPut(data, "deliveryActive", deliveryActive ? 1 : 0);
             safeJsonPut(data, "flowActive", flowActive ? 1 : 0);
             safeJsonPut(data, "ticketPending", ticketPending ? 1 : 0);
+
             safeJsonPut(data, "net", netL);
             safeJsonPut(data, "gross", grossL);
             safeJsonPut(data, "decimals", cachedDigits);
+
             safeJsonPut(data, "preset_requested", job.presetNetL_requested);
             safeJsonPut(data, "preset_applied", job.presetNetL_applied);
+
             safeJsonPut(data, "delivered_net", deliveryActive ? netL : JSONObject.NULL);
+
             safeJsonPut(data, "pause_active", pauseActive ? 1 : 0);
             safeJsonPut(data, "pause_reason", (pauseReason == null) ? JSONObject.NULL : pauseReason);
+
             safeJsonPut(data, "flow_off_age_ms", offAge);
             safeJsonPut(data, "flow_off_confirmed", flowOffConfirmed ? 1 : 0);
             safeJsonPut(data, "continue_grace_ms_left", Math.max(0L, job.continueGraceUntilMs - now));
             safeJsonPut(data, "next_poll_ms", API_JOB_MIN_POLL_MS);
 
-            // ✅ Filet "startingAfterContinue": RUN demandé mais deliveryActive pas encore monté
+            // ✅ Inclure tick snapshot
+            try {
+                JSONObject tick = buildTickJsonSnapshot();
+                safeJsonPut(data, "tick", tick);
+            } catch (Exception ignored) {}
+
+            // ✅ Filet "startingAfterContinue"
             boolean startingAfterContinue = (job.continueGraceUntilMs > now) && !deliveryActive && !job.sawDeliveryActiveOnce;
             if (startingAfterContinue) {
                 job.state = "RUNNING";
@@ -1633,10 +2035,12 @@ public ApiResult api_deliveryAlignA() {
                 safeJsonPut(data, "pause_active", 1);
                 safeJsonPut(data, "pause_reason", "WAIT_FLOW_ON");
                 safeJsonPut(data, "live_status", "LIVE: RUNNING_FLOWING (Flow OFF - waiting progression)");
+
                 JSONArray a0 = new JSONArray();
                 a0.put("CONTINUER");
                 a0.put("TERMINER");
                 safeJsonPut(data, "available_actions", a0);
+
                 job.lastOkData = safeJsonCopy(data);
                 job.lastOkMsg = "Job: 1 - RUNNING";
                 job.nextAllowedReadMs = now + API_JOB_MIN_POLL_MS;
@@ -1651,6 +2055,7 @@ public ApiResult api_deliveryAlignA() {
                 safeJsonPut(data, "state", DeliveryState.CONNECTED.name());
                 safeJsonPut(data, "live_status", liveStatusArmed());
                 safeJsonPut(data, "available_actions", actionsContinueTerminate());
+
                 job.lastOkData = safeJsonCopy(data);
                 job.lastOkMsg = "Job: 1 - PENDING";
                 job.nextAllowedReadMs = now + API_JOB_MIN_POLL_MS;
@@ -1698,6 +2103,7 @@ public ApiResult api_deliveryAlignA() {
                 safeJsonPut(result, "net_delta", ndU);
                 safeJsonPut(result, "gross_total", job.grossTotalRaw & 0xFFFFFFFFL);
                 safeJsonPut(result, "net_total", job.netTotalRaw & 0xFFFFFFFFL);
+
                 safeJsonPut(result, "inventory_written", JSONObject.NULL);
                 safeJsonPut(result, "host_printed", true);
 
@@ -1713,7 +2119,7 @@ public ApiResult api_deliveryAlignA() {
                 safeJsonPut(data, "available_actions", new JSONArray());
                 safeJsonPut(data, "result", result);
 
-                // ✅ SQLite: finalise attempt + summary + times
+                // SQLite
                 DeliveryLogStore store = this.logStore;
                 if (store != null && job.serialId != null && !job.serialId.isEmpty() && job.ticketNo != null && !job.ticketNo.isEmpty()) {
                     store.upsertSummaryAsync(job.serialId, job.ticketNo, job.saleNo, "DONE", DeliveryLogStore.SOURCE_API, jobId, result.toString(), null);
@@ -1773,7 +2179,6 @@ public ApiResult api_deliveryAlignA() {
             if (store != null && job.attemptId > 0) {
                 store.addEventAsync(job.attemptId, DeliveryLogStore.LEVEL_WARN, "JOBGET_READ_FAIL", safeMsg(e), null);
             }
-
             if (job.lastOkData != null) {
                 JSONObject data = safeJsonCopy(job.lastOkData);
                 if (data == null) data = new JSONObject();
@@ -1781,9 +2186,15 @@ public ApiResult api_deliveryAlignA() {
                 safeJsonPut(data, "stale_reason", "READ_FAIL");
                 safeJsonPut(data, "next_poll_ms", API_JOB_BACKOFF_ON_FAIL_MS);
                 job.nextAllowedReadMs = now + API_JOB_BACKOFF_ON_FAIL_MS;
+
+                // tick snapshot even on fail
+                try {
+                    JSONObject tick = buildTickJsonSnapshot();
+                    safeJsonPut(data, "tick", tick);
+                } catch (Exception ignored) {}
+
                 return ApiResult.ok(job.lastOkMsg != null ? job.lastOkMsg : "Job: 1 - RUNNING", data);
             }
-
             JSONObject d = new JSONObject();
             safeJsonPut(d, "detail", (e.getMessage() != null) ? e.getMessage() : "");
             return ApiResult.fail("Job: 0 - Read error", "JOB_READ_FAIL", d);

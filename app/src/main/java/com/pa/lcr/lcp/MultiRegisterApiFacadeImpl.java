@@ -19,6 +19,14 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * MultiRegisterApiFacadeImpl
+ * - USB open/ping
+ * - Node-aware sessions (RegisterSessionManager)
+ * - jobId -> node mapping
+ *
+ * ✅ NEW: api_tickWait(...) pour long-poll de ticks (change-driven).
+ */
 public final class MultiRegisterApiFacadeImpl implements ApiFacade {
 
     // Auto-tab: broadcast vers UI pour créer un tab si absent (no focus)
@@ -55,20 +63,14 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     }
 
     /**
-     * Open/Ping USB doit être actif:
+     * Open/Ping USB:
      * - Si UsbSession port déjà prêt -> OK
-     * - Sinon:
-     *   - si aucun device -> ERR_MEDIA_NOT_PRESENT
-     *   - si pas permission -> ERR_USB_PERMISSION_REQUIRED
-     *   - sinon ouvrir port série, setParameters, UsbSession.set(dev, port) -> OK
-     *
-     * ✅ Ajout: broadcast UsbReceiver.ACTION_USB_READY quand l'ouverture réussit,
-     * pour que l'UI (tabs) puisse auto-attach sans intervention.
+     * - Sinon: ouvrir port série, UsbSession.set(dev, port)
+     * - Broadcast UsbReceiver.ACTION_USB_READY si succès
      */
     @Override
     public ApiResult api_openPingUsb() {
         try {
-            // 0) Déjà prêt ?
             UsbSerialPort existing = UsbSession.getPort();
             if (existing != null) {
                 JSONObject d = new JSONObject();
@@ -80,7 +82,6 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                 return ApiResult.fail("Open/Ping USB: 0 - USB manager null.", "ERR_USB_OPEN_FAILED");
             }
 
-            // 1) Trouver un device (un seul média USB-C présumé)
             Map<String, UsbDevice> devs = usbManager.getDeviceList();
             if (devs == null || devs.isEmpty()) {
                 JSONObject d = new JSONObject();
@@ -94,7 +95,6 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                 return ApiResult.fail("Open/Ping USB: 0 - Aucun périphérique USB détecté.", "ERR_MEDIA_NOT_PRESENT");
             }
 
-            // 2) Permission ?
             if (!usbManager.hasPermission(dev)) {
                 JSONObject d = new JSONObject();
                 d.put("vid", dev.getVendorId());
@@ -107,7 +107,6 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                 );
             }
 
-            // 3) Driver ?
             UsbSerialDriver driver = UsbSerialProber.getDefaultProber().probeDevice(dev);
             if (driver == null || driver.getPorts() == null || driver.getPorts().isEmpty()) {
                 JSONObject d = new JSONObject();
@@ -117,7 +116,6 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                         "ERR_USB_DRIVER_NOT_FOUND", d);
             }
 
-            // 4) Ouvrir connexion + port
             UsbDeviceConnection conn = usbManager.openDevice(dev);
             if (conn == null) {
                 JSONObject d = new JSONObject();
@@ -132,10 +130,8 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                 port.open(conn);
                 port.setParameters(19200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
 
-                // ✅ publier la session globale
                 UsbSession.set(dev, port);
 
-                // ✅ IMPORTANT: signaler à l’UI que l’USB est prêt (tabs auto-attach)
                 try {
                     Intent ready = new Intent(UsbReceiver.ACTION_USB_READY);
                     ready.setPackage(appCtx.getPackageName());
@@ -155,8 +151,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
 
                 JSONObject d = new JSONObject();
                 d.put("detail", (openEx.getMessage() != null) ? openEx.getMessage() : openEx.getClass().getSimpleName());
-                return ApiResult.fail("Open/Ping USB: 0 - Échec ouverture port.",
-                        "ERR_USB_OPEN_FAILED", d);
+                return ApiResult.fail("Open/Ping USB: 0 - Échec ouverture port.", "ERR_USB_OPEN_FAILED", d);
             }
 
         } catch (Exception e) {
@@ -221,7 +216,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     }
 
     // =========================
-    // Legacy wrappers REQUIRED by ApiFacade (abstract methods)
+    // Legacy wrappers REQUIRED by ApiFacade
     // =========================
     @Override public ApiResult api_connectLcp() { return api_connectLcp(null, null); }
     @Override public ApiResult api_deliveryAlignA() { return api_deliveryAlignA(null, null); }
@@ -244,7 +239,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     }
 
     // =========================
-    // Node-aware operations (B2: create if missing)
+    // Node-aware operations (B2)
     // =========================
     @Override
     public ApiResult api_connectLcp(Integer lcrnode_dec, Integer from_dec) {
@@ -329,5 +324,23 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             try { d.put("detail", (e.getMessage() != null) ? e.getMessage() : ""); } catch (Exception ignored) {}
             return ApiResult.fail("DB Dump: 0 - Failed", "DB_DUMP_FAIL", d);
         }
+    }
+
+    // =========================================================
+    // ✅ NEW: Tick wait (B+): net/gross OR dev/prn OR delCode/delStatus OR state changes
+    // =========================================================
+    @Override
+    public ApiResult api_tickWait(Integer lcrnode_dec, Long since_seq, Integer wait_ms) {
+        int node = normNode(lcrnode_dec);
+        long since = (since_seq != null) ? since_seq : 0L;
+        long wait = (wait_ms != null) ? wait_ms.longValue() : 25_000L;
+
+        // from par défaut 255 (comme les autres endpoints)
+        DeliveryController dc = requireSession(node, 255);
+        if (dc == null) {
+            return ApiResult.fail("Tick: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
+        }
+
+        return dc.api_tickWait(since, wait);
     }
 }
