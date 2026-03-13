@@ -19,14 +19,6 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-/**
- * MultiRegisterApiFacadeImpl
- * - USB open/ping
- * - Node-aware sessions (RegisterSessionManager)
- * - jobId -> node mapping
- *
- * ✅ NEW: api_tickWait(...) pour long-poll de ticks (change-driven).
- */
 public final class MultiRegisterApiFacadeImpl implements ApiFacade {
 
     // Auto-tab: broadcast vers UI pour créer un tab si absent (no focus)
@@ -38,6 +30,12 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
 
     // jobId -> node (fallback)
     private final Map<String, Integer> jobToNode = new ConcurrentHashMap<>();
+    // ✅ NEW: jobId -> from (best-effort)
+    private final Map<String, Integer> jobToFrom = new ConcurrentHashMap<>();
+
+    // ✅ NEW: dernier node/from observé (hint robuste)
+    private volatile int lastNodeHint = 250;
+    private volatile int lastFromHint = 255;
 
     public MultiRegisterApiFacadeImpl(Context ctx) {
         this.appCtx = ctx.getApplicationContext();
@@ -65,12 +63,13 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     /**
      * Open/Ping USB:
      * - Si UsbSession port déjà prêt -> OK
-     * - Sinon: ouvrir port série, UsbSession.set(dev, port)
-     * - Broadcast UsbReceiver.ACTION_USB_READY si succès
+     * - Sinon: ouvre port série, setParameters, UsbSession.set(dev, port) -> OK
+     * - Broadcast UsbReceiver.ACTION_USB_READY si succès (tabs auto-attach).
      */
     @Override
     public ApiResult api_openPingUsb() {
         try {
+            // 0) Déjà prêt ?
             UsbSerialPort existing = UsbSession.getPort();
             if (existing != null) {
                 JSONObject d = new JSONObject();
@@ -82,6 +81,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                 return ApiResult.fail("Open/Ping USB: 0 - USB manager null.", "ERR_USB_OPEN_FAILED");
             }
 
+            // 1) Trouver un device
             Map<String, UsbDevice> devs = usbManager.getDeviceList();
             if (devs == null || devs.isEmpty()) {
                 JSONObject d = new JSONObject();
@@ -95,6 +95,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                 return ApiResult.fail("Open/Ping USB: 0 - Aucun périphérique USB détecté.", "ERR_MEDIA_NOT_PRESENT");
             }
 
+            // 2) Permission ?
             if (!usbManager.hasPermission(dev)) {
                 JSONObject d = new JSONObject();
                 d.put("vid", dev.getVendorId());
@@ -107,6 +108,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                 );
             }
 
+            // 3) Driver ?
             UsbSerialDriver driver = UsbSerialProber.getDefaultProber().probeDevice(dev);
             if (driver == null || driver.getPorts() == null || driver.getPorts().isEmpty()) {
                 JSONObject d = new JSONObject();
@@ -116,6 +118,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                         "ERR_USB_DRIVER_NOT_FOUND", d);
             }
 
+            // 4) Ouvrir connexion + port
             UsbDeviceConnection conn = usbManager.openDevice(dev);
             if (conn == null) {
                 JSONObject d = new JSONObject();
@@ -130,8 +133,10 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                 port.open(conn);
                 port.setParameters(19200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
 
+                // publier la session globale
                 UsbSession.set(dev, port);
 
+                // signaler à l’UI que l’USB est prêt (tabs auto-attach)
                 try {
                     Intent ready = new Intent(UsbReceiver.ACTION_USB_READY);
                     ready.setPackage(appCtx.getPackageName());
@@ -148,10 +153,10 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             } catch (Exception openEx) {
                 try { port.close(); } catch (Exception ignored) {}
                 try { conn.close(); } catch (Exception ignored) {}
-
                 JSONObject d = new JSONObject();
                 d.put("detail", (openEx.getMessage() != null) ? openEx.getMessage() : openEx.getClass().getSimpleName());
-                return ApiResult.fail("Open/Ping USB: 0 - Échec ouverture port.", "ERR_USB_OPEN_FAILED", d);
+                return ApiResult.fail("Open/Ping USB: 0 - Échec ouverture port.",
+                        "ERR_USB_OPEN_FAILED", d);
             }
 
         } catch (Exception e) {
@@ -179,6 +184,10 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     }
 
     private void notifyNodeSeen(int node, int from) {
+        // update hints
+        lastNodeHint = node;
+        lastFromHint = from;
+
         try {
             Intent i = new Intent(ACTION_NODE_SEEN);
             i.setPackage(appCtx.getPackageName());
@@ -191,32 +200,65 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     private DeliveryController requireSession(Integer nodeDec, Integer fromDec) {
         UsbSerialPort port = UsbSession.getPort();
         if (port == null) return null;
+
         int n = normNode(nodeDec);
         int f = normFrom(fromDec);
+
         notifyNodeSeen(n, f);
+
+        // Crée ou retourne le controller pour ce node (unicité par node) via RegisterSessionManager [3](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/ApiFacade.java)
         return sessions.getOrCreate(n, f, port);
     }
 
-    private void recordJobId(ApiResult r, int node) {
+    private void recordJobId(ApiResult r, int node, int from) {
         try {
             JSONObject j = r.toJson();
             JSONObject data = j.optJSONObject("data");
             if (data == null) return;
             String jobId = data.optString("jobId", "").trim();
-            if (!jobId.isEmpty()) jobToNode.put(jobId, node);
+            if (!jobId.isEmpty()) {
+                jobToNode.put(jobId, node);
+                jobToFrom.put(jobId, from);
+            }
         } catch (Exception ignored) {}
     }
 
+    /**
+     * ✅ FIX NO_CONTROLLER:
+     * - Priorité à nodeDec s'il est fourni (query param / body)
+     * - Sinon fallback jobToNode (recordJobId)
+     * - Sinon fallback lastNodeHint
+     * - From: priorité à jobToFrom si disponible, sinon lastFromHint
+     */
     private DeliveryController resolveJobController(String jobId, Integer nodeDec) {
         if (jobId == null || jobId.trim().isEmpty()) return null;
+
+        // 1) node explicite -> priorité
         Integer node = nodeDec;
-        if (node == null) node = jobToNode.get(jobId);
-        if (node == null) return null;
-        return requireSession(node, 255 /* from default */);
+        if (node != null) {
+            int n = normNode(node);
+            int f = lastFromHint; // default/hint
+            return requireSession(n, f);
+        }
+
+        // 2) mapping job->node
+        Integer mappedNode = jobToNode.get(jobId);
+        Integer mappedFrom = jobToFrom.get(jobId);
+
+        if (mappedNode != null) {
+            int n = normNode(mappedNode);
+            int f = normFrom(mappedFrom != null ? mappedFrom : lastFromHint);
+            return requireSession(n, f);
+        }
+
+        // 3) fallback sur hint
+        int n = lastNodeHint;
+        int f = lastFromHint;
+        return requireSession(n, f);
     }
 
     // =========================
-    // Legacy wrappers REQUIRED by ApiFacade
+    // Legacy wrappers REQUIRED by ApiFacade (abstract methods)
     // =========================
     @Override public ApiResult api_connectLcp() { return api_connectLcp(null, null); }
     @Override public ApiResult api_deliveryAlignA() { return api_deliveryAlignA(null, null); }
@@ -239,18 +281,22 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     }
 
     // =========================
-    // Node-aware operations (B2)
+    // Node-aware operations (B2: create if missing)
     // =========================
     @Override
     public ApiResult api_connectLcp(Integer lcrnode_dec, Integer from_dec) {
-        DeliveryController dc = requireSession(lcrnode_dec, from_dec);
+        int node = normNode(lcrnode_dec);
+        int from = normFrom(from_dec);
+        DeliveryController dc = requireSession(node, from);
         if (dc == null) return ApiResult.fail("Connect LCP: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
         return dc.api_connectLcp();
     }
 
     @Override
     public ApiResult api_deliveryAlignA(Integer lcrnode_dec, Integer from_dec) {
-        DeliveryController dc = requireSession(lcrnode_dec, from_dec);
+        int node = normNode(lcrnode_dec);
+        int from = normFrom(from_dec);
+        DeliveryController dc = requireSession(node, from);
         if (dc == null) return ApiResult.fail("Align A: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
         return dc.api_deliveryAlignA();
     }
@@ -258,10 +304,12 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     @Override
     public ApiResult api_deliveryStartC(Integer lcrnode_dec, Integer from_dec, int product1to16, double presetNet) {
         int node = normNode(lcrnode_dec);
-        DeliveryController dc = requireSession(node, from_dec);
+        int from = normFrom(from_dec);
+        DeliveryController dc = requireSession(node, from);
         if (dc == null) return ApiResult.fail("Delivery C: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
+
         ApiResult r = dc.api_deliveryStartC(product1to16, presetNet);
-        recordJobId(r, node);
+        recordJobId(r, node, from);
         return r;
     }
 
@@ -269,10 +317,13 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     public ApiResult api_deliveryOneShotStart(Integer lcrnode_dec, Integer from_dec,
                                              String numero_livraison, int product1to16, double presetNetL, String compartment) {
         int node = normNode(lcrnode_dec);
-        DeliveryController dc = requireSession(node, from_dec);
+        int from = normFrom(from_dec);
+
+        DeliveryController dc = requireSession(node, from);
         if (dc == null) return ApiResult.fail("OneShot: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
+
         ApiResult r = dc.api_deliveryOneShotStart(numero_livraison, product1to16, presetNetL, compartment);
-        recordJobId(r, node);
+        recordJobId(r, node, from);
         return r;
     }
 
@@ -292,6 +343,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
 
     @Override
     public ApiResult api_deliveryJobGet(String jobId, Integer lcrnode_dec) {
+        // ✅ FIX: même si mapping jobToNode est absent, on privilégie node query param et last hints
         DeliveryController dc = resolveJobController(jobId, lcrnode_dec);
         if (dc == null) return ApiResult.fail("Job: 0 - Controller introuvable (node/job).", "NO_CONTROLLER");
         return dc.api_deliveryJobGet(jobId);
@@ -304,8 +356,12 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                                          String expected_serial_id,
                                          Integer expected_product_number,
                                          String expected_compartment) {
-        DeliveryController dc = requireSession(expected_lcrnode_dec, from_dec);
+        int node = normNode(expected_lcrnode_dec);
+        int from = normFrom(from_dec);
+
+        DeliveryController dc = requireSession(node, from);
         if (dc == null) return ApiResult.fail("Validate: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
+
         return dc.api_registerValidate(numero_livraison, expected_lcrnode_dec,
                 expected_serial_id, expected_product_number, expected_compartment);
     }
@@ -332,11 +388,11 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     @Override
     public ApiResult api_tickWait(Integer lcrnode_dec, Long since_seq, Integer wait_ms) {
         int node = normNode(lcrnode_dec);
+        int from = lastFromHint; // default/hint
         long since = (since_seq != null) ? since_seq : 0L;
         long wait = (wait_ms != null) ? wait_ms.longValue() : 25_000L;
 
-        // from par défaut 255 (comme les autres endpoints)
-        DeliveryController dc = requireSession(node, 255);
+        DeliveryController dc = requireSession(node, from);
         if (dc == null) {
             return ApiResult.fail("Tick: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
         }
