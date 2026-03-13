@@ -70,7 +70,7 @@ public interface ApiFacade {
 
     // ✅ Node-aware default (B2)
     default ApiResult api_deliveryOneShotStart(Integer lcrnode_dec, Integer from_dec,
-                                               String numero_livraison, int product1to16, double presetNetL, String compartment) {
+                                              String numero_livraison, int product1to16, double presetNetL, String compartment) {
         return api_deliveryOneShotStart(numero_livraison, product1to16, presetNetL, compartment);
     }
 
@@ -110,5 +110,30 @@ public interface ApiFacade {
     ) {
         return api_registerValidate(numero_livraison, expected_lcrnode_dec, expected_serial_id,
                 expected_product_number, expected_compartment);
+    }
+
+    // =========================================================
+    // ✅ NEW: TickBus (B+) - long-poll tick change (cache-only)
+    // =========================================================
+
+    /**
+     * Legacy default: tick wait (mono-registre).
+     * Implémentations mono-registre peuvent override si désiré.
+     *
+     * since_seq: dernière séquence vue par le client
+     * wait_ms: durée max d’attente serveur (ex: 25000)
+     */
+    default ApiResult api_tickWait(Long since_seq, Integer wait_ms) {
+        // Par défaut, pas supporté sur legacy -> réponse explicite
+        return ApiResult.fail("Tick: 0 - Not supported (legacy facade).", "TICK_NOT_SUPPORTED");
+    }
+
+    /**
+     * Node-aware (B2): Tick wait par node.
+     * ApiServer route vers cette signature (lcrnode_dec + since_seq + wait_ms).
+     */
+    default ApiResult api_tickWait(Integer lcrnode_dec, Long since_seq, Integer wait_ms) {
+        // fallback sur legacy si non override
+        return api_tickWait(since_seq, wait_ms);
     }
 }
