@@ -96,9 +96,7 @@ public final class LogBus {
         BUFFER.addLast(e);
 
         for (Listener l : LISTENERS) {
-            try {
-                l.onLog(e);
-            } catch (Exception ignored) {}
+            try { l.onLog(e); } catch (Exception ignored) {}
         }
     }
 
@@ -106,12 +104,45 @@ public final class LogBus {
     // Snapshot (PAR NODE SEULEMENT)
     // -------------------------
     public static synchronized List<LogEvent> snapshotForNode(int node, int maxLines) {
-        ArrayList<LogEvent> out = new ArrayList<>(maxLines);
+        ArrayList<LogEvent> out = new ArrayList<>(Math.max(16, maxLines));
         Iterator<LogEvent> it = BUFFER.descendingIterator();
 
         while (it.hasNext() && out.size() < maxLines) {
             LogEvent e = it.next();
             if (e.node == node) {
+                out.add(e);
+            }
+        }
+
+        Collections.reverse(out);
+        return out;
+    }
+
+    // -------------------------
+    // ✅ Snapshot GLOBAL (pour MainActivity)
+    // -------------------------
+
+    /** Snapshot global des derniers événements (maxLines), sans filtre de temps. */
+    public static synchronized List<LogEvent> snapshotGlobal(int maxLines) {
+        ArrayList<LogEvent> out = new ArrayList<>(Math.max(16, maxLines));
+        Iterator<LogEvent> it = BUFFER.descendingIterator();
+
+        while (it.hasNext() && out.size() < maxLines) {
+            out.add(it.next());
+        }
+
+        Collections.reverse(out);
+        return out;
+    }
+
+    /** Snapshot global des derniers événements (maxLines) filtrés par timestamp >= sinceMs. */
+    public static synchronized List<LogEvent> snapshotGlobal(int maxLines, long sinceMs) {
+        ArrayList<LogEvent> out = new ArrayList<>(Math.max(16, maxLines));
+        Iterator<LogEvent> it = BUFFER.descendingIterator();
+
+        while (it.hasNext() && out.size() < maxLines) {
+            LogEvent e = it.next();
+            if (e.ts >= sinceMs) {
                 out.add(e);
             }
         }
