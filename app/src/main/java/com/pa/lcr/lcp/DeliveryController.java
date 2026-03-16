@@ -1402,6 +1402,17 @@ public final class DeliveryController implements DeliveryControllerPort {
             Integer expected_product_number,
             String expected_compartment
     ) {
+        return api_registerValidate(numero_livraison, expected_lcrnode_dec, expected_serial_id, expected_product_number, expected_compartment, true);
+    }
+
+public ApiResult api_registerValidate(
+            String numero_livraison,
+            Integer expected_lcrnode_dec,
+            String expected_serial_id,
+            Integer expected_product_number,
+            String expected_compartment
+            boolean persist
+    ){
         if (link == null || link.isClosed()) {
             return ApiResult.fail("Validate: 0 - USB not ready.", RegisterValidator.Codes.ERR_USB_PORT_NOT_READY);
         }
@@ -1505,7 +1516,7 @@ public final class DeliveryController implements DeliveryControllerPort {
 
             // SQLite logs (best-effort)
             DeliveryLogStore store = this.logStore;
-            if (store != null && serialId != null && !serialId.isEmpty()
+            if (persist && store != null && serialId != null && !serialId.isEmpty()
                     && ticketNo != null && !ticketNo.isEmpty()) {
 
                 String stateTxt = ready ? "VALIDATE_READY" : "VALIDATE_BLOCKED";

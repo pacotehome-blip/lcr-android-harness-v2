@@ -13,7 +13,6 @@ import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.*;
-
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.fragment.app.Fragment;
@@ -32,16 +31,7 @@ import java.util.concurrent.Executors;
 /**
  * RegisterTabFragment (node-specific)
  *
- * Correctifs:
- * - ✅ Pas de polling local (liveTick/statusTick supprimés) -> polling centralisé dans RegisterSessionManager (scheduler par node).
- * - ✅ UI/API tandem: controller partagé via RegisterSessionManager.getOrCreate(node, from, UsbSession.getPort()).
- * - ✅ Multi-listener: attach/detach du listener UI via RegisterSessionManager.
- * - ✅ Auto-attach: retry sur UsbReceiver.ACTION_USB_READY.
- *
- * FIX LOG CRASH:
- * - ✅ Le tab ne reconstruit plus le log via filter* (inexistant) : snapshotForNode + buildText(events).
- * - ✅ Throttle/coalesce refresh log (ne pas setText() à chaque event).
- * - ✅ TX/RX + TS suivent les flags globaux LogBus (source unique).
+ * (contenu inchangé hors appel validate persist=false)
  */
 public class RegisterTabFragment extends Fragment {
 
@@ -62,10 +52,8 @@ public class RegisterTabFragment extends Fragment {
 
     private TextView txtLcrNode, txtFrom, txtSerialId, txtTicketNo, txtTicketPending;
     private TextView txtLive, txtQtyNet, txtQtyGross, txtDeliveryUid;
-
     private Spinner spnProduct;
     private EditText edtPreset;
-
     private Button btnConnect, btnA, btnB, btnC, btnContinue, btnFinish;
 
     // Log tab
@@ -85,7 +73,6 @@ public class RegisterTabFragment extends Fragment {
     // Auto-attach lifecycle
     private boolean attemptedAutoAttachOnce = false;
     private boolean uiListenerAttached = false;
-
     private UsbManager usbManager;
 
     // Controller partagé UI ↔ API (RegisterSessionManager)
@@ -98,12 +85,9 @@ public class RegisterTabFragment extends Fragment {
     private boolean starting = false;
     private long startingSinceMs = 0L;
 
-    // ---------------------------
-    // ✅ FIX: Throttle/coalesce log refresh
-    // ---------------------------
-    private static final int TAB_LOG_MAX_LINES = 400;     // 300-600 recommandé
-    private static final long LOG_REFRESH_MIN_MS = 300;   // ~3 FPS max
-
+    // Throttle/coalesce log refresh
+    private static final int TAB_LOG_MAX_LINES = 400;
+    private static final long LOG_REFRESH_MIN_MS = 300;
     private long lastLogRefreshMs = 0L;
     private boolean logRefreshPending = false;
 
@@ -119,10 +103,9 @@ public class RegisterTabFragment extends Fragment {
             refreshLogView();
             return;
         }
-
         if (logRefreshPending) return;
-        logRefreshPending = true;
 
+        logRefreshPending = true;
         long delay = Math.max(0L, LOG_REFRESH_MIN_MS - dt);
         ui.postDelayed(() -> {
             logRefreshPending = false;
@@ -131,22 +114,17 @@ public class RegisterTabFragment extends Fragment {
         }, delay);
     }
 
-    // ----------- Listener UI (multi-listener) -----------
     private final DeliveryControllerPort.Listener uiListener = new DeliveryControllerPort.Listener() {
-
         @Override
         public void onStateChanged(DeliveryState state) {
             ui.post(() -> {
-                // fin "starting" dès qu'on voit FLOWING, ou timeout
                 if (starting && state == DeliveryState.RUNNING_FLOWING) starting = false;
                 if (starting && (System.currentTimeMillis() - startingSinceMs) > 12000L) starting = false;
 
                 updateButtons(state);
 
-                // refresh rapide (sans polling local)
                 try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
 
-                // ✅ FIX: rafraîchir le log avec throttle
                 scheduleLogRefresh();
             });
         }
@@ -155,13 +133,11 @@ public class RegisterTabFragment extends Fragment {
 
         @Override
         public void onLog(String message) {
-            // ✅ FIX: NE PAS refreshLogView() directement à chaque ligne
             scheduleLogRefresh();
         }
 
         @Override
         public void onError(String context, Throwable error) {
-            // ✅ FIX: LogBus n'a pas err(); on route erreur vers API avec préfixe
             LogBus.api(node, "[ERR][" + context + "] " + (error != null ? error.getMessage() : ""));
             scheduleLogRefresh();
         }
@@ -194,15 +170,12 @@ public class RegisterTabFragment extends Fragment {
         }
     };
 
-    // Rafraîchit les logs tab quand un event node arrive
     private final LogBus.Listener logListener = e -> {
         if (e == null) return;
-        // ✅ FIX: node est int (non-null)
         if (e.node != node) return;
         scheduleLogRefresh();
     };
 
-    // Retry auto-attach quand USB devient prêt
     private final BroadcastReceiver usbStateReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
             if (intent == null) return;
@@ -246,7 +219,6 @@ public class RegisterTabFragment extends Fragment {
     public void onStart() {
         super.onStart();
         LogBus.addListener(logListener);
-
         IntentFilter f = new IntentFilter();
         f.addAction(UsbReceiver.ACTION_USB_READY);
         f.addAction(UsbReceiver.ACTION_USB_DETACHED);
@@ -276,7 +248,7 @@ public class RegisterTabFragment extends Fragment {
     public void onDestroyView() {
         super.onDestroyView();
         try { bg.shutdownNow(); } catch (Exception ignored) {}
-        controller = null; // controller partagé: ne pas shutdown ici
+        controller = null;
     }
 
     @Nullable
@@ -297,22 +269,18 @@ public class RegisterTabFragment extends Fragment {
         txtSerialId = v.findViewById(R.id.txtSerialId);
         txtTicketNo = v.findViewById(R.id.txtTicketNo);
         txtTicketPending = v.findViewById(R.id.txtTicketPending);
-
         spnProduct = v.findViewById(R.id.spnProduct);
         edtPreset = v.findViewById(R.id.edtPreset);
-
         btnConnect = v.findViewById(R.id.btnConnectTab);
         btnA = v.findViewById(R.id.btnA);
         btnB = v.findViewById(R.id.btnB);
         btnC = v.findViewById(R.id.btnC);
         btnContinue = v.findViewById(R.id.btnContinue);
         btnFinish = v.findViewById(R.id.btnFinish);
-
         txtLive = v.findViewById(R.id.txtLive);
         txtQtyNet = v.findViewById(R.id.txtQtyNet);
         txtQtyGross = v.findViewById(R.id.txtQtyGross);
         txtDeliveryUid = v.findViewById(R.id.txtDeliveryUid);
-
         cbShowLog = v.findViewById(R.id.cbShowLog);
         logPanel = v.findViewById(R.id.logPanel);
         txtLog = v.findViewById(R.id.txtLog);
@@ -327,17 +295,14 @@ public class RegisterTabFragment extends Fragment {
     private void initUi() {
         txtLcrNode.setText(String.format(Locale.ROOT, "LCR Node : %d", node));
         txtFrom.setText(String.format(Locale.ROOT, "From : %d", from));
-
         txtSerialId.setText("#Série : —");
         txtTicketNo.setText("Ticket Number : —");
         txtTicketPending.setText("Ticket pending : —");
         ticketPendingFlag = -1;
-
         txtLive.setText("LIVE: (en attente)");
         txtQtyNet.setText("NET: 0.0");
         txtQtyGross.setText("GROSS: 0.0");
         txtDeliveryUid.setText("Delivery UID : —");
-
         edtPreset.setText("50");
 
         List<String> items = new ArrayList<>();
@@ -351,7 +316,6 @@ public class RegisterTabFragment extends Fragment {
         logPanel.setVisibility(View.GONE);
         logViewSinceMs = 0L;
 
-        // ✅ flags globaux LogBus
         cbTxRx.setChecked(LogBus.SHOW_IO);
         cbLogTs.setChecked(LogBus.SHOW_TS);
 
@@ -359,7 +323,6 @@ public class RegisterTabFragment extends Fragment {
     }
 
     private void wireUi() {
-
         cbShowLog.setOnCheckedChangeListener((b, checked) -> {
             logPanel.setVisibility(checked ? View.VISIBLE : View.GONE);
             LogBus.ui(node, ts("Afficher log: " + (checked ? "ON" : "OFF")));
@@ -376,82 +339,60 @@ public class RegisterTabFragment extends Fragment {
 
         btnCopyLog.setOnClickListener(v -> {
             android.content.ClipboardManager cm =
-                    (android.content.ClipboardManager) requireContext().getSystemService(Context.CLIPBOARD_SERVICE);
+                (android.content.ClipboardManager) requireContext().getSystemService(Context.CLIPBOARD_SERVICE);
             cm.setPrimaryClip(android.content.ClipData.newPlainText("log", txtLog.getText()));
             LogBus.ui(node, ts("Log copié"));
         });
 
         cbLogTs.setOnCheckedChangeListener((b, checked) -> {
             logTsEnabled = checked;
-
-            // ✅ global flags (source unique)
             LogBus.SHOW_TS = checked;
-
-            // optionnel: timestamps côté controller
             if (controller != null) controller.setLogTimestampsEnabled(checked);
-
             LogBus.ui(node, ts("Timestamps: " + (checked ? "ON" : "OFF")));
             scheduleLogRefresh();
         });
 
         cbTxRx.setOnCheckedChangeListener((b, checked) -> {
-            // ✅ global flags (source unique)
             LogBus.SHOW_IO = checked;
-
-            // optionnel: coupe/active la production IO côté controller
             if (controller != null) controller.setTxRxLoggingEnabled(checked);
-
             LogBus.ui(node, ts("TX/RX: " + (checked ? "ON" : "OFF")));
             scheduleLogRefresh();
         });
 
         btnConnect.setOnClickListener(v -> connectThisRegister(true));
-
         btnA.setOnClickListener(v -> { if (controller != null) controller.alignOrRecover(); });
-
         btnB.setOnClickListener(v -> { if (controller != null) controller.requestStatus(); });
 
         btnC.setOnClickListener(v -> {
             if (controller == null) return;
-
             if (ticketPendingFlag == 1) {
                 txtLive.setText("LIVE: ticket_pending — faire Resolve (A)");
                 LogBus.ui(node, ts("C bloqué: ticket_pending=1"));
                 updateButtons(controller.getState());
                 return;
             }
-
             starting = true;
             startingSinceMs = System.currentTimeMillis();
             updateButtons(controller.getState());
             txtLive.setText("LIVE: RUNNING_FLOWING (flow off - waiting progression)");
-
             int prod = spnProduct.getSelectedItemPosition() + 1;
             double preset = parseDouble(edtPreset.getText().toString(), 0.0);
-
             controller.startDelivery(prod, preset);
-            // ✅ Pas de tick ici : polling central dans RegisterSessionManager
         });
 
         btnContinue.setOnClickListener(v -> { if (controller != null) controller.resumeIfPaused(); });
-
         btnFinish.setOnClickListener(v -> { if (controller != null) controller.endDelivery(); });
     }
 
-    // ---------------------------
-    // Attach logic (no local polling)
-    // ---------------------------
     private void attemptAttachIfPossible(boolean verboseLog) {
         if (uiListenerAttached && controller != null) {
             syncUiFromController();
             return;
         }
-
         if (UsbSession.getPort() == null) {
             if (verboseLog) LogBus.api(node, "Auto-attach: USB/Controller pas encore prêt (retry sur USB_READY).");
             return;
         }
-
         connectThisRegister(false);
     }
 
@@ -464,26 +405,23 @@ public class RegisterTabFragment extends Fragment {
             }
             return;
         }
-
         RegisterSessionManager sm = RegisterSessionManager.get(requireContext());
         controller = sm.getOrCreate(node, from, p);
-
         if (controller == null) {
             if (userInitiated) Toast.makeText(requireContext(), "USB non prêt", Toast.LENGTH_SHORT).show();
             return;
         }
-
         if (!uiListenerAttached) {
             sm.attachUiListener(node, uiListener);
             uiListenerAttached = true;
         }
 
-        // garder : contrôle transport
         controller.setTxRxLoggingEnabled(cbTxRx.isChecked());
         controller.setLogTimestampsEnabled(cbLogTs.isChecked());
 
         syncUiFromController();
-        validateHeaderAsync();
+
+        validateHeaderAsync(); // ✅ NOW persist=false inside
 
         if (userInitiated) LogBus.api(node, "Connect TAB: 1 - UI attached");
         scheduleLogRefresh();
@@ -508,7 +446,10 @@ public class RegisterTabFragment extends Fragment {
         bg.execute(() -> {
             try {
                 if (controller == null) return;
-                ApiResult r = controller.api_registerValidate(null, node, null, null, null);
+
+                // ✅ Option 2: UI validate must NOT write to SQLite
+                ApiResult r = controller.api_registerValidate(null, node, null, null, null, false);
+
                 JSONObject j = r.toJson().optJSONObject("data");
                 if (j == null) return;
 
@@ -523,16 +464,12 @@ public class RegisterTabFragment extends Fragment {
                     updateButtons(controller != null ? controller.getState() : null);
                     scheduleLogRefresh();
                 });
-
             } catch (Exception e) {
                 LogBus.api(node, "validate header fail: " + safeMsg(e));
             }
         });
     }
 
-    // ---------------------------
-    // UI state (buttons)
-    // ---------------------------
     private void updateButtons(DeliveryState state) {
         if (controller == null) {
             btnConnect.setEnabled(true);
@@ -543,7 +480,6 @@ public class RegisterTabFragment extends Fragment {
             btnFinish.setEnabled(false);
             return;
         }
-
         DeliveryState st = (state != null) ? state : controller.getState();
         boolean connected = (st == DeliveryState.CONNECTED);
         boolean paused = (st == DeliveryState.RUNNING_PAUSED);
@@ -555,7 +491,6 @@ public class RegisterTabFragment extends Fragment {
         btnConnect.setEnabled(true);
         btnB.setEnabled(true);
         btnA.setEnabled(connected || paused || flowing);
-
         btnC.setEnabled(connected && ticketPendingFlag != 1);
 
         if (starting) {
@@ -567,17 +502,12 @@ public class RegisterTabFragment extends Fragment {
         }
     }
 
-    // ---------------------------
-    // Log tab view (NEW: snapshot + buildText)
-    // ---------------------------
     private void refreshLogView() {
         if (txtLog == null) return;
         if (cbShowLog == null || !cbShowLog.isChecked()) return;
 
-        // On garde logViewSinceMs: filtrage simple côté UI (post-snapshot)
         List<LogBus.LogEvent> events = LogBus.snapshotForNode(node, TAB_LOG_MAX_LINES);
 
-        // Filtrer "since" localement (léger)
         if (logViewSinceMs > 0) {
             ArrayList<LogBus.LogEvent> filtered = new ArrayList<>(events.size());
             for (LogBus.LogEvent e : events) {
@@ -587,15 +517,9 @@ public class RegisterTabFragment extends Fragment {
         }
 
         txtLog.setText(LogBus.buildText(events));
-
-        if (logScroll != null) {
-            logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
-        }
+        if (logScroll != null) logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
     }
 
-    // ---------------------------
-    // Small helpers
-    // ---------------------------
     private String ts(String msg) {
         if (!logTsEnabled) return msg;
         return uiTs() + " " + msg;
@@ -603,7 +527,7 @@ public class RegisterTabFragment extends Fragment {
 
     private String uiTs() {
         return new SimpleDateFormat("HH:mm:ss.SSS", Locale.CANADA_FRENCH)
-                .format(new Date(System.currentTimeMillis()));
+            .format(new Date(System.currentTimeMillis()));
     }
 
     private static double parseDouble(String s, double def) {
