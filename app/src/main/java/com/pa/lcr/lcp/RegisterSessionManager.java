@@ -20,9 +20,11 @@ import java.util.concurrent.TimeUnit;
  * - Multi-listener (mux).
  * - Scheduler central par node pour réduire rc=0x26 (poll collisions).
  *
- * ✅ FIX DEMANDÉ:
- * - Ne plus envoyer STATUS en boucle lorsque state == CONNECTED (même si UI attachée / ticketPending).
- * - STATUS + LIVE polling uniquement en RUNNING_*.
+ * ✅ FIXES:
+ * 1) STOP STATUS auto en CONNECTED (même si UI attachée / ticketPending)
+ * 2) RUNNING_PAUSED: réduire fortement le polling (évite spam + rc=0x26)
+ *    - LIVE: OFF (ou très lent)
+ *    - STATUS: lent (par défaut 4s)
  */
 public final class RegisterSessionManager {
 
@@ -74,6 +76,7 @@ public final class RegisterSessionManager {
         MuxListener mux = new MuxListener();
         mux.addListener(new LogBusSink(node, scheduler));
         mux.addListener(scheduler);
+
         dc.setListener(mux);
 
         try { dc.initialize(); } catch (Exception ignored) {}
@@ -188,13 +191,11 @@ public final class RegisterSessionManager {
     /**
      * Scheduler central par node.
      *
-     * ✅ FIX:
-     * - LIVE polling: RUNNING_* uniquement
-     * - STATUS polling: RUNNING_* uniquement
-     *
-     * Donc en CONNECTED (incluant ticketPending / imprimante sans papier):
-     * - plus de requestStatus() en boucle
-     * - plus de collisions inutiles (rc=0x26)
+     * ✅ Règles:
+     * - DISCONNECTED: rien
+     * - CONNECTED: rien (pas de STATUS auto)
+     * - RUNNING_FLOWING: LIVE rapide + STATUS normal
+     * - RUNNING_PAUSED: LIVE OFF (ou très lent) + STATUS ralenti (évite spam rc=0x26)
      */
     private static final class NodeScheduler implements DeliveryControllerPort.Listener {
 
@@ -210,8 +211,13 @@ public final class RegisterSessionManager {
         private volatile long liveBackoffMs = 0L;
         private volatile long statusBackoffMs = 0L;
 
-        private static final long LIVE_RUNNING_MS = 500;
-        private static final long STATUS_RUNNING_MS = 1500;
+        // Polling base
+        private static final long LIVE_RUNNING_MS = 500;      // flowing only
+        private static final long STATUS_RUNNING_MS = 1500;   // flowing only
+
+        // ✅ PAUSED throttling
+        private static final long LIVE_PAUSED_MS = 0;         // 0 = OFF
+        private static final long STATUS_PAUSED_MS = 4000;    // ralentir en pause
 
         NodeScheduler(int node) {
             this.node = node;
@@ -231,6 +237,7 @@ public final class RegisterSessionManager {
         void setUiSubscribed(boolean v) { this.uiSubscribed = v; }
 
         void noteBusyRc26() {
+            // backoff partagé
             liveBackoffMs = Math.min(2000, Math.max(liveBackoffMs * 2, 400));
             statusBackoffMs = Math.min(2000, Math.max(statusBackoffMs * 2, 400));
         }
@@ -248,10 +255,19 @@ public final class RegisterSessionManager {
             if (st == DeliveryState.DISCONNECTED) return;
 
             long now = System.currentTimeMillis();
-            boolean running = (st == DeliveryState.RUNNING_FLOWING) || (st == DeliveryState.RUNNING_PAUSED);
 
-            // ✅ LIVE uniquement pendant RUNNING (progression)
-            if (running) {
+            boolean flowing = (st == DeliveryState.RUNNING_FLOWING);
+            boolean paused  = (st == DeliveryState.RUNNING_PAUSED);
+
+            // ✅ CONNECTED: aucun polling auto
+            if (!flowing && !paused) {
+                return;
+            }
+
+            // ---------------------------
+            // LIVE
+            // ---------------------------
+            if (flowing) {
                 long interval = LIVE_RUNNING_MS + liveBackoffMs;
                 if (now - lastLiveMs >= interval) {
                     lastLiveMs = now;
@@ -260,11 +276,34 @@ public final class RegisterSessionManager {
                         if (liveBackoffMs > 0) liveBackoffMs = Math.max(0, liveBackoffMs - 200);
                     } catch (Exception ignored) {}
                 }
+            } else if (paused) {
+                // LIVE OFF by default (LIVE_PAUSED_MS == 0)
+                if (LIVE_PAUSED_MS > 0) {
+                    long interval = LIVE_PAUSED_MS + liveBackoffMs;
+                    if (now - lastLiveMs >= interval) {
+                        lastLiveMs = now;
+                        try {
+                            c.requestLiveSample();
+                            if (liveBackoffMs > 0) liveBackoffMs = Math.max(0, liveBackoffMs - 200);
+                        } catch (Exception ignored) {}
+                    }
+                }
             }
 
-            // ✅ STATUS uniquement pendant RUNNING (plus de STATUS auto en CONNECTED)
-            if (running) {
+            // ---------------------------
+            // STATUS
+            // ---------------------------
+            if (flowing) {
                 long interval = STATUS_RUNNING_MS + statusBackoffMs;
+                if (now - lastStatusMs >= interval) {
+                    lastStatusMs = now;
+                    try {
+                        c.requestStatus();
+                        if (statusBackoffMs > 0) statusBackoffMs = Math.max(0, statusBackoffMs - 200);
+                    } catch (Exception ignored) {}
+                }
+            } else if (paused) {
+                long interval = STATUS_PAUSED_MS + statusBackoffMs;
                 if (now - lastStatusMs >= interval) {
                     lastStatusMs = now;
                     try {
