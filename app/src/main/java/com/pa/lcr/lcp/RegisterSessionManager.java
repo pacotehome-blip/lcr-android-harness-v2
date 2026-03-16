@@ -19,6 +19,10 @@ import java.util.concurrent.TimeUnit;
  * - Unicité: 1 node -> 1 DeliveryController.
  * - Multi-listener (mux).
  * - Scheduler central par node pour réduire rc=0x26 (poll collisions).
+ *
+ * ✅ FIX DEMANDÉ:
+ * - Ne plus envoyer STATUS en boucle lorsque state == CONNECTED (même si UI attachée / ticketPending).
+ * - STATUS + LIVE polling uniquement en RUNNING_*.
  */
 public final class RegisterSessionManager {
 
@@ -70,7 +74,6 @@ public final class RegisterSessionManager {
         MuxListener mux = new MuxListener();
         mux.addListener(new LogBusSink(node, scheduler));
         mux.addListener(scheduler);
-
         dc.setListener(mux);
 
         try { dc.initialize(); } catch (Exception ignored) {}
@@ -122,6 +125,9 @@ public final class RegisterSessionManager {
         }
     }
 
+    /**
+     * Multiplexeur de listeners : UI + LogBus + Scheduler.
+     */
     private static final class MuxListener implements DeliveryControllerPort.Listener {
         private final CopyOnWriteArrayList<DeliveryControllerPort.Listener> listeners =
                 new CopyOnWriteArrayList<>();
@@ -181,10 +187,14 @@ public final class RegisterSessionManager {
 
     /**
      * Scheduler central par node.
-     * ✅ FIX: après fin (state CONNECTED), ne plus poller STATUS automatiquement.
-     * - RUNNING_* : live + status
-     * - CONNECTED : rien (one-shot via UI uniquement)
-     * - DISCONNECTED : rien
+     *
+     * ✅ FIX:
+     * - LIVE polling: RUNNING_* uniquement
+     * - STATUS polling: RUNNING_* uniquement
+     *
+     * Donc en CONNECTED (incluant ticketPending / imprimante sans papier):
+     * - plus de requestStatus() en boucle
+     * - plus de collisions inutiles (rc=0x26)
      */
     private static final class NodeScheduler implements DeliveryControllerPort.Listener {
 
@@ -235,14 +245,12 @@ public final class RegisterSessionManager {
             if (c == null) return;
 
             DeliveryState st = c.getState();
-
-            // ✅ STOP total en DISCONNECTED
             if (st == DeliveryState.DISCONNECTED) return;
 
             long now = System.currentTimeMillis();
             boolean running = (st == DeliveryState.RUNNING_FLOWING) || (st == DeliveryState.RUNNING_PAUSED);
 
-            // ✅ LIVE uniquement en RUNNING
+            // ✅ LIVE uniquement pendant RUNNING (progression)
             if (running) {
                 long interval = LIVE_RUNNING_MS + liveBackoffMs;
                 if (now - lastLiveMs >= interval) {
@@ -254,7 +262,7 @@ public final class RegisterSessionManager {
                 }
             }
 
-            // ✅ STATUS uniquement en RUNNING (plus de polling automatique en CONNECTED)
+            // ✅ STATUS uniquement pendant RUNNING (plus de STATUS auto en CONNECTED)
             if (running) {
                 long interval = STATUS_RUNNING_MS + statusBackoffMs;
                 if (now - lastStatusMs >= interval) {
@@ -283,6 +291,9 @@ public final class RegisterSessionManager {
         }
     }
 
+    /**
+     * Sink LogBus: route UI/API/IO (TX/RX) et injecte backoff rc=0x26.
+     */
     private static final class LogBusSink implements DeliveryControllerPort.Listener {
 
         private final int node;
@@ -303,10 +314,14 @@ public final class RegisterSessionManager {
             if (message == null) return;
             String s = message.trim();
 
+            // IO TX/RX routing (si détectable)
             if (s.startsWith("TX:") || s.startsWith("[TX]")) { LogBus.ioTx(node, s); return; }
             if (s.startsWith("RX:") || s.startsWith("[RX]")) { LogBus.ioRx(node, s); return; }
+
+            // API tag
             if (s.startsWith("[API") || s.startsWith("[API]")) { LogBus.api(node, s); return; }
 
+            // Default
             LogBus.ui(node, s);
         }
 
