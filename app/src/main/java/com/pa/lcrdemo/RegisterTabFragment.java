@@ -31,7 +31,7 @@ import java.util.concurrent.Executors;
 /**
  * RegisterTabFragment (node-specific)
  *
- * (contenu inchangé hors appel validate persist=false)
+ * (contenu inchangé hors correctifs crash executor + garde-fous lifecycle)
  */
 public class RegisterTabFragment extends Fragment {
 
@@ -118,12 +118,16 @@ public class RegisterTabFragment extends Fragment {
         @Override
         public void onStateChanged(DeliveryState state) {
             ui.post(() -> {
+                if (!isAdded() || getView() == null) return;
+
                 if (starting && state == DeliveryState.RUNNING_FLOWING) starting = false;
                 if (starting && (System.currentTimeMillis() - startingSinceMs) > 12000L) starting = false;
 
                 updateButtons(state);
 
-                try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
+                try {
+                    if (controller != null) controller.requestStatus();
+                } catch (Exception ignored) {}
 
                 scheduleLogRefresh();
             });
@@ -145,6 +149,7 @@ public class RegisterTabFragment extends Fragment {
         @Override
         public void onLiveQty(double net, double gross) {
             ui.post(() -> {
+                if (!isAdded() || getView() == null) return;
                 txtQtyNet.setText(String.format(Locale.ROOT, "NET: %.3f", net));
                 txtQtyGross.setText(String.format(Locale.ROOT, "GROSS: %.3f", gross));
             });
@@ -153,6 +158,8 @@ public class RegisterTabFragment extends Fragment {
         @Override
         public void onLiveStatus(String liveText) {
             ui.post(() -> {
+                if (!isAdded() || getView() == null) return;
+
                 if (starting) {
                     txtLive.setText("LIVE: RUNNING_FLOWING (flow off - waiting progression)");
                 } else {
@@ -164,6 +171,8 @@ public class RegisterTabFragment extends Fragment {
         @Override
         public void onTicketInfo(String ticketNo, String deliveryUid) {
             ui.post(() -> {
+                if (!isAdded() || getView() == null) return;
+
                 txtTicketNo.setText("Ticket Number : " + (ticketNo == null ? "—" : ticketNo));
                 txtDeliveryUid.setText("Delivery UID : " + (deliveryUid == null ? "—" : deliveryUid));
             });
@@ -191,6 +200,8 @@ public class RegisterTabFragment extends Fragment {
                 ticketPendingFlag = -1;
 
                 ui.post(() -> {
+                    if (!isAdded() || getView() == null) return;
+
                     txtSerialId.setText("#Série : —");
                     txtTicketPending.setText("Ticket pending : —");
                     txtTicketNo.setText("Ticket Number : —");
@@ -219,6 +230,7 @@ public class RegisterTabFragment extends Fragment {
     public void onStart() {
         super.onStart();
         LogBus.addListener(logListener);
+
         IntentFilter f = new IntentFilter();
         f.addAction(UsbReceiver.ACTION_USB_READY);
         f.addAction(UsbReceiver.ACTION_USB_DETACHED);
@@ -247,7 +259,13 @@ public class RegisterTabFragment extends Fragment {
     @Override
     public void onDestroyView() {
         super.onDestroyView();
+
+        // ✅ Correctif crash: empêcher des ui.post() d'exécuter du code après destruction de la view
+        try { ui.removeCallbacksAndMessages(null); } catch (Exception ignored) {}
+
+        // ✅ Correctif crash: bg peut être TERMINATED lors d'un rebuild de fragments (scan autoritaire)
         try { bg.shutdownNow(); } catch (Exception ignored) {}
+
         controller = null;
     }
 
@@ -295,14 +313,17 @@ public class RegisterTabFragment extends Fragment {
     private void initUi() {
         txtLcrNode.setText(String.format(Locale.ROOT, "LCR Node : %d", node));
         txtFrom.setText(String.format(Locale.ROOT, "From : %d", from));
+
         txtSerialId.setText("#Série : —");
         txtTicketNo.setText("Ticket Number : —");
         txtTicketPending.setText("Ticket pending : —");
         ticketPendingFlag = -1;
+
         txtLive.setText("LIVE: (en attente)");
         txtQtyNet.setText("NET: 0.0");
         txtQtyGross.setText("GROSS: 0.0");
         txtDeliveryUid.setText("Delivery UID : —");
+
         edtPreset.setText("50");
 
         List<String> items = new ArrayList<>();
@@ -339,7 +360,7 @@ public class RegisterTabFragment extends Fragment {
 
         btnCopyLog.setOnClickListener(v -> {
             android.content.ClipboardManager cm =
-                (android.content.ClipboardManager) requireContext().getSystemService(Context.CLIPBOARD_SERVICE);
+                    (android.content.ClipboardManager) requireContext().getSystemService(Context.CLIPBOARD_SERVICE);
             cm.setPrimaryClip(android.content.ClipData.newPlainText("log", txtLog.getText()));
             LogBus.ui(node, ts("Log copié"));
         });
@@ -375,6 +396,7 @@ public class RegisterTabFragment extends Fragment {
             startingSinceMs = System.currentTimeMillis();
             updateButtons(controller.getState());
             txtLive.setText("LIVE: RUNNING_FLOWING (flow off - waiting progression)");
+
             int prod = spnProduct.getSelectedItemPosition() + 1;
             double preset = parseDouble(edtPreset.getText().toString(), 0.0);
             controller.startDelivery(prod, preset);
@@ -405,12 +427,14 @@ public class RegisterTabFragment extends Fragment {
             }
             return;
         }
+
         RegisterSessionManager sm = RegisterSessionManager.get(requireContext());
         controller = sm.getOrCreate(node, from, p);
         if (controller == null) {
             if (userInitiated) Toast.makeText(requireContext(), "USB non prêt", Toast.LENGTH_SHORT).show();
             return;
         }
+
         if (!uiListenerAttached) {
             sm.attachUiListener(node, uiListener);
             uiListenerAttached = true;
@@ -421,7 +445,7 @@ public class RegisterTabFragment extends Fragment {
 
         syncUiFromController();
 
-        validateHeaderAsync(); // ✅ NOW persist=false inside
+        validateHeaderAsync(); // ✅ persist=false inside
 
         if (userInitiated) LogBus.api(node, "Connect TAB: 1 - UI attached");
         scheduleLogRefresh();
@@ -442,32 +466,53 @@ public class RegisterTabFragment extends Fragment {
         try { controller.requestStatus(); } catch (Exception ignored) {}
     }
 
+    /**
+     * ✅ Correctif crash:
+     * - si le fragment a été détruit (scan autoritaire/rebuild), bg peut être shutdown/terminated
+     * - on protège l’exécution + on ignore si executor rejette la tâche
+     */
     private void validateHeaderAsync() {
-        bg.execute(() -> {
-            try {
-                if (controller == null) return;
+        // garde-fou rapide: si executor déjà fermé, on n’exécute rien
+        try {
+            if (bg.isShutdown() || bg.isTerminated()) return;
+        } catch (Exception ignored) {}
 
-                // ✅ Option 2: UI validate must NOT write to SQLite
-                ApiResult r = controller.api_registerValidate(null, node, null, null, null, false);
+        try {
+            bg.execute(() -> {
+                try {
+                    if (controller == null) return;
 
-                JSONObject j = r.toJson().optJSONObject("data");
-                if (j == null) return;
+                    // ✅ Option 2: UI validate must NOT write to SQLite
+                    ApiResult r = controller.api_registerValidate(null, node, null, null, null, false);
+                    JSONObject j = r.toJson().optJSONObject("data");
+                    if (j == null) return;
 
-                String serial = j.optString("serial_id", "");
-                int tp = j.optInt("ticketPending", -1);
-                ticketPendingFlag = (tp == 1 ? 1 : (tp == 0 ? 0 : -1));
+                    String serial = j.optString("serial_id", "");
+                    int tp = j.optInt("ticketPending", -1);
+                    ticketPendingFlag = (tp == 1 ? 1 : (tp == 0 ? 0 : -1));
 
-                ui.post(() -> {
-                    txtSerialId.setText("#Série : " + ((serial == null || serial.isEmpty()) ? "—" : serial));
-                    txtTicketPending.setText("Ticket pending : " + (ticketPendingFlag == 1 ? "OUI" : (ticketPendingFlag == 0 ? "NON" : "—")));
-                    if (ticketPendingFlag == 1) txtLive.setText("LIVE: ticket_pending — faire Resolve (A)");
-                    updateButtons(controller != null ? controller.getState() : null);
-                    scheduleLogRefresh();
-                });
-            } catch (Exception e) {
-                LogBus.api(node, "validate header fail: " + safeMsg(e));
-            }
-        });
+                    ui.post(() -> {
+                        // garde-fou lifecycle : fragment plus valide -> skip
+                        if (!isAdded() || getView() == null) return;
+
+                        txtSerialId.setText("#Série : " + ((serial == null || serial.isEmpty()) ? "—" : serial));
+                        txtTicketPending.setText("Ticket pending : " +
+                                (ticketPendingFlag == 1 ? "OUI" : (ticketPendingFlag == 0 ? "NON" : "—")));
+
+                        if (ticketPendingFlag == 1) {
+                            txtLive.setText("LIVE: ticket_pending — faire Resolve (A)");
+                        }
+
+                        updateButtons(controller != null ? controller.getState() : null);
+                        scheduleLogRefresh();
+                    });
+                } catch (Exception e) {
+                    LogBus.api(node, "validate header fail: " + safeMsg(e));
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+            // ✅ Correctif crash: executor déjà TERMINATED (rebuild fragments) => on ignore
+        }
     }
 
     private void updateButtons(DeliveryState state) {
@@ -480,6 +525,7 @@ public class RegisterTabFragment extends Fragment {
             btnFinish.setEnabled(false);
             return;
         }
+
         DeliveryState st = (state != null) ? state : controller.getState();
         boolean connected = (st == DeliveryState.CONNECTED);
         boolean paused = (st == DeliveryState.RUNNING_PAUSED);
@@ -507,7 +553,6 @@ public class RegisterTabFragment extends Fragment {
         if (cbShowLog == null || !cbShowLog.isChecked()) return;
 
         List<LogBus.LogEvent> events = LogBus.snapshotForNode(node, TAB_LOG_MAX_LINES);
-
         if (logViewSinceMs > 0) {
             ArrayList<LogBus.LogEvent> filtered = new ArrayList<>(events.size());
             for (LogBus.LogEvent e : events) {
@@ -527,7 +572,7 @@ public class RegisterTabFragment extends Fragment {
 
     private String uiTs() {
         return new SimpleDateFormat("HH:mm:ss.SSS", Locale.CANADA_FRENCH)
-            .format(new Date(System.currentTimeMillis()));
+                .format(new Date(System.currentTimeMillis()));
     }
 
     private static double parseDouble(String s, double def) {
