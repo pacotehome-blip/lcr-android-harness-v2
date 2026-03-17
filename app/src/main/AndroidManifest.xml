@@ -1,6 +1,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools"
-    package="com.pa.lcrdemo">
+    
+	android {
+		namespace "com.pa.lcrdemo"
+	}
+
 
     <uses-feature
         android:name="android.hardware.usb.host"
