@@ -172,7 +172,10 @@ public final class DeliveryController implements DeliveryControllerPort {
     private volatile DeliveryState state = DeliveryState.DISCONNECTED;
     private volatile int cachedDigits = -1;
 
-    // LIVE
+    
+ // ✅ Cache du dernier NUM reçu via API (numero_livraison) pour reconstruire delivery_uid côté UI
+ private volatile String lastNumeroLivraison = null;
+// LIVE
     private volatile boolean flowOffStable = false;
     private volatile boolean sawFlowOnOnce = false;
     private volatile long flowOffStartMs = 0L;
@@ -1411,7 +1414,7 @@ public ApiResult api_registerValidate(
             String expected_serial_id,
             Integer expected_product_number,
             String expected_compartment,
-            boolean persist
+ boolean persist
     ){
         if (link == null || link.isClosed()) {
             return ApiResult.fail("Validate: 0 - USB not ready.", RegisterValidator.Codes.ERR_USB_PORT_NOT_READY);
@@ -1662,7 +1665,12 @@ public ApiResult api_registerValidate(
         if (link == null || link.isClosed()) {
             return ApiResult.fail("Delivery OneShot: 0 - USB not ready.", "USB_NOT_READY");
         }
-        try {
+        
+ // ✅ Mémoriser le NUM (WorkOrder) pour l’UI: delivery_uid = NUM-ticketNo
+ if (numero_livraison != null && !numero_livraison.trim().isEmpty()) {
+     lastNumeroLivraison = numero_livraison.trim();
+ }
+try {
             int[] ds0 = lcpDeliveryStatus();
             int delStatus0 = ds0[0];
             int delCode0 = ds0[1];

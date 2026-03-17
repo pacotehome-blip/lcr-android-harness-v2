@@ -31,7 +31,9 @@ import java.util.concurrent.Executors;
 /**
  * RegisterTabFragment (node-specific)
  *
- * (contenu inchangé hors correctifs crash executor + garde-fous lifecycle)
+ * Correctifs intégrés:
+ * - ✅ Log tab: refresh toujours sur UI thread (évite "log n'affiche plus")
+ * - ✅ Anti-crash: bg executor / lifecycle guards (évite RejectedExecutionException après rebuild)
  */
 public class RegisterTabFragment extends Fragment {
 
@@ -91,9 +93,19 @@ public class RegisterTabFragment extends Fragment {
     private long lastLogRefreshMs = 0L;
     private boolean logRefreshPending = false;
 
+    /**
+     * ✅ FIX LOG: toujours exécuter la logique de refresh sur UI thread.
+     * Sinon, selon le thread du callback (LogBus/Controller), le log peut ne plus s'afficher.
+     */
     private void scheduleLogRefresh() {
         if (txtLog == null) return;
         if (cbShowLog == null || !cbShowLog.isChecked()) return;
+
+        // Force UI thread
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            ui.post(this::scheduleLogRefresh);
+            return;
+        }
 
         long now = System.currentTimeMillis();
         long dt = now - lastLogRefreshMs;
@@ -125,9 +137,7 @@ public class RegisterTabFragment extends Fragment {
 
                 updateButtons(state);
 
-                try {
-                    if (controller != null) controller.requestStatus();
-                } catch (Exception ignored) {}
+                try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
 
                 scheduleLogRefresh();
             });
@@ -150,8 +160,8 @@ public class RegisterTabFragment extends Fragment {
         public void onLiveQty(double net, double gross) {
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
-                txtQtyNet.setText(String.format(Locale.ROOT, "NET: %.3f", net));
-                txtQtyGross.setText(String.format(Locale.ROOT, "GROSS: %.3f", gross));
+                if (txtQtyNet != null) txtQtyNet.setText(String.format(Locale.ROOT, "NET: %.3f", net));
+                if (txtQtyGross != null) txtQtyGross.setText(String.format(Locale.ROOT, "GROSS: %.3f", gross));
             });
         }
 
@@ -161,9 +171,9 @@ public class RegisterTabFragment extends Fragment {
                 if (!isAdded() || getView() == null) return;
 
                 if (starting) {
-                    txtLive.setText("LIVE: RUNNING_FLOWING (flow off - waiting progression)");
+                    if (txtLive != null) txtLive.setText("LIVE: RUNNING_FLOWING (flow off - waiting progression)");
                 } else {
-                    txtLive.setText(liveText);
+                    if (txtLive != null) txtLive.setText(liveText);
                 }
             });
         }
@@ -173,8 +183,8 @@ public class RegisterTabFragment extends Fragment {
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
 
-                txtTicketNo.setText("Ticket Number : " + (ticketNo == null ? "—" : ticketNo));
-                txtDeliveryUid.setText("Delivery UID : " + (deliveryUid == null ? "—" : deliveryUid));
+                if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : " + (ticketNo == null ? "—" : ticketNo));
+                if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : " + (deliveryUid == null ? "—" : deliveryUid));
             });
         }
     };
@@ -193,6 +203,7 @@ public class RegisterTabFragment extends Fragment {
 
             if (UsbReceiver.ACTION_USB_READY.equals(a)) {
                 attemptAttachIfPossible(false);
+
             } else if (UsbReceiver.ACTION_USB_DETACHED.equals(a)) {
                 detachUiListenerSafe();
                 controller = null;
@@ -202,13 +213,13 @@ public class RegisterTabFragment extends Fragment {
                 ui.post(() -> {
                     if (!isAdded() || getView() == null) return;
 
-                    txtSerialId.setText("#Série : —");
-                    txtTicketPending.setText("Ticket pending : —");
-                    txtTicketNo.setText("Ticket Number : —");
-                    txtDeliveryUid.setText("Delivery UID : —");
-                    txtLive.setText("LIVE: (en attente)");
-                    txtQtyNet.setText("NET: 0.0");
-                    txtQtyGross.setText("GROSS: 0.0");
+                    if (txtSerialId != null) txtSerialId.setText("#Série : —");
+                    if (txtTicketPending != null) txtTicketPending.setText("Ticket pending : —");
+                    if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : —");
+                    if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : —");
+                    if (txtLive != null) txtLive.setText("LIVE: (en attente)");
+                    if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
+                    if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
                     updateButtons(null);
                 });
             }
@@ -218,6 +229,7 @@ public class RegisterTabFragment extends Fragment {
     @Override
     public void onAttach(@NonNull Context context) {
         super.onAttach(context);
+
         Bundle a = getArguments();
         if (a != null) {
             node = a.getInt(ARG_NODE, 250);
@@ -260,10 +272,10 @@ public class RegisterTabFragment extends Fragment {
     public void onDestroyView() {
         super.onDestroyView();
 
-        // ✅ Correctif crash: empêcher des ui.post() d'exécuter du code après destruction de la view
+        // ✅ Anti-crash: empêcher des ui.post() (log + attach) de survivre à la destruction de la view
         try { ui.removeCallbacksAndMessages(null); } catch (Exception ignored) {}
 
-        // ✅ Correctif crash: bg peut être TERMINATED lors d'un rebuild de fragments (scan autoritaire)
+        // Stopper executor du fragment
         try { bg.shutdownNow(); } catch (Exception ignored) {}
 
         controller = null;
@@ -287,18 +299,22 @@ public class RegisterTabFragment extends Fragment {
         txtSerialId = v.findViewById(R.id.txtSerialId);
         txtTicketNo = v.findViewById(R.id.txtTicketNo);
         txtTicketPending = v.findViewById(R.id.txtTicketPending);
+
         spnProduct = v.findViewById(R.id.spnProduct);
         edtPreset = v.findViewById(R.id.edtPreset);
+
         btnConnect = v.findViewById(R.id.btnConnectTab);
         btnA = v.findViewById(R.id.btnA);
         btnB = v.findViewById(R.id.btnB);
         btnC = v.findViewById(R.id.btnC);
         btnContinue = v.findViewById(R.id.btnContinue);
         btnFinish = v.findViewById(R.id.btnFinish);
+
         txtLive = v.findViewById(R.id.txtLive);
         txtQtyNet = v.findViewById(R.id.txtQtyNet);
         txtQtyGross = v.findViewById(R.id.txtQtyGross);
         txtDeliveryUid = v.findViewById(R.id.txtDeliveryUid);
+
         cbShowLog = v.findViewById(R.id.cbShowLog);
         logPanel = v.findViewById(R.id.logPanel);
         txtLog = v.findViewById(R.id.txtLog);
@@ -306,104 +322,127 @@ public class RegisterTabFragment extends Fragment {
         btnClearLog = v.findViewById(R.id.btnClearLog);
         btnCopyLog = v.findViewById(R.id.btnCopyLog);
         btnScrollDown = v.findViewById(R.id.btnScrollDown);
+
         cbTxRx = v.findViewById(R.id.cbTxRx);
         cbLogTs = v.findViewById(R.id.cbLogTs);
     }
 
     private void initUi() {
-        txtLcrNode.setText(String.format(Locale.ROOT, "LCR Node : %d", node));
-        txtFrom.setText(String.format(Locale.ROOT, "From : %d", from));
+        if (txtLcrNode != null) txtLcrNode.setText(String.format(Locale.ROOT, "LCR Node : %d", node));
+        if (txtFrom != null) txtFrom.setText(String.format(Locale.ROOT, "From : %d", from));
 
-        txtSerialId.setText("#Série : —");
-        txtTicketNo.setText("Ticket Number : —");
-        txtTicketPending.setText("Ticket pending : —");
+        if (txtSerialId != null) txtSerialId.setText("#Série : —");
+        if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : —");
+        if (txtTicketPending != null) txtTicketPending.setText("Ticket pending : —");
         ticketPendingFlag = -1;
 
-        txtLive.setText("LIVE: (en attente)");
-        txtQtyNet.setText("NET: 0.0");
-        txtQtyGross.setText("GROSS: 0.0");
-        txtDeliveryUid.setText("Delivery UID : —");
+        if (txtLive != null) txtLive.setText("LIVE: (en attente)");
+        if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
+        if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
+        if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : —");
 
-        edtPreset.setText("50");
+        if (edtPreset != null) edtPreset.setText("50");
 
         List<String> items = new ArrayList<>();
         for (int i = 1; i <= 16; i++) items.add("Produit " + i);
+
         ArrayAdapter<String> ad = new ArrayAdapter<>(requireContext(), android.R.layout.simple_spinner_item, items);
         ad.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        spnProduct.setAdapter(ad);
-        spnProduct.setSelection(0);
+        if (spnProduct != null) {
+            spnProduct.setAdapter(ad);
+            spnProduct.setSelection(0);
+        }
 
-        cbShowLog.setChecked(false);
-        logPanel.setVisibility(View.GONE);
+        if (cbShowLog != null) cbShowLog.setChecked(false);
+        if (logPanel != null) logPanel.setVisibility(View.GONE);
         logViewSinceMs = 0L;
 
-        cbTxRx.setChecked(LogBus.SHOW_IO);
-        cbLogTs.setChecked(LogBus.SHOW_TS);
+        if (cbTxRx != null) cbTxRx.setChecked(LogBus.SHOW_IO);
+        if (cbLogTs != null) cbLogTs.setChecked(LogBus.SHOW_TS);
 
         updateButtons(null);
     }
 
     private void wireUi() {
-        cbShowLog.setOnCheckedChangeListener((b, checked) -> {
-            logPanel.setVisibility(checked ? View.VISIBLE : View.GONE);
-            LogBus.ui(node, ts("Afficher log: " + (checked ? "ON" : "OFF")));
-            if (checked) refreshLogView();
-        });
+        if (cbShowLog != null) {
+            cbShowLog.setOnCheckedChangeListener((b, checked) -> {
+                if (logPanel != null) logPanel.setVisibility(checked ? View.VISIBLE : View.GONE);
+                LogBus.ui(node, ts("Afficher log: " + (checked ? "ON" : "OFF")));
+                // ✅ FIX LOG: utiliser schedule (UI-safe + throttle)
+                if (checked) scheduleLogRefresh();
+            });
+        }
 
-        btnScrollDown.setOnClickListener(v -> logScroll.fullScroll(View.FOCUS_DOWN));
+        if (btnScrollDown != null && logScroll != null) {
+            btnScrollDown.setOnClickListener(v -> logScroll.fullScroll(View.FOCUS_DOWN));
+        }
 
-        btnClearLog.setOnClickListener(v -> {
-            logViewSinceMs = System.currentTimeMillis();
-            if (txtLog != null) txtLog.setText("");
-            LogBus.ui(node, ts("Clear log (vue locale)"));
-        });
+        if (btnClearLog != null) {
+            btnClearLog.setOnClickListener(v -> {
+                logViewSinceMs = System.currentTimeMillis();
+                if (txtLog != null) txtLog.setText("");
+                LogBus.ui(node, ts("Clear log (vue locale)"));
+                scheduleLogRefresh();
+            });
+        }
 
-        btnCopyLog.setOnClickListener(v -> {
-            android.content.ClipboardManager cm =
-                    (android.content.ClipboardManager) requireContext().getSystemService(Context.CLIPBOARD_SERVICE);
-            cm.setPrimaryClip(android.content.ClipData.newPlainText("log", txtLog.getText()));
-            LogBus.ui(node, ts("Log copié"));
-        });
+        if (btnCopyLog != null) {
+            btnCopyLog.setOnClickListener(v -> {
+                android.content.ClipboardManager cm =
+                        (android.content.ClipboardManager) requireContext().getSystemService(Context.CLIPBOARD_SERVICE);
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("log", txtLog != null ? txtLog.getText() : ""));
+                LogBus.ui(node, ts("Log copié"));
+            });
+        }
 
-        cbLogTs.setOnCheckedChangeListener((b, checked) -> {
-            logTsEnabled = checked;
-            LogBus.SHOW_TS = checked;
-            if (controller != null) controller.setLogTimestampsEnabled(checked);
-            LogBus.ui(node, ts("Timestamps: " + (checked ? "ON" : "OFF")));
-            scheduleLogRefresh();
-        });
+        if (cbLogTs != null) {
+            cbLogTs.setOnCheckedChangeListener((b, checked) -> {
+                logTsEnabled = checked;
+                LogBus.SHOW_TS = checked;
+                if (controller != null) controller.setLogTimestampsEnabled(checked);
+                LogBus.ui(node, ts("Timestamps: " + (checked ? "ON" : "OFF")));
+                scheduleLogRefresh();
+            });
+        }
 
-        cbTxRx.setOnCheckedChangeListener((b, checked) -> {
-            LogBus.SHOW_IO = checked;
-            if (controller != null) controller.setTxRxLoggingEnabled(checked);
-            LogBus.ui(node, ts("TX/RX: " + (checked ? "ON" : "OFF")));
-            scheduleLogRefresh();
-        });
+        if (cbTxRx != null) {
+            cbTxRx.setOnCheckedChangeListener((b, checked) -> {
+                LogBus.SHOW_IO = checked;
+                if (controller != null) controller.setTxRxLoggingEnabled(checked);
+                LogBus.ui(node, ts("TX/RX: " + (checked ? "ON" : "OFF")));
+                scheduleLogRefresh();
+            });
+        }
 
-        btnConnect.setOnClickListener(v -> connectThisRegister(true));
-        btnA.setOnClickListener(v -> { if (controller != null) controller.alignOrRecover(); });
-        btnB.setOnClickListener(v -> { if (controller != null) controller.requestStatus(); });
+        if (btnConnect != null) btnConnect.setOnClickListener(v -> connectThisRegister(true));
+        if (btnA != null) btnA.setOnClickListener(v -> { if (controller != null) controller.alignOrRecover(); });
+        if (btnB != null) btnB.setOnClickListener(v -> { if (controller != null) controller.requestStatus(); });
 
-        btnC.setOnClickListener(v -> {
-            if (controller == null) return;
-            if (ticketPendingFlag == 1) {
-                txtLive.setText("LIVE: ticket_pending — faire Resolve (A)");
-                LogBus.ui(node, ts("C bloqué: ticket_pending=1"));
+        if (btnC != null) {
+            btnC.setOnClickListener(v -> {
+                if (controller == null) return;
+
+                if (ticketPendingFlag == 1) {
+                    if (txtLive != null) txtLive.setText("LIVE: ticket_pending — faire Resolve (A)");
+                    LogBus.ui(node, ts("C bloqué: ticket_pending=1"));
+                    updateButtons(controller.getState());
+                    return;
+                }
+
+                starting = true;
+                startingSinceMs = System.currentTimeMillis();
                 updateButtons(controller.getState());
-                return;
-            }
-            starting = true;
-            startingSinceMs = System.currentTimeMillis();
-            updateButtons(controller.getState());
-            txtLive.setText("LIVE: RUNNING_FLOWING (flow off - waiting progression)");
+                if (txtLive != null) txtLive.setText("LIVE: RUNNING_FLOWING (flow off - waiting progression)");
 
-            int prod = spnProduct.getSelectedItemPosition() + 1;
-            double preset = parseDouble(edtPreset.getText().toString(), 0.0);
-            controller.startDelivery(prod, preset);
-        });
+                int prod = (spnProduct != null ? (spnProduct.getSelectedItemPosition() + 1) : 1);
+                double preset = parseDouble(edtPreset != null ? edtPreset.getText().toString() : "0", 0.0);
 
-        btnContinue.setOnClickListener(v -> { if (controller != null) controller.resumeIfPaused(); });
-        btnFinish.setOnClickListener(v -> { if (controller != null) controller.endDelivery(); });
+                controller.startDelivery(prod, preset);
+            });
+        }
+
+        if (btnContinue != null) btnContinue.setOnClickListener(v -> { if (controller != null) controller.resumeIfPaused(); });
+        if (btnFinish != null) btnFinish.setOnClickListener(v -> { if (controller != null) controller.endDelivery(); });
     }
 
     private void attemptAttachIfPossible(boolean verboseLog) {
@@ -411,10 +450,12 @@ public class RegisterTabFragment extends Fragment {
             syncUiFromController();
             return;
         }
+
         if (UsbSession.getPort() == null) {
             if (verboseLog) LogBus.api(node, "Auto-attach: USB/Controller pas encore prêt (retry sur USB_READY).");
             return;
         }
+
         connectThisRegister(false);
     }
 
@@ -440,12 +481,11 @@ public class RegisterTabFragment extends Fragment {
             uiListenerAttached = true;
         }
 
-        controller.setTxRxLoggingEnabled(cbTxRx.isChecked());
-        controller.setLogTimestampsEnabled(cbLogTs.isChecked());
+        if (cbTxRx != null) controller.setTxRxLoggingEnabled(cbTxRx.isChecked());
+        if (cbLogTs != null) controller.setLogTimestampsEnabled(cbLogTs.isChecked());
 
         syncUiFromController();
-
-        validateHeaderAsync(); // ✅ persist=false inside
+        validateHeaderAsync(); // persist=false inside
 
         if (userInitiated) LogBus.api(node, "Connect TAB: 1 - UI attached");
         scheduleLogRefresh();
@@ -453,9 +493,7 @@ public class RegisterTabFragment extends Fragment {
 
     private void detachUiListenerSafe() {
         if (!uiListenerAttached) return;
-        try {
-            RegisterSessionManager.get(requireContext()).detachUiListener(node, uiListener);
-        } catch (Exception ignored) {}
+        try { RegisterSessionManager.get(requireContext()).detachUiListener(node, uiListener); } catch (Exception ignored) {}
         uiListenerAttached = false;
     }
 
@@ -467,12 +505,11 @@ public class RegisterTabFragment extends Fragment {
     }
 
     /**
-     * ✅ Correctif crash:
-     * - si le fragment a été détruit (scan autoritaire/rebuild), bg peut être shutdown/terminated
-     * - on protège l’exécution + on ignore si executor rejette la tâche
+     * ✅ Anti-crash: protège l'exécution si executor shutdown/terminated après rebuild fragments
+     * ✅ Et garde persist=false (Option 2) pour ne PAS écrire SQLite depuis l'UI validate
      */
     private void validateHeaderAsync() {
-        // garde-fou rapide: si executor déjà fermé, on n’exécute rien
+        // garde-fou rapide: executor déjà fermé
         try {
             if (bg.isShutdown() || bg.isTerminated()) return;
         } catch (Exception ignored) {}
@@ -480,10 +517,10 @@ public class RegisterTabFragment extends Fragment {
         try {
             bg.execute(() -> {
                 try {
-                    if (controller == null) return;
+                    DeliveryController c = controller;
+                    if (c == null) return;
 
-                    // ✅ Option 2: UI validate must NOT write to SQLite
-                    ApiResult r = controller.api_registerValidate(null, node, null, null, null, false);
+                    ApiResult r = c.api_registerValidate(null, node, null, null, null, false);
                     JSONObject j = r.toJson().optJSONObject("data");
                     if (j == null) return;
 
@@ -492,14 +529,16 @@ public class RegisterTabFragment extends Fragment {
                     ticketPendingFlag = (tp == 1 ? 1 : (tp == 0 ? 0 : -1));
 
                     ui.post(() -> {
-                        // garde-fou lifecycle : fragment plus valide -> skip
                         if (!isAdded() || getView() == null) return;
 
-                        txtSerialId.setText("#Série : " + ((serial == null || serial.isEmpty()) ? "—" : serial));
-                        txtTicketPending.setText("Ticket pending : " +
-                                (ticketPendingFlag == 1 ? "OUI" : (ticketPendingFlag == 0 ? "NON" : "—")));
-
-                        if (ticketPendingFlag == 1) {
+                        if (txtSerialId != null) {
+                            txtSerialId.setText("#Série : " + ((serial == null || serial.isEmpty()) ? "—" : serial));
+                        }
+                        if (txtTicketPending != null) {
+                            txtTicketPending.setText("Ticket pending : " +
+                                    (ticketPendingFlag == 1 ? "OUI" : (ticketPendingFlag == 0 ? "NON" : "—")));
+                        }
+                        if (ticketPendingFlag == 1 && txtLive != null) {
                             txtLive.setText("LIVE: ticket_pending — faire Resolve (A)");
                         }
 
@@ -511,11 +550,13 @@ public class RegisterTabFragment extends Fragment {
                 }
             });
         } catch (java.util.concurrent.RejectedExecutionException ignored) {
-            // ✅ Correctif crash: executor déjà TERMINATED (rebuild fragments) => on ignore
+            // executor déjà terminé -> ignorer (évite crash)
         }
     }
 
     private void updateButtons(DeliveryState state) {
+        if (btnConnect == null || btnA == null || btnB == null || btnC == null || btnContinue == null || btnFinish == null) return;
+
         if (controller == null) {
             btnConnect.setEnabled(true);
             btnA.setEnabled(false);
@@ -536,6 +577,7 @@ public class RegisterTabFragment extends Fragment {
 
         btnConnect.setEnabled(true);
         btnB.setEnabled(true);
+
         btnA.setEnabled(connected || paused || flowing);
         btnC.setEnabled(connected && ticketPendingFlag != 1);
 
@@ -548,9 +590,21 @@ public class RegisterTabFragment extends Fragment {
         }
     }
 
+    /**
+     * ✅ FIX LOG: UI thread + guard lifecycle
+     */
     private void refreshLogView() {
         if (txtLog == null) return;
         if (cbShowLog == null || !cbShowLog.isChecked()) return;
+
+        // Force UI thread
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            ui.post(this::refreshLogView);
+            return;
+        }
+
+        // Guard lifecycle
+        if (!isAdded() || getView() == null) return;
 
         List<LogBus.LogEvent> events = LogBus.snapshotForNode(node, TAB_LOG_MAX_LINES);
         if (logViewSinceMs > 0) {
