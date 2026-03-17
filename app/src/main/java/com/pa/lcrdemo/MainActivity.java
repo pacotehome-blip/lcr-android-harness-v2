@@ -105,7 +105,6 @@ public class MainActivity extends AppCompatActivity {
     // ===================== Tabs registres =====================
     private TabLayout tabRegisters;
     private View registerContainer;
-
     private final LinkedHashMap<Integer, Integer> regNodeToFrom = new LinkedHashMap<>(); // node -> from
     private int currentRegNode = -1;
 
@@ -122,7 +121,6 @@ public class MainActivity extends AppCompatActivity {
     private boolean logTsEnabled = false;
     private long mainLogViewSinceMs = 0L;
     private final Handler ui = new Handler(Looper.getMainLooper());
-
     private static final long MAIN_LOG_REFRESH_MIN_MS = 250;
     private long lastMainLogRefreshMs = 0L;
     private boolean mainLogRefreshPending = false;
@@ -192,7 +190,6 @@ public class MainActivity extends AppCompatActivity {
             if (intent == null) return;
             String a = intent.getAction();
             if (a == null) return;
-
             if (UsbReceiver.ACTION_USB_READY.equals(a)) {
                 UsbSerialPort p = UsbSession.getPort();
                 if (p != null) onUsbPortReady(p);
@@ -210,6 +207,7 @@ public class MainActivity extends AppCompatActivity {
         setContentView(R.layout.activity_main);
 
         usbManager = (UsbManager) getSystemService(USB_SERVICE);
+
         bindUi();
         wireUi();
         initUiDefaults();
@@ -236,7 +234,6 @@ public class MainActivity extends AppCompatActivity {
         if (p != null && usbPort == null) {
             onUsbPortReady(p);
         }
-
         refreshGlobalLogView();
     }
 
@@ -262,7 +259,6 @@ public class MainActivity extends AppCompatActivity {
         btnScanUsb = findViewById(R.id.btnScanUsb);
         btnPingUsb = findViewById(R.id.btnPingUsb);
         spnUsbDevices = findViewById(R.id.spnUsbDevices);
-
         edtTo = findViewById(R.id.edtTo);
         edtFrom = findViewById(R.id.edtFrom);
         txtActiveNode = findViewById(R.id.txtActiveNode);
@@ -306,6 +302,7 @@ public class MainActivity extends AppCompatActivity {
         if (logPanel != null) logPanel.setVisibility(View.GONE);
 
         SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
+
         boolean showTxRx = prefs.getBoolean("log_tx_rx", false);
         if (cbTxRx != null) cbTxRx.setChecked(showTxRx);
         LogBus.SHOW_IO = showTxRx;
@@ -346,7 +343,6 @@ public class MainActivity extends AppCompatActivity {
                 if (e.getAction() == MotionEvent.ACTION_DOWN) nodeUserTouchedSpinner = true;
                 return false;
             });
-
             spnNodesFound.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
                 @Override public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
                     if (!nodeUserTouchedSpinner) return;
@@ -439,7 +435,6 @@ public class MainActivity extends AppCompatActivity {
         tabLayout.addTab(tabLayout.newTab().setText("MAIN"), true);
         tabLayout.addTab(tabLayout.newTab().setText("API-Face"), false);
         showPage(0);
-
         tabLayout.addOnTabSelectedListener(new TabLayout.OnTabSelectedListener() {
             @Override public void onTabSelected(TabLayout.Tab tab) { showPage(tab.getPosition()); }
             @Override public void onTabUnselected(TabLayout.Tab tab) {}
@@ -544,13 +539,11 @@ public class MainActivity extends AppCompatActivity {
             toast("Scan registres: USB non prêt");
             return;
         }
-
         if (btnScanNodes != null) btnScanNodes.setEnabled(false);
         if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : scan en cours...");
 
         scanExec.execute(() -> {
             final long scanStartedMs = System.currentTimeMillis();
-
             LinkedHashMap<Integer, NodeScanItem> found = new LinkedHashMap<>();
             final int T28 = 300;
             final int TF = 300;
@@ -560,23 +553,18 @@ public class MainActivity extends AppCompatActivity {
                     LcpLink tmp = new LcpLink(p, node, 255, true);
                     int[] ds = tmp.opDeliveryStatus(T28);
                     int delCode = ds[1];
-
                     boolean ticketPending = (delCode & 0x0001) != 0;
                     boolean flowActive = (delCode & 0x0004) != 0;
                     boolean deliveryActive = (delCode & 0x0008) != 0;
-
                     String serialId = decodeAz(tmp.opGetField(80, TF));
                     String ticketNo = u32beDec(tmp.opGetField(23, TF));
-
                     found.put(node, new NodeScanItem(node, serialId, ticketNo, ticketPending, deliveryActive, flowActive, false));
-
                 } catch (Exception ignored) {
                     // ignore: node not present / timeout / etc.
                 }
             }
 
             final long scanFinishedMs = System.currentTimeMillis();
-
             // ✅ Option 5: ALWAYS write a scan completion trace at end (even if found is empty)
             // ✅ And write node-detected events only for nodes in 'found'
             persistScanEvents(scanStartedMs, scanFinishedMs, found);
@@ -618,12 +606,10 @@ public class MainActivity extends AppCompatActivity {
                     for (NodeScanItem it : nodeItems) {
                         if (it.lcrnode != defaultNode) ensureRegisterTab(it.lcrnode, 255, false);
                     }
-
                     edtTo.setText(String.valueOf(defaultNode));
                     if (txtActiveNode != null) txtActiveNode.setText("Node actif : " + defaultNode);
 
                     logUi(null, "Scan registres terminé: " + nodeItems.size() + " node(s), default=" + defaultNode + " (scan autoritaire)");
-
                 } finally {
                     if (btnScanNodes != null) btnScanNodes.setEnabled(true);
                 }
@@ -650,7 +636,6 @@ public class MainActivity extends AppCompatActivity {
                 if (it.ticketNo == null || it.ticketNo.trim().isEmpty()) continue;
 
                 long detectedMs = System.currentTimeMillis();
-
                 JSONObject data = new JSONObject();
                 try {
                     data.put("event_type", "SCAN_NODE_DETECTED");
@@ -668,21 +653,21 @@ public class MainActivity extends AppCompatActivity {
                 } catch (Exception ignored) {}
 
                 deliveryStore.upsertSummaryAsync(
-                    it.serialId,
-                    it.ticketNo,
-                    null,
-                    "NODE_DETECTED_SCAN",
-                    DeliveryLogStore.SOURCE_UI,
-                    null,
-                    null,
-                    null
+                        it.serialId,
+                        it.ticketNo,
+                        null,
+                        "NODE_DETECTED_SCAN",
+                        DeliveryLogStore.SOURCE_UI,
+                        null,
+                        null,
+                        null
                 );
 
                 deliveryStore.openAttemptAsync(it.serialId, it.ticketNo, DeliveryLogStore.SOURCE_UI, null, attemptId -> {
                     deliveryStore.addEventAsync(attemptId, DeliveryLogStore.LEVEL_INFO,
-                        "SCAN_NODE_DETECTED",
-                        "Scan registres: node détecté",
-                        data.toString());
+                            "SCAN_NODE_DETECTED",
+                            "Scan registres: node détecté",
+                            data.toString());
                     deliveryStore.closeAttemptAsync(attemptId, "SEEN", data.toString(), null);
                 });
             }
@@ -715,23 +700,23 @@ public class MainActivity extends AppCompatActivity {
         } catch (Exception ignored) {}
 
         deliveryStore.upsertSummaryAsync(
-            scanSerial,
-            scanTicket,
-            null,
-            scanState,
-            DeliveryLogStore.SOURCE_UI,
-            null,
-            null,
-            null
+                scanSerial,
+                scanTicket,
+                null,
+                scanState,
+                DeliveryLogStore.SOURCE_UI,
+                null,
+                null,
+                null
         );
 
         deliveryStore.openAttemptAsync(scanSerial, scanTicket, DeliveryLogStore.SOURCE_UI, null, attemptId -> {
             deliveryStore.addEventAsync(attemptId, DeliveryLogStore.LEVEL_INFO,
-                "SCAN_COMPLETED",
-                (foundCount == 0)
-                    ? "Scan registres terminé: aucun node détecté"
-                    : ("Scan registres terminé: " + foundCount + " node(s) détecté(s)"),
-                summary.toString());
+                    "SCAN_COMPLETED",
+                    (foundCount == 0)
+                            ? "Scan registres terminé: aucun node détecté"
+                            : ("Scan registres terminé: " + foundCount + " node(s) détecté(s)"),
+                    summary.toString());
             deliveryStore.closeAttemptAsync(attemptId, "DONE", summary.toString(), null);
         });
     }
@@ -750,9 +735,9 @@ public class MainActivity extends AppCompatActivity {
     private static String u32beDec(byte[] be4) {
         if (be4 == null || be4.length < 4) return "";
         long u = ((be4[0] & 0xFFL) << 24)
-            | ((be4[1] & 0xFFL) << 16)
-            | ((be4[2] & 0xFFL) << 8)
-            | (be4[3] & 0xFFL);
+                | ((be4[1] & 0xFFL) << 16)
+                | ((be4[2] & 0xFFL) << 8)
+                | (be4[3] & 0xFFL);
         return String.valueOf(u & 0xFFFFFFFFL);
     }
 
@@ -766,7 +751,7 @@ public class MainActivity extends AppCompatActivity {
         final boolean isDefault;
 
         NodeScanItem(int lcrnode, String serialId, String ticketNo,
-                     boolean ticketPending, boolean deliveryActive, boolean flowActive, boolean isDefault) {
+                    boolean ticketPending, boolean deliveryActive, boolean flowActive, boolean isDefault) {
             this.lcrnode = lcrnode;
             this.serialId = serialId;
             this.ticketNo = ticketNo;
@@ -819,6 +804,7 @@ public class MainActivity extends AppCompatActivity {
             logUi(null, "USB déjà prêt (UsbSession port déjà ouvert)");
             return;
         }
+
         if (usbPort != null) {
             logUi(null, "USB déjà prêt (port déjà ouvert)");
             UsbDevice dev = (usbDevices.isEmpty() ? null : getSelectedUsbDeviceSafe());
@@ -834,8 +820,8 @@ public class MainActivity extends AppCompatActivity {
 
         if (!usbManager.hasPermission(dev)) {
             PendingIntent pi = PendingIntent.getBroadcast(
-                this, 0, new Intent(ACTION_USB_PERMISSION),
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE
+                    this, 0, new Intent(ACTION_USB_PERMISSION),
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE
             );
             usbManager.requestPermission(dev, pi);
             logUi(null, "Permission USB demandée");
@@ -895,7 +881,6 @@ public class MainActivity extends AppCompatActivity {
         nodeItems.add(NodeScanItem.default250());
         if (nodeAdapter != null) nodeAdapter.notifyDataSetChanged();
         if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : —");
-
         clearAllRegisterTabsAndFragments();
         ensureRegisterTab(250, 255, true);
         if (txtActiveNode != null) txtActiveNode.setText("Node actif : 250");
@@ -956,6 +941,7 @@ public class MainActivity extends AppCompatActivity {
             if (path != null) apiRidToPath.put(rid, path);
             Integer node = extractNodeFromPath(path);
             if (node == null && currentRegNode > 0) node = currentRegNode;
+
             String jobId = extractJobIdFromPath(path);
             if (jobId != null) {
                 if (apiJobSeen.contains(jobId)) return;
@@ -972,6 +958,7 @@ public class MainActivity extends AppCompatActivity {
             String path = apiRidToPath.remove(rid);
             Integer node = extractNodeFromPath(path);
             if (node == null && currentRegNode > 0) node = currentRegNode;
+
             String jobId = extractJobIdFromPath(path);
             if (jobId != null) {
                 if (apiFirstJobRid.remove(rid)) {
@@ -999,11 +986,13 @@ public class MainActivity extends AppCompatActivity {
             toast("Backup DB impossible: store absent");
             return;
         }
+
         Uri savedDir = getSavedBackupDirUri();
         if (savedDir != null) {
             backupDbToChosenDir(savedDir);
             return;
         }
+
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
             String name = "lcr_delivery_" + utcStamp() + ".db";
             deliveryStore.backupDbToDownloadsAsync(this, name, (ok, fileName, detail) -> {
@@ -1032,11 +1021,13 @@ public class MainActivity extends AppCompatActivity {
                 toast("Backup: sélection de dossier annulée");
                 return;
             }
+
             Uri dirUri = data.getData();
             final int takeFlags = data.getFlags() & (
-                Intent.FLAG_GRANT_READ_URI_PERMISSION |
-                Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                            | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
             );
+
             try { getContentResolver().takePersistableUriPermission(dirUri, takeFlags); } catch (Exception ignored) {}
             saveBackupDirUri(dirUri);
             toast("Backup: dossier enregistré");
@@ -1063,6 +1054,7 @@ public class MainActivity extends AppCompatActivity {
                 toast("Backup FAIL: DB introuvable (" + DeliveryDb.DB_NAME + ")");
                 return;
             }
+
             if (deliveryStore != null) deliveryStore.checkpointWalBestEffort();
 
             String name = "lcr_delivery_" + utcStamp() + ".db";
@@ -1071,25 +1063,31 @@ public class MainActivity extends AppCompatActivity {
                 toast("Backup FAIL: dossier non accessible en écriture");
                 return;
             }
+
             DocumentFile existing = dir.findFile(name);
             if (existing != null) { try { existing.delete(); } catch (Exception ignore) {} }
+
             DocumentFile target = dir.createFile("application/x-sqlite3", name);
             if (target == null || target.getUri() == null) {
                 toast("Backup FAIL: création du fichier impossible");
                 return;
             }
+
             Uri outUri = target.getUri();
             try (java.io.InputStream in = new java.io.FileInputStream(dbFile);
                  java.io.OutputStream out = getContentResolver().openOutputStream(outUri)) {
+
                 if (out == null) {
                     toast("Backup FAIL: output stream null");
                     return;
                 }
+
                 byte[] buf = new byte[64 * 1024];
                 int r;
                 while ((r = in.read(buf)) > 0) out.write(buf, 0, r);
                 out.flush();
             }
+
             toast("Backup OK (dossier choisi): " + name);
         } catch (Exception e) {
             toast("Backup FAIL: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
@@ -1131,6 +1129,7 @@ public class MainActivity extends AppCompatActivity {
     private void refreshGlobalLogView() {
         if (txtLog == null) return;
         if (cbShowLog != null && !cbShowLog.isChecked()) return;
+
         List<LogBus.LogEvent> events = LogBus.snapshotGlobal(1400, mainLogViewSinceMs);
         txtLog.setText(LogBus.buildText(events));
     }
