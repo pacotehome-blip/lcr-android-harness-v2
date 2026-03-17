@@ -1410,7 +1410,7 @@ public ApiResult api_registerValidate(
             Integer expected_lcrnode_dec,
             String expected_serial_id,
             Integer expected_product_number,
-            String expected_compartment
+            String expected_compartment,
             boolean persist
     ){
         if (link == null || link.isClosed()) {
