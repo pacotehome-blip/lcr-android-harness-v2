@@ -15,6 +15,7 @@ import android.view.ViewGroup;
 import android.widget.*;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.core.widget.NestedScrollView;
 import androidx.fragment.app.Fragment;
 
 import com.hoho.android.usbserial.driver.UsbSerialPort;
@@ -33,6 +34,7 @@ import java.util.concurrent.Executors;
  *
  * Correctifs intégrés:
  * - ✅ Log tab: refresh toujours sur UI thread (évite "log n'affiche plus")
+ * - ✅ Option A: NO auto-scroll du log + préserver scroll du tab (évite le jump vers le haut)
  * - ✅ Anti-crash: bg executor / lifecycle guards (évite RejectedExecutionException après rebuild)
  */
 public class RegisterTabFragment extends Fragment {
@@ -57,6 +59,9 @@ public class RegisterTabFragment extends Fragment {
     private Spinner spnProduct;
     private EditText edtPreset;
     private Button btnConnect, btnA, btnB, btnC, btnContinue, btnFinish;
+
+    // Root scroll (tab)
+    private NestedScrollView regRootScroll;
 
     // Log tab
     private CheckBox cbShowLog, cbTxRx, cbLogTs;
@@ -95,7 +100,6 @@ public class RegisterTabFragment extends Fragment {
 
     /**
      * ✅ FIX LOG: toujours exécuter la logique de refresh sur UI thread.
-     * Sinon, selon le thread du callback (LogBus/Controller), le log peut ne plus s'afficher.
      */
     private void scheduleLogRefresh() {
         if (txtLog == null) return;
@@ -136,7 +140,6 @@ public class RegisterTabFragment extends Fragment {
                 if (starting && (System.currentTimeMillis() - startingSinceMs) > 12000L) starting = false;
 
                 updateButtons(state);
-
                 try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
 
                 scheduleLogRefresh();
@@ -169,7 +172,6 @@ public class RegisterTabFragment extends Fragment {
         public void onLiveStatus(String liveText) {
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
-
                 if (starting) {
                     if (txtLive != null) txtLive.setText("LIVE: RUNNING_FLOWING (flow off - waiting progression)");
                 } else {
@@ -182,7 +184,6 @@ public class RegisterTabFragment extends Fragment {
         public void onTicketInfo(String ticketNo, String deliveryUid) {
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
-
                 if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : " + (ticketNo == null ? "—" : ticketNo));
                 if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : " + (deliveryUid == null ? "—" : deliveryUid));
             });
@@ -229,7 +230,6 @@ public class RegisterTabFragment extends Fragment {
     @Override
     public void onAttach(@NonNull Context context) {
         super.onAttach(context);
-
         Bundle a = getArguments();
         if (a != null) {
             node = a.getInt(ARG_NODE, 250);
@@ -294,6 +294,8 @@ public class RegisterTabFragment extends Fragment {
     }
 
     private void bindUi(View v) {
+        regRootScroll = v.findViewById(R.id.regRootScroll);
+
         txtLcrNode = v.findViewById(R.id.txtLcrNode);
         txtFrom = v.findViewById(R.id.txtFrom);
         txtSerialId = v.findViewById(R.id.txtSerialId);
@@ -345,7 +347,6 @@ public class RegisterTabFragment extends Fragment {
 
         List<String> items = new ArrayList<>();
         for (int i = 1; i <= 16; i++) items.add("Produit " + i);
-
         ArrayAdapter<String> ad = new ArrayAdapter<>(requireContext(), android.R.layout.simple_spinner_item, items);
         ad.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         if (spnProduct != null) {
@@ -368,7 +369,6 @@ public class RegisterTabFragment extends Fragment {
             cbShowLog.setOnCheckedChangeListener((b, checked) -> {
                 if (logPanel != null) logPanel.setVisibility(checked ? View.VISIBLE : View.GONE);
                 LogBus.ui(node, ts("Afficher log: " + (checked ? "ON" : "OFF")));
-                // ✅ FIX LOG: utiliser schedule (UI-safe + throttle)
                 if (checked) scheduleLogRefresh();
             });
         }
@@ -450,12 +450,10 @@ public class RegisterTabFragment extends Fragment {
             syncUiFromController();
             return;
         }
-
         if (UsbSession.getPort() == null) {
             if (verboseLog) LogBus.api(node, "Auto-attach: USB/Controller pas encore prêt (retry sur USB_READY).");
             return;
         }
-
         connectThisRegister(false);
     }
 
@@ -509,7 +507,6 @@ public class RegisterTabFragment extends Fragment {
      * ✅ Et garde persist=false (Option 2) pour ne PAS écrire SQLite depuis l'UI validate
      */
     private void validateHeaderAsync() {
-        // garde-fou rapide: executor déjà fermé
         try {
             if (bg.isShutdown() || bg.isTerminated()) return;
         } catch (Exception ignored) {}
@@ -577,7 +574,6 @@ public class RegisterTabFragment extends Fragment {
 
         btnConnect.setEnabled(true);
         btnB.setEnabled(true);
-
         btnA.setEnabled(connected || paused || flowing);
         btnC.setEnabled(connected && ticketPendingFlag != 1);
 
@@ -591,7 +587,9 @@ public class RegisterTabFragment extends Fragment {
     }
 
     /**
-     * ✅ FIX LOG: UI thread + guard lifecycle
+     * ✅ Option A:
+     * - préserver scroll du tab (NestedScrollView root)
+     * - ne PAS auto-scroll le panneau log
      */
     private void refreshLogView() {
         if (txtLog == null) return;
@@ -606,6 +604,9 @@ public class RegisterTabFragment extends Fragment {
         // Guard lifecycle
         if (!isAdded() || getView() == null) return;
 
+        // ✅ préserver position scroll du tab
+        final int oldY = (regRootScroll != null) ? regRootScroll.getScrollY() : -1;
+
         List<LogBus.LogEvent> events = LogBus.snapshotForNode(node, TAB_LOG_MAX_LINES);
         if (logViewSinceMs > 0) {
             ArrayList<LogBus.LogEvent> filtered = new ArrayList<>(events.size());
@@ -616,7 +617,14 @@ public class RegisterTabFragment extends Fragment {
         }
 
         txtLog.setText(LogBus.buildText(events));
-        if (logScroll != null) logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
+
+        // ✅ restaurer scroll du tab
+        if (regRootScroll != null && oldY >= 0) {
+            regRootScroll.post(() -> regRootScroll.scrollTo(0, oldY));
+        }
+
+        // ✅ Option A: PAS d’auto-scroll du log (tu as déjà le bouton Down)
+        // if (logScroll != null) logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
     }
 
     private String ts(String msg) {
