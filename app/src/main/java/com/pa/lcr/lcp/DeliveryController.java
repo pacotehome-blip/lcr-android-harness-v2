@@ -668,9 +668,14 @@ public final class DeliveryController implements DeliveryControllerPort {
 
                 // ✅ Ticket info (UI): ticket_no (#23). delivery_uid est inconnu ici => null
                 try {
-                    String tno = readTicketNo23();
-                    if (listener != null) listener.onTicketInfo(tno, null);
-                } catch (Exception ignored) {}
+ String tno = readTicketNo23();
+ String uid = null;
+ String n = lastNumeroLivraison;
+ if (n != null && !n.trim().isEmpty() && tno != null && !tno.trim().isEmpty()) {
+ uid = n.trim() + "-" + tno.trim();
+ }
+ if (listener != null) listener.onTicketInfo(tno, uid);
+ } catch (Exception ignored) {}
 
             } catch (Exception e) {
                 handleIoFailure("status", e);
@@ -2192,6 +2197,7 @@ try {
                 String uid = (job.numeroLivraison == null ? "" : job.numeroLivraison) + "-" + job.ticketNo;
                 job.deliveryUid = uid;
                 safeJsonPut(result, "delivery_uid", uid);
+ try { if (listener != null) listener.onTicketInfo(job.ticketNo, uid); } catch (Exception ignored) {}
 
                 safeJsonPut(result, "start_ms", job.startMs);
                 safeJsonPut(result, "end_ms", job.endMs);
