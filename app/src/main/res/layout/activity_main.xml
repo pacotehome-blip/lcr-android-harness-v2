@@ -43,10 +43,12 @@
         app:tabGravity="fill" />
 
     <!-- ===================== PAGE 1: MAIN (Infrastructure + Tabs registres) ===================== -->
+    <!-- ✅ FIX: height=0dp + weight=1 pour éviter les conflits avec pageApiFace -->
     <LinearLayout
         android:id="@+id/pageMain"
         android:layout_width="match_parent"
-        android:layout_height="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
         android:orientation="vertical">
 
         <LinearLayout
@@ -183,7 +185,7 @@
                 android:checked="false"
                 android:minHeight="0dp"
                 android:paddingTop="0dp"
-                android:paddingBottom="0dp"/>
+                android:paddingBottom="0dp" />
 
             <LinearLayout
                 android:id="@+id/logPanel"
@@ -253,7 +255,7 @@
                         android:checked="false"
                         android:minHeight="0dp"
                         android:paddingTop="0dp"
-                        android:paddingBottom="0dp"/>
+                        android:paddingBottom="0dp" />
 
                     <CheckBox
                         android:id="@+id/cbLogTs"
@@ -264,17 +266,20 @@
                         android:checked="false"
                         android:minHeight="0dp"
                         android:paddingTop="0dp"
-                        android:paddingBottom="0dp"/>
+                        android:paddingBottom="0dp" />
                 </LinearLayout>
             </LinearLayout>
+
         </LinearLayout>
     </LinearLayout>
 
     <!-- ===================== PAGE 2: API-Face ===================== -->
+    <!-- ✅ FIX: height=0dp + weight=1 -->
     <LinearLayout
         android:id="@+id/pageApiFace"
         android:layout_width="match_parent"
-        android:layout_height="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
         android:orientation="vertical"
         android:visibility="gone">
 
@@ -285,7 +290,13 @@
             android:text="Backup DB (Downloads)"
             android:layout_margin="8dp" />
 
-        <include layout="@layout/fragment_api_face" />
+        <!-- ✅ FIX: donner l’espace restant à la page scrollable -->
+        <include
+            layout="@layout/fragment_api_face"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+
     </LinearLayout>
 
 </LinearLayout>
