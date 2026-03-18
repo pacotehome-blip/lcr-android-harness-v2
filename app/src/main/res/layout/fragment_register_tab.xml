@@ -1,4 +1,5 @@
-<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android" 
+
+<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/regRootScroll"
     android:layout_width="match_parent"
@@ -171,6 +172,7 @@
                         </com.google.android.material.textfield.TextInputLayout>
                     </LinearLayout>
                 </LinearLayout>
+
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
@@ -193,7 +195,7 @@
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="Actions" 
+                    android:text="Actions"
                     android:textStyle="bold"
                     android:textSize="14sp" />
 
@@ -260,6 +262,7 @@
                         android:layout_marginStart="8dp"
                         android:text="Terminer" />
                 </LinearLayout>
+
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
@@ -314,6 +317,7 @@
                         android:textColor="#222222"
                         android:layout_marginTop="4dp" />
                 </LinearLayout>
+
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
@@ -346,6 +350,16 @@
                     android:layout_height="wrap_content"
                     android:text="Delivery UID : —"
                     android:layout_marginTop="6dp" />
+
+                <!-- ✅ NOUVEAU: Reprint last ticket -->
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnReprintTicket"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Reprint (last ticket)"
+                    android:layout_marginTop="8dp" />
+
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
@@ -450,6 +464,7 @@
                             android:text="Timestamps UI + IO + API"
                             android:checked="false" />
                     </LinearLayout>
+
                 </LinearLayout>
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>

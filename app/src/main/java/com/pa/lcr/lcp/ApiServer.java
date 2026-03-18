@@ -136,18 +136,31 @@ public final class ApiServer {
 
             t("[API " + ts() + "][RID=" + rid + "] REQ " + req.method + " " + req.path + " body=" + shrink(req.body));
 
+            ApiResult ar;
             JSONObject resp;
-            int status = 200;
-
+            int status;
             try {
                 // ✅ Ne PAS lock lcpLock pour tick/wait (cache-only + wait/notify)
                 if (isTickWait(req)) {
-                    resp = route(req).toJson();
+                    ar = route(req);
                 } else {
                     synchronized (lcpLock) {
-                        resp = route(req).toJson();
+                        ar = route(req);
                     }
                 }
+
+                // ✅ HTTP status mapping basé sur ApiResult
+                if (ar != null && ar.code == 0) {
+                    if ("TICKET_PENDING".equals(ar.err)) status = 422;
+                    else status = 400;
+                } else {
+                    status = 200;
+                }
+
+                resp = (ar != null)
+                        ? ar.toJson()
+                        : ApiResult.fail("API: 0 - Internal error", "INTERNAL").toJson();
+
             } catch (Exception e) {
                 status = 500;
                 JSONObject d = new JSONObject();
@@ -239,6 +252,14 @@ public final class ApiServer {
             } catch (Exception ignored) {}
 
             return facade.api_registerValidate(numero, node, from, expectedSerial, product, compartment);
+        }
+
+        // Ticket: Reprint current
+        if ("POST".equals(req.method) && "/v1/ticket/reprint/current".equals(req.path)) {
+            JSONObject body = req.jsonBody();
+            Integer node = parseNodeDec(body);
+            Integer from = parseFromDec(body);
+            return facade.api_ticketReprintCurrent(node, from);
         }
 
         // DB dump
@@ -336,8 +357,10 @@ public final class ApiServer {
 
         String statusText =
                 (status == 200) ? "OK" :
+                (status == 400) ? "Bad Request" :
                 (status == 403) ? "Forbidden" :
-                (status == 404) ? "Not Found" : "Internal Server Error";
+                (status == 404) ? "Not Found" :
+                (status == 422) ? "Unprocessable Entity" : "Internal Server Error";
 
         String headers =
                 "HTTP/1.1 " + status + " " + statusText + "\r\n" +
@@ -408,11 +431,13 @@ public final class ApiServer {
         // read headers until CRLFCRLF
         while ((b = in.read()) != -1) {
             headerOut.write(b);
+
             if (state == 0 && b == '\r') state = 1;
             else if (state == 1 && b == '\n') state = 2;
             else if (state == 2 && b == '\r') state = 3;
             else if (state == 3 && b == '\n') break;
             else state = 0;
+
             if (headerOut.size() > 16_384) break;
         }
 
