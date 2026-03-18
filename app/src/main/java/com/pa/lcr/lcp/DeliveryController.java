@@ -1493,33 +1493,7 @@ public final class DeliveryController implements DeliveryControllerPort {
             return ApiResult.fail("Reprint: 0 - LCP error.", "REPRINT_FAIL", d);
         }
     }
-  try {
-   int[] ds = lcpDeliveryStatus();
-   int delStatus = ds[0];
-   int delCode = ds[1];
-   boolean ticketPending = (delCode & DC_TICKET_PENDING) != 0;
 
-   JSONObject data = new JSONObject();
-   safeJsonPut(data, "ticketPending", ticketPending ? 1 : 0);
-   safeJsonPut(data, "delStatus", delStatus);
-   safeJsonPut(data, "delCode", delCode);
-
-   if (ticketPending) {
-    safeJsonPut(data, "next", "A");
-    return ApiResult.fail("Reprint: 0 - Ticket pending", "TICKET_PENDING", data);
-   }
-
-   // Ticket DONE -> envoyer PRINT_LAST_TICKET (0x06)
-   lcpIssueCommand(CMD_PRINT_LAST_TICKET);
-   safeJsonPut(data, "action", "PRINT_LAST_TICKET_SENT");
-   return ApiResult.ok("Reprint: 1 - Print sent", data);
-
-  } catch (Exception e) {
-   JSONObject d = new JSONObject();
-   safeJsonPut(d, "detail", safeMsg(e));
-   return ApiResult.fail("Reprint: 0 - LCP error.", "REPRINT_FAIL", d);
-  }
- }
 
 
     // =========================================================

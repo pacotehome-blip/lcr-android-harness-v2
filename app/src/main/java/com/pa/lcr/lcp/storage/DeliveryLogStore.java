@@ -135,6 +135,7 @@ public class DeliveryLogStore {
             ins.put("last_ts", now);
             ins.put("result_json", resultJson);
             ins.put("error_json", errorJson);
+
             db.insert("delivery_summary", null, ins);
         }
     }
@@ -169,6 +170,7 @@ public class DeliveryLogStore {
         if (endUtc != null) cv.put("end_utc", endUtc);
         if (durationMs != null) cv.put("duration_ms", durationMs);
         if (cv.size() == 0) return;
+
         db.update("delivery_summary", cv, "serial_id=? AND ticket_no=?", new String[]{serialId, ticketNo});
     }
 
@@ -288,7 +290,6 @@ public class DeliveryLogStore {
 
         try (InputStream in = new java.io.FileInputStream(dbFile);
              OutputStream out = ctx.getContentResolver().openOutputStream(uri)) {
-
             if (out == null) throw new Exception("openOutputStream failed");
             byte[] buf = new byte[64 * 1024];
             int r;
@@ -301,13 +302,11 @@ public class DeliveryLogStore {
             done.put(MediaStore.Downloads.IS_PENDING, 0);
             ctx.getContentResolver().update(uri, done, null, null);
         }
-
         return true;
     }
 
     public boolean dumpJsonToDownloads(Context ctx, String fileName) throws Exception {
         SQLiteDatabase db = helper.getReadableDatabase();
-
         StringBuilder sb = new StringBuilder(1024 * 256);
         sb.append("{\"delivery_summary\":");
         sb.append(queryTableAsJsonArray(db, "delivery_summary"));
@@ -316,7 +315,6 @@ public class DeliveryLogStore {
         sb.append(",\"delivery_event\":");
         sb.append(queryTableAsJsonArray(db, "delivery_event"));
         sb.append("}");
-
         byte[] bytes = sb.toString().getBytes(StandardCharsets.UTF_8);
 
         ContentValues values = new ContentValues();
@@ -340,7 +338,6 @@ public class DeliveryLogStore {
             done.put(MediaStore.Downloads.IS_PENDING, 0);
             ctx.getContentResolver().update(uri, done, null, null);
         }
-
         return true;
     }
 
@@ -397,6 +394,7 @@ public class DeliveryLogStore {
         return "\"" + s + "\"";
     }
 
+
     // =========================================================
     // ✅ READ helper: last RESULT for a serial_id (delivery_summary)
     // =========================================================
@@ -444,4 +442,5 @@ public class DeliveryLogStore {
         }
         return null;
     }
+
 }
