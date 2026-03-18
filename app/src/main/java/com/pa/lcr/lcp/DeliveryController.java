@@ -1408,9 +1408,91 @@ public final class DeliveryController implements DeliveryControllerPort {
   * Règle: interdit si ticketPending=1 -> FAIL code "TICKET_PENDING" (HTTP 422 côté ApiServer).
   */
  public ApiResult api_ticketReprintCurrent() {
-  if (link == null || link.isClosed()) {
-   return ApiResult.fail("Reprint: 0 - USB not ready.", "USB_NOT_READY");
-  }
+        if (link == null || link.isClosed()) {
+            return ApiResult.fail("Reprint: 0 - USB not ready.", "USB_NOT_READY");
+        }
+        try {
+            // 0) Lire état ticketPending
+            int[] ds = lcpDeliveryStatus();
+            int delStatus = ds[0];
+            int delCode = ds[1];
+            boolean ticketPending = (delCode & DC_TICKET_PENDING) != 0;
+
+            // 1) Lire serial_id registre (#80) = clé DB
+            String serialId = null;
+            try { serialId = decodeAzString(lcpGetField(FIELD_SERIAL_ID)); } catch (Exception ignored) {}
+
+            // 2) Lookup DB: dernier RESULT pour ce serial_id (source de vérité)
+            JSONObject resultObj = null;
+            boolean resultFound = false;
+            String ticketNoDb = null;
+            DeliveryLogStore store = this.logStore;
+            if (store != null && serialId != null && !serialId.trim().isEmpty()) {
+                try {
+                    DeliveryLogStore.LatestResultRow row = store.getLatestResultBySerial(serialId);
+                    if (row != null && row.resultJson != null && !row.resultJson.trim().isEmpty()) {
+                        ticketNoDb = row.ticketNo;
+                        try {
+                            resultObj = new JSONObject(row.resultJson);
+                            resultFound = true;
+                        } catch (Exception ignored) {
+                            resultObj = null;
+                            resultFound = false;
+                        }
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+
+            // 3) Construire réponse
+            JSONObject data = new JSONObject();
+            safeJsonPut(data, "ticketPending", ticketPending ? 1 : 0);
+            safeJsonPut(data, "delStatus", delStatus);
+            safeJsonPut(data, "delCode", delCode);
+            safeJsonPut(data, "serial_id", (serialId == null || serialId.trim().isEmpty()) ? JSONObject.NULL : serialId);
+
+            // ticket_no = celui du RESULT DB (ou fallback row.ticketNo)
+            String ticketNo = null;
+            if (resultObj != null) ticketNo = resultObj.optString("ticket_no", null);
+            if ((ticketNo == null || ticketNo.trim().isEmpty()) && ticketNoDb != null && !ticketNoDb.trim().isEmpty()) {
+                ticketNo = ticketNoDb;
+            }
+            safeJsonPut(data, "ticket_no", (ticketNo == null || ticketNo.trim().isEmpty()) ? JSONObject.NULL : ticketNo);
+
+            // delivery_uid depuis result_json si possible
+            String deliveryUid = null;
+            if (resultObj != null) deliveryUid = resultObj.optString("delivery_uid", null);
+            safeJsonPut(data, "delivery_uid", (deliveryUid == null || deliveryUid.trim().isEmpty()) ? JSONObject.NULL : deliveryUid);
+
+            safeJsonPut(data, "result_found", resultFound ? 1 : 0);
+            safeJsonPut(data, "result", (resultObj == null) ? JSONObject.NULL : resultObj);
+
+            // ✅ Option 2: string prête à persister côté Field Service
+            safeJsonPut(data, "result_text", (resultObj == null) ? JSONObject.NULL : ("RESULT: " + resultObj.toString()));
+
+            // 4) Gate: ticket pending -> demander Resolve (A)
+            if (ticketPending) {
+                safeJsonPut(data, "next", "A");
+                return ApiResult.fail("Reprint: 0 - Ticket pending", "TICKET_PENDING", data);
+            }
+
+            // 5) Ticket DONE -> imprimer le dernier ticket (duplicate/last ticket)
+            lcpIssueCommand(CMD_PRINT_LAST_TICKET);
+            safeJsonPut(data, "action", "PRINT_LAST_TICKET_SENT");
+
+            // 6) Si result absent, on ne bloque pas la commande; on indique simplement l'absence.
+            if (!resultFound) {
+                safeJsonPut(data, "result_note", "RESULT_NOT_FOUND_IN_DB");
+            }
+
+            return ApiResult.ok("Reprint: 1 - Print sent", data);
+
+        } catch (Exception e) {
+            JSONObject d = new JSONObject();
+            safeJsonPut(d, "detail", safeMsg(e));
+            return ApiResult.fail("Reprint: 0 - LCP error.", "REPRINT_FAIL", d);
+        }
+    }
   try {
    int[] ds = lcpDeliveryStatus();
    int delStatus = ds[0];

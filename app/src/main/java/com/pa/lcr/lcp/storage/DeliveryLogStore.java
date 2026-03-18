@@ -135,7 +135,6 @@ public class DeliveryLogStore {
             ins.put("last_ts", now);
             ins.put("result_json", resultJson);
             ins.put("error_json", errorJson);
-
             db.insert("delivery_summary", null, ins);
         }
     }
@@ -170,7 +169,6 @@ public class DeliveryLogStore {
         if (endUtc != null) cv.put("end_utc", endUtc);
         if (durationMs != null) cv.put("duration_ms", durationMs);
         if (cv.size() == 0) return;
-
         db.update("delivery_summary", cv, "serial_id=? AND ticket_no=?", new String[]{serialId, ticketNo});
     }
 
@@ -290,6 +288,7 @@ public class DeliveryLogStore {
 
         try (InputStream in = new java.io.FileInputStream(dbFile);
              OutputStream out = ctx.getContentResolver().openOutputStream(uri)) {
+
             if (out == null) throw new Exception("openOutputStream failed");
             byte[] buf = new byte[64 * 1024];
             int r;
@@ -302,11 +301,13 @@ public class DeliveryLogStore {
             done.put(MediaStore.Downloads.IS_PENDING, 0);
             ctx.getContentResolver().update(uri, done, null, null);
         }
+
         return true;
     }
 
     public boolean dumpJsonToDownloads(Context ctx, String fileName) throws Exception {
         SQLiteDatabase db = helper.getReadableDatabase();
+
         StringBuilder sb = new StringBuilder(1024 * 256);
         sb.append("{\"delivery_summary\":");
         sb.append(queryTableAsJsonArray(db, "delivery_summary"));
@@ -315,6 +316,7 @@ public class DeliveryLogStore {
         sb.append(",\"delivery_event\":");
         sb.append(queryTableAsJsonArray(db, "delivery_event"));
         sb.append("}");
+
         byte[] bytes = sb.toString().getBytes(StandardCharsets.UTF_8);
 
         ContentValues values = new ContentValues();
@@ -338,6 +340,7 @@ public class DeliveryLogStore {
             done.put(MediaStore.Downloads.IS_PENDING, 0);
             ctx.getContentResolver().update(uri, done, null, null);
         }
+
         return true;
     }
 
@@ -394,52 +397,51 @@ public class DeliveryLogStore {
         return "\"" + s + "\"";
     }
 
+    // =========================================================
+    // ✅ READ helper: last RESULT for a serial_id (delivery_summary)
+    // =========================================================
 
-    // =========================================================
-    // ✅ READ helpers (Reprint): fetch last RESULT JSON from delivery_summary
-    // =========================================================
+    /** Lightweight row holder for latest RESULT lookup. */
+    public static final class LatestResultRow {
+        public final String ticketNo;
+        public final String resultJson;
+        public final long lastTs;
+
+        public LatestResultRow(String ticketNo, String resultJson, long lastTs) {
+            this.ticketNo = ticketNo;
+            this.resultJson = resultJson;
+            this.lastTs = lastTs;
+        }
+    }
 
     /**
-     * Return delivery_summary.result_json for the business key (serial_id, ticket_no).
-     * @return JSON string or null if not found/empty.
+     * Return latest non-empty delivery_summary.result_json for the given serial_id.
+     * Ordered by last_ts DESC.
+     * @return LatestResultRow or null if not found.
      */
-    public String getSummaryResultJson(String serialId, String ticketNo) {
+    public LatestResultRow getLatestResultBySerial(String serialId) {
         if (serialId == null || serialId.trim().isEmpty()) return null;
-        if (ticketNo == null || ticketNo.trim().isEmpty()) return null;
         try {
             SQLiteDatabase db = helper.getReadableDatabase();
             try (Cursor c = db.rawQuery(
-                    "SELECT result_json FROM delivery_summary WHERE serial_id=? AND ticket_no=? LIMIT 1",
-                    new String[]{serialId.trim(), ticketNo.trim()})) {
+                    "SELECT ticket_no, result_json, last_ts " +
+                            "FROM delivery_summary " +
+                            "WHERE serial_id=? AND result_json IS NOT NULL AND result_json<>'' " +
+                            "ORDER BY last_ts DESC LIMIT 1",
+                    new String[]{serialId.trim()})) {
+
                 if (c.moveToFirst()) {
-                    String s = c.isNull(0) ? null : c.getString(0);
-                    if (s != null && !s.trim().isEmpty()) return s;
+                    String ticketNo = c.isNull(0) ? null : c.getString(0);
+                    String resultJson = c.isNull(1) ? null : c.getString(1);
+                    long lastTs = c.isNull(2) ? 0L : c.getLong(2);
+
+                    if (resultJson != null && !resultJson.trim().isEmpty()) {
+                        return new LatestResultRow(ticketNo, resultJson, lastTs);
+                    }
                 }
             }
         } catch (Exception ignored) {
         }
         return null;
     }
-
-    /**
-     * Fallback: return the latest non-empty delivery_summary.result_json for a ticket_no, regardless of serial_id.
-     * Useful if serial_id is unavailable.
-     */
-    public String getLatestResultJsonByTicket(String ticketNo) {
-        if (ticketNo == null || ticketNo.trim().isEmpty()) return null;
-        try {
-            SQLiteDatabase db = helper.getReadableDatabase();
-            try (Cursor c = db.rawQuery(
-                    "SELECT result_json FROM delivery_summary WHERE ticket_no=? AND result_json IS NOT NULL AND result_json<>'' ORDER BY last_ts DESC LIMIT 1",
-                    new String[]{ticketNo.trim()})) {
-                if (c.moveToFirst()) {
-                    String s = c.isNull(0) ? null : c.getString(0);
-                    if (s != null && !s.trim().isEmpty()) return s;
-                }
-            }
-        } catch (Exception ignored) {
-        }
-        return null;
-    }
-
 }
