@@ -393,4 +393,53 @@ public class DeliveryLogStore {
                 .replace("\n", "\\n");
         return "\"" + s + "\"";
     }
+
+
+    // =========================================================
+    // ✅ READ helpers (Reprint): fetch last RESULT JSON from delivery_summary
+    // =========================================================
+
+    /**
+     * Return delivery_summary.result_json for the business key (serial_id, ticket_no).
+     * @return JSON string or null if not found/empty.
+     */
+    public String getSummaryResultJson(String serialId, String ticketNo) {
+        if (serialId == null || serialId.trim().isEmpty()) return null;
+        if (ticketNo == null || ticketNo.trim().isEmpty()) return null;
+        try {
+            SQLiteDatabase db = helper.getReadableDatabase();
+            try (Cursor c = db.rawQuery(
+                    "SELECT result_json FROM delivery_summary WHERE serial_id=? AND ticket_no=? LIMIT 1",
+                    new String[]{serialId.trim(), ticketNo.trim()})) {
+                if (c.moveToFirst()) {
+                    String s = c.isNull(0) ? null : c.getString(0);
+                    if (s != null && !s.trim().isEmpty()) return s;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    /**
+     * Fallback: return the latest non-empty delivery_summary.result_json for a ticket_no, regardless of serial_id.
+     * Useful if serial_id is unavailable.
+     */
+    public String getLatestResultJsonByTicket(String ticketNo) {
+        if (ticketNo == null || ticketNo.trim().isEmpty()) return null;
+        try {
+            SQLiteDatabase db = helper.getReadableDatabase();
+            try (Cursor c = db.rawQuery(
+                    "SELECT result_json FROM delivery_summary WHERE ticket_no=? AND result_json IS NOT NULL AND result_json<>'' ORDER BY last_ts DESC LIMIT 1",
+                    new String[]{ticketNo.trim()})) {
+                if (c.moveToFirst()) {
+                    String s = c.isNull(0) ? null : c.getString(0);
+                    if (s != null && !s.trim().isEmpty()) return s;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
 }
