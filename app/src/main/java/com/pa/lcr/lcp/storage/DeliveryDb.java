@@ -17,7 +17,7 @@ public class DeliveryDb extends SQLiteOpenHelper {
     public static final String DB_NAME = "lcr_delivery.db";
     // v1: base tables
     // v2: add time columns to delivery_summary + index
-    public static final int DB_VERSION = 2;
+    public static final int DB_VERSION = 3; // v3: add media_profile/media_event
 
     private static final String TAG = "DeliveryDb";
 
@@ -131,6 +131,55 @@ public class DeliveryDb extends SQLiteOpenHelper {
             addColumnIfMissing(db, "delivery_summary", "duration_ms", "INTEGER");
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_summary_time ON delivery_summary(start_ms, end_ms);");
         }
+
+  if (oldVersion < 3) {
+   // v3: media tables
+   db.execSQL(
+    "CREATE TABLE IF NOT EXISTS media_profile (" +
+     "media_id INTEGER PRIMARY KEY AUTOINCREMENT," +
+     "media_type TEXT NOT NULL," +
+     "display_name TEXT," +
+     "enabled INTEGER NOT NULL DEFAULT 1," +
+     "is_active INTEGER NOT NULL DEFAULT 0," +
+     "status TEXT NOT NULL DEFAULT 'DISCONNECTED'," +
+     "last_error TEXT," +
+     "created_ts INTEGER NOT NULL," +
+     "last_seen_ts INTEGER," +
+     "last_ok_ts INTEGER," +
+     "usb_vid INTEGER," +
+     "usb_pid INTEGER," +
+     "usb_device_name TEXT," +
+     "usb_permission INTEGER," +
+     "serial_baud INTEGER," +
+     "serial_data_bits INTEGER," +
+     "serial_stop_bits INTEGER," +
+     "serial_parity TEXT," +
+     "serial_flow_control TEXT," +
+     "bt_name TEXT," +
+     "bt_mac TEXT," +
+     "bt_uuid TEXT," +
+     "bt_bond_state TEXT," +
+     "bt_socket_state TEXT" +
+    ");"
+   );
+   db.execSQL("CREATE INDEX IF NOT EXISTS idx_media_active ON media_profile(is_active);");
+   db.execSQL("CREATE INDEX IF NOT EXISTS idx_media_type ON media_profile(media_type);");
+
+   db.execSQL(
+    "CREATE TABLE IF NOT EXISTS media_event (" +
+     "event_id INTEGER PRIMARY KEY AUTOINCREMENT," +
+     "ts INTEGER NOT NULL," +
+     "media_id INTEGER," +
+     "media_type TEXT," +
+     "level TEXT NOT NULL," +
+     "code TEXT," +
+     "message TEXT," +
+     "data_json TEXT" +
+    ");"
+   );
+   db.execSQL("CREATE INDEX IF NOT EXISTS idx_media_event_ts ON media_event(ts);");
+  }
+
     }
 
     private static void addColumnIfMissing(SQLiteDatabase db, String table, String col, String type) {

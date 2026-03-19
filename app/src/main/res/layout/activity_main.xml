@@ -1,4 +1,3 @@
-
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/rootTabs"
@@ -57,37 +56,9 @@
             android:layout_height="match_parent"
             android:orientation="vertical"
             android:padding="6dp">
+      <!-- ===================== USB (déplacé dans CONFIGURE) ===================== -->
 
-            <!-- ===================== USB ===================== -->
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:layout_marginTop="4dp">
-
-                <Button
-                    android:id="@+id/btnScanUsb"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="Scan USB" />
-
-                <Button
-                    android:id="@+id/btnPingUsb"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:layout_marginStart="8dp"
-                    android:text="Ouvrir/Ping USB" />
-            </LinearLayout>
-
-            <Spinner
-                android:id="@+id/spnUsbDevices"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp" />
-
-            <!-- ===================== MANUEL: TO/FROM + Ajouter/Focus TAB ===================== -->
+<!-- ===================== MANUEL: TO/FROM + Ajouter/Focus TAB ===================== -->
             <TextView
                 android:id="@+id/txtActiveNode"
                 android:layout_width="match_parent"
@@ -298,5 +269,165 @@
             android:layout_weight="1" />
 
     </LinearLayout>
+
+
+
+  <!-- ===================== PAGE 3: CONFIGURE (USB / Bluetooth / Wi-Fi) ===================== -->
+  <LinearLayout
+      android:id="@+id/pageConfigure"
+      android:layout_width="match_parent"
+      android:layout_height="0dp"
+      android:layout_weight="1"
+      android:orientation="vertical"
+      android:visibility="gone">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:padding="10dp">
+
+      <!-- Header configure + status à droite -->
+      <LinearLayout
+          android:layout_width="match_parent"
+          android:layout_height="wrap_content"
+          android:orientation="horizontal"
+          android:gravity="center_vertical">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Configure"
+            android:textStyle="bold"
+            android:textSize="18sp"/>
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:gravity="end">
+
+          <TextView
+              android:id="@+id/txtMediaActive"
+              android:layout_width="wrap_content"
+              android:layout_height="wrap_content"
+              android:text="Média : —"
+              android:textSize="12sp"
+              android:textStyle="bold"/>
+
+          <TextView
+              android:id="@+id/txtNodesActive"
+              android:layout_width="wrap_content"
+              android:layout_height="wrap_content"
+              android:text="Nodes : —"
+              android:textSize="12sp"/>
+        </LinearLayout>
+      </LinearLayout>
+
+      <!-- ===================== USB ===================== -->
+      <TextView
+          android:layout_width="match_parent"
+          android:layout_height="wrap_content"
+          android:layout_marginTop="10dp"
+          android:text="USB"
+          android:textStyle="bold"/>
+
+      <LinearLayout
+          android:layout_width="match_parent"
+          android:layout_height="wrap_content"
+          android:orientation="horizontal"
+          android:layout_marginTop="4dp">
+
+        <Button
+            android:id="@+id/btnScanUsb"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Scan USB"/>
+
+        <Button
+            android:id="@+id/btnPingUsb"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="8dp"
+            android:text="Ouvrir/Ping USB"/>
+      </LinearLayout>
+
+      <Spinner
+          android:id="@+id/spnUsbDevices"
+          android:layout_width="match_parent"
+          android:layout_height="wrap_content"
+          android:layout_marginTop="4dp"/>
+
+      <!-- ===================== BLUETOOTH (paired only) ===================== -->
+      <TextView
+          android:layout_width="match_parent"
+          android:layout_height="wrap_content"
+          android:layout_marginTop="14dp"
+          android:text="Bluetooth (appareils appairés)"
+          android:textStyle="bold"/>
+
+      <Spinner
+          android:id="@+id/spnBtBonded"
+          android:layout_width="match_parent"
+          android:layout_height="wrap_content"
+          android:layout_marginTop="4dp"/>
+
+      <LinearLayout
+          android:layout_width="match_parent"
+          android:layout_height="wrap_content"
+          android:orientation="horizontal"
+          android:layout_marginTop="6dp">
+
+        <Button
+            android:id="@+id/btnBtRefresh"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Refresh"/>
+
+        <Button
+            android:id="@+id/btnBtConnect"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="8dp"
+            android:text="Connect"/>
+
+        <Button
+            android:id="@+id/btnBtDisconnect"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="8dp"
+            android:text="Disconnect"/>
+      </LinearLayout>
+
+      <TextView
+          android:id="@+id/txtBtStatus"
+          android:layout_width="match_parent"
+          android:layout_height="wrap_content"
+          android:layout_marginTop="6dp"
+          android:text="BT : —"
+          android:textSize="12sp"/>
+
+      <!-- ===================== Wi-Fi (bientôt) ===================== -->
+      <TextView
+          android:layout_width="match_parent"
+          android:layout_height="wrap_content"
+          android:layout_marginTop="14dp"
+          android:text="Wi‑Fi (bientôt)"
+          android:textStyle="bold"/>
+
+      <Button
+          android:layout_width="match_parent"
+          android:layout_height="wrap_content"
+          android:enabled="false"
+          android:text="Configurer Wi‑Fi (à venir)"/>
+
+    </LinearLayout>
+  </LinearLayout>
 
 </LinearLayout>
