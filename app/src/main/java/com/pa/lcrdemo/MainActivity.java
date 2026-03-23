@@ -14,7 +14,6 @@ import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothSocket;
 import android.content.pm.PackageManager;
 import android.os.Build;
-
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
@@ -539,6 +538,7 @@ public class MainActivity extends AppCompatActivity {
             logUi(null, "TAB registre: node invalide: " + node);
             return;
         }
+
         if (from < 0 || from > 255) from = 255;
 
         if (!regNodeToFrom.containsKey(node)) {
@@ -640,6 +640,7 @@ public class MainActivity extends AppCompatActivity {
                     LcpLink tmp = new LcpLink(p, node, 255, true);
                     int[] ds = tmp.opDeliveryStatus(T28);
                     int delCode = ds[1];
+
                     boolean ticketPending = (delCode & 0x0001) != 0;
                     boolean flowActive = (delCode & 0x0004) != 0;
                     boolean deliveryActive = (delCode & 0x0008) != 0;
@@ -716,6 +717,7 @@ public class MainActivity extends AppCompatActivity {
         final long durationMs = Math.max(0L, scanFinishedMs - scanStartedMs);
         final int foundCount = (found != null) ? found.size() : 0;
 
+        // 1) Per-node detected events (ONLY if found)
         if (found != null && !found.isEmpty()) {
             for (NodeScanItem it : found.values()) {
                 if (it == null) continue;
@@ -760,6 +762,7 @@ public class MainActivity extends AppCompatActivity {
             }
         }
 
+        // 2) Completion event (ALWAYS)
         final String scanSerial = "__SCAN__";
         final String scanTicket = "SCAN-" + scanStartedMs;
         final String scanState = "SCAN_COMPLETED";
@@ -837,7 +840,7 @@ public class MainActivity extends AppCompatActivity {
         final boolean isDefault;
 
         NodeScanItem(int lcrnode, String serialId, String ticketNo,
-                    boolean ticketPending, boolean deliveryActive, boolean flowActive, boolean isDefault) {
+                     boolean ticketPending, boolean deliveryActive, boolean flowActive, boolean isDefault) {
             this.lcrnode = lcrnode;
             this.serialId = serialId;
             this.ticketNo = ticketNo;
@@ -878,7 +881,8 @@ public class MainActivity extends AppCompatActivity {
             if (m == null) m = "Unknown";
             if (p == null) p = "Device";
             labels.add(m + " - " + p);
-            logUi(null, String.format(Locale.ROOT, " - %s - %s (VID=%04X PID=%04X)", m, p, d.getVendorId(), d.getProductId()));
+            logUi(null, String.format(Locale.ROOT, " - %s - %s (VID=%04X PID=%04X)",
+                    m, p, d.getVendorId(), d.getProductId()));
         }
 
         spnUsbDevices.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, labels));
@@ -1109,6 +1113,7 @@ public class MainActivity extends AppCompatActivity {
         super.onActivityResult(requestCode, resultCode, data);
 
         if (requestCode == REQ_ENABLE_BT) {
+            // retour du dialog système d'activation Bluetooth
             refreshBondedBtList();
             return;
         }
@@ -1347,6 +1352,7 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
+        // Android 9+: s'assurer que le Bluetooth est activé (sinon getBondedDevices peut retourner vide)
         try {
             if (!btAdapter.isEnabled()) {
                 if (txtBtStatus != null) txtBtStatus.setText("BT : désactivé — activation requise");
@@ -1411,10 +1417,10 @@ public class MainActivity extends AppCompatActivity {
             try {
                 btDisconnect();
 
-                // ✅ FIX: réduire les échecs RFCOMM (ret=-1) : arrêter la discovery
+                // ✅ FIX: éviter que la discovery casse le RFCOMM (ret=-1)
                 try { if (btAdapter != null) btAdapter.cancelDiscovery(); } catch (Exception ignored) {}
 
-                // ✅ FIX: essayer INSECURE d'abord (souvent requis sur adaptateurs série),
+                // ✅ FIX: insecure RFCOMM d'abord (souvent requis sur adaptateurs série),
                 // puis fallback secure si nécessaire.
                 try {
                     s = dev.createInsecureRfcommSocketToServiceRecord(SPP_UUID);
