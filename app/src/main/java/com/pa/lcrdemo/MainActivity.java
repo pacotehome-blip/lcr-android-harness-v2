@@ -16,9 +16,11 @@ import android.content.pm.PackageManager;
 import android.os.Build;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
+
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.UUID;
+
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -26,13 +28,16 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbDeviceConnection;
 import android.hardware.usb.UsbManager;
 import android.net.Uri;
+
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+
 import android.view.MotionEvent;
 import android.view.View;
 import android.widget.*;
@@ -41,6 +46,7 @@ import com.google.android.material.tabs.TabLayout;
 import com.hoho.android.usbserial.driver.UsbSerialDriver;
 import com.hoho.android.usbserial.driver.UsbSerialPort;
 import com.hoho.android.usbserial.driver.UsbSerialProber;
+
 import com.pa.lcr.lcp.ApiFacade;
 import com.pa.lcr.lcp.ApiServer;
 import com.pa.lcr.lcp.LcpLink;
@@ -78,35 +84,35 @@ public class MainActivity extends AppCompatActivity {
     private final List<UsbDevice> usbDevices = new ArrayList<>();
     private UsbSerialPort usbPort; // cache local (la vérité = UsbSession.getPort())
 
-    // ===== Tabs / Pages (TOP: MAIN / API-Face) =====
+    // ===== Tabs / Pages (TOP: MAIN / API-Face / CONFIGURE) =====
     private TabLayout tabLayout;
     private View pageMain;
     private View pageApiFace;
- private View pageConfigure;
+    private View pageConfigure;
 
- // ===== CONFIGURE UI (status + BT) =====
- private TextView txtMediaActive;
- private TextView txtNodesActive;
- private Spinner spnBtBonded;
- private Button btnBtRefresh;
- private Button btnBtConnect;
- private Button btnBtDisconnect;
- private TextView txtBtStatus;
+    // ===== CONFIGURE UI (status + BT) =====
+    private TextView txtMediaActive;
+    private TextView txtNodesActive;
+    private Spinner spnBtBonded;
+    private Button btnBtRefresh;
+    private Button btnBtConnect;
+    private Button btnBtDisconnect;
+    private TextView txtBtStatus;
 
- // ===== BT runtime (paired-only) =====
- private static final int REQ_ENABLE_BT = 9103;
- private final ExecutorService btExec = Executors.newSingleThreadExecutor();
- private BluetoothAdapter btAdapter;
- private final List<BluetoothDevice> btBonded = new ArrayList<>();
- private ArrayAdapter<String> btAdapterUi;
- private BluetoothSocket btSocket;
- private InputStream btIn;
- private OutputStream btOut;
- private static final UUID SPP_UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
+    // ===== BT runtime (paired-only) =====
+    private static final int REQ_ENABLE_BT = 9103;
+    private final ExecutorService btExec = Executors.newSingleThreadExecutor();
+    private BluetoothAdapter btAdapter;
+    private final List<BluetoothDevice> btBonded = new ArrayList<>();
+    private ArrayAdapter<String> btAdapterUi;
 
- // ===== Media profile store =====
- private com.pa.lcr.lcp.storage.MediaProfileStore mediaProfileStore;
+    private BluetoothSocket btSocket;
+    private InputStream btIn;
+    private OutputStream btOut;
+    private static final UUID SPP_UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
 
+    // ===== Media profile store =====
+    private com.pa.lcr.lcp.storage.MediaProfileStore mediaProfileStore;
 
     // ===== API-Face UI =====
     private TextView txtApiStatus;
@@ -124,6 +130,7 @@ public class MainActivity extends AppCompatActivity {
     private Spinner spnUsbDevices;
     private Button btnScanUsb;
     private Button btnPingUsb;
+
     private EditText edtTo;
     private EditText edtFrom;
     private TextView txtActiveNode;
@@ -156,6 +163,7 @@ public class MainActivity extends AppCompatActivity {
     private CheckBox cbLogTs;
     private boolean logTsEnabled = false;
     private long mainLogViewSinceMs = 0L;
+
     private final Handler ui = new Handler(Looper.getMainLooper());
     private static final long MAIN_LOG_REFRESH_MIN_MS = 250;
     private long lastMainLogRefreshMs = 0L;
@@ -249,9 +257,9 @@ public class MainActivity extends AppCompatActivity {
         initUiDefaults();
         setupTabsTop();
 
- // CONFIGURE: media + bluetooth
- mediaProfileStore = new com.pa.lcr.lcp.storage.MediaProfileStore(this);
- btAdapter = BluetoothAdapter.getDefaultAdapter();
+        // CONFIGURE: media + bluetooth
+        mediaProfileStore = new com.pa.lcr.lcp.storage.MediaProfileStore(this);
+        btAdapter = BluetoothAdapter.getDefaultAdapter();
 
         deliveryStore = new DeliveryLogStore(this);
         deliveryStore.purgeOlderThanDaysAsync(7);
@@ -263,6 +271,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onStart() {
         super.onStart();
+
         IntentFilter f = new IntentFilter();
         f.addAction(UsbReceiver.ACTION_USB_READY);
         f.addAction(UsbReceiver.ACTION_USB_DETACHED);
@@ -279,7 +288,9 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onStop() {
-        try { unregisterReceiver(usbUiReceiver); } catch (Exception ignored) {}
+        try {
+            unregisterReceiver(usbUiReceiver);
+        } catch (Exception ignored) {}
         LogBus.removeListener(mainLogListener);
         super.onStop();
     }
@@ -295,11 +306,12 @@ public class MainActivity extends AppCompatActivity {
         tabLayout = findViewById(R.id.tabLayout);
         pageMain = findViewById(R.id.pageMain);
         pageApiFace = findViewById(R.id.pageApiFace);
- pageConfigure = findViewById(R.id.pageConfigure);
+        pageConfigure = findViewById(R.id.pageConfigure);
 
         btnScanUsb = findViewById(R.id.btnScanUsb);
         btnPingUsb = findViewById(R.id.btnPingUsb);
         spnUsbDevices = findViewById(R.id.spnUsbDevices);
+
         edtTo = findViewById(R.id.edtTo);
         edtFrom = findViewById(R.id.edtFrom);
         txtActiveNode = findViewById(R.id.txtActiveNode);
@@ -328,14 +340,15 @@ public class MainActivity extends AppCompatActivity {
         btnApiStop = findViewById(R.id.btnApiStop);
         btnDbBackup = findViewById(R.id.btnDbBackup);
 
- // CONFIGURE status + BT
- txtMediaActive = findViewById(R.id.txtMediaActive);
- txtNodesActive = findViewById(R.id.txtNodesActive);
- spnBtBonded = findViewById(R.id.spnBtBonded);
- btnBtRefresh = findViewById(R.id.btnBtRefresh);
- btnBtConnect = findViewById(R.id.btnBtConnect);
- btnBtDisconnect = findViewById(R.id.btnBtDisconnect);
- txtBtStatus = findViewById(R.id.txtBtStatus);
+        // CONFIGURE status + BT
+        txtMediaActive = findViewById(R.id.txtMediaActive);
+        txtNodesActive = findViewById(R.id.txtNodesActive);
+
+        spnBtBonded = findViewById(R.id.spnBtBonded);
+        btnBtRefresh = findViewById(R.id.btnBtRefresh);
+        btnBtConnect = findViewById(R.id.btnBtConnect);
+        btnBtDisconnect = findViewById(R.id.btnBtDisconnect);
+        txtBtStatus = findViewById(R.id.txtBtStatus);
 
         if (txtApiUrl != null) {
             txtApiUrl.setText("http://127.0.0.1:" + API_PORT);
@@ -393,6 +406,7 @@ public class MainActivity extends AppCompatActivity {
                 if (e.getAction() == MotionEvent.ACTION_DOWN) nodeUserTouchedSpinner = true;
                 return false;
             });
+
             spnNodesFound.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
                 @Override public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
                     if (!nodeUserTouchedSpinner) return;
@@ -473,18 +487,31 @@ public class MainActivity extends AppCompatActivity {
 
         if (btnApiStart != null) btnApiStart.setOnClickListener(v -> startApiServer());
         if (btnApiStop != null) btnApiStop.setOnClickListener(v -> stopApiServer("Stop button"));
+
         if (btnDbBackup != null) {
             btnDbBackup.setOnClickListener(v -> doBackupDb());
             btnDbBackup.setOnLongClickListener(v -> { requestBackupDir(); return true; });
         }
+
+        // ✅ FIX: Brancher les boutons Bluetooth (Refresh / Connect / Disconnect)
+        if (btnBtRefresh != null) btnBtRefresh.setOnClickListener(v -> refreshBondedBtList());
+        if (btnBtConnect != null) btnBtConnect.setOnClickListener(v -> btConnectSelected());
+        if (btnBtDisconnect != null) btnBtDisconnect.setOnClickListener(v -> btDisconnect());
     }
 
     private void setupTabsTop() {
         if (tabLayout == null) return;
+
         tabLayout.removeAllTabs();
+
         tabLayout.addTab(tabLayout.newTab().setText("MAIN"), true);
         tabLayout.addTab(tabLayout.newTab().setText("API-Face"), false);
+
+        // ✅ FIX: Ajouter l'onglet CONFIGURE (3e tab)
+        tabLayout.addTab(tabLayout.newTab().setText("CONFIGURE"), false);
+
         showPage(0);
+
         tabLayout.addOnTabSelectedListener(new TabLayout.OnTabSelectedListener() {
             @Override public void onTabSelected(TabLayout.Tab tab) { showPage(tab.getPosition()); }
             @Override public void onTabUnselected(TabLayout.Tab tab) {}
@@ -495,9 +522,16 @@ public class MainActivity extends AppCompatActivity {
     private void showPage(int index) {
         if (pageMain != null) pageMain.setVisibility(index == 0 ? View.VISIBLE : View.GONE);
         if (pageApiFace != null) pageApiFace.setVisibility(index == 1 ? View.VISIBLE : View.GONE);
- if (pageConfigure != null) pageConfigure.setVisibility(index == 2 ? View.VISIBLE : View.GONE);
+        if (pageConfigure != null) pageConfigure.setVisibility(index == 2 ? View.VISIBLE : View.GONE);
+
         if (index == 1) refreshApiStatus();
- if (index == 2) { updateMediaStatusUi(); updateNodesStatusUi(); }
+
+        if (index == 2) {
+            updateMediaStatusUi();
+            updateNodesStatusUi();
+            // ✅ FIX: auto-refresh BT en entrant dans CONFIGURE (pratique terrain)
+            refreshBondedBtList();
+        }
     }
 
     // =========================
@@ -548,6 +582,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void showRegisterFragment(int node) {
         if (registerContainer == null) return;
+
         currentRegNode = node;
         int from = regNodeToFrom.containsKey(node) ? regNodeToFrom.get(node) : 255;
         if (txtActiveNode != null) txtActiveNode.setText("Node actif : " + node);
@@ -567,6 +602,7 @@ public class MainActivity extends AppCompatActivity {
         regNodeToFrom.clear();
         currentRegNode = -1;
         if (tabRegisters != null) tabRegisters.removeAllTabs();
+
         try {
             FragmentManager fm = getSupportFragmentManager();
             FragmentTransaction tx = fm.beginTransaction();
@@ -591,12 +627,14 @@ public class MainActivity extends AppCompatActivity {
             toast("Scan registres: USB non prêt");
             return;
         }
+
         if (btnScanNodes != null) btnScanNodes.setEnabled(false);
         if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : scan en cours...");
 
         scanExec.execute(() -> {
             final long scanStartedMs = System.currentTimeMillis();
             LinkedHashMap<Integer, NodeScanItem> found = new LinkedHashMap<>();
+
             final int T28 = 300;
             final int TF = 300;
 
@@ -617,6 +655,7 @@ public class MainActivity extends AppCompatActivity {
             }
 
             final long scanFinishedMs = System.currentTimeMillis();
+
             // ✅ Option 5: ALWAYS write a scan completion trace at end (even if found is empty)
             // ✅ And write node-detected events only for nodes in 'found'
             persistScanEvents(scanStartedMs, scanFinishedMs, found);
@@ -658,9 +697,9 @@ public class MainActivity extends AppCompatActivity {
                     for (NodeScanItem it : nodeItems) {
                         if (it.lcrnode != defaultNode) ensureRegisterTab(it.lcrnode, 255, false);
                     }
+
                     edtTo.setText(String.valueOf(defaultNode));
                     if (txtActiveNode != null) txtActiveNode.setText("Node actif : " + defaultNode);
-
                     logUi(null, "Scan registres terminé: " + nodeItems.size() + " node(s), default=" + defaultNode + " (scan autoritaire)");
                 } finally {
                     if (btnScanNodes != null) btnScanNodes.setEnabled(true);
@@ -676,7 +715,6 @@ public class MainActivity extends AppCompatActivity {
      */
     private void persistScanEvents(long scanStartedMs, long scanFinishedMs, Map<Integer, NodeScanItem> found) {
         if (deliveryStore == null) return;
-
         final long durationMs = Math.max(0L, scanFinishedMs - scanStartedMs);
         final int foundCount = (found != null) ? found.size() : 0;
 
@@ -813,7 +851,9 @@ public class MainActivity extends AppCompatActivity {
             this.isDefault = isDefault;
         }
 
-        static NodeScanItem default250() { return new NodeScanItem(250, "", "", false, false, false, true); }
+        static NodeScanItem default250() {
+            return new NodeScanItem(250, "", "", false, false, false, true);
+        }
 
         NodeScanItem asDefault() {
             return new NodeScanItem(lcrnode, serialId, ticketNo, ticketPending, deliveryActive, flowActive, true);
@@ -846,6 +886,7 @@ public class MainActivity extends AppCompatActivity {
             labels.add(m + " - " + p);
             logUi(null, String.format(Locale.ROOT, " - %s - %s (VID=%04X PID=%04X)", m, p, d.getVendorId(), d.getProductId()));
         }
+
         spnUsbDevices.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, labels));
     }
 
@@ -927,12 +968,14 @@ public class MainActivity extends AppCompatActivity {
         try { UsbSession.clear(); } catch (Exception ignore) {}
         stopApiServer("USB detached");
         try { RegisterSessionManager.get(this).clearAll(true); } catch (Exception ignored) {}
+
         usbPort = null;
 
         nodeItems.clear();
         nodeItems.add(NodeScanItem.default250());
         if (nodeAdapter != null) nodeAdapter.notifyDataSetChanged();
         if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : —");
+
         clearAllRegisterTabsAndFragments();
         ensureRegisterTab(250, 255, true);
         if (txtActiveNode != null) txtActiveNode.setText("Node actif : 250");
@@ -983,7 +1026,6 @@ public class MainActivity extends AppCompatActivity {
 
     private void onApiLine(String line) {
         if (line == null) return;
-
         Integer rid = parseRid(line);
         boolean isReq = line.contains("] REQ ");
         boolean isResp = line.contains("] RESP ");
@@ -991,6 +1033,7 @@ public class MainActivity extends AppCompatActivity {
         if (rid != null && isReq) {
             String path = parseReqPath(line);
             if (path != null) apiRidToPath.put(rid, path);
+
             Integer node = extractNodeFromPath(path);
             if (node == null && currentRegNode > 0) node = currentRegNode;
 
@@ -1002,6 +1045,7 @@ public class MainActivity extends AppCompatActivity {
                 logApi(node, line);
                 return;
             }
+
             logApi(node, line);
             return;
         }
@@ -1020,6 +1064,7 @@ public class MainActivity extends AppCompatActivity {
                 if (isJobDoneRespLine(line)) logApi(node, line);
                 return;
             }
+
             logApi(node, line);
             return;
         }
@@ -1045,7 +1090,7 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             String name = "lcr_delivery_" + utcStamp() + ".db";
             deliveryStore.backupDbToDownloadsAsync(this, name, (ok, fileName, detail) -> {
                 if (ok) toast("Backup OK (Downloads): " + fileName);
@@ -1068,23 +1113,23 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+
         if (requestCode == REQ_ENABLE_BT) {
             // retour du dialog système d'activation Bluetooth
             refreshBondedBtList();
             return;
         }
+
         if (requestCode == REQ_PICK_BACKUP_DIR) {
             if (resultCode != RESULT_OK || data == null || data.getData() == null) {
                 toast("Backup: sélection de dossier annulée");
                 return;
             }
-
             Uri dirUri = data.getData();
             final int takeFlags = data.getFlags() & (
                     Intent.FLAG_GRANT_READ_URI_PERMISSION
                             | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
             );
-
             try { getContentResolver().takePersistableUriPermission(dirUri, takeFlags); } catch (Exception ignored) {}
             saveBackupDirUri(dirUri);
             toast("Backup: dossier enregistré");
@@ -1146,6 +1191,7 @@ public class MainActivity extends AppCompatActivity {
             }
 
             toast("Backup OK (dossier choisi): " + name);
+
         } catch (Exception e) {
             toast("Backup FAIL: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
         }
@@ -1172,9 +1218,10 @@ public class MainActivity extends AppCompatActivity {
             refreshGlobalLogView();
             return;
         }
-        if (mainLogRefreshPending) return;
 
+        if (mainLogRefreshPending) return;
         mainLogRefreshPending = true;
+
         long delay = Math.max(0L, MAIN_LOG_REFRESH_MIN_MS - dt);
         ui.postDelayed(() -> {
             mainLogRefreshPending = false;
@@ -1233,7 +1280,6 @@ public class MainActivity extends AppCompatActivity {
         return (m == null) ? e.getClass().getSimpleName() : m;
     }
 
-
     // =========================
     // CONFIGURE: Status UI (media + nodes)
     // =========================
@@ -1242,9 +1288,11 @@ public class MainActivity extends AppCompatActivity {
             String s;
             boolean usbReady = (UsbSession.getPort() != null);
             boolean btReady = (btSocket != null && btSocket.isConnected());
+
             if (usbReady) s = "Média : USB (prêt)";
             else if (btReady) s = "Média : BT (connecté)";
             else s = "Média : —";
+
             if (txtMediaActive != null) txtMediaActive.setText(s);
         } catch (Exception ignored) {}
     }
@@ -1256,9 +1304,11 @@ public class MainActivity extends AppCompatActivity {
                 txtNodesActive.setText("Nodes : —");
                 return;
             }
+
             int count = nodeItems.size();
             StringBuilder sb = new StringBuilder();
             sb.append("Nodes : ").append(count).append(" (");
+
             int shown = 0;
             for (NodeScanItem it : nodeItems) {
                 if (it == null) continue;
@@ -1267,8 +1317,10 @@ public class MainActivity extends AppCompatActivity {
                 shown++;
                 if (shown >= 3) break;
             }
+
             if (count > 3) sb.append(", …");
             sb.append(")");
+
             txtNodesActive.setText(sb.toString());
         } catch (Exception ignored) {}
     }
@@ -1279,10 +1331,15 @@ public class MainActivity extends AppCompatActivity {
     private boolean ensureBtConnectPermission() {
         // Android 9: pas de permission runtime; Android 12+: BLUETOOTH_CONNECT.
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true;
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT)
+                == PackageManager.PERMISSION_GRANTED) {
             return true;
         }
-        ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.BLUETOOTH_CONNECT}, 9101);
+
+        ActivityCompat.requestPermissions(this,
+                new String[]{Manifest.permission.BLUETOOTH_CONNECT},
+                9101);
         return false;
     }
 
@@ -1291,12 +1348,15 @@ public class MainActivity extends AppCompatActivity {
             if (txtBtStatus != null) txtBtStatus.setText("BT : permission requise (BLUETOOTH_CONNECT)");
             return;
         }
+
         btBonded.clear();
+
         if (btAdapter == null) {
             if (txtBtStatus != null) txtBtStatus.setText("BT : non disponible");
             return;
         }
-        // ✅ Android 9+: s'assurer que le Bluetooth est activé (sinon getBondedDevices peut retourner vide)
+
+        // Android 9+: s'assurer que le Bluetooth est activé (sinon getBondedDevices peut retourner vide)
         try {
             if (!btAdapter.isEnabled()) {
                 if (txtBtStatus != null) txtBtStatus.setText("BT : désactivé — activation requise");
@@ -1314,12 +1374,14 @@ public class MainActivity extends AppCompatActivity {
         } catch (Exception e) {
             if (txtBtStatus != null) txtBtStatus.setText("BT : erreur liste appairés");
         }
+
         List<String> labels = new ArrayList<>();
         for (BluetoothDevice d : btBonded) {
             String name = (d.getName() != null) ? d.getName() : "(no-name)";
             String mac = (d.getAddress() != null) ? d.getAddress() : "";
             labels.add(name + " — " + mac);
         }
+
         if (btAdapterUi == null) {
             btAdapterUi = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, labels);
             btAdapterUi.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
@@ -1329,6 +1391,7 @@ public class MainActivity extends AppCompatActivity {
             btAdapterUi.addAll(labels);
             btAdapterUi.notifyDataSetChanged();
         }
+
         if (txtBtStatus != null) txtBtStatus.setText("BT : " + labels.size() + " appareil(s) appairé(s)");
     }
 
@@ -1344,35 +1407,47 @@ public class MainActivity extends AppCompatActivity {
             if (txtBtStatus != null) txtBtStatus.setText("BT : permission requise (BLUETOOTH_CONNECT)");
             return;
         }
+
         final BluetoothDevice dev = getSelectedBonded();
         if (dev == null) {
             if (txtBtStatus != null) txtBtStatus.setText("BT : aucun device sélectionné");
             return;
         }
+
         if (txtBtStatus != null) txtBtStatus.setText("BT : connecting…");
+
         btExec.execute(() -> {
             try {
                 btDisconnect();
+
                 BluetoothSocket s = dev.createRfcommSocketToServiceRecord(SPP_UUID);
                 s.connect();
+
                 btSocket = s;
                 btIn = s.getInputStream();
                 btOut = s.getOutputStream();
+
                 if (mediaProfileStore != null) {
                     mediaProfileStore.setActiveBt(dev.getName(), dev.getAddress(), SPP_UUID.toString());
                     mediaProfileStore.setActiveStatus("CONNECTED", null);
                 }
+
                 ui.post(() -> {
                     if (txtBtStatus != null) txtBtStatus.setText("BT : CONNECTED — " + dev.getName());
                     updateMediaStatusUi();
                 });
+
             } catch (Exception e) {
+
                 if (mediaProfileStore != null) {
                     mediaProfileStore.setActiveBt(dev.getName(), dev.getAddress(), SPP_UUID.toString());
-                    mediaProfileStore.setActiveStatus("ERROR", (e.getMessage() != null) ? e.getMessage() : e.getClass().getSimpleName());
+                    mediaProfileStore.setActiveStatus("ERROR",
+                            (e.getMessage() != null) ? e.getMessage() : e.getClass().getSimpleName());
                 }
+
                 ui.post(() -> {
-                    if (txtBtStatus != null) txtBtStatus.setText("BT : FAIL — " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
+                    if (txtBtStatus != null) txtBtStatus.setText("BT : FAIL — "
+                            + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
                     updateMediaStatusUi();
                 });
             }
@@ -1383,12 +1458,15 @@ public class MainActivity extends AppCompatActivity {
         try { if (btIn != null) btIn.close(); } catch (Exception ignored) {}
         try { if (btOut != null) btOut.close(); } catch (Exception ignored) {}
         try { if (btSocket != null) btSocket.close(); } catch (Exception ignored) {}
+
         btIn = null;
         btOut = null;
         btSocket = null;
+
         if (mediaProfileStore != null) {
             try { mediaProfileStore.setActiveStatus("DISCONNECTED", null); } catch (Exception ignored) {}
         }
+
         ui.post(() -> {
             if (txtBtStatus != null) txtBtStatus.setText("BT : DISCONNECTED");
             updateMediaStatusUi();
@@ -1399,10 +1477,10 @@ public class MainActivity extends AppCompatActivity {
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == 9101) {
-            boolean ok = (grantResults != null && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED);
+            boolean ok = (grantResults != null && grantResults.length > 0
+                    && grantResults[0] == PackageManager.PERMISSION_GRANTED);
             if (ok) refreshBondedBtList();
             else if (txtBtStatus != null) txtBtStatus.setText("BT : permission refusée");
         }
     }
-
 }
