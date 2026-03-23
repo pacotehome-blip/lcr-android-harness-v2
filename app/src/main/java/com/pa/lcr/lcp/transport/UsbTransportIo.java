@@ -27,8 +27,12 @@ public final class UsbTransportIo implements TransportIo {
     public int write(byte[] data, int timeoutMs) throws Exception {
         if (closed || port == null) return -1;
         if (data == null || data.length == 0) return 0;
+
         int to = Math.max(0, timeoutMs);
-        return port.write(data, to);
+
+        // ⚠️ Dans ta version, write() retourne void => on retourne data.length
+        port.write(data, to);
+        return data.length;
     }
 
     @Override
@@ -36,13 +40,7 @@ public final class UsbTransportIo implements TransportIo {
         if (closed || port == null) return -1;
         if (buffer == null || buffer.length == 0) return 0;
 
-        int to;
-        if (timeoutMs < 0) {
-            // blocant: on simule par un grand timeout
-            to = 60_000;
-        } else {
-            to = timeoutMs;
-        }
+        int to = (timeoutMs < 0) ? 60_000 : timeoutMs;
         return port.read(buffer, to);
     }
 

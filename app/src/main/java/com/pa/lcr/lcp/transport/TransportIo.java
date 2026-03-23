@@ -1,58 +1,29 @@
 
 package com.pa.lcr.lcp.transport;
 
-import com.hoho.android.usbserial.driver.UsbSerialPort;
+public interface TransportIo {
 
-public final class UsbTransportIo implements TransportIo {
+    /** Identifiant stable: "USB" ou "BT:AA:BB:CC:DD:EE:FF" */
+    String getKey();
 
-    private final String key; // "USB"
-    private final UsbSerialPort port;
-    private final String description;
-    private final long generationId;
-    private volatile boolean closed = false;
+    /** Info humaine (UI/logs) */
+    String describe();
 
-    public UsbTransportIo(String key, UsbSerialPort port, String description, long generationId) {
-        this.key = key;
-        this.port = port;
-        this.description = description;
-        this.generationId = generationId;
-    }
+    /** La session est-elle ouverte/prête à lire/écrire ? */
+    boolean isOpen();
 
-    @Override public String getKey() { return key; }
+    /** Génération du transport (change à chaque reconnect) */
+    long getGenerationId();
 
-    @Override public String describe() { return description; }
+    /** Write: retourne nb d'octets écrits, ou -1 si erreur */
+    int write(byte[] data, int timeoutMs) throws Exception;
 
-    @Override public boolean isOpen() { return !closed && port != null; }
+    /**
+     * Read: retourne nb d'octets lus, 0 si timeout, ou -1 si EOF/closed
+     * timeoutMs: 0 => non-bloquant (poll), <0 => bloquant, >0 => timeout.
+     */
+    int read(byte[] buffer, int timeoutMs) throws Exception;
 
-    @Override public long getGenerationId() { return generationId; }
-
-    @Override
-    public int write(byte[] data, int timeoutMs) throws Exception {
-        if (closed || port == null) return -1;
-        if (data == null || data.length == 0) return 0;
-        int to = Math.max(0, timeoutMs);
-        return port.write(data, to);
-    }
-
-    @Override
-    public int read(byte[] buffer, int timeoutMs) throws Exception {
-        if (closed || port == null) return -1;
-        if (buffer == null || buffer.length == 0) return 0;
-
-        int to;
-        if (timeoutMs < 0) {
-            // blocant: on simule par un grand timeout
-            to = 60_000;
-        } else {
-            to = timeoutMs;
-        }
-        return port.read(buffer, to);
-    }
-
-    @Override
-    public void close() {
-        if (closed) return;
-        closed = true;
-        try { port.close(); } catch (Exception ignored) {}
-    }
+    /** Ferme le transport */
+    void close();
 }
