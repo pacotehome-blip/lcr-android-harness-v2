@@ -14,6 +14,7 @@ import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothSocket;
 import android.content.pm.PackageManager;
 import android.os.Build;
+
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
@@ -56,6 +57,9 @@ import com.pa.lcr.lcp.log.LogBus;
 import com.pa.lcr.lcp.storage.DeliveryDb;
 import com.pa.lcr.lcp.storage.DeliveryLogStore;
 
+// ✅ Option A: transport manager runtime
+import com.pa.lcr.lcp.transport.MediaTransportManager;
+
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -93,6 +97,7 @@ public class MainActivity extends AppCompatActivity {
     // ===== CONFIGURE UI (status + BT) =====
     private TextView txtMediaActive;
     private TextView txtNodesActive;
+
     private Spinner spnBtBonded;
     private Button btnBtRefresh;
     private Button btnBtConnect;
@@ -102,6 +107,7 @@ public class MainActivity extends AppCompatActivity {
     // ===== BT runtime (paired-only) =====
     private static final int REQ_ENABLE_BT = 9103;
     private final ExecutorService btExec = Executors.newSingleThreadExecutor();
+
     private BluetoothAdapter btAdapter;
     private final List<BluetoothDevice> btBonded = new ArrayList<>();
     private ArrayAdapter<String> btAdapterUi;
@@ -113,6 +119,11 @@ public class MainActivity extends AppCompatActivity {
 
     // ===== Media profile store =====
     private com.pa.lcr.lcp.storage.MediaProfileStore mediaProfileStore;
+
+    // ✅ Option A: runtime transport manager
+    private MediaTransportManager mediaTransportManager;
+    // ✅ Option A: dernier MAC BT connecté (pour disconnect/error)
+    private String lastBtMac = null;
 
     // ===== API-Face UI =====
     private TextView txtApiStatus;
@@ -161,6 +172,7 @@ public class MainActivity extends AppCompatActivity {
     private Button btnScrollDown;
     private CheckBox cbTxRx;
     private CheckBox cbLogTs;
+
     private boolean logTsEnabled = false;
     private long mainLogViewSinceMs = 0L;
 
@@ -234,6 +246,7 @@ public class MainActivity extends AppCompatActivity {
             if (intent == null) return;
             String a = intent.getAction();
             if (a == null) return;
+
             if (UsbReceiver.ACTION_USB_READY.equals(a)) {
                 UsbSerialPort p = UsbSession.getPort();
                 if (p != null) onUsbPortReady(p);
@@ -260,6 +273,9 @@ public class MainActivity extends AppCompatActivity {
         // CONFIGURE: media + bluetooth
         mediaProfileStore = new com.pa.lcr.lcp.storage.MediaProfileStore(this);
         btAdapter = BluetoothAdapter.getDefaultAdapter();
+
+        // ✅ Option A: manager runtime multi-transport
+        mediaTransportManager = MediaTransportManager.get(this);
 
         deliveryStore = new DeliveryLogStore(this);
         deliveryStore.purgeOlderThanDaysAsync(7);
@@ -502,7 +518,6 @@ public class MainActivity extends AppCompatActivity {
         tabLayout.removeAllTabs();
         tabLayout.addTab(tabLayout.newTab().setText("MAIN"), true);
         tabLayout.addTab(tabLayout.newTab().setText("API-Face"), false);
-
         // ✅ FIX: Ajouter CONFIGURE (3e tab)
         tabLayout.addTab(tabLayout.newTab().setText("CONFIGURE"), false);
 
@@ -881,7 +896,8 @@ public class MainActivity extends AppCompatActivity {
             if (m == null) m = "Unknown";
             if (p == null) p = "Device";
             labels.add(m + " - " + p);
-            logUi(null, String.format(Locale.ROOT, " - %s - %s (VID=%04X PID=%04X)",
+            logUi(null, String.format(Locale.ROOT,
+                    " - %s - %s (VID=%04X PID=%04X)",
                     m, p, d.getVendorId(), d.getProductId()));
         }
 
@@ -959,10 +975,25 @@ public class MainActivity extends AppCompatActivity {
         }
         usbPort = port;
         logUi(null, "USB prêt (receiver)");
+
+        // ✅ Option A: publish USB ready
+        try {
+            if (mediaTransportManager != null) {
+                mediaTransportManager.onUsbReady(null, usbPort, "USB prêt (MainActivity)");
+            }
+        } catch (Exception ignored) {}
     }
 
     public void onUsbDetached() {
         logUi(null, "USB détaché");
+
+        // ✅ Option A: publish USB detached
+        try {
+            if (mediaTransportManager != null) {
+                mediaTransportManager.onUsbDetached("USB detached");
+            }
+        } catch (Exception ignored) {}
+
         try { UsbSession.clear(); } catch (Exception ignore) {}
         stopApiServer("USB detached");
         try { RegisterSessionManager.get(this).clearAll(true); } catch (Exception ignored) {}
@@ -1024,6 +1055,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void onApiLine(String line) {
         if (line == null) return;
+
         Integer rid = parseRid(line);
         boolean isReq = line.contains("] REQ ");
         boolean isResp = line.contains("] RESP ");
@@ -1113,7 +1145,6 @@ public class MainActivity extends AppCompatActivity {
         super.onActivityResult(requestCode, resultCode, data);
 
         if (requestCode == REQ_ENABLE_BT) {
-            // retour du dialog système d'activation Bluetooth
             refreshBondedBtList();
             return;
         }
@@ -1286,11 +1317,9 @@ public class MainActivity extends AppCompatActivity {
             String s;
             boolean usbReady = (UsbSession.getPort() != null);
             boolean btReady = (btSocket != null && btSocket.isConnected());
-
             if (usbReady) s = "Média : USB (prêt)";
             else if (btReady) s = "Média : BT (connecté)";
             else s = "Média : —";
-
             if (txtMediaActive != null) txtMediaActive.setText(s);
         } catch (Exception ignored) {}
     }
@@ -1306,7 +1335,6 @@ public class MainActivity extends AppCompatActivity {
             int count = nodeItems.size();
             StringBuilder sb = new StringBuilder();
             sb.append("Nodes : ").append(count).append(" (");
-
             int shown = 0;
             for (NodeScanItem it : nodeItems) {
                 if (it == null) continue;
@@ -1315,10 +1343,8 @@ public class MainActivity extends AppCompatActivity {
                 shown++;
                 if (shown >= 3) break;
             }
-
             if (count > 3) sb.append(", …");
             sb.append(")");
-
             txtNodesActive.setText(sb.toString());
         } catch (Exception ignored) {}
     }
@@ -1334,7 +1360,6 @@ public class MainActivity extends AppCompatActivity {
                 == PackageManager.PERMISSION_GRANTED) {
             return true;
         }
-
         ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.BLUETOOTH_CONNECT}, 9101);
         return false;
     }
@@ -1346,13 +1371,11 @@ public class MainActivity extends AppCompatActivity {
         }
 
         btBonded.clear();
-
         if (btAdapter == null) {
             if (txtBtStatus != null) txtBtStatus.setText("BT : non disponible");
             return;
         }
 
-        // Android 9+: s'assurer que le Bluetooth est activé (sinon getBondedDevices peut retourner vide)
         try {
             if (!btAdapter.isEnabled()) {
                 if (txtBtStatus != null) txtBtStatus.setText("BT : désactivé — activation requise");
@@ -1434,6 +1457,14 @@ public class MainActivity extends AppCompatActivity {
                 btIn = s.getInputStream();
                 btOut = s.getOutputStream();
 
+                // ✅ Option A: publish BT connected
+                try {
+                    lastBtMac = (dev != null ? dev.getAddress() : null);
+                    if (mediaTransportManager != null) {
+                        mediaTransportManager.onBtConnected(dev, btSocket, btIn, btOut, "BT SPP CONNECTED");
+                    }
+                } catch (Exception ignored) {}
+
                 if (mediaProfileStore != null) {
                     mediaProfileStore.setActiveBt(dev.getName(), dev.getAddress(), SPP_UUID.toString());
                     mediaProfileStore.setActiveStatus("CONNECTED", null);
@@ -1447,6 +1478,15 @@ public class MainActivity extends AppCompatActivity {
             } catch (Exception e) {
 
                 try { if (s != null) s.close(); } catch (Exception ignored) {}
+
+                // ✅ Option A: publish BT error
+                try {
+                    String mac = (dev != null ? dev.getAddress() : lastBtMac);
+                    if (mediaTransportManager != null) {
+                        mediaTransportManager.onBtError(mac,
+                                (e.getMessage() != null) ? e.getMessage() : e.getClass().getSimpleName());
+                    }
+                } catch (Exception ignored) {}
 
                 if (mediaProfileStore != null) {
                     mediaProfileStore.setActiveBt(dev.getName(), dev.getAddress(), SPP_UUID.toString());
@@ -1464,6 +1504,14 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private synchronized void btDisconnect() {
+
+        // ✅ Option A: publish BT disconnected
+        try {
+            if (mediaTransportManager != null) {
+                mediaTransportManager.onBtDisconnected(lastBtMac, "BT disconnected");
+            }
+        } catch (Exception ignored) {}
+
         try { if (btIn != null) btIn.close(); } catch (Exception ignored) {}
         try { if (btOut != null) btOut.close(); } catch (Exception ignored) {}
         try { if (btSocket != null) btSocket.close(); } catch (Exception ignored) {}
@@ -1475,6 +1523,9 @@ public class MainActivity extends AppCompatActivity {
         if (mediaProfileStore != null) {
             try { mediaProfileStore.setActiveStatus("DISCONNECTED", null); } catch (Exception ignored) {}
         }
+
+        // ✅ clear last mac
+        lastBtMac = null;
 
         ui.post(() -> {
             if (txtBtStatus != null) txtBtStatus.setText("BT : DISCONNECTED");
