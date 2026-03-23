@@ -14,6 +14,7 @@ import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothSocket;
 import android.content.pm.PackageManager;
 import android.os.Build;
+
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
@@ -288,9 +289,7 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onStop() {
-        try {
-            unregisterReceiver(usbUiReceiver);
-        } catch (Exception ignored) {}
+        try { unregisterReceiver(usbUiReceiver); } catch (Exception ignored) {}
         LogBus.removeListener(mainLogListener);
         super.onStop();
     }
@@ -343,7 +342,6 @@ public class MainActivity extends AppCompatActivity {
         // CONFIGURE status + BT
         txtMediaActive = findViewById(R.id.txtMediaActive);
         txtNodesActive = findViewById(R.id.txtNodesActive);
-
         spnBtBonded = findViewById(R.id.spnBtBonded);
         btnBtRefresh = findViewById(R.id.btnBtRefresh);
         btnBtConnect = findViewById(R.id.btnBtConnect);
@@ -493,7 +491,7 @@ public class MainActivity extends AppCompatActivity {
             btnDbBackup.setOnLongClickListener(v -> { requestBackupDir(); return true; });
         }
 
-        // ✅ FIX: Brancher les boutons Bluetooth (Refresh / Connect / Disconnect)
+        // ✅ FIX: brancher les boutons BT
         if (btnBtRefresh != null) btnBtRefresh.setOnClickListener(v -> refreshBondedBtList());
         if (btnBtConnect != null) btnBtConnect.setOnClickListener(v -> btConnectSelected());
         if (btnBtDisconnect != null) btnBtDisconnect.setOnClickListener(v -> btDisconnect());
@@ -503,11 +501,10 @@ public class MainActivity extends AppCompatActivity {
         if (tabLayout == null) return;
 
         tabLayout.removeAllTabs();
-
         tabLayout.addTab(tabLayout.newTab().setText("MAIN"), true);
         tabLayout.addTab(tabLayout.newTab().setText("API-Face"), false);
 
-        // ✅ FIX: Ajouter l'onglet CONFIGURE (3e tab)
+        // ✅ FIX: Ajouter CONFIGURE (3e tab)
         tabLayout.addTab(tabLayout.newTab().setText("CONFIGURE"), false);
 
         showPage(0);
@@ -529,7 +526,7 @@ public class MainActivity extends AppCompatActivity {
         if (index == 2) {
             updateMediaStatusUi();
             updateNodesStatusUi();
-            // ✅ FIX: auto-refresh BT en entrant dans CONFIGURE (pratique terrain)
+            // ✅ FIX: auto-refresh BT en entrant dans CONFIGURE
             refreshBondedBtList();
         }
     }
@@ -646,8 +643,10 @@ public class MainActivity extends AppCompatActivity {
                     boolean ticketPending = (delCode & 0x0001) != 0;
                     boolean flowActive = (delCode & 0x0004) != 0;
                     boolean deliveryActive = (delCode & 0x0008) != 0;
+
                     String serialId = decodeAz(tmp.opGetField(80, TF));
                     String ticketNo = u32beDec(tmp.opGetField(23, TF));
+
                     found.put(node, new NodeScanItem(node, serialId, ticketNo, ticketPending, deliveryActive, flowActive, false));
                 } catch (Exception ignored) {
                     // ignore: node not present / timeout / etc.
@@ -655,9 +654,6 @@ public class MainActivity extends AppCompatActivity {
             }
 
             final long scanFinishedMs = System.currentTimeMillis();
-
-            // ✅ Option 5: ALWAYS write a scan completion trace at end (even if found is empty)
-            // ✅ And write node-detected events only for nodes in 'found'
             persistScanEvents(scanStartedMs, scanFinishedMs, found);
 
             ui.post(() -> {
@@ -669,6 +665,7 @@ public class MainActivity extends AppCompatActivity {
                         nodeItems.add(NodeScanItem.default250());
                         if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : aucun (défaut 250)");
                         if (nodeAdapter != null) nodeAdapter.notifyDataSetChanged();
+
                         ensureRegisterTab(250, 255, true);
                         edtTo.setText("250");
                         if (txtActiveNode != null) txtActiveNode.setText("Node actif : 250");
@@ -715,10 +712,10 @@ public class MainActivity extends AppCompatActivity {
      */
     private void persistScanEvents(long scanStartedMs, long scanFinishedMs, Map<Integer, NodeScanItem> found) {
         if (deliveryStore == null) return;
+
         final long durationMs = Math.max(0L, scanFinishedMs - scanStartedMs);
         final int foundCount = (found != null) ? found.size() : 0;
 
-        // 1) Per-node detected events (ONLY if found)
         if (found != null && !found.isEmpty()) {
             for (NodeScanItem it : found.values()) {
                 if (it == null) continue;
@@ -763,7 +760,6 @@ public class MainActivity extends AppCompatActivity {
             }
         }
 
-        // 2) Completion event (ALWAYS)
         final String scanSerial = "__SCAN__";
         final String scanTicket = "SCAN-" + scanStartedMs;
         final String scanState = "SCAN_COMPLETED";
@@ -851,9 +847,7 @@ public class MainActivity extends AppCompatActivity {
             this.isDefault = isDefault;
         }
 
-        static NodeScanItem default250() {
-            return new NodeScanItem(250, "", "", false, false, false, true);
-        }
+        static NodeScanItem default250() { return new NodeScanItem(250, "", "", false, false, false, true); }
 
         NodeScanItem asDefault() {
             return new NodeScanItem(lcrnode, serialId, ticketNo, ticketPending, deliveryActive, flowActive, true);
@@ -1115,7 +1109,6 @@ public class MainActivity extends AppCompatActivity {
         super.onActivityResult(requestCode, resultCode, data);
 
         if (requestCode == REQ_ENABLE_BT) {
-            // retour du dialog système d'activation Bluetooth
             refreshBondedBtList();
             return;
         }
@@ -1337,9 +1330,7 @@ public class MainActivity extends AppCompatActivity {
             return true;
         }
 
-        ActivityCompat.requestPermissions(this,
-                new String[]{Manifest.permission.BLUETOOTH_CONNECT},
-                9101);
+        ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.BLUETOOTH_CONNECT}, 9101);
         return false;
     }
 
@@ -1356,7 +1347,6 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
-        // Android 9+: s'assurer que le Bluetooth est activé (sinon getBondedDevices peut retourner vide)
         try {
             if (!btAdapter.isEnabled()) {
                 if (txtBtStatus != null) txtBtStatus.setText("BT : désactivé — activation requise");
@@ -1417,10 +1407,21 @@ public class MainActivity extends AppCompatActivity {
         if (txtBtStatus != null) txtBtStatus.setText("BT : connecting…");
 
         btExec.execute(() -> {
+            BluetoothSocket s = null;
             try {
                 btDisconnect();
 
-                BluetoothSocket s = dev.createRfcommSocketToServiceRecord(SPP_UUID);
+                // ✅ FIX: réduire les échecs RFCOMM (ret=-1) : arrêter la discovery
+                try { if (btAdapter != null) btAdapter.cancelDiscovery(); } catch (Exception ignored) {}
+
+                // ✅ FIX: essayer INSECURE d'abord (souvent requis sur adaptateurs série),
+                // puis fallback secure si nécessaire.
+                try {
+                    s = dev.createInsecureRfcommSocketToServiceRecord(SPP_UUID);
+                } catch (Exception insecureNotSupported) {
+                    s = dev.createRfcommSocketToServiceRecord(SPP_UUID);
+                }
+
                 s.connect();
 
                 btSocket = s;
@@ -1439,6 +1440,8 @@ public class MainActivity extends AppCompatActivity {
 
             } catch (Exception e) {
 
+                try { if (s != null) s.close(); } catch (Exception ignored) {}
+
                 if (mediaProfileStore != null) {
                     mediaProfileStore.setActiveBt(dev.getName(), dev.getAddress(), SPP_UUID.toString());
                     mediaProfileStore.setActiveStatus("ERROR",
@@ -1446,8 +1449,8 @@ public class MainActivity extends AppCompatActivity {
                 }
 
                 ui.post(() -> {
-                    if (txtBtStatus != null) txtBtStatus.setText("BT : FAIL — "
-                            + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
+                    if (txtBtStatus != null) txtBtStatus.setText("BT : FAIL — " +
+                            (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
                     updateMediaStatusUi();
                 });
             }
@@ -1477,8 +1480,7 @@ public class MainActivity extends AppCompatActivity {
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == 9101) {
-            boolean ok = (grantResults != null && grantResults.length > 0
-                    && grantResults[0] == PackageManager.PERMISSION_GRANTED);
+            boolean ok = (grantResults != null && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED);
             if (ok) refreshBondedBtList();
             else if (txtBtStatus != null) txtBtStatus.setText("BT : permission refusée");
         }

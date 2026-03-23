@@ -2,24 +2,22 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- USB Host -->
     <uses-feature
         android:name="android.hardware.usb.host"
-        android:required="true" /> <!-- [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/MainActivity.java) -->
+        android:required="true" />  <!-- base existante [2](https://support.senanetworks.com/hc/en-us/sections/205912767-Parani-SD1000-Bluetooth-RS232-Adapter) -->
 
-    <!-- (Optionnel / protégé) : conservé tel quel, comme dans ton fichier -->
     <uses-permission
         android:name="android.permission.MANAGE_USB"
-        tools:ignore="ProtectedPermissions" /> <!-- [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/MainActivity.java) -->
+        tools:ignore="ProtectedPermissions" /> <!-- base existante [2](https://support.senanetworks.com/hc/en-us/sections/205912767-Parani-SD1000-Bluetooth-RS232-Adapter) -->
 
-    <!-- ✅ Nécessaire pour ServerSocket (API locale 127.0.0.1:8765) -->
-    <uses-permission android:name="android.permission.INTERNET" /> <!-- [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/MainActivity.java) -->
+    <!-- API loopback -->
+    <uses-permission android:name="android.permission.INTERNET" /> <!-- base existante [2](https://support.senanetworks.com/hc/en-us/sections/205912767-Parani-SD1000-Bluetooth-RS232-Adapter) -->
 
-    <!-- ✅ BLUETOOTH (Android 9 et +) : requis pour lire les appareils appairés -->
+    <!-- ✅ Bluetooth (Android 9+) -->
     <uses-permission android:name="android.permission.BLUETOOTH" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
 
-    <!-- ✅ Android 12+ (future-proof). Runtime demandé par ton code si SDK>=S -->
+    <!-- ✅ Android 12+ (future-proof) -->
     <uses-permission
         android:name="android.permission.BLUETOOTH_CONNECT"
         android:required="false" />
@@ -33,11 +31,11 @@
         android:label="Filgo Registre"
         android:icon="@mipmap/logoenergie1"
         android:roundIcon="@mipmap/logoiconeernergie"
-        android:theme="@style/Theme.LcrFilgoEnergie"> <!-- [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/MainActivity.java) -->
+        android:theme="@style/Theme.LcrFilgoEnergie"> <!-- base existante [2](https://support.senanetworks.com/hc/en-us/sections/205912767-Parani-SD1000-Bluetooth-RS232-Adapter) -->
 
         <activity
             android:name="com.pa.lcrdemo.MainActivity"
-            android:exported="true"> <!-- [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/MainActivity.java) -->
+            android:exported="true"> <!-- base existante [2](https://support.senanetworks.com/hc/en-us/sections/205912767-Parani-SD1000-Bluetooth-RS232-Adapter) -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -46,7 +44,7 @@
 
         <receiver
             android:name="com.pa.lcrdemo.UsbReceiver"
-            android:exported="true"> <!-- [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/MainActivity.java) -->
+            android:exported="true"> <!-- base existante [2](https://support.senanetworks.com/hc/en-us/sections/205912767-Parani-SD1000-Bluetooth-RS232-Adapter) -->
             <intent-filter>
                 <action android:name="com.pa.lcrdemo.USB_PERMISSION" />
                 <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
@@ -55,7 +53,7 @@
 
         <meta-data
             android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
-            android:resource="@xml/usb_device_filter" /> <!-- [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/MainActivity.java) -->
+            android:resource="@xml/usb_device_filter" /> <!-- base existante [2](https://support.senanetworks.com/hc/en-us/sections/205912767-Parani-SD1000-Bluetooth-RS232-Adapter) -->
 
     </application>
 
