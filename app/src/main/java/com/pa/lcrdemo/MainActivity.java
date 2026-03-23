@@ -84,7 +84,7 @@ public class MainActivity extends AppCompatActivity {
     private View pageApiFace;
  private View pageConfigure;
 
- // ===== CONFIGURE UI (USB + BT) =====
+ // ===== CONFIGURE UI (status + BT) =====
  private TextView txtMediaActive;
  private TextView txtNodesActive;
  private Spinner spnBtBonded;
@@ -93,7 +93,8 @@ public class MainActivity extends AppCompatActivity {
  private Button btnBtDisconnect;
  private TextView txtBtStatus;
 
- // ===== BT runtime =====
+ // ===== BT runtime (paired-only) =====
+ private static final int REQ_ENABLE_BT = 9103;
  private final ExecutorService btExec = Executors.newSingleThreadExecutor();
  private BluetoothAdapter btAdapter;
  private final List<BluetoothDevice> btBonded = new ArrayList<>();
@@ -248,6 +249,7 @@ public class MainActivity extends AppCompatActivity {
         initUiDefaults();
         setupTabsTop();
 
+ // CONFIGURE: media + bluetooth
  mediaProfileStore = new com.pa.lcr.lcp.storage.MediaProfileStore(this);
  btAdapter = BluetoothAdapter.getDefaultAdapter();
 
@@ -376,11 +378,6 @@ public class MainActivity extends AppCompatActivity {
         btnScanUsb.setOnClickListener(v -> scanUsb());
         btnPingUsb.setOnClickListener(v -> openSelectedUsb());
 
- // BT (paired only)
- if (btnBtRefresh != null) btnBtRefresh.setOnClickListener(v -> refreshBondedBtList());
- if (btnBtConnect != null) btnBtConnect.setOnClickListener(v -> btConnectSelected());
- if (btnBtDisconnect != null) btnBtDisconnect.setOnClickListener(v -> btDisconnect());
-
         if (btnAddRegisterTab != null) {
             btnAddRegisterTab.setOnClickListener(v -> {
                 int to = parseInt(edtTo.getText().toString(), 250);
@@ -487,7 +484,6 @@ public class MainActivity extends AppCompatActivity {
         tabLayout.removeAllTabs();
         tabLayout.addTab(tabLayout.newTab().setText("MAIN"), true);
         tabLayout.addTab(tabLayout.newTab().setText("API-Face"), false);
- tabLayout.addTab(tabLayout.newTab().setText("CONFIGURE"), false);
         showPage(0);
         tabLayout.addOnTabSelectedListener(new TabLayout.OnTabSelectedListener() {
             @Override public void onTabSelected(TabLayout.Tab tab) { showPage(tab.getPosition()); }
@@ -1072,6 +1068,11 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_ENABLE_BT) {
+            // retour du dialog système d'activation Bluetooth
+            refreshBondedBtList();
+            return;
+        }
         if (requestCode == REQ_PICK_BACKUP_DIR) {
             if (resultCode != RESULT_OK || data == null || data.getData() == null) {
                 toast("Backup: sélection de dossier annulée");
@@ -1257,8 +1258,7 @@ public class MainActivity extends AppCompatActivity {
             }
             int count = nodeItems.size();
             StringBuilder sb = new StringBuilder();
-            sb.append("Nodes : ").append(count);
-            sb.append(" (");
+            sb.append("Nodes : ").append(count).append(" (");
             int shown = 0;
             for (NodeScanItem it : nodeItems) {
                 if (it == null) continue;
@@ -1277,6 +1277,7 @@ public class MainActivity extends AppCompatActivity {
     // CONFIGURE: Bluetooth (paired only)
     // =========================
     private boolean ensureBtConnectPermission() {
+        // Android 9: pas de permission runtime; Android 12+: BLUETOOTH_CONNECT.
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true;
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
             return true;
@@ -1295,6 +1296,18 @@ public class MainActivity extends AppCompatActivity {
             if (txtBtStatus != null) txtBtStatus.setText("BT : non disponible");
             return;
         }
+        // ✅ Android 9+: s'assurer que le Bluetooth est activé (sinon getBondedDevices peut retourner vide)
+        try {
+            if (!btAdapter.isEnabled()) {
+                if (txtBtStatus != null) txtBtStatus.setText("BT : désactivé — activation requise");
+                try {
+                    Intent i = new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE);
+                    startActivityForResult(i, REQ_ENABLE_BT);
+                } catch (Exception ignored) {}
+                return;
+            }
+        } catch (Exception ignored) {}
+
         try {
             Set<BluetoothDevice> bonded = btAdapter.getBondedDevices();
             if (bonded != null) btBonded.addAll(bonded);

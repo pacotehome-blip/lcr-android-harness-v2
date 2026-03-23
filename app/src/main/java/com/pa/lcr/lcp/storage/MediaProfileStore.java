@@ -38,21 +38,24 @@ public final class MediaProfileStore {
         }
     }
 
-    /** Set USB as active media (best effort). */
-    public synchronized void setActiveUsb(Integer vid, Integer pid, String deviceName, int baud) {
-        long now = System.currentTimeMillis();
-        long id = upsertUsbProfile(vid, pid, deviceName, baud, now);
-        setActiveInternal(id, now);
+    public synchronized ActiveMedia getActive() {
+        SQLiteDatabase db = dbh.getReadableDatabase();
+        try (Cursor c = db.rawQuery(
+                "SELECT media_id, media_type, display_name, status, last_error FROM media_profile WHERE is_active=1 LIMIT 1",
+                null)) {
+            if (c.moveToFirst()) {
+                return new ActiveMedia(
+                        c.getLong(0),
+                        c.getString(1),
+                        c.getString(2),
+                        c.getString(3),
+                        c.getString(4)
+                );
+            }
+        } catch (Exception ignored) {}
+        return null;
     }
 
-    /** Set BT as active media (best effort). */
-    public synchronized void setActiveBt(String btName, String btMac, String btUuid) {
-        long now = System.currentTimeMillis();
-        long id = upsertBtProfile(btName, btMac, btUuid, now);
-        setActiveInternal(id, now);
-    }
-
-    /** Update status for active media. */
     public synchronized void setActiveStatus(String status, String lastError) {
         SQLiteDatabase db = dbh.getWritableDatabase();
         ContentValues cv = new ContentValues();
@@ -62,23 +65,16 @@ public final class MediaProfileStore {
         db.update("media_profile", cv, "is_active=1", null);
     }
 
-    /** Return active media (or null). */
-    public synchronized ActiveMedia getActive() {
-        SQLiteDatabase db = dbh.getReadableDatabase();
-        try (Cursor c = db.rawQuery(
-                "SELECT media_id, media_type, display_name, status, last_error FROM media_profile WHERE is_active=1 LIMIT 1",
-                null)) {
-            if (c.moveToFirst()) {
-                long id = c.getLong(0);
-                String type = c.getString(1);
-                String name = c.getString(2);
-                String st = c.getString(3);
-                String err = c.getString(4);
-                return new ActiveMedia(id, type, name, st, err);
-            }
-        } catch (Exception ignored) {
-        }
-        return null;
+    public synchronized void setActiveBt(String btName, String btMac, String btUuid) {
+        long now = System.currentTimeMillis();
+        long id = upsertBtProfile(btName, btMac, btUuid, now);
+        setActiveInternal(id, now);
+    }
+
+    public synchronized void setActiveUsb(Integer vid, Integer pid, String deviceName, int baud) {
+        long now = System.currentTimeMillis();
+        long id = upsertUsbProfile(vid, pid, deviceName, baud, now);
+        setActiveInternal(id, now);
     }
 
     // -------------------------
