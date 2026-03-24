@@ -8,6 +8,8 @@ import android.database.sqlite.SQLiteDatabase;
 import android.net.Uri;
 import android.os.Build;
 import android.provider.MediaStore;
+import org.json.JSONObject;
+import org.json.JSONException;
 
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -215,27 +217,147 @@ public class DeliveryLogStore {
         db.update("delivery_attempt", cv, "attempt_id=?", new String[]{Long.toString(attemptId)});
     }
 
+
+
+// v4: structured fields helper
+private static final class StructuredFields {
+    final String eventLevel;
+    final String eventCode;
+    final String eventWhere;
+    final String detailShort;
+    StructuredFields(String eventLevel, String eventCode, String eventWhere, String detailShort) {
+        this.eventLevel = eventLevel;
+        this.eventCode = eventCode;
+        this.eventWhere = eventWhere;
+        this.detailShort = detailShort;
+    }
+}
+
+private static String trimOrNull(String s) {
+    if (s == null) return null;
+    s = s.trim();
+    return s.isEmpty() ? null : s;
+}
+
+private static String trunc(String s, int max) {
+    if (s == null) return null;
+    s = s.trim();
+    if (s.length() <= max) return s;
+    return s.substring(0, max);
+}
+
+/**
+ * Best-effort extraction of structured fields from a JSON string.
+ * Supports:
+ * - ApiResult JSON: {code,msg,err,data:{level,where,detail,...}}
+ * - Data JSON: {level,where,detail,...}
+ */
+private static StructuredFields extractStructuredFromJson(String dataJson) {
+    String evLevel = null;
+    String evCode = null;
+    String evWhere = null;
+    String detail = null;
+
+    String s = trimOrNull(dataJson);
+    if (s == null) return new StructuredFields(null, null, null, null);
+    if (!s.startsWith("{") || !s.endsWith("}")) {
+        return new StructuredFields(null, null, null, trunc(s, 240));
+    }
+
+    try {
+        JSONObject root = new JSONObject(s);
+
+        // ApiResult style
+        Object dataObj = root.opt("data");
+        if (dataObj instanceof JSONObject) {
+            JSONObject d = (JSONObject) dataObj;
+            evLevel = trimOrNull(d.optString("level", null));
+            evWhere = trimOrNull(d.optString("where", null));
+            detail = trimOrNull(d.optString("detail", null));
+        } else {
+            // data-only style
+            evLevel = trimOrNull(root.optString("level", null));
+            evWhere = trimOrNull(root.optString("where", null));
+            detail = trimOrNull(root.optString("detail", null));
+        }
+
+        // error code might be present in ApiResult as "err"
+        Object errObj = root.opt("err");
+        if (errObj != null && errObj != JSONObject.NULL) {
+            evCode = trimOrNull(String.valueOf(errObj));
+            if ("null".equalsIgnoreCase(evCode)) evCode = null;
+        }
+
+        // allow alternate keys
+        if (evCode == null) evCode = trimOrNull(root.optString("event_code", null));
+        if (evCode == null) evCode = trimOrNull(root.optString("code", null));
+
+    } catch (JSONException ignored) {
+        detail = trunc(s, 240);
+    }
+
+    return new StructuredFields(evLevel, evCode, evWhere, trunc(detail, 240));
+}
     // ----------------------------
     // Events
     // ----------------------------
-    public void addEventAsync(long attemptId, String level, String type, String message, String dataJson) {
-        io.execute(() -> addEvent(attemptId, level, type, message, dataJson));
-    }
+    
+public void addEventAsync(long attemptId, String level, String type, String message, String dataJson) {
+    io.execute(() -> addEvent(attemptId, level, type, message, dataJson, null, null, null, null));
+}
 
-    public void addEvent(long attemptId, String level, String type, String message, String dataJson) {
-        long now = System.currentTimeMillis();
-        SQLiteDatabase db = helper.getWritableDatabase();
-        ContentValues cv = new ContentValues();
-        cv.put("attempt_id", attemptId);
-        cv.put("ts", now);
-        cv.put("level", level);
-        cv.put("type", type);
-        cv.put("message", message);
-        cv.put("data_json", dataJson);
-        db.insert("delivery_event", null, cv);
-    }
+/**
+ * v4: structured event fields (optional).
+ * - eventLevel: MEDIA|TRANSPORT|LCP|REGISTER|DELIVERY|UNKNOWN
+ * - eventCode: short code (ex: STATE28_FAIL, ERR_BT_NOT_CONNECTED)
+ * - eventWhere: context (ex: api_connectLcp)
+ * - detailShort: short technical detail (ex: Error reading)
+ */
+public void addEventAsync(long attemptId, String level, String type, String message, String dataJson,
+                          String eventLevel, String eventCode, String eventWhere, String detailShort) {
+    final String el = eventLevel;
+    final String ec = eventCode;
+    final String ew = eventWhere;
+    final String ds = detailShort;
+    io.execute(() -> addEvent(attemptId, level, type, message, dataJson, el, ec, ew, ds));
+}
 
-    // =========================================================
+public void addEvent(long attemptId, String level, String type, String message, String dataJson) {
+    addEvent(attemptId, level, type, message, dataJson, null, null, null, null);
+}
+
+public void addEvent(long attemptId, String level, String type, String message, String dataJson,
+                     String eventLevel, String eventCode, String eventWhere, String detailShort) {
+    long now = System.currentTimeMillis();
+    SQLiteDatabase db = helper.getWritableDatabase();
+
+    // Best-effort extraction if structured fields not provided
+    StructuredFields sf = null;
+    if (eventLevel == null || eventCode == null || eventWhere == null || detailShort == null) {
+        sf = extractStructuredFromJson(dataJson);
+    }
+    String evLevel = (eventLevel != null) ? trimOrNull(eventLevel) : (sf != null ? sf.eventLevel : null);
+    String evCode = (eventCode != null) ? trimOrNull(eventCode) : (sf != null ? sf.eventCode : null);
+    String evWhere = (eventWhere != null) ? trimOrNull(eventWhere) : (sf != null ? sf.eventWhere : null);
+    String det = (detailShort != null) ? trunc(detailShort, 240) : (sf != null ? sf.detailShort : null);
+
+    ContentValues cv = new ContentValues();
+    cv.put("attempt_id", attemptId);
+    cv.put("ts", now);
+    cv.put("level", level);
+    cv.put("type", type);
+    cv.put("message", message);
+    cv.put("data_json", dataJson);
+
+    // v4 columns (nullable)
+    cv.put("event_level", evLevel);
+    cv.put("event_code", evCode);
+    cv.put("event_where", evWhere);
+    cv.put("detail_short", det);
+
+    db.insert("delivery_event", null, cv);
+}
+// =========================================================
     // Backup helpers (WAL-safe single-file backups)
     // =========================================================
     public void checkpointWalBestEffort() {

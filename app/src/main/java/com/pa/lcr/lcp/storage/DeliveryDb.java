@@ -18,7 +18,8 @@ public class DeliveryDb extends SQLiteOpenHelper {
     // v1: base tables
     // v2: add time columns to delivery_summary + index
     // v3: add media_profile/media_event
-    public static final int DB_VERSION = 3;
+ // v4: add structured error columns to delivery_event (event_level/event_code/event_where/detail_short)
+    public static final int DB_VERSION = 4;
 
     private static final String TAG = "DeliveryDb";
 
@@ -76,6 +77,16 @@ public class DeliveryDb extends SQLiteOpenHelper {
         if (oldVersion < 3) {
             createMediaTables(db);
         }
+
+// v4 columns (structured error fields in delivery_event)
+if (oldVersion < 4) {
+    addColumnIfMissing(db, "delivery_event", "event_level", "TEXT");
+    addColumnIfMissing(db, "delivery_event", "event_code", "TEXT");
+    addColumnIfMissing(db, "delivery_event", "event_where", "TEXT");
+    addColumnIfMissing(db, "delivery_event", "detail_short", "TEXT");
+    db.execSQL("CREATE INDEX IF NOT EXISTS idx_event_level_ts ON delivery_event(event_level, ts);");
+    db.execSQL("CREATE INDEX IF NOT EXISTS idx_event_code_ts ON delivery_event(event_code, ts);");
+}
     }
 
     // =========================================================
@@ -128,20 +139,26 @@ public class DeliveryDb extends SQLiteOpenHelper {
                         "ON delivery_attempt(serial_id, ticket_no, source, job_id);"
         );
 
-        db.execSQL(
-                "CREATE TABLE IF NOT EXISTS delivery_event (" +
-                        "event_id INTEGER PRIMARY KEY AUTOINCREMENT," +
-                        "attempt_id INTEGER NOT NULL," +
-                        "ts INTEGER NOT NULL," +
-                        "level TEXT NOT NULL," +
-                        "type TEXT NOT NULL," +
-                        "message TEXT," +
-                        "data_json TEXT," +
-                        "FOREIGN KEY (attempt_id) " +
-                        "REFERENCES delivery_attempt(attempt_id) " +
-                        "ON DELETE CASCADE" +
-                        ");"
-        );
+        
+db.execSQL(
+"CREATE TABLE IF NOT EXISTS delivery_event (" +
+"event_id INTEGER PRIMARY KEY AUTOINCREMENT," +
+"attempt_id INTEGER NOT NULL," +
+"ts INTEGER NOT NULL," +
+"level TEXT NOT NULL," +
+"type TEXT NOT NULL," +
+"message TEXT," +
+"data_json TEXT," +
+// v4: structured error fields (optional)
+"event_level TEXT," +
+"event_code TEXT," +
+"event_where TEXT," +
+"detail_short TEXT," +
+"FOREIGN KEY (attempt_id) " +
+"REFERENCES delivery_attempt(attempt_id) " +
+"ON DELETE CASCADE" +
+");"
+);;
 
         db.execSQL(
                 "CREATE INDEX IF NOT EXISTS idx_event_attempt_ts " +
