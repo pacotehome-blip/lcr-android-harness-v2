@@ -28,20 +28,23 @@ import java.util.concurrent.atomic.AtomicInteger;
  * - Calls: via ApiFacade
  *
  * Endpoints:
- * GET  /v1/ping
- * GET  /v1/usb/scan
+ * GET /v1/ping
+ * GET /v1/usb/scan
  * POST /v1/usb/open-ping
  * POST /v1/lcp/connect
  * POST /v1/register/validate
  * POST /v1/delivery/C
  * POST /v1/delivery/oneshot/start
- * GET  /v1/delivery/job/{jobId}
+ * GET /v1/delivery/job/{jobId}
  * POST /v1/delivery/job/continue
  * POST /v1/delivery/job/terminate
  * POST /v1/db/dump
  *
  * ✅ NEW (B+ tick push-like via polling):
- * GET  /v1/tick/wait?lcrnode_dec=250&since_seq=123&wait_ms=25000
+ * GET /v1/tick/wait?lcrnode_dec=250&since_seq=123&wait_ms=25000
+ *
+ * ✅ NEW (Option A):
+ * POST /v1/media/check  body: {"media":"usb"} OR {"media":"bt","bt_mac":"AA:BB:.."}
  */
 public final class ApiServer {
 
@@ -72,13 +75,10 @@ public final class ApiServer {
 
     public synchronized void start() throws Exception {
         if (running) return;
-
         InetAddress loopback = InetAddress.getByName("127.0.0.1");
         serverSocket = new ServerSocket(port, 50, loopback);
-
         workers = Executors.newFixedThreadPool(4);
         acceptor = Executors.newSingleThreadExecutor();
-
         running = true;
         t("[API " + ts() + "] START http://127.0.0.1:" + port);
 
@@ -139,6 +139,7 @@ public final class ApiServer {
             ApiResult ar;
             JSONObject resp;
             int status;
+
             try {
                 // ✅ Ne PAS lock lcpLock pour tick/wait (cache-only + wait/notify)
                 if (isTickWait(req)) {
@@ -188,6 +189,33 @@ public final class ApiServer {
     }
 
     // =========================
+    // ✅ Option A: media gating helper (si body contient "media")
+    // =========================
+    private ApiResult gateMediaIfProvided(JSONObject body) {
+        if (body == null) return null;
+
+        String media = body.optString("media", "").trim();
+        if (media.isEmpty()) return null; // pas de media => legacy (USB)
+
+        String btMac = body.optString("bt_mac", body.optString("btMac", "")).trim();
+
+        // 1) Check connectivité (USB/BT) via facade
+        ApiResult check = facade.api_mediaCheck(media, btMac);
+        if (check != null && check.code == 0) { // FAIL => stop immédiat
+            return check;
+        }
+
+        // 2) Si ce n'est pas USB, endpoints LCP/Delivery actuels sont USB-only (Option B fera le vrai BT)
+        String m = media.toLowerCase(Locale.ROOT);
+        if (!"usb".equals(m)) {
+            return ApiResult.fail("Media: 0 - " + media + " non supporté par cet endpoint (USB only).",
+                    "ERR_MEDIA_NOT_SUPPORTED_YET");
+        }
+
+        return null;
+    }
+
+    // =========================
     // Routing (B2 node-aware)
     // =========================
     private ApiResult route(HttpReq req) throws Exception {
@@ -199,6 +227,16 @@ public final class ApiServer {
             d.put("bind", "127.0.0.1");
             d.put("port", port);
             return ApiResult.ok("PING: 1 - OK", d);
+        }
+
+        // ✅ NEW: Media check (Option A)
+        // POST /v1/media/check  body: {"media":"usb"} OR {"media":"bt","bt_mac":"AA:BB:.."}
+        if ("POST".equals(req.method) && "/v1/media/check".equals(req.path)) {
+            JSONObject body = req.jsonBody();
+            String media = body.optString("media", "").trim();
+            if (media.isEmpty()) media = "usb";
+            String btMac = body.optString("bt_mac", body.optString("btMac", "")).trim();
+            return facade.api_mediaCheck(media, btMac);
         }
 
         // ✅ NEW: Tick wait (long-poll)
@@ -222,6 +260,10 @@ public final class ApiServer {
         // LCP connect (B2: node-aware via body)
         if ("POST".equals(req.method) && "/v1/lcp/connect".equals(req.path)) {
             JSONObject body = req.jsonBody();
+
+            ApiResult gate = gateMediaIfProvided(body);
+            if (gate != null) return gate;
+
             Integer node = parseNodeDec(body);
             Integer from = parseFromDec(body);
             return facade.api_connectLcp(node, from);
@@ -230,6 +272,10 @@ public final class ApiServer {
         // Registre prêt / validation
         if ("POST".equals(req.method) && "/v1/register/validate".equals(req.path)) {
             JSONObject body = req.jsonBody();
+
+            ApiResult gate = gateMediaIfProvided(body);
+            if (gate != null) return gate;
+
             String numero = body.optString("numero_livraison", body.optString("numeroLivraison", ""));
             if (numero != null && numero.trim().isEmpty()) numero = null;
 
@@ -257,6 +303,10 @@ public final class ApiServer {
         // Ticket: Reprint current
         if ("POST".equals(req.method) && "/v1/ticket/reprint/current".equals(req.path)) {
             JSONObject body = req.jsonBody();
+
+            ApiResult gate = gateMediaIfProvided(body);
+            if (gate != null) return gate;
+
             Integer node = parseNodeDec(body);
             Integer from = parseFromDec(body);
             return facade.api_ticketReprintCurrent(node, from);
@@ -270,6 +320,10 @@ public final class ApiServer {
         // Delivery C
         if ("POST".equals(req.method) && "/v1/delivery/C".equals(req.path)) {
             JSONObject body = req.jsonBody();
+
+            ApiResult gate = gateMediaIfProvided(body);
+            if (gate != null) return gate;
+
             Integer node = parseNodeDec(body);
             Integer from = parseFromDec(body);
             int product = body.optInt("product1to16", body.optInt("productId", 1));
@@ -280,32 +334,49 @@ public final class ApiServer {
         // Delivery OneShot
         if ("POST".equals(req.method) && "/v1/delivery/oneshot/start".equals(req.path)) {
             JSONObject body = req.jsonBody();
+
+            ApiResult gate = gateMediaIfProvided(body);
+            if (gate != null) return gate;
+
             Integer node = parseNodeDec(body);
             Integer from = parseFromDec(body);
+
             String numero = body.optString("numero_livraison", body.optString("numeroLivraison", ""));
             int product = body.optInt("product1to16", body.optInt("product", body.optInt("productId", 1)));
             double preset = body.optDouble("presetNet", body.optDouble("presetNetL", body.optDouble("preset", 0.0)));
+
             String compartment = null;
             try {
                 Object c = body.opt("compartment");
                 if (c != null && c != JSONObject.NULL) compartment = String.valueOf(c);
             } catch (Exception ignored) {}
+
             return facade.api_deliveryOneShotStart(node, from, numero, product, preset, compartment);
         }
 
         // Delivery controls
         if ("POST".equals(req.method) && "/v1/delivery/job/continue".equals(req.path)) {
             JSONObject body = req.jsonBody();
+
+            ApiResult gate = gateMediaIfProvided(body);
+            if (gate != null) return gate;
+
             String jobId = body.optString("jobId", "").trim();
             if (jobId.isEmpty()) return ApiResult.fail("Continue: 0 - Job invalide", "JOB_ID_EMPTY");
+
             Integer node = parseNodeDec(body);
             return facade.api_deliveryContinue(jobId, node);
         }
 
         if ("POST".equals(req.method) && "/v1/delivery/job/terminate".equals(req.path)) {
             JSONObject body = req.jsonBody();
+
+            ApiResult gate = gateMediaIfProvided(body);
+            if (gate != null) return gate;
+
             String jobId = body.optString("jobId", "").trim();
             if (jobId.isEmpty()) return ApiResult.fail("Terminate: 0 - Job invalide", "JOB_ID_EMPTY");
+
             Integer node = parseNodeDec(body);
             return facade.api_deliveryTerminate(jobId, node);
         }
@@ -314,6 +385,7 @@ public final class ApiServer {
         if ("GET".equals(req.method) && req.path.startsWith("/v1/delivery/job/")) {
             String jobId = req.path.substring("/v1/delivery/job/".length()).trim();
             if (jobId.isEmpty()) return ApiResult.fail("Job: 0 - Invalide", "JOB_ID_EMPTY");
+
             Integer node = req.queryInt("lcrnode_dec");
             return facade.api_deliveryJobGet(jobId, node);
         }
@@ -328,19 +400,23 @@ public final class ApiServer {
     // =========================
     private static Integer parseNodeDec(JSONObject body) {
         if (body == null) return null;
+
         Integer to = null;
         if (body.has("lcrnode_dec")) to = body.optInt("lcrnode_dec", 0);
         else if (body.has("expected_lcrnode_dec")) to = body.optInt("expected_lcrnode_dec", 0);
         else if (body.has("lcrnode")) to = body.optInt("lcrnode", 0);
+
         if (to != null && to == 0) to = null;
         return to;
     }
 
     private static Integer parseFromDec(JSONObject body) {
         if (body == null) return null;
+
         Integer f = null;
         if (body.has("from_dec")) f = body.optInt("from_dec", 0);
         else if (body.has("from")) f = body.optInt("from", 0);
+
         if (f != null && f == 0) f = null;
         return f;
     }
