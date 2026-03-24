@@ -57,7 +57,7 @@ import com.pa.lcr.lcp.log.LogBus;
 import com.pa.lcr.lcp.storage.DeliveryDb;
 import com.pa.lcr.lcp.storage.DeliveryLogStore;
 
-// ✅ Option A: transport manager runtime
+// ✅ Option A: runtime transport manager
 import com.pa.lcr.lcp.transport.MediaTransportManager;
 
 import org.json.JSONArray;
@@ -97,7 +97,6 @@ public class MainActivity extends AppCompatActivity {
     // ===== CONFIGURE UI (status + BT) =====
     private TextView txtMediaActive;
     private TextView txtNodesActive;
-
     private Spinner spnBtBonded;
     private Button btnBtRefresh;
     private Button btnBtConnect;
@@ -107,11 +106,9 @@ public class MainActivity extends AppCompatActivity {
     // ===== BT runtime (paired-only) =====
     private static final int REQ_ENABLE_BT = 9103;
     private final ExecutorService btExec = Executors.newSingleThreadExecutor();
-
     private BluetoothAdapter btAdapter;
     private final List<BluetoothDevice> btBonded = new ArrayList<>();
     private ArrayAdapter<String> btAdapterUi;
-
     private BluetoothSocket btSocket;
     private InputStream btIn;
     private OutputStream btOut;
@@ -120,9 +117,8 @@ public class MainActivity extends AppCompatActivity {
     // ===== Media profile store =====
     private com.pa.lcr.lcp.storage.MediaProfileStore mediaProfileStore;
 
-    // ✅ Option A: runtime transport manager
+    // ✅ Option A: runtime transport manager + dernier MAC connecté
     private MediaTransportManager mediaTransportManager;
-    // ✅ Option A: dernier MAC BT connecté (pour disconnect/error)
     private String lastBtMac = null;
 
     // ===== API-Face UI =====
@@ -141,7 +137,6 @@ public class MainActivity extends AppCompatActivity {
     private Spinner spnUsbDevices;
     private Button btnScanUsb;
     private Button btnPingUsb;
-
     private EditText edtTo;
     private EditText edtFrom;
     private TextView txtActiveNode;
@@ -172,10 +167,8 @@ public class MainActivity extends AppCompatActivity {
     private Button btnScrollDown;
     private CheckBox cbTxRx;
     private CheckBox cbLogTs;
-
     private boolean logTsEnabled = false;
     private long mainLogViewSinceMs = 0L;
-
     private final Handler ui = new Handler(Looper.getMainLooper());
     private static final long MAIN_LOG_REFRESH_MIN_MS = 250;
     private long lastMainLogRefreshMs = 0L;
@@ -184,6 +177,13 @@ public class MainActivity extends AppCompatActivity {
     private final Map<Integer, String> apiRidToPath = new ConcurrentHashMap<>();
     private final Set<Integer> apiFirstJobRid = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private final Set<String> apiJobSeen = Collections.newSetFromMap(new ConcurrentHashMap<>());
+
+    // =========================
+    // ✅ 1 ligne courte par action (log global)
+    // =========================
+    private void logMedia1(String msg) {
+        logUi(null, "[MEDIA] " + msg);
+    }
 
     private static Integer parseRid(String line) {
         try {
@@ -246,7 +246,6 @@ public class MainActivity extends AppCompatActivity {
             if (intent == null) return;
             String a = intent.getAction();
             if (a == null) return;
-
             if (UsbReceiver.ACTION_USB_READY.equals(a)) {
                 UsbSerialPort p = UsbSession.getPort();
                 if (p != null) onUsbPortReady(p);
@@ -287,7 +286,6 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onStart() {
         super.onStart();
-
         IntentFilter f = new IntentFilter();
         f.addAction(UsbReceiver.ACTION_USB_READY);
         f.addAction(UsbReceiver.ACTION_USB_DETACHED);
@@ -373,12 +371,10 @@ public class MainActivity extends AppCompatActivity {
         edtFrom.setText("255");
         if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : —");
         if (txtActiveNode != null) txtActiveNode.setText("Node actif : —");
-
         if (cbShowLog != null) cbShowLog.setChecked(false);
         if (logPanel != null) logPanel.setVisibility(View.GONE);
 
         SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
-
         boolean showTxRx = prefs.getBoolean("log_tx_rx", false);
         if (cbTxRx != null) cbTxRx.setChecked(showTxRx);
         LogBus.SHOW_IO = showTxRx;
@@ -419,7 +415,6 @@ public class MainActivity extends AppCompatActivity {
                 if (e.getAction() == MotionEvent.ACTION_DOWN) nodeUserTouchedSpinner = true;
                 return false;
             });
-
             spnNodesFound.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
                 @Override public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
                     if (!nodeUserTouchedSpinner) return;
@@ -514,15 +509,11 @@ public class MainActivity extends AppCompatActivity {
 
     private void setupTabsTop() {
         if (tabLayout == null) return;
-
         tabLayout.removeAllTabs();
         tabLayout.addTab(tabLayout.newTab().setText("MAIN"), true);
         tabLayout.addTab(tabLayout.newTab().setText("API-Face"), false);
-        // ✅ FIX: Ajouter CONFIGURE (3e tab)
         tabLayout.addTab(tabLayout.newTab().setText("CONFIGURE"), false);
-
         showPage(0);
-
         tabLayout.addOnTabSelectedListener(new TabLayout.OnTabSelectedListener() {
             @Override public void onTabSelected(TabLayout.Tab tab) { showPage(tab.getPosition()); }
             @Override public void onTabUnselected(TabLayout.Tab tab) {}
@@ -534,13 +525,10 @@ public class MainActivity extends AppCompatActivity {
         if (pageMain != null) pageMain.setVisibility(index == 0 ? View.VISIBLE : View.GONE);
         if (pageApiFace != null) pageApiFace.setVisibility(index == 1 ? View.VISIBLE : View.GONE);
         if (pageConfigure != null) pageConfigure.setVisibility(index == 2 ? View.VISIBLE : View.GONE);
-
         if (index == 1) refreshApiStatus();
-
         if (index == 2) {
             updateMediaStatusUi();
             updateNodesStatusUi();
-            // ✅ FIX: auto-refresh BT en entrant dans CONFIGURE
             refreshBondedBtList();
         }
     }
@@ -553,7 +541,6 @@ public class MainActivity extends AppCompatActivity {
             logUi(null, "TAB registre: node invalide: " + node);
             return;
         }
-
         if (from < 0 || from > 255) from = 255;
 
         if (!regNodeToFrom.containsKey(node)) {
@@ -594,7 +581,6 @@ public class MainActivity extends AppCompatActivity {
 
     private void showRegisterFragment(int node) {
         if (registerContainer == null) return;
-
         currentRegNode = node;
         int from = regNodeToFrom.containsKey(node) ? regNodeToFrom.get(node) : 255;
         if (txtActiveNode != null) txtActiveNode.setText("Node actif : " + node);
@@ -614,7 +600,6 @@ public class MainActivity extends AppCompatActivity {
         regNodeToFrom.clear();
         currentRegNode = -1;
         if (tabRegisters != null) tabRegisters.removeAllTabs();
-
         try {
             FragmentManager fm = getSupportFragmentManager();
             FragmentTransaction tx = fm.beginTransaction();
@@ -655,17 +640,14 @@ public class MainActivity extends AppCompatActivity {
                     LcpLink tmp = new LcpLink(p, node, 255, true);
                     int[] ds = tmp.opDeliveryStatus(T28);
                     int delCode = ds[1];
-
                     boolean ticketPending = (delCode & 0x0001) != 0;
                     boolean flowActive = (delCode & 0x0004) != 0;
                     boolean deliveryActive = (delCode & 0x0008) != 0;
-
                     String serialId = decodeAz(tmp.opGetField(80, TF));
                     String ticketNo = u32beDec(tmp.opGetField(23, TF));
-
                     found.put(node, new NodeScanItem(node, serialId, ticketNo, ticketPending, deliveryActive, flowActive, false));
                 } catch (Exception ignored) {
-                    // ignore: node not present / timeout / etc.
+                    // ignore
                 }
             }
 
@@ -681,7 +663,6 @@ public class MainActivity extends AppCompatActivity {
                         nodeItems.add(NodeScanItem.default250());
                         if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : aucun (défaut 250)");
                         if (nodeAdapter != null) nodeAdapter.notifyDataSetChanged();
-
                         ensureRegisterTab(250, 255, true);
                         edtTo.setText("250");
                         if (txtActiveNode != null) txtActiveNode.setText("Node actif : 250");
@@ -728,7 +709,6 @@ public class MainActivity extends AppCompatActivity {
      */
     private void persistScanEvents(long scanStartedMs, long scanFinishedMs, Map<Integer, NodeScanItem> found) {
         if (deliveryStore == null) return;
-
         final long durationMs = Math.max(0L, scanFinishedMs - scanStartedMs);
         final int foundCount = (found != null) ? found.size() : 0;
 
@@ -896,19 +876,20 @@ public class MainActivity extends AppCompatActivity {
             if (m == null) m = "Unknown";
             if (p == null) p = "Device";
             labels.add(m + " - " + p);
-            logUi(null, String.format(Locale.ROOT,
-                    " - %s - %s (VID=%04X PID=%04X)",
-                    m, p, d.getVendorId(), d.getProductId()));
+            logUi(null, String.format(Locale.ROOT, " - %s - %s (VID=%04X PID=%04X)", m, p, d.getVendorId(), d.getProductId()));
         }
 
         spnUsbDevices.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, labels));
     }
 
     private void openSelectedUsb() {
+        logMedia1("USB Open/Ping");
+
         UsbSerialPort sessionPort = UsbSession.getPort();
         if (sessionPort != null) {
             if (usbPort == null) usbPort = sessionPort;
             logUi(null, "USB déjà prêt (UsbSession port déjà ouvert)");
+            logMedia1("USB Open/Ping: déjà prêt");
             return;
         }
 
@@ -916,12 +897,14 @@ public class MainActivity extends AppCompatActivity {
             logUi(null, "USB déjà prêt (port déjà ouvert)");
             UsbDevice dev = (usbDevices.isEmpty() ? null : getSelectedUsbDeviceSafe());
             if (dev != null) UsbSession.set(dev, usbPort);
+            logMedia1("USB Open/Ping: déjà prêt");
             return;
         }
 
         UsbDevice dev = getSelectedUsbDeviceSafe();
         if (dev == null) {
             logUi(null, "Aucun périphérique USB sélectionné");
+            logMedia1("USB Open/Ping: ÉCHEC");
             return;
         }
 
@@ -932,12 +915,14 @@ public class MainActivity extends AppCompatActivity {
             );
             usbManager.requestPermission(dev, pi);
             logUi(null, "Permission USB demandée");
+            logMedia1("USB Open/Ping: permission requise");
             return;
         }
 
         UsbSerialDriver driver = UsbSerialProber.getDefaultProber().probeDevice(dev);
         if (driver == null) {
             logUi(null, "Driver USB série introuvable");
+            logMedia1("USB Open/Ping: ÉCHEC");
             return;
         }
 
@@ -949,11 +934,13 @@ public class MainActivity extends AppCompatActivity {
             usbPort = port;
             UsbSession.set(dev, port);
             logUi(null, "USB prêt");
+            logMedia1("USB Open/Ping: OK");
         } catch (Exception e) {
             logErr(null, "Open USB ERR: " + safeMsg(e));
             try { if (usbPort != null) usbPort.close(); } catch (Exception ignored) {}
             usbPort = null;
             try { UsbSession.clear(); } catch (Exception ignored) {}
+            logMedia1("USB Open/Ping: ÉCHEC");
         }
     }
 
@@ -973,6 +960,7 @@ public class MainActivity extends AppCompatActivity {
             try { port.close(); } catch (Exception ignore) {}
             return;
         }
+
         usbPort = port;
         logUi(null, "USB prêt (receiver)");
 
@@ -982,6 +970,8 @@ public class MainActivity extends AppCompatActivity {
                 mediaTransportManager.onUsbReady(null, usbPort, "USB prêt (MainActivity)");
             }
         } catch (Exception ignored) {}
+
+        logMedia1("USB Ready");
     }
 
     public void onUsbDetached() {
@@ -993,6 +983,8 @@ public class MainActivity extends AppCompatActivity {
                 mediaTransportManager.onUsbDetached("USB detached");
             }
         } catch (Exception ignored) {}
+
+        logMedia1("USB Detached");
 
         try { UsbSession.clear(); } catch (Exception ignore) {}
         stopApiServer("USB detached");
@@ -1331,7 +1323,6 @@ public class MainActivity extends AppCompatActivity {
                 txtNodesActive.setText("Nodes : —");
                 return;
             }
-
             int count = nodeItems.size();
             StringBuilder sb = new StringBuilder();
             sb.append("Nodes : ").append(count).append(" (");
@@ -1360,6 +1351,7 @@ public class MainActivity extends AppCompatActivity {
                 == PackageManager.PERMISSION_GRANTED) {
             return true;
         }
+
         ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.BLUETOOTH_CONNECT}, 9101);
         return false;
     }
@@ -1367,12 +1359,15 @@ public class MainActivity extends AppCompatActivity {
     private void refreshBondedBtList() {
         if (!ensureBtConnectPermission()) {
             if (txtBtStatus != null) txtBtStatus.setText("BT : permission requise (BLUETOOTH_CONNECT)");
+            logMedia1("BT Refresh: permission");
             return;
         }
 
         btBonded.clear();
+
         if (btAdapter == null) {
             if (txtBtStatus != null) txtBtStatus.setText("BT : non disponible");
+            logMedia1("BT Refresh: non dispo");
             return;
         }
 
@@ -1383,6 +1378,7 @@ public class MainActivity extends AppCompatActivity {
                     Intent i = new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE);
                     startActivityForResult(i, REQ_ENABLE_BT);
                 } catch (Exception ignored) {}
+                logMedia1("BT Refresh: BT OFF");
                 return;
             }
         } catch (Exception ignored) {}
@@ -1392,6 +1388,8 @@ public class MainActivity extends AppCompatActivity {
             if (bonded != null) btBonded.addAll(bonded);
         } catch (Exception e) {
             if (txtBtStatus != null) txtBtStatus.setText("BT : erreur liste appairés");
+            logMedia1("BT Refresh: ÉCHEC");
+            return;
         }
 
         List<String> labels = new ArrayList<>();
@@ -1412,6 +1410,7 @@ public class MainActivity extends AppCompatActivity {
         }
 
         if (txtBtStatus != null) txtBtStatus.setText("BT : " + labels.size() + " appareil(s) appairé(s)");
+        logMedia1("BT Refresh: appairés=" + btBonded.size());
     }
 
     private BluetoothDevice getSelectedBonded() {
@@ -1424,14 +1423,18 @@ public class MainActivity extends AppCompatActivity {
     private void btConnectSelected() {
         if (!ensureBtConnectPermission()) {
             if (txtBtStatus != null) txtBtStatus.setText("BT : permission requise (BLUETOOTH_CONNECT)");
+            logMedia1("BT Connect: permission");
             return;
         }
 
         final BluetoothDevice dev = getSelectedBonded();
         if (dev == null) {
             if (txtBtStatus != null) txtBtStatus.setText("BT : aucun device sélectionné");
+            logMedia1("BT Connect: aucun device");
             return;
         }
+
+        logMedia1("BT Connect: demandé " + dev.getAddress());
 
         if (txtBtStatus != null) txtBtStatus.setText("BT : connecting…");
 
@@ -1475,6 +1478,8 @@ public class MainActivity extends AppCompatActivity {
                     updateMediaStatusUi();
                 });
 
+                logMedia1("BT Connect: OK " + dev.getAddress());
+
             } catch (Exception e) {
 
                 try { if (s != null) s.close(); } catch (Exception ignored) {}
@@ -1499,11 +1504,14 @@ public class MainActivity extends AppCompatActivity {
                             (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
                     updateMediaStatusUi();
                 });
+
+                logMedia1("BT Connect: ÉCHEC " + dev.getAddress());
             }
         });
     }
 
     private synchronized void btDisconnect() {
+        logMedia1("BT Disconnect: " + (lastBtMac != null ? lastBtMac : "-"));
 
         // ✅ Option A: publish BT disconnected
         try {
@@ -1524,13 +1532,14 @@ public class MainActivity extends AppCompatActivity {
             try { mediaProfileStore.setActiveStatus("DISCONNECTED", null); } catch (Exception ignored) {}
         }
 
-        // ✅ clear last mac
         lastBtMac = null;
 
         ui.post(() -> {
             if (txtBtStatus != null) txtBtStatus.setText("BT : DISCONNECTED");
             updateMediaStatusUi();
         });
+
+        logMedia1("BT Disconnect: OK");
     }
 
     @Override
@@ -1540,6 +1549,7 @@ public class MainActivity extends AppCompatActivity {
             boolean ok = (grantResults != null && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED);
             if (ok) refreshBondedBtList();
             else if (txtBtStatus != null) txtBtStatus.setText("BT : permission refusée");
+            if (!ok) logMedia1("BT Permission: refusée");
         }
     }
 }
