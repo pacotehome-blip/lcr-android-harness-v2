@@ -354,7 +354,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         int node = normNode(lcrnode_dec);
         int from = normFrom(from_dec);
         DeliveryController dc = requireSession(node, from);
-        if (dc == null) return failTransportLevel("usb", null, "api_connectLcp");
+        if (dc == null) return ApiResult.fail("Connect LCP: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
         return dc.api_connectLcp();
     }
 
@@ -363,7 +363,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         int node = normNode(lcrnode_dec);
         int from = normFrom(from_dec);
         DeliveryController dc = requireSession(node, from);
-        if (dc == null) return failTransportLevel("usb", null, "api_deliveryAlignA");
+        if (dc == null) return ApiResult.fail("Align A: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
         return dc.api_deliveryAlignA();
     }
 
@@ -372,7 +372,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         int node = normNode(lcrnode_dec);
         int from = normFrom(from_dec);
         DeliveryController dc = requireSession(node, from);
-        if (dc == null) return failTransportLevel("usb", null, "api_deliveryStartC");
+        if (dc == null) return ApiResult.fail("Delivery C: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
         ApiResult r = dc.api_deliveryStartC(product1to16, presetNet);
         recordJobId(r, node, from);
         return r;
@@ -384,7 +384,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         int node = normNode(lcrnode_dec);
         int from = normFrom(from_dec);
         DeliveryController dc = requireSession(node, from);
-        if (dc == null) return failTransportLevel("usb", null, "api_deliveryOneShotStart");
+        if (dc == null) return ApiResult.fail("OneShot: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
         ApiResult r = dc.api_deliveryOneShotStart(numero_livraison, product1to16, presetNetL, compartment);
         recordJobId(r, node, from);
         return r;
@@ -421,7 +421,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         int node = normNode(expected_lcrnode_dec);
         int from = normFrom(from_dec);
         DeliveryController dc = requireSession(node, from);
-        if (dc == null) return failTransportLevel("usb", null, "api_registerValidate");
+        if (dc == null) return ApiResult.fail("Validate: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
         return dc.api_registerValidate(numero_livraison, expected_lcrnode_dec,
                 expected_serial_id, expected_product_number, expected_compartment);
     }
@@ -434,7 +434,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         int node = normNode(lcrnode_dec);
         int from = normFrom(from_dec);
         DeliveryController dc = requireSession(node, from);
-        if (dc == null) return failTransportLevel("usb", null, "api_ticketReprintCurrent");
+        if (dc == null) return ApiResult.fail("Reprint: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
         return dc.api_ticketReprintCurrent();
     }
 
@@ -469,7 +469,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         }
         return dc.api_tickWait(since, wait);
     }
-}
+
 
 // =========================
 // ✅ A2: erreurs par niveau (MEDIA) pour transport non prêt
@@ -480,6 +480,7 @@ private ApiResult failTransportLevel(String media, String btMac, String where) {
     try { d.put("level", "MEDIA"); } catch (Exception ignored) {}
     try { d.put("where", where); } catch (Exception ignored) {}
     try { d.put("media", m); } catch (Exception ignored) {}
+
     if ("usb".equals(m)) {
         return ApiResult.fail("Transport: 0 - USB non connecté", "ERR_USB_NOT_CONNECTED", d);
     }
@@ -492,5 +493,5 @@ private ApiResult failTransportLevel(String media, String btMac, String where) {
     }
     return ApiResult.fail("Transport: 0 - media invalide", "ERR_MEDIA_INVALID", d);
 }
-
 }
+
