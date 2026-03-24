@@ -3,8 +3,10 @@ package com.pa.lcr.lcp;
 
 import android.content.Context;
 
+import com.hoho.android.usbserial.driver.UsbSerialPort;
 import com.pa.lcr.lcp.log.LogBus;
 import com.pa.lcr.lcp.storage.DeliveryLogStore;
+import com.pa.lcr.lcp.transport.MediaTransportManager;
 import com.pa.lcr.lcp.transport.TransportIo;
 
 import java.util.LinkedHashMap;
@@ -15,16 +17,16 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Session manager multi-registre ET multi-transport.
+ * Session manager multi-registre.
  *
  * ✅ Option B:
- * - Clé de session = transportKey + ":" + lcrnode_dec
- * - Recreate session si generationId du transport change (anti-mix après reconnect)
+ * - sessions indexées par transportKey + ":" + lcrnode_dec
+ * - getOrCreate(...) prend TransportIo
  *
- * ✅ Fixes conservés:
- * - Scheduler central par node
- * - CONNECTED: pas de STATUS auto
- * - RUNNING_PAUSED: throttling fort
+ * ✅ Compat UI (legacy):
+ * - getOrCreate(node, from, UsbSerialPort)
+ * - attachUiListener(node, listener)
+ * - detachUiListener(node, listener)
  */
 public final class RegisterSessionManager {
 
@@ -44,7 +46,7 @@ public final class RegisterSessionManager {
     private final Context appCtx;
     private final DeliveryLogStore store;
 
-    // key = transportKey + ":" + node
+    // ✅ Option B: key = transportKey + ":" + node
     private final Map<String, NodeSession> sessions = new LinkedHashMap<>();
 
     private RegisterSessionManager(Context appCtx) {
@@ -57,43 +59,40 @@ public final class RegisterSessionManager {
 
     private static String key(String transportKey, int nodeDec) {
         int node = nodeDec & 0xFF;
-        return (transportKey == null ? "?" : transportKey) + ":" + node;
+        String k = (transportKey == null || transportKey.trim().isEmpty()) ? "?" : transportKey.trim();
+        return k + ":" + node;
     }
 
+    // =========================================================
+    // ✅ Option B: API principale (TransportIo)
+    // =========================================================
     public synchronized DeliveryController getController(String transportKey, int nodeDec) {
         NodeSession s = sessions.get(key(transportKey, nodeDec));
         return (s != null) ? s.dc : null;
     }
 
-    /**
-     * Get or create a controller bound to (transportKey,node,from,io).
-     * Recreate if generationId changed (anti-mix).
-     */
     public synchronized DeliveryController getOrCreate(String transportKey, int nodeDec, int fromDec, TransportIo io) {
-        if (io == null) return null;
-        if (transportKey == null || transportKey.trim().isEmpty()) transportKey = io.getKey();
-
         int node = nodeDec & 0xFF;
         int from = fromDec & 0xFF;
 
-        String k = key(transportKey, node);
+        if (io == null || !io.isOpen()) return null;
+
+        String tk = (transportKey == null || transportKey.trim().isEmpty()) ? io.getKey() : transportKey.trim();
+        String k = key(tk, node);
 
         NodeSession existing = sessions.get(k);
         if (existing != null) {
-            // Recreate if generationId mismatch
-            if (existing.generationId != io.getGenerationId()) {
-                try { existing.scheduler.shutdown(); } catch (Exception ignored) {}
-                try { existing.dc.shutdown(false); } catch (Exception ignored) {} // ne ferme pas le transport ici
-                sessions.remove(k);
-            } else {
+            // ✅ Anti-mix: regen si génération transport différente
+            if (existing.generationId == io.getGenerationId()) {
                 return existing.dc;
             }
+            // génération a changé -> on ferme l’ancienne session (logique seulement)
+            try { existing.scheduler.shutdown(); } catch (Exception ignored) {}
+            try { existing.dc.shutdown(false); } catch (Exception ignored) {}
+            sessions.remove(k);
         }
 
-        if (!io.isOpen()) return null;
-
         LcpLink link = new LcpLink(io, node, from, true);
-
         DeliveryController dc = new DeliveryController(link);
         dc.setLogStore(store);
 
@@ -105,7 +104,7 @@ public final class RegisterSessionManager {
         dc.setListener(mux);
         try { dc.initialize(); } catch (Exception ignored) {}
 
-        NodeSession s = new NodeSession(dc, mux, scheduler, transportKey, io.getGenerationId());
+        NodeSession s = new NodeSession(dc, mux, scheduler, tk, io.getGenerationId());
         sessions.put(k, s);
         scheduler.bindController(dc);
 
@@ -128,6 +127,40 @@ public final class RegisterSessionManager {
         s.scheduler.setUiSubscribed(false);
     }
 
+    // =========================================================
+    // ✅ LEGACY COMPAT (UI/RegisterTabFragment) — USB par défaut
+    // =========================================================
+
+    /**
+     * Compat UI: signature legacy utilisée par RegisterTabFragment.
+     * On ignore le port pour LCP et on résout TransportIo "USB" via MediaTransportManager.
+     */
+    @Deprecated
+    public synchronized DeliveryController getOrCreate(int nodeDec, int fromDec, UsbSerialPort port) {
+        TransportIo io = null;
+        try {
+            io = MediaTransportManager.get(appCtx).getByKey("USB");
+        } catch (Exception ignored) {}
+
+        // Si le manager n’a pas encore USB (rare), pas de session.
+        if (io == null || !io.isOpen()) return null;
+
+        return getOrCreate("USB", nodeDec, fromDec, io);
+    }
+
+    @Deprecated
+    public synchronized void attachUiListener(int nodeDec, DeliveryControllerPort.Listener uiListener) {
+        attachUiListener("USB", nodeDec, uiListener);
+    }
+
+    @Deprecated
+    public synchronized void detachUiListener(int nodeDec, DeliveryControllerPort.Listener uiListener) {
+        detachUiListener("USB", nodeDec, uiListener);
+    }
+
+    // =========================================================
+    // Clear
+    // =========================================================
     public synchronized void clearAll(boolean closeTransport) {
         for (NodeSession s : sessions.values()) {
             try { s.scheduler.shutdown(); } catch (Exception ignored) {}
@@ -136,6 +169,9 @@ public final class RegisterSessionManager {
         sessions.clear();
     }
 
+    // =========================================================
+    // Internals
+    // =========================================================
     private static final class NodeSession {
         final DeliveryController dc;
         final MuxListener mux;
@@ -218,7 +254,7 @@ public final class RegisterSessionManager {
      *
      * ✅ Règles:
      * - DISCONNECTED: rien
-     * - CONNECTED: rien (pas de STATUS auto)
+     * - CONNECTED: rien
      * - RUNNING_FLOWING: LIVE rapide + STATUS normal
      * - RUNNING_PAUSED: LIVE OFF (ou très lent) + STATUS ralenti
      */
@@ -226,19 +262,18 @@ public final class RegisterSessionManager {
         private final int node;
         private final ScheduledExecutorService exec;
         private DeliveryController dc;
+
         private volatile boolean uiSubscribed = false;
         private volatile long lastLiveMs = 0L;
         private volatile long lastStatusMs = 0L;
         private volatile long liveBackoffMs = 0L;
         private volatile long statusBackoffMs = 0L;
 
-        // Polling base
-        private static final long LIVE_RUNNING_MS = 500;     // flowing only
-        private static final long STATUS_RUNNING_MS = 1500;  // flowing only
+        private static final long LIVE_RUNNING_MS = 500;
+        private static final long STATUS_RUNNING_MS = 1500;
 
-        // PAUSED throttling
-        private static final long LIVE_PAUSED_MS = 0;     // 0 = OFF
-        private static final long STATUS_PAUSED_MS = 4000; // ralentir en pause
+        private static final long LIVE_PAUSED_MS = 0;
+        private static final long STATUS_PAUSED_MS = 4000;
 
         NodeScheduler(int node) {
             this.node = node;
@@ -277,7 +312,6 @@ public final class RegisterSessionManager {
             boolean flowing = (st == DeliveryState.RUNNING_FLOWING);
             boolean paused = (st == DeliveryState.RUNNING_PAUSED);
 
-            // CONNECTED: aucun polling auto
             if (!flowing && !paused) return;
 
             // LIVE
@@ -337,7 +371,7 @@ public final class RegisterSessionManager {
     }
 
     /**
-     * Sink LogBus: route UI/API/IO (TX/RX) et injecte backoff rc=0x26.
+     * Sink LogBus: route UI/API/IO et injecte backoff rc=0x26.
      */
     private static final class LogBusSink implements DeliveryControllerPort.Listener {
         private final int node;
