@@ -1,5 +1,5 @@
 
-package com.pa.lcr.lcp.storage;
+package com.pa.lcr.lcp.storage;  
 
 import android.content.Context;
 import android.database.Cursor;
@@ -8,13 +8,13 @@ import android.database.sqlite.SQLiteOpenHelper;
 import android.util.Log;
 
 /**
- * SQLite DB for delivery traceability (API + UI).
+ * SQLite DB for delivery traceability (API + UI). ok c'est ici
  *
  * Rotation is handled by deleting old rows in delivery_summary (cascade to attempt/event).
  */
 public class DeliveryDb extends SQLiteOpenHelper {
 
-    public static final String DB_NAME = "lcr_delivery.db";
+    public static final String DB_NAME = "lcr_delivery.db";   
     // v1: base tables
     // v2: add time columns to delivery_summary + index
     // v3: add media_profile/media_event
