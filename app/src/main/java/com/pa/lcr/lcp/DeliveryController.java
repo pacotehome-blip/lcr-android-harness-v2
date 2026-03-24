@@ -96,17 +96,35 @@ public final class DeliveryController implements DeliveryControllerPort {
 // - detail: message technique
 // =========================================================
 private static void tagErrorLevel(JSONObject d, String level, String where, Exception e) {
-    try { safeJsonPut(d, "level", level); } catch (Exception ignored) {}
+    // ✅ A3.1: TRANSPORT déterministe si TransportException
+    boolean isTransport = false;
+    try {
+        isTransport = (e instanceof LcpLink.TransportException);
+    } catch (Exception ignored) {}
+
+    String lvl = level;
+    if (isTransport) {
+        lvl = "TRANSPORT";
+    } else if (lvl == null || lvl.trim().isEmpty()) {
+        lvl = "UNKNOWN";
+    }
+
+    try { safeJsonPut(d, "level", lvl); } catch (Exception ignored) {}
     try { safeJsonPut(d, "where", where); } catch (Exception ignored) {}
+
     if (e != null) {
         String m0 = (e.getMessage() != null) ? e.getMessage() : e.getClass().getSimpleName();
         try { safeJsonPut(d, "detail", m0); } catch (Exception ignored) {}
+
         // classification simple (help debug)
         try {
-            if (m0.contains("rc=0x26") || m0.contains("Queued timeout") || m0.contains("Timeout waiting LCP")) {
-                safeJsonPut(d, "class", "LCP");
-            } else if (m0.contains("Transport") || m0.contains("Error writing") || m0.contains("Error reading") || m0.contains("Connection closed")) {
+            if (isTransport) {
                 safeJsonPut(d, "class", "TRANSPORT");
+            } else if (m0.contains("rc=0x26") || m0.contains("rc=0X26")
+                    || m0.contains("Queued timeout") || m0.contains("Timeout waiting LCP")) {
+                safeJsonPut(d, "class", "LCP");
+            } else {
+                safeJsonPut(d, "class", "UNKNOWN");
             }
         } catch (Exception ignored) {}
     }
