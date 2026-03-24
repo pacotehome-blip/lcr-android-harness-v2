@@ -2,7 +2,6 @@
 package com.pa.lcr.lcp;
 
 import com.pa.lcr.lcp.transport.TransportIo;
-
 import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
@@ -23,18 +22,25 @@ import java.util.Locale;
  * 5) 0x7D immédiat après RC=0x26 sur commande queueable (comme Python)
  *
  * ✅ Option B: tout passe par TransportIo (USB/BT/WiFi)
+ *
+ * ✅ A3: erreurs TRANSPORT déterministes via TransportException
  */
 public final class LcpLink {
+
+    // ===================== ✅ A3: TransportException =====================
+    /** Exception typée pour erreurs de transport (I/O read/write/closed). */
+    public static final class TransportException extends IOException {
+        public TransportException(String msg) { super(msg); }
+        public TransportException(String msg, Throwable cause) { super(msg, cause); }
+    }
 
     // ===================== CONSTANTES =====================
     public static final byte SYNC = 0x7E;
     private static final byte ESC = 0x1B;
-
     private static final int RC_OK = 0x00;
     private static final int RC_REQUEST_QUEUED = 0x26;
     private static final int RC_NO_REQUEST_ACTIVE = 0x27;
     private static final int RC_REQUEST_ABORTED = 0x28;
-
     private static final byte MSG_GET_FIELD = 0x20;
     private static final byte MSG_SET_FIELD = 0x21;
     private static final byte MSG_GET_MACHINE_STATUS = 0x23;
@@ -56,7 +62,6 @@ public final class LcpLink {
     private final Object ioLock = new Object(); // lock par instance (évite blocage cross-media)
     private final int toAddr;
     private final int hostAddr;
-
     private volatile boolean closed = false;
 
     // ===================== TRACE =====================
@@ -210,9 +215,10 @@ public final class LcpLink {
 
     // ===================== SEND / RECV =====================
     private synchronized Response sendRecv(byte[] payload, int timeoutMs) throws IOException {
-        if (closed) throw new IOException("Transport closed");
-        if (io == null) throw new IOException("Transport null");
-        if (!io.isOpen()) throw new IOException("Transport not open");
+        // ✅ A3: erreurs transport typées
+        if (closed) throw new TransportException("Transport closed");
+        if (io == null) throw new TransportException("Transport null");
+        if (!io.isOpen()) throw new TransportException("Transport not open");
 
         final byte msg = (payload != null && payload.length > 0) ? payload[0] : 0;
 
@@ -220,13 +226,13 @@ public final class LcpLink {
         final boolean queueable = (msg == MSG_SET_FIELD) || (msg == MSG_ISSUE_COMMAND);
 
         byte[] frame = encodeFrame(payload);
-
         t("TX: " + hexDump(frame));
+
         synchronized (ioLock) {
             try {
                 io.write(frame, 500);
             } catch (Exception e) {
-                throw new IOException("Error writing", e);
+                throw new TransportException("Error writing", e); // ✅ A3
             }
         }
 
@@ -245,7 +251,7 @@ public final class LcpLink {
                     try {
                         io.write(chk, 500);
                     } catch (Exception e) {
-                        throw new IOException("Error writing", e);
+                        throw new TransportException("Error writing", e); // ✅ A3
                     }
                 }
                 nextCheck = System.currentTimeMillis() + QP_MS;
@@ -302,7 +308,7 @@ public final class LcpLink {
             try {
                 n = io.read(tmp, timeoutMs);
             } catch (Exception e) {
-                throw new IOException("Error reading", e);
+                throw new TransportException("Error reading", e); // ✅ A3
             }
         }
         if (n > 0) rxBuf.appendBytes(tmp, 0, n);
@@ -351,6 +357,7 @@ public final class LcpLink {
             int crc1 = readCrcByte(b, idx);
             int recv = ((crc1 & 0xFF) << 8) | (crc0 & 0xFF);
             int calc = crcLcp(rawForCrc.buf, 0, rawForCrc.len);
+
             if (calc != recv) {
                 b.drop(1);
                 return null;
@@ -461,7 +468,9 @@ public final class LcpLink {
         return crc & 0xFFFF;
     }
 
-    private static int u16be(byte hi, byte lo) { return ((hi & 0xFF) << 8) | (lo & 0xFF); }
+    private static int u16be(byte hi, byte lo) {
+        return ((hi & 0xFF) << 8) | (lo & 0xFF);
+    }
 
     private static String hex2(int v) { return String.format("%02X", v & 0xFF); }
 
