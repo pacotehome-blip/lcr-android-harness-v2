@@ -674,6 +674,30 @@ public final class DeliveryController implements DeliveryControllerPort {
  if (n != null && !n.trim().isEmpty() && tno != null && !tno.trim().isEmpty()) {
  uid = n.trim() + "-" + tno.trim();
  }
+
+// =========================================================
+// ✅ A2: Tagging erreurs par niveau dans les payloads API
+// - level: MEDIA | TRANSPORT | LCP | REGISTER | DELIVERY | UNKNOWN
+// - where : contexte court
+// - detail: message technique
+// =========================================================
+private static void tagErrorLevel(JSONObject d, String level, String where, Exception e) {
+try { safeJsonPut(d, "level", level); } catch (Exception ignored) {}
+try { safeJsonPut(d, "where", where); } catch (Exception ignored) {}
+if (e != null) {
+String m0 = (e.getMessage() != null) ? e.getMessage() : e.getClass().getSimpleName();
+try { safeJsonPut(d, "detail", m0); } catch (Exception ignored) {}
+// classification simple (help debug)
+try {
+if (m0.contains("rc=0x26") || m0.contains("Queued timeout") || m0.contains("Timeout waiting LCP")) {
+safeJsonPut(d, "class", "LCP");
+} else if (m0.contains("Transport") || m0.contains("Error writing") || m0.contains("Error reading") || m0.contains("Connection closed")) {
+safeJsonPut(d, "class", "TRANSPORT");
+}
+} catch (Exception ignored) {}
+}
+}
+
  if (listener != null) listener.onTicketInfo(tno, uid);
  } catch (Exception ignored) {}
 
@@ -1396,7 +1420,8 @@ public final class DeliveryController implements DeliveryControllerPort {
         } catch (Exception e) {
             JSONObject d = new JSONObject();
             safeJsonPut(d, "detail", (e.getMessage() != null) ? e.getMessage() : "");
-            return ApiResult.fail("Connect LCP: 0 - State check failed (0x28).", "STATE28_FAIL", d);
+            tagErrorLevel(d, "LCP", "api_connectLcp", e);
+ return ApiResult.fail("Connect LCP: 0 - State check failed (0x28).", "STATE28_FAIL", d);
         }
     }
 
@@ -1490,7 +1515,8 @@ public final class DeliveryController implements DeliveryControllerPort {
         } catch (Exception e) {
             JSONObject d = new JSONObject();
             safeJsonPut(d, "detail", safeMsg(e));
-            return ApiResult.fail("Reprint: 0 - LCP error.", "REPRINT_FAIL", d);
+            tagErrorLevel(d, "LCP", "api_ticketReprintCurrent", e);
+ return ApiResult.fail("Reprint: 0 - LCP error.", "REPRINT_FAIL", d);
         }
     }
 
@@ -1662,7 +1688,8 @@ public ApiResult api_registerValidate(
         } catch (Exception e) {
             JSONObject d = new JSONObject();
             safeJsonPut(d, "detail", safeMsg(e));
-            return ApiResult.fail("Validate: 0 - LCP error.", RegisterValidator.Codes.ERR_LCP_CONNECT_FAILED, d);
+            tagErrorLevel(d, "LCP", "api_registerValidate", e);
+ return ApiResult.fail("Validate: 0 - LCP error.", RegisterValidator.Codes.ERR_LCP_CONNECT_FAILED, d);
         }
     }
 
@@ -1703,7 +1730,8 @@ public ApiResult api_registerValidate(
         } catch (Exception e) {
             JSONObject d = new JSONObject();
             safeJsonPut(d, "detail", (e.getMessage() != null) ? e.getMessage() : "");
-            return ApiResult.fail("Align A: 0 - Failed", "ALIGN_FAIL", d);
+            tagErrorLevel(d, "LCP", "api_deliveryAlignA", e);
+ return ApiResult.fail("Align A: 0 - Failed", "ALIGN_FAIL", d);
         }
     }
 
@@ -1747,7 +1775,8 @@ public ApiResult api_registerValidate(
         } catch (Exception e) {
             JSONObject d = new JSONObject();
             safeJsonPut(d, "detail", (e.getMessage() != null) ? e.getMessage() : "");
-            return ApiResult.fail("Delivery StartC: 0 - orchestration error", "STARTC_FAIL", d);
+            tagErrorLevel(d, "LCP", "api_deliveryStartC", e);
+ return ApiResult.fail("Delivery StartC: 0 - orchestration error", "STARTC_FAIL", d);
         }
     }
 
@@ -1932,7 +1961,8 @@ try {
         } catch (Exception e) {
             JSONObject d = new JSONObject();
             safeJsonPut(d, "detail", (e.getMessage() != null) ? e.getMessage() : "");
-            return ApiResult.fail("Delivery OneShot: 0 - orchestration error", "ONESHOT_FAIL", d);
+            tagErrorLevel(d, "LCP", "api_deliveryOneShotStart", e);
+ return ApiResult.fail("Delivery OneShot: 0 - orchestration error", "ONESHOT_FAIL", d);
         }
     }
 
@@ -2015,7 +2045,8 @@ try {
             }
             JSONObject d = new JSONObject();
             safeJsonPut(d, "detail", (e.getMessage() != null) ? e.getMessage() : "");
-            return ApiResult.fail("Continue: 0 - RUN failed", "RUN_FAIL", d);
+            tagErrorLevel(d, "LCP", "api_deliveryContinue", e);
+ return ApiResult.fail("Continue: 0 - RUN failed", "RUN_FAIL", d);
         }
     }
 
@@ -2400,7 +2431,8 @@ try {
             }
             JSONObject d = new JSONObject();
             safeJsonPut(d, "detail", (e.getMessage() != null) ? e.getMessage() : "");
-            return ApiResult.fail("Job: 0 - Read error", "JOB_READ_FAIL", d);
+            tagErrorLevel(d, "LCP", "api_deliveryJobGet", e);
+ return ApiResult.fail("Job: 0 - Read error", "JOB_READ_FAIL", d);
         }
     }
 
