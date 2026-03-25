@@ -497,6 +497,17 @@ private static void tagErrorLevel(JSONObject d, String level, String where, Exce
         volatile int grossEndRaw = 0;
         volatile int netEndRaw = 0;
 
+        // =========================
+        // DISPLAY tick (delivery counters #44/#45 - register UI path)
+        // =========================
+        volatile long displayTickMs = 0L;
+        volatile long displayTickSeq = 0L;
+        volatile int displayGrossRaw = 0; // #44
+        volatile int displayNetRaw   = 0; // #45
+        volatile double displayGrossL = 0.0;
+        volatile double displayNetL   = 0.0;
+
+
         // Totaux
         volatile int grossTotalRaw = 0;
         volatile int netTotalRaw = 0;
@@ -2434,6 +2445,17 @@ safeJsonPut(result, "net_total_l", netEndU / scale);
 
 safeJsonPut(result, "gross_delta_l", grossDeltaU / scale);
 safeJsonPut(result, "net_delta_l", netDeltaU / scale);
+
+                // =========================
+                // DISPLAY (final register tick - UI truth)
+                // =========================
+                safeJsonPut(result, "display_tick_ms",  job.displayTickMs);
+                safeJsonPut(result, "display_tick_seq", job.displayTickSeq);
+                safeJsonPut(result, "display_gross_end_raw", (job.displayGrossRaw & 0xFFFFFFFFL));
+                safeJsonPut(result, "display_net_end_raw",   (job.displayNetRaw & 0xFFFFFFFFL));
+                safeJsonPut(result, "display_gross_end_l", job.displayGrossL);
+                safeJsonPut(result, "display_net_end_l",   job.displayNetL);
+
 
 safeJsonPut(data, "state_job", "DONE");
                 safeJsonPut(data, "armed", 0);
