@@ -216,6 +216,9 @@ private static void tagErrorLevel(JSONObject d, String level, String where, Exce
     
  // ✅ Cache du dernier NUM reçu via API (numero_livraison) pour reconstruire delivery_uid côté UI
  private volatile String lastNumeroLivraison = null;
+
+ // ✅ Media actif (usb/bt) - best-effort (déduit du transport si non fixé)
+ private volatile String activeMedia = null;
 // LIVE
     private volatile boolean flowOffStable = false;
     private volatile boolean sawFlowOnOnce = false;
@@ -466,7 +469,10 @@ private static void tagErrorLevel(JSONObject d, String level, String where, Exce
         volatile String compartment;
         volatile int productNumber;
 
-        // Preset
+        
+ // Media utilisé pour ce job (usb/bt)
+ volatile String media;
+// Preset
         volatile double presetNetL_requested;
         volatile double presetNetL_applied;
         volatile long presetRawU32;
@@ -1932,7 +1938,9 @@ try {
             job.deliveryUid = deliveryUid;
             job.compartment = compartment;
             job.productNumber = product1to16;
-            job.presetNetL_requested = presetNetL;
+            
+ job.media = resolveActiveMedia();
+job.presetNetL_requested = presetNetL;
             job.presetNetL_applied = presetApplied;
             job.presetRawU32 = presetRawU;
             job.decimals = cachedDigits;
@@ -1958,6 +1966,7 @@ try {
 
             JSONObject data = new JSONObject();
             safeJsonPut(data, "jobId", jobId);
+ safeJsonPut(data, "media", (job.media == null ? resolveActiveMedia() : job.media));
             safeJsonPut(data, "numero_livraison", numero_livraison);
             safeJsonPut(data, "ticket_no", ticketNo);
             safeJsonPut(data, "sale_no", saleNo);
@@ -2045,6 +2054,7 @@ try {
 
             JSONObject data = new JSONObject();
             safeJsonPut(data, "jobId", jobId);
+ safeJsonPut(data, "media", (job.media == null ? resolveActiveMedia() : job.media));
             safeJsonPut(data, "numero_livraison", job.numeroLivraison);
             safeJsonPut(data, "ticket_no", job.ticketNo);
             safeJsonPut(data, "sale_no", job.saleNo);
@@ -2109,6 +2119,7 @@ try {
 
         JSONObject data = new JSONObject();
         safeJsonPut(data, "jobId", jobId);
+ safeJsonPut(data, "media", (job.media == null ? resolveActiveMedia() : job.media));
         safeJsonPut(data, "numero_livraison", job.numeroLivraison);
         safeJsonPut(data, "ticket_no", job.ticketNo);
         safeJsonPut(data, "sale_no", job.saleNo);
@@ -2172,11 +2183,34 @@ try {
             double netL = (n & 0xFFFFFFFFL) / scale;
             double grossL = (g & 0xFFFFFFFFL) / scale;
 
-            if (deliveryActive && !job.baselineCaptured) {
-                job.baselineCaptured = true;
-                job.grossStartRaw = 0;
-                job.netStartRaw = 0;
-            }
+            
+if (deliveryActive && !job.baselineCaptured) {
+    job.baselineCaptured = true;
+
+    // ✅ Capture START réel (DE) à partir des TOTAUX registre (#17/#18)
+    try {
+        job.grossStartRaw = beI32(lcpGetField(FIELD_GROSS_TOTAL));
+        job.netStartRaw   = beI32(lcpGetField(FIELD_NET_TOTAL));
+    } catch (Exception e0) {
+        // fallback ultra-sûr : on se rabat sur les derniers compteurs vus
+        job.grossStartRaw = (job.grossTotalRaw != 0) ? job.grossTotalRaw : job.grossEndRaw;
+        job.netStartRaw   = (job.netTotalRaw != 0) ? job.netTotalRaw : job.netEndRaw;
+    }
+
+    // log BD (snapshot START)
+    try {
+        DeliveryLogStore store0 = this.logStore;
+        if (store0 != null && job.attemptId > 0) {
+            JSONObject ev = new JSONObject();
+            safeJsonPut(ev, "event", "DELIVERY_START_SNAPSHOT");
+            safeJsonPut(ev, "media", job.media == null ? resolveActiveMedia() : job.media);
+            safeJsonPut(ev, "gross_start", job.grossStartRaw & 0xFFFFFFFFL);
+            safeJsonPut(ev, "net_start", job.netStartRaw & 0xFFFFFFFFL);
+            store0.addEventAsync(job.attemptId, DeliveryLogStore.LEVEL_INFO,
+                    "DELIVERY_START", "Start snapshot captured", ev.toString());
+        }
+    } catch (Exception ignored) {}
+}
 
             int d = 0;
             if (job.lastGrossSeen != Integer.MIN_VALUE && job.lastNetSeen != Integer.MIN_VALUE) {
@@ -2219,6 +2253,7 @@ try {
 
             JSONObject data = new JSONObject();
             safeJsonPut(data, "jobId", jobId);
+ safeJsonPut(data, "media", (job.media == null ? resolveActiveMedia() : job.media));
             safeJsonPut(data, "numero_livraison", job.numeroLivraison);
             safeJsonPut(data, "ticket_no", job.ticketNo);
             safeJsonPut(data, "sale_no", job.saleNo);
@@ -2328,42 +2363,79 @@ try {
                     job.netTotalRaw = beI32(lcpGetField(FIELD_NET_TOTAL));
                 } catch (Exception ignored) {}
 
-                JSONObject result = new JSONObject();
-                long gdU = (job.grossEndRaw & 0xFFFFFFFFL);
-                long ndU = (job.netEndRaw & 0xFFFFFFFFL);
+                
+JSONObject result = new JSONObject();
 
-                safeJsonPut(result, "numero_livraison", job.numeroLivraison);
-                safeJsonPut(result, "ticket_no", job.ticketNo);
-                safeJsonPut(result, "serial_id", job.serialId);
-                safeJsonPut(result, "compartment", job.compartment == null ? JSONObject.NULL : job.compartment);
-                safeJsonPut(result, "product_number", job.productNumber);
+// ✅ Media (usb/bt)
+String media = (job.media == null) ? resolveActiveMedia() : job.media;
 
-                String uid = (job.numeroLivraison == null ? "" : job.numeroLivraison) + "-" + job.ticketNo;
-                job.deliveryUid = uid;
-                safeJsonPut(result, "delivery_uid", uid);
- try { if (listener != null) listener.onTicketInfo(job.ticketNo, uid); } catch (Exception ignored) {}
+// START totals (snapshot)
+long grossStartU = job.grossStartRaw & 0xFFFFFFFFL;
+long netStartU   = job.netStartRaw & 0xFFFFFFFFL;
 
-                safeJsonPut(result, "start_ms", job.startMs);
-                safeJsonPut(result, "end_ms", job.endMs);
-                safeJsonPut(result, "start_utc", msToUtcIso(job.startMs));
-                safeJsonPut(result, "end_utc", msToUtcIso(job.endMs));
-                safeJsonPut(result, "duration_ms", (job.endMs - job.startMs));
-                safeJsonPut(result, "duration_s", (job.endMs - job.startMs) / 1000.0);
+// END totals
+long grossEndU = job.grossTotalRaw & 0xFFFFFFFFL;
+long netEndU   = job.netTotalRaw & 0xFFFFFFFFL;
 
-                safeJsonPut(result, "gross_delta", gdU);
-                safeJsonPut(result, "net_delta", ndU);
-                safeJsonPut(result, "gross_total", job.grossTotalRaw & 0xFFFFFFFFL);
-                safeJsonPut(result, "net_total", job.netTotalRaw & 0xFFFFFFFFL);
+// Fallback si start non capturé (cas rare) -> delta 0
+if (!job.baselineCaptured) {
+    grossStartU = grossEndU;
+    netStartU = netEndU;
+}
 
-                safeJsonPut(result, "inventory_written", JSONObject.NULL);
-                safeJsonPut(result, "host_printed", true);
+long grossDeltaU = grossEndU - grossStartU;
+long netDeltaU   = netEndU - netStartU;
 
-                safeJsonPut(result, "gross_delta_l", gdU / scale);
-                safeJsonPut(result, "net_delta_l", ndU / scale);
-                safeJsonPut(result, "gross_total_l", (job.grossTotalRaw & 0xFFFFFFFFL) / scale);
-                safeJsonPut(result, "net_total_l", (job.netTotalRaw & 0xFFFFFFFFL) / scale);
+safeJsonPut(result, "media", media);
+safeJsonPut(result, "numero_livraison", job.numeroLivraison);
+safeJsonPut(result, "ticket_no", job.ticketNo);
+safeJsonPut(result, "serial_id", job.serialId);
+safeJsonPut(result, "compartment", job.compartment == null ? JSONObject.NULL : job.compartment);
+safeJsonPut(result, "product_number", job.productNumber);
 
-                safeJsonPut(data, "state_job", "DONE");
+String uid = (job.numeroLivraison == null ? "" : job.numeroLivraison) + "-" + job.ticketNo;
+job.deliveryUid = uid;
+safeJsonPut(result, "delivery_uid", uid);
+try { if (listener != null) listener.onTicketInfo(job.ticketNo, uid); } catch (Exception ignored) {}
+
+safeJsonPut(result, "start_ms", job.startMs);
+safeJsonPut(result, "end_ms", job.endMs);
+safeJsonPut(result, "start_utc", msToUtcIso(job.startMs));
+safeJsonPut(result, "end_utc", msToUtcIso(job.endMs));
+safeJsonPut(result, "duration_ms", (job.endMs - job.startMs));
+safeJsonPut(result, "duration_s", (job.endMs - job.startMs) / 1000.0);
+
+// ✅ START / END totals
+safeJsonPut(result, "gross_total_start", grossStartU);
+safeJsonPut(result, "net_total_start", netStartU);
+safeJsonPut(result, "gross_total_end", grossEndU);
+safeJsonPut(result, "net_total_end", netEndU);
+
+// Backward compat: keep existing keys as END
+safeJsonPut(result, "gross_total", grossEndU);
+safeJsonPut(result, "net_total", netEndU);
+
+// ✅ DELTA totals
+safeJsonPut(result, "gross_delta", grossDeltaU);
+safeJsonPut(result, "net_delta", netDeltaU);
+
+safeJsonPut(result, "inventory_written", JSONObject.NULL);
+safeJsonPut(result, "host_printed", true);
+
+// ✅ Litres
+safeJsonPut(result, "gross_total_start_l", grossStartU / scale);
+safeJsonPut(result, "net_total_start_l", netStartU / scale);
+safeJsonPut(result, "gross_total_end_l", grossEndU / scale);
+safeJsonPut(result, "net_total_end_l", netEndU / scale);
+
+// Backward compat: keep existing keys as END
+safeJsonPut(result, "gross_total_l", grossEndU / scale);
+safeJsonPut(result, "net_total_l", netEndU / scale);
+
+safeJsonPut(result, "gross_delta_l", grossDeltaU / scale);
+safeJsonPut(result, "net_delta_l", netDeltaU / scale);
+
+safeJsonPut(data, "state_job", "DONE");
                 safeJsonPut(data, "armed", 0);
                 safeJsonPut(data, "state", DeliveryState.CONNECTED.name());
                 safeJsonPut(data, "live_status", "LIVE: CONNECTED - Ready");
@@ -2456,6 +2528,36 @@ try {
     // ------------------------------------
     // helpers
     // ------------------------------------
+
+// =========================================================
+// ✅ Media helper (usb/bt)
+// =========================================================
+/** Permet à la façade de fixer le média actif (usb/bt). */
+public void setActiveMedia(String media) {
+    try {
+        if (media == null) return;
+        String m = media.trim().toLowerCase(Locale.ROOT);
+        if (m.isEmpty()) return;
+        activeMedia = m;
+    } catch (Exception ignored) {}
+}
+
+/** Déduit le média du transport si non fixé explicitement. */
+private String resolveActiveMedia() {
+    try {
+        String m = activeMedia;
+        if (m != null && !m.trim().isEmpty()) return m.trim().toLowerCase(Locale.ROOT);
+    } catch (Exception ignored) {}
+    try {
+        String k = (link != null) ? link.getTransportKey() : null;
+        if (k != null) {
+            String u = k.trim().toUpperCase(Locale.ROOT);
+            if (u.startsWith("BT") || u.contains("BT:")) return "bt";
+            if (u.startsWith("USB") || u.contains("USB")) return "usb";
+        }
+    } catch (Exception ignored) {}
+    return "usb";
+}
     private static String safeMsg(Exception e) {
         if (e == null) return "";
         String m = e.getMessage();
