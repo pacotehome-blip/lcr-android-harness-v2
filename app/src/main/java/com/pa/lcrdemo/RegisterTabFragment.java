@@ -94,6 +94,17 @@ public class RegisterTabFragment extends Fragment {
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService bg = Executors.newSingleThreadExecutor();
 
+ // =========================
+ // ✅ LIVE Tick loop (cache-only) : UI == API == registre
+ // - Appelle controller.api_tickWait(...) (TickBus, sans LCP IO)
+ // - Met à jour NET/GROSS + LIVE + ticketPending
+ // =========================
+ private volatile boolean tickLoopRunning = false;
+ private long lastTickSeq = 0L;
+ private ExecutorService tickExec = Executors.newSingleThreadExecutor();
+ private volatile long lastHeaderRefreshMs = 0L;
+
+
     // Start UX
     private boolean starting = false;
     private long startingSinceMs = 0L;
@@ -257,6 +268,7 @@ public class RegisterTabFragment extends Fragment {
 
     @Override
     public void onStop() {
+ stopTickLoop();
         detachUiListenerSafe();
         LogBus.removeListener(logListener);
         try { requireContext().unregisterReceiver(usbStateReceiver); } catch (Exception ignored) {}
@@ -266,6 +278,8 @@ public class RegisterTabFragment extends Fragment {
     @Override
     public void onResume() {
         super.onResume();
+ // ✅ LIVE tick loop
+ startTickLoop();
         if (!attemptedAutoAttachOnce) {
             attemptedAutoAttachOnce = true;
             ui.post(() -> attemptAttachIfPossible(true));
@@ -277,6 +291,8 @@ public class RegisterTabFragment extends Fragment {
     @Override
     public void onDestroyView() {
         super.onDestroyView();
+ // ✅ Stop LIVE tick loop
+ stopTickLoop();
         // ✅ Anti-crash: empêcher des ui.post() (log + attach) de survivre à la destruction de la view
         try { ui.removeCallbacksAndMessages(null); } catch (Exception ignored) {}
         // Stopper executor du fragment
@@ -536,7 +552,109 @@ public class RegisterTabFragment extends Fragment {
         return d != null && !d.trim().isEmpty();
     }
 
-    private void attemptAttachIfPossible(boolean verboseLog) {
+    
+ // =========================================================
+ // ✅ LIVE tick loop (TickBus /v1/tick/wait) — cache-only
+ // =========================================================
+ private void startTickLoop() {
+     if (tickLoopRunning) return;
+     tickLoopRunning = true;
+     // Réinitialiser executor si nécessaire
+     try {
+         if (tickExec == null || tickExec.isShutdown() || tickExec.isTerminated()) {
+             tickExec = Executors.newSingleThreadExecutor();
+         }
+     } catch (Exception ignored) {
+         tickExec = Executors.newSingleThreadExecutor();
+     }
+     try {
+         tickExec.execute(() -> {
+             long since = lastTickSeq;
+             while (tickLoopRunning) {
+                 try {
+                     DeliveryController c = controller;
+                     if (c == null) {
+                         try { Thread.sleep(250); } catch (InterruptedException ie) { break; }
+                         continue;
+                     }
+                     // ✅ Court wait (<=1000ms) : évite de bloquer le serveur / starvation JobGet
+                     ApiResult r = c.api_tickWait(since, 1000);
+                     if (!tickLoopRunning) break;
+                     if (r != null && r.code == 0 && r.data != null) {
+                         JSONObject t = r.data;
+                         if (t.optInt("has_tick", 0) == 1) {
+                             long seq = t.optLong("seq", since);
+                             if (seq > since) since = seq;
+                             lastTickSeq = since;
+                             applyTickSnapshotToUi(t);
+                         }
+                     }
+                     // ✅ Refresh header (serial/ticket/uid) best-effort, peu fréquent
+                     long now = System.currentTimeMillis();
+                     if (now - lastHeaderRefreshMs > 5000) {
+                         lastHeaderRefreshMs = now;
+                         try { c.requestStatus(); } catch (Exception ignored) {}
+                     }
+                     // Petit sleep pour éviter busy-loop si TIMEOUT
+                     try { Thread.sleep(80); } catch (InterruptedException ie) { break; }
+                 } catch (Exception e) {
+                     try { Thread.sleep(250); } catch (InterruptedException ie) { break; }
+                 }
+             }
+         });
+     } catch (Exception ignored) {}
+ }
+
+ private void stopTickLoop() {
+     tickLoopRunning = false;
+     try { if (tickExec != null) tickExec.shutdownNow(); } catch (Exception ignored) {}
+ }
+
+ private void applyTickSnapshotToUi(JSONObject tick) {
+     if (tick == null) return;
+     final double net = tick.optDouble("net", 0.0);
+     final double gross = tick.optDouble("gross", 0.0);
+     final int delCode = tick.optInt("delCode", 0);
+     final boolean flowActive = (delCode & 0x0004) != 0;
+     final boolean deliveryActive = (delCode & 0x0008) != 0;
+     final boolean ticketPending = (delCode & 0x0001) != 0;
+     final String st = tick.optString("state", "");
+
+     // Cache ticketPending pour gating boutons / reprint
+     ticketPendingFlag = ticketPending ? 1 : 0;
+
+     ui.post(() -> {
+         if (!isAdded() || getView() == null) return;
+
+         // LIVE Net/Gross (UI == API == registre)
+         if (txtQtyNet != null) txtQtyNet.setText(String.format(Locale.CANADA_FRENCH, "NET: %.3f", net));
+         if (txtQtyGross != null) txtQtyGross.setText(String.format(Locale.CANADA_FRENCH, "GROSS: %.3f", gross));
+
+         // LIVE status
+         if (txtLive != null) {
+             if (starting) {
+                 txtLive.setText("LIVE: RUNNING_FLOWING (flow off - waiting progression)");
+             } else if (deliveryActive && flowActive) {
+                 txtLive.setText("LIVE: RUNNING_FLOWING");
+             } else if (deliveryActive) {
+                 txtLive.setText("LIVE: RUNNING_PAUSED");
+             } else if (st != null && !st.trim().isEmpty()) {
+                 txtLive.setText("LIVE: " + st);
+             } else {
+                 txtLive.setText("LIVE: CONNECTED - Ready");
+             }
+         }
+
+         // Ticket pending (affichage tab)
+         if (txtTicketPending != null) {
+             txtTicketPending.setText("Ticket pending : " + (ticketPending ? "OUI" : "NON"));
+         }
+
+         updateButtons(controller != null ? controller.getState() : null);
+     });
+ }
+
+private void attemptAttachIfPossible(boolean verboseLog) {
         if (uiListenerAttached && controller != null) {
             syncUiFromController();
             return;
