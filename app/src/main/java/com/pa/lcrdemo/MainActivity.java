@@ -107,7 +107,10 @@ public class MainActivity extends AppCompatActivity {
 
     // ===== BT runtime (paired-only) =====
     private static final int REQ_ENABLE_BT = 9103;
-    private final ExecutorService btExec = Executors.newSingleThreadExecutor();
+    
+ // ✅ Android 9 (API 28) : permission Storage legacy pour écrire dans /Download
+ private static final int REQ_STORAGE_LEGACY = 9104;
+private final ExecutorService btExec = Executors.newSingleThreadExecutor();
     private BluetoothAdapter btAdapter;
     private final List<BluetoothDevice> btBonded = new ArrayList<>();
     private ArrayAdapter<String> btAdapterUi;
@@ -279,6 +282,8 @@ public class MainActivity extends AppCompatActivity {
         mediaTransportManager = MediaTransportManager.get(this);
 
         deliveryStore = new DeliveryLogStore(this);
+ // ✅ Android 9: demander la permission storage (une seule fois) pour /Download
+ ensureLegacyStoragePermissionForDownloads(true);
         deliveryStore.purgeOlderThanDaysAsync(7);
 
         refreshApiStatus();
@@ -1131,8 +1136,17 @@ private void scanRegistersOptionB() {
                 else toast("Backup FAIL: " + fileName + " " + detail);
             });
         } else {
-            requestBackupDir();
-        }
+		// Android 9 et - : tenter Downloads si permission accordée, sinon demander permission puis fallback dossier
+		if (ensureLegacyStoragePermissionForDownloads(true)) {
+			String name = "lcr_delivery_" + utcStamp() + ".db";
+			deliveryStore.backupDbToDownloadsAsync(this, name, (ok, fileName, detail) -> {
+				if (ok) toast("Backup OK (Downloads): " + fileName);
+				else toast("Backup FAIL: " + fileName + " " + detail);
+			});
+		} else {
+			requestBackupDir();
+		}
+	}
     }
 
     private void requestBackupDir() {
@@ -1355,7 +1369,31 @@ private void scanRegistersOptionB() {
     // =========================
     // CONFIGURE: Bluetooth (paired only)
     // =========================
-    private boolean ensureBtConnectPermission() {
+    
+ // =========================
+ // ✅ Storage legacy (Android 9 / API 28) : permission runtime
+ // - Requis pour écrire dans /storage/emulated/0/Download
+ // - Sur Android 10+ : non requis (MediaStore / scoped storage)
+ // =========================
+ private boolean ensureLegacyStoragePermissionForDownloads(boolean prompt) {
+     try {
+         // Android 10+ : pas besoin
+         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) return true;
+         // Android 9 et - : WRITE_EXTERNAL_STORAGE runtime (API 23+)
+         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true;
+         int p = ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE);
+         if (p == PackageManager.PERMISSION_GRANTED) return true;
+         if (!prompt) return false;
+         ActivityCompat.requestPermissions(this,
+                 new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE, Manifest.permission.READ_EXTERNAL_STORAGE},
+                 REQ_STORAGE_LEGACY);
+         return false;
+     } catch (Exception ignored) {
+         return false;
+     }
+ }
+
+private boolean ensureBtConnectPermission() {
         // Android 9: pas de permission runtime; Android 12+: BLUETOOTH_CONNECT.
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true;
 
@@ -1557,7 +1595,20 @@ private void scanRegistersOptionB() {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == 9101) {
+        
+	if (requestCode == REQ_STORAGE_LEGACY) {
+		boolean ok = (grantResults != null && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED);
+		if (ok) {
+			toast("Storage OK (Android 9): accès Downloads accordé");
+			logUi(null, "Storage permission granted (Downloads)");
+		} else {
+			toast("Storage refusé: /Download indisponible (Android 9)");
+			logUi(null, "Storage permission denied (Downloads)");
+		}
+		return;
+	}
+
+if (requestCode == 9101) {
             boolean ok = (grantResults != null && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED);
             if (ok) refreshBondedBtList();
             else if (txtBtStatus != null) txtBtStatus.setText("BT : permission refusée");
