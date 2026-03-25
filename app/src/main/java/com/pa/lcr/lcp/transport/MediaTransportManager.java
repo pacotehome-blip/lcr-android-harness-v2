@@ -145,7 +145,13 @@ public final class MediaTransportManager {
         return null;
     }
 
-    public TransportIo getByKey(String key) {
+    
+    /** Retourne n'importe quel TransportIo READY (USB ou BT), ou null. */
+    public TransportIo getAnyReady() {
+        return pickReady(null);
+    }
+
+public TransportIo getByKey(String key) {
         if (key == null) return null;
         TransportHandle h = handles.get(key);
         if (h == null) return null;

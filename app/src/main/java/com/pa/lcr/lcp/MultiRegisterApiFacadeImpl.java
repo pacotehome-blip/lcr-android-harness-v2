@@ -204,6 +204,12 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
 
                 // publier la session globale
                 UsbSession.set(dev, port);
+                    // ✅ Publish USB transport to MediaTransportManager (so UI+API share the same TransportIo)
+                    try {
+                        if (mediaMgr != null) {
+                            mediaMgr.onUsbReady(dev, port, "USB ready (API open-ping)");
+                        }
+                    } catch (Exception ignored) {}
 
                 // signaler à l’UI que l’USB est prêt (tabs auto-attach)
                 try {

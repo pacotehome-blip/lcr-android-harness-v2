@@ -150,20 +150,20 @@ public final class RegisterSessionManager {
 
     @Deprecated
     public synchronized void attachUiListener(int nodeDec, DeliveryControllerPort.Listener uiListener) {
-        attachUiListener("USB", nodeDec, uiListener);
-    }
-
-    @Deprecated
-    public synchronized void detachUiListener(int nodeDec, DeliveryControllerPort.Listener uiListener) {
-        detachUiListener("USB", nodeDec, uiListener);
-    }
-
-    // =========================================================
-    // Clear
-    // =========================================================
-    public synchronized void clearAll(boolean closeTransport) {
-        for (NodeSession s : sessions.values()) {
-            try { s.scheduler.shutdown(); } catch (Exception ignored) {}
+        // ✅ Attach à TOUTES les sessions correspondant à ce node (USB ou BT)
+        int node = nodeDec & 0xFF;
+        if (uiListener == null) return;
+        for (Map.Entry<String, NodeSession> e : sessions.entrySet()) {
+            if (e == null || e.getKey() == null) continue;
+            String k = e.getKey();
+            if (!k.endsWith(":" + node)) continue;
+            NodeSession s = e.getValue();
+            if (s == null) continue;
+            s.mux.addListener(uiListener);
+            s.scheduler.setUiSubscribed(true);
+        }
+    } 
+catch (Exception ignored) {}
             try { s.dc.shutdown(closeTransport); } catch (Exception ignored) {}
         }
         sessions.clear();
@@ -310,6 +310,8 @@ public final class RegisterSessionManager {
 
             long now = System.currentTimeMillis();
             boolean flowing = (st == DeliveryState.RUNNING_FLOWING);
+            // ✅ Ne faire du polling LIVE/STATUS que si UI est abonnée (réduit lag/contension)
+            if (!uiSubscribed) return;
             boolean paused = (st == DeliveryState.RUNNING_PAUSED);
 
             if (!flowing && !paused) return;
