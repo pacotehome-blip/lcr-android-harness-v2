@@ -634,7 +634,7 @@ private void scanRegistersOptionB() {
     String pickedKey = null;
     try {
         if (mediaTransportManager != null) {
-            java.util.ArrayList<String> preferred = new java.util.ArrayList<>();
+            ArrayList<String> preferred = new ArrayList<>();
             // préférer BT si on a un MAC connecté
             if (lastBtMac != null && !lastBtMac.trim().isEmpty()) {
                 preferred.add(com.pa.lcr.lcp.transport.MediaTransportManager.btKey(lastBtMac));
@@ -651,8 +651,7 @@ private void scanRegistersOptionB() {
     } catch (Exception ignored) {}
 
     if (io == null || !io.isOpen()) {
-        String msg = "Scan registres: aucun média prêt (USB/BT). Utilise Ouvrir/Ping USB ou Connect BT.";
-        logUi(null, msg);
+        logUi(null, "Scan registres: aucun média prêt (USB/BT). Utilise Ouvrir/Ping USB ou Connect BT.");
         toast("Scan registres: média non prêt");
         return;
     }
@@ -693,12 +692,12 @@ private void scanRegistersOptionB() {
                 clearAllRegisterTabsAndFragments();
                 if (found.isEmpty()) {
                     nodeItems.add(NodeScanItem.default250());
-                    if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : aucun (défaut 250)" + " (" + mediaLabel + ")");
+                    if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : aucun (défaut 250) (" + mediaLabel + ")");
                     if (nodeAdapter != null) nodeAdapter.notifyDataSetChanged();
                     ensureRegisterTab(250, 255, true);
                     edtTo.setText("250");
                     if (txtActiveNode != null) txtActiveNode.setText("Node actif : 250");
-                    logUi(null, "Scan registres: aucun trouvé -> reset + fallback tab 250 (" + mediaLabel + ")");
+                    logUi(null, "Scan registres: aucun trouvé -> fallback tab 250 (" + mediaLabel + ")");
                     return;
                 }
                 NodeScanItem defaultItem;
@@ -728,11 +727,9 @@ private void scanRegistersOptionB() {
         });
     });
 }
-/**
- * ✅ Option 2 + Option 5:
- * - SCAN_NODE_DETECTED: only for nodes truly detected
- * - SCAN_COMPLETED: always once at end (even if found_count==0)
- */
+
+    /**
+     * ✅ Option 2 + Option 5:
      * - SCAN_NODE_DETECTED: only for nodes truly detected
      * - SCAN_COMPLETED: always once at end (even if found_count==0)
      */
