@@ -33,6 +33,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  * POST /v1/usb/open-ping
  * POST /v1/lcp/connect
  * POST /v1/register/validate
+ * POST /v1/delivery/A
+ * POST /v1/delivery/alignA
  * POST /v1/delivery/C
  * POST /v1/delivery/oneshot/start
  * GET /v1/delivery/job/{jobId}
@@ -311,6 +313,30 @@ public final class ApiServer {
         if ("POST".equals(req.method) && "/v1/db/dump".equals(req.path)) {
             return facade.api_dbDump();
         }
+
+// Delivery A (Align/Recover) (media-aware)
+if ("POST".equals(req.method) && "/v1/delivery/A".equals(req.path)) {
+    JSONObject body = req.jsonBody();
+    ApiResult gate = gateMediaIfProvided(body);
+    if (gate != null) return gate;
+    Integer node = parseNodeDec(body);
+    Integer from = parseFromDec(body);
+    String media = body.optString("media", "usb");
+    String btMac = body.optString("bt_mac", body.optString("btMac", "")).trim();
+    return facade.api_deliveryAlignA(node, from, media, btMac);
+}
+
+// Delivery A alias (Align/Recover) (media-aware)
+if ("POST".equals(req.method) && "/v1/delivery/alignA".equals(req.path)) {
+    JSONObject body = req.jsonBody();
+    ApiResult gate = gateMediaIfProvided(body);
+    if (gate != null) return gate;
+    Integer node = parseNodeDec(body);
+    Integer from = parseFromDec(body);
+    String media = body.optString("media", "usb");
+    String btMac = body.optString("bt_mac", body.optString("btMac", "")).trim();
+    return facade.api_deliveryAlignA(node, from, media, btMac);
+}
 
         // Delivery C (media-aware)
         if ("POST".equals(req.method) && "/v1/delivery/C".equals(req.path)) {
