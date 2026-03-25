@@ -403,9 +403,8 @@ private static void tagErrorLevel(JSONObject d, String level, String where, Exce
      * waitMs: max attente serveur (ex: 25000). Clamp à [0..30000].
      */
     public ApiResult api_tickWait(long sinceSeq, long waitMs) {
-        // ✅ SAFE: do not block HTTP workers for long (prevents JobGet starvation)
-        if (waitMs <= 0) waitMs = 1000;
-        if (waitMs > 2000) waitMs = 2000;
+        if (waitMs <= 0) waitMs = 25_000;
+        if (waitMs > 30_000) waitMs = 30_000;
 
         long deadline = System.currentTimeMillis() + waitMs;
 
