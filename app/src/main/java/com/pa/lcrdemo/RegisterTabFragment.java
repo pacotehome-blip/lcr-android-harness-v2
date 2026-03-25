@@ -93,6 +93,13 @@ public class RegisterTabFragment extends Fragment {
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService bg = Executors.newSingleThreadExecutor();
+ // =========================
+ // ✅ LIVE Tick API loop (UI == API == registre)
+ // =========================
+ private volatile boolean tickLoopRunning = false;
+ private long lastTickSeq = 0L;
+ private ExecutorService tickExec = Executors.newSingleThreadExecutor();
+
 
     // Start UX
     private boolean starting = false;
@@ -257,7 +264,9 @@ public class RegisterTabFragment extends Fragment {
 
     @Override
     public void onStop() {
-        detachUiListenerSafe();
+        
+ stopTickLoop();
+detachUiListenerSafe();
         LogBus.removeListener(logListener);
         try { requireContext().unregisterReceiver(usbStateReceiver); } catch (Exception ignored) {}
         super.onStop();
@@ -266,6 +275,8 @@ public class RegisterTabFragment extends Fragment {
     @Override
     public void onResume() {
         super.onResume();
+ // ✅ LIVE tick loop (API tickWait)
+ startTickLoop();
         if (!attemptedAutoAttachOnce) {
             attemptedAutoAttachOnce = true;
             ui.post(() -> attemptAttachIfPossible(true));
@@ -277,6 +288,8 @@ public class RegisterTabFragment extends Fragment {
     @Override
     public void onDestroyView() {
         super.onDestroyView();
+ // ✅ Stop LIVE tick loop
+ stopTickLoop();
         // ✅ Anti-crash: empêcher des ui.post() (log + attach) de survivre à la destruction de la view
         try { ui.removeCallbacksAndMessages(null); } catch (Exception ignored) {}
         // Stopper executor du fragment
@@ -536,7 +549,96 @@ public class RegisterTabFragment extends Fragment {
         return d != null && !d.trim().isEmpty();
     }
 
-    private void attemptAttachIfPossible(boolean verboseLog) {
+    
+ // =========================================================
+ // ✅ LIVE Tick loop (API tickWait)
+ // - Source de vérité: DeliveryController TickBus (#44/#45)
+ // - But: UI Net/Gross identiques à l'API et au registre
+ // =========================================================
+ private void startTickLoop() {
+     if (tickLoopRunning) return;
+     tickLoopRunning = true;
+     // Réinitialiser l'executor si nécessaire
+     try {
+         if (tickExec == null || tickExec.isShutdown() || tickExec.isTerminated()) {
+             tickExec = Executors.newSingleThreadExecutor();
+         }
+     } catch (Exception ignored) {
+         tickExec = Executors.newSingleThreadExecutor();
+     }
+     // Démarrer en background (long-poll)
+     try {
+         tickExec.execute(() -> {
+             long since = lastTickSeq;
+             while (tickLoopRunning) {
+                 try {
+                     DeliveryController c = controller;
+                     if (c == null) {
+                         try { Thread.sleep(300); } catch (InterruptedException ie) { break; }
+                         continue;
+                     }
+                     ApiResult r = c.api_tickWait(since, 25_000);
+                     if (!tickLoopRunning) break;
+                     if (r != null && r.code == 0 && r.data != null) {
+                         JSONObject t = r.data;
+                         // t = snapshot TickBus: {has_tick, seq, ts_ms, net, gross, delCode, ...}
+                         long seq = t.optLong("seq", since);
+                         if (seq > since) since = seq;
+                         lastTickSeq = since;
+                         applyTickSnapshotToUi(t);
+                     }
+                 } catch (InterruptedException ie) {
+                     break;
+                 } catch (Exception e) {
+                     // soft retry
+                     try { Thread.sleep(400); } catch (InterruptedException ie) { break; }
+                 }
+             }
+         });
+     } catch (Exception ignored) {}
+ }
+
+ private void stopTickLoop() {
+     tickLoopRunning = false;
+     try {
+         if (tickExec != null) tickExec.shutdownNow();
+     } catch (Exception ignored) {}
+ }
+
+ private void applyTickSnapshotToUi(JSONObject tick) {
+     if (tick == null) return;
+     // has_tick=0 -> rien à afficher
+     if (tick.optInt("has_tick", 0) != 1) return;
+     final double net = tick.optDouble("net", 0.0);
+     final double gross = tick.optDouble("gross", 0.0);
+     final int delCode = tick.optInt("delCode", 0);
+     final boolean flowActive = (delCode & 0x0004) != 0;
+     final boolean deliveryActive = (delCode & 0x0008) != 0;
+     final String stateName = tick.optString("state", "");
+
+     ui.post(() -> {
+         if (!isAdded() || getView() == null) return;
+         if (txtQtyNet != null) txtQtyNet.setText(String.format(Locale.CANADA_FRENCH, "NET: %.3f", net));
+         if (txtQtyGross != null) txtQtyGross.setText(String.format(Locale.CANADA_FRENCH, "GROSS: %.3f", gross));
+
+         if (txtLive != null) {
+             if (starting) {
+                 txtLive.setText("LIVE: RUNNING_FLOWING (flow off - waiting progression)");
+             } else if (deliveryActive && flowActive) {
+                 txtLive.setText("LIVE: RUNNING_FLOWING");
+             } else if (deliveryActive) {
+                 txtLive.setText("LIVE: RUNNING_PAUSED");
+             } else if (stateName != null && !stateName.trim().isEmpty()) {
+                 // fallback: état du controller
+                 txtLive.setText("LIVE: " + stateName);
+             } else {
+                 txtLive.setText("LIVE: CONNECTED - Ready");
+             }
+         }
+     });
+ }
+
+private void attemptAttachIfPossible(boolean verboseLog) {
         if (uiListenerAttached && controller != null) {
             syncUiFromController();
             return;
