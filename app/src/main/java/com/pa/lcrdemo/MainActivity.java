@@ -629,63 +629,78 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
 // ✅ Option B strict: tout passe par TransportIo (USB/BT)
 // =========================
 private void scanRegistersOptionB() {
-    final TransportIo io = (mediaTransportManager != null) ? mediaTransportManager.getByKey("USB") : null;
+    // ✅ Media-aware: utiliser BT si connecté, sinon USB
+    TransportIo io = null;
+    String pickedKey = null;
+    try {
+        if (mediaTransportManager != null) {
+            java.util.ArrayList<String> preferred = new java.util.ArrayList<>();
+            // préférer BT si on a un MAC connecté
+            if (lastBtMac != null && !lastBtMac.trim().isEmpty()) {
+                preferred.add(com.pa.lcr.lcp.transport.MediaTransportManager.btKey(lastBtMac));
+            }
+            // fallback USB
+            preferred.add("USB");
+            io = mediaTransportManager.pickReady(preferred);
+            if (io == null) {
+                // fallback: n'importe quel READY
+                io = mediaTransportManager.pickReady(null);
+            }
+            pickedKey = (io != null) ? io.getKey() : null;
+        }
+    } catch (Exception ignored) {}
+
     if (io == null || !io.isOpen()) {
-        logUi(null, "Scan registres: USB non prêt (TransportIo null/fermé). Utilise Ouvrir/Ping USB ou auto-attach.");
-        toast("Scan registres: USB non prêt");
+        String msg = "Scan registres: aucun média prêt (USB/BT). Utilise Ouvrir/Ping USB ou Connect BT.";
+        logUi(null, msg);
+        toast("Scan registres: média non prêt");
         return;
     }
 
-    if (btnScanNodes != null) btnScanNodes.setEnabled(false);
-    if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : scan en cours...");
+    final String mediaLabel = (pickedKey != null ? pickedKey : "?");
+    logUi(null, "Scan registres (autoritaire) via: " + mediaLabel);
 
+    if (btnScanNodes != null) btnScanNodes.setEnabled(false);
+    if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : scan en cours... (" + mediaLabel + ")");
+
+    final TransportIo ioFinal = io;
     scanExec.execute(() -> {
         final long scanStartedMs = System.currentTimeMillis();
         LinkedHashMap<Integer, NodeScanItem> found = new LinkedHashMap<>();
-
         final int T28 = 300;
         final int TF = 300;
-
         for (int node = 1; node <= 250; node++) {
             try {
-                // ✅ Option B: LcpLink basé sur TransportIo (PAS UsbSerialPort)
-                LcpLink tmp = new LcpLink(io, node, 255, true);
+                // ✅ Option B: LcpLink basé sur TransportIo (USB/BT)
+                LcpLink tmp = new LcpLink(ioFinal, node, 255, true);
                 int[] ds = tmp.opDeliveryStatus(T28);
                 int delCode = ds[1];
-
                 boolean ticketPending = (delCode & 0x0001) != 0;
                 boolean flowActive = (delCode & 0x0004) != 0;
                 boolean deliveryActive = (delCode & 0x0008) != 0;
-
                 String serialId = decodeAz(tmp.opGetField(80, TF));
                 String ticketNo = u32beDec(tmp.opGetField(23, TF));
-
                 found.put(node, new NodeScanItem(node, serialId, ticketNo, ticketPending, deliveryActive, flowActive, false));
             } catch (Exception ignored) {
                 // ignore: node not present / timeout / etc.
             }
         }
-
         final long scanFinishedMs = System.currentTimeMillis();
         persistScanEvents(scanStartedMs, scanFinishedMs, found);
-
         ui.post(() -> {
             try {
                 nodeItems.clear();
                 clearAllRegisterTabsAndFragments();
-
                 if (found.isEmpty()) {
                     nodeItems.add(NodeScanItem.default250());
-                    if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : aucun (défaut 250)");
+                    if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : aucun (défaut 250)" + " (" + mediaLabel + ")");
                     if (nodeAdapter != null) nodeAdapter.notifyDataSetChanged();
-
                     ensureRegisterTab(250, 255, true);
                     edtTo.setText("250");
                     if (txtActiveNode != null) txtActiveNode.setText("Node actif : 250");
-                    logUi(null, "Scan registres: aucun trouvé -> reset + fallback tab 250");
+                    logUi(null, "Scan registres: aucun trouvé -> reset + fallback tab 250 (" + mediaLabel + ")");
                     return;
                 }
-
                 NodeScanItem defaultItem;
                 if (found.containsKey(250)) {
                     defaultItem = found.get(250).asDefault();
@@ -695,32 +710,29 @@ private void scanRegistersOptionB() {
                     defaultItem = first.getValue().asDefault();
                     found.remove(first.getKey());
                 }
-
                 nodeItems.add(defaultItem);
                 for (NodeScanItem it : found.values()) nodeItems.add(it);
-
-                if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : " + nodeItems.size());
+                if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : " + nodeItems.size() + " (" + mediaLabel + ")");
                 if (nodeAdapter != null) nodeAdapter.notifyDataSetChanged();
-
                 int defaultNode = defaultItem.lcrnode;
                 ensureRegisterTab(defaultNode, 255, true);
                 for (NodeScanItem it : nodeItems) {
                     if (it.lcrnode != defaultNode) ensureRegisterTab(it.lcrnode, 255, false);
                 }
-
                 edtTo.setText(String.valueOf(defaultNode));
                 if (txtActiveNode != null) txtActiveNode.setText("Node actif : " + defaultNode);
-                logUi(null, "Scan registres terminé: " + nodeItems.size() + " node(s), default=" + defaultNode + " (scan autoritaire)");
-
+                logUi(null, "Scan registres terminé: " + nodeItems.size() + " node(s), default=" + defaultNode + " (" + mediaLabel + ")");
             } finally {
                 if (btnScanNodes != null) btnScanNodes.setEnabled(true);
             }
         });
     });
 }
-
-    /**
-     * ✅ Option 2 + Option 5:
+/**
+ * ✅ Option 2 + Option 5:
+ * - SCAN_NODE_DETECTED: only for nodes truly detected
+ * - SCAN_COMPLETED: always once at end (even if found_count==0)
+ */
      * - SCAN_NODE_DETECTED: only for nodes truly detected
      * - SCAN_COMPLETED: always once at end (even if found_count==0)
      */

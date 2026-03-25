@@ -137,33 +137,58 @@ public final class RegisterSessionManager {
      */
     @Deprecated
     public synchronized DeliveryController getOrCreate(int nodeDec, int fromDec, UsbSerialPort port) {
+        // ✅ Legacy compat: choisir le transport READY (USB si dispo, sinon BT)
         TransportIo io = null;
         try {
-            io = MediaTransportManager.get(appCtx).getByKey("USB");
+            MediaTransportManager mgr = MediaTransportManager.get(appCtx);
+            if (mgr != null) {
+                io = mgr.getByKey(MediaTransportManager.KEY_USB);
+                if (io == null) io = mgr.pickReady(null);
+            }
         } catch (Exception ignored) {}
-
-        // Si le manager n’a pas encore USB (rare), pas de session.
         if (io == null || !io.isOpen()) return null;
-
-        return getOrCreate("USB", nodeDec, fromDec, io);
+        return getOrCreate(io.getKey(), nodeDec, fromDec, io);
     }
 
     @Deprecated
     public synchronized void attachUiListener(int nodeDec, DeliveryControllerPort.Listener uiListener) {
         // ✅ Attach à TOUTES les sessions correspondant à ce node (USB ou BT)
-        int node = nodeDec & 0xFF;
         if (uiListener == null) return;
+        int node = nodeDec & 0xFF;
         for (Map.Entry<String, NodeSession> e : sessions.entrySet()) {
-            if (e == null || e.getKey() == null) continue;
+            if (e == null) continue;
             String k = e.getKey();
+            if (k == null) continue;
             if (!k.endsWith(":" + node)) continue;
             NodeSession s = e.getValue();
             if (s == null) continue;
             s.mux.addListener(uiListener);
             s.scheduler.setUiSubscribed(true);
         }
-    } 
-catch (Exception ignored) {}
+    }
+
+    @Deprecated
+    public synchronized void detachUiListener(int nodeDec, DeliveryControllerPort.Listener uiListener) {
+        if (uiListener == null) return;
+        int node = nodeDec & 0xFF;
+        for (Map.Entry<String, NodeSession> e : sessions.entrySet()) {
+            if (e == null) continue;
+            String k = e.getKey();
+            if (k == null) continue;
+            if (!k.endsWith(":" + node)) continue;
+            NodeSession s = e.getValue();
+            if (s == null) continue;
+            s.mux.removeListener(uiListener);
+            s.scheduler.setUiSubscribed(false);
+        }
+    }
+
+    // =========================================================
+    // Clear
+    // =========================================================
+    public synchronized void clearAll(boolean closeTransport) {
+        for (NodeSession s : sessions.values()) {
+            try { s.scheduler.shutdown(); } catch (Exception ignored) {}
             try { s.dc.shutdown(closeTransport); } catch (Exception ignored) {}
         }
         sessions.clear();
