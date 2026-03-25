@@ -1,4 +1,3 @@
-
 package com.pa.lcr.lcp.storage;
 
 import android.content.ContentValues;
@@ -7,10 +6,15 @@ import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Environment;
 import android.provider.MediaStore;
-import org.json.JSONObject;
-import org.json.JSONException;
 
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
@@ -27,10 +31,10 @@ import java.util.concurrent.Executors;
 public class DeliveryLogStore {
 
     public static final String SOURCE_API = "API";
-    public static final String SOURCE_UI  = "UI";
+    public static final String SOURCE_UI = "UI";
 
-    public static final String LEVEL_INFO  = "INFO";
-    public static final String LEVEL_WARN  = "WARN";
+    public static final String LEVEL_INFO = "INFO";
+    public static final String LEVEL_WARN = "WARN";
     public static final String LEVEL_ERROR = "ERROR";
 
     private final DeliveryDb helper;
@@ -44,6 +48,7 @@ public class DeliveryLogStore {
     // ----------------------------
     // Purge / rotation
     // ----------------------------
+
     public void purgeOlderThanDaysAsync(int days) {
         io.execute(() -> purgeOlderThanDays(days));
     }
@@ -58,6 +63,7 @@ public class DeliveryLogStore {
     // ----------------------------
     // Summary upsert
     // ----------------------------
+
     public void upsertSummaryAsync(
             String serialId,
             String ticketNo,
@@ -75,11 +81,6 @@ public class DeliveryLogStore {
      * ✅ FIX: Do NOT use CONFLICT_REPLACE on delivery_summary.
      * REPLACE in SQLite is implemented as DELETE + INSERT, which triggers FK ON DELETE CASCADE
      * and wipes delivery_attempt / delivery_event rows.
-     *
-     * Strategy:
-     *  1) Keep first_ts stable by reading existing row if present
-     *  2) UPDATE existing row
-     *  3) If no row updated => INSERT
      */
     public void upsertSummary(
             String serialId,
@@ -106,7 +107,6 @@ public class DeliveryLogStore {
         }
 
         ContentValues cv = new ContentValues();
-        // NOTE: do NOT update PK columns in update payload; keep them for insert only.
         cv.put("sale_no", saleNo);
         cv.put("last_state", lastState);
         cv.put("last_source", source);
@@ -116,16 +116,13 @@ public class DeliveryLogStore {
         cv.put("result_json", resultJson);
         cv.put("error_json", errorJson);
 
-        // 1) UPDATE first (no DELETE => no cascade wipe)
         int rows = db.update(
                 "delivery_summary",
                 cv,
                 "serial_id=? AND ticket_no=?",
                 new String[]{serialId, ticketNo}
         );
-
         if (rows <= 0) {
-            // 2) INSERT if missing
             ContentValues ins = new ContentValues();
             ins.put("serial_id", serialId);
             ins.put("ticket_no", ticketNo);
@@ -137,12 +134,11 @@ public class DeliveryLogStore {
             ins.put("last_ts", now);
             ins.put("result_json", resultJson);
             ins.put("error_json", errorJson);
-
             db.insert("delivery_summary", null, ins);
         }
     }
 
-    // ✅ NEW (v2): update time columns in delivery_summary
+    // v2: update time columns in delivery_summary
     public void updateSummaryTimesAsync(
             String serialId,
             String ticketNo,
@@ -172,13 +168,13 @@ public class DeliveryLogStore {
         if (endUtc != null) cv.put("end_utc", endUtc);
         if (durationMs != null) cv.put("duration_ms", durationMs);
         if (cv.size() == 0) return;
-
         db.update("delivery_summary", cv, "serial_id=? AND ticket_no=?", new String[]{serialId, ticketNo});
     }
 
     // ----------------------------
     // Attempts
     // ----------------------------
+
     public interface AttemptIdCallback {
         void onAttemptId(long attemptId);
     }
@@ -217,149 +213,140 @@ public class DeliveryLogStore {
         db.update("delivery_attempt", cv, "attempt_id=?", new String[]{Long.toString(attemptId)});
     }
 
-
-
-// v4: structured fields helper
-private static final class StructuredFields {
-    final String eventLevel;
-    final String eventCode;
-    final String eventWhere;
-    final String detailShort;
-    StructuredFields(String eventLevel, String eventCode, String eventWhere, String detailShort) {
-        this.eventLevel = eventLevel;
-        this.eventCode = eventCode;
-        this.eventWhere = eventWhere;
-        this.detailShort = detailShort;
-    }
-}
-
-private static String trimOrNull(String s) {
-    if (s == null) return null;
-    s = s.trim();
-    return s.isEmpty() ? null : s;
-}
-
-private static String trunc(String s, int max) {
-    if (s == null) return null;
-    s = s.trim();
-    if (s.length() <= max) return s;
-    return s.substring(0, max);
-}
-
-/**
- * Best-effort extraction of structured fields from a JSON string.
- * Supports:
- * - ApiResult JSON: {code,msg,err,data:{level,where,detail,...}}
- * - Data JSON: {level,where,detail,...}
- */
-private static StructuredFields extractStructuredFromJson(String dataJson) {
-    String evLevel = null;
-    String evCode = null;
-    String evWhere = null;
-    String detail = null;
-
-    String s = trimOrNull(dataJson);
-    if (s == null) return new StructuredFields(null, null, null, null);
-    if (!s.startsWith("{") || !s.endsWith("}")) {
-        return new StructuredFields(null, null, null, trunc(s, 240));
-    }
-
-    try {
-        JSONObject root = new JSONObject(s);
-
-        // ApiResult style
-        Object dataObj = root.opt("data");
-        if (dataObj instanceof JSONObject) {
-            JSONObject d = (JSONObject) dataObj;
-            evLevel = trimOrNull(d.optString("level", null));
-            evWhere = trimOrNull(d.optString("where", null));
-            detail = trimOrNull(d.optString("detail", null));
-        } else {
-            // data-only style
-            evLevel = trimOrNull(root.optString("level", null));
-            evWhere = trimOrNull(root.optString("where", null));
-            detail = trimOrNull(root.optString("detail", null));
-        }
-
-        // error code might be present in ApiResult as "err"
-        Object errObj = root.opt("err");
-        if (errObj != null && errObj != JSONObject.NULL) {
-            evCode = trimOrNull(String.valueOf(errObj));
-            if ("null".equalsIgnoreCase(evCode)) evCode = null;
-        }
-
-        // allow alternate keys
-        if (evCode == null) evCode = trimOrNull(root.optString("event_code", null));
-        if (evCode == null) evCode = trimOrNull(root.optString("code", null));
-
-    } catch (JSONException ignored) {
-        detail = trunc(s, 240);
-    }
-
-    return new StructuredFields(evLevel, evCode, evWhere, trunc(detail, 240));
-}
     // ----------------------------
     // Events
     // ----------------------------
-    
-public void addEventAsync(long attemptId, String level, String type, String message, String dataJson) {
-    io.execute(() -> addEvent(attemptId, level, type, message, dataJson, null, null, null, null));
-}
 
-/**
- * v4: structured event fields (optional).
- * - eventLevel: MEDIA|TRANSPORT|LCP|REGISTER|DELIVERY|UNKNOWN
- * - eventCode: short code (ex: STATE28_FAIL, ERR_BT_NOT_CONNECTED)
- * - eventWhere: context (ex: api_connectLcp)
- * - detailShort: short technical detail (ex: Error reading)
- */
-public void addEventAsync(long attemptId, String level, String type, String message, String dataJson,
-                          String eventLevel, String eventCode, String eventWhere, String detailShort) {
-    final String el = eventLevel;
-    final String ec = eventCode;
-    final String ew = eventWhere;
-    final String ds = detailShort;
-    io.execute(() -> addEvent(attemptId, level, type, message, dataJson, el, ec, ew, ds));
-}
+    // v4: structured fields helper
+    private static final class StructuredFields {
+        final String eventLevel;
+        final String eventCode;
+        final String eventWhere;
+        final String detailShort;
 
-public void addEvent(long attemptId, String level, String type, String message, String dataJson) {
-    addEvent(attemptId, level, type, message, dataJson, null, null, null, null);
-}
-
-public void addEvent(long attemptId, String level, String type, String message, String dataJson,
-                     String eventLevel, String eventCode, String eventWhere, String detailShort) {
-    long now = System.currentTimeMillis();
-    SQLiteDatabase db = helper.getWritableDatabase();
-
-    // Best-effort extraction if structured fields not provided
-    StructuredFields sf = null;
-    if (eventLevel == null || eventCode == null || eventWhere == null || detailShort == null) {
-        sf = extractStructuredFromJson(dataJson);
+        StructuredFields(String eventLevel, String eventCode, String eventWhere, String detailShort) {
+            this.eventLevel = eventLevel;
+            this.eventCode = eventCode;
+            this.eventWhere = eventWhere;
+            this.detailShort = detailShort;
+        }
     }
-    String evLevel = (eventLevel != null) ? trimOrNull(eventLevel) : (sf != null ? sf.eventLevel : null);
-    String evCode = (eventCode != null) ? trimOrNull(eventCode) : (sf != null ? sf.eventCode : null);
-    String evWhere = (eventWhere != null) ? trimOrNull(eventWhere) : (sf != null ? sf.eventWhere : null);
-    String det = (detailShort != null) ? trunc(detailShort, 240) : (sf != null ? sf.detailShort : null);
 
-    ContentValues cv = new ContentValues();
-    cv.put("attempt_id", attemptId);
-    cv.put("ts", now);
-    cv.put("level", level);
-    cv.put("type", type);
-    cv.put("message", message);
-    cv.put("data_json", dataJson);
+    private static String trimOrNull(String s) {
+        if (s == null) return null;
+        s = s.trim();
+        return s.isEmpty() ? null : s;
+    }
 
-    // v4 columns (nullable)
-    cv.put("event_level", evLevel);
-    cv.put("event_code", evCode);
-    cv.put("event_where", evWhere);
-    cv.put("detail_short", det);
+    private static String trunc(String s, int max) {
+        if (s == null) return null;
+        s = s.trim();
+        if (s.length() <= max) return s;
+        return s.substring(0, max);
+    }
 
-    db.insert("delivery_event", null, cv);
-}
-// =========================================================
+    /**
+     * Best-effort extraction of structured fields from a JSON string.
+     * Supports:
+     * - ApiResult JSON: {code,msg,err,data:{level,where,detail,...}}
+     * - Data JSON: {level,where,detail,...}
+     */
+    private static StructuredFields extractStructuredFromJson(String dataJson) {
+        String evLevel = null;
+        String evCode = null;
+        String evWhere = null;
+        String detail = null;
+
+        String s = trimOrNull(dataJson);
+        if (s == null) return new StructuredFields(null, null, null, null);
+        if (!s.startsWith("{") || !s.endsWith("}")) return new StructuredFields(null, null, null, trunc(s, 240));
+
+        try {
+            JSONObject root = new JSONObject(s);
+
+            Object dataObj = root.opt("data");
+            if (dataObj instanceof JSONObject) {
+                JSONObject d = (JSONObject) dataObj;
+                evLevel = trimOrNull(d.optString("level", null));
+                evWhere = trimOrNull(d.optString("where", null));
+                detail = trimOrNull(d.optString("detail", null));
+            } else {
+                evLevel = trimOrNull(root.optString("level", null));
+                evWhere = trimOrNull(root.optString("where", null));
+                detail = trimOrNull(root.optString("detail", null));
+            }
+
+            Object errObj = root.opt("err");
+            if (errObj != null && errObj != JSONObject.NULL) {
+                evCode = trimOrNull(String.valueOf(errObj));
+                if ("null".equalsIgnoreCase(evCode)) evCode = null;
+            }
+
+            if (evCode == null) evCode = trimOrNull(root.optString("event_code", null));
+            if (evCode == null) evCode = trimOrNull(root.optString("code", null));
+
+        } catch (JSONException ignored) {
+            detail = trunc(s, 240);
+        }
+
+        return new StructuredFields(evLevel, evCode, evWhere, trunc(detail, 240));
+    }
+
+    public void addEventAsync(long attemptId, String level, String type, String message, String dataJson) {
+        io.execute(() -> addEvent(attemptId, level, type, message, dataJson, null, null, null, null));
+    }
+
+    /**
+     * v4: structured event fields (optional).
+     */
+    public void addEventAsync(long attemptId, String level, String type, String message, String dataJson,
+                              String eventLevel, String eventCode, String eventWhere, String detailShort) {
+        final String el = eventLevel;
+        final String ec = eventCode;
+        final String ew = eventWhere;
+        final String ds = detailShort;
+        io.execute(() -> addEvent(attemptId, level, type, message, dataJson, el, ec, ew, ds));
+    }
+
+    public void addEvent(long attemptId, String level, String type, String message, String dataJson) {
+        addEvent(attemptId, level, type, message, dataJson, null, null, null, null);
+    }
+
+    public void addEvent(long attemptId, String level, String type, String message, String dataJson,
+                         String eventLevel, String eventCode, String eventWhere, String detailShort) {
+
+        long now = System.currentTimeMillis();
+        SQLiteDatabase db = helper.getWritableDatabase();
+
+        StructuredFields sf = null;
+        if (eventLevel == null || eventCode == null || eventWhere == null || detailShort == null) {
+            sf = extractStructuredFromJson(dataJson);
+        }
+        String evLevel = (eventLevel != null) ? trimOrNull(eventLevel) : (sf != null ? sf.eventLevel : null);
+        String evCode = (eventCode != null) ? trimOrNull(eventCode) : (sf != null ? sf.eventCode : null);
+        String evWhere = (eventWhere != null) ? trimOrNull(eventWhere) : (sf != null ? sf.eventWhere : null);
+        String det = (detailShort != null) ? trunc(detailShort, 240) : (sf != null ? sf.detailShort : null);
+
+        ContentValues cv = new ContentValues();
+        cv.put("attempt_id", attemptId);
+        cv.put("ts", now);
+        cv.put("level", level);
+        cv.put("type", type);
+        cv.put("message", message);
+        cv.put("data_json", dataJson);
+
+        cv.put("event_level", evLevel);
+        cv.put("event_code", evCode);
+        cv.put("event_where", evWhere);
+        cv.put("detail_short", det);
+
+        db.insert("delivery_event", null, cv);
+    }
+
+    // =========================================================
     // Backup helpers (WAL-safe single-file backups)
     // =========================================================
+
     public void checkpointWalBestEffort() {
         try {
             SQLiteDatabase db = helper.getWritableDatabase();
@@ -373,6 +360,7 @@ public void addEvent(long attemptId, String level, String type, String message, 
     // UI: Backup DB to Downloads
     // API: Dump JSON to Downloads
     // =========================================================
+
     public interface BackupCallback {
         void onDone(boolean ok, String fileName, String detail);
     }
@@ -391,42 +379,66 @@ public void addEvent(long attemptId, String level, String type, String message, 
         });
     }
 
+    /**
+     * ✅ FIX Android 9/10: avoid MediaStore.Downloads (can crash on API 28).
+     * - API 29+: use MediaStore.Files + RELATIVE_PATH=Downloads
+     * - API 28- : write directly to /Download (requires legacy storage permission)
+     */
     public boolean backupDbToDownloads(Context ctx, String fileName) throws Exception {
-        java.io.File dbFile = ctx.getDatabasePath(DeliveryDb.DB_NAME);
+        File dbFile = ctx.getDatabasePath(DeliveryDb.DB_NAME);
         if (dbFile == null || !dbFile.exists()) {
             throw new Exception("DB file not found: " + DeliveryDb.DB_NAME);
         }
 
-        // WAL-safe single-file backup
         checkpointWalBestEffort();
 
-        ContentValues values = new ContentValues();
-        values.put(MediaStore.Downloads.DISPLAY_NAME, fileName);
-        values.put(MediaStore.Downloads.MIME_TYPE, "application/x-sqlite3");
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            values.put(MediaStore.Downloads.IS_PENDING, 1);
+            ContentValues values = new ContentValues();
+            values.put(MediaStore.MediaColumns.DISPLAY_NAME, fileName);
+            values.put(MediaStore.MediaColumns.MIME_TYPE, "application/x-sqlite3");
+            values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+            values.put(MediaStore.MediaColumns.IS_PENDING, 1);
+
+            Uri uri = ctx.getContentResolver().insert(MediaStore.Files.getContentUri("external"), values);
+            if (uri == null) throw new Exception("MediaStore insert failed");
+
+            try (InputStream in = new FileInputStream(dbFile);
+                 OutputStream out = ctx.getContentResolver().openOutputStream(uri)) {
+                if (out == null) throw new Exception("openOutputStream failed");
+                byte[] buf = new byte[64 * 1024];
+                int r;
+                while ((r = in.read(buf)) > 0) out.write(buf, 0, r);
+                out.flush();
+            }
+
+            ContentValues done = new ContentValues();
+            done.put(MediaStore.MediaColumns.IS_PENDING, 0);
+            ctx.getContentResolver().update(uri, done, null, null);
+            return true;
         }
 
-        Uri uri = ctx.getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
-        if (uri == null) throw new Exception("MediaStore insert failed");
-
-        try (InputStream in = new java.io.FileInputStream(dbFile);
-             OutputStream out = ctx.getContentResolver().openOutputStream(uri)) {
-            if (out == null) throw new Exception("openOutputStream failed");
+        // API 28-
+        File downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+        if (downloads == null) throw new Exception("Downloads dir not found");
+        if (!downloads.exists() && !downloads.mkdirs()) {
+            throw new Exception("Cannot create Downloads dir");
+        }
+        File outFile = new File(downloads, fileName);
+        try (InputStream in = new FileInputStream(dbFile);
+             FileOutputStream out = new FileOutputStream(outFile, false)) {
             byte[] buf = new byte[64 * 1024];
             int r;
             while ((r = in.read(buf)) > 0) out.write(buf, 0, r);
             out.flush();
         }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ContentValues done = new ContentValues();
-            done.put(MediaStore.Downloads.IS_PENDING, 0);
-            ctx.getContentResolver().update(uri, done, null, null);
-        }
         return true;
     }
 
+    /**
+     * ✅ FIX Android 9/10: avoid MediaStore.Downloads (can crash on API 28).
+     * - API 29+: use MediaStore.Files + RELATIVE_PATH=Downloads
+     * - API 28- : write directly to /Download (requires legacy storage permission)
+     */
     public boolean dumpJsonToDownloads(Context ctx, String fileName) throws Exception {
         SQLiteDatabase db = helper.getReadableDatabase();
         StringBuilder sb = new StringBuilder(1024 * 256);
@@ -437,28 +449,41 @@ public void addEvent(long attemptId, String level, String type, String message, 
         sb.append(",\"delivery_event\":");
         sb.append(queryTableAsJsonArray(db, "delivery_event"));
         sb.append("}");
+
         byte[] bytes = sb.toString().getBytes(StandardCharsets.UTF_8);
 
-        ContentValues values = new ContentValues();
-        values.put(MediaStore.Downloads.DISPLAY_NAME, fileName);
-        values.put(MediaStore.Downloads.MIME_TYPE, "application/json");
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            values.put(MediaStore.Downloads.IS_PENDING, 1);
-        }
+            ContentValues values = new ContentValues();
+            values.put(MediaStore.MediaColumns.DISPLAY_NAME, fileName);
+            values.put(MediaStore.MediaColumns.MIME_TYPE, "application/json");
+            values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+            values.put(MediaStore.MediaColumns.IS_PENDING, 1);
 
-        Uri uri = ctx.getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
-        if (uri == null) throw new Exception("MediaStore insert failed");
+            Uri uri = ctx.getContentResolver().insert(MediaStore.Files.getContentUri("external"), values);
+            if (uri == null) throw new Exception("MediaStore insert failed");
 
-        try (OutputStream out = ctx.getContentResolver().openOutputStream(uri)) {
-            if (out == null) throw new Exception("openOutputStream failed");
-            out.write(bytes);
-            out.flush();
-        }
+            try (OutputStream out = ctx.getContentResolver().openOutputStream(uri)) {
+                if (out == null) throw new Exception("openOutputStream failed");
+                out.write(bytes);
+                out.flush();
+            }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             ContentValues done = new ContentValues();
-            done.put(MediaStore.Downloads.IS_PENDING, 0);
+            done.put(MediaStore.MediaColumns.IS_PENDING, 0);
             ctx.getContentResolver().update(uri, done, null, null);
+            return true;
+        }
+
+        // API 28-
+        File downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+        if (downloads == null) throw new Exception("Downloads dir not found");
+        if (!downloads.exists() && !downloads.mkdirs()) {
+            throw new Exception("Cannot create Downloads dir");
+        }
+        File outFile = new File(downloads, fileName);
+        try (FileOutputStream fos = new FileOutputStream(outFile, false)) {
+            fos.write(bytes);
+            fos.flush();
         }
         return true;
     }
@@ -481,19 +506,26 @@ public void addEvent(long attemptId, String level, String type, String message, 
                 }
                 sb.append("}");
             }
-        } catch (Exception ignored) {}
+        } catch (Exception ignored) {
+        }
         sb.append("]");
         return sb.toString();
     }
 
     private static Object getCursorValue(Cursor c, int i) {
         switch (c.getType(i)) {
-            case Cursor.FIELD_TYPE_NULL: return null;
-            case Cursor.FIELD_TYPE_INTEGER: return c.getLong(i);
-            case Cursor.FIELD_TYPE_FLOAT: return c.getDouble(i);
-            case Cursor.FIELD_TYPE_STRING: return c.getString(i);
-            case Cursor.FIELD_TYPE_BLOB: return c.getBlob(i);
-            default: return null;
+            case Cursor.FIELD_TYPE_NULL:
+                return null;
+            case Cursor.FIELD_TYPE_INTEGER:
+                return c.getLong(i);
+            case Cursor.FIELD_TYPE_FLOAT:
+                return c.getDouble(i);
+            case Cursor.FIELD_TYPE_STRING:
+                return c.getString(i);
+            case Cursor.FIELD_TYPE_BLOB:
+                return c.getBlob(i);
+            default:
+                return null;
         }
     }
 
@@ -516,12 +548,10 @@ public void addEvent(long attemptId, String level, String type, String message, 
         return "\"" + s + "\"";
     }
 
-
     // =========================================================
-    // ✅ READ helper: last RESULT for a serial_id (delivery_summary)
+    // READ helper: last RESULT for a serial_id (delivery_summary)
     // =========================================================
 
-    /** Lightweight row holder for latest RESULT lookup. */
     public static final class LatestResultRow {
         public final String ticketNo;
         public final String resultJson;
@@ -534,11 +564,6 @@ public void addEvent(long attemptId, String level, String type, String message, 
         }
     }
 
-    /**
-     * Return latest non-empty delivery_summary.result_json for the given serial_id.
-     * Ordered by last_ts DESC.
-     * @return LatestResultRow or null if not found.
-     */
     public LatestResultRow getLatestResultBySerial(String serialId) {
         if (serialId == null || serialId.trim().isEmpty()) return null;
         try {
@@ -549,12 +574,10 @@ public void addEvent(long attemptId, String level, String type, String message, 
                             "WHERE serial_id=? AND result_json IS NOT NULL AND result_json<>'' " +
                             "ORDER BY last_ts DESC LIMIT 1",
                     new String[]{serialId.trim()})) {
-
                 if (c.moveToFirst()) {
                     String ticketNo = c.isNull(0) ? null : c.getString(0);
                     String resultJson = c.isNull(1) ? null : c.getString(1);
                     long lastTs = c.isNull(2) ? 0L : c.getLong(2);
-
                     if (resultJson != null && !resultJson.trim().isEmpty()) {
                         return new LatestResultRow(ticketNo, resultJson, lastTs);
                     }
@@ -564,5 +587,4 @@ public void addEvent(long attemptId, String level, String type, String message, 
         }
         return null;
     }
-
 }
