@@ -79,7 +79,7 @@ public final class ApiServer {
         if (running) return;
         InetAddress loopback = InetAddress.getByName("127.0.0.1");
         serverSocket = new ServerSocket(port, 50, loopback);
-        workers = Executors.newFixedThreadPool(4);
+        workers = Executors.newFixedThreadPool(8); // ✅ more workers (tick/wait long-poll + jobget)
         acceptor = Executors.newSingleThreadExecutor();
         running = true;
         t("[API " + ts() + "] START http://127.0.0.1:" + port);
@@ -129,9 +129,10 @@ public final class ApiServer {
             // Ajuster le timeout socket pour tick/wait (long-poll)
             if (isTickWait(req)) {
                 long waitMs = req.queryLong("wait_ms", 25_000L);
+                // ✅ SAFE: clamp tick/wait to avoid starving other endpoints (JobGet)
                 if (waitMs < 0) waitMs = 0;
-                if (waitMs > 30_000L) waitMs = 30_000L;
-                try { s.setSoTimeout((int) Math.min(60_000, waitMs + 8_000)); } catch (Exception ignored) {}
+                if (waitMs > 2000L) waitMs = 2000L;
+                try { s.setSoTimeout((int) Math.min(15_000, waitMs + 8_000)); } catch (Exception ignored) {}
             }
 
             t("[API " + ts() + "][RID=" + rid + "] REQ " + req.method + " " + req.path + " body=" + shrink(req.body));
@@ -236,6 +237,9 @@ public final class ApiServer {
             Integer node = req.queryInt("lcrnode_dec");
             long sinceSeq = req.queryLong("since_seq", 0L);
             long waitMs = req.queryLong("wait_ms", 25_000L);
+            // ✅ SAFE: clamp tick/wait to avoid starving other endpoints (JobGet)
+            if (waitMs < 0) waitMs = 0;
+            if (waitMs > 2000L) waitMs = 2000L;
             return facade.api_tickWait(node, sinceSeq, (int) waitMs);
         }
 
