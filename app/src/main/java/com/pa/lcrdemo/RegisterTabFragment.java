@@ -121,6 +121,18 @@ public class RegisterTabFragment extends Fragment {
     private long lastLogRefreshMs = 0L;
     private boolean logRefreshPending = false;
 
+ // ✅ Perf: throttling UI-triggered status reads (réduit lag)
+ private volatile long lastUiStatusReqMs = 0L;
+ private static final long UI_STATUS_MIN_MS = 1500L;
+
+ // ✅ Tick: keep track of delivery transition for resync (nouvelle livraison)
+ private volatile boolean lastTickDeliveryActive = false;
+
+ // ✅ Live sample cadence (quand FLOW_ACTIVE=1) - pour ticks fluides comme l’API
+ private volatile long lastLiveSampleReqMs = 0L;
+ private static final long LIVE_SAMPLE_MIN_MS = 250L;
+
+
     /**
      * ✅ FIX LOG: toujours exécuter la logique de refresh sur UI thread.
      */
@@ -163,7 +175,13 @@ public class RegisterTabFragment extends Fragment {
                 if (starting && (System.currentTimeMillis() - startingSinceMs) > 12000L) starting = false;
 
                 updateButtons(state);
-                try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
+                try {
+            long now = System.currentTimeMillis();
+            if (controller != null && (now - lastUiStatusReqMs) >= UI_STATUS_MIN_MS) {
+                lastUiStatusReqMs = now;
+                controller.requestStatus();
+            }
+        } catch (Exception ignored) {}
                 scheduleLogRefresh();
             });
         }
@@ -611,7 +629,7 @@ public class RegisterTabFragment extends Fragment {
                          try { c.requestStatus(); } catch (Exception ignored) {}
                      }
                      // Petit sleep pour éviter busy-loop si TIMEOUT
-                     try { Thread.sleep(80); } catch (InterruptedException ie) { break; }
+                     try { Thread.sleep(60); } catch (InterruptedException ie) { break; }
                  } catch (Exception e) {
                      try { Thread.sleep(250); } catch (InterruptedException ie) { break; }
                  }
@@ -638,6 +656,15 @@ public class RegisterTabFragment extends Fragment {
      // Cache ticketPending pour gating boutons / reprint
      ticketPendingFlag = ticketPending ? 1 : 0;
 
+ // ✅ FIN de livraison: resync complet (permet nouvelle livraison + UI coherent)
+ if (!deliveryActive && lastTickDeliveryActive) {
+     lastTickSeq = 0L;
+     starting = false;
+     try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
+     try { validateHeaderAsync(); } catch (Exception ignored) {}
+ }
+ lastTickDeliveryActive = deliveryActive;
+
      ui.post(() -> {
          if (!isAdded() || getView() == null) return;
 
@@ -645,22 +672,20 @@ public class RegisterTabFragment extends Fragment {
          if (txtQtyNet != null) txtQtyNet.setText(String.format(Locale.CANADA_FRENCH, "NET: %.3f", net));
          if (txtQtyGross != null) txtQtyGross.setText(String.format(Locale.CANADA_FRENCH, "GROSS: %.3f", gross));
 
-         // LIVE status
-         if (txtLive != null) {
-             if (starting) {
-                 txtLive.setText("LIVE: RUNNING_FLOWING (flow off - waiting progression)");
-             } else if (deliveryActive && flowActive) {
-                 txtLive.setText("LIVE: RUNNING_FLOWING");
-             } else if (deliveryActive) {
-                 txtLive.setText("LIVE: RUNNING_PAUSED");
-             } else if (st != null && !st.trim().isEmpty()) {
-                 txtLive.setText("LIVE: " + st);
-             } else {
-                 txtLive.setText("LIVE: CONNECTED - Ready");
-             }
-         }
+         // LIVE status (strict registre)
+        if (txtLive != null) {
+            if (deliveryActive && flowActive) {
+                txtLive.setText("LIVE: RUNNING_FLOWING");
+            } else if (deliveryActive) {
+                // si on est en START UX, garder le message d'attente uniquement tant que FLOW est OFF
+                if (starting) txtLive.setText("LIVE: RUNNING_FLOWING (flow off - waiting progression)");
+                else txtLive.setText("LIVE: RUNNING_PAUSED");
+            } else {
+                txtLive.setText(ticketPending ? "LIVE: CONNECTED - Ticket pending" : "LIVE: CONNECTED - Ready");
+            }
+        }
+        // Ticket pending (affichage tab)
 
-         // Ticket pending (affichage tab)
          if (txtTicketPending != null) {
              txtTicketPending.setText("Ticket pending : " + (ticketPending ? "OUI" : "NON"));
          }
@@ -881,24 +906,8 @@ private void attemptAttachIfPossible(boolean verboseLog) {
         // Guard lifecycle
         if (!isAdded() || getView() == null) return;
 
-        // ✅ préserver position scroll du tab
-        final int oldY = (regRootScroll != null) ? regRootScroll.getScrollY() : -1;
+        // ✅ NOTE: ne pas forcer le scroll du tab (évite le "jump" pendant refresh)
 
-        List<LogBus.LogEvent> events = LogBus.snapshotForNode(node, TAB_LOG_MAX_LINES);
-        if (logViewSinceMs > 0) {
-            ArrayList<LogBus.LogEvent> filtered = new ArrayList<>(events.size());
-            for (LogBus.LogEvent e : events) {
-                if (e.ts >= logViewSinceMs) filtered.add(e);
-            }
-            events = filtered;
-        }
-
-        txtLog.setText(LogBus.buildText(events));
-
-        // ✅ restaurer scroll du tab
-        if (regRootScroll != null && oldY >= 0) {
-            regRootScroll.post(() -> regRootScroll.scrollTo(0, oldY));
-        }
 
         // ✅ Option A: PAS d’auto-scroll du log
         // if (logScroll != null) logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
