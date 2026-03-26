@@ -20,6 +20,8 @@ import androidx.fragment.app.Fragment;
 import com.hoho.android.usbserial.driver.UsbSerialPort;
 import com.pa.lcr.lcp.*;
 import com.pa.lcr.lcp.log.LogBus;
+import com.pa.lcr.lcp.transport.MediaTransportManager;
+import com.pa.lcr.lcp.transport.TransportIo;
 import org.json.JSONObject;
 import java.text.SimpleDateFormat;
 import java.util.*;
@@ -90,6 +92,10 @@ public class RegisterTabFragment extends Fragment {
 
     // Controller partagé UI ↔ API (RegisterSessionManager)
     private DeliveryController controller;
+
+    // ✅ Media-aware TAB (USB/BT)
+    private MediaTransportManager mediaMgr;
+    private String tabTransportKey = null;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService bg = Executors.newSingleThreadExecutor();
@@ -225,6 +231,14 @@ public class RegisterTabFragment extends Fragment {
             if (UsbReceiver.ACTION_USB_READY.equals(a)) {
                 attemptAttachIfPossible(false);
             } else if (UsbReceiver.ACTION_USB_DETACHED.equals(a)) {
+            // ✅ Media-aware: ignorer USB DETACHED si ce TAB est attaché sur BT
+            try {
+                if (tabTransportKey != null && tabTransportKey.toUpperCase(Locale.ROOT).startsWith("BT:")) {
+                    LogBus.api(node, "USB detached ignored (TAB sur " + tabTransportKey + ")");
+                    return;
+                }
+            } catch (Exception ignored) {}
+
                 detachUiListenerSafe();
                 controller = null;
                 starting = false;
@@ -254,6 +268,7 @@ public class RegisterTabFragment extends Fragment {
             from = a.getInt(ARG_FROM, 255);
         }
         usbManager = (UsbManager) context.getSystemService(Context.USB_SERVICE);
+        try { mediaMgr = MediaTransportManager.get(context); } catch (Exception ignored) {}
     }
 
     @Override
@@ -654,54 +669,92 @@ public class RegisterTabFragment extends Fragment {
      });
  }
 
+    // =========================================================
+    // ✅ Media-aware: choisir un TransportIo READY pour ce TAB
+    // - Préfère BT si disponible, sinon USB
+    // =========================================================
+    private TransportIo pickTabTransportIo() {
+        try {
+            MediaTransportManager mgr = mediaMgr;
+            if (mgr == null) return null;
+            ArrayList<String> preferred = new ArrayList<>();
+            // 1) BT d'abord (tous les BT:... connus)
+            try {
+                List<com.pa.lcr.lcp.transport.TransportSnapshot> snaps = mgr.listSnapshots();
+                if (snaps != null) {
+                    for (com.pa.lcr.lcp.transport.TransportSnapshot s : snaps) {
+                        if (s == null || s.key == null) continue;
+                        if (s.key.startsWith("BT:")) preferred.add(s.key);
+                    }
+                }
+            } catch (Exception ignored) {}
+            // 2) fallback USB
+            preferred.add(MediaTransportManager.KEY_USB);
+            TransportIo io = mgr.pickReady(preferred);
+            if (io == null) io = mgr.pickReady(null);
+            return (io != null && io.isOpen()) ? io : null;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
 private void attemptAttachIfPossible(boolean verboseLog) {
         if (uiListenerAttached && controller != null) {
             syncUiFromController();
             return;
         }
-        if (UsbSession.getPort() == null) {
-            if (verboseLog) LogBus.api(node, "Auto-attach: USB/Controller pas encore prêt (retry sur USB_READY).");
+        TransportIo io = pickTabTransportIo();
+        if (io == null) {
+            if (verboseLog) LogBus.api(node, "Auto-attach: aucun média READY (USB/BT) — attendre connexion.");
             return;
         }
         connectThisRegister(false);
     }
 
     private void connectThisRegister(boolean userInitiated) {
-        UsbSerialPort p = UsbSession.getPort();
-        if (p == null) {
+        TransportIo io = pickTabTransportIo();
+        if (io == null) {
             if (userInitiated) {
-                LogBus.api(node, "USB non prêt (UsbSession port null)");
-                Toast.makeText(requireContext(), "USB non prêt", Toast.LENGTH_SHORT).show();
+                LogBus.api(node, "Aucun média prêt (USB/BT)");
+                Toast.makeText(requireContext(), "Aucun média prêt (USB/BT)", Toast.LENGTH_SHORT).show();
             }
             return;
         }
+        String tk = io.getKey(); // "USB" ou "BT:AA:BB:.."
+        tabTransportKey = tk;
 
         RegisterSessionManager sm = RegisterSessionManager.get(requireContext());
-        controller = sm.getOrCreate(node, from, p);
+        controller = sm.getOrCreate(tk, node, from, io);
         if (controller == null) {
-            if (userInitiated) Toast.makeText(requireContext(), "USB non prêt", Toast.LENGTH_SHORT).show();
+            if (userInitiated) Toast.makeText(requireContext(), "Transport non prêt", Toast.LENGTH_SHORT).show();
             return;
         }
-
         if (!uiListenerAttached) {
-            sm.attachUiListener(node, uiListener);
+            sm.attachUiListener(tk, node, uiListener);
             uiListenerAttached = true;
         }
-
         if (cbTxRx != null) controller.setTxRxLoggingEnabled(cbTxRx.isChecked());
         if (cbLogTs != null) controller.setLogTimestampsEnabled(cbLogTs.isChecked());
 
+        lastTickSeq = 0L;
         syncUiFromController();
-        validateHeaderAsync(); // persist=false inside
-
-        if (userInitiated) LogBus.api(node, "Connect TAB: 1 - UI attached");
+        validateHeaderAsync();
+        if (userInitiated) LogBus.api(node, "Connect TAB: 1 - UI attached (" + tk + ")");
         scheduleLogRefresh();
     }
 
     private void detachUiListenerSafe() {
         if (!uiListenerAttached) return;
-        try { RegisterSessionManager.get(requireContext()).detachUiListener(node, uiListener); } catch (Exception ignored) {}
+        try {
+            RegisterSessionManager sm = RegisterSessionManager.get(requireContext());
+            if (tabTransportKey != null && !tabTransportKey.trim().isEmpty()) {
+                sm.detachUiListener(tabTransportKey, node, uiListener);
+            } else {
+                sm.detachUiListener(node, uiListener); // legacy fallback
+            }
+        } catch (Exception ignored) {}
         uiListenerAttached = false;
+        tabTransportKey = null;
     }
 
     private void syncUiFromController() {
