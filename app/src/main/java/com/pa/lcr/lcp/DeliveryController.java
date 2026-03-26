@@ -561,6 +561,12 @@ private static void tagErrorLevel(JSONObject d, String level, String where, Exce
         return Math.max(0L, now - flowOffStartMs);
     }
 
+    // ✅ v7: exposer le nombre de décimales (#39) pour le formatage UI
+    public int getDisplayDigits() {
+        return (cachedDigits >= 0 ? cachedDigits : 3);
+    }
+
+
     // ====== Logging ======
     @Override
     public void setLogTimestampsEnabled(boolean enabled) {
