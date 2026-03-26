@@ -33,10 +33,13 @@ import java.util.concurrent.Executors;
  *
  * v7:
  * - 1 seul média attaché par registre (node + serial #80) => resolveOrCreateForNode()
- * - le TAB est une vue: LIVE + NET/GROSS + header + log (filtré par node)
- * - pas de tick loop locale (évite les conflits et les sauts)
- * - cadence LIVE/STATUS assurée par NodeScheduler (RegisterSessionManager v7)
- * - boutons A/B/C contextuels + Continue/Terminer en phase Flow OFF
+ * - le TAB = log global filtré par node
+ * - LIVE/NET/GROSS pilotés par DeliveryController (requestLiveSample cadence gérée ailleurs)
+ * - Fixes:
+ *   (1) Format décimal NET/GROSS selon #39 (via DeliveryController.getDisplayDigits())
+ *   (2) Après Finish/print: refresh Status + ValidateHeader
+ *   (3) #Série toujours affiché (retry throttlé)
+ *   (4) Bouton DOWN = scroll bas du log seulement, sans refresh tab
  */
 public class RegisterTabFragment extends Fragment {
 
@@ -88,6 +91,13 @@ public class RegisterTabFragment extends Fragment {
     // v7: dernier liveText reçu (source de vérité UI)
     private volatile String lastLiveText = null;
 
+    // v7: digits (#39) pour formatage (fallback=3)
+    private volatile int lastDigits = 3;
+
+    // v7: throttle validate header retry (serial #80)
+    private volatile long lastHeaderValidateMs = 0L;
+    private static final long HEADER_VALIDATE_MIN_MS = 5000L;
+
     // Auto-attach lifecycle
     private boolean attemptedAutoAttachOnce = false;
     private boolean uiListenerAttached = false;
@@ -113,9 +123,7 @@ public class RegisterTabFragment extends Fragment {
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService bg = Executors.newSingleThreadExecutor();
 
-    /**
-     * ✅ FIX LOG: toujours exécuter la logique de refresh sur UI thread.
-     */
+    /** ✅ Log refresh toujours sur UI thread. */
     private void scheduleLogRefresh() {
         if (txtLog == null) return;
         if (cbShowLog == null || !cbShowLog.isChecked()) return;
@@ -155,12 +163,10 @@ public class RegisterTabFragment extends Fragment {
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
 
-                // sortir du mode starting si l'état devient RUNNING_FLOWING
                 if (starting && state == DeliveryState.RUNNING_FLOWING) starting = false;
                 if (starting && (System.currentTimeMillis() - startingSinceMs) > 12000L) starting = false;
 
                 updateButtons(state);
-                // v7: cadence status gérée par NodeScheduler
                 scheduleLogRefresh();
             });
         }
@@ -182,8 +188,19 @@ public class RegisterTabFragment extends Fragment {
         public void onLiveQty(double net, double gross) {
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
-                if (txtQtyNet != null) txtQtyNet.setText(String.format(Locale.ROOT, "NET: %.3f", net));
-                if (txtQtyGross != null) txtQtyGross.setText(String.format(Locale.ROOT, "GROSS: %.3f", gross));
+
+                // ✅ digits dynamique depuis le controller (scale #39 déjà appliqué côté controller) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/DeliveryController.java)
+                int d = lastDigits;
+                try {
+                    if (controller != null) d = controller.getDisplayDigits(); // getter v7 (2 lignes dans DeliveryController)
+                } catch (Exception ignored) {}
+                if (d < 0) d = 3;
+                if (d > 6) d = 6; // garde-fou
+                lastDigits = d;
+
+                String fmt = "%." + d + "f";
+                if (txtQtyNet != null) txtQtyNet.setText("NET: " + String.format(Locale.ROOT, fmt, net));
+                if (txtQtyGross != null) txtQtyGross.setText("GROSS: " + String.format(Locale.ROOT, fmt, gross));
             });
         }
 
@@ -202,6 +219,9 @@ public class RegisterTabFragment extends Fragment {
                     }
                 } catch (Exception ignored) {}
 
+                // ✅ si serial absent, retenter validate (throttlé)
+                ensureSerialVisibleThrottled();
+
                 updateButtons(controller != null ? controller.getState() : null);
                 scheduleLogRefresh();
             });
@@ -214,6 +234,9 @@ public class RegisterTabFragment extends Fragment {
 
                 if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : " + (ticketNo == null ? "—" : ticketNo));
                 if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : " + (deliveryUid == null ? "—" : deliveryUid));
+
+                // ✅ si serial absent, retenter validate (throttlé)
+                ensureSerialVisibleThrottled();
 
                 updateButtons(controller != null ? controller.getState() : null);
             });
@@ -236,7 +259,6 @@ public class RegisterTabFragment extends Fragment {
             if (UsbReceiver.ACTION_USB_READY.equals(a)) {
                 attemptAttachIfPossible(false);
             } else if (UsbReceiver.ACTION_USB_DETACHED.equals(a)) {
-                // si on est attaché sur BT, ignorer le detach USB
                 try {
                     if (tabTransportKey != null && tabTransportKey.toUpperCase(Locale.ROOT).startsWith("BT:")) {
                         LogBus.api(node, "USB detached ignored (TAB sur " + tabTransportKey + ")");
@@ -372,6 +394,7 @@ public class RegisterTabFragment extends Fragment {
         if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : —");
 
         ticketPendingFlag = -1;
+        lastDigits = 3;
 
         if (txtLive != null) txtLive.setText("LIVE: (en attente)");
         if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
@@ -400,7 +423,6 @@ public class RegisterTabFragment extends Fragment {
     }
 
     private void wireUi() {
-
         if (cbShowLog != null) {
             cbShowLog.setOnCheckedChangeListener((b, checked) -> {
                 if (logPanel != null) logPanel.setVisibility(checked ? View.VISIBLE : View.GONE);
@@ -409,8 +431,9 @@ public class RegisterTabFragment extends Fragment {
             });
         }
 
+        // ✅ DOWN: scroll bas du LOG seulement, sans refresh tab
         if (btnScrollDown != null && logScroll != null) {
-            btnScrollDown.setOnClickListener(v -> logScroll.fullScroll(View.FOCUS_DOWN));
+            btnScrollDown.setOnClickListener(v -> logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN)));
         }
 
         if (btnClearLog != null) {
@@ -418,7 +441,7 @@ public class RegisterTabFragment extends Fragment {
                 logViewSinceMs = System.currentTimeMillis();
                 if (txtLog != null) txtLog.setText("");
                 LogBus.ui(node, ts("Clear log (vue locale)"));
-                scheduleLogRefresh();
+                // pas de scroll forcé
             });
         }
 
@@ -490,6 +513,7 @@ public class RegisterTabFragment extends Fragment {
 
         if (btnFinish != null) btnFinish.setOnClickListener(v -> {
             if (controller == null) return;
+
             boolean stableOff2 = false;
             try { stableOff2 = controller.isFlowOffStable(); } catch (Exception ignored) {}
             if (!stableOff2) {
@@ -497,7 +521,14 @@ public class RegisterTabFragment extends Fragment {
                 try { Toast.makeText(requireContext(), "FLOW OFF en confirmation...", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
                 return;
             }
+
             controller.endDelivery();
+
+            // ✅ v7: après END + impression, forcer un refresh status + validate
+            ui.postDelayed(() -> {
+                try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
+                try { validateHeaderAsync(); } catch (Exception ignored) {}
+            }, 1500);
         });
 
         if (btnReprintTicket != null) {
@@ -552,6 +583,10 @@ public class RegisterTabFragment extends Fragment {
                         LogBus.api(node, "[REPRINT] resp code=" + rr.code + " err=" + err + " msg=" + rr.msg);
                     } catch (Exception ignored) {}
 
+                    // refresh header après reprint
+                    try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
+                    try { validateHeaderAsync(); } catch (Exception ignored) {}
+
                     updateButtons(controller != null ? controller.getState() : null);
                     scheduleLogRefresh();
                 });
@@ -583,7 +618,6 @@ public class RegisterTabFragment extends Fragment {
     }
 
     private void connectThisRegister(boolean userInitiated) {
-        // v7: résolution par registre (node + serial) -> un seul média attaché
         RegisterSessionManager sm = RegisterSessionManager.get(requireContext());
         DeliveryController dc = sm.resolveOrCreateForNode(node, from);
         if (dc == null) {
@@ -595,7 +629,6 @@ public class RegisterTabFragment extends Fragment {
         }
         controller = dc;
 
-        // retrouver transportKey pour DETACHED gating (best-effort)
         try {
             String tk = sm.findTransportKeyForController(controller);
             if (tk != null) tabTransportKey = tk;
@@ -636,10 +669,23 @@ public class RegisterTabFragment extends Fragment {
         try { controller.requestStatus(); } catch (Exception ignored) {}
     }
 
-    /**
-     * v7: validate header -> met à jour serial/ticketPending et bindExpectedSerial(node, serial)
-     * persist=false pour ne pas écrire SQLite depuis l'UI validate
-     */
+    /** Throttlé : si #Série est encore —, retenter validateHeaderAsync. */
+    private void ensureSerialVisibleThrottled() {
+        try {
+            if (txtSerialId == null) return;
+            String cur = String.valueOf(txtSerialId.getText());
+            boolean missing = (cur.contains("—") || cur.trim().endsWith(":") || cur.trim().endsWith(": —"));
+            if (!missing) return;
+
+            long now = System.currentTimeMillis();
+            if (now - lastHeaderValidateMs < HEADER_VALIDATE_MIN_MS) return;
+            lastHeaderValidateMs = now;
+
+            validateHeaderAsync();
+        } catch (Exception ignored) {}
+    }
+
+    /** validate header -> met à jour serial/ticketPending et bindExpectedSerial(node, serial) */
     private void validateHeaderAsync() {
         try {
             if (bg.isShutdown() || bg.isTerminated()) return;
@@ -689,7 +735,7 @@ public class RegisterTabFragment extends Fragment {
     }
 
     // =========================================================
-    // Buttons logic (context registre via liveText + controller state)
+    // Buttons logic
     // =========================================================
     private void updateButtons(DeliveryState state) {
         if (btnConnect == null || btnA == null || btnB == null || btnC == null || btnContinue == null || btnFinish == null)
@@ -718,13 +764,9 @@ public class RegisterTabFragment extends Fragment {
         btnConnect.setEnabled(true);
         btnB.setEnabled(true);
 
-        // A disponible si connecté-ish (et utile si ticket pending / recover)
         btnA.setEnabled(connected || paused || flowing);
-
-        // C seulement si CONNECTED et pas ticket pending
         btnC.setEnabled(connected && ticketPendingFlag != 1);
 
-        // v7: Continue/Terminer disponibles quand FLOW OFF pendant livraison (waiting/confirming)
         if (starting) {
             btnContinue.setEnabled(false);
             btnFinish.setEnabled(false);
@@ -732,11 +774,12 @@ public class RegisterTabFragment extends Fragment {
             String lt = lastLiveText;
             boolean flowOffPhase = (lt != null && lt.contains("Flow OFF"));
             boolean enable = paused || flowOffPhase;
+
+            // Continue + Terminer actifs en phase Flow OFF; Terminer sera sécurisé par stableOff
             btnContinue.setEnabled(enable);
             btnFinish.setEnabled(enable);
         }
 
-        // Reprint: connecté-ish + ticket DONE + ticketNo présent
         if (btnReprintTicket != null) {
             boolean connectedish = (connected || paused || flowing);
             boolean ticketDone = (ticketPendingFlag != 1);
@@ -744,9 +787,7 @@ public class RegisterTabFragment extends Fragment {
         }
     }
 
-    /**
-     * Log view: log global filtré par node (pas de scroll forcé => évite jump).
-     */
+    /** Log view: log global filtré par node. [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LogBus.java) */
     private void refreshLogView() {
         if (txtLog == null) return;
         if (cbShowLog == null || !cbShowLog.isChecked()) return;
@@ -758,7 +799,7 @@ public class RegisterTabFragment extends Fragment {
 
         if (!isAdded() || getView() == null) return;
 
-        List<LogBus.LogEvent> events = LogBus.snapshotForNode(node, TAB_LOG_MAX_LINES);
+        List<LogBus.LogEvent> events = LogBus.snapshotForNode(node, TAB_LOG_MAX_LINES); // filtre node [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LogBus.java)
         if (logViewSinceMs > 0) {
             ArrayList<LogBus.LogEvent> filtered = new ArrayList<>(events.size());
             for (LogBus.LogEvent e : events) {
@@ -767,8 +808,7 @@ public class RegisterTabFragment extends Fragment {
             events = filtered;
         }
 
-        txtLog.setText(LogBus.buildText(events));
-        // pas d’auto-scroll
+        txtLog.setText(LogBus.buildText(events)); // format unique LogBus [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LogBus.java)
     }
 
     private String ts(String msg) {
