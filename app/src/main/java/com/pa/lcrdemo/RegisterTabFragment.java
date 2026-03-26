@@ -93,16 +93,10 @@ public class RegisterTabFragment extends Fragment {
 
     // v7: digits (#39) pour formatage (fallback=3)
     private volatile int lastDigits = 3;
- // v7: dernier delCode (0x28) observé via TickBus snapshot (cache-only)
- private volatile int lastDelCode = 0;
- private volatile long lastDelCodePollMs = 0L;
- private static final long DELCODE_POLL_MIN_MS = 800L;
 
     // v7: throttle validate header retry (serial #80)
     private volatile long lastHeaderValidateMs = 0L;
     private static final long HEADER_VALIDATE_MIN_MS = 5000L;
- // v7: stop auto-validate once serial acquired
- private volatile boolean headerValidatedOnce = false;
 
     // Auto-attach lifecycle
     private boolean attemptedAutoAttachOnce = false;
@@ -122,7 +116,7 @@ public class RegisterTabFragment extends Fragment {
 
     // Throttle/coalesce log refresh
     private static final int TAB_LOG_MAX_LINES = 400;
-    private static final long LOG_REFRESH_MIN_MS = 300;
+    private static final long LOG_REFRESH_MIN_MS = 600; // v7: réduit le jank (refresh moins fréquent)
     private long lastLogRefreshMs = 0L;
     private boolean logRefreshPending = false;
 
@@ -172,8 +166,7 @@ public class RegisterTabFragment extends Fragment {
                 if (starting && state == DeliveryState.RUNNING_FLOWING) starting = false;
                 if (starting && (System.currentTimeMillis() - startingSinceMs) > 12000L) starting = false;
 
-                refreshDelCodeFromTickSnapshotThrottled();
- updateButtons(state);
+                updateButtons(state);
                 scheduleLogRefresh();
             });
         }
@@ -205,8 +198,7 @@ public class RegisterTabFragment extends Fragment {
                 if (d > 6) d = 6; // garde-fou
                 lastDigits = d;
 
-                int show = Math.min(6, Math.max(0, d + 1));
- String fmt = "%." + show + "f";
+                String fmt = "%." + d + "f";
                 if (txtQtyNet != null) txtQtyNet.setText("NET: " + String.format(Locale.ROOT, fmt, net));
                 if (txtQtyGross != null) txtQtyGross.setText("GROSS: " + String.format(Locale.ROOT, fmt, gross));
             });
@@ -230,8 +222,7 @@ public class RegisterTabFragment extends Fragment {
                 // ✅ si serial absent, retenter validate (throttlé)
                 ensureSerialVisibleThrottled();
 
-                refreshDelCodeFromTickSnapshotThrottled();
- updateButtons(controller != null ? controller.getState() : null);
+                updateButtons(controller != null ? controller.getState() : null);
                 scheduleLogRefresh();
             });
         }
@@ -247,8 +238,7 @@ public class RegisterTabFragment extends Fragment {
                 // ✅ si serial absent, retenter validate (throttlé)
                 ensureSerialVisibleThrottled();
 
-                refreshDelCodeFromTickSnapshotThrottled();
- updateButtons(controller != null ? controller.getState() : null);
+                updateButtons(controller != null ? controller.getState() : null);
             });
         }
     };
@@ -432,18 +422,55 @@ public class RegisterTabFragment extends Fragment {
         updateButtons(null);
     }
 
-    private void wireUi() {
+    
+
+ // ✅ UX: bouton DOWN ne doit scroller que le log (pas le tab au complet)
+ private void scrollLogToBottomOnly() {
+     try {
+         if (logScroll == null) return;
+         final int rootY = (regRootScroll != null) ? regRootScroll.getScrollY() : -1;
+         logScroll.post(() -> {
+             try {
+                 if (regRootScroll != null) regRootScroll.requestDisallowInterceptTouchEvent(true);
+                 logScroll.fullScroll(View.FOCUS_DOWN);
+                 if (regRootScroll != null && rootY >= 0) regRootScroll.scrollTo(0, rootY);
+             } catch (Exception ignored) {}
+         });
+     } catch (Exception ignored) {}
+ }
+
+ // ✅ UX: permettre le scroll dans la zone log sans que le NestedScrollView "vole" le geste
+ private void installLogScrollInterceptionFix() {
+     try {
+         if (logScroll != null) {
+             logScroll.setOnTouchListener((v, ev) -> {
+                 try { if (regRootScroll != null) regRootScroll.requestDisallowInterceptTouchEvent(true); } catch (Exception ignored) {}
+                 return false;
+             });
+         }
+         if (txtLog != null) {
+             txtLog.setOnTouchListener((v, ev) -> {
+                 try { if (regRootScroll != null) regRootScroll.requestDisallowInterceptTouchEvent(true); } catch (Exception ignored) {}
+                 return false;
+             });
+         }
+     } catch (Exception ignored) {}
+ }
+private void wireUi() {
         if (cbShowLog != null) {
             cbShowLog.setOnCheckedChangeListener((b, checked) -> {
                 if (logPanel != null) logPanel.setVisibility(checked ? View.VISIBLE : View.GONE);
                 LogBus.ui(node, ts("Afficher log: " + (checked ? "ON" : "OFF")));
-                if (checked) scheduleLogRefresh();
+                if (checked) {
+ installLogScrollInterceptionFix();
+ scheduleLogRefresh();
+ }
             });
         }
 
         // ✅ DOWN: scroll bas du LOG seulement, sans refresh tab
         if (btnScrollDown != null && logScroll != null) {
-            btnScrollDown.setOnClickListener(v -> logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN)));
+            btnScrollDown.setOnClickListener(v -> scrollLogToBottomOnly());
         }
 
         if (btnClearLog != null) {
@@ -484,17 +511,7 @@ public class RegisterTabFragment extends Fragment {
         }
 
         if (btnConnect != null) btnConnect.setOnClickListener(v -> connectThisRegister(true));
-        if (btnA != null) btnA.setOnClickListener(v -> {
-            if (controller == null) return;
-            controller.alignOrRecover();
-            // v7: après Resolve(A), forcer un refresh unique pour débloquer C si registre prêt
-            ui.postDelayed(() -> {
-                try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
-                try { validateHeaderAsync(); } catch (Exception ignored) {}
-                refreshDelCodeFromTickSnapshotThrottled();
-                updateButtons(controller != null ? controller.getState() : null);
-            }, 900);
-        });
+        if (btnA != null) btnA.setOnClickListener(v -> { if (controller != null) controller.alignOrRecover(); });
         if (btnB != null) btnB.setOnClickListener(v -> { if (controller != null) controller.requestStatus(); });
 
         if (btnC != null) {
@@ -526,6 +543,7 @@ public class RegisterTabFragment extends Fragment {
             if (controller.getState() != DeliveryState.RUNNING_PAUSED) {
                 try { controller.requestLiveSample(); } catch (Exception ignored) {}
                 try { Toast.makeText(requireContext(), "Attendre confirmation FLOW OFF", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
+ LogBus.ui(node, ts("Continue ignoré: FLOW OFF pas encore confirmé"));
                 return;
             }
             controller.resumeIfPaused();
@@ -607,8 +625,7 @@ public class RegisterTabFragment extends Fragment {
                     try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
                     try { validateHeaderAsync(); } catch (Exception ignored) {}
 
-                    refreshDelCodeFromTickSnapshotThrottled();
- updateButtons(controller != null ? controller.getState() : null);
+                    updateButtons(controller != null ? controller.getState() : null);
                     scheduleLogRefresh();
                 });
             });
@@ -694,7 +711,6 @@ public class RegisterTabFragment extends Fragment {
     private void ensureSerialVisibleThrottled() {
         try {
             if (txtSerialId == null) return;
-            if (headerValidatedOnce) return;
             String cur = String.valueOf(txtSerialId.getText());
             boolean missing = (cur.contains("—") || cur.trim().endsWith(":") || cur.trim().endsWith(": —"));
             if (!missing) return;
@@ -745,8 +761,7 @@ public class RegisterTabFragment extends Fragment {
                             txtLive.setText("LIVE: ticket_pending — faire Resolve (A)");
                         }
 
-                        refreshDelCodeFromTickSnapshotThrottled();
- updateButtons(controller != null ? controller.getState() : null);
+                        updateButtons(controller != null ? controller.getState() : null);
                         scheduleLogRefresh();
                     });
 
@@ -760,26 +775,7 @@ public class RegisterTabFragment extends Fragment {
     // =========================================================
     // Buttons logic
     // =========================================================
-    
- // ---------------------------------------------------------
- // v7: delCode cache-only (TickBus) pour décider A/B/C sans spam LCP
- // ---------------------------------------------------------
- private void refreshDelCodeFromTickSnapshotThrottled() {
-     try {
-         DeliveryController c = controller;
-         if (c == null) return;
-         long now = System.currentTimeMillis();
-         if (now - lastDelCodePollMs < DELCODE_POLL_MIN_MS) return;
-         lastDelCodePollMs = now;
-         ApiResult r = c.api_tickSnapshot();
-         JSONObject d = (r != null) ? r.data : null;
-         if (d != null) {
-             lastDelCode = d.optInt("delCode", lastDelCode);
-         }
-     } catch (Exception ignored) {}
- }
-
-private void updateButtons(DeliveryState state) {
+    private void updateButtons(DeliveryState state) {
         if (btnConnect == null || btnA == null || btnB == null || btnC == null || btnContinue == null || btnFinish == null)
             return;
 
@@ -807,11 +803,7 @@ private void updateButtons(DeliveryState state) {
         btnB.setEnabled(true);
 
         btnA.setEnabled(connected || paused || flowing);
-        int dc = lastDelCode;
- boolean tp = (dc & 0x0001) != 0;
- boolean flow = (dc & 0x0004) != 0;
- boolean act = (dc & 0x0008) != 0;
- btnC.setEnabled(connected && !tp && !flow && !act);
+        btnC.setEnabled(connected && ticketPendingFlag != 1);
 
         if (starting) {
             btnContinue.setEnabled(false);
