@@ -17,29 +17,26 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.core.widget.NestedScrollView;
 import androidx.fragment.app.Fragment;
-import com.hoho.android.usbserial.driver.UsbSerialPort;
+
 import com.pa.lcr.lcp.*;
 import com.pa.lcr.lcp.log.LogBus;
-import com.pa.lcr.lcp.transport.MediaTransportManager;
-import com.pa.lcr.lcp.transport.TransportIo;
+
 import org.json.JSONObject;
+
 import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * RegisterTabFragment (node-specific)
+ * RegisterTabFragment (node-specific) — v7
  *
- * Correctifs intégrés:
- * - ✅ Log tab: refresh toujours sur UI thread (évite "log n'affiche plus")
- * - ✅ Option A: NO auto-scroll du log + préserver scroll du tab (évite le jump vers le haut)
- * - ✅ Anti-crash: bg executor / lifecycle guards (évite RejectedExecutionException après rebuild)
- *
- * ✅ AJOUT: bouton Reprint (last ticket)
- * - TicketNo: on tente d’utiliser celui affiché dans Ticket Number : … (digits). Si vide -> pas de ticket.
- * - Option A: si ticketPending est ON -> bouton désactivé + message "faire Resolve (A)"
- * - Appel direct controller.api_ticketReprintCurrent() (non bloquant UI) il faut que ca marche
+ * v7:
+ * - 1 seul média attaché par registre (node + serial #80) => resolveOrCreateForNode()
+ * - le TAB est une vue: LIVE + NET/GROSS + header + log (filtré par node)
+ * - pas de tick loop locale (évite les conflits et les sauts)
+ * - cadence LIVE/STATUS assurée par NodeScheduler (RegisterSessionManager v7)
+ * - boutons A/B/C contextuels + Continue/Terminer en phase Flow OFF
  */
 public class RegisterTabFragment extends Fragment {
 
@@ -58,19 +55,23 @@ public class RegisterTabFragment extends Fragment {
     private int node = 250;
     private int from = 255;
 
+    // Header UI
     private TextView txtLcrNode, txtFrom, txtSerialId, txtTicketNo, txtTicketPending;
-    private TextView txtLive, txtQtyNet, txtQtyGross, txtDeliveryUid;
+    private TextView txtDeliveryUid;
+
+    // Live UI
+    private TextView txtLive, txtQtyNet, txtQtyGross;
+
+    // Controls
     private Spinner spnProduct;
     private EditText edtPreset;
     private Button btnConnect, btnA, btnB, btnC, btnContinue, btnFinish;
-
-    // ✅ NEW: Reprint button
     private Button btnReprintTicket;
 
     // Root scroll (tab)
     private NestedScrollView regRootScroll;
 
-    // Log tab
+    // Log tab (node-filtered global log)
     private CheckBox cbShowLog, cbTxRx, cbLogTs;
     private View logPanel;
     private TextView txtLog;
@@ -84,6 +85,9 @@ public class RegisterTabFragment extends Fragment {
     // Cache ticket pending (utilisé pour gate C + Reprint)
     private int ticketPendingFlag = -1; // -1 unknown, 0 NO, 1 YES
 
+    // v7: dernier liveText reçu (source de vérité UI)
+    private volatile String lastLiveText = null;
+
     // Auto-attach lifecycle
     private boolean attemptedAutoAttachOnce = false;
     private boolean uiListenerAttached = false;
@@ -93,25 +97,21 @@ public class RegisterTabFragment extends Fragment {
     // Controller partagé UI ↔ API (RegisterSessionManager)
     private DeliveryController controller;
 
-    // ✅ Media-aware TAB (USB/BT)
-    private MediaTransportManager mediaMgr;
+    // v7: clé du transport réellement attaché (USB ou BT:..)
     private String tabTransportKey = null;
 
-    private final Handler ui = new Handler(Looper.getMainLooper());
-    private final ExecutorService bg = Executors.newSingleThreadExecutor();
-
- // v7: tickWait loop supprimée (cadence via NodeScheduler)
     // Start UX
     private boolean starting = false;
     private long startingSinceMs = 0L;
- // ✅ v7: dernier liveText reçu (source UI)
- private volatile String lastLiveText = null;
 
     // Throttle/coalesce log refresh
     private static final int TAB_LOG_MAX_LINES = 400;
     private static final long LOG_REFRESH_MIN_MS = 300;
     private long lastLogRefreshMs = 0L;
     private boolean logRefreshPending = false;
+
+    private final Handler ui = new Handler(Looper.getMainLooper());
+    private final ExecutorService bg = Executors.newSingleThreadExecutor();
 
     /**
      * ✅ FIX LOG: toujours exécuter la logique de refresh sur UI thread.
@@ -120,7 +120,6 @@ public class RegisterTabFragment extends Fragment {
         if (txtLog == null) return;
         if (cbShowLog == null || !cbShowLog.isChecked()) return;
 
-        // Force UI thread
         if (Looper.myLooper() != Looper.getMainLooper()) {
             ui.post(this::scheduleLogRefresh);
             return;
@@ -128,14 +127,16 @@ public class RegisterTabFragment extends Fragment {
 
         long now = System.currentTimeMillis();
         long dt = now - lastLogRefreshMs;
+
         if (dt >= LOG_REFRESH_MIN_MS && !logRefreshPending) {
             lastLogRefreshMs = now;
             refreshLogView();
             return;
         }
-        if (logRefreshPending) return;
 
+        if (logRefreshPending) return;
         logRefreshPending = true;
+
         long delay = Math.max(0L, LOG_REFRESH_MIN_MS - dt);
         ui.postDelayed(() -> {
             logRefreshPending = false;
@@ -144,6 +145,9 @@ public class RegisterTabFragment extends Fragment {
         }, delay);
     }
 
+    // =========================
+    // Delivery listener (UI)
+    // =========================
     private final DeliveryControllerPort.Listener uiListener = new DeliveryControllerPort.Listener() {
 
         @Override
@@ -151,11 +155,12 @@ public class RegisterTabFragment extends Fragment {
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
 
+                // sortir du mode starting si l'état devient RUNNING_FLOWING
                 if (starting && state == DeliveryState.RUNNING_FLOWING) starting = false;
                 if (starting && (System.currentTimeMillis() - startingSinceMs) > 12000L) starting = false;
 
                 updateButtons(state);
-                /* v7: cadence status gérée par NodeScheduler */
+                // v7: cadence status gérée par NodeScheduler
                 scheduleLogRefresh();
             });
         }
@@ -186,32 +191,36 @@ public class RegisterTabFragment extends Fragment {
         public void onLiveStatus(String liveText) {
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
+
                 lastLiveText = liveText;
                 if (txtLive != null) txtLive.setText(liveText);
+
                 // Sortie du mode starting dès qu'un état réel arrive
                 try {
                     if (liveText != null && (liveText.contains("FLOW ON") || liveText.contains("PAUSED") || liveText.contains("confirm"))) {
                         starting = false;
                     }
                 } catch (Exception ignored) {}
+
                 updateButtons(controller != null ? controller.getState() : null);
+                scheduleLogRefresh();
             });
         }
 
         @Override
-        public void onTicketInfo(String ticketNo, String deliveryUid) {(String ticketNo, String deliveryUid) {
+        public void onTicketInfo(String ticketNo, String deliveryUid) {
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
 
                 if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : " + (ticketNo == null ? "—" : ticketNo));
                 if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : " + (deliveryUid == null ? "—" : deliveryUid));
 
-                // ✅ Re-evaluate enablement now that ticket number may have changed
                 updateButtons(controller != null ? controller.getState() : null);
             });
         }
     };
 
+    // LogBus listener -> refresh tab log for this node
     private final LogBus.Listener logListener = e -> {
         if (e == null) return;
         if (e.node != node) return;
@@ -227,13 +236,13 @@ public class RegisterTabFragment extends Fragment {
             if (UsbReceiver.ACTION_USB_READY.equals(a)) {
                 attemptAttachIfPossible(false);
             } else if (UsbReceiver.ACTION_USB_DETACHED.equals(a)) {
-            // ✅ Media-aware: ignorer USB DETACHED si ce TAB est attaché sur BT
-            try {
-                if (tabTransportKey != null && tabTransportKey.toUpperCase(Locale.ROOT).startsWith("BT:")) {
-                    LogBus.api(node, "USB detached ignored (TAB sur " + tabTransportKey + ")");
-                    return;
-                }
-            } catch (Exception ignored) {}
+                // si on est attaché sur BT, ignorer le detach USB
+                try {
+                    if (tabTransportKey != null && tabTransportKey.toUpperCase(Locale.ROOT).startsWith("BT:")) {
+                        LogBus.api(node, "USB detached ignored (TAB sur " + tabTransportKey + ")");
+                        return;
+                    }
+                } catch (Exception ignored) {}
 
                 detachUiListenerSafe();
                 controller = null;
@@ -264,13 +273,13 @@ public class RegisterTabFragment extends Fragment {
             from = a.getInt(ARG_FROM, 255);
         }
         usbManager = (UsbManager) context.getSystemService(Context.USB_SERVICE);
-        try { mediaMgr = MediaTransportManager.get(context); } catch (Exception ignored) {}
     }
 
     @Override
     public void onStart() {
         super.onStart();
         LogBus.addListener(logListener);
+
         IntentFilter f = new IntentFilter();
         f.addAction(UsbReceiver.ACTION_USB_READY);
         f.addAction(UsbReceiver.ACTION_USB_DETACHED);
@@ -279,7 +288,6 @@ public class RegisterTabFragment extends Fragment {
 
     @Override
     public void onStop() {
- /* v7: no tickWait loop */
         detachUiListenerSafe();
         LogBus.removeListener(logListener);
         try { requireContext().unregisterReceiver(usbStateReceiver); } catch (Exception ignored) {}
@@ -289,8 +297,6 @@ public class RegisterTabFragment extends Fragment {
     @Override
     public void onResume() {
         super.onResume();
- // ✅ LIVE tick loop
- /* v7: no tickWait loop */
         if (!attemptedAutoAttachOnce) {
             attemptedAutoAttachOnce = true;
             ui.post(() -> attemptAttachIfPossible(true));
@@ -302,11 +308,7 @@ public class RegisterTabFragment extends Fragment {
     @Override
     public void onDestroyView() {
         super.onDestroyView();
- // ✅ Stop LIVE tick loop
- /* v7: no tickWait loop */
-        // ✅ Anti-crash: empêcher des ui.post() (log + attach) de survivre à la destruction de la view
         try { ui.removeCallbacksAndMessages(null); } catch (Exception ignored) {}
-        // Stopper executor du fragment
         try { bg.shutdownNow(); } catch (Exception ignored) {}
         controller = null;
     }
@@ -325,6 +327,7 @@ public class RegisterTabFragment extends Fragment {
 
     private void bindUi(View v) {
         regRootScroll = v.findViewById(R.id.regRootScroll);
+
         txtLcrNode = v.findViewById(R.id.txtLcrNode);
         txtFrom = v.findViewById(R.id.txtFrom);
         txtSerialId = v.findViewById(R.id.txtSerialId);
@@ -344,10 +347,8 @@ public class RegisterTabFragment extends Fragment {
         txtLive = v.findViewById(R.id.txtLive);
         txtQtyNet = v.findViewById(R.id.txtQtyNet);
         txtQtyGross = v.findViewById(R.id.txtQtyGross);
-
         txtDeliveryUid = v.findViewById(R.id.txtDeliveryUid);
 
-        // ✅ NEW
         btnReprintTicket = v.findViewById(R.id.btnReprintTicket);
 
         cbShowLog = v.findViewById(R.id.cbShowLog);
@@ -368,13 +369,13 @@ public class RegisterTabFragment extends Fragment {
         if (txtSerialId != null) txtSerialId.setText("#Série : —");
         if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : —");
         if (txtTicketPending != null) txtTicketPending.setText("Ticket pending : —");
+        if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : —");
+
         ticketPendingFlag = -1;
 
         if (txtLive != null) txtLive.setText("LIVE: (en attente)");
         if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
         if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
-
-        if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : —");
 
         if (edtPreset != null) edtPreset.setText("50");
 
@@ -382,7 +383,6 @@ public class RegisterTabFragment extends Fragment {
         for (int i = 1; i <= 16; i++) items.add("Produit " + i);
         ArrayAdapter<String> ad = new ArrayAdapter<>(requireContext(), android.R.layout.simple_spinner_item, items);
         ad.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-
         if (spnProduct != null) {
             spnProduct.setAdapter(ad);
             spnProduct.setSelection(0);
@@ -400,6 +400,7 @@ public class RegisterTabFragment extends Fragment {
     }
 
     private void wireUi() {
+
         if (cbShowLog != null) {
             cbShowLog.setOnCheckedChangeListener((b, checked) -> {
                 if (logPanel != null) logPanel.setVisibility(checked ? View.VISIBLE : View.GONE);
@@ -469,8 +470,10 @@ public class RegisterTabFragment extends Fragment {
                 updateButtons(controller.getState());
 
                 if (txtLive != null) txtLive.setText("LIVE: RUNNING_FLOWING (flow off - waiting progression)");
+
                 int prod = (spnProduct != null ? (spnProduct.getSelectedItemPosition() + 1) : 1);
                 double preset = parseDouble(edtPreset != null ? edtPreset.getText().toString() : "0", 0.0);
+
                 controller.startDelivery(prod, preset);
             });
         }
@@ -484,6 +487,7 @@ public class RegisterTabFragment extends Fragment {
             }
             controller.resumeIfPaused();
         });
+
         if (btnFinish != null) btnFinish.setOnClickListener(v -> {
             if (controller == null) return;
             boolean stableOff2 = false;
@@ -496,19 +500,17 @@ public class RegisterTabFragment extends Fragment {
             controller.endDelivery();
         });
 
-        // ✅ NEW: Reprint
         if (btnReprintTicket != null) {
             btnReprintTicket.setOnClickListener(v -> onReprintClicked());
         }
     }
 
     // =========================================================
-    // ✅ Reprint (last ticket) logic
+    // Reprint (last ticket)
     // =========================================================
     private void onReprintClicked() {
         if (controller == null) return;
 
-        // Option A: si ticketPending ON -> faire Resolve (A)
         if (ticketPendingFlag == 1) {
             if (txtLive != null) txtLive.setText("LIVE: ticket_pending — faire Resolve (A)");
             LogBus.ui(node, ts("Reprint bloqué: ticket_pending=1 -> faire Resolve (A)"));
@@ -516,22 +518,18 @@ public class RegisterTabFragment extends Fragment {
             return;
         }
 
-        // TicketNo: digits de "Ticket Number : ..."
         String ticketNo = extractTicketDigits();
         if (ticketNo == null || ticketNo.trim().isEmpty()) {
-            LogBus.ui(node, ts("Reprint: aucun ticket_no affiché -> rien à re-imprimer"));
+            LogBus.ui(node, ts("Reprint: aucun ticket_no affiché"));
             try { Toast.makeText(requireContext(), "Aucun ticket à re-imprimer", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
             scheduleLogRefresh();
             return;
         }
 
-        // Désactiver pour éviter double click (sera recalculé ensuite)
         if (btnReprintTicket != null) btnReprintTicket.setEnabled(false);
-
         LogBus.api(node, "[REPRINT] request (ticket_no=" + ticketNo + ")");
         scheduleLogRefresh();
 
-        // Exécuter en background pour ne pas bloquer l’UI
         try {
             if (bg.isShutdown() || bg.isTerminated()) return;
         } catch (Exception ignored) {}
@@ -540,33 +538,25 @@ public class RegisterTabFragment extends Fragment {
             bg.execute(() -> {
                 ApiResult r;
                 try {
-                    // Appel direct au controller (reprint last ticket via 0x06, gate ticketPending côté controller)
                     r = controller.api_ticketReprintCurrent();
                 } catch (Exception e) {
                     r = ApiResult.fail("Reprint: 0 - Exception", "REPRINT_FAIL");
                 }
-
                 final ApiResult rr = r;
+
                 ui.post(() -> {
                     if (!isAdded() || getView() == null) return;
 
-                    // Log résultat
                     try {
                         String err = (rr.err == null) ? "" : rr.err;
                         LogBus.api(node, "[REPRINT] resp code=" + rr.code + " err=" + err + " msg=" + rr.msg);
                     } catch (Exception ignored) {}
 
-                    if (rr.code == 0 && "TICKET_PENDING".equals(rr.err)) {
-                        if (txtLive != null) txtLive.setText("LIVE: ticket_pending — faire Resolve (A)");
-                    }
-
-                    // Re-enable selon règles
                     updateButtons(controller != null ? controller.getState() : null);
                     scheduleLogRefresh();
                 });
             });
-        } catch (java.util.concurrent.RejectedExecutionException ignored) {
-        }
+        } catch (java.util.concurrent.RejectedExecutionException ignored) { }
     }
 
     private String extractTicketDigits() {
@@ -581,34 +571,10 @@ public class RegisterTabFragment extends Fragment {
         return d != null && !d.trim().isEmpty();
     }
 
-    
- // v7: tickWait loop supprimée (cadence via NodeScheduler)
-    private TransportIo pickTabTransportIo() {
-        try {
-            MediaTransportManager mgr = mediaMgr;
-            if (mgr == null) return null;
-            ArrayList<String> preferred = new ArrayList<>();
-            // 1) BT d'abord (tous les BT:... connus)
-            try {
-                List<com.pa.lcr.lcp.transport.TransportSnapshot> snaps = mgr.listSnapshots();
-                if (snaps != null) {
-                    for (com.pa.lcr.lcp.transport.TransportSnapshot s : snaps) {
-                        if (s == null || s.key == null) continue;
-                        if (s.key.startsWith("BT:")) preferred.add(s.key);
-                    }
-                }
-            } catch (Exception ignored) {}
-            // 2) fallback USB
-            preferred.add(MediaTransportManager.KEY_USB);
-            TransportIo io = mgr.pickReady(preferred);
-            if (io == null) io = mgr.pickReady(null);
-            return (io != null && io.isOpen()) ? io : null;
-        } catch (Exception ignored) {
-            return null;
-        }
-    }
-
-private void attemptAttachIfPossible(boolean verboseLog) {
+    // =========================================================
+    // v7: attach / detach / validate header
+    // =========================================================
+    private void attemptAttachIfPossible(boolean verboseLog) {
         if (uiListenerAttached && controller != null) {
             syncUiFromController();
             return;
@@ -617,6 +583,7 @@ private void attemptAttachIfPossible(boolean verboseLog) {
     }
 
     private void connectThisRegister(boolean userInitiated) {
+        // v7: résolution par registre (node + serial) -> un seul média attaché
         RegisterSessionManager sm = RegisterSessionManager.get(requireContext());
         DeliveryController dc = sm.resolveOrCreateForNode(node, from);
         if (dc == null) {
@@ -627,16 +594,24 @@ private void attemptAttachIfPossible(boolean verboseLog) {
             return;
         }
         controller = dc;
-        if (!uiListenerAttached) {
-            String tk = null;
-            try { tk = sm.findTransportKeyForController(controller); } catch (Exception ignored) {}
-            if (tk == null) tk = tabTransportKey;
+
+        // retrouver transportKey pour DETACHED gating (best-effort)
+        try {
+            String tk = sm.findTransportKeyForController(controller);
             if (tk != null) tabTransportKey = tk;
-            try { if (tk != null) sm.attachUiListener(tk, node, uiListener); else sm.attachUiListener(node, uiListener); } catch (Exception ignored) {}
+        } catch (Exception ignored) {}
+
+        if (!uiListenerAttached) {
+            try {
+                if (tabTransportKey != null) sm.attachUiListener(tabTransportKey, node, uiListener);
+                else sm.attachUiListener(node, uiListener);
+            } catch (Exception ignored) {}
             uiListenerAttached = true;
         }
+
         if (cbTxRx != null) controller.setTxRxLoggingEnabled(cbTxRx.isChecked());
         if (cbLogTs != null) controller.setLogTimestampsEnabled(cbLogTs.isChecked());
+
         syncUiFromController();
         validateHeaderAsync();
         if (userInitiated) LogBus.api(node, "Connect TAB: 1 - UI attached (v7)");
@@ -662,8 +637,8 @@ private void attemptAttachIfPossible(boolean verboseLog) {
     }
 
     /**
-     * ✅ Anti-crash: protège l'exécution si executor shutdown/terminated après rebuild fragments
-     * ✅ Et garde persist=false pour ne PAS écrire SQLite depuis l'UI validate
+     * v7: validate header -> met à jour serial/ticketPending et bindExpectedSerial(node, serial)
+     * persist=false pour ne pas écrire SQLite depuis l'UI validate
      */
     private void validateHeaderAsync() {
         try {
@@ -681,7 +656,8 @@ private void attemptAttachIfPossible(boolean verboseLog) {
                     if (j == null) return;
 
                     String serial = j.optString("serial_id", "");
-                        try { RegisterSessionManager.get(requireContext()).bindExpectedSerial(node, serial); } catch (Exception ignored) {}
+                    try { RegisterSessionManager.get(requireContext()).bindExpectedSerial(node, serial); } catch (Exception ignored) {}
+
                     int tp = j.optInt("ticketPending", -1);
                     ticketPendingFlag = (tp == 1 ? 1 : (tp == 0 ? 0 : -1));
 
@@ -691,10 +667,12 @@ private void attemptAttachIfPossible(boolean verboseLog) {
                         if (txtSerialId != null) {
                             txtSerialId.setText("#Série : " + ((serial == null || serial.isEmpty()) ? "—" : serial));
                         }
+
                         if (txtTicketPending != null) {
                             txtTicketPending.setText("Ticket pending : " +
                                     (ticketPendingFlag == 1 ? "OUI" : (ticketPendingFlag == 0 ? "NON" : "—")));
                         }
+
                         if (ticketPendingFlag == 1 && txtLive != null) {
                             txtLive.setText("LIVE: ticket_pending — faire Resolve (A)");
                         }
@@ -707,17 +685,15 @@ private void attemptAttachIfPossible(boolean verboseLog) {
                     LogBus.api(node, "validate header fail: " + safeMsg(e));
                 }
             });
-        } catch (java.util.concurrent.RejectedExecutionException ignored) {
-        }
+        } catch (java.util.concurrent.RejectedExecutionException ignored) { }
     }
 
+    // =========================================================
+    // Buttons logic (context registre via liveText + controller state)
+    // =========================================================
     private void updateButtons(DeliveryState state) {
-        if (btnConnect == null ||
-                btnA == null ||
-                btnB == null ||
-                btnC == null ||
-                btnContinue == null ||
-                btnFinish == null) return;
+        if (btnConnect == null || btnA == null || btnB == null || btnC == null || btnContinue == null || btnFinish == null)
+            return;
 
         if (controller == null) {
             btnConnect.setEnabled(true);
@@ -731,6 +707,7 @@ private void attemptAttachIfPossible(boolean verboseLog) {
         }
 
         DeliveryState st = (state != null) ? state : controller.getState();
+
         boolean connected = (st == DeliveryState.CONNECTED);
         boolean paused = (st == DeliveryState.RUNNING_PAUSED);
         boolean flowing = (st == DeliveryState.RUNNING_FLOWING);
@@ -740,11 +717,14 @@ private void attemptAttachIfPossible(boolean verboseLog) {
 
         btnConnect.setEnabled(true);
         btnB.setEnabled(true);
+
+        // A disponible si connecté-ish (et utile si ticket pending / recover)
         btnA.setEnabled(connected || paused || flowing);
 
-        // gate C (existant)
+        // C seulement si CONNECTED et pas ticket pending
         btnC.setEnabled(connected && ticketPendingFlag != 1);
 
+        // v7: Continue/Terminer disponibles quand FLOW OFF pendant livraison (waiting/confirming)
         if (starting) {
             btnContinue.setEnabled(false);
             btnFinish.setEnabled(false);
@@ -756,7 +736,7 @@ private void attemptAttachIfPossible(boolean verboseLog) {
             btnFinish.setEnabled(enable);
         }
 
-        // ✅ Reprint: activé seulement si connecté-ish + ticket DONE + ticketNo présent
+        // Reprint: connecté-ish + ticket DONE + ticketNo présent
         if (btnReprintTicket != null) {
             boolean connectedish = (connected || paused || flowing);
             boolean ticketDone = (ticketPendingFlag != 1);
@@ -765,25 +745,18 @@ private void attemptAttachIfPossible(boolean verboseLog) {
     }
 
     /**
-     * ✅ Option A:
-     * - préserver scroll du tab (NestedScrollView root)
-     * - ne PAS auto-scroll le panneau log
+     * Log view: log global filtré par node (pas de scroll forcé => évite jump).
      */
     private void refreshLogView() {
         if (txtLog == null) return;
         if (cbShowLog == null || !cbShowLog.isChecked()) return;
 
-        // Force UI thread
         if (Looper.myLooper() != Looper.getMainLooper()) {
             ui.post(this::refreshLogView);
             return;
         }
 
-        // Guard lifecycle
         if (!isAdded() || getView() == null) return;
-
-        // ✅ préserver position scroll du tab
-        final int oldY = (regRootScroll != null) ? regRootScroll.getScrollY() : -1;
 
         List<LogBus.LogEvent> events = LogBus.snapshotForNode(node, TAB_LOG_MAX_LINES);
         if (logViewSinceMs > 0) {
@@ -795,14 +768,7 @@ private void attemptAttachIfPossible(boolean verboseLog) {
         }
 
         txtLog.setText(LogBus.buildText(events));
-
-        // ✅ restaurer scroll du tab
-        if (regRootScroll != null && oldY >= 0) {
-            regRootScroll.post(() -> regRootScroll.scrollTo(0, oldY));
-        }
-
-        // ✅ Option A: PAS d’auto-scroll du log
-        // if (logScroll != null) logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
+        // pas d’auto-scroll
     }
 
     private String ts(String msg) {
@@ -824,6 +790,4 @@ private void attemptAttachIfPossible(boolean verboseLog) {
         String m = e.getMessage();
         return (m == null) ? e.getClass().getSimpleName() : m;
     }
-}
-
 }
