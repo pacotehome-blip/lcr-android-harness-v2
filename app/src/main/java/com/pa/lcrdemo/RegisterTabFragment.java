@@ -100,38 +100,18 @@ public class RegisterTabFragment extends Fragment {
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService bg = Executors.newSingleThreadExecutor();
 
- // =========================
- // ✅ LIVE Tick loop (cache-only) : UI == API == registre
- // - Appelle controller.api_tickWait(...) (TickBus, sans LCP IO)
- // - Met à jour NET/GROSS + LIVE + ticketPending
- // =========================
- private volatile boolean tickLoopRunning = false;
- private long lastTickSeq = 0L;
- private ExecutorService tickExec = Executors.newSingleThreadExecutor();
- private volatile long lastHeaderRefreshMs = 0L;
-
-
+ // v7: tickWait loop supprimée (cadence via NodeScheduler)
     // Start UX
     private boolean starting = false;
     private long startingSinceMs = 0L;
+ // ✅ v7: dernier liveText reçu (source UI)
+ private volatile String lastLiveText = null;
 
     // Throttle/coalesce log refresh
     private static final int TAB_LOG_MAX_LINES = 400;
     private static final long LOG_REFRESH_MIN_MS = 300;
     private long lastLogRefreshMs = 0L;
     private boolean logRefreshPending = false;
-
- // ✅ Perf: throttling UI-triggered status reads (réduit lag)
- private volatile long lastUiStatusReqMs = 0L;
- private static final long UI_STATUS_MIN_MS = 1500L;
-
- // ✅ Tick: keep track of delivery transition for resync (nouvelle livraison)
- private volatile boolean lastTickDeliveryActive = false;
-
- // ✅ Live sample cadence (quand FLOW_ACTIVE=1) - pour ticks fluides comme l’API
- private volatile long lastLiveSampleReqMs = 0L;
- private static final long LIVE_SAMPLE_MIN_MS = 250L;
-
 
     /**
      * ✅ FIX LOG: toujours exécuter la logique de refresh sur UI thread.
@@ -175,13 +155,7 @@ public class RegisterTabFragment extends Fragment {
                 if (starting && (System.currentTimeMillis() - startingSinceMs) > 12000L) starting = false;
 
                 updateButtons(state);
-                try {
-            long now = System.currentTimeMillis();
-            if (controller != null && (now - lastUiStatusReqMs) >= UI_STATUS_MIN_MS) {
-                lastUiStatusReqMs = now;
-                controller.requestStatus();
-            }
-        } catch (Exception ignored) {}
+                /* v7: cadence status gérée par NodeScheduler */
                 scheduleLogRefresh();
             });
         }
@@ -212,16 +186,20 @@ public class RegisterTabFragment extends Fragment {
         public void onLiveStatus(String liveText) {
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
-                if (starting) {
-                    if (txtLive != null) txtLive.setText("LIVE: RUNNING_FLOWING (flow off - waiting progression)");
-                } else {
-                    if (txtLive != null) txtLive.setText(liveText);
-                }
+                lastLiveText = liveText;
+                if (txtLive != null) txtLive.setText(liveText);
+                // Sortie du mode starting dès qu'un état réel arrive
+                try {
+                    if (liveText != null && (liveText.contains("FLOW ON") || liveText.contains("PAUSED") || liveText.contains("confirm"))) {
+                        starting = false;
+                    }
+                } catch (Exception ignored) {}
+                updateButtons(controller != null ? controller.getState() : null);
             });
         }
 
         @Override
-        public void onTicketInfo(String ticketNo, String deliveryUid) {
+        public void onTicketInfo(String ticketNo, String deliveryUid) {(String ticketNo, String deliveryUid) {
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
 
@@ -301,7 +279,7 @@ public class RegisterTabFragment extends Fragment {
 
     @Override
     public void onStop() {
- stopTickLoop();
+ /* v7: no tickWait loop */
         detachUiListenerSafe();
         LogBus.removeListener(logListener);
         try { requireContext().unregisterReceiver(usbStateReceiver); } catch (Exception ignored) {}
@@ -312,7 +290,7 @@ public class RegisterTabFragment extends Fragment {
     public void onResume() {
         super.onResume();
  // ✅ LIVE tick loop
- startTickLoop();
+ /* v7: no tickWait loop */
         if (!attemptedAutoAttachOnce) {
             attemptedAutoAttachOnce = true;
             ui.post(() -> attemptAttachIfPossible(true));
@@ -325,7 +303,7 @@ public class RegisterTabFragment extends Fragment {
     public void onDestroyView() {
         super.onDestroyView();
  // ✅ Stop LIVE tick loop
- stopTickLoop();
+ /* v7: no tickWait loop */
         // ✅ Anti-crash: empêcher des ui.post() (log + attach) de survivre à la destruction de la view
         try { ui.removeCallbacksAndMessages(null); } catch (Exception ignored) {}
         // Stopper executor du fragment
@@ -497,8 +475,26 @@ public class RegisterTabFragment extends Fragment {
             });
         }
 
-        if (btnContinue != null) btnContinue.setOnClickListener(v -> { if (controller != null) controller.resumeIfPaused(); });
-        if (btnFinish != null) btnFinish.setOnClickListener(v -> { if (controller != null) controller.endDelivery(); });
+        if (btnContinue != null) btnContinue.setOnClickListener(v -> {
+            if (controller == null) return;
+            if (controller.getState() != DeliveryState.RUNNING_PAUSED) {
+                try { controller.requestLiveSample(); } catch (Exception ignored) {}
+                try { Toast.makeText(requireContext(), "Attendre confirmation FLOW OFF", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
+                return;
+            }
+            controller.resumeIfPaused();
+        });
+        if (btnFinish != null) btnFinish.setOnClickListener(v -> {
+            if (controller == null) return;
+            boolean stableOff2 = false;
+            try { stableOff2 = controller.isFlowOffStable(); } catch (Exception ignored) {}
+            if (!stableOff2) {
+                try { controller.requestLiveSample(); } catch (Exception ignored) {}
+                try { Toast.makeText(requireContext(), "FLOW OFF en confirmation...", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
+                return;
+            }
+            controller.endDelivery();
+        });
 
         // ✅ NEW: Reprint
         if (btnReprintTicket != null) {
@@ -586,118 +582,7 @@ public class RegisterTabFragment extends Fragment {
     }
 
     
- // =========================================================
- // ✅ LIVE tick loop (TickBus /v1/tick/wait) — cache-only
- // =========================================================
- private void startTickLoop() {
-     if (tickLoopRunning) return;
-     tickLoopRunning = true;
-     // Réinitialiser executor si nécessaire
-     try {
-         if (tickExec == null || tickExec.isShutdown() || tickExec.isTerminated()) {
-             tickExec = Executors.newSingleThreadExecutor();
-         }
-     } catch (Exception ignored) {
-         tickExec = Executors.newSingleThreadExecutor();
-     }
-     try {
-         tickExec.execute(() -> {
-             long since = lastTickSeq;
-             while (tickLoopRunning) {
-                 try {
-                     DeliveryController c = controller;
-                     if (c == null) {
-                         try { Thread.sleep(250); } catch (InterruptedException ie) { break; }
-                         continue;
-                     }
-                     // ✅ Court wait (<=1000ms) : évite de bloquer le serveur / starvation JobGet
-                     ApiResult r = c.api_tickWait(since, 1000);
-                     if (!tickLoopRunning) break;
-                     if (r != null && r.code == 0 && r.data != null) {
-                         JSONObject t = r.data;
-                         if (t.optInt("has_tick", 0) == 1) {
-                             long seq = t.optLong("seq", since);
-                             if (seq > since) since = seq;
-                             lastTickSeq = since;
-                             applyTickSnapshotToUi(t);
-                         }
-                     }
-                     // ✅ Refresh header (serial/ticket/uid) best-effort, peu fréquent
-                     long now = System.currentTimeMillis();
-                     if (now - lastHeaderRefreshMs > 5000) {
-                         lastHeaderRefreshMs = now;
-                         try { c.requestStatus(); } catch (Exception ignored) {}
-                     }
-                     // Petit sleep pour éviter busy-loop si TIMEOUT
-                     try { Thread.sleep(60); } catch (InterruptedException ie) { break; }
-                 } catch (Exception e) {
-                     try { Thread.sleep(250); } catch (InterruptedException ie) { break; }
-                 }
-             }
-         });
-     } catch (Exception ignored) {}
- }
-
- private void stopTickLoop() {
-     tickLoopRunning = false;
-     try { if (tickExec != null) tickExec.shutdownNow(); } catch (Exception ignored) {}
- }
-
- private void applyTickSnapshotToUi(JSONObject tick) {
-     if (tick == null) return;
-     final double net = tick.optDouble("net", 0.0);
-     final double gross = tick.optDouble("gross", 0.0);
-     final int delCode = tick.optInt("delCode", 0);
-     final boolean flowActive = (delCode & 0x0004) != 0;
-     final boolean deliveryActive = (delCode & 0x0008) != 0;
-     final boolean ticketPending = (delCode & 0x0001) != 0;
-     final String st = tick.optString("state", "");
-
-     // Cache ticketPending pour gating boutons / reprint
-     ticketPendingFlag = ticketPending ? 1 : 0;
-
- // ✅ FIN de livraison: resync complet (permet nouvelle livraison + UI coherent)
- if (!deliveryActive && lastTickDeliveryActive) {
-     lastTickSeq = 0L;
-     starting = false;
-     try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
-     try { validateHeaderAsync(); } catch (Exception ignored) {}
- }
- lastTickDeliveryActive = deliveryActive;
-
-     ui.post(() -> {
-         if (!isAdded() || getView() == null) return;
-
-         // LIVE Net/Gross (UI == API == registre)
-         if (txtQtyNet != null) txtQtyNet.setText(String.format(Locale.CANADA_FRENCH, "NET: %.3f", net));
-         if (txtQtyGross != null) txtQtyGross.setText(String.format(Locale.CANADA_FRENCH, "GROSS: %.3f", gross));
-
-         // LIVE status (strict registre)
-        if (txtLive != null) {
-            if (deliveryActive && flowActive) {
-                txtLive.setText("LIVE: RUNNING_FLOWING");
-            } else if (deliveryActive) {
-                // si on est en START UX, garder le message d'attente uniquement tant que FLOW est OFF
-                if (starting) txtLive.setText("LIVE: RUNNING_FLOWING (flow off - waiting progression)");
-                else txtLive.setText("LIVE: RUNNING_PAUSED");
-            } else {
-                txtLive.setText(ticketPending ? "LIVE: CONNECTED - Ticket pending" : "LIVE: CONNECTED - Ready");
-            }
-        }
-        // Ticket pending (affichage tab)
-
-         if (txtTicketPending != null) {
-             txtTicketPending.setText("Ticket pending : " + (ticketPending ? "OUI" : "NON"));
-         }
-
-         updateButtons(controller != null ? controller.getState() : null);
-     });
- }
-
-    // =========================================================
-    // ✅ Media-aware: choisir un TransportIo READY pour ce TAB
-    // - Préfère BT si disponible, sinon USB
-    // =========================================================
+ // v7: tickWait loop supprimée (cadence via NodeScheduler)
     private TransportIo pickTabTransportIo() {
         try {
             MediaTransportManager mgr = mediaMgr;
@@ -728,43 +613,33 @@ private void attemptAttachIfPossible(boolean verboseLog) {
             syncUiFromController();
             return;
         }
-        TransportIo io = pickTabTransportIo();
-        if (io == null) {
-            if (verboseLog) LogBus.api(node, "Auto-attach: aucun média READY (USB/BT) — attendre connexion.");
-            return;
-        }
         connectThisRegister(false);
     }
 
     private void connectThisRegister(boolean userInitiated) {
-        TransportIo io = pickTabTransportIo();
-        if (io == null) {
+        RegisterSessionManager sm = RegisterSessionManager.get(requireContext());
+        DeliveryController dc = sm.resolveOrCreateForNode(node, from);
+        if (dc == null) {
             if (userInitiated) {
-                LogBus.api(node, "Aucun média prêt (USB/BT)");
+                LogBus.api(node, "Aucun média prêt / registre introuvable pour ce node");
                 Toast.makeText(requireContext(), "Aucun média prêt (USB/BT)", Toast.LENGTH_SHORT).show();
             }
             return;
         }
-        String tk = io.getKey(); // "USB" ou "BT:AA:BB:.."
-        tabTransportKey = tk;
-
-        RegisterSessionManager sm = RegisterSessionManager.get(requireContext());
-        controller = sm.getOrCreate(tk, node, from, io);
-        if (controller == null) {
-            if (userInitiated) Toast.makeText(requireContext(), "Transport non prêt", Toast.LENGTH_SHORT).show();
-            return;
-        }
+        controller = dc;
         if (!uiListenerAttached) {
-            sm.attachUiListener(tk, node, uiListener);
+            String tk = null;
+            try { tk = sm.findTransportKeyForController(controller); } catch (Exception ignored) {}
+            if (tk == null) tk = tabTransportKey;
+            if (tk != null) tabTransportKey = tk;
+            try { if (tk != null) sm.attachUiListener(tk, node, uiListener); else sm.attachUiListener(node, uiListener); } catch (Exception ignored) {}
             uiListenerAttached = true;
         }
         if (cbTxRx != null) controller.setTxRxLoggingEnabled(cbTxRx.isChecked());
         if (cbLogTs != null) controller.setLogTimestampsEnabled(cbLogTs.isChecked());
-
-        lastTickSeq = 0L;
         syncUiFromController();
         validateHeaderAsync();
-        if (userInitiated) LogBus.api(node, "Connect TAB: 1 - UI attached (" + tk + ")");
+        if (userInitiated) LogBus.api(node, "Connect TAB: 1 - UI attached (v7)");
         scheduleLogRefresh();
     }
 
@@ -772,11 +647,8 @@ private void attemptAttachIfPossible(boolean verboseLog) {
         if (!uiListenerAttached) return;
         try {
             RegisterSessionManager sm = RegisterSessionManager.get(requireContext());
-            if (tabTransportKey != null && !tabTransportKey.trim().isEmpty()) {
-                sm.detachUiListener(tabTransportKey, node, uiListener);
-            } else {
-                sm.detachUiListener(node, uiListener); // legacy fallback
-            }
+            if (tabTransportKey != null) sm.detachUiListener(tabTransportKey, node, uiListener);
+            else sm.detachUiListener(node, uiListener);
         } catch (Exception ignored) {}
         uiListenerAttached = false;
         tabTransportKey = null;
@@ -809,6 +681,7 @@ private void attemptAttachIfPossible(boolean verboseLog) {
                     if (j == null) return;
 
                     String serial = j.optString("serial_id", "");
+                        try { RegisterSessionManager.get(requireContext()).bindExpectedSerial(node, serial); } catch (Exception ignored) {}
                     int tp = j.optInt("ticketPending", -1);
                     ticketPendingFlag = (tp == 1 ? 1 : (tp == 0 ? 0 : -1));
 
@@ -876,8 +749,11 @@ private void attemptAttachIfPossible(boolean verboseLog) {
             btnContinue.setEnabled(false);
             btnFinish.setEnabled(false);
         } else {
-            btnContinue.setEnabled(paused);
-            btnFinish.setEnabled(paused && stableOff);
+            String lt = lastLiveText;
+            boolean flowOffPhase = (lt != null && lt.contains("Flow OFF"));
+            boolean enable = paused || flowOffPhase;
+            btnContinue.setEnabled(enable);
+            btnFinish.setEnabled(enable);
         }
 
         // ✅ Reprint: activé seulement si connecté-ish + ticket DONE + ticketNo présent
@@ -906,8 +782,24 @@ private void attemptAttachIfPossible(boolean verboseLog) {
         // Guard lifecycle
         if (!isAdded() || getView() == null) return;
 
-        // ✅ NOTE: ne pas forcer le scroll du tab (évite le "jump" pendant refresh)
+        // ✅ préserver position scroll du tab
+        final int oldY = (regRootScroll != null) ? regRootScroll.getScrollY() : -1;
 
+        List<LogBus.LogEvent> events = LogBus.snapshotForNode(node, TAB_LOG_MAX_LINES);
+        if (logViewSinceMs > 0) {
+            ArrayList<LogBus.LogEvent> filtered = new ArrayList<>(events.size());
+            for (LogBus.LogEvent e : events) {
+                if (e.ts >= logViewSinceMs) filtered.add(e);
+            }
+            events = filtered;
+        }
+
+        txtLog.setText(LogBus.buildText(events));
+
+        // ✅ restaurer scroll du tab
+        if (regRootScroll != null && oldY >= 0) {
+            regRootScroll.post(() -> regRootScroll.scrollTo(0, oldY));
+        }
 
         // ✅ Option A: PAS d’auto-scroll du log
         // if (logScroll != null) logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
@@ -932,4 +824,6 @@ private void attemptAttachIfPossible(boolean verboseLog) {
         String m = e.getMessage();
         return (m == null) ? e.getClass().getSimpleName() : m;
     }
+}
+
 }

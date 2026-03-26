@@ -8,9 +8,13 @@ import com.pa.lcr.lcp.log.LogBus;
 import com.pa.lcr.lcp.storage.DeliveryLogStore;
 import com.pa.lcr.lcp.transport.MediaTransportManager;
 import com.pa.lcr.lcp.transport.TransportIo;
+import org.json.JSONObject;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.List;
+import java.util.ArrayList;
+import java.util.Locale;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -45,6 +49,10 @@ public final class RegisterSessionManager {
 
     private final Context appCtx;
     private final DeliveryLogStore store;
+ // ✅ v7: identité registre (node + serial) et pin du média
+ private final Map<Integer, String> expectedSerialByNode = new LinkedHashMap<>();
+ private final Map<String, String> pinnedTransportByRegKey = new LinkedHashMap<>();
+
 
     // ✅ Option B: key = transportKey + ":" + node
     private final Map<String, NodeSession> sessions = new LinkedHashMap<>();
@@ -57,7 +65,119 @@ public final class RegisterSessionManager {
 
     public DeliveryLogStore getStore() { return store; }
 
-    private static String key(String transportKey, int nodeDec) {
+    // =========================================================
+    // ✅ v7: Résolution média par registre (node + serial)
+    // - Si serial attendu connu: on choisit le transport READY dont #80 match
+    // - Sinon: on réutilise une session existante pour ce node (si unique)
+    // =========================================================
+    public synchronized DeliveryController resolveOrCreateForNode(int nodeDec, int fromDec) {
+        int node = nodeDec & 0xFF;
+        int from = fromDec & 0xFF;
+
+        // 0) si un transport est déjà pinné pour node#serial, on le réutilise
+        String expectedSerial = expectedSerialByNode.get(node);
+        if (expectedSerial != null && !expectedSerial.trim().isEmpty()) {
+            String rk = regKey(node, expectedSerial);
+            String pinned = pinnedTransportByRegKey.get(rk);
+            if (pinned != null) {
+                TransportIo io = MediaTransportManager.get(appCtx).getByKey(pinned);
+                if (io != null && io.isOpen()) {
+                    return getOrCreate(pinned, node, from, io);
+                }
+            }
+        }
+
+        // 1) si on a déjà une session existante unique pour ce node, la réutiliser
+        NodeSession one = null;
+        for (Map.Entry<String, NodeSession> e : sessions.entrySet()) {
+            if (e == null) continue;
+            String k = e.getKey();
+            if (k == null) continue;
+            if (!k.endsWith(":" + node)) continue;
+            NodeSession s = e.getValue();
+            if (s == null) continue;
+            if (one == null) one = s;
+            else {
+                one = null; // plusieurs sessions pour ce node
+                break;
+            }
+        }
+        if (one != null) {
+            TransportIo io = MediaTransportManager.get(appCtx).getByKey(one.transportKey);
+            if (io != null && io.isOpen()) return getOrCreate(one.transportKey, node, from, io);
+        }
+
+        // 2) si serial attendu connu: probe tous les transports READY et choisir celui dont #80 match
+        if (expectedSerial != null && !expectedSerial.trim().isEmpty()) {
+            String want = expectedSerial.trim();
+            MediaTransportManager mgr = MediaTransportManager.get(appCtx);
+            List<com.pa.lcr.lcp.transport.TransportSnapshot> snaps = mgr.listSnapshots();
+            if (snaps != null) {
+                for (com.pa.lcr.lcp.transport.TransportSnapshot s : snaps) {
+                    if (s == null || s.key == null) continue;
+                    if (s.status != com.pa.lcr.lcp.transport.TransportStatus.READY) continue;
+                    TransportIo io = mgr.getByKey(s.key);
+                    if (io == null || !io.isOpen()) continue;
+                    String serial = probeSerial(io, node, from);
+                    if (serial != null && serial.equalsIgnoreCase(want)) {
+                        pinnedTransportByRegKey.put(regKey(node, want), s.key);
+                        return getOrCreate(s.key, node, from, io);
+                    }
+                }
+            }
+        }
+
+        // 3) fallback: pickReady (USB puis autre)
+        try {
+            MediaTransportManager mgr = MediaTransportManager.get(appCtx);
+            ArrayList<String> pref = new ArrayList<>();
+            pref.add(MediaTransportManager.KEY_USB);
+            TransportIo io = mgr.pickReady(pref);
+            if (io == null) io = mgr.pickReady(null);
+            if (io != null && io.isOpen()) return getOrCreate(io.getKey(), node, from, io);
+        } catch (Exception ignored) {}
+
+        return null;
+    }
+
+    // Lecture best-effort du serial (#80) sur un transport donné
+    private String probeSerial(TransportIo io, int nodeDec, int fromDec) {
+        try {
+            LcpLink tmp = new LcpLink(io, nodeDec, fromDec, true);
+            byte[] b = tmp.opGetField(80, 500);
+            if (b == null || b.length == 0) return null;
+            String s = new String(b, java.nio.charset.StandardCharsets.UTF_8);
+            int nul = s.indexOf(' ');
+            if (nul >= 0) s = s.substring(0, nul);
+            s = s.trim();
+            return s.isEmpty() ? null : s;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+
+    
+    // ✅ v7: clé registre = node#serial (serial = #80)
+    private static String regKey(int nodeDec, String serialId) {
+        int node = nodeDec & 0xFF;
+        String s = (serialId == null) ? "" : serialId.trim();
+        return node + "#" + s;
+    }
+
+    /** Permet au scan/validate d'enregistrer le serial attendu pour un node. */
+    public synchronized void bindExpectedSerial(int nodeDec, String serialId) {
+        int node = nodeDec & 0xFF;
+        if (serialId == null || serialId.trim().isEmpty()) return;
+        expectedSerialByNode.put(node, serialId.trim());
+    }
+
+    public synchronized String getExpectedSerial(int nodeDec) {
+        int node = nodeDec & 0xFF;
+        return expectedSerialByNode.get(node);
+    }
+
+private static String key(String transportKey, int nodeDec) {
         int node = nodeDec & 0xFF;
         String k = (transportKey == null || transportKey.trim().isEmpty()) ? "?" : transportKey.trim();
         return k + ":" + node;
@@ -71,7 +191,19 @@ public final class RegisterSessionManager {
         return (s != null) ? s.dc : null;
     }
 
-    public synchronized DeliveryController getOrCreate(String transportKey, int nodeDec, int fromDec, TransportIo io) {
+    
+
+    /** v7: retrouve le transportKey associé à un controller (si présent). */
+    public synchronized String findTransportKeyForController(DeliveryController dc) {
+        if (dc == null) return null;
+        for (NodeSession s : sessions.values()) {
+            if (s == null) continue;
+            if (s.dc == dc) return s.transportKey;
+        }
+        return null;
+    }
+
+public synchronized DeliveryController getOrCreate(String transportKey, int nodeDec, int fromDec, TransportIo io) {
         int node = nodeDec & 0xFF;
         int from = fromDec & 0xFF;
 
@@ -205,12 +337,13 @@ public final class RegisterSessionManager {
         final long generationId;
 
         NodeSession(DeliveryController dc, MuxListener mux, NodeScheduler scheduler,
-                    String transportKey, long generationId) {
+                    String transportKey, long generationId, String serialId) {
             this.dc = dc;
             this.mux = mux;
             this.scheduler = scheduler;
             this.transportKey = transportKey;
             this.generationId = generationId;
+ this.serialId = serialId;
         }
     }
 
@@ -330,59 +463,39 @@ public final class RegisterSessionManager {
         private void tick() {
             DeliveryController c = dc;
             if (c == null) return;
-            DeliveryState st = c.getState();
-            if (st == DeliveryState.DISCONNECTED) return;
+            if (!uiSubscribed) return;
+            if (c.getState() == DeliveryState.DISCONNECTED) return;
 
             long now = System.currentTimeMillis();
-            boolean flowing = (st == DeliveryState.RUNNING_FLOWING);
-            // ✅ Ne faire du polling LIVE/STATUS que si UI est abonnée (réduit lag/contension)
-            if (!uiSubscribed) return;
-            boolean paused = (st == DeliveryState.RUNNING_PAUSED);
 
-            if (!flowing && !paused) return;
+            // Cache-only: dernier delCode publié (TickBus)
+            int delCode = 0;
+            try {
+                ApiResult snap = c.api_tickSnapshot();
+                JSONObject d = (snap != null) ? snap.data : null;
+                if (d != null) delCode = d.optInt("delCode", 0);
+            } catch (Exception ignored) {}
 
-            // LIVE
-            if (flowing) {
-                long interval = LIVE_RUNNING_MS + liveBackoffMs;
-                if (now - lastLiveMs >= interval) {
-                    lastLiveMs = now;
-                    try {
-                        c.requestLiveSample();
-                        if (liveBackoffMs > 0) liveBackoffMs = Math.max(0, liveBackoffMs - 200);
-                    } catch (Exception ignored) {}
-                }
-            } else if (paused) {
-                if (LIVE_PAUSED_MS > 0) {
-                    long interval = LIVE_PAUSED_MS + liveBackoffMs;
-                    if (now - lastLiveMs >= interval) {
-                        lastLiveMs = now;
-                        try {
-                            c.requestLiveSample();
-                            if (liveBackoffMs > 0) liveBackoffMs = Math.max(0, liveBackoffMs - 200);
-                        } catch (Exception ignored) {}
-                    }
-                }
+            boolean deliveryActive = (delCode & 0x0008) != 0;
+            boolean flowActive = (delCode & 0x0004) != 0;
+
+            long liveInterval = deliveryActive ? (flowActive ? 250L : 450L) : 1200L;
+            long statusInterval = deliveryActive ? 1500L : 3500L;
+
+            if (now - lastLiveMs >= (liveInterval + liveBackoffMs)) {
+                lastLiveMs = now;
+                try {
+                    c.requestLiveSample();
+                    if (liveBackoffMs > 0) liveBackoffMs = Math.max(0, liveBackoffMs - 200);
+                } catch (Exception ignored) {}
             }
 
-            // STATUS
-            if (flowing) {
-                long interval = STATUS_RUNNING_MS + statusBackoffMs;
-                if (now - lastStatusMs >= interval) {
-                    lastStatusMs = now;
-                    try {
-                        c.requestStatus();
-                        if (statusBackoffMs > 0) statusBackoffMs = Math.max(0, statusBackoffMs - 200);
-                    } catch (Exception ignored) {}
-                }
-            } else if (paused) {
-                long interval = STATUS_PAUSED_MS + statusBackoffMs;
-                if (now - lastStatusMs >= interval) {
-                    lastStatusMs = now;
-                    try {
-                        c.requestStatus();
-                        if (statusBackoffMs > 0) statusBackoffMs = Math.max(0, statusBackoffMs - 200);
-                    } catch (Exception ignored) {}
-                }
+            if (now - lastStatusMs >= (statusInterval + statusBackoffMs)) {
+                lastStatusMs = now;
+                try {
+                    c.requestStatus();
+                    if (statusBackoffMs > 0) statusBackoffMs = Math.max(0, statusBackoffMs - 200);
+                } catch (Exception ignored) {}
             }
         }
 
