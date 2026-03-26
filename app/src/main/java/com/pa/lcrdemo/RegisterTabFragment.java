@@ -93,10 +93,18 @@ public class RegisterTabFragment extends Fragment {
 
     // v7: digits (#39) pour formatage (fallback=3)
     private volatile int lastDigits = 3;
+ // v7: dernier delCode (0x28) observé via TickBus snapshot (cache-only)
+ private volatile int lastDelCode = 0;
+ private volatile long lastDelCodePollMs = 0L;
+ private static final long DELCODE_POLL_MIN_MS = 800L;
+
 
     // v7: throttle validate header retry (serial #80)
     private volatile long lastHeaderValidateMs = 0L;
     private static final long HEADER_VALIDATE_MIN_MS = 5000L;
+ // v7: stop auto-validate once serial acquired
+ private volatile boolean headerValidatedOnce = false;
+
 
     // Auto-attach lifecycle
     private boolean attemptedAutoAttachOnce = false;
@@ -166,7 +174,8 @@ public class RegisterTabFragment extends Fragment {
                 if (starting && state == DeliveryState.RUNNING_FLOWING) starting = false;
                 if (starting && (System.currentTimeMillis() - startingSinceMs) > 12000L) starting = false;
 
-                updateButtons(state);
+                refreshDelCodeFromTickSnapshotThrottled();
+ updateButtons(state);
                 scheduleLogRefresh();
             });
         }
@@ -189,7 +198,7 @@ public class RegisterTabFragment extends Fragment {
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
 
-                // ✅ digits dynamique depuis le controller (scale #39 déjà appliqué côté controller) [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/DeliveryController.java)
+                // ✅ digits dynamique depuis le controller (scale #39 déjà appliqué côté controller)
                 int d = lastDigits;
                 try {
                     if (controller != null) d = controller.getDisplayDigits(); // getter v7 (2 lignes dans DeliveryController)
@@ -198,7 +207,8 @@ public class RegisterTabFragment extends Fragment {
                 if (d > 6) d = 6; // garde-fou
                 lastDigits = d;
 
-                String fmt = "%." + d + "f";
+                int show = Math.min(6, Math.max(0, d + 1));
+            String fmt = "%." + show + "f";
                 if (txtQtyNet != null) txtQtyNet.setText("NET: " + String.format(Locale.ROOT, fmt, net));
                 if (txtQtyGross != null) txtQtyGross.setText("GROSS: " + String.format(Locale.ROOT, fmt, gross));
             });
@@ -222,7 +232,8 @@ public class RegisterTabFragment extends Fragment {
                 // ✅ si serial absent, retenter validate (throttlé)
                 ensureSerialVisibleThrottled();
 
-                updateButtons(controller != null ? controller.getState() : null);
+                refreshDelCodeFromTickSnapshotThrottled();
+ updateButtons(controller != null ? controller.getState() : null);
                 scheduleLogRefresh();
             });
         }
@@ -238,7 +249,8 @@ public class RegisterTabFragment extends Fragment {
                 // ✅ si serial absent, retenter validate (throttlé)
                 ensureSerialVisibleThrottled();
 
-                updateButtons(controller != null ? controller.getState() : null);
+                refreshDelCodeFromTickSnapshotThrottled();
+ updateButtons(controller != null ? controller.getState() : null);
             });
         }
     };
@@ -474,7 +486,17 @@ public class RegisterTabFragment extends Fragment {
         }
 
         if (btnConnect != null) btnConnect.setOnClickListener(v -> connectThisRegister(true));
-        if (btnA != null) btnA.setOnClickListener(v -> { if (controller != null) controller.alignOrRecover(); });
+        if (btnA != null) btnA.setOnClickListener(v -> {
+            if (controller == null) return;
+            controller.alignOrRecover();
+            // v7: après Resolve(A), forcer un refresh unique pour débloquer C si registre prêt
+            ui.postDelayed(() -> {
+                try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
+                try { validateHeaderAsync(); } catch (Exception ignored) {}
+                refreshDelCodeFromTickSnapshotThrottled();
+                updateButtons(controller != null ? controller.getState() : null);
+            }, 900);
+        });
         if (btnB != null) btnB.setOnClickListener(v -> { if (controller != null) controller.requestStatus(); });
 
         if (btnC != null) {
@@ -587,7 +609,8 @@ public class RegisterTabFragment extends Fragment {
                     try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
                     try { validateHeaderAsync(); } catch (Exception ignored) {}
 
-                    updateButtons(controller != null ? controller.getState() : null);
+                    refreshDelCodeFromTickSnapshotThrottled();
+ updateButtons(controller != null ? controller.getState() : null);
                     scheduleLogRefresh();
                 });
             });
@@ -673,6 +696,7 @@ public class RegisterTabFragment extends Fragment {
     private void ensureSerialVisibleThrottled() {
         try {
             if (txtSerialId == null) return;
+            if (headerValidatedOnce) return;
             String cur = String.valueOf(txtSerialId.getText());
             boolean missing = (cur.contains("—") || cur.trim().endsWith(":") || cur.trim().endsWith(": —"));
             if (!missing) return;
@@ -712,6 +736,7 @@ public class RegisterTabFragment extends Fragment {
 
                         if (txtSerialId != null) {
                             txtSerialId.setText("#Série : " + ((serial == null || serial.isEmpty()) ? "—" : serial));
+                    if (serial != null && !serial.trim().isEmpty()) headerValidatedOnce = true;
                         }
 
                         if (txtTicketPending != null) {
@@ -723,7 +748,8 @@ public class RegisterTabFragment extends Fragment {
                             txtLive.setText("LIVE: ticket_pending — faire Resolve (A)");
                         }
 
-                        updateButtons(controller != null ? controller.getState() : null);
+                        refreshDelCodeFromTickSnapshotThrottled();
+ updateButtons(controller != null ? controller.getState() : null);
                         scheduleLogRefresh();
                     });
 
@@ -765,7 +791,11 @@ public class RegisterTabFragment extends Fragment {
         btnB.setEnabled(true);
 
         btnA.setEnabled(connected || paused || flowing);
-        btnC.setEnabled(connected && ticketPendingFlag != 1);
+        int dc = lastDelCode;
+ boolean tp = (dc & 0x0001) != 0;
+ boolean flow = (dc & 0x0004) != 0;
+ boolean act = (dc & 0x0008) != 0;
+ btnC.setEnabled(connected && !tp && !flow && !act);
 
         if (starting) {
             btnContinue.setEnabled(false);
@@ -787,7 +817,7 @@ public class RegisterTabFragment extends Fragment {
         }
     }
 
-    /** Log view: log global filtré par node. [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LogBus.java) */
+    /** Log view: log global filtré par node. */
     private void refreshLogView() {
         if (txtLog == null) return;
         if (cbShowLog == null || !cbShowLog.isChecked()) return;
@@ -799,7 +829,7 @@ public class RegisterTabFragment extends Fragment {
 
         if (!isAdded() || getView() == null) return;
 
-        List<LogBus.LogEvent> events = LogBus.snapshotForNode(node, TAB_LOG_MAX_LINES); // filtre node [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LogBus.java)
+        List<LogBus.LogEvent> events = LogBus.snapshotForNode(node, TAB_LOG_MAX_LINES); // filtre node
         if (logViewSinceMs > 0) {
             ArrayList<LogBus.LogEvent> filtered = new ArrayList<>(events.size());
             for (LogBus.LogEvent e : events) {
@@ -808,7 +838,7 @@ public class RegisterTabFragment extends Fragment {
             events = filtered;
         }
 
-        txtLog.setText(LogBus.buildText(events)); // format unique LogBus [2](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/LogBus.java)
+        txtLog.setText(LogBus.buildText(events)); // format unique LogBus
     }
 
     private String ts(String msg) {
