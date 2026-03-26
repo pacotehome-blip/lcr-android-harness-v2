@@ -98,13 +98,11 @@ public class RegisterTabFragment extends Fragment {
  private volatile long lastDelCodePollMs = 0L;
  private static final long DELCODE_POLL_MIN_MS = 800L;
 
-
     // v7: throttle validate header retry (serial #80)
     private volatile long lastHeaderValidateMs = 0L;
     private static final long HEADER_VALIDATE_MIN_MS = 5000L;
  // v7: stop auto-validate once serial acquired
  private volatile boolean headerValidatedOnce = false;
-
 
     // Auto-attach lifecycle
     private boolean attemptedAutoAttachOnce = false;
@@ -208,7 +206,7 @@ public class RegisterTabFragment extends Fragment {
                 lastDigits = d;
 
                 int show = Math.min(6, Math.max(0, d + 1));
-            String fmt = "%." + show + "f";
+ String fmt = "%." + show + "f";
                 if (txtQtyNet != null) txtQtyNet.setText("NET: " + String.format(Locale.ROOT, fmt, net));
                 if (txtQtyGross != null) txtQtyGross.setText("GROSS: " + String.format(Locale.ROOT, fmt, gross));
             });
@@ -736,7 +734,6 @@ public class RegisterTabFragment extends Fragment {
 
                         if (txtSerialId != null) {
                             txtSerialId.setText("#Série : " + ((serial == null || serial.isEmpty()) ? "—" : serial));
-                    if (serial != null && !serial.trim().isEmpty()) headerValidatedOnce = true;
                         }
 
                         if (txtTicketPending != null) {
@@ -763,7 +760,26 @@ public class RegisterTabFragment extends Fragment {
     // =========================================================
     // Buttons logic
     // =========================================================
-    private void updateButtons(DeliveryState state) {
+    
+ // ---------------------------------------------------------
+ // v7: delCode cache-only (TickBus) pour décider A/B/C sans spam LCP
+ // ---------------------------------------------------------
+ private void refreshDelCodeFromTickSnapshotThrottled() {
+     try {
+         DeliveryController c = controller;
+         if (c == null) return;
+         long now = System.currentTimeMillis();
+         if (now - lastDelCodePollMs < DELCODE_POLL_MIN_MS) return;
+         lastDelCodePollMs = now;
+         ApiResult r = c.api_tickSnapshot();
+         JSONObject d = (r != null) ? r.data : null;
+         if (d != null) {
+             lastDelCode = d.optInt("delCode", lastDelCode);
+         }
+     } catch (Exception ignored) {}
+ }
+
+private void updateButtons(DeliveryState state) {
         if (btnConnect == null || btnA == null || btnB == null || btnC == null || btnContinue == null || btnFinish == null)
             return;
 
