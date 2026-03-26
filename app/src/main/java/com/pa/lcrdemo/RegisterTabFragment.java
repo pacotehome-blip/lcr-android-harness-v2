@@ -39,7 +39,7 @@ import java.util.concurrent.Executors;
  * ✅ AJOUT: bouton Reprint (last ticket)
  * - TicketNo: on tente d’utiliser celui affiché dans Ticket Number : … (digits). Si vide -> pas de ticket.
  * - Option A: si ticketPending est ON -> bouton désactivé + message "faire Resolve (A)"
- * - Appel direct controller.api_ticketReprintCurrent() (non bloquant UI)
+ * - Appel direct controller.api_ticketReprintCurrent() (non bloquant UI) il faut que ca marche
  */
 public class RegisterTabFragment extends Fragment {
 
