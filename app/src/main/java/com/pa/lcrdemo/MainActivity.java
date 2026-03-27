@@ -59,9 +59,8 @@ import com.pa.lcr.lcp.storage.DeliveryLogStore;
 
 // ✅ Option A: runtime transport manager
 import com.pa.lcr.lcp.transport.MediaTransportManager;
-
-
 import com.pa.lcr.lcp.transport.TransportIo;
+
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -105,12 +104,18 @@ public class MainActivity extends AppCompatActivity {
     private Button btnBtDisconnect;
     private TextView txtBtStatus;
 
+    // ===== CONFIGURE: Scan registres (par média) =====
+    private Button btnScanUsbRegs;
+    private Button btnScanBtRegs;
+    private TextView txtRegsFound;
+
     // ===== BT runtime (paired-only) =====
     private static final int REQ_ENABLE_BT = 9103;
-    
- // ✅ Android 9 (API 28) : permission Storage legacy pour écrire dans /Download
- private static final int REQ_STORAGE_LEGACY = 9104;
-private final ExecutorService btExec = Executors.newSingleThreadExecutor();
+
+    // ✅ Android 9 (API 28) : permission Storage legacy pour écrire dans /Download
+    private static final int REQ_STORAGE_LEGACY = 9104;
+
+    private final ExecutorService btExec = Executors.newSingleThreadExecutor();
     private BluetoothAdapter btAdapter;
     private final List<BluetoothDevice> btBonded = new ArrayList<>();
     private ArrayAdapter<String> btAdapterUi;
@@ -197,9 +202,11 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
     private Button btnScrollDown;
     private CheckBox cbTxRx;
     private CheckBox cbLogTs;
+
     private boolean logTsEnabled = false;
     private long mainLogViewSinceMs = 0L;
     private final Handler ui = new Handler(Looper.getMainLooper());
+
     private static final long MAIN_LOG_REFRESH_MIN_MS = 250;
     private long lastMainLogRefreshMs = 0L;
     private boolean mainLogRefreshPending = false;
@@ -307,8 +314,9 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
         mediaTransportManager = MediaTransportManager.get(this);
 
         deliveryStore = new DeliveryLogStore(this);
- // ✅ Android 9: demander la permission storage (une seule fois) pour /Download
- ensureLegacyStoragePermissionForDownloads(true);
+
+        // ✅ Android 9: demander la permission storage (une seule fois) pour /Download
+        ensureLegacyStoragePermissionForDownloads(true);
         deliveryStore.purgeOlderThanDaysAsync(7);
 
         refreshApiStatus();
@@ -393,6 +401,11 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
         btnBtDisconnect = findViewById(R.id.btnBtDisconnect);
         txtBtStatus = findViewById(R.id.txtBtStatus);
 
+        // CONFIGURE: scan registres (par média)
+        btnScanUsbRegs = findViewById(R.id.btnScanUsbRegs);
+        btnScanBtRegs = findViewById(R.id.btnScanBtRegs);
+        txtRegsFound = findViewById(R.id.txtRegsFound);
+
         if (txtApiUrl != null) {
             txtApiUrl.setText("http://127.0.0.1:" + API_PORT);
         }
@@ -401,8 +414,10 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
     private void initUiDefaults() {
         edtTo.setText("250");
         edtFrom.setText("255");
+
         if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : —");
         if (txtActiveNode != null) txtActiveNode.setText("Node actif : —");
+
         if (cbShowLog != null) cbShowLog.setChecked(false);
         if (logPanel != null) logPanel.setVisibility(View.GONE);
 
@@ -429,8 +444,8 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
     }
 
     private void wireUi() {
-        btnScanUsb.setOnClickListener(v -> scanUsb());
-        btnPingUsb.setOnClickListener(v -> openSelectedUsb());
+        if (btnScanUsb != null) btnScanUsb.setOnClickListener(v -> scanUsb());
+        if (btnPingUsb != null) btnPingUsb.setOnClickListener(v -> openSelectedUsb());
 
         if (btnAddRegisterTab != null) {
             btnAddRegisterTab.setOnClickListener(v -> {
@@ -537,6 +552,10 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
         if (btnBtRefresh != null) btnBtRefresh.setOnClickListener(v -> refreshBondedBtList());
         if (btnBtConnect != null) btnBtConnect.setOnClickListener(v -> btConnectSelected());
         if (btnBtDisconnect != null) btnBtDisconnect.setOnClickListener(v -> btDisconnect());
+
+        // ✅ CONFIGURE: scan registres (par média)
+        if (btnScanUsbRegs != null) btnScanUsbRegs.setOnClickListener(v -> scanRegistersUsbOnly());
+        if (btnScanBtRegs != null) btnScanBtRegs.setOnClickListener(v -> scanRegistersBtOnly());
     }
 
     private void setupTabsTop() {
@@ -546,6 +565,7 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
         tabLayout.addTab(tabLayout.newTab().setText("API-Face"), false);
         tabLayout.addTab(tabLayout.newTab().setText("CONFIGURE"), false);
         showPage(0);
+
         tabLayout.addOnTabSelectedListener(new TabLayout.OnTabSelectedListener() {
             @Override public void onTabSelected(TabLayout.Tab tab) { showPage(tab.getPosition()); }
             @Override public void onTabUnselected(TabLayout.Tab tab) {}
@@ -557,6 +577,7 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
         if (pageMain != null) pageMain.setVisibility(index == 0 ? View.VISIBLE : View.GONE);
         if (pageApiFace != null) pageApiFace.setVisibility(index == 1 ? View.VISIBLE : View.GONE);
         if (pageConfigure != null) pageConfigure.setVisibility(index == 2 ? View.VISIBLE : View.GONE);
+
         if (index == 1) refreshApiStatus();
         if (index == 2) {
             updateMediaStatusUi();
@@ -566,12 +587,11 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
     }
 
     // =========================
-// Register tabs helpers (multi-media)
-// =========================
-
+    // Register tabs helpers (multi-media)
+    // =========================
     private static String mediaShortFromTransportKey(String transportKey) {
         if (transportKey == null) return "—";
-        String k = transportKey.trim().toUpperCase(java.util.Locale.ROOT);
+        String k = transportKey.trim().toUpperCase(Locale.ROOT);
         if (k.startsWith("BT:")) return "BT";
         if (k.startsWith("USB")) return "USB";
         if (k.contains("BT")) return "BT";
@@ -641,6 +661,7 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
     private void upsertRegisterTabFromScan(String transportKey, int node, int from, String serialId, boolean focus) {
         if (node < 1 || node > 250) return;
         if (from < 0 || from > 255) from = 255;
+
         String mediaShort = mediaShortFromTransportKey(transportKey);
         String serial = safeSerial(serialId);
         if (serial.isEmpty()) return;
@@ -678,8 +699,8 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
 
     private void removeAllUnknownSerialTabsBestEffort() {
         try {
-            java.util.ArrayList<String> toRemove = new java.util.ArrayList<>();
-            for (java.util.Map.Entry<String, TabSpec> e : tabsByKey.entrySet()) {
+            ArrayList<String> toRemove = new ArrayList<>();
+            for (Map.Entry<String, TabSpec> e : tabsByKey.entrySet()) {
                 if (e == null) continue;
                 TabSpec s = e.getValue();
                 if (s == null) continue;
@@ -731,6 +752,7 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
         if (registerContainer == null || tabKey == null) return;
         TabSpec spec = tabsByKey.get(tabKey);
         if (spec == null) return;
+
         currentTabKey = tabKey;
         currentRegNode = spec.node;
 
@@ -758,8 +780,8 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
 
         // remove regKey mapping entries pointing to this tabKey
         try {
-            java.util.ArrayList<String> toRemove = new java.util.ArrayList<>();
-            for (java.util.Map.Entry<String, String> e : regKeyToTabKey.entrySet()) {
+            ArrayList<String> toRemove = new ArrayList<>();
+            for (Map.Entry<String, String> e : regKeyToTabKey.entrySet()) {
                 if (e == null) continue;
                 if (tabKey.equals(e.getValue())) toRemove.add(e.getKey());
             }
@@ -808,14 +830,163 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
 
         logUi(null, "TAB registre supprimé: " + tabKey + (reason != null ? (" (" + reason + ")") : ""));
     }
-// =========================
-    // Scan registres Option B (0x28 + #80 + #23) - AUTORITAIRE
+
     // =========================
-// =========================
-// Scan registres Option B (0x28 + #80 + #23) - AUTORITAIRE
-// ✅ Option B strict: tout passe par TransportIo (USB/BT)
-// =========================
-private void scanRegistersOptionB() {
+    // CONFIGURE: Scan registres par média (USB / BT) — Option A: dernier scan
+    // =========================
+
+    private void scanRegistersUsbOnly() {
+        TransportIo io = null;
+        try {
+            if (mediaTransportManager != null) {
+                io = mediaTransportManager.getByKey(MediaTransportManager.KEY_USB);
+            }
+        } catch (Exception ignored) {}
+
+        if (io == null || !io.isOpen()) {
+            logUi(null, "Scan USB registres: USB non prêt. Faire Scan USB + Ouvrir/Ping.");
+            toast("Scan USB registres: USB non prêt");
+            return;
+        }
+        scanRegistersWithIo(io, io.getKey());
+    }
+
+    private void scanRegistersBtOnly() {
+        if (lastBtMac == null || lastBtMac.trim().isEmpty()) {
+            logUi(null, "Scan BT registres: aucun BT connecté. Faire Refresh + Connect.");
+            toast("Scan BT registres: BT non connecté");
+            return;
+        }
+
+        TransportIo io = null;
+        try {
+            String key = MediaTransportManager.btKey(lastBtMac);
+            if (mediaTransportManager != null) {
+                io = mediaTransportManager.getByKey(key);
+            }
+        } catch (Exception ignored) {}
+
+        if (io == null || !io.isOpen()) {
+            logUi(null, "Scan BT registres: BT non prêt. Faire Connect BT.");
+            toast("Scan BT registres: BT non prêt");
+            return;
+        }
+        scanRegistersWithIo(io, io.getKey());
+    }
+
+    private void scanRegistersWithIo(TransportIo io, String transportKey) {
+        if (io == null || !io.isOpen()) return;
+
+        final String tk = (transportKey != null ? transportKey : io.getKey());
+        final String mediaShort = mediaShortFromTransportKey(tk);
+
+        logUi(null, "Scan registres (" + mediaShort + ") demandé");
+
+        try { if (btnScanUsbRegs != null) btnScanUsbRegs.setEnabled(false); } catch (Exception ignored) {}
+        try { if (btnScanBtRegs != null) btnScanBtRegs.setEnabled(false); } catch (Exception ignored) {}
+        try { if (btnScanNodes != null) btnScanNodes.setEnabled(false); } catch (Exception ignored) {}
+
+        if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : scan en cours... (" + mediaShort + ")");
+        if (txtRegsFound != null) txtRegsFound.setText("—");
+
+        final TransportIo ioFinal = io;
+        scanExec.execute(() -> {
+            final long scanStartedMs = System.currentTimeMillis();
+            LinkedHashMap<Integer, NodeScanItem> found = new LinkedHashMap<>();
+            final int T28 = 300;
+            final int TF = 300;
+
+            for (int node = 1; node <= 250; node++) {
+                try {
+                    LcpLink tmp = new LcpLink(ioFinal, node, 255, true);
+                    int[] ds = tmp.opDeliveryStatus(T28);
+                    int delCode = ds[1];
+                    boolean ticketPending = (delCode & 0x0001) != 0;
+                    boolean flowActive = (delCode & 0x0004) != 0;
+                    boolean deliveryActive = (delCode & 0x0008) != 0;
+
+                    String serialId = decodeAz(tmp.opGetField(80, TF));
+                    // ticketNo optionnel (vient avec status du TAB)
+                    String ticketNo = u32beDec(tmp.opGetField(23, TF));
+
+                    if (serialId != null && !serialId.trim().isEmpty()) {
+                        found.put(node, new NodeScanItem(node, serialId, ticketNo, ticketPending, deliveryActive, flowActive, false));
+                    }
+                } catch (Exception ignored) {}
+            }
+
+            final long scanFinishedMs = System.currentTimeMillis();
+            persistScanEvents(scanStartedMs, scanFinishedMs, found);
+
+            ui.post(() -> {
+                try {
+                    nodeItems.clear();
+
+                    if (found.isEmpty()) {
+                        nodeItems.add(NodeScanItem.default250());
+                        if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : aucun (" + mediaShort + ")");
+                        if (nodeAdapter != null) nodeAdapter.notifyDataSetChanged();
+                        if (txtRegsFound != null) txtRegsFound.setText("(aucun registre trouvé)\n" + mediaShort);
+                        logUi(null, "Scan registres: aucun trouvé (" + mediaShort + ")");
+                        return;
+                    }
+
+                    // default = 250 si présent sinon premier trouvé
+                    NodeScanItem defaultItem;
+                    if (found.containsKey(250)) {
+                        defaultItem = found.get(250).asDefault();
+                        found.remove(250);
+                    } else {
+                        Map.Entry<Integer, NodeScanItem> first = found.entrySet().iterator().next();
+                        defaultItem = first.getValue().asDefault();
+                        found.remove(first.getKey());
+                    }
+
+                    nodeItems.add(defaultItem);
+                    for (NodeScanItem it : found.values()) nodeItems.add(it);
+
+                    if (txtNodesSummary != null)
+                        txtNodesSummary.setText("Nodes trouvés : " + nodeItems.size() + " (" + mediaShort + ")");
+                    if (nodeAdapter != null) nodeAdapter.notifyDataSetChanged();
+
+                    // Upsert tabs (pas de clear all)
+                    int defaultNode = defaultItem.lcrnode;
+                    upsertRegisterTabFromScan(tk, defaultNode, 255, defaultItem.serialId, true);
+                    for (NodeScanItem it : nodeItems) {
+                        if (it == null) continue;
+                        if (it.lcrnode == defaultNode) continue;
+                        upsertRegisterTabFromScan(tk, it.lcrnode, 255, it.serialId, false);
+                    }
+
+                    // Option A: afficher uniquement le dernier scan
+                    if (txtRegsFound != null) {
+                        StringBuilder sb = new StringBuilder();
+                        sb.append(mediaShort).append(" — ").append(nodeItems.size()).append(" registre(s)\n");
+                        for (NodeScanItem it : nodeItems) {
+                            if (it == null) continue;
+                            sb.append(tabLabelOf(mediaShort, it.lcrnode, it.serialId)).append("\n");
+                        }
+                        txtRegsFound.setText(sb.toString().trim());
+                    }
+
+                    edtTo.setText(String.valueOf(defaultNode));
+                    logUi(null, "Scan registres terminé: " + nodeItems.size() + " node(s), default=" + defaultNode + " (" + mediaShort + ")");
+
+                } finally {
+                    try { if (btnScanUsbRegs != null) btnScanUsbRegs.setEnabled(true); } catch (Exception ignored) {}
+                    try { if (btnScanBtRegs != null) btnScanBtRegs.setEnabled(true); } catch (Exception ignored) {}
+                    try { if (btnScanNodes != null) btnScanNodes.setEnabled(true); } catch (Exception ignored) {}
+                    updateNodesStatusUi();
+                }
+            });
+        });
+    }
+
+    // =========================
+    // Scan registres Option B (0x28 + #80 + #23) — (ancienne entrée, conservée)
+    // pickReady (BT préféré, sinon USB)
+    // =========================
+    private void scanRegistersOptionB() {
         // ✅ Media-aware: choisir le média READY selon préférence (BT si lastBtMac) sinon USB.
         TransportIo io = null;
         String pickedKey = null;
@@ -823,9 +994,9 @@ private void scanRegistersOptionB() {
             if (mediaTransportManager != null) {
                 ArrayList<String> preferred = new ArrayList<>();
                 if (lastBtMac != null && !lastBtMac.trim().isEmpty()) {
-                    preferred.add(com.pa.lcr.lcp.transport.MediaTransportManager.btKey(lastBtMac));
+                    preferred.add(MediaTransportManager.btKey(lastBtMac));
                 }
-                preferred.add(com.pa.lcr.lcp.transport.MediaTransportManager.KEY_USB);
+                preferred.add(MediaTransportManager.KEY_USB);
                 io = mediaTransportManager.pickReady(preferred);
                 if (io == null) io = mediaTransportManager.pickReady(null);
                 pickedKey = (io != null) ? io.getKey() : null;
@@ -861,16 +1032,13 @@ private void scanRegistersOptionB() {
                     boolean ticketPending = (delCode & 0x0001) != 0;
                     boolean flowActive = (delCode & 0x0004) != 0;
                     boolean deliveryActive = (delCode & 0x0008) != 0;
-
                     String serialId = decodeAz(tmp.opGetField(80, TF));
                     // ticketNo optionnel (vient avec status du TAB)
                     String ticketNo = u32beDec(tmp.opGetField(23, TF));
-
                     if (serialId != null && !serialId.trim().isEmpty()) {
                         found.put(node, new NodeScanItem(node, serialId, ticketNo, ticketPending, deliveryActive, flowActive, false));
                     }
-                } catch (Exception ignored) {
-                }
+                } catch (Exception ignored) {}
             }
 
             final long scanFinishedMs = System.currentTimeMillis();
@@ -900,10 +1068,12 @@ private void scanRegistersOptionB() {
 
                     nodeItems.add(defaultItem);
                     for (NodeScanItem it : found.values()) nodeItems.add(it);
+
                     if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : " + nodeItems.size() + " (" + mediaShort + ")");
                     if (nodeAdapter != null) nodeAdapter.notifyDataSetChanged();
 
                     int defaultNode = defaultItem.lcrnode;
+
                     upsertRegisterTabFromScan(transportKey, defaultNode, 255, defaultItem.serialId, true);
                     for (NodeScanItem it : nodeItems) {
                         if (it == null) continue;
@@ -913,7 +1083,6 @@ private void scanRegistersOptionB() {
 
                     edtTo.setText(String.valueOf(defaultNode));
                     logUi(null, "Scan registres terminé: " + nodeItems.size() + " node(s), default=" + defaultNode + " (" + mediaShort + ")");
-
                 } finally {
                     if (btnScanNodes != null) btnScanNodes.setEnabled(true);
                     updateNodesStatusUi();
@@ -921,7 +1090,6 @@ private void scanRegistersOptionB() {
             });
         });
     }
-
 
     /**
      * ✅ Option 2 + Option 5:
@@ -937,8 +1105,15 @@ private void scanRegistersOptionB() {
         if (found != null && !found.isEmpty()) {
             for (NodeScanItem it : found.values()) {
                 if (it == null) continue;
+
+                // ✅ serial requis
                 if (it.serialId == null || it.serialId.trim().isEmpty()) continue;
-                if (it.ticketNo == null || it.ticketNo.trim().isEmpty()) continue;
+
+                // ✅ ticket optionnel: vient avec status du TAB.
+                // Pour respecter la clé métier (serial_id, ticket_no), on génère une clé scan si ticket vide.
+                String tno = (it.ticketNo != null && !it.ticketNo.trim().isEmpty())
+                        ? it.ticketNo.trim()
+                        : ("SCAN-" + scanStartedMs + "-N" + it.lcrnode);
 
                 long detectedMs = System.currentTimeMillis();
                 JSONObject data = new JSONObject();
@@ -951,7 +1126,8 @@ private void scanRegistersOptionB() {
                     data.put("scan_finished_ms", scanFinishedMs);
                     data.put("duration_ms", durationMs);
                     data.put("serial_id", it.serialId);
-                    data.put("ticket_no", it.ticketNo);
+                    data.put("ticket_no", it.ticketNo); // peut être vide
+                    data.put("ticket_key", tno);        // clé utilisée si ticket vide
                     data.put("ticketPending", it.ticketPending ? 1 : 0);
                     data.put("deliveryActive", it.deliveryActive ? 1 : 0);
                     data.put("flowActive", it.flowActive ? 1 : 0);
@@ -959,7 +1135,7 @@ private void scanRegistersOptionB() {
 
                 deliveryStore.upsertSummaryAsync(
                         it.serialId,
-                        it.ticketNo,
+                        tno,
                         null,
                         "NODE_DETECTED_SCAN",
                         DeliveryLogStore.SOURCE_UI,
@@ -968,7 +1144,10 @@ private void scanRegistersOptionB() {
                         null
                 );
 
-                deliveryStore.openAttemptAsync(it.serialId, it.ticketNo, DeliveryLogStore.SOURCE_UI, null, attemptId -> {
+                final String serialKey = it.serialId;
+                final String ticketKey = tno;
+
+                deliveryStore.openAttemptAsync(serialKey, ticketKey, DeliveryLogStore.SOURCE_UI, null, attemptId -> {
                     deliveryStore.addEventAsync(attemptId, DeliveryLogStore.LEVEL_INFO,
                             "SCAN_NODE_DETECTED",
                             "Scan registres: node détecté",
@@ -982,7 +1161,6 @@ private void scanRegistersOptionB() {
         final String scanSerial = "__SCAN__";
         final String scanTicket = "SCAN-" + scanStartedMs;
         final String scanState = "SCAN_COMPLETED";
-
         JSONObject summary = new JSONObject();
         try {
             summary.put("event_type", "SCAN_COMPLETED");
@@ -990,7 +1168,6 @@ private void scanRegistersOptionB() {
             summary.put("scan_finished_ms", scanFinishedMs);
             summary.put("duration_ms", durationMs);
             summary.put("found_count", foundCount);
-
             JSONArray nodes = new JSONArray();
             if (found != null) {
                 int k = 0;
@@ -1089,7 +1266,6 @@ private void scanRegistersOptionB() {
         usbDevices.clear();
         usbDevices.addAll(usbManager.getDeviceList().values());
         logUi(null, "Scan USB: " + usbDevices.size() + " périphérique(s)");
-
         List<String> labels = new ArrayList<>();
         for (UsbDevice d : usbDevices) {
             String m = d.getManufacturerName();
@@ -1099,7 +1275,6 @@ private void scanRegistersOptionB() {
             labels.add(m + " - " + p);
             logUi(null, String.format(Locale.ROOT, " - %s - %s (VID=%04X PID=%04X)", m, p, d.getVendorId(), d.getProductId()));
         }
-
         spnUsbDevices.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, labels));
     }
 
@@ -1181,17 +1356,14 @@ private void scanRegistersOptionB() {
             try { port.close(); } catch (Exception ignore) {}
             return;
         }
-
         usbPort = port;
         logUi(null, "USB prêt (receiver)");
-
         // ✅ Option A: publish USB ready
         try {
             if (mediaTransportManager != null) {
                 mediaTransportManager.onUsbReady(null, usbPort, "USB prêt (MainActivity)");
             }
         } catch (Exception ignored) {}
-
         logMedia1("USB Ready");
     }
 
@@ -1226,7 +1398,6 @@ private void scanRegistersOptionB() {
         updateMediaStatusUi();
         updateNodesStatusUi();
     }
-
 
     // =========================
     // API Server
@@ -1293,7 +1464,6 @@ private void scanRegistersOptionB() {
                 logApi(node, line);
                 return;
             }
-
             logApi(node, line);
             return;
         }
@@ -1312,7 +1482,6 @@ private void scanRegistersOptionB() {
                 if (isJobDoneRespLine(line)) logApi(node, line);
                 return;
             }
-
             logApi(node, line);
             return;
         }
@@ -1331,7 +1500,6 @@ private void scanRegistersOptionB() {
             toast("Backup DB impossible: store absent");
             return;
         }
-
         Uri savedDir = getSavedBackupDirUri();
         if (savedDir != null) {
             backupDbToChosenDir(savedDir);
@@ -1345,17 +1513,17 @@ private void scanRegistersOptionB() {
                 else toast("Backup FAIL: " + fileName + " " + detail);
             });
         } else {
-		// Android 9 et - : tenter Downloads si permission accordée, sinon demander permission puis fallback dossier
-		if (ensureLegacyStoragePermissionForDownloads(true)) {
-			String name = "lcr_delivery_" + utcStamp() + ".db";
-			deliveryStore.backupDbToDownloadsAsync(this, name, (ok, fileName, detail) -> {
-				if (ok) toast("Backup OK (Downloads): " + fileName);
-				else toast("Backup FAIL: " + fileName + " " + detail);
-			});
-		} else {
-			requestBackupDir();
-		}
-	}
+            // Android 9 et - : tenter Downloads si permission accordée, sinon demander permission puis fallback dossier
+            if (ensureLegacyStoragePermissionForDownloads(true)) {
+                String name = "lcr_delivery_" + utcStamp() + ".db";
+                deliveryStore.backupDbToDownloadsAsync(this, name, (ok, fileName, detail) -> {
+                    if (ok) toast("Backup OK (Downloads): " + fileName);
+                    else toast("Backup FAIL: " + fileName + " " + detail);
+                });
+            } else {
+                requestBackupDir();
+            }
+        }
     }
 
     private void requestBackupDir() {
@@ -1412,42 +1580,35 @@ private void scanRegistersOptionB() {
                 toast("Backup FAIL: DB introuvable (" + DeliveryDb.DB_NAME + ")");
                 return;
             }
-
             if (deliveryStore != null) deliveryStore.checkpointWalBestEffort();
-
             String name = "lcr_delivery_" + utcStamp() + ".db";
+
             DocumentFile dir = DocumentFile.fromTreeUri(this, dirUri);
             if (dir == null || !dir.canWrite()) {
                 toast("Backup FAIL: dossier non accessible en écriture");
                 return;
             }
-
             DocumentFile existing = dir.findFile(name);
             if (existing != null) { try { existing.delete(); } catch (Exception ignore) {} }
-
             DocumentFile target = dir.createFile("application/x-sqlite3", name);
             if (target == null || target.getUri() == null) {
                 toast("Backup FAIL: création du fichier impossible");
                 return;
             }
-
             Uri outUri = target.getUri();
+
             try (java.io.InputStream in = new java.io.FileInputStream(dbFile);
                  java.io.OutputStream out = getContentResolver().openOutputStream(outUri)) {
-
                 if (out == null) {
                     toast("Backup FAIL: output stream null");
                     return;
                 }
-
                 byte[] buf = new byte[64 * 1024];
                 int r;
                 while ((r = in.read(buf)) > 0) out.write(buf, 0, r);
                 out.flush();
             }
-
             toast("Backup OK (dossier choisi): " + name);
-
         } catch (Exception e) {
             toast("Backup FAIL: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
         }
@@ -1468,16 +1629,14 @@ private void scanRegistersOptionB() {
 
         long now = System.currentTimeMillis();
         long dt = now - lastMainLogRefreshMs;
-
         if (dt >= MAIN_LOG_REFRESH_MIN_MS && !mainLogRefreshPending) {
             lastMainLogRefreshMs = now;
             refreshGlobalLogView();
             return;
         }
-
         if (mainLogRefreshPending) return;
-        mainLogRefreshPending = true;
 
+        mainLogRefreshPending = true;
         long delay = Math.max(0L, MAIN_LOG_REFRESH_MIN_MS - dt);
         ui.postDelayed(() -> {
             mainLogRefreshPending = false;
@@ -1489,7 +1648,6 @@ private void scanRegistersOptionB() {
     private void refreshGlobalLogView() {
         if (txtLog == null) return;
         if (cbShowLog != null && !cbShowLog.isChecked()) return;
-
         List<LogBus.LogEvent> events = LogBus.snapshotGlobal(1400, mainLogViewSinceMs);
         txtLog.setText(LogBus.buildText(events));
     }
@@ -1576,41 +1734,35 @@ private void scanRegistersOptionB() {
     }
 
     // =========================
-    // CONFIGURE: Bluetooth (paired only)
+    // ✅ Storage legacy (Android 9 / API 28) : permission runtime
     // =========================
-    
- // =========================
- // ✅ Storage legacy (Android 9 / API 28) : permission runtime
- // - Requis pour écrire dans /storage/emulated/0/Download
- // - Sur Android 10+ : non requis (MediaStore / scoped storage)
- // =========================
- private boolean ensureLegacyStoragePermissionForDownloads(boolean prompt) {
-     try {
-         // Android 10+ : pas besoin
-         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) return true;
-         // Android 9 et - : WRITE_EXTERNAL_STORAGE runtime (API 23+)
-         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true;
-         int p = ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE);
-         if (p == PackageManager.PERMISSION_GRANTED) return true;
-         if (!prompt) return false;
-         ActivityCompat.requestPermissions(this,
-                 new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE, Manifest.permission.READ_EXTERNAL_STORAGE},
-                 REQ_STORAGE_LEGACY);
-         return false;
-     } catch (Exception ignored) {
-         return false;
-     }
- }
+    private boolean ensureLegacyStoragePermissionForDownloads(boolean prompt) {
+        try {
+            // Android 10+ : pas besoin
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) return true;
+            // Android 9 et - : WRITE_EXTERNAL_STORAGE runtime (API 23+)
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true;
 
-private boolean ensureBtConnectPermission() {
+            int p = ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE);
+            if (p == PackageManager.PERMISSION_GRANTED) return true;
+            if (!prompt) return false;
+
+            ActivityCompat.requestPermissions(this,
+                    new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE, Manifest.permission.READ_EXTERNAL_STORAGE},
+                    REQ_STORAGE_LEGACY);
+            return false;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private boolean ensureBtConnectPermission() {
         // Android 9: pas de permission runtime; Android 12+: BLUETOOTH_CONNECT.
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true;
-
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT)
                 == PackageManager.PERMISSION_GRANTED) {
             return true;
         }
-
         ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.BLUETOOTH_CONNECT}, 9101);
         return false;
     }
@@ -1694,7 +1846,6 @@ private boolean ensureBtConnectPermission() {
         }
 
         logMedia1("BT Connect: demandé " + dev.getAddress());
-
         if (txtBtStatus != null) txtBtStatus.setText("BT : connecting…");
 
         btExec.execute(() -> {
@@ -1705,8 +1856,7 @@ private boolean ensureBtConnectPermission() {
                 // ✅ FIX: éviter que la discovery casse le RFCOMM (ret=-1)
                 try { if (btAdapter != null) btAdapter.cancelDiscovery(); } catch (Exception ignored) {}
 
-                // ✅ FIX: insecure RFCOMM d'abord (souvent requis sur adaptateurs série),
-                // puis fallback secure si nécessaire.
+                // ✅ FIX: insecure RFCOMM d'abord, puis fallback secure si nécessaire.
                 try {
                     s = dev.createInsecureRfcommSocketToServiceRecord(SPP_UUID);
                 } catch (Exception insecureNotSupported) {
@@ -1714,12 +1864,11 @@ private boolean ensureBtConnectPermission() {
                 }
 
                 s.connect();
-
                 btSocket = s;
                 btIn = s.getInputStream();
                 btOut = s.getOutputStream();
 
-                // ✅ Option A: publish BT connected
+                // ✅ publish BT connected
                 try {
                     lastBtMac = (dev != null ? dev.getAddress() : null);
                     if (mediaTransportManager != null) {
@@ -1740,10 +1889,9 @@ private boolean ensureBtConnectPermission() {
                 logMedia1("BT Connect: OK " + dev.getAddress());
 
             } catch (Exception e) {
-
                 try { if (s != null) s.close(); } catch (Exception ignored) {}
 
-                // ✅ Option A: publish BT error
+                // ✅ publish BT error
                 try {
                     String mac = (dev != null ? dev.getAddress() : lastBtMac);
                     if (mediaTransportManager != null) {
@@ -1772,7 +1920,7 @@ private boolean ensureBtConnectPermission() {
     private synchronized void btDisconnect() {
         logMedia1("BT Disconnect: " + (lastBtMac != null ? lastBtMac : "-"));
 
-        // ✅ Option A: publish BT disconnected
+        // ✅ publish BT disconnected
         try {
             if (mediaTransportManager != null) {
                 mediaTransportManager.onBtDisconnected(lastBtMac, "BT disconnected");
@@ -1804,20 +1952,20 @@ private boolean ensureBtConnectPermission() {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        
-	if (requestCode == REQ_STORAGE_LEGACY) {
-		boolean ok = (grantResults != null && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED);
-		if (ok) {
-			toast("Storage OK (Android 9): accès Downloads accordé");
-			logUi(null, "Storage permission granted (Downloads)");
-		} else {
-			toast("Storage refusé: /Download indisponible (Android 9)");
-			logUi(null, "Storage permission denied (Downloads)");
-		}
-		return;
-	}
 
-if (requestCode == 9101) {
+        if (requestCode == REQ_STORAGE_LEGACY) {
+            boolean ok = (grantResults != null && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED);
+            if (ok) {
+                toast("Storage OK (Android 9): accès Downloads accordé");
+                logUi(null, "Storage permission granted (Downloads)");
+            } else {
+                toast("Storage refusé: /Download indisponible (Android 9)");
+                logUi(null, "Storage permission denied (Downloads)");
+            }
+            return;
+        }
+
+        if (requestCode == 9101) {
             boolean ok = (grantResults != null && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED);
             if (ok) refreshBondedBtList();
             else if (txtBtStatus != null) txtBtStatus.setText("BT : permission refusée");

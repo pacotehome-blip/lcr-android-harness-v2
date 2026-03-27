@@ -57,79 +57,6 @@
             android:orientation="vertical"
             android:padding="6dp">
       <!-- ===================== USB (déplacé dans CONFIGURE) ===================== -->
-
-<!-- ===================== MANUEL: TO/FROM + Ajouter/Focus TAB ===================== -->
-            <TextView
-                android:id="@+id/txtActiveNode"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Node actif : —"
-                android:textStyle="bold"
-                android:layout_marginTop="6dp" />
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:layout_marginTop="4dp">
-
-                <EditText
-                    android:id="@+id/edtTo"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:hint="TO (ex: 250)"
-                    android:inputType="number"
-                    android:singleLine="true" />
-
-                <EditText
-                    android:id="@+id/edtFrom"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:layout_marginStart="8dp"
-                    android:hint="FROM (ex: 255)"
-                    android:inputType="number"
-                    android:singleLine="true" />
-            </LinearLayout>
-
-            <Button
-                android:id="@+id/btnAddRegisterTab"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Ajouter / Focus TAB (TO)"
-                android:layout_marginTop="6dp" />
-
-            <!-- ===================== SCAN REGISTRES (Option B - autoritaire) ===================== -->
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:layout_marginTop="8dp">
-
-                <Button
-                    android:id="@+id/btnScanNodes"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="Scan registres (1..250)" />
-
-                <Spinner
-                    android:id="@+id/spnNodesFound"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1.2"
-                    android:layout_marginStart="8dp" />
-            </LinearLayout>
-
-            <TextView
-                android:id="@+id/txtNodesSummary"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Nodes trouvés : —"
-                android:layout_marginTop="2dp"
-                android:textSize="12sp" />
-
             <!-- ===================== TABS REGISTRES (1 tab par lcrnode) ===================== -->
             <com.google.android.material.tabs.TabLayout
                 android:id="@+id/tabRegisters"
@@ -361,6 +288,82 @@
           android:layout_width="match_parent"
           android:layout_height="wrap_content"
           android:layout_marginTop="4dp"/>
+
+
+<!-- ===================== MANUEL: TO/FROM + Ajouter/Focus TAB ===================== -->
+            <TextView
+                android:id="@+id/txtActiveNode"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Node actif : —"
+                android:textStyle="bold"
+                android:layout_marginTop="6dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginTop="4dp">
+
+                <EditText
+                    android:id="@+id/edtTo"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:hint="TO (ex: 250)"
+                    android:inputType="number"
+                    android:singleLine="true" />
+
+                <EditText
+                    android:id="@+id/edtFrom"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginStart="8dp"
+                    android:hint="FROM (ex: 255)"
+                    android:inputType="number"
+                    android:singleLine="true" />
+            </LinearLayout>
+
+            <Button
+                android:id="@+id/btnAddRegisterTab"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Ajouter / Focus TAB (TO)"
+                android:layout_marginTop="6dp" />
+
+            <!-- ===================== SCAN REGISTRES (Option B - autoritaire) ===================== -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginTop="8dp">
+
+                <Button
+                    android:id="@+id/btnScanNodes"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Scan registres (1..250)" />
+
+                <Spinner
+                    android:id="@+id/spnNodesFound"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1.2"
+                    android:layout_marginStart="8dp" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/txtNodesSummary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Nodes trouvés : —"
+                android:layout_marginTop="2dp"
+                android:textSize="12sp" />
+
+
+
 
       <!-- ===================== BLUETOOTH (paired only) ===================== -->
       <TextView
