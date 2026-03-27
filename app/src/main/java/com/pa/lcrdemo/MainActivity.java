@@ -159,8 +159,33 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
     // ===================== Tabs registres =====================
     private TabLayout tabRegisters;
     private View registerContainer;
-    private final LinkedHashMap<Integer, Integer> regNodeToFrom = new LinkedHashMap<>(); // node -> from
-    private int currentRegNode = -1;
+
+    // ✅ Multi-media tabs: unique par (media,node,serial)
+    private static final class TabSpec {
+        final String tabKey;       // ex: BT:250:1234
+        final String mediaShort;   // BT / USB / —
+        final String transportKey; // TransportIo.getKey() best-effort
+        final int node;
+        final int from;
+        final String serialId;
+
+        TabSpec(String tabKey, String mediaShort, String transportKey, int node, int from, String serialId) {
+            this.tabKey = tabKey;
+            this.mediaShort = mediaShort;
+            this.transportKey = transportKey;
+            this.node = node;
+            this.from = from;
+            this.serialId = serialId;
+        }
+    }
+
+    // tabKey -> spec
+    private final LinkedHashMap<String, TabSpec> tabsByKey = new LinkedHashMap<>();
+    // regKey(node#serial) -> tabKey courant (clear ciblé si migre de média)
+    private final LinkedHashMap<String, String> regKeyToTabKey = new LinkedHashMap<>();
+
+    private String currentTabKey = null;
+    private int currentRegNode = -1; // node actif (fallback pour logs API)
 
     // ===== LOG GLOBAL (MAIN) =====
     private CheckBox cbShowLog;
@@ -439,12 +464,12 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
             tabRegisters.addOnTabSelectedListener(new TabLayout.OnTabSelectedListener() {
                 @Override public void onTabSelected(TabLayout.Tab tab) {
                     Object tag = tab.getTag();
-                    if (tag instanceof Integer) showRegisterFragment((Integer) tag);
+                    if (tag instanceof String) showRegisterFragmentByKey((String) tag);
                 }
                 @Override public void onTabUnselected(TabLayout.Tab tab) {}
                 @Override public void onTabReselected(TabLayout.Tab tab) {
                     Object tag = tab.getTag();
-                    if (tag instanceof Integer) showRegisterFragment((Integer) tag);
+                    if (tag instanceof String) showRegisterFragmentByKey((String) tag);
                 }
             });
         }
@@ -541,8 +566,48 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
     }
 
     // =========================
-    // Register tabs helpers
-    // =========================
+// Register tabs helpers (multi-media)
+// =========================
+
+    private static String mediaShortFromTransportKey(String transportKey) {
+        if (transportKey == null) return "—";
+        String k = transportKey.trim().toUpperCase(java.util.Locale.ROOT);
+        if (k.startsWith("BT:")) return "BT";
+        if (k.startsWith("USB")) return "USB";
+        if (k.contains("BT")) return "BT";
+        if (k.contains("USB")) return "USB";
+        return "—";
+    }
+
+    private static String safeSerial(String serialId) {
+        if (serialId == null) return "";
+        return serialId.trim();
+    }
+
+    private static String serialShort(String serialId) {
+        String s = safeSerial(serialId);
+        if (s.isEmpty()) return "—";
+        if (s.length() <= 6) return s;
+        return s.substring(Math.max(0, s.length() - 4));
+    }
+
+    private static String tabKeyOf(String mediaShort, int node, String serialId) {
+        String m = (mediaShort == null || mediaShort.trim().isEmpty()) ? "—" : mediaShort.trim();
+        return m + ":" + (node & 0xFF) + ":" + safeSerial(serialId);
+    }
+
+    private static String regKeyOf(int node, String serialId) {
+        return (node & 0xFF) + "#" + safeSerial(serialId);
+    }
+
+    private String tabLabelOf(String mediaShort, int node, String serialId) {
+        String m = (mediaShort == null || mediaShort.trim().isEmpty()) ? "—" : mediaShort.trim();
+        return m + " - " + (node & 0xFF) + " - S" + serialShort(serialId);
+    }
+
+    /**
+     * Legacy: créer un TAB "unknown serial" (avant scan) — pas de regKey mapping.
+     */
     private void ensureRegisterTab(int node, int from, boolean focus) {
         if (node < 1 || node > 250) {
             logUi(null, "TAB registre: node invalide: " + node);
@@ -550,78 +615,200 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
         }
         if (from < 0 || from > 255) from = 255;
 
-        if (!regNodeToFrom.containsKey(node)) {
-            regNodeToFrom.put(node, from);
-            addRegisterTabUi(node);
-            logUi(null, "TAB registre ajouté: " + node);
+        String tabKey = tabKeyOf("—", node, "");
+        if (!tabsByKey.containsKey(tabKey)) {
+            TabSpec spec = new TabSpec(tabKey, "—", null, node, from, "");
+            tabsByKey.put(tabKey, spec);
+            addRegisterTabUi(spec);
+            logUi(null, "TAB registre ajouté (unknown): " + node);
         } else {
-            logUi(null, "TAB registre déjà présent: " + node + " (focus)");
+            logUi(null, "TAB registre déjà présent (unknown): " + node + " (focus)");
         }
 
         if (focus) {
-            selectRegisterTab(node);
-            showRegisterFragment(node);
-        } else if (currentRegNode < 0) {
-            selectRegisterTab(node);
-            showRegisterFragment(node);
+            selectRegisterTabByKey(tabKey);
+            showRegisterFragmentByKey(tabKey);
+        } else if (currentTabKey == null) {
+            selectRegisterTabByKey(tabKey);
+            showRegisterFragmentByKey(tabKey);
         }
     }
 
-    private void addRegisterTabUi(int node) {
-        if (tabRegisters == null) return;
+    /**
+     * Upsert issu d'un scan (serial connu).
+     * Règle: clear ciblé A1 si même (node,serial) apparaît sur un autre média.
+     */
+    private void upsertRegisterTabFromScan(String transportKey, int node, int from, String serialId, boolean focus) {
+        if (node < 1 || node > 250) return;
+        if (from < 0 || from > 255) from = 255;
+        String mediaShort = mediaShortFromTransportKey(transportKey);
+        String serial = safeSerial(serialId);
+        if (serial.isEmpty()) return;
+
+        // 1) retirer les tabs legacy (serial vide) dès qu'on trouve au moins un registre
+        removeAllUnknownSerialTabsBestEffort();
+
+        // 2) clear ciblé si migration (même node+serial, média différent)
+        String regKey = regKeyOf(node, serial);
+        String newTabKey = tabKeyOf(mediaShort, node, serial);
+        String oldTabKey = regKeyToTabKey.get(regKey);
+        if (oldTabKey != null && !oldTabKey.equals(newTabKey)) {
+            removeTabAndFragment(oldTabKey, "migrated to " + newTabKey);
+        }
+        regKeyToTabKey.put(regKey, newTabKey);
+
+        // 3) upsert tab
+        TabSpec existing = tabsByKey.get(newTabKey);
+        if (existing == null) {
+            TabSpec spec = new TabSpec(newTabKey, mediaShort, transportKey, node, from, serial);
+            tabsByKey.put(newTabKey, spec);
+            addRegisterTabUi(spec);
+            logUi(null, "TAB registre ajouté: " + tabLabelOf(mediaShort, node, serial));
+        } else {
+            TabSpec spec = new TabSpec(newTabKey, mediaShort, transportKey, node, from, serial);
+            tabsByKey.put(newTabKey, spec);
+            updateRegisterTabLabel(newTabKey, tabLabelOf(mediaShort, node, serial));
+        }
+
+        if (focus) {
+            selectRegisterTabByKey(newTabKey);
+            showRegisterFragmentByKey(newTabKey);
+        }
+    }
+
+    private void removeAllUnknownSerialTabsBestEffort() {
+        try {
+            java.util.ArrayList<String> toRemove = new java.util.ArrayList<>();
+            for (java.util.Map.Entry<String, TabSpec> e : tabsByKey.entrySet()) {
+                if (e == null) continue;
+                TabSpec s = e.getValue();
+                if (s == null) continue;
+                if (s.serialId == null || s.serialId.trim().isEmpty()) {
+                    toRemove.add(e.getKey());
+                }
+            }
+            for (String k : toRemove) {
+                removeTabAndFragment(k, "remove legacy unknown tab");
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private void addRegisterTabUi(TabSpec spec) {
+        if (tabRegisters == null || spec == null) return;
         TabLayout.Tab t = tabRegisters.newTab();
-        t.setText(String.valueOf(node));
-        t.setTag(node);
+        t.setText(tabLabelOf(spec.mediaShort, spec.node, spec.serialId));
+        t.setTag(spec.tabKey);
         tabRegisters.addTab(t, false);
     }
 
-    private void selectRegisterTab(int node) {
-        if (tabRegisters == null) return;
+    private void updateRegisterTabLabel(String tabKey, String label) {
+        try {
+            if (tabRegisters == null) return;
+            for (int i = 0; i < tabRegisters.getTabCount(); i++) {
+                TabLayout.Tab t = tabRegisters.getTabAt(i);
+                if (t == null) continue;
+                Object tag = t.getTag();
+                if (tag instanceof String && tabKey.equals(tag)) {
+                    t.setText(label);
+                    return;
+                }
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private void selectRegisterTabByKey(String tabKey) {
+        if (tabRegisters == null || tabKey == null) return;
         for (int i = 0; i < tabRegisters.getTabCount(); i++) {
             TabLayout.Tab t = tabRegisters.getTabAt(i);
-            if (t != null && t.getTag() instanceof Integer && ((Integer) t.getTag()) == node) {
+            if (t != null && t.getTag() instanceof String && tabKey.equals((String) t.getTag())) {
                 t.select();
                 return;
             }
         }
     }
 
-    private void showRegisterFragment(int node) {
-        if (registerContainer == null) return;
-        currentRegNode = node;
-        int from = regNodeToFrom.containsKey(node) ? regNodeToFrom.get(node) : 255;
-        if (txtActiveNode != null) txtActiveNode.setText("Node actif : " + node);
+    private void showRegisterFragmentByKey(String tabKey) {
+        if (registerContainer == null || tabKey == null) return;
+        TabSpec spec = tabsByKey.get(tabKey);
+        if (spec == null) return;
+        currentTabKey = tabKey;
+        currentRegNode = spec.node;
+
+        if (txtActiveNode != null) {
+            txtActiveNode.setText("Node actif : " + tabLabelOf(spec.mediaShort, spec.node, spec.serialId));
+        }
 
         FragmentManager fm = getSupportFragmentManager();
-        String tag = "regtab_" + node;
+        String tag = "regtab_" + tabKey;
         Fragment existing = fm.findFragmentByTag(tag);
-        Fragment f = (existing != null) ? existing : RegisterTabFragment.newInstance(node, from);
-
+        Fragment f = (existing != null) ? existing : RegisterTabFragment.newInstance(spec.node, spec.from);
         FragmentTransaction tx = fm.beginTransaction();
         tx.replace(R.id.registerContainer, f, tag);
         tx.setReorderingAllowed(true);
         tx.commitAllowingStateLoss();
     }
 
-    private void clearAllRegisterTabsAndFragments() {
-        regNodeToFrom.clear();
-        currentRegNode = -1;
-        if (tabRegisters != null) tabRegisters.removeAllTabs();
+    /**
+     * ✅ Clear ciblé A1: retire TAB + Fragment explicitement.
+     */
+    private void removeTabAndFragment(String tabKey, String reason) {
+        if (tabKey == null) return;
+
+        tabsByKey.remove(tabKey);
+
+        // remove regKey mapping entries pointing to this tabKey
         try {
-            FragmentManager fm = getSupportFragmentManager();
-            FragmentTransaction tx = fm.beginTransaction();
-            for (Fragment f : fm.getFragments()) {
-                if (f == null) continue;
-                String tag = f.getTag();
-                if (tag != null && tag.startsWith("regtab_")) {
-                    tx.remove(f);
+            java.util.ArrayList<String> toRemove = new java.util.ArrayList<>();
+            for (java.util.Map.Entry<String, String> e : regKeyToTabKey.entrySet()) {
+                if (e == null) continue;
+                if (tabKey.equals(e.getValue())) toRemove.add(e.getKey());
+            }
+            for (String k : toRemove) regKeyToTabKey.remove(k);
+        } catch (Exception ignored) {}
+
+        // remove tab UI
+        try {
+            if (tabRegisters != null) {
+                for (int i = 0; i < tabRegisters.getTabCount(); i++) {
+                    TabLayout.Tab t = tabRegisters.getTabAt(i);
+                    if (t == null) continue;
+                    Object tag = t.getTag();
+                    if (tag instanceof String && tabKey.equals(tag)) {
+                        tabRegisters.removeTabAt(i);
+                        break;
+                    }
                 }
             }
-            tx.commitAllowingStateLoss();
         } catch (Exception ignored) {}
-    }
 
-    // =========================
+        // remove fragment explicitly
+        try {
+            FragmentManager fm = getSupportFragmentManager();
+            String ftag = "regtab_" + tabKey;
+            Fragment f = fm.findFragmentByTag(ftag);
+            if (f != null) {
+                FragmentTransaction tx = fm.beginTransaction();
+                tx.remove(f);
+                tx.commitAllowingStateLoss();
+            }
+        } catch (Exception ignored) {}
+
+        if (tabKey.equals(currentTabKey)) {
+            currentTabKey = null;
+            currentRegNode = -1;
+            try {
+                if (tabRegisters != null && tabRegisters.getTabCount() > 0) {
+                    TabLayout.Tab t0 = tabRegisters.getTabAt(0);
+                    if (t0 != null) t0.select();
+                    Object tag = (t0 != null) ? t0.getTag() : null;
+                    if (tag instanceof String) showRegisterFragmentByKey((String) tag);
+                }
+            } catch (Exception ignored) {}
+        }
+
+        logUi(null, "TAB registre supprimé: " + tabKey + (reason != null ? (" (" + reason + ")") : ""));
+    }
+// =========================
     // Scan registres Option B (0x28 + #80 + #23) - AUTORITAIRE
     // =========================
 // =========================
@@ -629,104 +816,112 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
 // ✅ Option B strict: tout passe par TransportIo (USB/BT)
 // =========================
 private void scanRegistersOptionB() {
-    // ✅ Media-aware: utiliser BT si connecté, sinon USB
-    TransportIo io = null;
-    String pickedKey = null;
-    try {
-        if (mediaTransportManager != null) {
-            ArrayList<String> preferred = new ArrayList<>();
-            // préférer BT si on a un MAC connecté
-            if (lastBtMac != null && !lastBtMac.trim().isEmpty()) {
-                preferred.add(com.pa.lcr.lcp.transport.MediaTransportManager.btKey(lastBtMac));
+        // ✅ Media-aware: choisir le média READY selon préférence (BT si lastBtMac) sinon USB.
+        TransportIo io = null;
+        String pickedKey = null;
+        try {
+            if (mediaTransportManager != null) {
+                ArrayList<String> preferred = new ArrayList<>();
+                if (lastBtMac != null && !lastBtMac.trim().isEmpty()) {
+                    preferred.add(com.pa.lcr.lcp.transport.MediaTransportManager.btKey(lastBtMac));
+                }
+                preferred.add(com.pa.lcr.lcp.transport.MediaTransportManager.KEY_USB);
+                io = mediaTransportManager.pickReady(preferred);
+                if (io == null) io = mediaTransportManager.pickReady(null);
+                pickedKey = (io != null) ? io.getKey() : null;
             }
-            // fallback USB
-            preferred.add("USB");
-            io = mediaTransportManager.pickReady(preferred);
-            if (io == null) {
-                // fallback: n'importe quel READY
-                io = mediaTransportManager.pickReady(null);
-            }
-            pickedKey = (io != null) ? io.getKey() : null;
-        }
-    } catch (Exception ignored) {}
+        } catch (Exception ignored) {}
 
-    if (io == null || !io.isOpen()) {
-        logUi(null, "Scan registres: aucun média prêt (USB/BT). Utilise Ouvrir/Ping USB ou Connect BT.");
-        toast("Scan registres: média non prêt");
-        return;
+        if (io == null || !io.isOpen()) {
+            logUi(null, "Scan registres: aucun média prêt (USB/BT). Utilise Ouvrir/Ping USB ou Connect BT.");
+            toast("Scan registres: média non prêt");
+            return;
+        }
+
+        final String transportKey = (pickedKey != null ? pickedKey : io.getKey());
+        final String mediaShort = mediaShortFromTransportKey(transportKey);
+
+        logUi(null, "Scan registres (incrémental) via: " + transportKey);
+
+        if (btnScanNodes != null) btnScanNodes.setEnabled(false);
+        if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : scan en cours... (" + mediaShort + ")");
+
+        final TransportIo ioFinal = io;
+        scanExec.execute(() -> {
+            final long scanStartedMs = System.currentTimeMillis();
+            LinkedHashMap<Integer, NodeScanItem> found = new LinkedHashMap<>();
+            final int T28 = 300;
+            final int TF = 300;
+
+            for (int node = 1; node <= 250; node++) {
+                try {
+                    LcpLink tmp = new LcpLink(ioFinal, node, 255, true);
+                    int[] ds = tmp.opDeliveryStatus(T28);
+                    int delCode = ds[1];
+                    boolean ticketPending = (delCode & 0x0001) != 0;
+                    boolean flowActive = (delCode & 0x0004) != 0;
+                    boolean deliveryActive = (delCode & 0x0008) != 0;
+
+                    String serialId = decodeAz(tmp.opGetField(80, TF));
+                    // ticketNo optionnel (vient avec status du TAB)
+                    String ticketNo = u32beDec(tmp.opGetField(23, TF));
+
+                    if (serialId != null && !serialId.trim().isEmpty()) {
+                        found.put(node, new NodeScanItem(node, serialId, ticketNo, ticketPending, deliveryActive, flowActive, false));
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+
+            final long scanFinishedMs = System.currentTimeMillis();
+            persistScanEvents(scanStartedMs, scanFinishedMs, found);
+
+            ui.post(() -> {
+                try {
+                    nodeItems.clear();
+
+                    if (found.isEmpty()) {
+                        nodeItems.add(NodeScanItem.default250());
+                        if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : aucun (" + mediaShort + ")");
+                        if (nodeAdapter != null) nodeAdapter.notifyDataSetChanged();
+                        logUi(null, "Scan registres: aucun trouvé (" + mediaShort + ")");
+                        return;
+                    }
+
+                    NodeScanItem defaultItem;
+                    if (found.containsKey(250)) {
+                        defaultItem = found.get(250).asDefault();
+                        found.remove(250);
+                    } else {
+                        Map.Entry<Integer, NodeScanItem> first = found.entrySet().iterator().next();
+                        defaultItem = first.getValue().asDefault();
+                        found.remove(first.getKey());
+                    }
+
+                    nodeItems.add(defaultItem);
+                    for (NodeScanItem it : found.values()) nodeItems.add(it);
+                    if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : " + nodeItems.size() + " (" + mediaShort + ")");
+                    if (nodeAdapter != null) nodeAdapter.notifyDataSetChanged();
+
+                    int defaultNode = defaultItem.lcrnode;
+                    upsertRegisterTabFromScan(transportKey, defaultNode, 255, defaultItem.serialId, true);
+                    for (NodeScanItem it : nodeItems) {
+                        if (it == null) continue;
+                        if (it.lcrnode == defaultNode) continue;
+                        upsertRegisterTabFromScan(transportKey, it.lcrnode, 255, it.serialId, false);
+                    }
+
+                    edtTo.setText(String.valueOf(defaultNode));
+                    logUi(null, "Scan registres terminé: " + nodeItems.size() + " node(s), default=" + defaultNode + " (" + mediaShort + ")");
+
+                } finally {
+                    if (btnScanNodes != null) btnScanNodes.setEnabled(true);
+                    updateNodesStatusUi();
+                }
+            });
+        });
     }
 
-    final String mediaLabel = (pickedKey != null ? pickedKey : "?");
-    logUi(null, "Scan registres (autoritaire) via: " + mediaLabel);
-
-    if (btnScanNodes != null) btnScanNodes.setEnabled(false);
-    if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : scan en cours... (" + mediaLabel + ")");
-
-    final TransportIo ioFinal = io;
-    scanExec.execute(() -> {
-        final long scanStartedMs = System.currentTimeMillis();
-        LinkedHashMap<Integer, NodeScanItem> found = new LinkedHashMap<>();
-        final int T28 = 300;
-        final int TF = 300;
-        for (int node = 1; node <= 250; node++) {
-            try {
-                // ✅ Option B: LcpLink basé sur TransportIo (USB/BT)
-                LcpLink tmp = new LcpLink(ioFinal, node, 255, true);
-                int[] ds = tmp.opDeliveryStatus(T28);
-                int delCode = ds[1];
-                boolean ticketPending = (delCode & 0x0001) != 0;
-                boolean flowActive = (delCode & 0x0004) != 0;
-                boolean deliveryActive = (delCode & 0x0008) != 0;
-                String serialId = decodeAz(tmp.opGetField(80, TF));
-                String ticketNo = u32beDec(tmp.opGetField(23, TF));
-                found.put(node, new NodeScanItem(node, serialId, ticketNo, ticketPending, deliveryActive, flowActive, false));
-            } catch (Exception ignored) {
-                // ignore: node not present / timeout / etc.
-            }
-        }
-        final long scanFinishedMs = System.currentTimeMillis();
-        persistScanEvents(scanStartedMs, scanFinishedMs, found);
-        ui.post(() -> {
-            try {
-                nodeItems.clear();
-                clearAllRegisterTabsAndFragments();
-                if (found.isEmpty()) {
-                    nodeItems.add(NodeScanItem.default250());
-                    if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : aucun (défaut 250) (" + mediaLabel + ")");
-                    if (nodeAdapter != null) nodeAdapter.notifyDataSetChanged();
-                    ensureRegisterTab(250, 255, true);
-                    edtTo.setText("250");
-                    if (txtActiveNode != null) txtActiveNode.setText("Node actif : 250");
-                    logUi(null, "Scan registres: aucun trouvé -> fallback tab 250 (" + mediaLabel + ")");
-                    return;
-                }
-                NodeScanItem defaultItem;
-                if (found.containsKey(250)) {
-                    defaultItem = found.get(250).asDefault();
-                    found.remove(250);
-                } else {
-                    Map.Entry<Integer, NodeScanItem> first = found.entrySet().iterator().next();
-                    defaultItem = first.getValue().asDefault();
-                    found.remove(first.getKey());
-                }
-                nodeItems.add(defaultItem);
-                for (NodeScanItem it : found.values()) nodeItems.add(it);
-                if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : " + nodeItems.size() + " (" + mediaLabel + ")");
-                if (nodeAdapter != null) nodeAdapter.notifyDataSetChanged();
-                int defaultNode = defaultItem.lcrnode;
-                ensureRegisterTab(defaultNode, 255, true);
-                for (NodeScanItem it : nodeItems) {
-                    if (it.lcrnode != defaultNode) ensureRegisterTab(it.lcrnode, 255, false);
-                }
-                edtTo.setText(String.valueOf(defaultNode));
-                if (txtActiveNode != null) txtActiveNode.setText("Node actif : " + defaultNode);
-                logUi(null, "Scan registres terminé: " + nodeItems.size() + " node(s), default=" + defaultNode + " (" + mediaLabel + ")");
-            } finally {
-                if (btnScanNodes != null) btnScanNodes.setEnabled(true);
-            }
-        });
-    });
-}
 
     /**
      * ✅ Option 2 + Option 5:
@@ -1002,31 +1197,36 @@ private void scanRegistersOptionB() {
 
     public void onUsbDetached() {
         logUi(null, "USB détaché");
-
         // ✅ Option A: publish USB detached
         try {
             if (mediaTransportManager != null) {
                 mediaTransportManager.onUsbDetached("USB detached");
             }
         } catch (Exception ignored) {}
-
         logMedia1("USB Detached");
 
         try { UsbSession.clear(); } catch (Exception ignore) {}
         stopApiServer("USB detached");
-        try { RegisterSessionManager.get(this).clearAll(true); } catch (Exception ignored) {}
+
+        // ✅ Multi-média: ne pas détruire les tabs BT.
+        // Retirer uniquement les tabs USB (et leurs fragments) de manière explicite (A1).
+        try {
+            ArrayList<String> toRemove = new ArrayList<>();
+            for (Map.Entry<String, TabSpec> e : tabsByKey.entrySet()) {
+                if (e == null) continue;
+                TabSpec s = e.getValue();
+                if (s == null) continue;
+                String mShort = (s.mediaShort != null) ? s.mediaShort : mediaShortFromTransportKey(s.transportKey);
+                if ("USB".equalsIgnoreCase(mShort)) toRemove.add(e.getKey());
+            }
+            for (String k : toRemove) removeTabAndFragment(k, "USB detached");
+        } catch (Exception ignored) {}
 
         usbPort = null;
-
-        nodeItems.clear();
-        nodeItems.add(NodeScanItem.default250());
-        if (nodeAdapter != null) nodeAdapter.notifyDataSetChanged();
-        if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : —");
-
-        clearAllRegisterTabsAndFragments();
-        ensureRegisterTab(250, 255, true);
-        if (txtActiveNode != null) txtActiveNode.setText("Node actif : 250");
+        updateMediaStatusUi();
+        updateNodesStatusUi();
     }
+
 
     // =========================
     // API Server
