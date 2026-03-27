@@ -1,4 +1,3 @@
-
 package com.pa.lcrdemo;
 
 import android.content.BroadcastReceiver;
@@ -30,14 +29,12 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * RegisterTabFragment (node-specific) — v7 (cohérent / complet)
+ * RegisterTabFragment (node-specific) — v7
  *
- * Objectifs:
- * - Pas de jump quand on utilise DOWN (scroll log seulement)
- * - Scroll manuel dans le log
- * - Pas de requestStatus() automatique en idle (READY / TicketPending)
- * - C (New) gouverné par delCode (0x28) cache-only via api_tickSnapshot()
- * - Format NET/GROSS stable (digits+1) pour réduire l'effet "saut"
+ * Approche:
+ * - LIVE conforme au registre: READY/TicketPending = one-shot (Connect/B/A/END), pas de polling.
+ * - RUNNING_FLOWING / RUNNING_PAUSED: refresh sur changement (scheduler + backoff).
+ * - Log scrollable sans jump (DOWN = log seulement).
  */
 public class RegisterTabFragment extends Fragment {
 
@@ -114,33 +111,24 @@ public class RegisterTabFragment extends Fragment {
 
     private UsbManager usbManager;
 
-    // Controller partagé UI ↔ API
     private DeliveryController controller;
-
-    // Transport attaché (USB/BT)
     private String tabTransportKey = null;
 
-    // Start UX
     private boolean starting = false;
     private long startingSinceMs = 0L;
 
-    // Throttle/coalesce log refresh
     private static final int TAB_LOG_MAX_LINES = 400;
-    private static final long LOG_REFRESH_MIN_MS = 800; // réduit le jank
+    private static final long LOG_REFRESH_MIN_MS = 800;
     private long lastLogRefreshMs = 0L;
     private boolean logRefreshPending = false;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService bg = Executors.newSingleThreadExecutor();
 
-    // =========================
-    // Log refresh (throttlé)
-    // =========================
     private void scheduleLogRefresh() {
         if (txtLog == null) return;
         if (cbShowLog == null || !cbShowLog.isChecked()) return;
 
-        // suspend refresh pendant scroll utilisateur
         long now0 = System.currentTimeMillis();
         if (logUserScrolling && now0 < logUserScrollUntilMs) return;
 
@@ -169,27 +157,19 @@ public class RegisterTabFragment extends Fragment {
         }, delay);
     }
 
-    // =========================
-    // delCode cache-only
-    // =========================
     private void refreshDelCodeFromTickSnapshotThrottled() {
         try {
             DeliveryController c = controller;
             if (c == null) return;
-
             long now = System.currentTimeMillis();
             if (now - lastDelCodePollMs < DELCODE_POLL_MIN_MS) return;
             lastDelCodePollMs = now;
-
-            ApiResult r = c.api_tickSnapshot(); // cache-only
+            ApiResult r = c.api_tickSnapshot();
             JSONObject d = (r != null) ? r.data : null;
             if (d != null) lastDelCode = d.optInt("delCode", lastDelCode);
         } catch (Exception ignored) {}
     }
 
-    // =========================
-    // UX: scroll log sans que parent vole le geste
-    // =========================
     private void installLogScrollInterceptionFix() {
         try {
             if (logScroll != null) {
@@ -223,13 +203,9 @@ public class RegisterTabFragment extends Fragment {
         } catch (Exception ignored) {}
     }
 
-    // =========================
-    // UX: DOWN = scroll log seulement (anti-jump)
-    // =========================
     private void scrollLogToBottomOnly() {
         try {
             if (logScroll == null) return;
-
             final int rootY = (regRootScroll != null) ? regRootScroll.getScrollY() : -1;
 
             try {
@@ -255,11 +231,7 @@ public class RegisterTabFragment extends Fragment {
         } catch (Exception ignored) {}
     }
 
-    // =========================
-    // Listener UI (DeliveryController)
-    // =========================
     private final DeliveryControllerPort.Listener uiListener = new DeliveryControllerPort.Listener() {
-
         @Override
         public void onStateChanged(DeliveryState state) {
             ui.post(() -> {
@@ -307,18 +279,10 @@ public class RegisterTabFragment extends Fragment {
         public void onLiveStatus(String liveText) {
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
-
                 lastLiveText = liveText;
                 if (txtLive != null) txtLive.setText(liveText);
 
-                try {
-                    if (liveText != null && (liveText.contains("FLOW ON") || liveText.contains("PAUSED") || liveText.contains("confirm"))) {
-                        starting = false;
-                    }
-                } catch (Exception ignored) {}
-
                 ensureSerialVisibleThrottled();
-
                 refreshDelCodeFromTickSnapshotThrottled();
                 updateButtons(controller != null ? controller.getState() : null);
                 scheduleLogRefresh();
@@ -329,12 +293,10 @@ public class RegisterTabFragment extends Fragment {
         public void onTicketInfo(String ticketNo, String deliveryUid) {
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
-
                 if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : " + (ticketNo == null ? "—" : ticketNo));
                 if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : " + (deliveryUid == null ? "—" : deliveryUid));
 
                 ensureSerialVisibleThrottled();
-
                 refreshDelCodeFromTickSnapshotThrottled();
                 updateButtons(controller != null ? controller.getState() : null);
             });
@@ -580,12 +542,20 @@ public class RegisterTabFragment extends Fragment {
             ui.postDelayed(() -> {
                 try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
                 try { validateHeaderAsync(); } catch (Exception ignored) {}
+                try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
                 refreshDelCodeFromTickSnapshotThrottled();
                 updateButtons(controller != null ? controller.getState() : null);
             }, 900);
         });
 
-        if (btnB != null) btnB.setOnClickListener(v -> { if (controller != null) controller.requestStatus(); });
+        // ✅ B = Status + one-shot LIVE recale (READY / ticket pending)
+        if (btnB != null) btnB.setOnClickListener(v -> {
+            if (controller == null) return;
+            controller.requestStatus();
+            ui.postDelayed(() -> {
+                try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
+            }, 200);
+        });
 
         if (btnC != null) {
             btnC.setOnClickListener(v -> {
@@ -637,19 +607,16 @@ public class RegisterTabFragment extends Fragment {
             }
 
             controller.endDelivery();
-
             ui.postDelayed(() -> {
                 try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
                 try { validateHeaderAsync(); } catch (Exception ignored) {}
+                try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
                 refreshDelCodeFromTickSnapshotThrottled();
                 updateButtons(controller != null ? controller.getState() : null);
             }, 1500);
         });
     }
 
-    // =========================================================
-    // Attach/detach session
-    // =========================================================
     private void attemptAttachIfPossible(boolean verboseLog) {
         if (uiListenerAttached && controller != null) {
             syncUiFromController();
@@ -688,6 +655,12 @@ public class RegisterTabFragment extends Fragment {
 
         syncUiFromController();
         validateHeaderAsync();
+
+        // ✅ One-shot LIVE recale (READY / ticket pending) après attach
+        ui.postDelayed(() -> {
+            try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
+        }, 200);
+
         if (userInitiated) LogBus.api(node, "Connect TAB: 1 - UI attached");
         scheduleLogRefresh();
     }
@@ -708,19 +681,16 @@ public class RegisterTabFragment extends Fragment {
         DeliveryState st = controller.getState();
         refreshDelCodeFromTickSnapshotThrottled();
         updateButtons(st);
-        // IMPORTANT: pas de requestStatus() automatique ici (idle)
+        // pas de requestStatus() automatique en idle
     }
 
-    // =========================================================
-    // Header validate
-    // =========================================================
     private void ensureSerialVisibleThrottled() {
         try {
             if (txtSerialId == null) return;
             if (headerValidatedOnce) return;
 
             String cur = String.valueOf(txtSerialId.getText());
-            boolean missing = (cur.contains("—") || cur.trim().endsWith(":") || cur.trim().endsWith(": —"));
+            boolean missing = (cur.contains("—") || cur.trim().endsWith(":" ) || cur.trim().endsWith(": —"));
             if (!missing) return;
 
             long now = System.currentTimeMillis();
@@ -765,10 +735,6 @@ public class RegisterTabFragment extends Fragment {
                                     (ticketPendingFlag == 1 ? "OUI" : (ticketPendingFlag == 0 ? "NON" : "—")));
                         }
 
-                        if (ticketPendingFlag == 1 && txtLive != null) {
-                            txtLive.setText("LIVE: ticket_pending — faire Resolve (A)");
-                        }
-
                         refreshDelCodeFromTickSnapshotThrottled();
                         updateButtons(controller != null ? controller.getState() : null);
                         scheduleLogRefresh();
@@ -781,9 +747,6 @@ public class RegisterTabFragment extends Fragment {
         } catch (java.util.concurrent.RejectedExecutionException ignored) {}
     }
 
-    // =========================================================
-    // Buttons
-    // =========================================================
     private void updateButtons(DeliveryState state) {
         if (btnConnect == null || btnA == null || btnB == null || btnC == null || btnContinue == null || btnFinish == null)
             return;
@@ -827,16 +790,12 @@ public class RegisterTabFragment extends Fragment {
         }
     }
 
-    // =========================================================
-    // Log view (node-filtered)
-    // =========================================================
     private void refreshLogView() {
         if (txtLog == null) return;
+        if (cbShowLog == null || !cbShowLog.isChecked()) return;
 
         long now0 = System.currentTimeMillis();
         if (logUserScrolling && now0 < logUserScrollUntilMs) return;
-
-        if (cbShowLog == null || !cbShowLog.isChecked()) return;
 
         if (Looper.myLooper() != Looper.getMainLooper()) {
             ui.post(this::refreshLogView);

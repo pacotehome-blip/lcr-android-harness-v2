@@ -440,6 +440,10 @@ public final class RegisterSessionManager {
         private volatile long liveBackoffMs = 0L;
         private volatile long statusBackoffMs = 0L;
 
+        // v7: backoff adaptatif basé sur TickBus (seq change-driven)
+        private volatile long lastTickSeqSeen = -1L;
+        private volatile int noChangeCount = 0;
+
         // v7: cadences (stables)
         private static final long LIVE_MS = 350;        // ajuste si besoin BT/USB
         private static final long STATUS_MS = 2500; // v7: réduit les ERR status pendant RUNNING
@@ -478,35 +482,61 @@ public final class RegisterSessionManager {
             DeliveryState st = c.getState();
             if (st == DeliveryState.DISCONNECTED) return;
 
-            // ✅ v7 règle: en CONNECTED (READY ou ticket pending), pas de polling automatique.
-            // L'opérateur utilise B (Status) ou A/C selon le contexte.
+            // ✅ Règle: en CONNECTED (READY / Ticket pending), on ne poll pas.
+            // Le LIVE est recalé par des one-shots (Connect/B/A/END) côté UI.
             if (st == DeliveryState.CONNECTED || st == DeliveryState.PRESTART || st == DeliveryState.ENDING) {
                 return;
             }
 
-            // Polling uniquement pendant livraison (RUNNING_FLOWING / RUNNING_PAUSED)
             boolean running = (st == DeliveryState.RUNNING_FLOWING) || (st == DeliveryState.RUNNING_PAUSED);
             if (!running) return;
 
+            // ✅ Backoff basé sur "changement vs pas de changement" (TickBus seq).
+            try {
+                ApiResult tr = c.api_tickSnapshot(); // cache-only
+                JSONObject td = (tr != null) ? tr.data : null;
+                long seq = (td != null) ? td.optLong("seq", -1L) : -1L;
+                if (seq >= 0) {
+                    if (lastTickSeqSeen >= 0 && seq == lastTickSeqSeen) {
+                        noChangeCount++;
+                    } else {
+                        noChangeCount = 0;
+                        lastTickSeqSeen = seq;
+                        // reset backoff sur changement
+                        liveBackoffMs = 0L;
+                        statusBackoffMs = 0L;
+                    }
+                    // si aucun changement répété, augmenter doucement le backoff (max 2000ms)
+                    if (noChangeCount >= 3) {
+                        liveBackoffMs = Math.min(2000, Math.max(liveBackoffMs, 200));
+                        liveBackoffMs = Math.min(2000, liveBackoffMs + 200);
+                    }
+                    if (noChangeCount >= 6) {
+                        statusBackoffMs = Math.min(4000, Math.max(statusBackoffMs, 500));
+                        statusBackoffMs = Math.min(4000, statusBackoffMs + 500);
+                    }
+                }
+            } catch (Exception ignored) {}
+
             long now = System.currentTimeMillis();
 
-            // LIVE (flow on/off + NET/GROSS)
+            // LIVE (flow on/off + NET/GROSS) — cadence adaptative
             long liveInterval = LIVE_MS + liveBackoffMs;
             if (now - lastLiveMs >= liveInterval) {
                 lastLiveMs = now;
                 try {
                     c.requestLiveSample();
-                    if (liveBackoffMs > 0) liveBackoffMs = Math.max(0, liveBackoffMs - 200);
+                    if (liveBackoffMs > 0 && noChangeCount == 0) liveBackoffMs = Math.max(0, liveBackoffMs - 200);
                 } catch (Exception ignored) {}
             }
 
-            // STATUS (dev/prn + header) - fréquence plus lente pendant livraison
+            // STATUS pendant RUNNING seulement — plus lent + backoff si stable
             long stInterval = STATUS_MS + statusBackoffMs;
             if (now - lastStatusMs >= stInterval) {
                 lastStatusMs = now;
                 try {
                     c.requestStatus();
-                    if (statusBackoffMs > 0) statusBackoffMs = Math.max(0, statusBackoffMs - 200);
+                    if (statusBackoffMs > 0 && noChangeCount == 0) statusBackoffMs = Math.max(0, statusBackoffMs - 200);
                 } catch (Exception ignored) {}
             }
         }
