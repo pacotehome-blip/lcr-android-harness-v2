@@ -499,7 +499,6 @@ ensureRegisterTab(250, 255, true);
         if (btnScanWifiRegs != null) btnScanWifiRegs.setOnClickListener(v -> toast("Wi‑Fi: bientôt"));
     }
 
-
 private void setupTabsTop() {
         if (tabLayout == null) return;
         tabLayout.removeAllTabs();
@@ -863,32 +862,26 @@ private void setupTabsTop() {
 
             ui.post(() -> {
                 try {
-                    // status global (dernier scan) = nodeItems
                     nodeItems.clear();
                     nodeItems.addAll(found.values());
 
-                    // affichage sous la section (serial complet)
                     if (target != null) {
                         if (found.isEmpty()) {
-                            target.setText("(aucun registre trouvé)
-" + mediaShort);
+                            target.setText("(aucun registre trouvé)\n" + mediaShort);
                         } else {
                             StringBuilder sb = new StringBuilder();
-                            sb.append(mediaShort).append(" — ").append(found.size()).append(" registre(s)
-");
+                            sb.append(mediaShort).append(" — ").append(found.size()).append(" registre(s)\n");
                             for (NodeScanItem it : found.values()) {
                                 if (it == null) continue;
                                 sb.append("Serial=").append(safeSerial(it.serialId))
                                   .append("  Node=").append(it.lcrnode)
                                   .append("  TO=").append(it.lcrnode)
-                                  .append("  From=255
-");
+                                  .append("  From=255\n");
                             }
                             target.setText(sb.toString().trim());
                         }
                     }
 
-                    // Tabs MAIN (serial abrégé last6) + A1 clear via upsert
                     if (!found.isEmpty()) {
                         boolean focused = false;
                         for (NodeScanItem it : found.values()) {
@@ -964,8 +957,7 @@ private void setupTabsTop() {
                         null
                 deliveryStore.openAttemptAsync(it.serialId, tno, DeliveryLogStore.SOURCE_UI, null, attemptId -> {
                     deliveryStore.addEventAsync(attemptId, DeliveryLogStore.LEVEL_INFO,
-                            "SCAN_NODE_DETECTED",
-                            "Scan registres: node détecté",
+                            "SCAN_NODE_DETECTED",\n"Scan registres: node détecté",
                             data.toString());
                     deliveryStore.closeAttemptAsync(attemptId, "SEEN", data.toString(), null);
                 });
