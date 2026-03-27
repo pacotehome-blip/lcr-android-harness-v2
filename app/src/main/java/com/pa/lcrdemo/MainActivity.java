@@ -955,10 +955,11 @@ private void setupTabsTop() {
                         null,
                         null,
                         null
-                deliveryStore.openAttemptAsync(it.serialId, tno, DeliveryLogStore.SOURCE_UI, null, attemptId -> {
+        );
+        deliveryStore.openAttemptAsync(it.serialId, tno, DeliveryLogStore.SOURCE_UI, null, attemptId -> {
                     deliveryStore.addEventAsync(attemptId, DeliveryLogStore.LEVEL_INFO,
                             "SCAN_NODE_DETECTED",
-"Scan registres: node détecté",
+                            "Scan registres: node détecté",
                             data.toString());
                     deliveryStore.closeAttemptAsync(attemptId, "SEEN", data.toString(), null);
                 });
@@ -1000,7 +1001,8 @@ private void setupTabsTop() {
                 null,
                 null,
                 null
-        deliveryStore.openAttemptAsync(scanSerial, scanTicket, DeliveryLogStore.SOURCE_UI, null, attemptId -> {
+    );
+    deliveryStore.openAttemptAsync(scanSerial, scanTicket, DeliveryLogStore.SOURCE_UI, null, attemptId -> {
             deliveryStore.addEventAsync(attemptId, DeliveryLogStore.LEVEL_INFO,
                     "SCAN_COMPLETED",
                     (foundCount == 0)
@@ -1118,6 +1120,7 @@ private void setupTabsTop() {
             PendingIntent pi = PendingIntent.getBroadcast(
                     this, 0, new Intent(ACTION_USB_PERMISSION),
                     PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE
+            );
             usbManager.requestPermission(dev, pi);
             logUi(null, "Permission USB demandée");
             logMedia1("USB Open/Ping: permission requise");
@@ -1369,6 +1372,7 @@ private void setupTabsTop() {
             final int takeFlags = data.getFlags() & (
                     Intent.FLAG_GRANT_READ_URI_PERMISSION
                             | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            );
             try { getContentResolver().takePersistableUriPermission(dirUri, takeFlags); } catch (Exception ignored) {}
             saveBackupDirUri(dirUri);
             toast("Backup: dossier enregistré");
