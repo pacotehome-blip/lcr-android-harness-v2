@@ -737,3 +737,15 @@ public class RegisterTabFragment extends Fragment {
     private boolean hasTicketDigits() {
         String d = extractTicketDigits();
         return d != null && !d.trim().isEmpty();
+
+    }
+    
+
+
+    private static String safeMsg(Exception e) {
+        if (e == null) return "";
+        String m = e.getMessage();
+        return (m == null) ? e.getClass().getSimpleName() : m;
+    }
+
+}
