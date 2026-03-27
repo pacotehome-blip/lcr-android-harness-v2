@@ -152,6 +152,7 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
     private TextView txtActiveNode;
     // ===================== Scan registres (exec) =====================
     private final ExecutorService scanExec = Executors.newSingleThreadExecutor();
+ private final List<NodeScanItem> nodeItems = new ArrayList<>();
     // ===================== Tabs registres =====================
     private TabLayout tabRegisters;
     private View registerContainer;
@@ -393,7 +394,6 @@ tabRegisters = findViewById(R.id.tabRegisters);
     }
 
     private void initUiDefaults() {
-if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : —");
         if (txtActiveNode != null) txtActiveNode.setText("Node actif : —");
         if (cbShowLog != null) cbShowLog.setChecked(false);
         if (logPanel != null) logPanel.setVisibility(View.GONE);
@@ -415,38 +415,25 @@ ensureRegisterTab(250, 255, true);
     }
 
     private void wireUi() {
-        btnScanUsb.setOnClickListener(v -> scanUsb());
-        btnPingUsb.setOnClickListener(v -> openSelectedUsb());
-);
-        }
-);
-            spnNodesFound.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-                @Override public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
-                    if (!nodeUserTouchedSpinner) return;
-                    nodeUserTouchedSpinner = false;
-                    NodeScanItem it = (NodeScanItem) spnNodesFound.getSelectedItem();
-                    if (it == null) return;
-                    edtTo.setText(String.valueOf(it.lcrnode));
-                    logUi(null, "TO sélectionné via scan: " + it.lcrnode + " (cliquer Ajouter/Focus TAB)");
-                }
-                @Override public void onNothingSelected(AdapterView<?> parent) {}
-            });
-        }
+        if (btnScanUsb != null) btnScanUsb.setOnClickListener(v -> scanUsb());
+        if (btnPingUsb != null) btnPingUsb.setOnClickListener(v -> openSelectedUsb());
 
+        // Tabs registres
         if (tabRegisters != null) {
             tabRegisters.addOnTabSelectedListener(new TabLayout.OnTabSelectedListener() {
                 @Override public void onTabSelected(TabLayout.Tab tab) {
-                    Object tag = tab.getTag();
+                    Object tag = (tab != null) ? tab.getTag() : null;
                     if (tag instanceof String) showRegisterFragmentByKey((String) tag);
                 }
                 @Override public void onTabUnselected(TabLayout.Tab tab) {}
                 @Override public void onTabReselected(TabLayout.Tab tab) {
-                    Object tag = tab.getTag();
+                    Object tag = (tab != null) ? tab.getTag() : null;
                     if (tag instanceof String) showRegisterFragmentByKey((String) tag);
                 }
             });
         }
 
+        // Log global
         if (cbShowLog != null) {
             cbShowLog.setOnCheckedChangeListener((buttonView, checked) -> {
                 if (logPanel != null) logPanel.setVisibility(checked ? View.VISIBLE : View.GONE);
@@ -454,7 +441,6 @@ ensureRegisterTab(250, 255, true);
                 if (checked) refreshGlobalLogView();
             });
         }
-
         if (btnClearLog != null) {
             btnClearLog.setOnClickListener(v -> {
                 mainLogViewSinceMs = System.currentTimeMillis();
@@ -462,7 +448,6 @@ ensureRegisterTab(250, 255, true);
                 logUi(null, "Clear log (vue MAIN)");
             });
         }
-
         if (btnCopyLog != null) {
             btnCopyLog.setOnClickListener(v -> {
                 ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
@@ -470,13 +455,11 @@ ensureRegisterTab(250, 255, true);
                 logUi(null, "Log copié dans le presse-papiers");
             });
         }
-
         if (btnScrollDown != null) {
             btnScrollDown.setOnClickListener(v -> {
                 if (logScroll != null) logScroll.fullScroll(View.FOCUS_DOWN);
             });
         }
-
         if (cbTxRx != null) {
             cbTxRx.setOnCheckedChangeListener((buttonView, checked) -> {
                 SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
@@ -486,7 +469,6 @@ ensureRegisterTab(250, 255, true);
                 refreshGlobalLogView();
             });
         }
-
         if (cbLogTs != null) {
             cbLogTs.setOnCheckedChangeListener((buttonView, checked) -> {
                 SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
@@ -498,26 +480,27 @@ ensureRegisterTab(250, 255, true);
             });
         }
 
+        // API-Face
         if (btnApiStart != null) btnApiStart.setOnClickListener(v -> startApiServer());
         if (btnApiStop != null) btnApiStop.setOnClickListener(v -> stopApiServer("Stop button"));
-
         if (btnDbBackup != null) {
             btnDbBackup.setOnClickListener(v -> doBackupDb());
             btnDbBackup.setOnLongClickListener(v -> { requestBackupDir(); return true; });
         }
 
-        // ✅ FIX: brancher les boutons BT
+        // BT
         if (btnBtRefresh != null) btnBtRefresh.setOnClickListener(v -> refreshBondedBtList());
         if (btnBtConnect != null) btnBtConnect.setOnClickListener(v -> btConnectSelected());
         if (btnBtDisconnect != null) btnBtDisconnect.setOnClickListener(v -> btDisconnect());
 
-        // CONFIGURE: scan registres (par média)
+        // CONFIGURE: scan registres par média
         if (btnScanUsbRegs != null) btnScanUsbRegs.setOnClickListener(v -> scanRegistersUsbOnly());
         if (btnScanBtRegs != null) btnScanBtRegs.setOnClickListener(v -> scanRegistersBtOnly());
         if (btnScanWifiRegs != null) btnScanWifiRegs.setOnClickListener(v -> toast("Wi‑Fi: bientôt"));
     }
 
-    private void setupTabsTop() {
+
+private void setupTabsTop() {
         if (tabLayout == null) return;
         tabLayout.removeAllTabs();
         tabLayout.addTab(tabLayout.newTab().setText("MAIN"), true);
@@ -867,8 +850,7 @@ ensureRegisterTab(250, 255, true);
                     boolean deliveryActive = (delCode & 0x0008) != 0;
 
                     String serialId = decodeAz(tmp.opGetField(80, TF));
-                    // ticketNo optionnel (vient avec status du TAB)
-                    String ticketNo = u32beDec(tmp.opGetField(23, TF));
+                    String ticketNo = u32beDec(tmp.opGetField(23, TF)); // optionnel
 
                     if (serialId != null && !serialId.trim().isEmpty()) {
                         found.put(node, new NodeScanItem(node, serialId, ticketNo, ticketPending, deliveryActive, flowActive, false));
@@ -881,11 +863,11 @@ ensureRegisterTab(250, 255, true);
 
             ui.post(() -> {
                 try {
-                    // Pour le status global CONFIGURE, on conserve le dernier scan dans nodeItems.
+                    // status global (dernier scan) = nodeItems
                     nodeItems.clear();
                     nodeItems.addAll(found.values());
 
-                    // Affichage sous la section
+                    // affichage sous la section (serial complet)
                     if (target != null) {
                         if (found.isEmpty()) {
                             target.setText("(aucun registre trouvé)
@@ -896,7 +878,6 @@ ensureRegisterTab(250, 255, true);
 ");
                             for (NodeScanItem it : found.values()) {
                                 if (it == null) continue;
-                                // Série complète + Node + TO/FROM (TO=node, From=255)
                                 sb.append("Serial=").append(safeSerial(it.serialId))
                                   .append("  Node=").append(it.lcrnode)
                                   .append("  TO=").append(it.lcrnode)
@@ -907,26 +888,21 @@ ensureRegisterTab(250, 255, true);
                         }
                     }
 
-                    // Upsert tabs MAIN (pas de clear all)
+                    // Tabs MAIN (serial abrégé last6) + A1 clear via upsert
                     if (!found.isEmpty()) {
                         boolean focused = false;
                         for (NodeScanItem it : found.values()) {
                             if (it == null) continue;
-                            // focus le premier trouvé (ou 250 si présent) pour une UX agréable
                             boolean focus = false;
-                            if (!focused) {
-                                focus = (it.lcrnode == 250); // priorité 250
-                            }
+                            if (!focused && it.lcrnode == 250) focus = true;
                             upsertRegisterTabFromScan(tk, it.lcrnode, 255, it.serialId, focus);
                             if (focus) focused = true;
                         }
-                        // si 250 absent, focus le premier
                         if (!focused) {
                             NodeScanItem first = found.values().iterator().next();
                             if (first != null) upsertRegisterTabFromScan(tk, first.lcrnode, 255, first.serialId, true);
                         }
                     }
-
                 } finally {
                     try { if ("USB".equalsIgnoreCase(mediaShort) && btnScanUsbRegs != null) btnScanUsbRegs.setEnabled(true); } catch (Exception ignored) {}
                     try { if ("BT".equalsIgnoreCase(mediaShort) && btnScanBtRegs != null) btnScanBtRegs.setEnabled(true); } catch (Exception ignored) {}
@@ -937,112 +913,9 @@ ensureRegisterTab(250, 255, true);
     }
 
 
-private void scanRegistersOptionB() {
-        // ✅ Media-aware: choisir le média READY selon préférence (BT si lastBtMac) sinon USB.
-        TransportIo io = null;
-        String pickedKey = null;
-        try {
-            if (mediaTransportManager != null) {
-                ArrayList<String> preferred = new ArrayList<>();
-                if (lastBtMac != null && !lastBtMac.trim().isEmpty()) {
-                    preferred.add(com.pa.lcr.lcp.transport.MediaTransportManager.btKey(lastBtMac));
-                }
-                preferred.add(com.pa.lcr.lcp.transport.MediaTransportManager.KEY_USB);
-                io = mediaTransportManager.pickReady(preferred);
-                if (io == null) io = mediaTransportManager.pickReady(null);
-                pickedKey = (io != null) ? io.getKey() : null;
-            }
-        } catch (Exception ignored) {}
 
-        if (io == null || !io.isOpen()) {
-            logUi(null, "Scan registres: aucun média prêt (USB/BT). Utilise Ouvrir/Ping USB ou Connect BT.");
-            toast("Scan registres: média non prêt");
-            return;
-        }
 
-        final String transportKey = (pickedKey != null ? pickedKey : io.getKey());
-        final String mediaShort = mediaShortFromTransportKey(transportKey);
 
-        logUi(null, "Scan registres (incrémental) via: " + transportKey);
-
-        if (btnScanNodes != null) btnScanNodes.setEnabled(false);
-        if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : scan en cours... (" + mediaShort + ")");
-
-        final TransportIo ioFinal = io;
-        scanExec.execute(() -> {
-            final long scanStartedMs = System.currentTimeMillis();
-            LinkedHashMap<Integer, NodeScanItem> found = new LinkedHashMap<>();
-            final int T28 = 300;
-            final int TF = 300;
-
-            for (int node = 1; node <= 250; node++) {
-                try {
-                    LcpLink tmp = new LcpLink(ioFinal, node, 255, true);
-                    int[] ds = tmp.opDeliveryStatus(T28);
-                    int delCode = ds[1];
-                    boolean ticketPending = (delCode & 0x0001) != 0;
-                    boolean flowActive = (delCode & 0x0004) != 0;
-                    boolean deliveryActive = (delCode & 0x0008) != 0;
-
-                    String serialId = decodeAz(tmp.opGetField(80, TF));
-                    // ticketNo optionnel (vient avec status du TAB)
-                    String ticketNo = u32beDec(tmp.opGetField(23, TF));
-
-                    if (serialId != null && !serialId.trim().isEmpty()) {
-                        found.put(node, new NodeScanItem(node, serialId, ticketNo, ticketPending, deliveryActive, flowActive, false));
-                    }
-                } catch (Exception ignored) {
-                }
-            }
-
-            final long scanFinishedMs = System.currentTimeMillis();
-            persistScanEvents(scanStartedMs, scanFinishedMs, found);
-
-            ui.post(() -> {
-                try {
-                    nodeItems.clear();
-
-                    if (found.isEmpty()) {
-                        nodeItems.add(NodeScanItem.default250());
-                        if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : aucun (" + mediaShort + ")");
-                        if (nodeAdapter != null) nodeAdapter.notifyDataSetChanged();
-                        logUi(null, "Scan registres: aucun trouvé (" + mediaShort + ")");
-                        return;
-                    }
-
-                    NodeScanItem defaultItem;
-                    if (found.containsKey(250)) {
-                        defaultItem = found.get(250).asDefault();
-                        found.remove(250);
-                    } else {
-                        Map.Entry<Integer, NodeScanItem> first = found.entrySet().iterator().next();
-                        defaultItem = first.getValue().asDefault();
-                        found.remove(first.getKey());
-                    }
-
-                    nodeItems.add(defaultItem);
-                    for (NodeScanItem it : found.values()) nodeItems.add(it);
-                    if (txtNodesSummary != null) txtNodesSummary.setText("Nodes trouvés : " + nodeItems.size() + " (" + mediaShort + ")");
-                    if (nodeAdapter != null) nodeAdapter.notifyDataSetChanged();
-
-                    int defaultNode = defaultItem.lcrnode;
-                    upsertRegisterTabFromScan(transportKey, defaultNode, 255, defaultItem.serialId, true);
-                    for (NodeScanItem it : nodeItems) {
-                        if (it == null) continue;
-                        if (it.lcrnode == defaultNode) continue;
-                        upsertRegisterTabFromScan(transportKey, it.lcrnode, 255, it.serialId, false);
-                    }
-
-                    edtTo.setText(String.valueOf(defaultNode));
-                    logUi(null, "Scan registres terminé: " + nodeItems.size() + " node(s), default=" + defaultNode + " (" + mediaShort + ")");
-
-                } finally {
-                    if (btnScanNodes != null) btnScanNodes.setEnabled(true);
-                    updateNodesStatusUi();
-                }
-            });
-        });
-    }
 
 
     /**
@@ -1060,7 +933,6 @@ private void scanRegistersOptionB() {
             for (NodeScanItem it : found.values()) {
                 if (it == null) continue;
                 if (it.serialId == null || it.serialId.trim().isEmpty()) continue;
-                if (it.ticketNo == null || it.ticketNo.trim().isEmpty()) continue;
 
                 long detectedMs = System.currentTimeMillis();
             String tno = (it.ticketNo != null && !it.ticketNo.trim().isEmpty()) ? it.ticketNo.trim() : ("SCAN-" + scanStartedMs + "-N" + it.lcrnode);
@@ -1090,8 +962,6 @@ private void scanRegistersOptionB() {
                         null,
                         null,
                         null
-                );
-
                 deliveryStore.openAttemptAsync(it.serialId, tno, DeliveryLogStore.SOURCE_UI, null, attemptId -> {
                     deliveryStore.addEventAsync(attemptId, DeliveryLogStore.LEVEL_INFO,
                             "SCAN_NODE_DETECTED",
@@ -1137,8 +1007,6 @@ private void scanRegistersOptionB() {
                 null,
                 null,
                 null
-        );
-
         deliveryStore.openAttemptAsync(scanSerial, scanTicket, DeliveryLogStore.SOURCE_UI, null, attemptId -> {
             deliveryStore.addEventAsync(attemptId, DeliveryLogStore.LEVEL_INFO,
                     "SCAN_COMPLETED",
@@ -1257,7 +1125,6 @@ private void scanRegistersOptionB() {
             PendingIntent pi = PendingIntent.getBroadcast(
                     this, 0, new Intent(ACTION_USB_PERMISSION),
                     PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE
-            );
             usbManager.requestPermission(dev, pi);
             logUi(null, "Permission USB demandée");
             logMedia1("USB Open/Ping: permission requise");
@@ -1509,7 +1376,6 @@ private void scanRegistersOptionB() {
             final int takeFlags = data.getFlags() & (
                     Intent.FLAG_GRANT_READ_URI_PERMISSION
                             | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            );
             try { getContentResolver().takePersistableUriPermission(dirUri, takeFlags); } catch (Exception ignored) {}
             saveBackupDirUri(dirUri);
             toast("Backup: dossier enregistré");
