@@ -442,7 +442,7 @@ public final class RegisterSessionManager {
 
         // v7: cadences (stables)
         private static final long LIVE_MS = 350;        // ajuste si besoin BT/USB
-        private static final long STATUS_MS = 1500;
+        private static final long STATUS_MS = 2500; // v7: réduit les ERR status pendant RUNNING
 
         NodeScheduler(int node) {
             this.node = node;
@@ -475,7 +475,18 @@ public final class RegisterSessionManager {
             DeliveryController c = dc;
             if (c == null) return;
             if (!uiSubscribed) return;
-            if (c.getState() == DeliveryState.DISCONNECTED) return;
+            DeliveryState st = c.getState();
+            if (st == DeliveryState.DISCONNECTED) return;
+
+            // ✅ v7 règle: en CONNECTED (READY ou ticket pending), pas de polling automatique.
+            // L'opérateur utilise B (Status) ou A/C selon le contexte.
+            if (st == DeliveryState.CONNECTED || st == DeliveryState.PRESTART || st == DeliveryState.ENDING) {
+                return;
+            }
+
+            // Polling uniquement pendant livraison (RUNNING_FLOWING / RUNNING_PAUSED)
+            boolean running = (st == DeliveryState.RUNNING_FLOWING) || (st == DeliveryState.RUNNING_PAUSED);
+            if (!running) return;
 
             long now = System.currentTimeMillis();
 
@@ -489,7 +500,7 @@ public final class RegisterSessionManager {
                 } catch (Exception ignored) {}
             }
 
-            // STATUS (header, ticket, serial)
+            // STATUS (dev/prn + header) - fréquence plus lente pendant livraison
             long stInterval = STATUS_MS + statusBackoffMs;
             if (now - lastStatusMs >= stInterval) {
                 lastStatusMs = now;
