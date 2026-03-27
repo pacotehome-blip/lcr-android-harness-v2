@@ -1,7 +1,3 @@
-
-// FILE: RegisterTabFragment.java
-// Source: version corrigée générée à partir de ton fichier fourni. [1](https://groupefilgo-my.sharepoint.com/personal/paul-andre_cote_filgo_ca/Documents/Fichiers%20Microsoft%20Copilot%20Chat/RegisterTabFragment.java)[2](blob:https://m365.cloud.microsoft/2234dd2e-fbd9-48b8-ab45-589703745606)
-
 package com.pa.lcrdemo;
 
 import android.content.BroadcastReceiver;
@@ -21,28 +17,31 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.core.widget.NestedScrollView;
 import androidx.fragment.app.Fragment;
+
 import com.pa.lcr.lcp.*;
 import com.pa.lcr.lcp.log.LogBus;
+import com.pa.lcr.lcp.transport.MediaTransportManager;
+import com.pa.lcr.lcp.transport.TransportIo;
+
 import org.json.JSONObject;
+
 import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * RegisterTabFragment (node-specific) — v8
+ * RegisterTabFragment (node-specific) — v7
  *
- * Ajouts:
- * - ARG_SERIAL (serial connu dès création du tab)
- * - Snapshot d’activation: status + validate + live sample + delCode, avec mini-poll idle
- * - Net/Gross: décimales = digits exact (plus de digits+1)
- * - Publication snapshot: LogBus.api + DeliveryLogStore (TAB_SNAPSHOT_READY)
+ * Approche:
+ * - LIVE conforme au registre: READY/TicketPending = one-shot (Connect/B/A/END), pas de polling.
+ * - RUNNING_FLOWING / RUNNING_PAUSED: refresh sur changement (scheduler + backoff).
+ * - Log scrollable sans jump (DOWN = log seulement).
  */
 public class RegisterTabFragment extends Fragment {
 
     private static final String ARG_NODE = "node";
     private static final String ARG_FROM = "from";
-    private static final String ARG_SERIAL = "serial";
 
     public static RegisterTabFragment newInstance(int node, int from) {
         RegisterTabFragment f = new RegisterTabFragment();
@@ -53,27 +52,8 @@ public class RegisterTabFragment extends Fragment {
         return f;
     }
 
-    public static RegisterTabFragment newInstance(int node, int from, String serialId) {
-        RegisterTabFragment f = new RegisterTabFragment();
-        Bundle b = new Bundle();
-        b.putInt(ARG_NODE, node);
-        b.putInt(ARG_FROM, from);
-        if (serialId != null) b.putString(ARG_SERIAL, serialId);
-        f.setArguments(b);
-        return f;
-    }
-
     private int node = 250;
     private int from = 255;
-    private String serialFromArgs = null;
-
-    // Activation snapshot state
-    private volatile boolean activationSnapshotPending = false;
-    private volatile boolean activationSnapshotPublished = false;
-    private volatile long activationStartedMs = 0L;
-    private volatile double lastNet = 0.0;
-    private volatile double lastGross = 0.0;
-    private volatile boolean lastQtyValid = false;
 
     // Header UI
     private TextView txtLcrNode, txtFrom, txtSerialId, txtTicketNo, txtTicketPending;
@@ -132,6 +112,7 @@ public class RegisterTabFragment extends Fragment {
     private boolean uiListenerAttached = false;
 
     private UsbManager usbManager;
+
     private DeliveryController controller;
     private String tabTransportKey = null;
 
@@ -160,6 +141,7 @@ public class RegisterTabFragment extends Fragment {
 
         long now = System.currentTimeMillis();
         long dt = now - lastLogRefreshMs;
+
         if (dt >= LOG_REFRESH_MIN_MS && !logRefreshPending) {
             lastLogRefreshMs = now;
             refreshLogView();
@@ -168,6 +150,7 @@ public class RegisterTabFragment extends Fragment {
 
         if (logRefreshPending) return;
         logRefreshPending = true;
+
         long delay = Math.max(0L, LOG_REFRESH_MIN_MS - dt);
         ui.postDelayed(() -> {
             logRefreshPending = false;
@@ -226,12 +209,15 @@ public class RegisterTabFragment extends Fragment {
         try {
             if (logScroll == null) return;
             final int rootY = (regRootScroll != null) ? regRootScroll.getScrollY() : -1;
+
             try {
                 if (regRootScroll != null) regRootScroll.setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);
                 if (regRootScroll != null) regRootScroll.requestDisallowInterceptTouchEvent(true);
             } catch (Exception ignored) {}
+
             logUserScrolling = true;
             logUserScrollUntilMs = System.currentTimeMillis() + 1200L;
+
             logScroll.post(() -> {
                 try {
                     logScroll.requestFocus();
@@ -252,8 +238,10 @@ public class RegisterTabFragment extends Fragment {
         public void onStateChanged(DeliveryState state) {
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
+
                 if (starting && state == DeliveryState.RUNNING_FLOWING) starting = false;
                 if (starting && (System.currentTimeMillis() - startingSinceMs) > 12000L) starting = false;
+
                 refreshDelCodeFromTickSnapshotThrottled();
                 updateButtons(state);
                 scheduleLogRefresh();
@@ -261,6 +249,7 @@ public class RegisterTabFragment extends Fragment {
         }
 
         @Override public void onProductsUpdated(List<ProductUiItem> products, int activeIndex0) { }
+
         @Override public void onLog(String message) { scheduleLogRefresh(); }
 
         @Override
@@ -280,18 +269,11 @@ public class RegisterTabFragment extends Fragment {
                 if (d > 6) d = 6;
                 lastDigits = d;
 
-                // ✅ décimales exactes = digits
-                int show = Math.min(6, Math.max(0, d));
+                int show = Math.min(6, Math.max(0, d + 1));
                 String fmt = "%." + show + "f";
-
-                lastNet = net;
-                lastGross = gross;
-                lastQtyValid = true;
 
                 if (txtQtyNet != null) txtQtyNet.setText("NET: " + String.format(Locale.ROOT, fmt, net));
                 if (txtQtyGross != null) txtQtyGross.setText("GROSS: " + String.format(Locale.ROOT, fmt, gross));
-
-                maybePublishActivationSnapshot("onLiveQty");
             });
         }
 
@@ -301,11 +283,11 @@ public class RegisterTabFragment extends Fragment {
                 if (!isAdded() || getView() == null) return;
                 lastLiveText = liveText;
                 if (txtLive != null) txtLive.setText(liveText);
+
                 ensureSerialVisibleThrottled();
                 refreshDelCodeFromTickSnapshotThrottled();
                 updateButtons(controller != null ? controller.getState() : null);
                 scheduleLogRefresh();
-                maybePublishActivationSnapshot("onLiveStatus");
             });
         }
 
@@ -315,10 +297,10 @@ public class RegisterTabFragment extends Fragment {
                 if (!isAdded() || getView() == null) return;
                 if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : " + (ticketNo == null ? "—" : ticketNo));
                 if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : " + (deliveryUid == null ? "—" : deliveryUid));
+
                 ensureSerialVisibleThrottled();
                 refreshDelCodeFromTickSnapshotThrottled();
                 updateButtons(controller != null ? controller.getState() : null);
-                maybePublishActivationSnapshot("onTicketInfo");
             });
         }
     };
@@ -372,7 +354,6 @@ public class RegisterTabFragment extends Fragment {
         if (a != null) {
             node = a.getInt(ARG_NODE, 250);
             from = a.getInt(ARG_FROM, 255);
-            serialFromArgs = a.getString(ARG_SERIAL, null);
         }
         usbManager = (UsbManager) context.getSystemService(Context.USB_SERVICE);
     }
@@ -381,6 +362,7 @@ public class RegisterTabFragment extends Fragment {
     public void onStart() {
         super.onStart();
         LogBus.addListener(logListener);
+
         IntentFilter f = new IntentFilter();
         f.addAction(UsbReceiver.ACTION_USB_READY);
         f.addAction(UsbReceiver.ACTION_USB_DETACHED);
@@ -429,24 +411,30 @@ public class RegisterTabFragment extends Fragment {
 
     private void bindUi(View v) {
         regRootScroll = v.findViewById(R.id.regRootScroll);
+
         txtLcrNode = v.findViewById(R.id.txtLcrNode);
         txtFrom = v.findViewById(R.id.txtFrom);
         txtSerialId = v.findViewById(R.id.txtSerialId);
         txtTicketNo = v.findViewById(R.id.txtTicketNo);
         txtTicketPending = v.findViewById(R.id.txtTicketPending);
+
         spnProduct = v.findViewById(R.id.spnProduct);
         edtPreset = v.findViewById(R.id.edtPreset);
+
         btnConnect = v.findViewById(R.id.btnConnectTab);
         btnA = v.findViewById(R.id.btnA);
         btnB = v.findViewById(R.id.btnB);
         btnC = v.findViewById(R.id.btnC);
         btnContinue = v.findViewById(R.id.btnContinue);
         btnFinish = v.findViewById(R.id.btnFinish);
+
         txtLive = v.findViewById(R.id.txtLive);
         txtQtyNet = v.findViewById(R.id.txtQtyNet);
         txtQtyGross = v.findViewById(R.id.txtQtyGross);
         txtDeliveryUid = v.findViewById(R.id.txtDeliveryUid);
+
         btnReprintTicket = v.findViewById(R.id.btnReprintTicket);
+
         cbShowLog = v.findViewById(R.id.cbShowLog);
         logPanel = v.findViewById(R.id.logPanel);
         txtLog = v.findViewById(R.id.txtLog);
@@ -461,15 +449,19 @@ public class RegisterTabFragment extends Fragment {
     private void initUi() {
         if (txtLcrNode != null) txtLcrNode.setText(String.format(Locale.ROOT, "LCR Node : %d", node));
         if (txtFrom != null) txtFrom.setText(String.format(Locale.ROOT, "From : %d", from));
-        if (txtSerialId != null) txtSerialId.setText("#Série : " + ((serialFromArgs != null && !serialFromArgs.trim().isEmpty()) ? serialFromArgs : "—"));
+
+        if (txtSerialId != null) txtSerialId.setText("#Série : —");
         if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : —");
         if (txtTicketPending != null) txtTicketPending.setText("Ticket pending : —");
         if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : —");
+
         ticketPendingFlag = -1;
         lastDigits = 3;
+
         if (txtLive != null) txtLive.setText("LIVE: (en attente)");
         if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
         if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
+
         if (edtPreset != null) edtPreset.setText("50");
 
         List<String> items = new ArrayList<>();
@@ -483,7 +475,9 @@ public class RegisterTabFragment extends Fragment {
 
         if (cbShowLog != null) cbShowLog.setChecked(false);
         if (logPanel != null) logPanel.setVisibility(View.GONE);
+
         logViewSinceMs = 0L;
+
         if (cbTxRx != null) cbTxRx.setChecked(LogBus.SHOW_IO);
         if (cbLogTs != null) cbLogTs.setChecked(LogBus.SHOW_TS);
 
@@ -542,7 +536,7 @@ public class RegisterTabFragment extends Fragment {
             });
         }
 
-        if (btnConnect != null) btnConnect.setOnClickListener(v -> connectThisRegister(true));
+        if (btnConnect != null) btnConnect.setOnClickListener(v -> reconnectThisRegister(true));
 
         if (btnA != null) btnA.setOnClickListener(v -> {
             if (controller == null) return;
@@ -556,6 +550,7 @@ public class RegisterTabFragment extends Fragment {
             }, 900);
         });
 
+        // ✅ B = Status + one-shot LIVE recale (READY / ticket pending)
         if (btnB != null) btnB.setOnClickListener(v -> {
             if (controller == null) return;
             controller.requestStatus();
@@ -567,6 +562,7 @@ public class RegisterTabFragment extends Fragment {
         if (btnC != null) {
             btnC.setOnClickListener(v -> {
                 if (controller == null) return;
+
                 refreshDelCodeFromTickSnapshotThrottled();
                 int dc = lastDelCode;
                 boolean tp = (dc & 0x0001) != 0;
@@ -603,6 +599,7 @@ public class RegisterTabFragment extends Fragment {
 
         if (btnFinish != null) btnFinish.setOnClickListener(v -> {
             if (controller == null) return;
+
             boolean stableOff2 = false;
             try { stableOff2 = controller.isFlowOffStable(); } catch (Exception ignored) {}
             if (!stableOff2) {
@@ -610,6 +607,7 @@ public class RegisterTabFragment extends Fragment {
                 try { Toast.makeText(requireContext(), "FLOW OFF en confirmation...", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
                 return;
             }
+
             controller.endDelivery();
             ui.postDelayed(() -> {
                 try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
@@ -628,10 +626,44 @@ public class RegisterTabFragment extends Fragment {
         }
         connectThisRegister(false);
     }
+    private void reconnectThisRegister(boolean userInitiated) {
+        try { detachUiListenerSafe(); } catch (Exception ignored) {}
+        controller = null;
+        starting = false;
+        ticketPendingFlag = -1;
+        activationSnapshotPending = false;
+        activationSnapshotPublished = false;
+        connectThisRegister(userInitiated);
+    }
+
+
 
     private void connectThisRegister(boolean userInitiated) {
         RegisterSessionManager sm = RegisterSessionManager.get(requireContext());
-        DeliveryController dc = sm.resolveOrCreateForNode(node, from);
+        DeliveryController dc = null;
+
+        // 1) Forcer le média du TAB si connu
+        if (tabTransportKey != null && !tabTransportKey.trim().isEmpty()) {
+            TransportIo io = null;
+            try {
+                MediaTransportManager mgr = MediaTransportManager.get(requireContext());
+                io = (mgr != null) ? mgr.getByKey(tabTransportKey) : null;
+            } catch (Exception ignored) {}
+
+            if (io != null && io.isOpen()) {
+                dc = sm.getOrCreate(tabTransportKey, node, from, io);
+            } else {
+                if (userInitiated) {
+                    LogBus.api(node, "Média du TAB non prêt: " + tabTransportKey);
+                    Toast.makeText(requireContext(), "Média du TAB non prêt: " + tabTransportKey, Toast.LENGTH_SHORT).show();
+                }
+            }
+        }
+
+        // 2) Fallback: résolution v7 (pin/probe) si pas de média TAB ou non prêt
+        if (dc == null) {
+            dc = sm.resolveOrCreateForNode(node, from);
+        }
         if (dc == null) {
             if (userInitiated) {
                 LogBus.api(node, "Aucun média prêt / registre introuvable pour ce node");
@@ -639,8 +671,8 @@ public class RegisterTabFragment extends Fragment {
             }
             return;
         }
-
         controller = dc;
+
         try {
             String tk = sm.findTransportKeyForController(controller);
             if (tk != null) tabTransportKey = tk;
@@ -658,9 +690,9 @@ public class RegisterTabFragment extends Fragment {
         if (cbLogTs != null) controller.setLogTimestampsEnabled(cbLogTs.isChecked());
 
         syncUiFromController();
-        startActivationSnapshot("attach");
         validateHeaderAsync();
 
+        // ✅ One-shot LIVE recale (READY / ticket pending) après attach
         ui.postDelayed(() -> {
             try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
         }, 200);
@@ -685,132 +717,22 @@ public class RegisterTabFragment extends Fragment {
         DeliveryState st = controller.getState();
         refreshDelCodeFromTickSnapshotThrottled();
         updateButtons(st);
-    }
-
-    private void startActivationSnapshot(String reason) {
-        try {
-            activationSnapshotPending = true;
-            activationSnapshotPublished = false;
-            activationStartedMs = System.currentTimeMillis();
-            lastQtyValid = false;
-
-            if (txtSerialId != null && serialFromArgs != null && !serialFromArgs.trim().isEmpty()) {
-                txtSerialId.setText("#Série : " + serialFromArgs);
-            }
-        } catch (Exception ignored) {}
-
-        try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
-        try { validateHeaderAsync(); } catch (Exception ignored) {}
-
-        ui.postDelayed(() -> {
-            try { refreshDelCodeFromTickSnapshotThrottled(); } catch (Exception ignored) {}
-            try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
-            try { updateButtons(controller != null ? controller.getState() : null); } catch (Exception ignored) {}
-        }, 250);
-
-        ui.postDelayed(new Runnable() {
-            int n = 0;
-            @Override public void run() {
-                if (!isAdded() || getView() == null) return;
-                if (controller == null) return;
-                if (activationSnapshotPublished) return;
-                n++;
-                try { controller.requestStatus(); } catch (Exception ignored) {}
-                try { refreshDelCodeFromTickSnapshotThrottled(); } catch (Exception ignored) {}
-                if ((n % 2) == 0) {
-                    try { controller.requestLiveSample(); } catch (Exception ignored) {}
-                }
-                try { updateButtons(controller.getState()); } catch (Exception ignored) {}
-                if (n < 10) ui.postDelayed(this, 600);
-            }
-        }, 600);
-    }
-
-    private void maybePublishActivationSnapshot(String reason) {
-        try {
-            if (!activationSnapshotPending) return;
-            if (activationSnapshotPublished) return;
-            if (controller == null) return;
-            if (!lastQtyValid) return;
-
-            String serial = null;
-            try {
-                if (txtSerialId != null) {
-                    String s = String.valueOf(txtSerialId.getText());
-                    int k = s.indexOf(":");
-                    serial = (k >= 0) ? s.substring(k + 1).trim() : s.trim();
-                    if (serial != null && serial.equals("—")) serial = null;
-                }
-            } catch (Exception ignored) {}
-
-            if ((serial == null || serial.isEmpty()) && serialFromArgs != null) serial = serialFromArgs;
-            if (serial == null || serial.trim().isEmpty() || "—".equals(serial.trim())) return;
-
-            JSONObject snap = new JSONObject();
-            long now = System.currentTimeMillis();
-            int dc = lastDelCode;
-            DeliveryState st = null;
-            try { st = controller.getState(); } catch (Exception ignored) {}
-            String ticketNo = null;
-            try { ticketNo = (txtTicketNo != null) ? String.valueOf(txtTicketNo.getText()) : null; } catch (Exception ignored) {}
-            String deliveryUid = null;
-            try { deliveryUid = (txtDeliveryUid != null) ? String.valueOf(txtDeliveryUid.getText()) : null; } catch (Exception ignored) {}
-
-            try {
-                snap.put("event_type", "TAB_ACTIVATION_SNAPSHOT");
-                snap.put("ts_ms", now);
-                snap.put("node", node);
-                snap.put("from", from);
-                snap.put("serial_id", serial);
-                snap.put("transport_key", tabTransportKey);
-                snap.put("state", (st != null ? st.name() : "—"));
-                snap.put("delCode", dc);
-                snap.put("ticketPending", ((dc & 0x0001) != 0) ? 1 : 0);
-                snap.put("flowActive", ((dc & 0x0004) != 0) ? 1 : 0);
-                snap.put("deliveryActive", ((dc & 0x0008) != 0) ? 1 : 0);
-                snap.put("digits", lastDigits);
-                snap.put("net", lastNet);
-                snap.put("gross", lastGross);
-                snap.put("ticket_text", ticketNo);
-                snap.put("delivery_uid_text", deliveryUid);
-                snap.put("reason", reason);
-            } catch (Exception ignored) {}
-
-            LogBus.api(node, "[TAB_SNAPSHOT] " + snap.toString());
-
-            try {
-                com.pa.lcr.lcp.storage.DeliveryLogStore store = new com.pa.lcr.lcp.storage.DeliveryLogStore(requireContext());
-                String ticketKey = (ticketNo != null && ticketNo.contains(":")) ? ticketNo.substring(ticketNo.indexOf(":") + 1).trim() : ticketNo;
-                if (ticketKey == null || ticketKey.isEmpty() || ticketKey.equals("—")) {
-                    ticketKey = "TAB-" + activationStartedMs;
-                }
-                store.upsertSummaryAsync(serial, ticketKey, null, "TAB_SNAPSHOT_READY",
-                        com.pa.lcr.lcp.storage.DeliveryLogStore.SOURCE_UI, null, null, null);
-                final String tk = ticketKey;
-                store.openAttemptAsync(serial, tk, com.pa.lcr.lcp.storage.DeliveryLogStore.SOURCE_UI, null, attemptId -> {
-                    store.addEventAsync(attemptId, com.pa.lcr.lcp.storage.DeliveryLogStore.LEVEL_INFO,
-                            "TAB_ACTIVATION_SNAPSHOT",
-                            "Snapshot TAB (activation)",
-                            snap.toString());
-                    store.closeAttemptAsync(attemptId, "DONE", snap.toString(), null);
-                });
-            } catch (Exception ignored) {}
-
-            activationSnapshotPublished = true;
-            activationSnapshotPending = false;
-        } catch (Exception ignored) {}
+        // pas de requestStatus() automatique en idle
     }
 
     private void ensureSerialVisibleThrottled() {
         try {
             if (txtSerialId == null) return;
             if (headerValidatedOnce) return;
+
             String cur = String.valueOf(txtSerialId.getText());
-            boolean missing = (cur.contains("—") || cur.trim().endsWith(":") || cur.trim().endsWith(": —"));
+            boolean missing = (cur.contains("—") || cur.trim().endsWith(":" ) || cur.trim().endsWith(": —"));
             if (!missing) return;
+
             long now = System.currentTimeMillis();
             if (now - lastHeaderValidateMs < HEADER_VALIDATE_MIN_MS) return;
             lastHeaderValidateMs = now;
+
             validateHeaderAsync();
         } catch (Exception ignored) {}
     }
@@ -843,14 +765,15 @@ public class RegisterTabFragment extends Fragment {
                             txtSerialId.setText("#Série : " + ((serial == null || serial.isEmpty()) ? "—" : serial));
                             if (serial != null && !serial.trim().isEmpty()) headerValidatedOnce = true;
                         }
+
                         if (txtTicketPending != null) {
                             txtTicketPending.setText("Ticket pending : " +
                                     (ticketPendingFlag == 1 ? "OUI" : (ticketPendingFlag == 0 ? "NON" : "—")));
                         }
+
                         refreshDelCodeFromTickSnapshotThrottled();
                         updateButtons(controller != null ? controller.getState() : null);
                         scheduleLogRefresh();
-                        maybePublishActivationSnapshot("validateHeader");
                     });
 
                 } catch (Exception e) {
@@ -861,7 +784,8 @@ public class RegisterTabFragment extends Fragment {
     }
 
     private void updateButtons(DeliveryState state) {
-        if (btnConnect == null || btnA == null || btnB == null || btnC == null || btnContinue == null || btnFinish == null) return;
+        if (btnConnect == null || btnA == null || btnB == null || btnC == null || btnContinue == null || btnFinish == null)
+            return;
 
         if (controller == null) {
             btnConnect.setEnabled(true);
@@ -875,6 +799,7 @@ public class RegisterTabFragment extends Fragment {
         }
 
         DeliveryState st = (state != null) ? state : controller.getState();
+
         boolean connected = (st == DeliveryState.CONNECTED);
         boolean paused = (st == DeliveryState.RUNNING_PAUSED);
         boolean flowing = (st == DeliveryState.RUNNING_FLOWING);
@@ -887,7 +812,6 @@ public class RegisterTabFragment extends Fragment {
         boolean tp = (dc & 0x0001) != 0;
         boolean flow = (dc & 0x0004) != 0;
         boolean act = (dc & 0x0008) != 0;
-
         btnC.setEnabled(connected && !tp && !flow && !act);
 
         if (starting) {
@@ -913,6 +837,7 @@ public class RegisterTabFragment extends Fragment {
             ui.post(this::refreshLogView);
             return;
         }
+
         if (!isAdded() || getView() == null) return;
 
         List<LogBus.LogEvent> events = LogBus.snapshotForNode(node, TAB_LOG_MAX_LINES);
@@ -923,6 +848,7 @@ public class RegisterTabFragment extends Fragment {
             }
             events = filtered;
         }
+
         txtLog.setText(LogBus.buildText(events));
     }
 
@@ -932,7 +858,8 @@ public class RegisterTabFragment extends Fragment {
     }
 
     private String uiTs() {
-        return new SimpleDateFormat("HH:mm:ss.SSS", Locale.CANADA_FRENCH).format(new Date(System.currentTimeMillis()));
+        return new SimpleDateFormat("HH:mm:ss.SSS", Locale.CANADA_FRENCH)
+                .format(new Date(System.currentTimeMillis()));
     }
 
     private static double parseDouble(String s, double def) {
@@ -945,3 +872,15 @@ public class RegisterTabFragment extends Fragment {
         return (m == null) ? e.getClass().getSimpleName() : m;
     }
 }
+
+    public static RegisterTabFragment newInstance(int node, int from, String serialId, String transportKey) {
+        RegisterTabFragment f = new RegisterTabFragment();
+        Bundle b = new Bundle();
+        b.putInt(ARG_NODE, node);
+        b.putInt(ARG_FROM, from);
+        if (serialId != null) b.putString(ARG_SERIAL, serialId);
+        if (transportKey != null) b.putString(ARG_TRANSPORT, transportKey);
+        f.setArguments(b);
+        return f;
+    }
+
