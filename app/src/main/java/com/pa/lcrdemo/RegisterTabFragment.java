@@ -40,6 +40,9 @@ public class RegisterTabFragment extends Fragment {
 
     private static final String ARG_NODE = "node";
     private static final String ARG_FROM = "from";
+    private static final String ARG_SERIAL = "serial";
+    private static final String ARG_TRANSPORT = "transport";
+
 
     public static RegisterTabFragment newInstance(int node, int from) {
         RegisterTabFragment f = new RegisterTabFragment();
