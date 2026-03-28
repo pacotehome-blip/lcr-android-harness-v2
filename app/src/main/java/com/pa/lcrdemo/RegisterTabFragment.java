@@ -20,8 +20,6 @@ import androidx.fragment.app.Fragment;
 
 import com.pa.lcr.lcp.*;
 import com.pa.lcr.lcp.log.LogBus;
-import com.pa.lcr.lcp.transport.MediaTransportManager;
-import com.pa.lcr.lcp.transport.TransportIo;
 
 import org.json.JSONObject;
 
@@ -536,7 +534,7 @@ public class RegisterTabFragment extends Fragment {
             });
         }
 
-        if (btnConnect != null) btnConnect.setOnClickListener(v -> reconnectThisRegister(true));
+        if (btnConnect != null) btnConnect.setOnClickListener(v -> connectThisRegister(true));
 
         if (btnA != null) btnA.setOnClickListener(v -> {
             if (controller == null) return;
@@ -626,44 +624,10 @@ public class RegisterTabFragment extends Fragment {
         }
         connectThisRegister(false);
     }
-    private void reconnectThisRegister(boolean userInitiated) {
-        try { detachUiListenerSafe(); } catch (Exception ignored) {}
-        controller = null;
-        starting = false;
-        ticketPendingFlag = -1;
-        activationSnapshotPending = false;
-        activationSnapshotPublished = false;
-        connectThisRegister(userInitiated);
-    }
-
-
 
     private void connectThisRegister(boolean userInitiated) {
         RegisterSessionManager sm = RegisterSessionManager.get(requireContext());
-        DeliveryController dc = null;
-
-        // 1) Forcer le média du TAB si connu
-        if (tabTransportKey != null && !tabTransportKey.trim().isEmpty()) {
-            TransportIo io = null;
-            try {
-                MediaTransportManager mgr = MediaTransportManager.get(requireContext());
-                io = (mgr != null) ? mgr.getByKey(tabTransportKey) : null;
-            } catch (Exception ignored) {}
-
-            if (io != null && io.isOpen()) {
-                dc = sm.getOrCreate(tabTransportKey, node, from, io);
-            } else {
-                if (userInitiated) {
-                    LogBus.api(node, "Média du TAB non prêt: " + tabTransportKey);
-                    Toast.makeText(requireContext(), "Média du TAB non prêt: " + tabTransportKey, Toast.LENGTH_SHORT).show();
-                }
-            }
-        }
-
-        // 2) Fallback: résolution v7 (pin/probe) si pas de média TAB ou non prêt
-        if (dc == null) {
-            dc = sm.resolveOrCreateForNode(node, from);
-        }
+        DeliveryController dc = sm.resolveOrCreateForNode(node, from);
         if (dc == null) {
             if (userInitiated) {
                 LogBus.api(node, "Aucun média prêt / registre introuvable pour ce node");
@@ -871,7 +835,7 @@ public class RegisterTabFragment extends Fragment {
         String m = e.getMessage();
         return (m == null) ? e.getClass().getSimpleName() : m;
     }
-}
+
 
     public static RegisterTabFragment newInstance(int node, int from, String serialId, String transportKey) {
         RegisterTabFragment f = new RegisterTabFragment();
@@ -884,3 +848,4 @@ public class RegisterTabFragment extends Fragment {
         return f;
     }
 
+}
