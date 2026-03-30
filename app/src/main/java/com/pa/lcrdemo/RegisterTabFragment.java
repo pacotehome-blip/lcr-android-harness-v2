@@ -20,8 +20,6 @@ import androidx.fragment.app.Fragment;
 
 import com.pa.lcr.lcp.*;
 import com.pa.lcr.lcp.log.LogBus;
-import com.pa.lcr.lcp.transport.MediaTransportManager;
-import com.pa.lcr.lcp.transport.TransportIo;
 
 import org.json.JSONObject;
 
@@ -117,14 +115,7 @@ public class RegisterTabFragment extends Fragment {
     private UsbManager usbManager;
 
     private DeliveryController controller;
-    private String // tabTransportKey conservé (identité média du TAB) // identité média du TAB (BT:... / USB...)
-
-    private volatile boolean tabMediaReady = true;
-    private volatile boolean pendingReconnect = false;
-    private volatile String tabMediaShort = "—";
-
-    private String serialFromArgs = null;
-    private String transportFromArgs = null;
+    private String tabTransportKey = null;
 
     private boolean starting = false;
     private long startingSinceMs = 0L;
@@ -344,7 +335,7 @@ public class RegisterTabFragment extends Fragment {
 
                 ui.post(() -> {
                     if (!isAdded() || getView() == null) return;
-                    if (txtSerialId != null) txtSerialId.setText("#Série : " + ((serialFromArgs != null && !serialFromArgs.trim().isEmpty()) ? serialFromArgs : "—"));
+                    if (txtSerialId != null) txtSerialId.setText("#Série : —");
                     if (txtTicketPending != null) txtTicketPending.setText("Ticket pending : —");
                     if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : —");
                     if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : —");
@@ -363,14 +354,7 @@ public class RegisterTabFragment extends Fragment {
         Bundle a = getArguments();
         if (a != null) {
             node = a.getInt(ARG_NODE, 250);
-        from = a.getInt(ARG_FROM, 255);
-        serialFromArgs = a.getString(ARG_SERIAL, null);
-        transportFromArgs = a.getString(ARG_TRANSPORT, null);
-        if (transportFromArgs != null && !transportFromArgs.trim().isEmpty()) {
-            tabTransportKey = transportFromArgs.trim();
-            String up = tabTransportKey.toUpperCase(Locale.ROOT);
-            tabMediaShort = up.startsWith("BT:") ? "BT" : (up.startsWith("USB") ? "USB" : tabMediaShort);
-        }
+            from = a.getInt(ARG_FROM, 255);
         }
         usbManager = (UsbManager) context.getSystemService(Context.USB_SERVICE);
     }
@@ -467,7 +451,7 @@ public class RegisterTabFragment extends Fragment {
         if (txtLcrNode != null) txtLcrNode.setText(String.format(Locale.ROOT, "LCR Node : %d", node));
         if (txtFrom != null) txtFrom.setText(String.format(Locale.ROOT, "From : %d", from));
 
-        if (txtSerialId != null) txtSerialId.setText("#Série : " + ((serialFromArgs != null && !serialFromArgs.trim().isEmpty()) ? serialFromArgs : "—"));
+        if (txtSerialId != null) txtSerialId.setText("#Série : —");
         if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : —");
         if (txtTicketPending != null) txtTicketPending.setText("Ticket pending : —");
         if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : —");
@@ -553,7 +537,7 @@ public class RegisterTabFragment extends Fragment {
             });
         }
 
-        if (btnConnect != null) btnConnect.setOnClickListener(v -> reconnectThisRegister(true));
+        if (btnConnect != null) btnConnect.setOnClickListener(v -> connectThisRegister(true));
 
         if (btnA != null) btnA.setOnClickListener(v -> {
             if (controller == null) return;
@@ -636,44 +620,7 @@ public class RegisterTabFragment extends Fragment {
         });
     }
 
-    
-
-    public void onTabMediaStatusChanged(boolean ready, String mediaShort) {
-        tabMediaReady = ready;
-        tabMediaShort = (mediaShort == null || mediaShort.trim().isEmpty()) ? "—" : mediaShort.trim();
-
-        ui.post(() -> {
-            if (!isAdded() || getView() == null) return;
-            if (!tabMediaReady) {
-                if (txtLive != null) txtLive.setText("LIVE: " + tabMediaShort + "(OFF) — reconnect requis");
-                controller = null;
-                updateButtons(null);
-                return;
-            }
-            if (pendingReconnect) {
-                pendingReconnect = false;
-                reconnectThisRegister(false);
-            }
-        });
-    }
-
-    private void reconnectThisRegister(boolean userInitiated) {
-        if (!tabMediaReady) {
-            pendingReconnect = true;
-            if (userInitiated) {
-                try { Toast.makeText(requireContext(), tabMediaShort + "(OFF) — en attente…", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
-            }
-            return;
-        }
-        try { detachUiListenerSafe(); } catch (Exception ignored) {}
-        controller = null;
-        starting = false;
-        ticketPendingFlag = -1;
-        connectThisRegister(userInitiated);
-    }
-
-private void attemptAttachIfPossible(boolean verboseLog) {
-        if (!tabMediaReady && !pendingReconnect) return;
+    private void attemptAttachIfPossible(boolean verboseLog) {
         if (uiListenerAttached && controller != null) {
             syncUiFromController();
             return;
@@ -683,28 +630,7 @@ private void attemptAttachIfPossible(boolean verboseLog) {
 
     private void connectThisRegister(boolean userInitiated) {
         RegisterSessionManager sm = RegisterSessionManager.get(requireContext());
-        // Forcer le média du TAB si transportKey connu (BT/USB)
-        if (tabTransportKey != null && !tabTransportKey.trim().isEmpty()) {
-            try {
-                MediaTransportManager mgr = MediaTransportManager.get(requireContext());
-                TransportIo io = (mgr != null) ? mgr.getByKey(tabTransportKey) : null;
-                boolean ready = (io != null && io.isOpen());
-                tabMediaReady = ready;
-                String up = tabTransportKey.toUpperCase(Locale.ROOT);
-                tabMediaShort = up.startsWith("BT:") ? "BT" : (up.startsWith("USB") ? "USB" : tabMediaShort);
-                if (!ready) {
-                    if (userInitiated) pendingReconnect = true;
-                    if (txtLive != null) txtLive.setText("LIVE: " + tabMediaShort + "(OFF) — reconnect requis");
-                    controller = null;
-                    updateButtons(null);
-                    return;
-                }
-                DeliveryController forced = sm.getOrCreate(tabTransportKey, node, from, io);
-                if (forced != null) controller = forced;
-            } catch (Exception ignored) {}
-        }
-
-        DeliveryController dc = (controller != null) ? controller : sm.resolveOrCreateForNode(node, from);
+        DeliveryController dc = sm.resolveOrCreateForNode(node, from);
         if (dc == null) {
             if (userInitiated) {
                 LogBus.api(node, "Aucun média prêt / registre introuvable pour ce node");
