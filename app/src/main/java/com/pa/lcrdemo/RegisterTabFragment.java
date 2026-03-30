@@ -117,6 +117,15 @@ public class RegisterTabFragment extends Fragment {
     private DeliveryController controller;
     private String tabTransportKey = null;
 
+ // Media status for this TAB (OFF/READY) + pendingReconnect
+ private volatile boolean tabMediaReady = true;
+ private volatile boolean pendingReconnect = false;
+ private volatile String tabMediaShort = "—";
+
+ // Args (tab): serial + transport
+ private String serialFromArgs = null;
+ private String transportFromArgs = null;
+
     private boolean starting = false;
     private long startingSinceMs = 0L;
 
@@ -270,7 +279,7 @@ public class RegisterTabFragment extends Fragment {
                 if (d > 6) d = 6;
                 lastDigits = d;
 
-                int show = Math.min(6, Math.max(0, d + 1));
+                int show = Math.min(6, Math.max(0, d));
                 String fmt = "%." + show + "f";
 
                 if (txtQtyNet != null) txtQtyNet.setText("NET: " + String.format(Locale.ROOT, fmt, net));
@@ -335,7 +344,7 @@ public class RegisterTabFragment extends Fragment {
 
                 ui.post(() -> {
                     if (!isAdded() || getView() == null) return;
-                    if (txtSerialId != null) txtSerialId.setText("#Série : —");
+                    if (txtSerialId != null) txtSerialId.setText("#Série : " + ((serialFromArgs != null && !serialFromArgs.trim().isEmpty()) ? serialFromArgs : "—"));
                     if (txtTicketPending != null) txtTicketPending.setText("Ticket pending : —");
                     if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : —");
                     if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : —");
@@ -355,6 +364,13 @@ public class RegisterTabFragment extends Fragment {
         if (a != null) {
             node = a.getInt(ARG_NODE, 250);
             from = a.getInt(ARG_FROM, 255);
+ serialFromArgs = a.getString(ARG_SERIAL, null);
+ transportFromArgs = a.getString(ARG_TRANSPORT, null);
+ if (transportFromArgs != null && !transportFromArgs.trim().isEmpty()) {
+     tabTransportKey = transportFromArgs.trim();
+     String up = tabTransportKey.toUpperCase(Locale.ROOT);
+     tabMediaShort = up.startsWith("BT:") ? "BT" : (up.startsWith("USB") ? "USB" : tabMediaShort);
+ }
         }
         usbManager = (UsbManager) context.getSystemService(Context.USB_SERVICE);
     }
@@ -451,7 +467,7 @@ public class RegisterTabFragment extends Fragment {
         if (txtLcrNode != null) txtLcrNode.setText(String.format(Locale.ROOT, "LCR Node : %d", node));
         if (txtFrom != null) txtFrom.setText(String.format(Locale.ROOT, "From : %d", from));
 
-        if (txtSerialId != null) txtSerialId.setText("#Série : —");
+        if (txtSerialId != null) txtSerialId.setText("#Série : " + ((serialFromArgs != null && !serialFromArgs.trim().isEmpty()) ? serialFromArgs : "—"));
         if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : —");
         if (txtTicketPending != null) txtTicketPending.setText("Ticket pending : —");
         if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : —");
@@ -537,7 +553,7 @@ public class RegisterTabFragment extends Fragment {
             });
         }
 
-        if (btnConnect != null) btnConnect.setOnClickListener(v -> connectThisRegister(true));
+        if (btnConnect != null) btnConnect.setOnClickListener(v -> reconnectThisRegister(true));
 
         if (btnA != null) btnA.setOnClickListener(v -> {
             if (controller == null) return;
@@ -620,7 +636,55 @@ public class RegisterTabFragment extends Fragment {
         });
     }
 
-    private void attemptAttachIfPossible(boolean verboseLog) {
+    
+
+ // Reconnect LCP (ce registre) :
+ // - si OFF: pendingReconnect=true, pas d'auto-reconnect tant que OFF
+ // - si READY: detach + connect
+ private void reconnectThisRegister(boolean userInitiated) {
+     if (!tabMediaReady) {
+         pendingReconnect = true;
+         if (userInitiated) {
+             try { Toast.makeText(requireContext(), tabMediaShort + "(OFF) — en attente…", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
+         }
+         return;
+     }
+     try { detachUiListenerSafe(); } catch (Exception ignored) {}
+     controller = null;
+     starting = false;
+     ticketPendingFlag = -1;
+     connectThisRegister(userInitiated);
+ }
+
+
+ // =========================
+ // Media OFF / READY (appelé par MainActivity)
+ // Auto-reconnect UNIQUEMENT si pendingReconnect=true
+ // =========================
+ public void onTabMediaStatusChanged(boolean ready, String mediaShort) {
+     tabMediaReady = ready;
+     tabMediaShort = (mediaShort == null || mediaShort.trim().isEmpty()) ? "—" : mediaShort.trim();
+
+     ui.post(() -> {
+         if (!isAdded() || getView() == null) return;
+
+         if (!tabMediaReady) {
+             if (txtLive != null) txtLive.setText("LIVE: " + tabMediaShort + "(OFF) — reconnect requis");
+             controller = null;
+             updateButtons(null);
+             return;
+         }
+
+         if (pendingReconnect) {
+             pendingReconnect = false;
+             reconnectThisRegister(false);
+         }
+     });
+ }
+private void attemptAttachIfPossible(boolean verboseLog) {
+ if (!tabMediaReady && !pendingReconnect) {
+     return;
+ }
         if (uiListenerAttached && controller != null) {
             syncUiFromController();
             return;
