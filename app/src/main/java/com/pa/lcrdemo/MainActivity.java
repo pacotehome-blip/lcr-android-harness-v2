@@ -112,6 +112,15 @@ private Button btnScanBtRegs;
 private TextView txtBtRegsFound;
 private Button btnScanWifiRegs;
 private TextView txtWifiRegsFound;
+
+// ===== CONFIGURE: Ajout manuel (2 registres par média) =====
+private EditText edtUsbNode1, edtUsbNode2;
+private TextView txtUsbSerial1, txtUsbSerial2;
+private Button btnUsbConnect1, btnUsbConnect2;
+
+private EditText edtBtNode1, edtBtNode2;
+private TextView txtBtSerial1, txtBtSerial2;
+private Button btnBtConnect1, btnBtConnect2;
     // ===== BT runtime (paired-only) =====
     private static final int REQ_ENABLE_BT = 9103;
     
@@ -388,6 +397,21 @@ tabRegisters = findViewById(R.id.tabRegisters);
         txtBtRegsFound = findViewById(R.id.txtBtRegsFound);
         btnScanWifiRegs = findViewById(R.id.btnScanWifiRegs);
         txtWifiRegsFound = findViewById(R.id.txtWifiRegsFound);
+
+// CONFIGURE: Ajout manuel (2 registres / média)
+edtUsbNode1 = findViewById(R.id.edtUsbNode1);
+edtUsbNode2 = findViewById(R.id.edtUsbNode2);
+txtUsbSerial1 = findViewById(R.id.txtUsbSerial1);
+txtUsbSerial2 = findViewById(R.id.txtUsbSerial2);
+btnUsbConnect1 = findViewById(R.id.btnUsbConnect1);
+btnUsbConnect2 = findViewById(R.id.btnUsbConnect2);
+
+edtBtNode1 = findViewById(R.id.edtBtNode1);
+edtBtNode2 = findViewById(R.id.edtBtNode2);
+txtBtSerial1 = findViewById(R.id.txtBtSerial1);
+txtBtSerial2 = findViewById(R.id.txtBtSerial2);
+btnBtConnect1 = findViewById(R.id.btnBtConnect1);
+btnBtConnect2 = findViewById(R.id.btnBtConnect2);
         if (txtApiUrl != null) {
             txtApiUrl.setText("http://127.0.0.1:" + API_PORT);
         }
@@ -497,6 +521,14 @@ ensureRegisterTab(250, 255, true);
         if (btnScanUsbRegs != null) btnScanUsbRegs.setOnClickListener(v -> scanRegistersUsbOnly());
         if (btnScanBtRegs != null) btnScanBtRegs.setOnClickListener(v -> scanRegistersBtOnly());
         if (btnScanWifiRegs != null) btnScanWifiRegs.setOnClickListener(v -> toast("Wi‑Fi: bientôt"));
+
+// CONFIGURE: ajout manuel (2 slots / média)
+if (btnUsbConnect1 != null) btnUsbConnect1.setOnClickListener(v -> connectManualUsbSlot(1));
+if (btnUsbConnect2 != null) btnUsbConnect2.setOnClickListener(v -> connectManualUsbSlot(2));
+if (btnBtConnect1 != null) btnBtConnect1.setOnClickListener(v -> connectManualBtSlot(1));
+if (btnBtConnect2 != null) btnBtConnect2.setOnClickListener(v -> connectManualBtSlot(2));
+
+loadManualSlotsFromPrefs();
     }
 
 private void setupTabsTop() {
@@ -520,6 +552,8 @@ private void setupTabsTop() {
         if (index == 1) refreshApiStatus();
         if (index == 2) {
             updateMediaStatusUi();
+                refreshAllTabsMediaStatus();
+                        refreshAllTabsMediaStatus();
             updateNodesStatusUi();
             refreshBondedBtList();
         }
@@ -1262,6 +1296,7 @@ private void setupTabsTop() {
         } catch (Exception ignored) {}
 
         logMedia1("USB Ready");
+        refreshAllTabsMediaStatus();
     }
 
     public void onUsbDetached() {
@@ -1276,24 +1311,11 @@ private void setupTabsTop() {
 
         try { UsbSession.clear(); } catch (Exception ignore) {}
         stopApiServer("USB detached");
-
-        // ✅ Multi-média: ne pas détruire les tabs BT.
-        // Retirer uniquement les tabs USB (et leurs fragments) de manière explicite (A1).
-        try {
-            ArrayList<String> toRemove = new ArrayList<>();
-            for (Map.Entry<String, TabSpec> e : tabsByKey.entrySet()) {
-                if (e == null) continue;
-                TabSpec s = e.getValue();
-                if (s == null) continue;
-                String mShort = (s.mediaShort != null) ? s.mediaShort : mediaShortFromTransportKey(s.transportKey);
-                if ("USB".equalsIgnoreCase(mShort)) toRemove.add(e.getKey());
-            }
-            for (String k : toRemove) removeTabAndFragment(k, "USB detached");
-        } catch (Exception ignored) {}
-
-        usbPort = null;
+        // ✅ Conserver les tabs USB/BT; rafraîchir leur statut OFF/READY
         updateMediaStatusUi();
+                refreshAllTabsMediaStatus();
         updateNodesStatusUi();
+        refreshAllTabsMediaStatus();
     }
 
 
@@ -1804,6 +1826,7 @@ private boolean ensureBtConnectPermission() {
                 ui.post(() -> {
                     if (txtBtStatus != null) txtBtStatus.setText("BT : CONNECTED — " + dev.getName());
                     updateMediaStatusUi();
+                refreshAllTabsMediaStatus();
                 });
 
                 logMedia1("BT Connect: OK " + dev.getAddress());
@@ -1831,6 +1854,7 @@ private boolean ensureBtConnectPermission() {
                     if (txtBtStatus != null) txtBtStatus.setText("BT : FAIL — " +
                             (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
                     updateMediaStatusUi();
+                refreshAllTabsMediaStatus();
                 });
 
                 logMedia1("BT Connect: ÉCHEC " + dev.getAddress());
@@ -1865,6 +1889,7 @@ private boolean ensureBtConnectPermission() {
         ui.post(() -> {
             if (txtBtStatus != null) txtBtStatus.setText("BT : DISCONNECTED");
             updateMediaStatusUi();
+                refreshAllTabsMediaStatus();
         });
 
         logMedia1("BT Disconnect: OK");

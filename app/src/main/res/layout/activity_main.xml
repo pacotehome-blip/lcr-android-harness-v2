@@ -323,6 +323,7 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="10dp"
                     android:text="USB — Ajout manuel (max 2 registres)"
+ android:textColor="#FFFFFF"
                     android:textStyle="bold"
                     android:textSize="13sp"/>
 
@@ -332,7 +333,7 @@
                     android:orientation="vertical"
                     android:layout_marginTop="4dp"
                     android:padding="6dp"
-                    android:background="#1A1A1A">
+                    android:background="#0B6623">
 
                     <!-- Slot 1 -->
                     <LinearLayout
@@ -348,7 +349,9 @@
                             android:layout_weight="1"
                             android:inputType="number"
                             android:hint="Node (1..250)"
-                            android:textSize="14sp"/>
+                            android:textSize="14sp"
+ android:textColor="#FFFFFF"
+ android:textColorHint="#CCFFFFFF"/>
 
                         <Button
                             android:id="@+id/btnUsbConnect1"
@@ -364,7 +367,7 @@
                         android:layout_height="wrap_content"
                         android:layout_marginTop="2dp"
                         android:typeface="monospace"
-                        android:textColor="#00FF00"
+                        android:textColor="#FFFFFF"
                         android:textSize="12sp"
                         android:text="#Série : —"/>
 
@@ -402,7 +405,7 @@
                         android:layout_height="wrap_content"
                         android:layout_marginTop="2dp"
                         android:typeface="monospace"
-                        android:textColor="#00FF00"
+                        android:textColor="#FFFFFF"
                         android:textSize="12sp"
                         android:text="#Série : —"/>
 
@@ -493,6 +496,7 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="10dp"
                     android:text="BT — Ajout manuel (max 2 registres)"
+ android:textColor="#FFFFFF"
                     android:textStyle="bold"
                     android:textSize="13sp"/>
 
@@ -502,7 +506,7 @@
                     android:orientation="vertical"
                     android:layout_marginTop="4dp"
                     android:padding="6dp"
-                    android:background="#1A1A1A">
+                    android:background="#0B6623">
 
                     <!-- Slot 1 -->
                     <LinearLayout
@@ -534,7 +538,7 @@
                         android:layout_height="wrap_content"
                         android:layout_marginTop="2dp"
                         android:typeface="monospace"
-                        android:textColor="#00FF00"
+                        android:textColor="#FFFFFF"
                         android:textSize="12sp"
                         android:text="#Série : —"/>
 
@@ -572,7 +576,7 @@
                         android:layout_height="wrap_content"
                         android:layout_marginTop="2dp"
                         android:typeface="monospace"
-                        android:textColor="#00FF00"
+                        android:textColor="#FFFFFF"
                         android:textSize="12sp"
                         android:text="#Série : —"/>
 
