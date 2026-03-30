@@ -358,7 +358,8 @@
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:layout_marginStart="8dp"
-                            android:text="Connect"/>
+                            android:text="Connect"
+ android:textColor="#FFFFFF"/>
                     </LinearLayout>
 
                     <TextView
@@ -389,14 +390,17 @@
                             android:layout_weight="1"
                             android:inputType="number"
                             android:hint="Node (1..250)"
-                            android:textSize="14sp"/>
+                            android:textSize="14sp"
+ android:textColor="#FFFFFF"
+ android:textColorHint="#CCFFFFFF"/>
 
                         <Button
                             android:id="@+id/btnUsbConnect2"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:layout_marginStart="8dp"
-                            android:text="Connect"/>
+                            android:text="Connect"
+ android:textColor="#FFFFFF"/>
                     </LinearLayout>
 
                     <TextView
@@ -522,14 +526,17 @@
                             android:layout_weight="1"
                             android:inputType="number"
                             android:hint="Node (1..250)"
-                            android:textSize="14sp"/>
+                            android:textSize="14sp"
+ android:textColor="#FFFFFF"
+ android:textColorHint="#CCFFFFFF"/>
 
                         <Button
                             android:id="@+id/btnBtConnect1"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:layout_marginStart="8dp"
-                            android:text="Connect"/>
+                            android:text="Connect"
+ android:textColor="#FFFFFF"/>
                     </LinearLayout>
 
                     <TextView
@@ -560,14 +567,17 @@
                             android:layout_weight="1"
                             android:inputType="number"
                             android:hint="Node (1..250)"
-                            android:textSize="14sp"/>
+                            android:textSize="14sp"
+ android:textColor="#FFFFFF"
+ android:textColorHint="#CCFFFFFF"/>
 
                         <Button
                             android:id="@+id/btnBtConnect2"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:layout_marginStart="8dp"
-                            android:text="Connect"/>
+                            android:text="Connect"
+ android:textColor="#FFFFFF"/>
                     </LinearLayout>
 
                     <TextView
