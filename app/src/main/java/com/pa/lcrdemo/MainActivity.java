@@ -112,6 +112,15 @@ private Button btnScanBtRegs;
 private TextView txtBtRegsFound;
 private Button btnScanWifiRegs;
 private TextView txtWifiRegsFound;
+
+// ===== CONFIGURE: Ajout manuel (2 registres par média) =====
+private EditText edtUsbNode1, edtUsbNode2;
+private TextView txtUsbSerial1, txtUsbSerial2;
+private Button btnUsbConnect1, btnUsbConnect2;
+
+private EditText edtBtNode1, edtBtNode2;
+private TextView txtBtSerial1, txtBtSerial2;
+private Button btnBtConnect1, btnBtConnect2;
     // ===== BT runtime (paired-only) =====
     private static final int REQ_ENABLE_BT = 9103;
     
@@ -388,6 +397,21 @@ tabRegisters = findViewById(R.id.tabRegisters);
         txtBtRegsFound = findViewById(R.id.txtBtRegsFound);
         btnScanWifiRegs = findViewById(R.id.btnScanWifiRegs);
         txtWifiRegsFound = findViewById(R.id.txtWifiRegsFound);
+
+// CONFIGURE: Ajout manuel (2 registres / média)
+edtUsbNode1 = findViewById(R.id.edtUsbNode1);
+edtUsbNode2 = findViewById(R.id.edtUsbNode2);
+txtUsbSerial1 = findViewById(R.id.txtUsbSerial1);
+txtUsbSerial2 = findViewById(R.id.txtUsbSerial2);
+btnUsbConnect1 = findViewById(R.id.btnUsbConnect1);
+btnUsbConnect2 = findViewById(R.id.btnUsbConnect2);
+
+edtBtNode1 = findViewById(R.id.edtBtNode1);
+edtBtNode2 = findViewById(R.id.edtBtNode2);
+txtBtSerial1 = findViewById(R.id.txtBtSerial1);
+txtBtSerial2 = findViewById(R.id.txtBtSerial2);
+btnBtConnect1 = findViewById(R.id.btnBtConnect1);
+btnBtConnect2 = findViewById(R.id.btnBtConnect2);
         if (txtApiUrl != null) {
             txtApiUrl.setText("http://127.0.0.1:" + API_PORT);
         }
@@ -497,6 +521,14 @@ ensureRegisterTab(250, 255, true);
         if (btnScanUsbRegs != null) btnScanUsbRegs.setOnClickListener(v -> scanRegistersUsbOnly());
         if (btnScanBtRegs != null) btnScanBtRegs.setOnClickListener(v -> scanRegistersBtOnly());
         if (btnScanWifiRegs != null) btnScanWifiRegs.setOnClickListener(v -> toast("Wi‑Fi: bientôt"));
+
+// CONFIGURE: connect manuel (slots)
+if (btnUsbConnect1 != null) btnUsbConnect1.setOnClickListener(v -> connectManualUsbSlot(1));
+if (btnUsbConnect2 != null) btnUsbConnect2.setOnClickListener(v -> connectManualUsbSlot(2));
+if (btnBtConnect1 != null) btnBtConnect1.setOnClickListener(v -> connectManualBtSlot(1));
+if (btnBtConnect2 != null) btnBtConnect2.setOnClickListener(v -> connectManualBtSlot(2));
+
+loadManualSlotsFromPrefs();
     }
 
 private void setupTabsTop() {
@@ -1262,15 +1294,21 @@ private void setupTabsTop() {
         } catch (Exception ignored) {}
 
         logMedia1("USB Ready");
+        refreshAllTabsMediaStatus();
     }
 
     public void onUsbDetached() {
         logUi(null, "USB détaché");
-        // ✅ Option A: publish USB detached
-        try {
-            if (mediaTransportManager != null) {
-                mediaTransportManager.onUsbDetached("USB detached");
-            }
+        try { if (mediaTransportManager != null) mediaTransportManager.onUsbDetached("USB detached"); } catch (Exception ignored) {}
+        logMedia1("USB Detached");
+        try { UsbSession.clear(); } catch (Exception ignore) {}
+        stopApiServer("USB detached");
+        // ✅ Conserver les tabs USB; ils passeront en OFF via refreshAllTabsMediaStatus()
+        usbPort = null;
+        updateMediaStatusUi();
+        updateNodesStatusUi();
+        refreshAllTabsMediaStatus();
+    }
         } catch (Exception ignored) {}
         logMedia1("USB Detached");
 
