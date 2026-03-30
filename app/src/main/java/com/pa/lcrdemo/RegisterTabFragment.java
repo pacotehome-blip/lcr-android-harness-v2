@@ -20,6 +20,8 @@ import androidx.fragment.app.Fragment;
 
 import com.pa.lcr.lcp.*;
 import com.pa.lcr.lcp.log.LogBus;
+import com.pa.lcr.lcp.transport.MediaTransportManager;
+import com.pa.lcr.lcp.transport.TransportIo;
 
 import org.json.JSONObject;
 
@@ -115,16 +117,17 @@ public class RegisterTabFragment extends Fragment {
     private UsbManager usbManager;
 
     private DeliveryController controller;
-    private String // tabTransportKey preserved (identité média du TAB)
+    private String tabTransportKey = null;
 
- // Media status for this TAB (OFF/READY) + pendingReconnect
+ // Media status du TAB (OFF/READY) + pendingReconnect (auto-reconnect seulement si true)
  private volatile boolean tabMediaReady = true;
  private volatile boolean pendingReconnect = false;
- private volatile String tabMediaShort = "—";
+ private volatile String tabMediaShort = \"—\";
 
  // Args (tab): serial + transport
  private String serialFromArgs = null;
  private String transportFromArgs = null;
+
 
     private boolean starting = false;
     private long startingSinceMs = 0L;
@@ -363,13 +366,13 @@ public class RegisterTabFragment extends Fragment {
         Bundle a = getArguments();
         if (a != null) {
             node = a.getInt(ARG_NODE, 250);
- from = a.getInt(ARG_FROM, 255);
+            from = a.getInt(ARG_FROM, 255);
  serialFromArgs = a.getString(ARG_SERIAL, null);
  transportFromArgs = a.getString(ARG_TRANSPORT, null);
  if (transportFromArgs != null && !transportFromArgs.trim().isEmpty()) {
      tabTransportKey = transportFromArgs.trim();
      String up = tabTransportKey.toUpperCase(Locale.ROOT);
-     tabMediaShort = up.startsWith("BT:") ? "BT" : (up.startsWith("USB") ? "USB" : tabMediaShort);
+     tabMediaShort = up.startsWith(\"BT:\") ? \"BT\" : (up.startsWith(\"USB\") ? \"USB\" : tabMediaShort);
  }
         }
         usbManager = (UsbManager) context.getSystemService(Context.USB_SERVICE);
@@ -637,25 +640,6 @@ public class RegisterTabFragment extends Fragment {
     }
 
     
-
- // Reconnect LCP (ce registre) :
- // - si OFF: pendingReconnect=true, pas d'auto-reconnect tant que OFF
- // - si READY: detach + connect forcé (média du tab)
- private void reconnectThisRegister(boolean userInitiated) {
-     if (!tabMediaReady) {
-         pendingReconnect = true;
-         if (userInitiated) {
-             try { Toast.makeText(requireContext(), tabMediaShort + "(OFF) — en attente…", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
-         }
-         return;
-     }
-     try { detachUiListenerSafe(); } catch (Exception ignored) {}
-     controller = null;
-     starting = false;
-     ticketPendingFlag = -1;
-     connectThisRegister(userInitiated);
- }
-
 
  // =========================
  // Media OFF / READY (appelé par MainActivity)
