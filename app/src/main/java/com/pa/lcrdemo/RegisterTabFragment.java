@@ -117,14 +117,14 @@ public class RegisterTabFragment extends Fragment {
     private DeliveryController controller;
     private String tabTransportKey = null;
 
- // Media status for this TAB (OFF/READY) + pendingReconnect
- private volatile boolean tabMediaReady = true;
- private volatile boolean pendingReconnect = false;
- private volatile String tabMediaShort = "—";
+    // Media status for this TAB (OFF/READY) + pendingReconnect
+    private volatile boolean tabMediaReady = true;
+    private volatile boolean pendingReconnect = false;
+    private volatile String tabMediaShort = "—";
 
- // Args (tab): serial + transport
- private String serialFromArgs = null;
- private String transportFromArgs = null;
+    // Args (tab): serial + transport
+    private String serialFromArgs = null;
+    private String transportFromArgs = null;
 
     private boolean starting = false;
     private long startingSinceMs = 0L;
@@ -364,13 +364,13 @@ public class RegisterTabFragment extends Fragment {
         if (a != null) {
             node = a.getInt(ARG_NODE, 250);
             from = a.getInt(ARG_FROM, 255);
- serialFromArgs = a.getString(ARG_SERIAL, null);
- transportFromArgs = a.getString(ARG_TRANSPORT, null);
- if (transportFromArgs != null && !transportFromArgs.trim().isEmpty()) {
-     tabTransportKey = transportFromArgs.trim();
-     String up = tabTransportKey.toUpperCase(Locale.ROOT);
-     tabMediaShort = up.startsWith("BT:") ? "BT" : (up.startsWith("USB") ? "USB" : tabMediaShort);
- }
+            serialFromArgs = a.getString(ARG_SERIAL, null);
+            transportFromArgs = a.getString(ARG_TRANSPORT, null);
+            if (transportFromArgs != null && !transportFromArgs.trim().isEmpty()) {
+                tabTransportKey = transportFromArgs.trim();
+                String up = tabTransportKey.toUpperCase(Locale.ROOT);
+                tabMediaShort = up.startsWith("BT:") ? "BT" : (up.startsWith("USB") ? "USB" : tabMediaShort);
+            }
         }
         usbManager = (UsbManager) context.getSystemService(Context.USB_SERVICE);
     }
@@ -638,53 +638,48 @@ public class RegisterTabFragment extends Fragment {
 
     
 
- // Reconnect LCP (ce registre) :
- // - si OFF: pendingReconnect=true, pas d'auto-reconnect tant que OFF
- // - si READY: detach + connect
- private void reconnectThisRegister(boolean userInitiated) {
-     if (!tabMediaReady) {
-         pendingReconnect = true;
-         if (userInitiated) {
-             try { Toast.makeText(requireContext(), tabMediaShort + "(OFF) — en attente…", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
-         }
-         return;
-     }
-     try { detachUiListenerSafe(); } catch (Exception ignored) {}
-     controller = null;
-     starting = false;
-     ticketPendingFlag = -1;
-     connectThisRegister(userInitiated);
- }
+    // =========================
+    // Media OFF / READY (appelé par MainActivity)
+    // Auto-reconnect UNIQUEMENT si pendingReconnect=true
+    // =========================
+    public void onTabMediaStatusChanged(boolean ready, String mediaShort) {
+        tabMediaReady = ready;
+        tabMediaShort = (mediaShort == null || mediaShort.trim().isEmpty()) ? "—" : mediaShort.trim();
 
+        ui.post(() -> {
+            if (!isAdded() || getView() == null) return;
 
- // =========================
- // Media OFF / READY (appelé par MainActivity)
- // Auto-reconnect UNIQUEMENT si pendingReconnect=true
- // =========================
- public void onTabMediaStatusChanged(boolean ready, String mediaShort) {
-     tabMediaReady = ready;
-     tabMediaShort = (mediaShort == null || mediaShort.trim().isEmpty()) ? "—" : mediaShort.trim();
+            if (!tabMediaReady) {
+                if (txtLive != null) txtLive.setText("LIVE: " + tabMediaShort + "(OFF) — reconnect requis");
+                controller = null;
+                updateButtons(null);
+                return;
+            }
 
-     ui.post(() -> {
-         if (!isAdded() || getView() == null) return;
+            if (pendingReconnect) {
+                pendingReconnect = false;
+                reconnectThisRegister(false);
+            }
+        });
+    }
 
-         if (!tabMediaReady) {
-             if (txtLive != null) txtLive.setText("LIVE: " + tabMediaShort + "(OFF) — reconnect requis");
-             controller = null;
-             updateButtons(null);
-             return;
-         }
-
-         if (pendingReconnect) {
-             pendingReconnect = false;
-             reconnectThisRegister(false);
-         }
-     });
- }
+    // Reconnect LCP (ce registre)
+    private void reconnectThisRegister(boolean userInitiated) {
+        if (!tabMediaReady) {
+            pendingReconnect = true;
+            if (userInitiated) {
+                try { Toast.makeText(requireContext(), tabMediaShort + "(OFF) — en attente…", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
+            }
+            return;
+        }
+        try { detachUiListenerSafe(); } catch (Exception ignored) {}
+        controller = null;
+        starting = false;
+        ticketPendingFlag = -1;
+        connectThisRegister(userInitiated);
+    }
 private void attemptAttachIfPossible(boolean verboseLog) {
- if (!tabMediaReady && !pendingReconnect) {
-     return;
- }
+        if (!tabMediaReady && !pendingReconnect) return;
         if (uiListenerAttached && controller != null) {
             syncUiFromController();
             return;

@@ -316,6 +316,98 @@
                         android:text="—"/>
                 </ScrollView>
 
+
+                <!-- USB: Ajout manuel (max 2 registres) -->
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="USB — Ajout manuel (max 2 registres)"
+                    android:textStyle="bold"
+                    android:textSize="13sp"/>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:layout_marginTop="4dp"
+                    android:padding="6dp"
+                    android:background="#1A1A1A">
+
+                    <!-- Slot 1 -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical">
+
+                        <EditText
+                            android:id="@+id/edtUsbNode1"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:inputType="number"
+                            android:hint="Node (1..250)"
+                            android:textSize="14sp"/>
+
+                        <Button
+                            android:id="@+id/btnUsbConnect1"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="8dp"
+                            android:text="Connect"/>
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/txtUsbSerial1"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:typeface="monospace"
+                        android:textColor="#00FF00"
+                        android:textSize="12sp"
+                        android:text="#Série : —"/>
+
+                    <View
+                        android:layout_width="match_parent"
+                        android:layout_height="6dp"/>
+
+                    <!-- Slot 2 -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical">
+
+                        <EditText
+                            android:id="@+id/edtUsbNode2"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:inputType="number"
+                            android:hint="Node (1..250)"
+                            android:textSize="14sp"/>
+
+                        <Button
+                            android:id="@+id/btnUsbConnect2"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="8dp"
+                            android:text="Connect"/>
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/txtUsbSerial2"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:typeface="monospace"
+                        android:textColor="#00FF00"
+                        android:textSize="12sp"
+                        android:text="#Série : —"/>
+
+                </LinearLayout>
+
                 <!-- BT -->
                 <TextView
                     android:layout_width="match_parent"
@@ -393,6 +485,98 @@
                         android:textSize="12sp"
                         android:text="—"/>
                 </ScrollView>
+
+
+                <!-- BT: Ajout manuel (max 2 registres) -->
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="BT — Ajout manuel (max 2 registres)"
+                    android:textStyle="bold"
+                    android:textSize="13sp"/>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:layout_marginTop="4dp"
+                    android:padding="6dp"
+                    android:background="#1A1A1A">
+
+                    <!-- Slot 1 -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical">
+
+                        <EditText
+                            android:id="@+id/edtBtNode1"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:inputType="number"
+                            android:hint="Node (1..250)"
+                            android:textSize="14sp"/>
+
+                        <Button
+                            android:id="@+id/btnBtConnect1"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="8dp"
+                            android:text="Connect"/>
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/txtBtSerial1"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:typeface="monospace"
+                        android:textColor="#00FF00"
+                        android:textSize="12sp"
+                        android:text="#Série : —"/>
+
+                    <View
+                        android:layout_width="match_parent"
+                        android:layout_height="6dp"/>
+
+                    <!-- Slot 2 -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical">
+
+                        <EditText
+                            android:id="@+id/edtBtNode2"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:inputType="number"
+                            android:hint="Node (1..250)"
+                            android:textSize="14sp"/>
+
+                        <Button
+                            android:id="@+id/btnBtConnect2"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="8dp"
+                            android:text="Connect"/>
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/txtBtSerial2"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:typeface="monospace"
+                        android:textColor="#00FF00"
+                        android:textSize="12sp"
+                        android:text="#Série : —"/>
+
+                </LinearLayout>
 
                 <!-- Wi‑Fi -->
                 <TextView
