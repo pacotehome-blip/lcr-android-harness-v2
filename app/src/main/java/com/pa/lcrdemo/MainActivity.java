@@ -565,6 +565,78 @@ private void setupTabsTop() {
         return m + " - " + serialShort(serialId) + " - " + (node & 0xFF);
     }
 
+    private boolean isTransportReady(String transportKey) {
+        try {
+            if (mediaTransportManager == null) return false;
+            if (transportKey == null || transportKey.trim().isEmpty()) return false;
+            TransportIo io = mediaTransportManager.getByKey(transportKey.trim());
+            return io != null && io.isOpen();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private void persistTabMediaStatusForApi(TabSpec spec, boolean ready, String media) {
+        try {
+            if (deliveryStore == null || spec == null) return;
+            String serial = safeSerial(spec.serialId);
+            if (serial.isEmpty()) return;
+
+            String ticketKey = "TAB-" + (spec.node & 0xFF);
+            JSONObject data = new JSONObject();
+            data.put("event_type", "TAB_MEDIA_STATUS");
+            data.put("state", ready ? "READY" : "OFF");
+            data.put("media", media);
+            data.put("transport_key", spec.transportKey);
+            data.put("node", (spec.node & 0xFF));
+            data.put("serial_id", serial);
+            data.put("ts_ms", System.currentTimeMillis());
+
+            deliveryStore.upsertSummaryAsync(serial, ticketKey, null,
+                    ready ? "TAB_READY" : "TAB_OFF",
+                    DeliveryLogStore.SOURCE_UI, null, null, null);
+
+            final String tk = ticketKey;
+            deliveryStore.openAttemptAsync(serial, tk, DeliveryLogStore.SOURCE_UI, null, attemptId -> {
+                deliveryStore.addEventAsync(attemptId, DeliveryLogStore.LEVEL_INFO,
+                        "TAB_MEDIA_STATUS",
+                        "Tab media status",
+                        data.toString());
+                deliveryStore.closeAttemptAsync(attemptId, "DONE", data.toString(), null);
+            });
+        } catch (Exception ignored) {}
+    }
+
+    private void refreshOneTabMediaStatus(String tabKey) {
+        if (tabKey == null) return;
+        TabSpec spec = tabsByKey.get(tabKey);
+        if (spec == null) return;
+
+        boolean ready = isTransportReady(spec.transportKey);
+        String media = mediaShortFromTransportKey(spec.transportKey);
+        String mediaLabel = ready ? media : (media + "(OFF)");
+
+        // ✅ Format: BT(OFF) - 123456 - 250
+        updateRegisterTabLabel(tabKey, tabLabelOf(mediaLabel, spec.node, spec.serialId));
+
+        try {
+            Fragment f = getSupportFragmentManager().findFragmentByTag("regtab_" + tabKey);
+            if (f instanceof RegisterTabFragment) {
+                ((RegisterTabFragment) f).onTabMediaStatusChanged(ready, media);
+            }
+        } catch (Exception ignored) {}
+
+        persistTabMediaStatusForApi(spec, ready, media);
+    }
+
+    private void refreshAllTabsMediaStatus() {
+        try {
+            ArrayList<String> keys = new ArrayList<>(tabsByKey.keySet());
+            for (String k : keys) refreshOneTabMediaStatus(k);
+        } catch (Exception ignored) {}
+    }
+
+
     /**
      * Legacy: créer un TAB "unknown serial" (avant scan) — pas de regKey mapping.
      */
@@ -706,6 +778,7 @@ private void setupTabsTop() {
         tx.replace(R.id.registerContainer, f, tag);
         tx.setReorderingAllowed(true);
         tx.commitAllowingStateLoss();
+        ui.postDelayed(() -> refreshOneTabMediaStatus(tabKey), 50);
     }
 
     /**
@@ -750,6 +823,7 @@ private void setupTabsTop() {
                 FragmentTransaction tx = fm.beginTransaction();
                 tx.remove(f);
                 tx.commitAllowingStateLoss();
+        ui.postDelayed(() -> refreshOneTabMediaStatus(tabKey), 50);
             }
         } catch (Exception ignored) {}
 

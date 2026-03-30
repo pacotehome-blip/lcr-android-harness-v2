@@ -676,7 +676,7 @@ public class RegisterTabFragment extends Fragment {
             else sm.detachUiListener(node, uiListener);
         } catch (Exception ignored) {}
         uiListenerAttached = false;
-        tabTransportKey = null;
+        // tabTransportKey preserved
     }
 
     private void syncUiFromController() {
