@@ -113,14 +113,14 @@ private TextView txtBtRegsFound;
 private Button btnScanWifiRegs;
 private TextView txtWifiRegsFound;
 
-// ===== CONFIGURE: Ajout manuel (2 registres par média) =====
-private EditText edtUsbNode1, edtUsbNode2;
-private TextView txtUsbSerial1, txtUsbSerial2;
-private Button btnUsbConnect1, btnUsbConnect2;
+    // ===== CONFIGURE: Ajout manuel (2 registres par média) =====
+    private EditText edtUsbNode1, edtUsbNode2;
+    private TextView txtUsbSerial1, txtUsbSerial2;
+    private Button btnUsbConnect1, btnUsbConnect2;
 
-private EditText edtBtNode1, edtBtNode2;
-private TextView txtBtSerial1, txtBtSerial2;
-private Button btnBtConnect1, btnBtConnect2;
+    private EditText edtBtNode1, edtBtNode2;
+    private TextView txtBtSerial1, txtBtSerial2;
+    private Button btnBtConnect1, btnBtConnect2;
     // ===== BT runtime (paired-only) =====
     private static final int REQ_ENABLE_BT = 9103;
     
@@ -398,20 +398,20 @@ tabRegisters = findViewById(R.id.tabRegisters);
         btnScanWifiRegs = findViewById(R.id.btnScanWifiRegs);
         txtWifiRegsFound = findViewById(R.id.txtWifiRegsFound);
 
-// CONFIGURE: Ajout manuel (2 registres / média)
-edtUsbNode1 = findViewById(R.id.edtUsbNode1);
-edtUsbNode2 = findViewById(R.id.edtUsbNode2);
-txtUsbSerial1 = findViewById(R.id.txtUsbSerial1);
-txtUsbSerial2 = findViewById(R.id.txtUsbSerial2);
-btnUsbConnect1 = findViewById(R.id.btnUsbConnect1);
-btnUsbConnect2 = findViewById(R.id.btnUsbConnect2);
+        // CONFIGURE: Ajout manuel (2 registres / média)
+        edtUsbNode1 = findViewById(R.id.edtUsbNode1);
+        edtUsbNode2 = findViewById(R.id.edtUsbNode2);
+        txtUsbSerial1 = findViewById(R.id.txtUsbSerial1);
+        txtUsbSerial2 = findViewById(R.id.txtUsbSerial2);
+        btnUsbConnect1 = findViewById(R.id.btnUsbConnect1);
+        btnUsbConnect2 = findViewById(R.id.btnUsbConnect2);
 
-edtBtNode1 = findViewById(R.id.edtBtNode1);
-edtBtNode2 = findViewById(R.id.edtBtNode2);
-txtBtSerial1 = findViewById(R.id.txtBtSerial1);
-txtBtSerial2 = findViewById(R.id.txtBtSerial2);
-btnBtConnect1 = findViewById(R.id.btnBtConnect1);
-btnBtConnect2 = findViewById(R.id.btnBtConnect2);
+        edtBtNode1 = findViewById(R.id.edtBtNode1);
+        edtBtNode2 = findViewById(R.id.edtBtNode2);
+        txtBtSerial1 = findViewById(R.id.txtBtSerial1);
+        txtBtSerial2 = findViewById(R.id.txtBtSerial2);
+        btnBtConnect1 = findViewById(R.id.btnBtConnect1);
+        btnBtConnect2 = findViewById(R.id.btnBtConnect2);
         if (txtApiUrl != null) {
             txtApiUrl.setText("http://127.0.0.1:" + API_PORT);
         }
@@ -522,13 +522,13 @@ ensureRegisterTab(250, 255, true);
         if (btnScanBtRegs != null) btnScanBtRegs.setOnClickListener(v -> scanRegistersBtOnly());
         if (btnScanWifiRegs != null) btnScanWifiRegs.setOnClickListener(v -> toast("Wi‑Fi: bientôt"));
 
-// CONFIGURE: ajout manuel (2 slots / média)
-if (btnUsbConnect1 != null) btnUsbConnect1.setOnClickListener(v -> connectManualUsbSlot(1));
-if (btnUsbConnect2 != null) btnUsbConnect2.setOnClickListener(v -> connectManualUsbSlot(2));
-if (btnBtConnect1 != null) btnBtConnect1.setOnClickListener(v -> connectManualBtSlot(1));
-if (btnBtConnect2 != null) btnBtConnect2.setOnClickListener(v -> connectManualBtSlot(2));
+        // CONFIGURE: ajout manuel (2 slots / média)
+        if (btnUsbConnect1 != null) btnUsbConnect1.setOnClickListener(v -> connectManualUsbSlot(1));
+        if (btnUsbConnect2 != null) btnUsbConnect2.setOnClickListener(v -> connectManualUsbSlot(2));
+        if (btnBtConnect1 != null) btnBtConnect1.setOnClickListener(v -> connectManualBtSlot(1));
+        if (btnBtConnect2 != null) btnBtConnect2.setOnClickListener(v -> connectManualBtSlot(2));
 
-loadManualSlotsFromPrefs();
+        loadManualSlotsFromPrefs();
     }
 
 private void setupTabsTop() {
@@ -552,8 +552,6 @@ private void setupTabsTop() {
         if (index == 1) refreshApiStatus();
         if (index == 2) {
             updateMediaStatusUi();
-                refreshAllTabsMediaStatus();
-                        refreshAllTabsMediaStatus();
             updateNodesStatusUi();
             refreshBondedBtList();
         }
@@ -1312,8 +1310,8 @@ private void setupTabsTop() {
         try { UsbSession.clear(); } catch (Exception ignore) {}
         stopApiServer("USB detached");
         // ✅ Conserver les tabs USB/BT; rafraîchir leur statut OFF/READY
+        usbPort = null;
         updateMediaStatusUi();
-                refreshAllTabsMediaStatus();
         updateNodesStatusUi();
         refreshAllTabsMediaStatus();
     }
@@ -1826,7 +1824,6 @@ private boolean ensureBtConnectPermission() {
                 ui.post(() -> {
                     if (txtBtStatus != null) txtBtStatus.setText("BT : CONNECTED — " + dev.getName());
                     updateMediaStatusUi();
-                refreshAllTabsMediaStatus();
                 });
 
                 logMedia1("BT Connect: OK " + dev.getAddress());
@@ -1854,7 +1851,6 @@ private boolean ensureBtConnectPermission() {
                     if (txtBtStatus != null) txtBtStatus.setText("BT : FAIL — " +
                             (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
                     updateMediaStatusUi();
-                refreshAllTabsMediaStatus();
                 });
 
                 logMedia1("BT Connect: ÉCHEC " + dev.getAddress());
@@ -1889,7 +1885,6 @@ private boolean ensureBtConnectPermission() {
         ui.post(() -> {
             if (txtBtStatus != null) txtBtStatus.setText("BT : DISCONNECTED");
             updateMediaStatusUi();
-                refreshAllTabsMediaStatus();
         });
 
         logMedia1("BT Disconnect: OK");
@@ -1918,4 +1913,159 @@ if (requestCode == 9101) {
             if (!ok) logMedia1("BT Permission: refusée");
         }
     }
+
+
+    // =========================
+    // CONFIGURE: Ajout manuel (2 registres par média)
+    // - Node saisi -> Connect -> lecture #80 (serial) -> mise à jour slot + upsert tab
+    // - Persisté en SharedPreferences (simple)
+    // =========================
+    private static final String PREF_USB_NODE1 = "manual_usb_node1";
+    private static final String PREF_USB_NODE2 = "manual_usb_node2";
+    private static final String PREF_USB_SER1  = "manual_usb_ser1";
+    private static final String PREF_USB_SER2  = "manual_usb_ser2";
+    private static final String PREF_BT_NODE1  = "manual_bt_node1";
+    private static final String PREF_BT_NODE2  = "manual_bt_node2";
+    private static final String PREF_BT_SER1   = "manual_bt_ser1";
+    private static final String PREF_BT_SER2   = "manual_bt_ser2";
+
+    private void loadManualSlotsFromPrefs() {
+        try {
+            SharedPreferences p = getSharedPreferences("prefs", MODE_PRIVATE);
+
+            int un1 = p.getInt(PREF_USB_NODE1, 0);
+            int un2 = p.getInt(PREF_USB_NODE2, 0);
+            String us1 = p.getString(PREF_USB_SER1, "");
+            String us2 = p.getString(PREF_USB_SER2, "");
+
+            int bn1 = p.getInt(PREF_BT_NODE1, 0);
+            int bn2 = p.getInt(PREF_BT_NODE2, 0);
+            String bs1 = p.getString(PREF_BT_SER1, "");
+            String bs2 = p.getString(PREF_BT_SER2, "");
+
+            if (edtUsbNode1 != null && un1 > 0) edtUsbNode1.setText(String.valueOf(un1));
+            if (edtUsbNode2 != null && un2 > 0) edtUsbNode2.setText(String.valueOf(un2));
+            if (txtUsbSerial1 != null) txtUsbSerial1.setText("#Série : " + ((us1 == null || us1.trim().isEmpty()) ? "—" : us1));
+            if (txtUsbSerial2 != null) txtUsbSerial2.setText("#Série : " + ((us2 == null || us2.trim().isEmpty()) ? "—" : us2));
+
+            if (edtBtNode1 != null && bn1 > 0) edtBtNode1.setText(String.valueOf(bn1));
+            if (edtBtNode2 != null && bn2 > 0) edtBtNode2.setText(String.valueOf(bn2));
+            if (txtBtSerial1 != null) txtBtSerial1.setText("#Série : " + ((bs1 == null || bs1.trim().isEmpty()) ? "—" : bs1));
+            if (txtBtSerial2 != null) txtBtSerial2.setText("#Série : " + ((bs2 == null || bs2.trim().isEmpty()) ? "—" : bs2));
+
+        } catch (Exception ignored) {}
+    }
+
+    private void saveManualSlotToPrefs(boolean usb, int slot, int node, String serial) {
+        try {
+            SharedPreferences p = getSharedPreferences("prefs", MODE_PRIVATE);
+            SharedPreferences.Editor e = p.edit();
+            if (usb) {
+                if (slot == 1) { e.putInt(PREF_USB_NODE1, node); e.putString(PREF_USB_SER1, serial != null ? serial : ""); }
+                if (slot == 2) { e.putInt(PREF_USB_NODE2, node); e.putString(PREF_USB_SER2, serial != null ? serial : ""); }
+            } else {
+                if (slot == 1) { e.putInt(PREF_BT_NODE1, node); e.putString(PREF_BT_SER1, serial != null ? serial : ""); }
+                if (slot == 2) { e.putInt(PREF_BT_NODE2, node); e.putString(PREF_BT_SER2, serial != null ? serial : ""); }
+            }
+            e.apply();
+        } catch (Exception ignored) {}
+    }
+
+    private int readNode(EditText edt) {
+        try {
+            if (edt == null) return -1;
+            String s = String.valueOf(edt.getText());
+            if (s == null) return -1;
+            s = s.trim();
+            if (s.isEmpty()) return -1;
+            int n = Integer.parseInt(s);
+            if (n < 1 || n > 250) return -1;
+            return n;
+        } catch (Exception ignored) { return -1; }
+    }
+
+    private void connectManualUsbSlot(int slot) {
+        int node = (slot == 1) ? readNode(edtUsbNode1) : readNode(edtUsbNode2);
+        if (node < 0) { toast("USB: node invalide (1..250)"); return; }
+
+        TransportIo io = null;
+        try {
+            if (mediaTransportManager != null) io = mediaTransportManager.getByKey(MediaTransportManager.KEY_USB);
+        } catch (Exception ignored) {}
+
+        if (io == null || !io.isOpen()) {
+            toast("USB(OFF): média non prêt");
+            if (slot == 1 && txtUsbSerial1 != null) txtUsbSerial1.setText("#Série : USB(OFF)");
+            if (slot == 2 && txtUsbSerial2 != null) txtUsbSerial2.setText("#Série : USB(OFF)");
+            return;
+        }
+
+        TextView out = (slot == 1) ? txtUsbSerial1 : txtUsbSerial2;
+        connectManualWithIo(io, io.getKey(), "USB", slot, node, out, true);
+    }
+
+    private void connectManualBtSlot(int slot) {
+        int node = (slot == 1) ? readNode(edtBtNode1) : readNode(edtBtNode2);
+        if (node < 0) { toast("BT: node invalide (1..250)"); return; }
+
+        if (lastBtMac == null || lastBtMac.trim().isEmpty()) {
+            toast("BT(OFF): aucun BT connecté");
+            if (slot == 1 && txtBtSerial1 != null) txtBtSerial1.setText("#Série : BT(OFF)");
+            if (slot == 2 && txtBtSerial2 != null) txtBtSerial2.setText("#Série : BT(OFF)");
+            return;
+        }
+
+        String key = MediaTransportManager.btKey(lastBtMac);
+        TransportIo io = null;
+        try {
+            if (mediaTransportManager != null) io = mediaTransportManager.getByKey(key);
+        } catch (Exception ignored) {}
+
+        if (io == null || !io.isOpen()) {
+            toast("BT(OFF): média non prêt");
+            if (slot == 1 && txtBtSerial1 != null) txtBtSerial1.setText("#Série : BT(OFF)");
+            if (slot == 2 && txtBtSerial2 != null) txtBtSerial2.setText("#Série : BT(OFF)");
+            return;
+        }
+
+        TextView out = (slot == 1) ? txtBtSerial1 : txtBtSerial2;
+        connectManualWithIo(io, io.getKey(), "BT", slot, node, out, false);
+    }
+
+    private void connectManualWithIo(TransportIo io, String transportKey, String mediaShort, int slot, int node, TextView out, boolean usb) {
+        if (io == null || !io.isOpen()) return;
+        final int from = 255;
+
+        scanExec.execute(() -> {
+            try {
+                LcpLink tmp = new LcpLink(io, node, from, true);
+                byte[] b80 = tmp.opGetField(80, 600);
+                String serial = decodeAz(b80);
+                if (serial == null) serial = "";
+                serial = serial.trim();
+
+                final String fSerial = serial;
+                ui.post(() -> {
+                    if (out != null) out.setText("#Série : " + (fSerial.isEmpty() ? "—" : fSerial));
+                });
+
+                if (fSerial.isEmpty()) {
+                    ui.post(() -> toast(mediaShort + ": lecture #80 (serial) échouée"));
+                    saveManualSlotToPrefs(usb, slot, node, "");
+                    return;
+                }
+
+                ui.post(() -> {
+                    upsertRegisterTabFromScan(transportKey, node, from, fSerial, true);
+                    refreshAllTabsMediaStatus();
+                });
+
+                saveManualSlotToPrefs(usb, slot, node, fSerial);
+
+            } catch (Exception e) {
+                ui.post(() -> toast(mediaShort + ": connect manuel ERR: " + safeMsg(e)));
+            }
+        });
+    }
+
 }
