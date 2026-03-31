@@ -16,6 +16,8 @@ import com.pa.lcrdemo.UsbSession; // ✅ adapte si ton UsbSession est ailleurs
 
 import com.pa.lcr.lcp.transport.MediaTransportManager;
 import com.pa.lcr.lcp.transport.TransportIo;
+import com.pa.lcr.lcp.storage.DeliveryLogStore;
+import com.pa.lcr.lcp.log.LogBus;
 
 import org.json.JSONObject;
 
@@ -241,6 +243,144 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         }
     }
 
+
+
+    // =========================
+    // ✅ Option 3: Média OFF — bloquer START seulement si DELIVERY_ACTIVE=0
+    // - Si DELIVERY_ACTIVE=1: retourner RECOVER (pendingReconnect)
+    // - Si DELIVERY_ACTIVE=0: retourner MEDIA_NOT_READY (bloque START)
+    // =========================
+    private static final int MASK_DELIVERY_ACTIVE = 0x0008; // 0x28
+
+    private static final class MediaCtx {
+        final String media;          // usb/bt
+        final String transportKey;   // USB or BT:xx
+        final boolean mediaReady;    // TransportIo open?
+        final DeliveryController dc; // may be null
+        final boolean deliveryActiveCache; // best-effort from tickSnapshot cache
+        MediaCtx(String media, String transportKey, boolean mediaReady, DeliveryController dc, boolean deliveryActiveCache) {
+            this.media = media;
+            this.transportKey = transportKey;
+            this.mediaReady = mediaReady;
+            this.dc = dc;
+            this.deliveryActiveCache = deliveryActiveCache;
+        }
+    }
+
+    private MediaCtx resolveMediaCtx(String media, String btMac, int node, int from) {
+        String m = (media == null) ? "usb" : media.trim().toLowerCase(Locale.ROOT);
+        if (m.isEmpty()) m = "usb";
+
+        String tk;
+        TransportIo io = null;
+        boolean ready = false;
+        DeliveryController dc = null;
+
+        try {
+            if ("bt".equals(m) || "bluetooth".equals(m)) {
+                String mac = (btMac == null) ? "" : btMac.trim();
+                tk = MediaTransportManager.btKey(mac);
+                io = (mediaMgr != null) ? mediaMgr.getByKey(tk) : null;
+            } else {
+                tk = MediaTransportManager.KEY_USB;
+                io = (mediaMgr != null) ? mediaMgr.getByKey(tk) : null;
+            }
+        } catch (Exception e) {
+            tk = ("bt".equals(m) || "bluetooth".equals(m))
+                    ? MediaTransportManager.btKey((btMac == null) ? "" : btMac.trim())
+                    : MediaTransportManager.KEY_USB;
+        }
+
+        try { ready = (io != null && io.isOpen()); } catch (Exception ignored) {}
+
+        // 1) si prêt: getOrCreate sur ce transport
+        if (ready) {
+            try { dc = sessions.getOrCreate(tk, node, from, io); } catch (Exception ignored) {}
+        }
+
+        // 2) si non prêt: tenter un controller existant (cache)
+        if (dc == null) {
+            try { dc = sessions.getController(tk, node); } catch (Exception ignored) {}
+        }
+
+        boolean delActiveCache = false;
+        try {
+            if (dc != null) {
+                ApiResult r = dc.api_tickSnapshot(); // cache-only côté controller
+                JSONObject d = (r != null) ? r.data : null;
+                int delCode = (d != null) ? d.optInt("delCode", 0) : 0;
+                delActiveCache = (delCode & MASK_DELIVERY_ACTIVE) != 0;
+            }
+        } catch (Exception ignored) {}
+
+        return new MediaCtx(m, tk, ready, dc, delActiveCache);
+    }
+
+    private void persistApiMediaStatusOff(int node, String transportKey, String origin, String detail) {
+        try {
+            DeliveryLogStore store = sessions.getStore();
+            if (store == null) return;
+
+            String serial = sessions.getExpectedSerial(node);
+            if (serial == null || serial.trim().isEmpty()) serial = "__API__";
+            String ticketKey = "TAB-" + (node & 0xFF);
+
+            JSONObject data = new JSONObject();
+            data.put("event_type", "TAB_MEDIA_STATUS");
+            data.put("state", "OFF");
+            data.put("media", (transportKey != null && transportKey.toUpperCase(Locale.ROOT).startsWith("BT:")) ? "BT" : "USB");
+            data.put("transport_key", transportKey);
+            data.put("node", (node & 0xFF));
+            data.put("origin", origin != null ? origin : "-");
+            data.put("detail", detail != null ? detail : "-");
+            data.put("ts_ms", System.currentTimeMillis());
+
+            store.upsertSummaryAsync(serial, ticketKey, null, "TAB_OFF", DeliveryLogStore.SOURCE_API, null, null, null);
+            final String sFinal = serial;
+            final String tkFinal = ticketKey;
+            store.openAttemptAsync(sFinal, tkFinal, DeliveryLogStore.SOURCE_API, null, attemptId -> {
+                store.addEventAsync(attemptId, DeliveryLogStore.LEVEL_INFO,
+                        "TAB_MEDIA_STATUS", "API reports media OFF", data.toString());
+                store.closeAttemptAsync(attemptId, "DONE", data.toString(), null);
+            });
+        } catch (Exception ignored) {}
+    }
+
+    /**
+     * Retourne:
+     * - null si OK pour procéder
+     * - ApiResult FAIL si media OFF et delivery inactive (bloque START)
+     * - ApiResult OK (RECOVER) si media OFF et delivery active
+     */
+    private ApiResult option3_startGate(MediaCtx mc, int node, String opName) {
+        try {
+            JSONObject d = new JSONObject();
+            d.put("media", mc.media);
+            d.put("transportKey", mc.transportKey);
+            d.put("connected", mc.mediaReady ? 1 : 0);
+            d.put("deliveryActive_cache", mc.deliveryActiveCache ? 1 : 0);
+
+            if (!mc.mediaReady) {
+                if (!mc.deliveryActiveCache) {
+                    String msg = opName + ": 0 - MEDIA OFF (delivery inactive)";
+                    LogBus.api(node, msg);
+                    persistApiMediaStatusOff(node, mc.transportKey, "API_START_BLOCKED", msg);
+                    return ApiResult.fail(opName + ": 0 - Média OFF / not ready (START bloqué)", "ERR_MEDIA_NOT_READY", d);
+                }
+
+                String msg = opName + ": 1 - RECOVER (media OFF, delivery active)";
+                LogBus.api(node, msg);
+                d.put("mode", "RECOVER");
+                d.put("pendingReconnect", 1);
+                persistApiMediaStatusOff(node, mc.transportKey, "API_RECOVER", msg);
+                return ApiResult.ok(opName + ": 1 - RECOVER (media OFF, livraison en cours)", d);
+            }
+
+            return null;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
     // =========================
     // Helpers
     // =========================
@@ -375,26 +515,61 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
 
     @Override
     public ApiResult api_deliveryStartC(Integer lcrnode_dec, Integer from_dec, int product1to16, double presetNet) {
+        return api_deliveryStartC(lcrnode_dec, from_dec, product1to16, presetNet, "usb", null);
+    }
+
+    /**
+     * ✅ Option 3 (media-aware): START C
+     */
+    public ApiResult api_deliveryStartC(Integer lcrnode_dec, Integer from_dec, int product1to16, double presetNet,
+                                       String media, String bt_mac) {
         int node = normNode(lcrnode_dec);
         int from = normFrom(from_dec);
-        DeliveryController dc = requireSession(node, from);
-        if (dc == null) return ApiResult.fail("Delivery C: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
+
+        MediaCtx mc = resolveMediaCtx(media, bt_mac, node, from);
+        ApiResult gate = option3_startGate(mc, node, "Delivery C");
+        if (gate != null) return gate;
+
+        DeliveryController dc = mc.dc;
+        if (dc == null) {
+            return ApiResult.fail("Delivery C: 0 - Controller introuvable", "NO_CONTROLLER");
+        }
+
         ApiResult r = dc.api_deliveryStartC(product1to16, presetNet);
         recordJobId(r, node, from);
         return r;
     }
 
+
     @Override
     public ApiResult api_deliveryOneShotStart(Integer lcrnode_dec, Integer from_dec,
-                                             String numero_livraison, int product1to16, double presetNetL, String compartment) {
+            String numero_livraison, int product1to16, double presetNetL, String compartment) {
+        return api_deliveryOneShotStart(lcrnode_dec, from_dec, numero_livraison, product1to16, presetNetL, compartment, "usb", null);
+    }
+
+    /**
+     * ✅ Option 3 (media-aware): OneShot START
+     */
+    public ApiResult api_deliveryOneShotStart(Integer lcrnode_dec, Integer from_dec,
+            String numero_livraison, int product1to16, double presetNetL, String compartment,
+            String media, String bt_mac) {
         int node = normNode(lcrnode_dec);
         int from = normFrom(from_dec);
-        DeliveryController dc = requireSession(node, from);
-        if (dc == null) return ApiResult.fail("OneShot: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
+
+        MediaCtx mc = resolveMediaCtx(media, bt_mac, node, from);
+        ApiResult gate = option3_startGate(mc, node, "OneShot");
+        if (gate != null) return gate;
+
+        DeliveryController dc = mc.dc;
+        if (dc == null) {
+            return ApiResult.fail("OneShot: 0 - Controller introuvable", "NO_CONTROLLER");
+        }
+
         ApiResult r = dc.api_deliveryOneShotStart(numero_livraison, product1to16, presetNetL, compartment);
         recordJobId(r, node, from);
         return r;
     }
+
 
     @Override
     public ApiResult api_deliveryContinue(String jobId, Integer lcrnode_dec) {
