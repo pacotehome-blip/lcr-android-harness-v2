@@ -193,8 +193,6 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
     private final LinkedHashMap<String, String> regKeyToTabKey = new LinkedHashMap<>();
 
     private String currentTabKey = null;
- private String visibleRegFragmentTag = null; // fragment visible dans registerContainer
-
     private int currentRegNode = -1; // node actif (fallback pour logs API)
 
     // ===== LOG GLOBAL (MAIN) =====
@@ -450,24 +448,14 @@ ensureRegisterTab(250, 255, true);
         if (tabRegisters != null) {
             tabRegisters.addOnTabSelectedListener(new TabLayout.OnTabSelectedListener() {
                 @Override public void onTabSelected(TabLayout.Tab tab) {
- Object tag = (tab != null) ? tab.getTag() : null;
- if (tag instanceof String) {
- String k = (String) tag;
- showRegisterFragmentByKey(k);
- refreshOneTabMediaStatus(k);
- notifyTabBecameActive(k);
- }
- }
+                    Object tag = (tab != null) ? tab.getTag() : null;
+                    if (tag instanceof String) showRegisterFragmentByKey((String) tag);
+                }
                 @Override public void onTabUnselected(TabLayout.Tab tab) {}
                 @Override public void onTabReselected(TabLayout.Tab tab) {
- Object tag = (tab != null) ? tab.getTag() : null;
- if (tag instanceof String) {
- String k = (String) tag;
- showRegisterFragmentByKey(k);
- refreshOneTabMediaStatus(k);
- notifyTabBecameActive(k);
- }
- }
+                    Object tag = (tab != null) ? tab.getTag() : null;
+                    if (tag instanceof String) showRegisterFragmentByKey((String) tag);
+                }
             });
         }
 
@@ -566,8 +554,6 @@ private void setupTabsTop() {
         if (index == 1) refreshApiStatus();
         if (index == 2) {
             updateMediaStatusUi();
- refreshAllTabsMediaStatus();
- refreshAllTabsMediaStatus();
             updateNodesStatusUi();
             refreshBondedBtList();
         }
@@ -808,43 +794,63 @@ private void setupTabsTop() {
     }
 
     private void showRegisterFragmentByKey(String tabKey) {
- if (registerContainer == null || tabKey == null) return;
- TabSpec spec = tabsByKey.get(tabKey);
- if (spec == null) return;
+        if (registerContainer == null || tabKey == null) return;
+        TabSpec spec = tabsByKey.get(tabKey);
+        if (spec == null) return;
 
- currentTabKey = tabKey;
- currentRegNode = spec.node;
- if (txtActiveNode != null) {
- txtActiveNode.setText("Node actif : " + tabLabelOf(spec.mediaShort, spec.node, spec.serialId));
- }
+        currentTabKey = tabKey;
+        currentRegNode = spec.node;
+        if (txtActiveNode != null) {
+            txtActiveNode.setText("Node actif : " + tabLabelOf(spec.mediaShort, spec.node, spec.serialId));
+        }
 
- FragmentManager fm = getSupportFragmentManager();
- String tag = "regtab_" + tabKey;
+        FragmentManager fm = getSupportFragmentManager();
+        String tag = "regtab_" + tabKey;
 
- Fragment target = fm.findFragmentByTag(tag);
- if (target == null) {
- target = RegisterTabFragment.newInstance(spec.node, spec.from, spec.serialId, spec.transportKey);
- }
+        Fragment target = fm.findFragmentByTag(tag);
+        if (target == null) {
+            target = RegisterTabFragment.newInstance(spec.node, spec.from, spec.serialId, spec.transportKey);
+        }
 
- FragmentTransaction tx = fm.beginTransaction();
- tx.setReorderingAllowed(true);
+        FragmentTransaction tx = fm.beginTransaction();
+        tx.setReorderingAllowed(true);
 
- if (visibleRegFragmentTag != null && !visibleRegFragmentTag.equals(tag)) {
- Fragment cur = fm.findFragmentByTag(visibleRegFragmentTag);
- if (cur != null) tx.hide(cur);
- }
+        // ✅ Sécurité: cacher TOUS les fragments regtab_ sauf celui ciblé (évite le "tab en dessous")
+        for (Fragment f : fm.getFragments()) {
+            if (f == null) continue;
+            String t = f.getTag();
+            if (t == null) continue;
+            if (!t.startsWith("regtab_")) continue;
+            if (!t.equals(tag)) {
+                try { tx.hide(f); } catch (Exception ignored) {}
+                try {
+                    if (f instanceof RegisterTabFragment) {
+                        ((RegisterTabFragment) f).setTabActive(false);
+                    }
+                } catch (Exception ignored) {}
+            }
+        }
 
- if (target.isAdded()) {
- tx.show(target);
- } else {
- tx.add(R.id.registerContainer, target, tag);
- }
+        if (target.isAdded()) {
+            tx.show(target);
+        } else {
+            tx.add(R.id.registerContainer, target, tag);
+        }
 
- visibleRegFragmentTag = tag;
- tx.commitAllowingStateLoss();
+        visibleRegFragmentTag = tag;
+        tx.commitAllowingStateLoss();
 
- ui.postDelayed(() -> refreshOneTabMediaStatus(tabKey), 50);
- }
+        // ✅ marquer actif + refresh ciblé
+        ui.postDelayed(() -> {
+            try {
+                Fragment f = fm.findFragmentByTag(tag);
+                if (f instanceof RegisterTabFragment) {
+                    ((RegisterTabFragment) f).setTabActive(true);
+                }
+            } catch (Exception ignored) {}
+            refreshOneTabMediaStatus(tabKey);
+        }, 60);
+    }
 
     /**
      * ✅ Clear ciblé A1: retire TAB + Fragment explicitement.
@@ -1338,16 +1344,23 @@ private void setupTabsTop() {
             }
         } catch (Exception ignored) {}
         logMedia1("USB Detached");
- try { refreshAllTabsMediaStatus(); } catch (Exception ignored) {}
 
         try { UsbSession.clear(); } catch (Exception ignore) {}
         stopApiServer("USB detached");
 
-        // ✅ Multi-média: conserver les tabs; marquer USB(OFF) via refresh
- try {
- refreshAllTabsMediaStatus();
- } catch (Exception ignored) {}
-
+        // ✅ Multi-média: ne pas détruire les tabs BT.
+        // Retirer uniquement les tabs USB (et leurs fragments) de manière explicite (A1).
+        try {
+            ArrayList<String> toRemove = new ArrayList<>();
+            for (Map.Entry<String, TabSpec> e : tabsByKey.entrySet()) {
+                if (e == null) continue;
+                TabSpec s = e.getValue();
+                if (s == null) continue;
+                String mShort = (s.mediaShort != null) ? s.mediaShort : mediaShortFromTransportKey(s.transportKey);
+                if ("USB".equalsIgnoreCase(mShort)) toRemove.add(e.getKey());
+            }
+            for (String k : toRemove) removeTabAndFragment(k, "USB detached");
+        } catch (Exception ignored) {}
 
         usbPort = null;
         updateMediaStatusUi();
@@ -1667,29 +1680,16 @@ private void setupTabsTop() {
     // CONFIGURE: Status UI (media + nodes)
     // =========================
     private void updateMediaStatusUi() {
- try {
- if (txtMediaActive == null) return;
- boolean usbReady = false;
- boolean btReady = false;
- try {
- if (mediaTransportManager != null) {
- TransportIo u = mediaTransportManager.getByKey(MediaTransportManager.KEY_USB);
- usbReady = (u != null && u.isOpen());
- java.util.List<TransportSnapshot> snaps = mediaTransportManager.listSnapshots();
- if (snaps != null) {
- for (TransportSnapshot s : snaps) {
- if (s == null || s.key == null) continue;
- if (!s.key.toUpperCase(java.util.Locale.ROOT).startsWith("BT:")) continue;
- if (s.status == TransportStatus.READY) { btReady = true; break; }
- }
- }
- }
- } catch (Exception ignored) {}
- String usbLabel = usbReady ? "USB (prêt)" : "USB(OFF)";
- String btLabel = btReady ? "BT (connecté)" : "BT(OFF)";
- txtMediaActive.setText("Média : " + usbLabel + " | " + btLabel);
- } catch (Exception ignored) {}
- }
+        try {
+            String s;
+            boolean usbReady = (UsbSession.getPort() != null);
+            boolean btReady = (btSocket != null && btSocket.isConnected());
+            if (usbReady) s = "Média : USB (prêt)";
+            else if (btReady) s = "Média : BT (connecté)";
+            else s = "Média : —";
+            if (txtMediaActive != null) txtMediaActive.setText(s);
+        } catch (Exception ignored) {}
+    }
 
     private void updateNodesStatusUi() {
         try {
@@ -2133,20 +2133,5 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
         }
     });
 }
-
-
-
- // =========================
- // ✅ Refresh soft du TAB visible (sans reconnect dur)
- // =========================
- private void notifyTabBecameActive(String tabKey) {
-     try {
-         if (tabKey == null) return;
-         Fragment f = getSupportFragmentManager().findFragmentByTag("regtab_" + tabKey);
-         if (f instanceof RegisterTabFragment) {
-             ((RegisterTabFragment) f).onTabBecameActive();
-         }
-     } catch (Exception ignored) {}
- }
 
 }
