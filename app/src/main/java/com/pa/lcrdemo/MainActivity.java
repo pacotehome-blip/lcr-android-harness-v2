@@ -193,6 +193,8 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
     private final LinkedHashMap<String, String> regKeyToTabKey = new LinkedHashMap<>();
 
     private String currentTabKey = null;
+ private String visibleRegFragmentTag = null; // fragment visible dans registerContainer
+
     private int currentRegNode = -1; // node actif (fallback pour logs API)
 
     // ===== LOG GLOBAL (MAIN) =====
@@ -797,59 +799,22 @@ private void setupTabsTop() {
         if (registerContainer == null || tabKey == null) return;
         TabSpec spec = tabsByKey.get(tabKey);
         if (spec == null) return;
-
         currentTabKey = tabKey;
         currentRegNode = spec.node;
+
         if (txtActiveNode != null) {
             txtActiveNode.setText("Node actif : " + tabLabelOf(spec.mediaShort, spec.node, spec.serialId));
         }
 
         FragmentManager fm = getSupportFragmentManager();
         String tag = "regtab_" + tabKey;
-
-        Fragment target = fm.findFragmentByTag(tag);
-        if (target == null) {
-            target = RegisterTabFragment.newInstance(spec.node, spec.from, spec.serialId, spec.transportKey);
-        }
-
+        Fragment existing = fm.findFragmentByTag(tag);
+        Fragment f = (existing != null) ? existing : RegisterTabFragment.newInstance(spec.node, spec.from, spec.serialId, spec.transportKey);
         FragmentTransaction tx = fm.beginTransaction();
+        tx.replace(R.id.registerContainer, f, tag);
         tx.setReorderingAllowed(true);
-
-        // ✅ Sécurité: cacher TOUS les fragments regtab_ sauf celui ciblé (évite le "tab en dessous")
-        for (Fragment f : fm.getFragments()) {
-            if (f == null) continue;
-            String t = f.getTag();
-            if (t == null) continue;
-            if (!t.startsWith("regtab_")) continue;
-            if (!t.equals(tag)) {
-                try { tx.hide(f); } catch (Exception ignored) {}
-                try {
-                    if (f instanceof RegisterTabFragment) {
-                        ((RegisterTabFragment) f).setTabActive(false);
-                    }
-                } catch (Exception ignored) {}
-            }
-        }
-
-        if (target.isAdded()) {
-            tx.show(target);
-        } else {
-            tx.add(R.id.registerContainer, target, tag);
-        }
-
-        visibleRegFragmentTag = tag;
         tx.commitAllowingStateLoss();
-
-        // ✅ marquer actif + refresh ciblé
-        ui.postDelayed(() -> {
-            try {
-                Fragment f = fm.findFragmentByTag(tag);
-                if (f instanceof RegisterTabFragment) {
-                    ((RegisterTabFragment) f).setTabActive(true);
-                }
-            } catch (Exception ignored) {}
-            refreshOneTabMediaStatus(tabKey);
-        }, 60);
+        ui.postDelayed(() -> refreshOneTabMediaStatus(tabKey), 50);
     }
 
     /**
@@ -2133,5 +2098,42 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
         }
     });
 }
+
+
+
+    // =========================
+    // ✅ Reçu des tabs: média OFF/not-ready (pour que l'API/FS sache avant/pendant)
+    // =========================
+    public void reportMediaNotReadyFromTab(int node, String serialId, String transportKey, String origin, String detail) {
+        try {
+            String media = mediaShortFromTransportKey(transportKey);
+            LogBus.api(node, "TAB_MEDIA_STATUS OFF (from TAB) media=" + media + " origin=" + origin + " detail=" + detail);
+
+            if (deliveryStore == null) return;
+            String serial = safeSerial(serialId);
+            if (serial.isEmpty()) serial = "__TAB__";
+            String ticketKey = "TAB-" + (node & 0xFF);
+
+            JSONObject data = new JSONObject();
+            data.put("event_type", "TAB_MEDIA_STATUS");
+            data.put("state", "OFF");
+            data.put("media", media);
+            data.put("transport_key", transportKey);
+            data.put("node", (node & 0xFF));
+            data.put("serial_id", serial);
+            data.put("origin", origin != null ? origin : "-");
+            data.put("detail", detail != null ? detail : "-");
+            data.put("ts_ms", System.currentTimeMillis());
+
+            deliveryStore.upsertSummaryAsync(serial, ticketKey, null, "TAB_OFF", DeliveryLogStore.SOURCE_UI, null, null, null);
+            deliveryStore.openAttemptAsync(serial, ticketKey, DeliveryLogStore.SOURCE_UI, null, attemptId -> {
+                deliveryStore.addEventAsync(attemptId, DeliveryLogStore.LEVEL_INFO,
+                        "TAB_MEDIA_STATUS",
+                        "Tab media OFF (reported)",
+                        data.toString());
+                deliveryStore.closeAttemptAsync(attemptId, "DONE", data.toString(), null);
+            });
+        } catch (Exception ignored) {}
+    }
 
 }
