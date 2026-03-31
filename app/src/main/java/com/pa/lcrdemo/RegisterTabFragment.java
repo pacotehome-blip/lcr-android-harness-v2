@@ -689,7 +689,41 @@ private void attemptAttachIfPossible(boolean verboseLog) {
 
     private void connectThisRegister(boolean userInitiated) {
         RegisterSessionManager sm = RegisterSessionManager.get(requireContext());
-        DeliveryController dc = sm.resolveOrCreateForNode(node, from);
+
+        // ✅ TAB strict: si transportKey connu, on doit TOUJOURS utiliser ce média.
+        // - si OFF: pendingReconnect=true et on NE fallback PAS sur un autre média.
+        // - si READY: getOrCreate(transportKey,node,from,io)
+        try {
+            if (tabTransportKey != null && !tabTransportKey.trim().isEmpty()) {
+                com.pa.lcr.lcp.transport.MediaTransportManager mgr = com.pa.lcr.lcp.transport.MediaTransportManager.get(requireContext());
+                com.pa.lcr.lcp.transport.TransportIo io0 = (mgr != null) ? mgr.getByKey(tabTransportKey) : null;
+
+                boolean ready = (io0 != null && io0.isOpen());
+                tabMediaReady = ready;
+
+                if (!ready) {
+                    pendingReconnect = true;
+                    if (txtLive != null) txtLive.setText("LIVE: " + tabMediaShort + "(OFF) — reconnect requis");
+                    updateButtons(null);
+                    if (userInitiated) {
+                        try { Toast.makeText(requireContext(), tabMediaShort + "(OFF) — en attente…", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
+                    }
+                    return;
+                }
+
+                DeliveryController forced = sm.getOrCreate(tabTransportKey, node, from, io0);
+                if (forced != null) {
+                    controller = forced;
+                }
+            }
+        } catch (Exception ignored) {}
+
+        // Fallback seulement si le TAB n'a PAS de transportKey.
+        DeliveryController dc = (controller != null) ? controller : null;
+        if (dc == null) {
+            dc = sm.resolveOrCreateForNode(node, from);
+        }
+
         if (dc == null) {
             if (userInitiated) {
                 LogBus.api(node, "Aucun média prêt / registre introuvable pour ce node");
@@ -697,8 +731,8 @@ private void attemptAttachIfPossible(boolean verboseLog) {
             }
             return;
         }
-        controller = dc;
 
+        controller = dc;
         try {
             String tk = sm.findTransportKeyForController(controller);
             if (tk != null) tabTransportKey = tk;
@@ -908,6 +942,31 @@ private void attemptAttachIfPossible(boolean verboseLog) {
         if (transportKey != null) b.putString(ARG_TRANSPORT, transportKey);
         f.setArguments(b);
         return f;
+    }
+
+
+
+    // =========================
+    // ✅ Refresh soft (tab actif)
+    // - Ne coupe jamais le lien (important si une livraison est en cours)
+    // - Si controller existe: requestStatus + live + header + updateButtons
+    // - Sinon: attemptAttachIfPossible
+    // =========================
+    public void onTabBecameActive() {
+        ui.post(() -> {
+            if (!isAdded() || getView() == null) return;
+
+            if (controller != null) {
+                try { controller.requestStatus(); } catch (Exception ignored) {}
+                try { controller.requestLiveSample(); } catch (Exception ignored) {}
+                try { validateHeaderAsync(); } catch (Exception ignored) {}
+                try { updateButtons(controller.getState()); } catch (Exception ignored) {}
+                scheduleLogRefresh();
+                return;
+            }
+
+            attemptAttachIfPossible(false);
+        });
     }
 
 }
