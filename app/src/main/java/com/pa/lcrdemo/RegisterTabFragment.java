@@ -712,17 +712,13 @@ private void attemptAttachIfPossible(boolean verboseLog) {
                 }
 
                 DeliveryController forced = sm.getOrCreate(tabTransportKey, node, from, io0);
-                if (forced != null) {
-                    controller = forced;
-                }
+                if (forced != null) controller = forced;
             }
         } catch (Exception ignored) {}
 
         // Fallback seulement si le TAB n'a PAS de transportKey.
         DeliveryController dc = (controller != null) ? controller : null;
-        if (dc == null) {
-            dc = sm.resolveOrCreateForNode(node, from);
-        }
+        if (dc == null) dc = sm.resolveOrCreateForNode(node, from);
 
         if (dc == null) {
             if (userInitiated) {
@@ -752,7 +748,6 @@ private void attemptAttachIfPossible(boolean verboseLog) {
         syncUiFromController();
         validateHeaderAsync();
 
-        // ✅ One-shot LIVE recale (READY / ticket pending) après attach
         ui.postDelayed(() -> {
             try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
         }, 200);
@@ -950,7 +945,7 @@ private void attemptAttachIfPossible(boolean verboseLog) {
     // ✅ Refresh soft (tab actif)
     // - Ne coupe jamais le lien (important si une livraison est en cours)
     // - Si controller existe: requestStatus + live + header + updateButtons
-    // - Sinon: attemptAttachIfPossible
+    // - Sinon: attemptAttachIfPossible (respecte tabMediaReady/pendingReconnect)
     // =========================
     public void onTabBecameActive() {
         ui.post(() -> {
