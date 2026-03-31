@@ -121,8 +121,6 @@ public class RegisterTabFragment extends Fragment {
     private volatile boolean tabMediaReady = true;
     private volatile boolean pendingReconnect = false;
     private volatile String tabMediaShort = "—";
- // ✅ Visible/actif: évite que des callbacks d'un tab caché perturbent l'UI
- private volatile boolean isActiveTab = false;
 
     // Args (tab): serial + transport
     private String serialFromArgs = null;
@@ -249,8 +247,6 @@ public class RegisterTabFragment extends Fragment {
         @Override
         public void onStateChanged(DeliveryState state) {
             ui.post(() -> {
-                if (!isTabActive()) return;
-
                 if (!isAdded() || getView() == null) return;
 
                 if (starting && state == DeliveryState.RUNNING_FLOWING) starting = false;
@@ -275,8 +271,6 @@ public class RegisterTabFragment extends Fragment {
         @Override
         public void onLiveQty(double net, double gross) {
             ui.post(() -> {
-                if (!isTabActive()) return;
-
                 if (!isAdded() || getView() == null) return;
 
                 int d = lastDigits;
@@ -296,8 +290,6 @@ public class RegisterTabFragment extends Fragment {
         @Override
         public void onLiveStatus(String liveText) {
             ui.post(() -> {
-                if (!isTabActive()) return;
-
                 if (!isAdded() || getView() == null) return;
                 lastLiveText = liveText;
                 if (txtLive != null) txtLive.setText(liveText);
@@ -312,8 +304,6 @@ public class RegisterTabFragment extends Fragment {
         @Override
         public void onTicketInfo(String ticketNo, String deliveryUid) {
             ui.post(() -> {
-                if (!isTabActive()) return;
-
                 if (!isAdded() || getView() == null) return;
                 if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : " + (ticketNo == null ? "—" : ticketNo));
                 if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : " + (deliveryUid == null ? "—" : deliveryUid));
@@ -579,33 +569,7 @@ public class RegisterTabFragment extends Fragment {
 
         // ✅ B = Status + one-shot LIVE recale (READY / ticket pending)
         if (btnB != null) btnB.setOnClickListener(v -> {
-            if (!isTabActive()) return;
-            if (controller == null) {
-                // tenter attach soft
-                reconnectThisRegister(true);
-                return;
-            }
-
-            // ✅ Média strict: si transportKey connu mais OFF => erreur immédiate + report API
-            try {
-                if (tabTransportKey != null && !tabTransportKey.trim().isEmpty()) {
-                    com.pa.lcr.lcp.transport.MediaTransportManager mgr = com.pa.lcr.lcp.transport.MediaTransportManager.get(requireContext());
-                    com.pa.lcr.lcp.transport.TransportIo io0 = (mgr != null) ? mgr.getByKey(tabTransportKey) : null;
-                    boolean ready = (io0 != null && io0.isOpen());
-                    tabMediaReady = ready;
-                    if (!ready) {
-                        pendingReconnect = true;
-                        String msg = tabMediaShort + "(OFF) — Status impossible";
-                        LogBus.api(node, msg);
-                        reportMediaOffToApi("STATUS_CLICK", msg);
-                        if (txtLive != null) txtLive.setText("LIVE: " + tabMediaShort + "(OFF) — reconnect requis");
-                        updateButtons(null);
-                        try { Toast.makeText(requireContext(), msg, Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
-                        return;
-                    }
-                }
-            } catch (Exception ignored) {}
-
+            if (controller == null) return;
             controller.requestStatus();
             ui.postDelayed(() -> {
                 try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
@@ -948,47 +912,15 @@ private void attemptAttachIfPossible(boolean verboseLog) {
 
 
 
-    // =========================
-    // ✅ Piloté par MainActivity lors du switch de tab (un seul tab actif)
-    // =========================
-    public void setTabActive(boolean active) {
-        isActiveTab = active;
-        if (active) {
-            onTabBecameActive();
-        } else {
-            onTabBecameInactive();
-        }
-    }
-
-    private boolean isTabActive() {
-        return isActiveTab;
-    }
-
-    private void onTabBecameInactive() {
-        // aucune action intrusive; on stoppe seulement le refresh visuel/log.
-        try {
-            // pas de detach ici (important: ne pas casser une livraison en cours)
-        } catch (Exception ignored) {}
-    }
-
-
-
-    public void onTabBecameActive() {
-        ui.post(() -> {
-            if (!isAdded() || getView() == null) return;
-            if (!isTabActive()) return;
-
-            if (controller != null) {
-                try { controller.requestStatus(); } catch (Exception ignored) {}
-                try { controller.requestLiveSample(); } catch (Exception ignored) {}
-                try { validateHeaderAsync(); } catch (Exception ignored) {}
-                try { updateButtons(controller.getState()); } catch (Exception ignored) {}
-                scheduleLogRefresh();
-                return;
-            }
-
-            attemptAttachIfPossible(false);
-        });
-    }
+ // =========================
+ // ✅ Report media OFF/not-ready à l'API (via MainActivity -> DeliveryLogStore)
+ // =========================
+ private void reportMediaOffToApi(String origin, String detail) {
+     try {
+         if (getActivity() instanceof MainActivity) {
+             ((MainActivity) getActivity()).reportMediaNotReadyFromTab(node, serialFromArgs, tabTransportKey, origin, detail);
+         }
+     } catch (Exception ignored) {}
+ }
 
 }

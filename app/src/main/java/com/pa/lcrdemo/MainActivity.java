@@ -2101,39 +2101,39 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
 
 
 
-    // =========================
-    // ✅ Reçu des tabs: média OFF/not-ready (pour que l'API/FS sache avant/pendant)
-    // =========================
-    public void reportMediaNotReadyFromTab(int node, String serialId, String transportKey, String origin, String detail) {
-        try {
-            String media = mediaShortFromTransportKey(transportKey);
-            LogBus.api(node, "TAB_MEDIA_STATUS OFF (from TAB) media=" + media + " origin=" + origin + " detail=" + detail);
+ // =========================
+ // ✅ Reçu des tabs: média OFF/not-ready (pour que l'API/FS sache avant/pendant)
+ // =========================
+ public void reportMediaNotReadyFromTab(int node, String serialId, String transportKey, String origin, String detail) {
+     try {
+         String media = mediaShortFromTransportKey(transportKey);
+         LogBus.api(node, "TAB_MEDIA_STATUS OFF (from TAB) media=" + media + " origin=" + origin + " detail=" + detail);
 
-            if (deliveryStore == null) return;
-            String serial = safeSerial(serialId);
-            if (serial.isEmpty()) serial = "__TAB__";
-            String ticketKey = "TAB-" + (node & 0xFF);
+         if (deliveryStore == null) return;
+         String serial = safeSerial(serialId);
+         if (serial.isEmpty()) serial = "__TAB__";
+         String ticketKey = "TAB-" + (node & 0xFF);
 
-            JSONObject data = new JSONObject();
-            data.put("event_type", "TAB_MEDIA_STATUS");
-            data.put("state", "OFF");
-            data.put("media", media);
-            data.put("transport_key", transportKey);
-            data.put("node", (node & 0xFF));
-            data.put("serial_id", serial);
-            data.put("origin", origin != null ? origin : "-");
-            data.put("detail", detail != null ? detail : "-");
-            data.put("ts_ms", System.currentTimeMillis());
+         JSONObject data = new JSONObject();
+         data.put("event_type", "TAB_MEDIA_STATUS");
+         data.put("state", "OFF");
+         data.put("media", media);
+         data.put("transport_key", transportKey);
+         data.put("node", (node & 0xFF));
+         data.put("serial_id", serial);
+         data.put("origin", origin != null ? origin : "-");
+         data.put("detail", detail != null ? detail : "-");
+         data.put("ts_ms", System.currentTimeMillis());
 
-            deliveryStore.upsertSummaryAsync(serial, ticketKey, null, "TAB_OFF", DeliveryLogStore.SOURCE_UI, null, null, null);
-            deliveryStore.openAttemptAsync(serial, ticketKey, DeliveryLogStore.SOURCE_UI, null, attemptId -> {
-                deliveryStore.addEventAsync(attemptId, DeliveryLogStore.LEVEL_INFO,
-                        "TAB_MEDIA_STATUS",
-                        "Tab media OFF (reported)",
-                        data.toString());
-                deliveryStore.closeAttemptAsync(attemptId, "DONE", data.toString(), null);
-            });
-        } catch (Exception ignored) {}
-    }
+         deliveryStore.upsertSummaryAsync(serial, ticketKey, null, "TAB_OFF", DeliveryLogStore.SOURCE_UI, null, null, null);
+         deliveryStore.openAttemptAsync(serial, ticketKey, DeliveryLogStore.SOURCE_UI, null, attemptId -> {
+             deliveryStore.addEventAsync(attemptId, DeliveryLogStore.LEVEL_INFO,
+                     "TAB_MEDIA_STATUS",
+                     "Tab media OFF (reported)",
+                     data.toString());
+             deliveryStore.closeAttemptAsync(attemptId, "DONE", data.toString(), null);
+         });
+     } catch (Exception ignored) {}
+ }
 
 }
