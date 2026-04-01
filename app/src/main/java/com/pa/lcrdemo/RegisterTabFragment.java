@@ -1,5 +1,7 @@
 package com.pa.lcrdemo;
 
+
+import com.pa.lcr.lcp.transport.TransportIo;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -560,8 +562,12 @@ public class RegisterTabFragment extends Fragment {
             if (controller == null) return;
             controller.alignOrRecover();
             ui.postDelayed(() -> {
-                try { if (controller != null) try { if (tabTransportKey != null) MediaTransportManager.get(requireContext()).activateExclusive(tabTransportKey, "STATUS_B"); } catch (Exception ignored) {}
- controller.requestStatus(); } catch (Exception ignored) {}
+                try {
+                if (tabTransportKey != null) {
+                    MediaTransportManager.get(requireContext()).activateExclusive(tabTransportKey, "TAB_A");
+                }
+            } catch (Exception ignored) {}
+            try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
                 try { validateHeaderAsync(); } catch (Exception ignored) {}
                 try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
                 refreshDelCodeFromTickSnapshotThrottled();
@@ -571,9 +577,30 @@ public class RegisterTabFragment extends Fragment {
 
         // ✅ B = Status + one-shot LIVE recale (READY / ticket pending)
         if (btnB != null) btnB.setOnClickListener(v -> {
-            if (controller == null) return;
-            controller.requestStatus();
+            if (controller == null) {
+                reconnectThisRegister(true);
+                return;
+            }
+
+            // B1: activer le transport du tab avant status
+            try {
+                if (tabTransportKey != null) {
+                    MediaTransportManager.get(requireContext()).activateExclusive(tabTransportKey, "STATUS_B");
+                }
+            } catch (Exception ignored) {}
+
+            try {
+                controller.requestStatus();
+            } catch (Exception e) {
+                LogBus.api(node, "Status(B) ERR: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
+            }
+
             ui.postDelayed(() -> {
+                try {
+                    if (tabTransportKey != null) {
+                        MediaTransportManager.get(requireContext()).activateExclusive(tabTransportKey, "LIVE_AFTER_B");
+                    }
+                } catch (Exception ignored) {}
                 try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
             }, 200);
         });
@@ -692,7 +719,51 @@ private void attemptAttachIfPossible(boolean verboseLog) {
 
     private void connectThisRegister(boolean userInitiated) {
         RegisterSessionManager sm = RegisterSessionManager.get(requireContext());
-        DeliveryController dc = sm.resolveOrCreateForNode(node, from);
+
+        // ✅ STRICT TAB MEDIA PIN + B1
+        // - Si le TAB a un transportKey: on FORCE ce média (pas de fallback USB/BT)
+        // - Fallback resolveOrCreateForNode() seulement si tabTransportKey est absent.
+        DeliveryController dc = null;
+
+        // 1) Tab pin strict
+        if (tabTransportKey != null && !tabTransportKey.trim().isEmpty()) {
+            final String tkPinned = tabTransportKey.trim();
+
+            // B1: activer ce transport (sinon GuardedTransportIo va refuser read/write)
+            try { MediaTransportManager.get(requireContext()).activateExclusive(tkPinned, "TAB_CONNECT"); } catch (Exception ignored) {}
+
+            // Récupérer IO pour CE transport
+            TransportIo io = null;
+            try { io = MediaTransportManager.get(requireContext()).getByKey(tkPinned); } catch (Exception ignored) {}
+
+            if (io == null || !io.isOpen()) {
+                tabMediaReady = false;
+                pendingReconnect = true;
+
+                String msg = tabMediaShort + "(OFF) — impossible de connecter";
+                LogBus.api(node, msg);
+                reportMediaOffToApi("CONNECT_CLICK", msg);
+
+                ui.post(() -> {
+                    if (!isAdded() || getView() == null) return;
+                    if (txtLive != null) txtLive.setText("LIVE: " + tabMediaShort + "(OFF) — reconnect requis");
+                    updateButtons(null);
+                    if (userInitiated) {
+                        try { Toast.makeText(requireContext(), msg, Toast.LENGTH_SHORT).show(); } catch (Exception ignored2) {}
+                    }
+                });
+                return;
+            }
+
+            // ✅ création STRICTE sur ce transport
+            dc = sm.getOrCreate(tkPinned, node, from, io);
+        }
+
+        // 2) Fallback seulement si le TAB n'est pas pin
+        if (dc == null && (tabTransportKey == null || tabTransportKey.trim().isEmpty())) {
+            dc = sm.resolveOrCreateForNode(node, from);
+        }
+
         if (dc == null) {
             if (userInitiated) {
                 LogBus.api(node, "Aucun média prêt / registre introuvable pour ce node");
@@ -700,15 +771,21 @@ private void attemptAttachIfPossible(boolean verboseLog) {
             }
             return;
         }
+
         controller = dc;
 
+        // Sync transportKey réel du controller (sécurité)
         try {
             String tk = sm.findTransportKeyForController(controller);
-            if (tk != null) tabTransportKey = tk;
-        // ✅ B1 FSM: activer le transport de ce tab avant attach/status
-        try { if (tabTransportKey != null) MediaTransportManager.get(requireContext()).activateExclusive(tabTransportKey, "TAB_CONNECT"); } catch (Exception ignored) {}
+            if (tk != null && !tk.trim().isEmpty()) tabTransportKey = tk.trim();
         } catch (Exception ignored) {}
 
+        // B1: activer le transport réellement utilisé
+        try {
+            if (tabTransportKey != null) MediaTransportManager.get(requireContext()).activateExclusive(tabTransportKey, "TAB_CONNECT_FINAL");
+        } catch (Exception ignored) {}
+
+        // UI listener
         if (!uiListenerAttached) {
             try {
                 if (tabTransportKey != null) sm.attachUiListener(tabTransportKey, node, uiListener);
@@ -725,6 +802,9 @@ private void attemptAttachIfPossible(boolean verboseLog) {
 
         // ✅ One-shot LIVE recale (READY / ticket pending) après attach
         ui.postDelayed(() -> {
+            try {
+                if (tabTransportKey != null) MediaTransportManager.get(requireContext()).activateExclusive(tabTransportKey, "LIVE_ONE_SHOT");
+            } catch (Exception ignored) {}
             try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
         }, 200);
 
