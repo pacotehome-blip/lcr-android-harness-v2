@@ -30,6 +30,9 @@ public final class MediaTransportManager {
     private final Context appCtx;
     private final Map<String, TransportHandle> handles = new ConcurrentHashMap<>();
 
+ // ✅ B1 FSM: un seul transport ACTIVE à la fois
+ private volatile String activeKey = null;
+
     private MediaTransportManager(Context appCtx) {
         this.appCtx = appCtx;
         handles.put(KEY_USB, new TransportHandle(KEY_USB));
@@ -55,6 +58,7 @@ public final class MediaTransportManager {
         TransportHandle h = handles.get(KEY_USB);
         if (h == null) return;
         h.setDisconnected(reason != null ? reason : "USB detached");
+ clearActiveIfMatches(KEY_USB);
     }
 
     // -------------------------
@@ -96,6 +100,7 @@ public final class MediaTransportManager {
         TransportHandle h = handles.get(key);
         if (h == null) return;
         h.setDisconnected(reason != null ? reason : "BT disconnected");
+ clearActiveIfMatches(key);
     }
 
     public synchronized void onBtError(String mac, String err) {
@@ -109,7 +114,51 @@ public final class MediaTransportManager {
     }
 
     // -------------------------
-    // Query
+    
+
+ // -------------------------
+ // B1 FSM — activation exclusive (USB/BT)
+ // -------------------------
+ /**
+  * Rend ce transport ACTIVE et suspend implicitement les autres.
+  * Retourne false si le transport n'est pas prêt (io null/closed).
+  */
+ public synchronized boolean activateExclusive(String key, String reason) {
+     if (key == null || key.trim().isEmpty()) return false;
+     TransportHandle target = handles.get(key);
+     if (target == null) return false;
+     TransportIo tio = target.getIo();
+     if (tio == null || !tio.isOpen()) return false;
+
+     // Suspend others (on garde READY pour compat; l'ACTIVE est déterminé par activeKey)
+     for (TransportHandle h : handles.values()) {
+         if (h == null) continue;
+         if (h.getKey().equals(key)) continue;
+         try { h.setSuspended(reason); } catch (Exception ignored) {}
+     }
+
+     activeKey = key;
+     try { target.setActive(reason); } catch (Exception ignored) {}
+     return true;
+ }
+
+ public synchronized void clearActiveIfMatches(String key) {
+     if (key == null) return;
+     if (key.equals(activeKey)) activeKey = null;
+ }
+
+ public String getActiveKey() { return activeKey; }
+
+ // Static helpers for GuardedTransportIo
+ public static String getActiveKeyStatic() {
+     return (INSTANCE != null) ? INSTANCE.activeKey : null;
+ }
+
+ public static boolean isKeyActive(String key) {
+     if (key == null) return false;
+     return (INSTANCE != null && key.equals(INSTANCE.activeKey));
+ }
+// Query
     // -------------------------
     public TransportSnapshot getUsbSnapshot() {
         TransportHandle h = handles.get(KEY_USB);
@@ -156,6 +205,7 @@ public TransportIo getByKey(String key) {
         TransportHandle h = handles.get(key);
         if (h == null) return null;
         TransportIo io = h.getIo();
+ if (h.getStatus() == TransportStatus.ERROR || h.getStatus() == TransportStatus.DISCONNECTED) return null;
         if (io == null || !io.isOpen()) return null;
         return io;
     }

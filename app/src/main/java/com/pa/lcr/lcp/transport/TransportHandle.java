@@ -24,7 +24,9 @@ public final class TransportHandle {
     public synchronized void setConnected(TransportIo io, String description) {
         this.io = io;
         this.description = description;
-        this.generationId = GEN.incrementAndGet();
+        long g = 0;
+ try { g = (io != null ? io.getGenerationId() : 0); } catch (Exception ignored) {}
+ this.generationId = (g > 0 ? g : GEN.incrementAndGet());
         this.status = TransportStatus.READY;
         this.lastError = null;
         this.updatedAtMs = System.currentTimeMillis();
@@ -39,7 +41,9 @@ public final class TransportHandle {
             try { this.io.close(); } catch (Exception ignored) {}
         }
         this.io = null;
-        this.generationId = GEN.incrementAndGet();
+        long g = 0;
+ try { g = (io != null ? io.getGenerationId() : 0); } catch (Exception ignored) {}
+ this.generationId = (g > 0 ? g : GEN.incrementAndGet());
     }
 
     public synchronized void setError(String description, String error) {
@@ -62,7 +66,28 @@ public final class TransportHandle {
 
     public long getUpdatedAtMs() { return updatedAtMs; }
 
-    public TransportSnapshot snapshot() {
+    
+
+    // =========================
+    // B1 FSM minimaliste
+    // =========================
+    public synchronized void setActive(String why) {
+        this.status = TransportStatus.READY; // compat
+        this.updatedAtMs = System.currentTimeMillis();
+        if (why != null && !why.trim().isEmpty() && this.description != null && !this.description.contains("active:")) {
+            this.description = this.description + " (active:" + why + ")";
+        }
+    }
+
+    public synchronized void setSuspended(String why) {
+        this.status = TransportStatus.READY; // compat
+        this.updatedAtMs = System.currentTimeMillis();
+        if (why != null && !why.trim().isEmpty() && this.description != null && !this.description.contains("suspended:")) {
+            this.description = this.description + " (suspended:" + why + ")";
+        }
+    }
+
+public TransportSnapshot snapshot() {
         return new TransportSnapshot(
                 key,
                 description,
