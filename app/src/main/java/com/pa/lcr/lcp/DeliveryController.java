@@ -19,7 +19,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.ArrayDeque;
 /**
  * DeliveryController
  *
@@ -130,93 +129,6 @@ private static void tagErrorLevel(JSONObject d, String level, String where, Exce
         } catch (Exception ignored) {}
     }
 }
-
-// =========================================================
-// ✅ REPRO (always-on, DB) - logs de changements (sans TX/RX)
-// 1 attempt long-vivant: __REPRO__ / REPRO-<utc>
-// =========================================================
-private volatile long reproAttemptId = 0L;
-private volatile String reproTicketKey = null;
-private final ArrayDeque<PendingReproEvent> reproPending = new ArrayDeque<>();
-private static final int REPRO_PENDING_MAX = 200;
-
-private static final class PendingReproEvent {
-    final String level, type, message, dataJson;
-    PendingReproEvent(String level, String type, String message, String dataJson) {
-        this.level = level;
-        this.type = type;
-        this.message = message;
-        this.dataJson = dataJson;
-    }
-}
-
-private void reproStartIfNeeded() {
-    DeliveryLogStore store = this.logStore;
-    if (store == null) return;
-    if (reproAttemptId > 0) return;
-
-    if (reproTicketKey == null || reproTicketKey.trim().isEmpty()) {
-        reproTicketKey = "REPRO-" + msToUtcIso(System.currentTimeMillis());
-    }
-
-    // Summary repère (best-effort)
-    store.upsertSummaryAsync("__REPRO__", reproTicketKey, null,
-            "REPRO_OPEN", DeliveryLogStore.SOURCE_UI, null, null, null);
-
-    store.openAttemptAsync("__REPRO__", reproTicketKey, DeliveryLogStore.SOURCE_UI, null, attemptId -> {
-        reproAttemptId = attemptId;
-        // Flush pending
-        try {
-            while (!reproPending.isEmpty()) {
-                PendingReproEvent e = reproPending.removeFirst();
-                store.addEventAsync(attemptId, e.level, e.type, e.message, e.dataJson);
-            }
-        } catch (Exception ignored) {}
-    });
-}
-
-private void reproStopBestEffort(String reason) {
-    DeliveryLogStore store = this.logStore;
-    long id = reproAttemptId;
-    reproAttemptId = 0L;
-    if (store == null || id <= 0) return;
-
-    JSONObject d = new JSONObject();
-    safeJsonPut(d, "reason", (reason != null) ? reason : "");
-    safeJsonPut(d, "media", resolveActiveMedia());
-    safeJsonPut(d, "transport_key", (link != null) ? link.getTransportKey() : JSONObject.NULL);
-    safeJsonPut(d, "to", (link != null) ? (link.getToAddr() & 0xFF) : -1);
-    safeJsonPut(d, "from", (link != null) ? (link.getHostAddr() & 0xFF) : -1);
-
-    store.addEventAsync(id, DeliveryLogStore.LEVEL_INFO, "APP_STOP", "Repro session stop", d.toString());
-    store.closeAttemptAsync(id, "DONE", d.toString(), null);
-
-    store.upsertSummaryAsync("__REPRO__", reproTicketKey, null,
-            "REPRO_CLOSED", DeliveryLogStore.SOURCE_UI, null, null, null);
-    try { reproPending.clear(); } catch (Exception ignored) {}
-}
-
-private void reproEvent(String level, String type, String message, JSONObject data) {
-    DeliveryLogStore store = this.logStore;
-    if (store == null) return;
-
-    reproStartIfNeeded();
-
-    String json = (data != null) ? data.toString() : null;
-    long id = reproAttemptId;
-
-    if (id > 0) {
-        store.addEventAsync(id, level, type, message, json);
-        return;
-    }
-
-    // Attempt pas encore prêt -> buffer
-    try {
-        if (reproPending.size() >= REPRO_PENDING_MAX) reproPending.removeFirst();
-        reproPending.addLast(new PendingReproEvent(level, type, message, json));
-    } catch (Exception ignored) {}
-}
-
 
     // =========================================================
     // ✅ LCP global lock (UI LIVE + API)
@@ -728,18 +640,6 @@ private void reproEvent(String level, String type, String message, JSONObject da
             setState(DeliveryState.CONNECTED);
             emitLog("LCP pret (sans refresh automatique)");
             if (listener != null) listener.onLiveStatus("LIVE: CONNECTED - (pret)");
-
-// ✅ REPRO: APP_START best-effort (sans TX/RX)
-try {
-    JSONObject d = new JSONObject();
-    safeJsonPut(d, "state", state.name());
-    safeJsonPut(d, "media", resolveActiveMedia());
-    safeJsonPut(d, "transport_key", (link != null) ? link.getTransportKey() : JSONObject.NULL);
-    safeJsonPut(d, "to", (link != null) ? (link.getToAddr() & 0xFF) : -1);
-    safeJsonPut(d, "from", (link != null) ? (link.getHostAddr() & 0xFF) : -1);
-    reproEvent(DeliveryLogStore.LEVEL_INFO, "APP_START", "Controller initialize", d);
-} catch (Exception ignored) {}
-
         });
     }
 
@@ -748,11 +648,6 @@ try {
     @Override
     public void shutdown(boolean closeTransport) {
         stopped = true;
-
-// ✅ REPRO: close session best-effort
-try { reproStopBestEffort(closeTransport ? "shutdown/closeTransport" : "shutdown/logicOnly"); }
-catch (Exception ignored) {}
-
         try { link.setTraceSink(null); } catch (Exception ignored) {}
         try { io.shutdownNow(); } catch (Exception ignored) {}
         setState(DeliveryState.DISCONNECTED);
@@ -772,22 +667,10 @@ catch (Exception ignored) {}
 
     private void setState(DeliveryState s) {
         if (state == s) return;
+        DeliveryState prev = state;
         state = s;
 
         if (listener != null) listener.onStateChanged(s);
-
-// ✅ REPRO: transition FSM (sans TX/RX)
-try {
-    JSONObject d = new JSONObject();
-    safeJsonPut(d, "from", (prev != null) ? prev.name() : "null");
-    safeJsonPut(d, "to", (s != null) ? s.name() : "null");
-    safeJsonPut(d, "media", resolveActiveMedia());
-    safeJsonPut(d, "transport_key", (link != null) ? link.getTransportKey() : JSONObject.NULL);
-    safeJsonPut(d, "to", (link != null) ? (link.getToAddr() & 0xFF) : -1);
-    safeJsonPut(d, "from_addr", (link != null) ? (link.getHostAddr() & 0xFF) : -1);
-    reproEvent(DeliveryLogStore.LEVEL_INFO, "FSM_STATE_CHANGED", "State transition", d);
-} catch (Exception ignored) {}
-
 
         // ✅ TickBus: publier le changement d'état immédiatement
         try {
@@ -825,16 +708,7 @@ try {
         io.execute(() -> {
             if (isStopped()) return;
             try {
-                
-
-// ✅ REPRO: intent Status (B)
-try {
-    JSONObject d0 = new JSONObject();
-    safeJsonPut(d0, "media", resolveActiveMedia());
-    safeJsonPut(d0, "state", state.name());
-    reproEvent(DeliveryLogStore.LEVEL_INFO, "UI_STATUS_B", "Status requested", d0);
-} catch (Exception ignored) {}
-FullStatus fs = readFullStatus("status/full");
+                FullStatus fs = readFullStatus("status/full");
 
                 // keep last known dev/prn for B+ tick bus
                 lastDevStatusKnown = fs.devStatus;
@@ -842,22 +716,6 @@ FullStatus fs = readFullStatus("status/full");
 
                 emitLog(String.format("[STATUS] dev=0x%02X prn=0x%02X ds=0x%04X dc=0x%04X",
                         fs.devStatus, fs.prnStatus, fs.delStatus, fs.delCode));
-
-// ✅ REPRO: résultat Status B (sans TX/RX)
-try {
-    JSONObject d = new JSONObject();
-    safeJsonPut(d, "media", resolveActiveMedia());
-    safeJsonPut(d, "transport_key", (link != null) ? link.getTransportKey() : JSONObject.NULL);
-    safeJsonPut(d, "dev", fs.devStatus);
-    safeJsonPut(d, "prn", fs.prnStatus);
-    safeJsonPut(d, "delStatus", fs.delStatus);
-    safeJsonPut(d, "delCode", fs.delCode);
-    safeJsonPut(d, "ticketPending", fs.ticketPending ? 1 : 0);
-    safeJsonPut(d, "deliveryActive", fs.deliveryActive ? 1 : 0);
-    safeJsonPut(d, "flowActive", fs.flowActive ? 1 : 0);
-    reproEvent(DeliveryLogStore.LEVEL_INFO, "UI_STATUS_B_RESULT", "Status result", d);
-} catch (Exception ignored) {}
-
 
                 ensureDigits();
                 double scale = Math.pow(10, cachedDigits);
@@ -896,16 +754,6 @@ try {
             if (isStopped()) return;
             try {
                 emitLog("[A] Align / recover requested");
-
-// ✅ REPRO: action A
-try {
-    JSONObject d = new JSONObject();
-    safeJsonPut(d, "media", resolveActiveMedia());
-    safeJsonPut(d, "state", state.name());
-    safeJsonPut(d, "transport_key", (link != null) ? link.getTransportKey() : JSONObject.NULL);
-    reproEvent(DeliveryLogStore.LEVEL_INFO, "UI_A", "Align/recover requested", d);
-} catch (Exception ignored) {}
-
                 doAlignOrRecoverFull();
             } catch (Exception e) {
                 handleIoFailure("alignOrRecover", e);
@@ -919,37 +767,9 @@ try {
             if (isStopped()) return;
             if (state == DeliveryState.PRESTART || state == DeliveryState.ENDING) return;
             emitLog("[C] New delivery requested");
-
-// ✅ REPRO: intent C (sans IO additionnel)
-try {
-    JSONObject d = new JSONObject();
-    safeJsonPut(d, "media", resolveActiveMedia());
-    safeJsonPut(d, "transport_key", (link != null) ? link.getTransportKey() : JSONObject.NULL);
-    safeJsonPut(d, "state", state.name());
-    safeJsonPut(d, "product", product1to16);
-    safeJsonPut(d, "preset_net", presetNet);
-    reproEvent(DeliveryLogStore.LEVEL_INFO, "UI_C", "New delivery requested", d);
-} catch (Exception ignored) {}
-
             final long deadline = System.currentTimeMillis() + START_RETRY_WINDOW_MS;
             try {
                 FullStatus fs = retryUntilDeadline(deadline, "C/full-precheck", () -> readFullStatus("C/full"));
-
-// ✅ REPRO: décision C (precheck) sans changer la logique
-try {
-    JSONObject d = new JSONObject();
-    safeJsonPut(d, "media", resolveActiveMedia());
-    safeJsonPut(d, "transport_key", (link != null) ? link.getTransportKey() : JSONObject.NULL);
-    safeJsonPut(d, "delStatus", fs.delStatus);
-    safeJsonPut(d, "delCode", fs.delCode);
-    safeJsonPut(d, "ticketPending", fs.ticketPending ? 1 : 0);
-    safeJsonPut(d, "deliveryActive", fs.deliveryActive ? 1 : 0);
-    safeJsonPut(d, "flowActive", fs.flowActive ? 1 : 0);
-    safeJsonPut(d, "product", product1to16);
-    safeJsonPut(d, "preset_net", presetNet);
-    reproEvent(DeliveryLogStore.LEVEL_INFO, "UI_C_PRECHECK", "C precheck status", d);
-} catch (Exception ignored) {}
-
 
                 // keep last known dev/prn for B+ tick bus
                 lastDevStatusKnown = fs.devStatus;
@@ -1014,19 +834,7 @@ try {
 
         retryUntilDeadline(deadlineMs, "SET_FIELD#6", () -> { writePresetNet_WithCacheOrFallback(presetNet); return null; });
 
-        retryUntilDeadline(deadlineMs, "RUN(0x00)", () -> { lcpIssueCommand(CMD_RUN);
-
-// ✅ REPRO: RUN sent
-try {
-    JSONObject d = new JSONObject();
-    safeJsonPut(d, "media", resolveActiveMedia());
-    safeJsonPut(d, "transport_key", (link != null) ? link.getTransportKey() : JSONObject.NULL);
-    safeJsonPut(d, "product", product1to16);
-    safeJsonPut(d, "preset_net", presetNet);
-    safeJsonPut(d, "digits", cachedDigits);
-    reproEvent(DeliveryLogStore.LEVEL_INFO, "DELIVERY_RUN_SENT", "RUN sent", d);
-} catch (Exception ignored) {}
- return null; });
+        retryUntilDeadline(deadlineMs, "RUN(0x00)", () -> { lcpIssueCommand(CMD_RUN); return null; });
 
         setState(DeliveryState.RUNNING_PAUSED);
         if (listener != null) listener.onLiveStatus("LIVE: RUNNING_PAUSED (Flow OFF)");
@@ -1049,17 +857,6 @@ try {
                 lcpIssueCommand(CMD_RUN);
                 continueGraceUntilMs = now + CONTINUE_GRACE_MS;
 
-// ✅ REPRO: continue
-try {
-    JSONObject d = new JSONObject();
-    safeJsonPut(d, "media", resolveActiveMedia());
-    safeJsonPut(d, "transport_key", (link != null) ? link.getTransportKey() : JSONObject.NULL);
-    safeJsonPut(d, "state", state.name());
-    safeJsonPut(d, "grace_until_ms", continueGraceUntilMs);
-    reproEvent(DeliveryLogStore.LEVEL_INFO, "UI_CONTINUE", "Continue (RUN) requested", d);
-} catch (Exception ignored) {}
-
-
                 setState(DeliveryState.RUNNING_FLOWING);
                 if (listener != null) listener.onLiveStatus("LIVE: RUNNING_FLOWING (Flow OFF - waiting progression)");
 
@@ -1078,29 +875,8 @@ try {
                 if (state != DeliveryState.RUNNING_PAUSED) return;
                 if (!flowOffStable && !sawFlowOnOnce) return;
 
-                
-
-// ✅ REPRO: END requested
-try {
-    JSONObject d0 = new JSONObject();
-    safeJsonPut(d0, "media", resolveActiveMedia());
-    safeJsonPut(d0, "transport_key", (link != null) ? link.getTransportKey() : JSONObject.NULL);
-    safeJsonPut(d0, "state", state.name());
-    safeJsonPut(d0, "flowOffStable", flowOffStable ? 1 : 0);
-    safeJsonPut(d0, "sawFlowOnOnce", sawFlowOnOnce ? 1 : 0);
-    reproEvent(DeliveryLogStore.LEVEL_INFO, "UI_END", "End requested", d0);
-} catch (Exception ignored) {}
-setState(DeliveryState.ENDING);
+                setState(DeliveryState.ENDING);
                 lcpIssueCommand(CMD_END);
-
-// ✅ REPRO: END sent
-try {
-    JSONObject d1 = new JSONObject();
-    safeJsonPut(d1, "media", resolveActiveMedia());
-    safeJsonPut(d1, "transport_key", (link != null) ? link.getTransportKey() : JSONObject.NULL);
-    reproEvent(DeliveryLogStore.LEVEL_INFO, "DELIVERY_END_SENT", "END sent", d1);
-} catch (Exception ignored) {}
-
 
                 long deadline = System.currentTimeMillis() + 15_000;
                 while (!isStopped() && System.currentTimeMillis() < deadline) {
@@ -1114,21 +890,6 @@ try {
 
                 setState(DeliveryState.CONNECTED);
                 if (listener != null) listener.onLiveStatus("LIVE: CONNECTED - Ready");
-
-// ✅ REPRO: end completed (ready)
-try {
-    JSONObject d2 = new JSONObject();
-    safeJsonPut(d2, "media", resolveActiveMedia());
-    safeJsonPut(d2, "transport_key", (link != null) ? link.getTransportKey() : JSONObject.NULL);
-    safeJsonPut(d2, "state", state.name());
-    if (fsAfter != null) {
-        safeJsonPut(d2, "delStatus", fsAfter.delStatus);
-        safeJsonPut(d2, "delCode", fsAfter.delCode);
-        safeJsonPut(d2, "ticketPending", fsAfter.ticketPending ? 1 : 0);
-    }
-    reproEvent(DeliveryLogStore.LEVEL_INFO, "DELIVERY_END_DONE", "End done (ready)", d2);
-} catch (Exception ignored) {}
-
 
             } catch (Exception e) {
                 handleIoFailure("endDelivery", e);
@@ -1548,18 +1309,7 @@ try {
                 if (hardFatal) throw e;
                 if (!retryable) throw e;
 
-                
-
-// ✅ REPRO: retry (best-effort)
-try {
-    JSONObject d = new JSONObject();
-    safeJsonPut(d, "step", step);
-    safeJsonPut(d, "err", m);
-    safeJsonPut(d, "media", resolveActiveMedia());
-    safeJsonPut(d, "transport_key", (link != null) ? link.getTransportKey() : JSONObject.NULL);
-    reproEvent(DeliveryLogStore.LEVEL_WARN, "RETRY", "Retry step", d);
-} catch (Exception ignored) {}
-softResync("retry/" + step);
+                softResync("retry/" + step);
                 try { Thread.sleep(START_RETRY_POLL_MS); } catch (InterruptedException ignored) {}
             }
         }
@@ -1631,17 +1381,6 @@ softResync("retry/" + step);
     // =========================
     private void handleIoFailure(String ctx, Exception e) {
         if (listener != null) listener.onError(ctx, e);
-
-// ✅ REPRO: erreur (sans TX/RX), best-effort
-try {
-    JSONObject d = new JSONObject();
-    safeJsonPut(d, "ctx", ctx);
-    safeJsonPut(d, "media", resolveActiveMedia());
-    safeJsonPut(d, "transport_key", (link != null) ? link.getTransportKey() : JSONObject.NULL);
-    tagErrorLevel(d, null, ctx, e);
-    reproEvent(DeliveryLogStore.LEVEL_ERROR, "ERR_IO", "IO failure", d);
-} catch (Exception ignored) {}
-
         String msg = (e != null && e.getMessage() != null) ? e.getMessage() : "";
 
         boolean hardFatal =
@@ -1665,16 +1404,6 @@ try {
         long now = System.currentTimeMillis();
         if (now - lastResyncMs < 1500) return;
         lastResyncMs = now;
-
-// ✅ REPRO: resync (sans IO additionnel)
-try {
-    JSONObject d = new JSONObject();
-    safeJsonPut(d, "reason", reason);
-    safeJsonPut(d, "media", resolveActiveMedia());
-    safeJsonPut(d, "transport_key", (link != null) ? link.getTransportKey() : JSONObject.NULL);
-    reproEvent(DeliveryLogStore.LEVEL_WARN, "SOFT_RESYNC", "Soft resync", d);
-} catch (Exception ignored) {}
-
         link.drainInput(250);
         link.forceSyncNext(reason);
     }
