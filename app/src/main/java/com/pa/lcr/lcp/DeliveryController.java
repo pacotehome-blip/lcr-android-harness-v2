@@ -62,10 +62,6 @@ public final class DeliveryController implements DeliveryControllerPort {
     // OPTIONAL SQLite store (injected)
     // =========================================================
     private volatile DeliveryLogStore logStore;
- // ===== Livraison métier (auto-clôture) =====
- private volatile boolean deliveryInProgress = false;
- private volatile Long currentDeliveryAttemptId = null;
-
 
     /** Injection optionnelle. Si non appelé => aucune écriture DB (baseline-safe). */
     public void setLogStore(DeliveryLogStore store) {
@@ -311,6 +307,11 @@ private void reproEvent(String level, String type, String message, JSONObject da
 
  // ✅ Media actif (usb/bt) - best-effort (déduit du transport si non fixé)
  private volatile String activeMedia = null;
+
+ // ===== Livraison métier (auto-clôture) =====
+ private volatile boolean deliveryInProgress = false;
+ private volatile Long currentDeliveryAttemptId = null;
+ private volatile long deliveryStartMs = 0L;
 // LIVE
     private volatile boolean flowOffStable = false;
     private volatile boolean sawFlowOnOnce = false;
@@ -730,6 +731,9 @@ private void reproEvent(String level, String type, String message, JSONObject da
         io.execute(() -> {
             if (isStopped()) return;
             setState(DeliveryState.CONNECTED);
+ // Auto close delivery for END path
+ try { onDeliveryFinishedIfNeeded("END"); } catch (Exception ignored) {}
+
             emitLog("LCP pret (sans refresh automatique)");
             if (listener != null) listener.onLiveStatus("LIVE: CONNECTED - (pret)");
 
@@ -778,9 +782,10 @@ catch (Exception ignored) {}
         if (state == s) return;
         DeliveryState prevState = state;
         state = s;
- // Auto close delivery on RUNNING_FLOWING -> CONNECTED
- if (prevState == DeliveryState.RUNNING_FLOWING && s == DeliveryState.CONNECTED) {
-     onDeliveryFinishedIfNeeded();
+ // Auto close delivery on end-of-delivery transitions
+ if ((prevState == DeliveryState.RUNNING_FLOWING || prevState == DeliveryState.RUNNING_PAUSED)
+         && s == DeliveryState.CONNECTED) {
+     onDeliveryFinishedIfNeeded("FSM");
  }
 
 
@@ -1022,20 +1027,16 @@ try {
     safeJsonPut(d, "digits", cachedDigits);
     reproEvent(DeliveryLogStore.LEVEL_INFO, "DELIVERY_RUN_SENT", "RUN sent", d);
 } catch (Exception ignored) {}
- return null; });
+ 
 
-        // === DELIVERY START (UI path) ===
+ // === DELIVERY START (UI path) ===
  try {
      deliveryInProgress = true;
-     DeliveryLogStore store = this.logStore;
-     if (store != null) {
-         String serialId = decodeAzString(lcpGetField(FIELD_SERIAL_ID));
-         String ticketNo = readTicketNo23();
-         store.openAttemptAsync(serialId, ticketNo, DeliveryLogStore.SOURCE_UI, null,
-             attemptId -> currentDeliveryAttemptId = attemptId);
-     }
- } catch (Exception ignore) {}
-setState(DeliveryState.RUNNING_PAUSED);
+     deliveryStartMs = System.currentTimeMillis();
+ } catch (Exception ignored) {}
+return null; });
+
+        setState(DeliveryState.RUNNING_PAUSED);
         if (listener != null) listener.onLiveStatus("LIVE: RUNNING_PAUSED (Flow OFF)");
     }
 
@@ -2874,29 +2875,71 @@ private String resolveActiveMedia() {
         String m = e.getMessage();
         return (m == null) ? e.getClass().getSimpleName() : m;
     }
-}
 
 
- // ===== Auto close delivery on FSM end =====
- private void onDeliveryFinishedIfNeeded() {
+ // ===== Auto close delivery on FSM end (write in SQLite) =====
+ private void onDeliveryFinishedIfNeeded(String reason) {
      if (!deliveryInProgress) return;
      deliveryInProgress = false;
+     final long endMs = System.currentTimeMillis();
+     final long startMs = (deliveryStartMs > 0L) ? deliveryStartMs : 0L;
+     deliveryStartMs = 0L;
+
      try {
          DeliveryLogStore store = this.logStore;
-         if (store == null || currentDeliveryAttemptId == null) return;
-         String serialId = decodeAzString(lcpGetField(FIELD_SERIAL_ID));
-         String ticketNo = readTicketNo23();
-         String saleNo = readSaleNo22();
+         if (store == null) return;
+
+         String serialId = null;
+         String ticketNo = null;
+         String saleNo = null;
+         try { serialId = decodeAzString(lcpGetField(FIELD_SERIAL_ID)); } catch (Exception ignored) {}
+         try { ticketNo = readTicketNo23(); } catch (Exception ignored) {}
+         try { saleNo = readSaleNo22(); } catch (Exception ignored) {}
+
+         if (serialId == null || serialId.trim().isEmpty()) serialId = "__UNKNOWN__";
+         if (ticketNo == null || ticketNo.trim().isEmpty()) ticketNo = "TICKET-UNKNOWN";
+
          JSONObject result = new JSONObject();
+         safeJsonPut(result, "event_type", "DELIVERY_DONE");
+         safeJsonPut(result, "reason", (reason == null) ? "" : reason);
+         safeJsonPut(result, "media", resolveActiveMedia());
+         safeJsonPut(result, "transport_key", (link != null) ? link.getTransportKey() : JSONObject.NULL);
          safeJsonPut(result, "serial_id", serialId);
          safeJsonPut(result, "ticket_no", ticketNo);
-         safeJsonPut(result, "sale_no", saleNo);
-         safeJsonPut(result, "ended_at_ms", System.currentTimeMillis());
-         store.addEventAsync(currentDeliveryAttemptId, DeliveryLogStore.LEVEL_INFO,
-             "DELIVERY_DONE", "Delivery finished", result.toString());
-         store.closeAttemptAsync(currentDeliveryAttemptId, "DONE", result.toString(), null);
-         store.upsertSummaryAsync(serialId, ticketNo, saleNo, "DELIVERY_DONE",
-             DeliveryLogStore.SOURCE_UI, null, result.toString(), null);
+         safeJsonPut(result, "sale_no", (saleNo == null || saleNo.trim().isEmpty()) ? JSONObject.NULL : saleNo);
+         safeJsonPut(result, "start_ms", (startMs > 0L) ? startMs : JSONObject.NULL);
+         safeJsonPut(result, "end_ms", endMs);
+         safeJsonPut(result, "duration_ms", (startMs > 0L) ? Math.max(0L, endMs - startMs) : JSONObject.NULL);
+         if (startMs > 0L) safeJsonPut(result, "start_utc", msToUtcIso(startMs));
+         safeJsonPut(result, "end_utc", msToUtcIso(endMs));
+
+         // Summary: clé métier (serial_id, ticket_no)
+         store.upsertSummaryAsync(serialId, ticketNo, saleNo, "DELIVERY_DONE", DeliveryLogStore.SOURCE_UI,
+                 null, result.toString(), null);
+
+         // Times: si helper disponible (déjà utilisé côté API JobGet)
+         try {
+             if (startMs > 0L) {
+                 store.updateSummaryTimesAsync(serialId, ticketNo,
+                         startMs, endMs,
+                         msToUtcIso(startMs), msToUtcIso(endMs),
+                         Math.max(0L, endMs - startMs));
+             }
+         } catch (Exception ignored) {}
+
+         // Attempt: on crée une attempt et on la ferme immédiatement (trace livraison)
+         store.openAttemptAsync(serialId, ticketNo, DeliveryLogStore.SOURCE_UI, null, attemptId -> {
+             try { currentDeliveryAttemptId = attemptId; } catch (Exception ignored) {}
+             try {
+                 store.addEventAsync(attemptId, DeliveryLogStore.LEVEL_INFO,
+                         "DELIVERY_DONE", "Delivery finished", result.toString());
+                 store.closeAttemptAsync(attemptId, "DONE", result.toString(), null);
+             } catch (Exception ignored) {}
+         });
+
+     } catch (Exception ignored) {
+     } finally {
          currentDeliveryAttemptId = null;
-     } catch (Exception ignore) {}
+     }
  }
+}
