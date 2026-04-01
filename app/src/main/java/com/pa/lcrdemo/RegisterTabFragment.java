@@ -20,6 +20,7 @@ import androidx.fragment.app.Fragment;
 
 import com.pa.lcr.lcp.*;
 import com.pa.lcr.lcp.log.LogBus;
+import com.pa.lcr.lcp.transport.MediaTransportManager;
 
 import org.json.JSONObject;
 
@@ -559,7 +560,8 @@ public class RegisterTabFragment extends Fragment {
             if (controller == null) return;
             controller.alignOrRecover();
             ui.postDelayed(() -> {
-                try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
+                try { if (controller != null) try { if (tabTransportKey != null) MediaTransportManager.get(requireContext()).activateExclusive(tabTransportKey, "STATUS_B"); } catch (Exception ignored) {}
+ controller.requestStatus(); } catch (Exception ignored) {}
                 try { validateHeaderAsync(); } catch (Exception ignored) {}
                 try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
                 refreshDelCodeFromTickSnapshotThrottled();
@@ -676,7 +678,8 @@ public class RegisterTabFragment extends Fragment {
         controller = null;
         starting = false;
         ticketPendingFlag = -1;
-        connectThisRegister(userInitiated);
+        try { if (tabTransportKey != null) MediaTransportManager.get(requireContext()).activateExclusive(tabTransportKey, "TAB_RECONNECT"); } catch (Exception ignored) {}
+ connectThisRegister(userInitiated);
     }
 private void attemptAttachIfPossible(boolean verboseLog) {
         if (!tabMediaReady && !pendingReconnect) return;
@@ -702,6 +705,8 @@ private void attemptAttachIfPossible(boolean verboseLog) {
         try {
             String tk = sm.findTransportKeyForController(controller);
             if (tk != null) tabTransportKey = tk;
+        // ✅ B1 FSM: activer le transport de ce tab avant attach/status
+        try { if (tabTransportKey != null) MediaTransportManager.get(requireContext()).activateExclusive(tabTransportKey, "TAB_CONNECT"); } catch (Exception ignored) {}
         } catch (Exception ignored) {}
 
         if (!uiListenerAttached) {

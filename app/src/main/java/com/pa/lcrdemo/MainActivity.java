@@ -799,6 +799,10 @@ private void setupTabsTop() {
         if (registerContainer == null || tabKey == null) return;
         TabSpec spec = tabsByKey.get(tabKey);
         if (spec == null) return;
+
+        // ✅ B1 FSM: activer le transport du tab (évite boutons morts après switch)
+        ensureActiveTransport(spec.transportKey, "TAB_SWITCH");
+
         currentTabKey = tabKey;
         currentRegNode = spec.node;
 
@@ -905,7 +909,8 @@ private void setupTabsTop() {
             toast("Scan USB registres: USB non prêt");
             return;
         }
-        scanRegistersWithIo(io, io.getKey(), txtUsbRegsFound);
+        ensureActiveTransport(io.getKey(), "SCAN_USB");
+ scanRegistersWithIo(io, io.getKey(), txtUsbRegsFound);
     }
 
     private void scanRegistersBtOnly() {
@@ -926,7 +931,8 @@ private void setupTabsTop() {
             toast("Scan BT registres: BT non prêt");
             return;
         }
-        scanRegistersWithIo(io, io.getKey(), txtBtRegsFound);
+        ensureActiveTransport(io.getKey(), "SCAN_BT");
+ scanRegistersWithIo(io, io.getKey(), txtBtRegsFound);
     }
 
     private void scanRegistersWithIo(TransportIo io, String transportKey, TextView target) {
@@ -2017,7 +2023,8 @@ private void connectManualUsbSlot(int slot) {
     }
 
     TextView out = (slot == 1) ? txtUsbSerial1 : txtUsbSerial2;
-    connectManualWithIo(io, io.getKey(), "USB", slot, node, out, true);
+    ensureActiveTransport(io.getKey(), "MANUAL_USB");
+ connectManualWithIo(io, io.getKey(), "USB", slot, node, out, true);
 }
 
 private void connectManualBtSlot(int slot) {
@@ -2059,7 +2066,8 @@ private void connectManualBtSlot(int slot) {
     }
 
     TextView out = (slot == 1) ? txtBtSerial1 : txtBtSerial2;
-    connectManualWithIo(io, (transportKey != null ? transportKey : io.getKey()), "BT", slot, node, out, false);
+    ensureActiveTransport((transportKey != null ? transportKey : io.getKey()), "MANUAL_BT");
+ connectManualWithIo(io, (transportKey != null ? transportKey : io.getKey()), "BT", slot, node, out, false);
 }
 
 private void connectManualWithIo(TransportIo io, String transportKey, String mediaShort, int slot, int node, TextView out, boolean usb) {
@@ -2135,5 +2143,20 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
          });
      } catch (Exception ignored) {}
  }
+
+
+
+    // =========================
+    // ✅ B1 FSM: rendre un transport ACTIVE avant toute opération IO (USB/BT)
+    // =========================
+    private void ensureActiveTransport(String transportKey, String reason) {
+        try {
+            if (transportKey == null || transportKey.trim().isEmpty()) return;
+            if (mediaTransportManager == null) mediaTransportManager = MediaTransportManager.get(this);
+            if (mediaTransportManager != null) {
+                mediaTransportManager.activateExclusive(transportKey.trim(), (reason != null ? reason : "UI"));
+            }
+        } catch (Exception ignored) {}
+    }
 
 }
