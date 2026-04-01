@@ -667,20 +667,19 @@ private static void tagErrorLevel(JSONObject d, String level, String where, Exce
 
     private void setState(DeliveryState s) {
         if (state == s) return;
-        DeliveryState prev = state;
         state = s;
 
         if (listener != null) listener.onStateChanged(s);
 
         // ✅ TickBus: publier le changement d'état immédiatement
         try {
-            LastTick prev = lastTick;
-            double net = (prev != null) ? prev.net : 0.0;
-            double gross = (prev != null) ? prev.gross : 0.0;
-            int dev = (prev != null) ? prev.devStatus : (lastDevStatusKnown >= 0 ? lastDevStatusKnown : -1);
-            int prn = (prev != null) ? prev.prnStatus : (lastPrnStatusKnown >= 0 ? lastPrnStatusKnown : -1);
-            int ds = (prev != null) ? prev.delStatus : 0;
-            int dc = (prev != null) ? prev.delCode : 0;
+            LastTick prevTick = lastTick;
+            double net = (prev != null) ? prevTick.net : 0.0;
+            double gross = (prev != null) ? prevTick.gross : 0.0;
+            int dev = (prev != null) ? prevTick.devStatus : (lastDevStatusKnown >= 0 ? lastDevStatusKnown : -1);
+            int prn = (prev != null) ? prevTick.prnStatus : (lastPrnStatusKnown >= 0 ? lastPrnStatusKnown : -1);
+            int ds = (prev != null) ? prevTick.delStatus : 0;
+            int dc = (prev != null) ? prevTick.delCode : 0;
             publishTickIfChanged(net, gross, dev, prn, ds, dc, s);
         } catch (Exception ignored) {}
     }
@@ -778,9 +777,9 @@ private static void tagErrorLevel(JSONObject d, String level, String where, Exce
                 // TickBus publish on status check
                 // (net/gross unknown here, keep prev values)
                 try {
-                    LastTick prev = lastTick;
-                    double net = (prev != null) ? prev.net : 0.0;
-                    double gross = (prev != null) ? prev.gross : 0.0;
+                    LastTick prevTick = lastTick;
+                    double net = (prev != null) ? prevTick.net : 0.0;
+                    double gross = (prev != null) ? prevTick.gross : 0.0;
                     publishTickIfChanged(net, gross, fs.devStatus, fs.prnStatus, fs.delStatus, fs.delCode, state);
                 } catch (Exception ignored) {}
 
@@ -944,9 +943,9 @@ private static void tagErrorLevel(JSONObject d, String level, String where, Exce
 
                     // ✅ TickBus: publish state/del changes even if quantities unknown
                     try {
-                        LastTick prev = lastTick;
-                        double net = (prev != null) ? prev.net : 0.0;
-                        double gross = (prev != null) ? prev.gross : 0.0;
+                        LastTick prevTick = lastTick;
+                        double net = (prev != null) ? prevTick.net : 0.0;
+                        double gross = (prev != null) ? prevTick.gross : 0.0;
                         publishTickIfChanged(net, gross, -1, -1, delStatus, delCode, state);
                     } catch (Exception ignored) {}
 
@@ -1090,9 +1089,9 @@ private static void tagErrorLevel(JSONObject d, String level, String where, Exce
 
                 // publish state/ds/dc (net/gross unchanged)
                 try {
-                    LastTick prev = lastTick;
-                    double net = (prev != null) ? prev.net : 0.0;
-                    double gross = (prev != null) ? prev.gross : 0.0;
+                    LastTick prevTick = lastTick;
+                    double net = (prev != null) ? prevTick.net : 0.0;
+                    double gross = (prev != null) ? prevTick.gross : 0.0;
                     publishTickIfChanged(net, gross, fs.devStatus, fs.prnStatus, fs.delStatus, fs.delCode, state);
                 } catch (Exception ignored) {}
 
@@ -1145,9 +1144,9 @@ private static void tagErrorLevel(JSONObject d, String level, String where, Exce
 
         // publish state/ds/dc changes quickly (net/gross unchanged here)
         try {
-            LastTick prev = lastTick;
-            double net = (prev != null) ? prev.net : 0.0;
-            double gross = (prev != null) ? prev.gross : 0.0;
+            LastTick prevTick = lastTick;
+            double net = (prev != null) ? prevTick.net : 0.0;
+            double gross = (prev != null) ? prevTick.gross : 0.0;
             publishTickIfChanged(net, gross, fs.devStatus, fs.prnStatus, fs.delStatus, fs.delCode, state);
         } catch (Exception ignored) {}
 
@@ -1445,9 +1444,9 @@ private static void tagErrorLevel(JSONObject d, String level, String where, Exce
 
             // TickBus: publish ds/dc changes immediately
             try {
-                LastTick prev = lastTick;
-                double net = (prev != null) ? prev.net : 0.0;
-                double gross = (prev != null) ? prev.gross : 0.0;
+                LastTick prevTick = lastTick;
+                double net = (prev != null) ? prevTick.net : 0.0;
+                double gross = (prev != null) ? prevTick.gross : 0.0;
                 publishTickIfChanged(net, gross, -1, -1, delStatus, delCode, state);
             } catch (Exception ignored) {}
 
@@ -1674,9 +1673,9 @@ public ApiResult api_registerValidate(
 
             // ✅ TickBus: publish ds/dc/dev/prn/state changes quickly
             try {
-                LastTick prev = lastTick;
-                double net = (prev != null) ? prev.net : 0.0;
-                double gross = (prev != null) ? prev.gross : 0.0;
+                LastTick prevTick = lastTick;
+                double net = (prev != null) ? prevTick.net : 0.0;
+                double gross = (prev != null) ? prevTick.gross : 0.0;
                 publishTickIfChanged(net, gross, fs.devStatus, fs.prnStatus, fs.delStatus, fs.delCode, state);
             } catch (Exception ignored) {}
 
@@ -1760,9 +1759,9 @@ public ApiResult api_registerValidate(
 
             // TickBus publish ds/dc change (net/gross unchanged)
             try {
-                LastTick prev = lastTick;
-                double net = (prev != null) ? prev.net : 0.0;
-                double gross = (prev != null) ? prev.gross : 0.0;
+                LastTick prevTick = lastTick;
+                double net = (prev != null) ? prevTick.net : 0.0;
+                double gross = (prev != null) ? prevTick.gross : 0.0;
                 publishTickIfChanged(net, gross, -1, -1, delStatus, delCode, state);
             } catch (Exception ignored) {}
 
@@ -1798,9 +1797,9 @@ public ApiResult api_registerValidate(
 
             // TickBus publish ds/dc change (net/gross unchanged)
             try {
-                LastTick prev = lastTick;
-                double net = (prev != null) ? prev.net : 0.0;
-                double gross = (prev != null) ? prev.gross : 0.0;
+                LastTick prevTick = lastTick;
+                double net = (prev != null) ? prevTick.net : 0.0;
+                double gross = (prev != null) ? prevTick.gross : 0.0;
                 publishTickIfChanged(net, gross, -1, -1, delStatus0, delCode0, state);
             } catch (Exception ignored) {}
 
@@ -1856,9 +1855,9 @@ try {
 
             // TickBus publish ds/dc change (net/gross unchanged)
             try {
-                LastTick prev = lastTick;
-                double net = (prev != null) ? prev.net : 0.0;
-                double gross = (prev != null) ? prev.gross : 0.0;
+                LastTick prevTick = lastTick;
+                double net = (prev != null) ? prevTick.net : 0.0;
+                double gross = (prev != null) ? prevTick.gross : 0.0;
                 publishTickIfChanged(net, gross, -1, -1, delStatus0, delCode0, state);
             } catch (Exception ignored) {}
 
@@ -1895,9 +1894,9 @@ try {
 
                 // TickBus publish ticket pending changes
                 try {
-                    LastTick prev = lastTick;
-                    double net = (prev != null) ? prev.net : 0.0;
-                    double gross = (prev != null) ? prev.gross : 0.0;
+                    LastTick prevTick = lastTick;
+                    double net = (prev != null) ? prevTick.net : 0.0;
+                    double gross = (prev != null) ? prevTick.gross : 0.0;
                     publishTickIfChanged(net, gross, -1, -1, delStatusA, delCodeA, state);
                 } catch (Exception ignored) {}
 
