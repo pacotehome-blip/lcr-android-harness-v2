@@ -62,6 +62,10 @@ public final class DeliveryController implements DeliveryControllerPort {
     // OPTIONAL SQLite store (injected)
     // =========================================================
     private volatile DeliveryLogStore logStore;
+ // ===== Livraison métier (auto-clôture) =====
+ private volatile boolean deliveryInProgress = false;
+ private volatile Long currentDeliveryAttemptId = null;
+
 
     /** Injection optionnelle. Si non appelé => aucune écriture DB (baseline-safe). */
     public void setLogStore(DeliveryLogStore store) {
@@ -774,6 +778,11 @@ catch (Exception ignored) {}
         if (state == s) return;
         DeliveryState prevState = state;
         state = s;
+ // Auto close delivery on RUNNING_FLOWING -> CONNECTED
+ if (prevState == DeliveryState.RUNNING_FLOWING && s == DeliveryState.CONNECTED) {
+     onDeliveryFinishedIfNeeded();
+ }
+
 
         if (listener != null) listener.onStateChanged(s);
 
@@ -1015,7 +1024,18 @@ try {
 } catch (Exception ignored) {}
  return null; });
 
-        setState(DeliveryState.RUNNING_PAUSED);
+        // === DELIVERY START (UI path) ===
+ try {
+     deliveryInProgress = true;
+     DeliveryLogStore store = this.logStore;
+     if (store != null) {
+         String serialId = decodeAzString(lcpGetField(FIELD_SERIAL_ID));
+         String ticketNo = readTicketNo23();
+         store.openAttemptAsync(serialId, ticketNo, DeliveryLogStore.SOURCE_UI, null,
+             attemptId -> currentDeliveryAttemptId = attemptId);
+     }
+ } catch (Exception ignore) {}
+setState(DeliveryState.RUNNING_PAUSED);
         if (listener != null) listener.onLiveStatus("LIVE: RUNNING_PAUSED (Flow OFF)");
     }
 
@@ -2855,3 +2875,28 @@ private String resolveActiveMedia() {
         return (m == null) ? e.getClass().getSimpleName() : m;
     }
 }
+
+
+ // ===== Auto close delivery on FSM end =====
+ private void onDeliveryFinishedIfNeeded() {
+     if (!deliveryInProgress) return;
+     deliveryInProgress = false;
+     try {
+         DeliveryLogStore store = this.logStore;
+         if (store == null || currentDeliveryAttemptId == null) return;
+         String serialId = decodeAzString(lcpGetField(FIELD_SERIAL_ID));
+         String ticketNo = readTicketNo23();
+         String saleNo = readSaleNo22();
+         JSONObject result = new JSONObject();
+         safeJsonPut(result, "serial_id", serialId);
+         safeJsonPut(result, "ticket_no", ticketNo);
+         safeJsonPut(result, "sale_no", saleNo);
+         safeJsonPut(result, "ended_at_ms", System.currentTimeMillis());
+         store.addEventAsync(currentDeliveryAttemptId, DeliveryLogStore.LEVEL_INFO,
+             "DELIVERY_DONE", "Delivery finished", result.toString());
+         store.closeAttemptAsync(currentDeliveryAttemptId, "DONE", result.toString(), null);
+         store.upsertSummaryAsync(serialId, ticketNo, saleNo, "DELIVERY_DONE",
+             DeliveryLogStore.SOURCE_UI, null, result.toString(), null);
+         currentDeliveryAttemptId = null;
+     } catch (Exception ignore) {}
+ }
