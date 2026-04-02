@@ -176,7 +176,6 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
         final int node;
         final int from;
         final String serialId;
-        String qtySuffix; // " | N=.. G=.."
 
         TabSpec(String tabKey, String mediaShort, String transportKey, int node, int from, String serialId) {
             this.tabKey = tabKey;
@@ -567,14 +566,6 @@ private void setupTabsTop() {
 
     // =========================
 // Register tabs helpers (multi-media)
-
-    // =========================
-    // ✅ TAB label Net/Gross (affiché après Status B)
-    // =========================
-    private static String formatQtyLabel(double net, double gross) {
-        return String.format(java.util.Locale.ROOT, " | N=%.2f G=%.2f", net, gross);
-    }
-
 // =========================
 
     private static String mediaShortFromTransportKey(String transportKey) {
@@ -665,7 +656,7 @@ private void setupTabsTop() {
         String mediaLabel = ready ? media : (media + "(OFF)");
 
         // ✅ Format: BT(OFF) - 123456 - 250
-        updateRegisterTabLabel(tabKey, tabLabelOf(mediaLabel, spec.node, spec.serialId) + (spec.qtySuffix != null ? spec.qtySuffix : ""));
+        updateRegisterTabLabel(tabKey, tabLabelOf(mediaLabel, spec.node, spec.serialId));
 
         try {
             Fragment f = getSupportFragmentManager().findFragmentByTag("regtab_" + tabKey);
@@ -1227,7 +1218,6 @@ private void setupTabsTop() {
     private static final class NodeScanItem {
         final int lcrnode;
         final String serialId;
-        String qtySuffix; // " | N=.. G=.."
         final String ticketNo;
         final boolean ticketPending;
         final boolean deliveryActive;
@@ -2192,68 +2182,7 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
  // =========================
  // ✅ Reçu des tabs: média OFF/not-ready (pour que l'API/FS sache avant/pendant)
  // =========================
- 
-
-    // =========================
-    // ✅ Status (B) -> TAB label Net/Gross
-    // - SUCCÈS: afficher N/G sur le tab
-    // - ÉCHEC : effacer N/G du tab
-    // =========================
-    public void reportTabQuantitiesFromStatusB(int node, String serialId, String transportKey, double net, double gross) {
-        try {
-            String media = mediaShortFromTransportKey(transportKey);
-            String serial = safeSerial(serialId);
-            if (serial.isEmpty()) return;
-
-            TabSpec spec = null;
-            String key = tabKeyOf(media, node, serial);
-            try { spec = tabsByKey.get(key); } catch (Exception ignored) {}
-
-            if (spec == null) {
-                for (TabSpec s : tabsByKey.values()) {
-                    if (s == null) continue;
-                    if ((s.node & 0xFF) != (node & 0xFF)) continue;
-                    if (!serial.equalsIgnoreCase(safeSerial(s.serialId))) continue;
-                    spec = s;
-                    break;
-                }
-            }
-            if (spec == null) return;
-
-            spec.qtySuffix = formatQtyLabel(net, gross);
-            String base = tabLabelOf(spec.mediaShort, spec.node, spec.serialId);
-            updateRegisterTabLabel(spec.tabKey, base + spec.qtySuffix);
-        } catch (Exception ignored) {}
-    }
-
-    public void clearTabQuantitiesFromStatusB(int node, String serialId, String transportKey) {
-        try {
-            String media = mediaShortFromTransportKey(transportKey);
-            String serial = safeSerial(serialId);
-            if (serial.isEmpty()) return;
-
-            TabSpec spec = null;
-            String key = tabKeyOf(media, node, serial);
-            try { spec = tabsByKey.get(key); } catch (Exception ignored) {}
-
-            if (spec == null) {
-                for (TabSpec s : tabsByKey.values()) {
-                    if (s == null) continue;
-                    if ((s.node & 0xFF) != (node & 0xFF)) continue;
-                    if (!serial.equalsIgnoreCase(safeSerial(s.serialId))) continue;
-                    spec = s;
-                    break;
-                }
-            }
-            if (spec == null) return;
-
-            spec.qtySuffix = null;
-            String base = tabLabelOf(spec.mediaShort, spec.node, spec.serialId);
-            updateRegisterTabLabel(spec.tabKey, base);
-        } catch (Exception ignored) {}
-    }
-
-public void reportMediaNotReadyFromTab(int node, String serialId, String transportKey, String origin, String detail) {
+ public void reportMediaNotReadyFromTab(int node, String serialId, String transportKey, String origin, String detail) {
      try {
          String media = mediaShortFromTransportKey(transportKey);
          LogBus.api(node, "TAB_MEDIA_STATUS OFF (from TAB) media=" + media + " origin=" + origin + " detail=" + detail);
