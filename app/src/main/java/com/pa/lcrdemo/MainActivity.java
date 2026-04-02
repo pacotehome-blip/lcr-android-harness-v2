@@ -176,6 +176,7 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
         final int node;
         final int from;
         final String serialId;
+        String qtySuffix; // " | N=.. G=.."
 
         TabSpec(String tabKey, String mediaShort, String transportKey, int node, int from, String serialId) {
             this.tabKey = tabKey;
@@ -667,7 +668,7 @@ private static String tabKeyOf(String mediaShort, int node, String serialId) {
         String mediaLabel = ready ? media : (media + "(OFF)");
 
         // ✅ Format: BT(OFF) - 123456 - 250
-        updateRegisterTabLabel(tabKey, tabLabelOf(mediaLabel, spec.node, spec.serialId));
+        updateRegisterTabLabel(tabKey, tabLabelOf(mediaLabel, spec.node, spec.serialId) + (spec.qtySuffix != null ? spec.qtySuffix : ""));
 
         try {
             Fragment f = getSupportFragmentManager().findFragmentByTag("regtab_" + tabKey);
@@ -703,7 +704,6 @@ private static String tabKeyOf(String mediaShort, int node, String serialId) {
             tabsByKey.put(tabKey, spec);
             addRegisterTabUi(spec);
             logUi(null, "TAB registre ajouté (unknown): " + node);
-        refreshTabNetGross(spec);
         } else {
             logUi(null, "TAB registre déjà présent (unknown): " + node + " (focus)");
         }
@@ -723,7 +723,7 @@ private static String tabKeyOf(String mediaShort, int node, String serialId) {
      */
     
     // =========================
-    // ✅ Lire Net/Gross dès création du TAB
+    // ✅ Lire Net/Gross pour un TAB (post-switch, transport READY)
     // =========================
     private void refreshTabNetGross(TabSpec spec) {
         if (spec == null || spec.transportKey == null) return;
@@ -743,9 +743,13 @@ private static String tabKeyOf(String mediaShort, int node, String serialId) {
                 long netRaw   = Long.parseLong(u32beDec(link.opGetField(45, 400)));
                 double gross = applyDecimals(grossRaw, decimals);
                 double net   = applyDecimals(netRaw, decimals);
+                String suffix = formatQtyLabel(net, gross);
                 ui.post(() -> {
-                    String base = tabLabelOf(spec.mediaShort, spec.node, spec.serialId);
-                    updateRegisterTabLabel(spec.tabKey, base + formatQtyLabel(net, gross));
+                    TabSpec live = tabsByKey.get(spec.tabKey);
+                    if (live == null) return;
+                    live.qtySuffix = suffix;
+                    String base = tabLabelOf(live.mediaShort, live.node, live.serialId);
+                    updateRegisterTabLabel(live.tabKey, base + suffix);
                 });
             } catch (Exception ignored) {}
         });
@@ -1260,6 +1264,7 @@ private void upsertRegisterTabFromScan(String transportKey, int node, int from, 
     private static final class NodeScanItem {
         final int lcrnode;
         final String serialId;
+        String qtySuffix; // " | N=.. G=.."
         final String ticketNo;
         final boolean ticketPending;
         final boolean deliveryActive;
