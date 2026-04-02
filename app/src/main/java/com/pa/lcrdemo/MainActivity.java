@@ -697,9 +697,7 @@ private void setupTabsTop() {
             logUi(null, "TAB registre déjà présent (unknown): " + node + " (focus)");
         }
 
-        scheduleValidateAndDedupeTab(newTabKey, "SCAN_UPSERT");
-
- if (focus) {
+        if (focus) {
             selectRegisterTabByKey(tabKey);
             showRegisterFragmentByKey(tabKey);
         } else if (currentTabKey == null) {
@@ -743,6 +741,9 @@ private void setupTabsTop() {
             tabsByKey.put(newTabKey, spec);
             updateRegisterTabLabel(newTabKey, tabLabelOf(mediaShort, node, serial));
         }
+
+        // ✅ Option 1: validation immediate (Status B) + dedupe doublons
+        scheduleValidateAndDedupeTab(newTabKey, "SCAN_UPSERT");
 
         if (focus) {
             selectRegisterTabByKey(newTabKey);
@@ -898,13 +899,11 @@ private void setupTabsTop() {
      if (serial == null) return false;
      String s = serial.trim();
      if (s.isEmpty()) return false;
-     // rejeter le caractère de remplacement Unicode (garbage)
-     if (s.indexOf('�') >= 0) return false;
-     // longueur raisonnable
+     if (s.indexOf('�') >= 0) return false; // garbage unicode
      if (s.length() < 4 || s.length() > 32) return false;
      for (int i = 0; i < s.length(); i++) {
          char c = s.charAt(i);
-         if (c < 0x20 || c == 0x7F) return false; // control chars
+         if (c < 0x20 || c == 0x7F) return false;
          boolean ok = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
                  || c == '-' || c == '_' || c == '.';
          if (!ok) return false;
@@ -930,7 +929,6 @@ private void setupTabsTop() {
      if (node < 1 || node > 250) return ProbeResult.fail("node_invalid");
      if (from < 0 || from > 255) from = 255;
      try {
-         // timeouts courts (équivalent Status(B) best-effort)
          LcpLink tmp = new LcpLink(io, node, from, true);
          try { tmp.opGetMachineStatus(); } catch (Exception ignored) {}
          try { tmp.opDeliveryStatus(450); } catch (Exception ignored) {}
@@ -952,28 +950,25 @@ private void setupTabsTop() {
      if (tabKey == null || tabKey.trim().isEmpty()) return;
      if (!tabValidateInFlight.add(tabKey)) return;
      final String tk = tabKey;
-     final String org = (origin == null ? "" : origin);
      scanExec.execute(() -> {
          try {
-             validateAndDedupeTabInternal(tk, org);
+             validateAndDedupeTabInternal(tk);
          } finally {
              tabValidateInFlight.remove(tk);
          }
      });
  }
 
- private void validateAndDedupeTabInternal(String tabKey, String origin) {
+ private void validateAndDedupeTabInternal(String tabKey) {
      TabSpec spec;
      try { spec = tabsByKey.get(tabKey); } catch (Exception e) { spec = null; }
      if (spec == null) return;
 
-     // 0) Si serial garbage, supprimer immédiatement
      if (!isPlausibleSerial(spec.serialId)) {
          ui.post(() -> removeTabAndFragment(tabKey, "serial illisible"));
          return;
      }
 
-     // 1) Transport disponible ?
      String transportKey = (spec.transportKey != null ? spec.transportKey.trim() : null);
      if (transportKey == null || transportKey.isEmpty()) {
          ui.post(() -> removeTabAndFragment(tabKey, "transportKey absent"));
@@ -981,15 +976,12 @@ private void setupTabsTop() {
      }
 
      TransportIo ioT = null;
-     try {
-         if (mediaTransportManager != null) ioT = mediaTransportManager.getByKey(transportKey);
-     } catch (Exception ignored) {}
+     try { if (mediaTransportManager != null) ioT = mediaTransportManager.getByKey(transportKey); } catch (Exception ignored) {}
      if (ioT == null || !ioT.isOpen()) {
          ui.post(() -> removeTabAndFragment(tabKey, "transport OFF"));
          return;
      }
 
-     // 2) Activer le transport (B1) et probe
      ensureActiveTransport(transportKey, "TAB_VALIDATE");
      ProbeResult pr = probeRegisterReadable(ioT, spec.node, spec.from, safeSerial(spec.serialId));
      if (!pr.ok) {
@@ -999,7 +991,6 @@ private void setupTabsTop() {
 
      final String canonicalSerial = safeSerial(pr.serial);
 
-     // 3) Dédupe: même node + même serial -> supprimer tout tab illisible
      java.util.ArrayList<String> dupKeys = new java.util.ArrayList<>();
      try {
          for (java.util.Map.Entry<String, TabSpec> e : tabsByKey.entrySet()) {
@@ -1014,14 +1005,11 @@ private void setupTabsTop() {
          }
      } catch (Exception ignored) {}
 
-     if (dupKeys.isEmpty()) return;
-
      for (String dk : dupKeys) {
          TabSpec os;
          try { os = tabsByKey.get(dk); } catch (Exception e) { os = null; }
          if (os == null) continue;
 
-         // si l'autre tab a un serial garbage -> remove direct
          if (!isPlausibleSerial(os.serialId)) {
              ui.post(() -> removeTabAndFragment(dk, "doublon illisible"));
              continue;
@@ -1032,6 +1020,7 @@ private void setupTabsTop() {
              ui.post(() -> removeTabAndFragment(dk, "doublon sans transport"));
              continue;
          }
+
          TransportIo oio = null;
          try { if (mediaTransportManager != null) oio = mediaTransportManager.getByKey(otk); } catch (Exception ignored) {}
          if (oio == null || !oio.isOpen()) {
@@ -1039,7 +1028,6 @@ private void setupTabsTop() {
              continue;
          }
 
-         // Probe du doublon: s'il échoue -> on le supprime
          ensureActiveTransport(otk, "TAB_VALIDATE_DUP");
          ProbeResult pr2 = probeRegisterReadable(oio, os.node, os.from, canonicalSerial);
          if (!pr2.ok) {
