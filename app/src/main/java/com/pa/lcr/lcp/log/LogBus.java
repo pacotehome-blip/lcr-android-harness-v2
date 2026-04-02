@@ -170,6 +170,8 @@ public final class LogBus {
                 sb.append(df.format(new Date(e.ts))).append(" ");
             }
 
+ // ✅ Node prefix (log général + tab)
+ sb.append("[").append(e.node).append("] ");
             // ✅ FIX: éviter "TX TX:" / "RX RX:"
             String m = (e.msg == null) ? "" : e.msg;
             boolean msgAlreadyHasTx = m.startsWith("TX:");
