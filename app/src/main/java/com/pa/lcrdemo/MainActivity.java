@@ -590,7 +590,18 @@ private void setupTabsTop() {
         return s.substring(Math.max(0, s.length() - 6));
     }
 
-    private static String tabKeyOf(String mediaShort, int node, String serialId) {
+    
+    // =========================
+    // ✅ Net/Gross helpers
+    // =========================
+    private static String formatQtyLabel(double net, double gross) {
+        return String.format(java.util.Locale.ROOT, " | N=%.2f G=%.2f", net, gross);
+    }
+    private static double applyDecimals(long raw, int decimals) {
+        return raw / Math.pow(10.0, Math.max(0, decimals));
+    }
+
+private static String tabKeyOf(String mediaShort, int node, String serialId) {
         String m = (mediaShort == null || mediaShort.trim().isEmpty()) ? "—" : mediaShort.trim();
         return m + ":" + (node & 0xFF) + ":" + safeSerial(serialId);
     }
@@ -692,6 +703,7 @@ private void setupTabsTop() {
             tabsByKey.put(tabKey, spec);
             addRegisterTabUi(spec);
             logUi(null, "TAB registre ajouté (unknown): " + node);
+        refreshTabNetGross(spec);
         } else {
             logUi(null, "TAB registre déjà présent (unknown): " + node + " (focus)");
         }
@@ -709,7 +721,37 @@ private void setupTabsTop() {
      * Upsert issu d'un scan (serial connu).
      * Règle: clear ciblé A1 si même (node,serial) apparaît sur un autre média.
      */
-    private void upsertRegisterTabFromScan(String transportKey, int node, int from, String serialId, boolean focus) {
+    
+    // =========================
+    // ✅ Lire Net/Gross dès création du TAB
+    // =========================
+    private void refreshTabNetGross(TabSpec spec) {
+        if (spec == null || spec.transportKey == null) return;
+        if (isMediaSwitchGuardActive()) {
+            ui.postDelayed(() -> refreshTabNetGross(spec), 800);
+            return;
+        }
+        scanExec.execute(() -> {
+            try {
+                TransportIo io = (mediaTransportManager != null) ? mediaTransportManager.getByKey(spec.transportKey) : null;
+                if (io == null || !io.isOpen()) return;
+                ensureActiveTransport(spec.transportKey, "TAB_QTY");
+                LcpLink link = new LcpLink(io, spec.node, spec.from, true);
+                int decimals = 0;
+                try { decimals = Integer.parseInt(decodeAz(link.opGetField(39, 400))); } catch (Exception ignored) {}
+                long grossRaw = Long.parseLong(u32beDec(link.opGetField(44, 400)));
+                long netRaw   = Long.parseLong(u32beDec(link.opGetField(45, 400)));
+                double gross = applyDecimals(grossRaw, decimals);
+                double net   = applyDecimals(netRaw, decimals);
+                ui.post(() -> {
+                    String base = tabLabelOf(spec.mediaShort, spec.node, spec.serialId);
+                    updateRegisterTabLabel(spec.tabKey, base + formatQtyLabel(net, gross));
+                });
+            } catch (Exception ignored) {}
+        });
+    }
+
+private void upsertRegisterTabFromScan(String transportKey, int node, int from, String serialId, boolean focus) {
         if (node < 1 || node > 250) return;
         if (from < 0 || from > 255) from = 255;
         String mediaShort = mediaShortFromTransportKey(transportKey);
