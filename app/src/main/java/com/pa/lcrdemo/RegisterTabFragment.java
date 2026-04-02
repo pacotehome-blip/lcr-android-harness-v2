@@ -800,6 +800,29 @@ private void attemptAttachIfPossible(boolean verboseLog) {
         syncUiFromController();
         validateHeaderAsync();
 
+
+
+        // ✅ AUTO_STATUS_B: afficher Net/Gross automatiquement dès qu'un TAB est connecté
+        ui.postDelayed(() -> {
+            try {
+                if (controller == null) return;
+                // armer la mise à jour du label TAB à partir du prochain onLiveQty
+                pendingStatusBQty = true;
+                if (tabTransportKey != null) {
+                    MediaTransportManager.get(requireContext()).activateExclusive(tabTransportKey, "AUTO_STATUS_B");
+                }
+                controller.requestStatus();
+            } catch (Exception ignored) {
+                // si erreur, effacer (best-effort)
+                try {
+                    pendingStatusBQty = false;
+                    if (isAdded() && getActivity() instanceof MainActivity) {
+                        ((MainActivity) getActivity()).clearTabQuantitiesFromStatusB(node, (serialFromArgs != null ? serialFromArgs : ""), (tabTransportKey != null ? tabTransportKey : transportFromArgs));
+                    }
+                } catch (Exception ignored2) {}
+            }
+        }, 300);
+
         // ✅ One-shot LIVE recale (READY / ticket pending) après attach
         ui.postDelayed(() -> {
             try {
