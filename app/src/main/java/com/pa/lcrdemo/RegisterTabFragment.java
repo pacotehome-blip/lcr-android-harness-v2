@@ -123,7 +123,10 @@ public class RegisterTabFragment extends Fragment {
     // Media status for this TAB (OFF/READY) + pendingReconnect
     private volatile boolean tabMediaReady = true;
     private volatile boolean pendingReconnect = false;
-    private volatile String tabMediaShort = "—";
+    
+    // ✅ AUTO Status(B): afficher Net/Gross dans le label du TAB
+    private volatile boolean pendingStatusBQty = false;
+private volatile String tabMediaShort = "—";
 
     // Args (tab): serial + transport
     private String serialFromArgs = null;
@@ -267,12 +270,39 @@ public class RegisterTabFragment extends Fragment {
 
         @Override
         public void onError(String context, Throwable error) {
+            // ✅ Si Status(B) échoue, effacer Net/Gross du label du TAB
+            try {
+                if (pendingStatusBQty) {
+                    String c = (context != null) ? context.toLowerCase(java.util.Locale.ROOT) : "";
+                    if (c.contains("status")) {
+                        pendingStatusBQty = false;
+                        if (isAdded() && getActivity() instanceof MainActivity) {
+                            String serial = (serialFromArgs != null ? serialFromArgs : "");
+                            String tk = (tabTransportKey != null ? tabTransportKey : transportFromArgs);
+                            ((MainActivity) getActivity()).clearTabQuantitiesFromStatusB(node, serial, tk);
+                        }
+                    }
+                }
+            } catch (Exception ignored) {}
+
             LogBus.api(node, "[ERR][" + context + "] " + (error != null ? error.getMessage() : ""));
             scheduleLogRefresh();
         }
 
         @Override
         public void onLiveQty(double net, double gross) {
+            // ✅ Si Status(B) (auto ou manuel) a été demandé, mettre à jour le label du TAB
+            if (pendingStatusBQty) {
+                pendingStatusBQty = false;
+                try {
+                    if (isAdded() && getActivity() instanceof MainActivity) {
+                        String serial = (serialFromArgs != null ? serialFromArgs : "");
+                        String tk = (tabTransportKey != null ? tabTransportKey : transportFromArgs);
+                        ((MainActivity) getActivity()).reportTabQuantitiesFromStatusB(node, serial, tk, net, gross);
+                    }
+                } catch (Exception ignored) {}
+            }
+
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
 
@@ -577,6 +607,8 @@ public class RegisterTabFragment extends Fragment {
 
         // ✅ B = Status + one-shot LIVE recale (READY / ticket pending)
         if (btnB != null) btnB.setOnClickListener(v -> {
+            pendingStatusBQty = true; // Status(B) manuel -> update TAB label
+
             if (controller == null) {
                 reconnectThisRegister(true);
                 return;
@@ -806,20 +838,15 @@ private void attemptAttachIfPossible(boolean verboseLog) {
         ui.postDelayed(() -> {
             try {
                 if (controller == null) return;
-                // armer la mise à jour du label TAB à partir du prochain onLiveQty
                 pendingStatusBQty = true;
-                if (tabTransportKey != null) {
-                    MediaTransportManager.get(requireContext()).activateExclusive(tabTransportKey, "AUTO_STATUS_B");
-                }
-                controller.requestStatus();
-            } catch (Exception ignored) {
-                // si erreur, effacer (best-effort)
                 try {
-                    pendingStatusBQty = false;
-                    if (isAdded() && getActivity() instanceof MainActivity) {
-                        ((MainActivity) getActivity()).clearTabQuantitiesFromStatusB(node, (serialFromArgs != null ? serialFromArgs : ""), (tabTransportKey != null ? tabTransportKey : transportFromArgs));
+                    if (tabTransportKey != null) {
+                        MediaTransportManager.get(requireContext()).activateExclusive(tabTransportKey, "AUTO_STATUS_B");
                     }
-                } catch (Exception ignored2) {}
+                } catch (Exception ignored) {}
+                controller.requestStatus();
+            } catch (Exception e) {
+                pendingStatusBQty = false;
             }
         }, 300);
 

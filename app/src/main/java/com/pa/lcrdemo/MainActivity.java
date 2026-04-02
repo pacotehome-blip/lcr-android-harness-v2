@@ -176,6 +176,7 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
         final int node;
         final int from;
         final String serialId;
+        String qtySuffix; // " | N=.. G=.."
 
         TabSpec(String tabKey, String mediaShort, String transportKey, int node, int from, String serialId) {
             this.tabKey = tabKey;
@@ -656,7 +657,7 @@ private void setupTabsTop() {
         String mediaLabel = ready ? media : (media + "(OFF)");
 
         // ✅ Format: BT(OFF) - 123456 - 250
-        updateRegisterTabLabel(tabKey, tabLabelOf(mediaLabel, spec.node, spec.serialId));
+        updateRegisterTabLabel(tabKey, tabLabelOf(mediaLabel, spec.node, spec.serialId) + (spec.qtySuffix != null ? spec.qtySuffix : ""));
 
         try {
             Fragment f = getSupportFragmentManager().findFragmentByTag("regtab_" + tabKey);
@@ -1218,6 +1219,7 @@ private void setupTabsTop() {
     private static final class NodeScanItem {
         final int lcrnode;
         final String serialId;
+        String qtySuffix; // " | N=.. G=.."
         final String ticketNo;
         final boolean ticketPending;
         final boolean deliveryActive;
@@ -1781,6 +1783,14 @@ private void setupTabsTop() {
      }
  }
 
+    // =========================
+    // ✅ TAB label Net/Gross
+    // =========================
+    private static String formatQtyLabel(double net, double gross) {
+        return String.format(java.util.Locale.ROOT, " | N=%.2f G=%.2f", net, gross);
+    }
+
+
 private boolean ensureBtConnectPermission() {
         // Android 9: pas de permission runtime; Android 12+: BLUETOOTH_CONNECT.
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true;
@@ -2293,6 +2303,99 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
             } catch (Exception ignored) {}
         });
     }
+
+
+    // =========================
+    // ✅ Status(B) -> TAB label Net/Gross
+    // - SUCCÈS: afficher N/G sur le tab
+    // - ÉCHEC : effacer N/G du tab
+    // =========================
+    public void reportTabQuantitiesFromStatusB(int node, String serialId, String transportKey, double net, double gross) {
+        try {
+            String serial = safeSerial(serialId);
+            TabSpec spec = null;
+
+            // 1) match exact (media,node,serial)
+            if (!serial.isEmpty()) {
+                String media = mediaShortFromTransportKey(transportKey);
+                String key = tabKeyOf(media, node, serial);
+                spec = tabsByKey.get(key);
+            }
+
+            // 2) fallback (node,serial)
+            if (spec == null && !serial.isEmpty()) {
+                for (TabSpec s : tabsByKey.values()) {
+                    if (s == null) continue;
+                    if ((s.node & 0xFF) != (node & 0xFF)) continue;
+                    if (!serial.equalsIgnoreCase(safeSerial(s.serialId))) continue;
+                    spec = s;
+                    break;
+                }
+            }
+
+            // 3) fallback (node,transportKey)
+            if (spec == null) {
+                String tk = (transportKey != null ? transportKey.trim() : "");
+                if (!tk.isEmpty()) {
+                    for (TabSpec s : tabsByKey.values()) {
+                        if (s == null) continue;
+                        if ((s.node & 0xFF) != (node & 0xFF)) continue;
+                        String stk = (s.transportKey != null ? s.transportKey.trim() : "");
+                        if (tk.equalsIgnoreCase(stk)) {
+                            spec = s;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (spec == null) return;
+            spec.qtySuffix = formatQtyLabel(net, gross);
+            String base = tabLabelOf(spec.mediaShort, spec.node, spec.serialId);
+            updateRegisterTabLabel(spec.tabKey, base + spec.qtySuffix);
+        } catch (Exception ignored) {}
+    }
+
+    public void clearTabQuantitiesFromStatusB(int node, String serialId, String transportKey) {
+        try {
+            String serial = safeSerial(serialId);
+            TabSpec spec = null;
+
+            if (!serial.isEmpty()) {
+                String media = mediaShortFromTransportKey(transportKey);
+                String key = tabKeyOf(media, node, serial);
+                spec = tabsByKey.get(key);
+            }
+
+            if (spec == null && !serial.isEmpty()) {
+                for (TabSpec s : tabsByKey.values()) {
+                    if (s == null) continue;
+                    if ((s.node & 0xFF) != (node & 0xFF)) continue;
+                    if (!serial.equalsIgnoreCase(safeSerial(s.serialId))) continue;
+                    spec = s;
+                    break;
+                }
+            }
+
+            if (spec == null) {
+                String tk = (transportKey != null ? transportKey.trim() : "");
+                if (!tk.isEmpty()) {
+                    for (TabSpec s : tabsByKey.values()) {
+                        if (s == null) continue;
+                        if ((s.node & 0xFF) != (node & 0xFF)) continue;
+                        String stk = (s.transportKey != null ? s.transportKey.trim() : "");
+                        if (tk.equalsIgnoreCase(stk)) { spec = s; break; }
+                    }
+                }
+            }
+
+            if (spec == null) return;
+            spec.qtySuffix = null;
+            String base = tabLabelOf(spec.mediaShort, spec.node, spec.serialId);
+            updateRegisterTabLabel(spec.tabKey, base);
+        } catch (Exception ignored) {}
+    }
+
 private void ensureActiveTransport(String transportKey, String reason) {
         try {
             if (transportKey == null || transportKey.trim().isEmpty()) return;
