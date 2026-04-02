@@ -219,9 +219,8 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
     private final Set<String> apiJobSeen = Collections.newSetFromMap(new ConcurrentHashMap<>());
 
     
- // ✅ Validation tab (anti-doublon illisible)
- private final java.util.Set<String> tabValidateInFlight =
-         java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
+ // ✅ Guard switch média (CONFIGURE): bloque probes/IO pendant ~800ms
+ private volatile long mediaSwitchGuardUntilMs = 0L;
 // =========================
     // ✅ 1 ligne courte par action (log global)
     // =========================
@@ -742,9 +741,6 @@ private void setupTabsTop() {
             updateRegisterTabLabel(newTabKey, tabLabelOf(mediaShort, node, serial));
         }
 
-        // ✅ Option 1: validation immediate (Status B) + dedupe doublons
-        scheduleValidateAndDedupeTab(newTabKey, "SCAN_UPSERT");
-
         if (focus) {
             selectRegisterTabByKey(newTabKey);
             showRegisterFragmentByKey(newTabKey);
@@ -889,153 +885,6 @@ private void setupTabsTop() {
 
         logUi(null, "TAB registre supprimé: " + tabKey + (reason != null ? (" (" + reason + ")") : ""));
     }
-
- // =========================
- // ✅ Validation immédiate à la création des tabs (Option 1)
- // - Probe "Status(B)" best-effort: MachineStatus + 0x28 + #80
- // - Si doublon (même node + même serial) : supprime immédiatement le tab illisible
- // =========================
- private static boolean isPlausibleSerial(String serial) {
-     if (serial == null) return false;
-     String s = serial.trim();
-     if (s.isEmpty()) return false;
-     if (s.indexOf('�') >= 0) return false; // garbage unicode
-     if (s.length() < 4 || s.length() > 32) return false;
-     for (int i = 0; i < s.length(); i++) {
-         char c = s.charAt(i);
-         if (c < 0x20 || c == 0x7F) return false;
-         boolean ok = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
-                 || c == '-' || c == '_' || c == '.';
-         if (!ok) return false;
-     }
-     return true;
- }
-
- private static final class ProbeResult {
-     final boolean ok;
-     final String serial;
-     final String reason;
-     ProbeResult(boolean ok, String serial, String reason) {
-         this.ok = ok;
-         this.serial = serial;
-         this.reason = reason;
-     }
-     static ProbeResult ok(String serial) { return new ProbeResult(true, serial, null); }
-     static ProbeResult fail(String reason) { return new ProbeResult(false, null, reason); }
- }
-
- private ProbeResult probeRegisterReadable(TransportIo io, int node, int from, String expectedSerial) {
-     if (io == null || !io.isOpen()) return ProbeResult.fail("transport_not_ready");
-     if (node < 1 || node > 250) return ProbeResult.fail("node_invalid");
-     if (from < 0 || from > 255) from = 255;
-     try {
-         LcpLink tmp = new LcpLink(io, node, from, true);
-         try { tmp.opGetMachineStatus(); } catch (Exception ignored) {}
-         try { tmp.opDeliveryStatus(450); } catch (Exception ignored) {}
-         String serial = decodeAz(tmp.opGetField(80, 750));
-         if (!isPlausibleSerial(serial)) return ProbeResult.fail("serial_invalid");
-         if (expectedSerial != null && !expectedSerial.trim().isEmpty()) {
-             String exp = expectedSerial.trim();
-             if (!serial.equalsIgnoreCase(exp)) {
-                 return ProbeResult.fail("serial_mismatch(" + exp + " != " + serial + ")");
-             }
-         }
-         return ProbeResult.ok(serial);
-     } catch (Exception e) {
-         return ProbeResult.fail("probe_err:" + safeMsg(e));
-     }
- }
-
- private void scheduleValidateAndDedupeTab(String tabKey, String origin) {
-     if (tabKey == null || tabKey.trim().isEmpty()) return;
-     if (!tabValidateInFlight.add(tabKey)) return;
-     final String tk = tabKey;
-     scanExec.execute(() -> {
-         try {
-             validateAndDedupeTabInternal(tk);
-         } finally {
-             tabValidateInFlight.remove(tk);
-         }
-     });
- }
-
- private void validateAndDedupeTabInternal(String tabKey) {
-     TabSpec spec;
-     try { spec = tabsByKey.get(tabKey); } catch (Exception e) { spec = null; }
-     if (spec == null) return;
-
-     if (!isPlausibleSerial(spec.serialId)) {
-         ui.post(() -> removeTabAndFragment(tabKey, "serial illisible"));
-         return;
-     }
-
-     String transportKey = (spec.transportKey != null ? spec.transportKey.trim() : null);
-     if (transportKey == null || transportKey.isEmpty()) {
-         ui.post(() -> removeTabAndFragment(tabKey, "transportKey absent"));
-         return;
-     }
-
-     TransportIo ioT = null;
-     try { if (mediaTransportManager != null) ioT = mediaTransportManager.getByKey(transportKey); } catch (Exception ignored) {}
-     if (ioT == null || !ioT.isOpen()) {
-         ui.post(() -> removeTabAndFragment(tabKey, "transport OFF"));
-         return;
-     }
-
-     ensureActiveTransport(transportKey, "TAB_VALIDATE");
-     ProbeResult pr = probeRegisterReadable(ioT, spec.node, spec.from, safeSerial(spec.serialId));
-     if (!pr.ok) {
-         ui.post(() -> removeTabAndFragment(tabKey, "illisible(" + pr.reason + ")"));
-         return;
-     }
-
-     final String canonicalSerial = safeSerial(pr.serial);
-
-     java.util.ArrayList<String> dupKeys = new java.util.ArrayList<>();
-     try {
-         for (java.util.Map.Entry<String, TabSpec> e : tabsByKey.entrySet()) {
-             if (e == null) continue;
-             String k = e.getKey();
-             if (k == null || k.equals(tabKey)) continue;
-             TabSpec o = e.getValue();
-             if (o == null) continue;
-             if ((o.node & 0xFF) != (spec.node & 0xFF)) continue;
-             if (!canonicalSerial.equalsIgnoreCase(safeSerial(o.serialId))) continue;
-             dupKeys.add(k);
-         }
-     } catch (Exception ignored) {}
-
-     for (String dk : dupKeys) {
-         TabSpec os;
-         try { os = tabsByKey.get(dk); } catch (Exception e) { os = null; }
-         if (os == null) continue;
-
-         if (!isPlausibleSerial(os.serialId)) {
-             ui.post(() -> removeTabAndFragment(dk, "doublon illisible"));
-             continue;
-         }
-
-         String otk = (os.transportKey != null ? os.transportKey.trim() : null);
-         if (otk == null || otk.isEmpty()) {
-             ui.post(() -> removeTabAndFragment(dk, "doublon sans transport"));
-             continue;
-         }
-
-         TransportIo oio = null;
-         try { if (mediaTransportManager != null) oio = mediaTransportManager.getByKey(otk); } catch (Exception ignored) {}
-         if (oio == null || !oio.isOpen()) {
-             ui.post(() -> removeTabAndFragment(dk, "doublon transport OFF"));
-             continue;
-         }
-
-         ensureActiveTransport(otk, "TAB_VALIDATE_DUP");
-         ProbeResult pr2 = probeRegisterReadable(oio, os.node, os.from, canonicalSerial);
-         if (!pr2.ok) {
-             ui.post(() -> removeTabAndFragment(dk, "doublon illisible(" + pr2.reason + ")"));
-         }
-     }
- }
-
 // =========================
     // Scan registres Option B (0x28 + #80 + #23) - AUTORITAIRE
     // =========================
@@ -1417,6 +1266,8 @@ private void setupTabsTop() {
             try {
                 if (mediaTransportManager != null) {
                     mediaTransportManager.onUsbReady(dev, usbPort, "USB prêt (OpenSelectedUsb)");
+                // ✅ CONFIGURE: média activé -> rebind tab sur USB
+                onConfigureMediaActivated(MediaTransportManager.KEY_USB, "USB_READY");
                 }
             } catch (Exception ignored) {}
             logUi(null, "USB prêt");
@@ -1454,6 +1305,8 @@ private void setupTabsTop() {
         try {
             if (mediaTransportManager != null) {
                 mediaTransportManager.onUsbReady(null, usbPort, "USB prêt (MainActivity)");
+                // ✅ CONFIGURE: média activé -> rebind tab sur USB
+                onConfigureMediaActivated(MediaTransportManager.KEY_USB, "USB_READY_RX");
             }
         } catch (Exception ignored) {}
 
@@ -1989,6 +1842,8 @@ private boolean ensureBtConnectPermission() {
                     lastBtMac = (dev != null ? dev.getAddress() : null);
                     if (mediaTransportManager != null) {
                         mediaTransportManager.onBtConnected(dev, btSocket, btIn, btOut, "BT SPP CONNECTED");
+                    // ✅ CONFIGURE: média activé -> rebind tab sur BT
+                    try { onConfigureMediaActivated(MediaTransportManager.btKey(lastBtMac), "BT_READY"); } catch (Exception ignored) {}
                     }
                 } catch (Exception ignored) {}
 
@@ -2303,7 +2158,81 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
     // =========================
     // ✅ B1 FSM: rendre un transport ACTIVE avant toute opération IO (USB/BT)
     // =========================
-    private void ensureActiveTransport(String transportKey, String reason) {
+    
+
+ // =========================
+ // ✅ Guard switch média (CONFIGURE)
+ // - Empêche les probes/validations pendant un switch (BT↔USB)
+ // - Rebind le tab courant sur le nouveau transport (évite "Transport not open")
+ // =========================
+ private void beginMediaSwitchGuard(String reason) {
+     try {
+         long now = System.currentTimeMillis();
+         mediaSwitchGuardUntilMs = now + 800; // 0.8s
+         logMedia1("MEDIA SWITCH (guard) " + (reason != null ? reason : ""));
+     } catch (Exception ignored) {}
+ }
+ private boolean isMediaSwitchGuardActive() {
+     try { return System.currentTimeMillis() < mediaSwitchGuardUntilMs; }
+     catch (Exception e) { return false; }
+ }
+
+ /**
+  * Appelé quand un média devient READY via CONFIGURE (USB Open/Ping / BT Connect).
+  * But: forcer le transport actif + rebind sur un tab du même registre.
+  */
+ private void onConfigureMediaActivated(String transportKey, String reason) {
+     if (transportKey == null || transportKey.trim().isEmpty()) return;
+     beginMediaSwitchGuard(reason);
+     final String tk = transportKey.trim();
+
+     // 1) activer exclusif immédiatement
+     ensureActiveTransport(tk, "CONFIGURE_MEDIA_SWITCH");
+
+     // 2) déterminer node/serial "courants" pour créer/activer le bon tab
+     int node = (currentRegNode > 0 ? currentRegNode : 250);
+     String serial = null;
+     try {
+         if (currentTabKey != null) {
+             TabSpec cur = tabsByKey.get(currentTabKey);
+             if (cur != null && isPlausibleSerial(cur.serialId)) {
+                 serial = safeSerial(cur.serialId);
+                 node = (cur.node > 0 ? cur.node : node);
+             }
+         }
+     } catch (Exception ignored) {}
+
+     // 3) si on n'a pas un serial plausible, tenter un probe rapide sur le nouveau transport
+     if (serial == null || serial.trim().isEmpty()) {
+         try {
+             TransportIo ioT = (mediaTransportManager != null) ? mediaTransportManager.getByKey(tk) : null;
+             if (ioT != null && ioT.isOpen()) {
+                 ProbeResult pr = probeRegisterReadable(ioT, node, 255, null);
+                 if (pr != null && pr.ok && pr.serial != null && isPlausibleSerial(pr.serial)) {
+                     serial = safeSerial(pr.serial);
+                 }
+             }
+         } catch (Exception ignored) {}
+     }
+
+     if (serial == null || serial.trim().isEmpty() || !isPlausibleSerial(serial)) {
+         // pas assez d'info: au moins rafraîchir les statuts
+         ui.post(this::refreshAllTabsMediaStatus);
+         return;
+     }
+
+     final int fNode = node;
+     final String fSerial = serial;
+
+     // 4) créer/activer un tab pour ce transport (même registre) + focus
+     ui.post(() -> {
+         try {
+             upsertRegisterTabFromScan(tk, fNode, 255, fSerial, true);
+             refreshAllTabsMediaStatus();
+         } catch (Exception ignored) {}
+     });
+ }
+private void ensureActiveTransport(String transportKey, String reason) {
         try {
             if (transportKey == null || transportKey.trim().isEmpty()) return;
             if (mediaTransportManager == null) mediaTransportManager = MediaTransportManager.get(this);
