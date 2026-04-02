@@ -123,10 +123,7 @@ public class RegisterTabFragment extends Fragment {
     // Media status for this TAB (OFF/READY) + pendingReconnect
     private volatile boolean tabMediaReady = true;
     private volatile boolean pendingReconnect = false;
-    
-    // ✅ TAB label Net/Gross: seulement via Status (B)
-    private volatile boolean pendingStatusBQty = false;
-private volatile String tabMediaShort = "—";
+    private volatile String tabMediaShort = "—";
 
     // Args (tab): serial + transport
     private String serialFromArgs = null;
@@ -270,35 +267,12 @@ private volatile String tabMediaShort = "—";
 
         @Override
         public void onError(String context, Throwable error) {
-            // Si Status(B) échoue, on efface Net/Gross du label du TAB.
-            try {
-                if (pendingStatusBQty) {
-                    String c = (context != null) ? context.toLowerCase(java.util.Locale.ROOT) : "";
-                    if (c.contains("status")) {
-                        pendingStatusBQty = false;
-                        if (isAdded() && getActivity() instanceof MainActivity) {
-                            ((MainActivity) getActivity()).clearTabQuantitiesFromStatusB(node, serialId, tabTransportKey);
-                        }
-                    }
-                }
-            } catch (Exception ignored) {}
-
             LogBus.api(node, "[ERR][" + context + "] " + (error != null ? error.getMessage() : ""));
             scheduleLogRefresh();
         }
 
         @Override
         public void onLiveQty(double net, double gross) {
-            // Si le dernier clic était Status (B), on met à jour le label du TAB.
-            if (pendingStatusBQty) {
-                pendingStatusBQty = false;
-                try {
-                    if (isAdded() && getActivity() instanceof MainActivity) {
-                        ((MainActivity) getActivity()).reportTabQuantitiesFromStatusB(node, serialId, tabTransportKey, net, gross);
-                    }
-                } catch (Exception ignored) {}
-            }
-
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
 
@@ -603,9 +577,6 @@ private volatile String tabMediaShort = "—";
 
         // ✅ B = Status + one-shot LIVE recale (READY / ticket pending)
         if (btnB != null) btnB.setOnClickListener(v -> {
-            // Net/Gross du TAB: armé (sera affiché si Status B réussit)
-            pendingStatusBQty = true;
-
             if (controller == null) {
                 reconnectThisRegister(true);
                 return;
