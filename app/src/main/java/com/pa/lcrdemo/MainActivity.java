@@ -219,8 +219,8 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
     private final Set<String> apiJobSeen = Collections.newSetFromMap(new ConcurrentHashMap<>());
 
     
- // ✅ Guard switch média (CONFIGURE): bloque probes/IO pendant ~800ms
- private volatile long mediaSwitchGuardUntilMs = 0L;
+    // ✅ Guard switch média (CONFIGURE): bloque probes/IO pendant ~800ms
+    private volatile long mediaSwitchGuardUntilMs = 0L;
 // =========================
     // ✅ 1 ligne courte par action (log global)
     // =========================
@@ -885,6 +885,67 @@ private void setupTabsTop() {
 
         logUi(null, "TAB registre supprimé: " + tabKey + (reason != null ? (" (" + reason + ")") : ""));
     }
+
+    // =========================
+    // ✅ Serial plausibility (évite les serial garbage: "��")
+    // =========================
+    private static boolean isPlausibleSerial(String serial) {
+        if (serial == null) return false;
+        String s = serial.trim();
+        if (s.isEmpty()) return false;
+        if (s.indexOf('�') >= 0) return false; // unicode replacement char
+        if (s.length() < 4 || s.length() > 32) return false;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c < 0x20 || c == 0x7F) return false; // control
+            boolean ok = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+                    || c == '-' || c == '_' || c == '.';
+            if (!ok) return false;
+        }
+        return true;
+    }
+
+    private static final class ProbeResult {
+        final boolean ok;
+        final String serial;
+        final String reason;
+        ProbeResult(boolean ok, String serial, String reason) {
+            this.ok = ok;
+            this.serial = serial;
+            this.reason = reason;
+        }
+        static ProbeResult ok(String serial) { return new ProbeResult(true, serial, null); }
+        static ProbeResult fail(String reason) { return new ProbeResult(false, null, reason); }
+    }
+
+    /**
+     * Probe best-effort équivalent à un Status(B) minimal:
+     * - MachineStatus (best-effort)
+     * - 0x28 delivery status (timeout court)
+     * - #80 serial (timeout court)
+     */
+    private ProbeResult probeRegisterReadable(TransportIo io, int node, int from, String expectedSerial) {
+        if (io == null || !io.isOpen()) return ProbeResult.fail("transport_not_ready");
+        if (node < 1 || node > 250) return ProbeResult.fail("node_invalid");
+        if (from < 0 || from > 255) from = 255;
+        try {
+            LcpLink tmp = new LcpLink(io, node, from, true);
+            try { tmp.opGetMachineStatus(); } catch (Exception ignored) {}
+            try { tmp.opDeliveryStatus(450); } catch (Exception ignored) {}
+            String serial = decodeAz(tmp.opGetField(80, 750));
+            if (!isPlausibleSerial(serial)) return ProbeResult.fail("serial_invalid");
+            if (expectedSerial != null && !expectedSerial.trim().isEmpty()) {
+                String exp = expectedSerial.trim();
+                if (!serial.equalsIgnoreCase(exp)) {
+                    return ProbeResult.fail("serial_mismatch(" + exp + " != " + serial + ")");
+                }
+            }
+            return ProbeResult.ok(serial);
+        } catch (Exception e) {
+            return ProbeResult.fail("probe_err:" + safeMsg(e));
+        }
+    }
+
 // =========================
     // Scan registres Option B (0x28 + #80 + #23) - AUTORITAIRE
     // =========================
@@ -2160,78 +2221,78 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
     // =========================
     
 
- // =========================
- // ✅ Guard switch média (CONFIGURE)
- // - Empêche les probes/validations pendant un switch (BT↔USB)
- // - Rebind le tab courant sur le nouveau transport (évite "Transport not open")
- // =========================
- private void beginMediaSwitchGuard(String reason) {
-     try {
-         long now = System.currentTimeMillis();
-         mediaSwitchGuardUntilMs = now + 800; // 0.8s
-         logMedia1("MEDIA SWITCH (guard) " + (reason != null ? reason : ""));
-     } catch (Exception ignored) {}
- }
- private boolean isMediaSwitchGuardActive() {
-     try { return System.currentTimeMillis() < mediaSwitchGuardUntilMs; }
-     catch (Exception e) { return false; }
- }
+    // =========================
+    // ✅ Guard switch média (CONFIGURE)
+    // - Empêche les probes/validations pendant un switch (BT↔USB)
+    // - Rebind le tab courant sur le nouveau transport (évite "Transport not open")
+    // =========================
+    private void beginMediaSwitchGuard(String reason) {
+        try {
+            long now = System.currentTimeMillis();
+            mediaSwitchGuardUntilMs = now + 800; // 0.8s
+            logMedia1("MEDIA SWITCH (guard) " + (reason != null ? reason : ""));
+        } catch (Exception ignored) {}
+    }
 
- /**
-  * Appelé quand un média devient READY via CONFIGURE (USB Open/Ping / BT Connect).
-  * But: forcer le transport actif + rebind sur un tab du même registre.
-  */
- private void onConfigureMediaActivated(String transportKey, String reason) {
-     if (transportKey == null || transportKey.trim().isEmpty()) return;
-     beginMediaSwitchGuard(reason);
-     final String tk = transportKey.trim();
+    private boolean isMediaSwitchGuardActive() {
+        try { return System.currentTimeMillis() < mediaSwitchGuardUntilMs; }
+        catch (Exception e) { return false; }
+    }
 
-     // 1) activer exclusif immédiatement
-     ensureActiveTransport(tk, "CONFIGURE_MEDIA_SWITCH");
+    /**
+     * Appelé quand un média devient READY via CONFIGURE (USB Open/Ping / BT Connect).
+     * But: forcer le transport actif + rebind sur un tab du même registre.
+     */
+    private void onConfigureMediaActivated(String transportKey, String reason) {
+        if (transportKey == null || transportKey.trim().isEmpty()) return;
+        beginMediaSwitchGuard(reason);
+        final String tk = transportKey.trim();
 
-     // 2) déterminer node/serial "courants" pour créer/activer le bon tab
-     int node = (currentRegNode > 0 ? currentRegNode : 250);
-     String serial = null;
-     try {
-         if (currentTabKey != null) {
-             TabSpec cur = tabsByKey.get(currentTabKey);
-             if (cur != null && isPlausibleSerial(cur.serialId)) {
-                 serial = safeSerial(cur.serialId);
-                 node = (cur.node > 0 ? cur.node : node);
-             }
-         }
-     } catch (Exception ignored) {}
+        // 1) activer exclusif immédiatement
+        ensureActiveTransport(tk, "CONFIGURE_MEDIA_SWITCH");
 
-     // 3) si on n'a pas un serial plausible, tenter un probe rapide sur le nouveau transport
-     if (serial == null || serial.trim().isEmpty()) {
-         try {
-             TransportIo ioT = (mediaTransportManager != null) ? mediaTransportManager.getByKey(tk) : null;
-             if (ioT != null && ioT.isOpen()) {
-                 ProbeResult pr = probeRegisterReadable(ioT, node, 255, null);
-                 if (pr != null && pr.ok && pr.serial != null && isPlausibleSerial(pr.serial)) {
-                     serial = safeSerial(pr.serial);
-                 }
-             }
-         } catch (Exception ignored) {}
-     }
+        // 2) déterminer node/serial "courants" pour créer/activer le bon tab
+        int node = (currentRegNode > 0 ? currentRegNode : 250);
+        String serial = null;
+        try {
+            if (currentTabKey != null) {
+                TabSpec cur = tabsByKey.get(currentTabKey);
+                if (cur != null && isPlausibleSerial(cur.serialId)) {
+                    serial = safeSerial(cur.serialId);
+                    node = (cur.node > 0 ? cur.node : node);
+                }
+            }
+        } catch (Exception ignored) {}
 
-     if (serial == null || serial.trim().isEmpty() || !isPlausibleSerial(serial)) {
-         // pas assez d'info: au moins rafraîchir les statuts
-         ui.post(this::refreshAllTabsMediaStatus);
-         return;
-     }
+        // 3) si on n'a pas un serial plausible, tenter un probe rapide sur le nouveau transport
+        if (serial == null || serial.trim().isEmpty()) {
+            try {
+                TransportIo ioT = (mediaTransportManager != null) ? mediaTransportManager.getByKey(tk) : null;
+                if (ioT != null && ioT.isOpen()) {
+                    ProbeResult pr = probeRegisterReadable(ioT, node, 255, null);
+                    if (pr != null && pr.ok && pr.serial != null && isPlausibleSerial(pr.serial)) {
+                        serial = safeSerial(pr.serial);
+                    }
+                }
+            } catch (Exception ignored) {}
+        }
 
-     final int fNode = node;
-     final String fSerial = serial;
+        if (serial == null || serial.trim().isEmpty() || !isPlausibleSerial(serial)) {
+            ui.post(this::refreshAllTabsMediaStatus);
+            return;
+        }
 
-     // 4) créer/activer un tab pour ce transport (même registre) + focus
-     ui.post(() -> {
-         try {
-             upsertRegisterTabFromScan(tk, fNode, 255, fSerial, true);
-             refreshAllTabsMediaStatus();
-         } catch (Exception ignored) {}
-     });
- }
+        final int fNode = node;
+        final String fSerial = serial;
+
+        // 4) créer/activer un tab pour ce transport (même registre) + focus
+        ui.post(() -> {
+            try {
+                upsertRegisterTabFromScan(tk, fNode, 255, fSerial, true);
+                refreshAllTabsMediaStatus();
+            } catch (Exception ignored) {}
+        });
+    }
 private void ensureActiveTransport(String transportKey, String reason) {
         try {
             if (transportKey == null || transportKey.trim().isEmpty()) return;
