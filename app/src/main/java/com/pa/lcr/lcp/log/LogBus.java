@@ -105,7 +105,8 @@ public final class LogBus {
                 case API: sb.append("API "); break;
                 default: break;
             }
-            sb.append(m).append('\n');
+            sb.append(m).append('
+');
         }
         return sb.toString();
     }

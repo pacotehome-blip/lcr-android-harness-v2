@@ -1780,6 +1780,13 @@ private void setupTabsTop() {
          return false;
      }
  }
+
+    // =========================
+    // ✅ TAB label Net/Gross
+    // =========================
+
+
+
 private boolean ensureBtConnectPermission() {
         // Android 9: pas de permission runtime; Android 12+: BLUETOOTH_CONNECT.
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true;
@@ -2292,34 +2299,16 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
             } catch (Exception ignored) {}
         });
     }
-            if (spec == null && !serial.isEmpty()) {
-                for (TabSpec s : tabsByKey.values()) {
-                    if (s == null) continue;
-                    if ((s.node & 0xFF) != (node & 0xFF)) continue;
-                    if (!serial.equalsIgnoreCase(safeSerial(s.serialId))) continue;
-                    spec = s;
-                    break;
-                }
-            }
 
-            if (spec == null) {
-                String tk = (transportKey != null ? transportKey.trim() : "");
-                if (!tk.isEmpty()) {
-                    for (TabSpec s : tabsByKey.values()) {
-                        if (s == null) continue;
-                        if ((s.node & 0xFF) != (node & 0xFF)) continue;
-                        String stk = (s.transportKey != null ? s.transportKey.trim() : "");
-                        if (tk.equalsIgnoreCase(stk)) { spec = s; break; }
-                    }
-                }
-            }
 
-            if (spec == null) return;
-            spec.qtySuffix = null;
-            String base = tabLabelOf(spec.mediaShort, spec.node, spec.serialId);
-            updateRegisterTabLabel(spec.tabKey, base);
-        } catch (Exception ignored) {}
-    }
+    // =========================
+    // ✅ Status(B) -> TAB label Net/Gross
+    // - SUCCÈS: afficher N/G sur le tab
+    // - ÉCHEC : effacer N/G du tab
+    // =========================
+
+
+
 
 private void ensureActiveTransport(String transportKey, String reason) {
         try {
