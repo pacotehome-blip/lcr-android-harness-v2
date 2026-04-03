@@ -123,9 +123,6 @@ public class RegisterTabFragment extends Fragment {
     // Media status for this TAB (OFF/READY) + pendingReconnect
     private volatile boolean tabMediaReady = true;
     private volatile boolean pendingReconnect = false;
-    
-    // ✅ AUTO Status(B): afficher Net/Gross dans le label du TAB
-    private volatile boolean pendingStatusBQty = false;
 private volatile String tabMediaShort = "—";
 
     // Args (tab): serial + transport
@@ -269,39 +266,12 @@ private volatile String tabMediaShort = "—";
         @Override public void onLog(String message) { scheduleLogRefresh(); }
 
         @Override
-        public void onError(String context, Throwable error) {
-            // ✅ Si Status(B) échoue, effacer Net/Gross du label du TAB
-            try {
-                if (pendingStatusBQty) {
-                    String c = (context != null) ? context.toLowerCase(java.util.Locale.ROOT) : "";
-                    if (c.contains("status")) {
-                        pendingStatusBQty = false;
-                        if (isAdded() && getActivity() instanceof MainActivity) {
-                            String serial = (serialFromArgs != null ? serialFromArgs : "");
-                            String tk = (tabTransportKey != null ? tabTransportKey : transportFromArgs);
-                            ((MainActivity) getActivity()).clearTabQuantitiesFromStatusB(node, serial, tk);
-                        }
-                    }
-                }
-            } catch (Exception ignored) {}
-
-            LogBus.api(node, "[ERR][" + context + "] " + (error != null ? error.getMessage() : ""));
+        public void onError(String context, Throwable error) {            LogBus.api(node, "[ERR][" + context + "] " + (error != null ? error.getMessage() : ""));
             scheduleLogRefresh();
         }
 
         @Override
-        public void onLiveQty(double net, double gross) {
-            // ✅ Si Status(B) (auto ou manuel) a été demandé, mettre à jour le label du TAB
-            if (pendingStatusBQty) {
-                pendingStatusBQty = false;
-                try {
-                    if (isAdded() && getActivity() instanceof MainActivity) {
-                        String serial = (serialFromArgs != null ? serialFromArgs : "");
-                        String tk = (tabTransportKey != null ? tabTransportKey : transportFromArgs);
-                        ((MainActivity) getActivity()).reportTabQuantitiesFromStatusB(node, serial, tk, net, gross);
-                    }
-                } catch (Exception ignored) {}
-            }
+        public void onLiveQty(double net, double gross) {            }
 
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
@@ -607,8 +577,7 @@ private volatile String tabMediaShort = "—";
 
         // ✅ B = Status + one-shot LIVE recale (READY / ticket pending)
         if (btnB != null) btnB.setOnClickListener(v -> {
-            pendingStatusBQty = true; // Status(B) manuel -> update TAB label
-
+            
             if (controller == null) {
                 reconnectThisRegister(true);
                 return;
@@ -831,25 +800,6 @@ private void attemptAttachIfPossible(boolean verboseLog) {
 
         syncUiFromController();
         validateHeaderAsync();
-
-
-
-        // ✅ AUTO_STATUS_B: afficher Net/Gross automatiquement dès qu'un TAB est connecté
-        ui.postDelayed(() -> {
-            try {
-                if (controller == null) return;
-                pendingStatusBQty = true;
-                try {
-                    if (tabTransportKey != null) {
-                        MediaTransportManager.get(requireContext()).activateExclusive(tabTransportKey, "AUTO_STATUS_B");
-                    }
-                } catch (Exception ignored) {}
-                controller.requestStatus();
-            } catch (Exception e) {
-                pendingStatusBQty = false;
-            }
-        }, 300);
-
         // ✅ One-shot LIVE recale (READY / ticket pending) après attach
         ui.postDelayed(() -> {
             try {

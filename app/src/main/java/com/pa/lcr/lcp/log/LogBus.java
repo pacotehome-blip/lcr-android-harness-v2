@@ -1,4 +1,3 @@
-
 package com.pa.lcr.lcp.log;
 
 import java.text.SimpleDateFormat;
@@ -7,12 +6,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 
 public final class LogBus {
 
-    public enum Src {
-        UI,
-        API,
-        IO_TX,
-        IO_RX
-    }
+    public enum Src { UI, API, IO_TX, IO_RX }
 
     public static final class LogEvent {
         public final long ts;
@@ -27,71 +21,42 @@ public final class LogBus {
         }
     }
 
-    // -------------------------
-    // Global flags
-    // -------------------------
     public static volatile boolean SHOW_UI = true;
     public static volatile boolean SHOW_API = true;
     public static volatile boolean SHOW_IO = false;
     public static volatile boolean SHOW_TS = false;
 
-    // -------------------------
-    // Buffer circulaire
-    // -------------------------
     private static final int MAX_EVENTS = 5000;
     private static final Deque<LogEvent> BUFFER = new ArrayDeque<>(MAX_EVENTS);
 
-    // -------------------------
-    // UI listeners
-    // -------------------------
-    public interface Listener {
-        void onLog(LogEvent e);
-    }
+    public interface Listener { void onLog(LogEvent e); }
 
-    private static final CopyOnWriteArrayList<Listener> LISTENERS =
-            new CopyOnWriteArrayList<>();
+    private static final CopyOnWriteArrayList<Listener> LISTENERS = new CopyOnWriteArrayList<>();
 
-    public static void addListener(Listener l) {
-        if (l != null) LISTENERS.addIfAbsent(l);
-    }
+    public static void addListener(Listener l) { if (l != null) LISTENERS.addIfAbsent(l); }
+    public static void removeListener(Listener l) { LISTENERS.remove(l); }
 
-    public static void removeListener(Listener l) {
-        LISTENERS.remove(l);
-    }
-
-    // -------------------------
-    // Emitters
-    // -------------------------
     public static void ui(int node, String msg) { emit(node, Src.UI, msg); }
     public static void api(int node, String msg) { emit(node, Src.API, msg); }
     public static void ioTx(int node, String msg) { emit(node, Src.IO_TX, msg); }
     public static void ioRx(int node, String msg) { emit(node, Src.IO_RX, msg); }
 
     /**
-     * ✅ IMPORTANT: ne pas appeler les listeners sous lock.
-     * Sinon, un burst de logs (switch USB/BT + IO_TX/IO_RX) peut bloquer l’UI et casser la robustesse.
+     * ✅ IMPORTANT: listeners notifiés hors lock (évite régressions switch USB/BT).
      */
     public static void emit(int node, Src src, String msg) {
         if (msg == null) return;
-
         final LogEvent e;
         synchronized (LogBus.class) {
-            if (BUFFER.size() >= MAX_EVENTS) {
-                BUFFER.removeFirst();
-            }
+            if (BUFFER.size() >= MAX_EVENTS) BUFFER.removeFirst();
             e = new LogEvent(System.currentTimeMillis(), node, src, msg);
             BUFFER.addLast(e);
         }
-
-        // ✅ notifier hors du lock (critique)
         for (Listener l : LISTENERS) {
             try { l.onLog(e); } catch (Exception ignored) {}
         }
     }
 
-    // -------------------------
-    // Snapshot (PAR NODE SEULEMENT)
-    // -------------------------
     public static synchronized List<LogEvent> snapshotForNode(int node, int maxLines) {
         ArrayList<LogEvent> out = new ArrayList<>(Math.max(16, maxLines));
         Iterator<LogEvent> it = BUFFER.descendingIterator();
@@ -103,9 +68,6 @@ public final class LogBus {
         return out;
     }
 
-    // -------------------------
-    // Snapshot GLOBAL (pour MainActivity)
-    // -------------------------
     public static synchronized List<LogEvent> snapshotGlobal(int maxLines) {
         ArrayList<LogEvent> out = new ArrayList<>(Math.max(16, maxLines));
         Iterator<LogEvent> it = BUFFER.descendingIterator();
@@ -125,46 +87,24 @@ public final class LogBus {
         return out;
     }
 
-    // -------------------------
-    // Build text (global + tab)
-    // -------------------------
     public static String buildText(List<LogEvent> events) {
         StringBuilder sb = new StringBuilder(8192);
-        SimpleDateFormat df = SHOW_TS
-                ? new SimpleDateFormat("HH:mm:ss.SSS", Locale.CANADA_FRENCH)
-                : null;
-
+        SimpleDateFormat df = SHOW_TS ? new SimpleDateFormat("HH:mm:ss.SSS", Locale.CANADA_FRENCH) : null;
         for (LogEvent e : events) {
             if (e.src == Src.UI && !SHOW_UI) continue;
             if (e.src == Src.API && !SHOW_API) continue;
             if ((e.src == Src.IO_TX || e.src == Src.IO_RX) && !SHOW_IO) continue;
-
-            if (SHOW_TS && df != null) {
-                sb.append(df.format(new Date(e.ts))).append(" ");
-            }
-
-            // ✅ Node prefix
-            sb.append("[").append(e.node).append("] ");
-
-            // ✅ FIX: éviter "TX TX:" / "RX RX:"
+            if (SHOW_TS && df != null) sb.append(df.format(new Date(e.ts))).append(' ');
+            sb.append('[').append(e.node).append("] ");
             String m = (e.msg == null) ? "" : e.msg;
             boolean msgAlreadyHasTx = m.startsWith("TX:");
             boolean msgAlreadyHasRx = m.startsWith("RX:");
-
             switch (e.src) {
-                case IO_TX:
-                    if (!msgAlreadyHasTx) sb.append("TX ");
-                    break;
-                case IO_RX:
-                    if (!msgAlreadyHasRx) sb.append("RX ");
-                    break;
-                case API:
-                    sb.append("API ");
-                    break;
-                default:
-                    break;
+                case IO_TX: if (!msgAlreadyHasTx) sb.append("TX "); break;
+                case IO_RX: if (!msgAlreadyHasRx) sb.append("RX "); break;
+                case API: sb.append("API "); break;
+                default: break;
             }
-
             sb.append(m).append('\n');
         }
         return sb.toString();
