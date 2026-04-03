@@ -266,30 +266,27 @@ private volatile String tabMediaShort = "—";
         @Override public void onLog(String message) { scheduleLogRefresh(); }
 
         @Override
-        public void onError(String context, Throwable error) {
-            LogBus.api(node, "[ERR][" + context + "] " + (error != null ? error.getMessage() : ""));
-            scheduleLogRefresh();
-        }
+public void onError(String context, Throwable error) {
+ LogBus.api(node, "[ERR][" + context + "] " + (error != null ? error.getMessage() : ""));
+ scheduleLogRefresh();
+ }
 
 
         @Override
-        public void onLiveQty(double net, double gross) {
-            ui.post(() -> {
-                if (!isAdded() || getView() == null) return;
-
-                int d = lastDigits;
-                try { if (controller != null) d = controller.getDisplayDigits(); } catch (Exception ignored) {}
-                if (d < 0) d = 3;
-                if (d > 6) d = 6;
-                lastDigits = d;
-
-                int show = Math.min(6, Math.max(0, d));
-                String fmt = "%." + show + "f";
-
-                if (txtQtyNet != null) txtQtyNet.setText("NET: " + String.format(Locale.ROOT, fmt, net));
-                if (txtQtyGross != null) txtQtyGross.setText("GROSS: " + String.format(Locale.ROOT, fmt, gross));
-            });
-        }
+public void onLiveQty(double net, double gross) {
+ ui.post(() -> {
+ if (!isAdded() || getView() == null) return;
+ int d = lastDigits;
+ try { if (controller != null) d = controller.getDisplayDigits(); } catch (Exception ignored) {}
+ if (d < 0) d = 3;
+ if (d > 6) d = 6;
+ lastDigits = d;
+ int show = Math.min(6, Math.max(0, d));
+ String fmt = "%." + show + "f";
+ if (txtQtyNet != null) txtQtyNet.setText("NET: " + String.format(Locale.ROOT, fmt, net));
+ if (txtQtyGross != null) txtQtyGross.setText("GROSS: " + String.format(Locale.ROOT, fmt, gross));
+ });
+ }
 
 
         @Override
@@ -506,7 +503,39 @@ private volatile String tabMediaShort = "—";
         updateButtons(null);
     }
 
-    private void wireUi() {
+    
+ // =========================
+ // ✅ Reproduit EXACTEMENT le bouton Status (B)
+ // - Active le transport du TAB
+ // - requestStatus()
+ // - puis (200ms) requestLiveSample()
+ // =========================
+ private void runStatusBLikeButton(String reason) {
+ try {
+ if (controller == null) return;
+ try {
+ if (tabTransportKey != null) {
+ MediaTransportManager.get(requireContext()).activateExclusive(tabTransportKey, (reason != null ? reason : "STATUS_B"));
+ }
+ } catch (Exception ignored) {}
+ try {
+ controller.requestStatus();
+ } catch (Exception e) {
+ LogBus.api(node, "Status(B) ERR: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
+ return;
+ }
+ ui.postDelayed(() -> {
+ try {
+ if (tabTransportKey != null) {
+ MediaTransportManager.get(requireContext()).activateExclusive(tabTransportKey, "LIVE_AFTER_B");
+ }
+ } catch (Exception ignored) {}
+ try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
+ }, 200);
+ } catch (Exception ignored) {}
+ }
+
+private void wireUi() {
         if (cbShowLog != null) {
             cbShowLog.setOnCheckedChangeListener((b, checked) -> {
                 if (logPanel != null) logPanel.setVisibility(checked ? View.VISIBLE : View.GONE);
@@ -577,36 +606,14 @@ private volatile String tabMediaShort = "—";
             }, 900);
         });
 
-        // ✅ B = Status + one-shot LIVE recale (READY / ticket pending)
-        if (btnB != null) btnB.setOnClickListener(v -> {
-
-            if (controller == null) {
-                reconnectThisRegister(true);
-                return;
-            }
-
-            // B1: activer le transport du tab avant status
-            try {
-                if (tabTransportKey != null) {
-                    MediaTransportManager.get(requireContext()).activateExclusive(tabTransportKey, "STATUS_B");
-                }
-            } catch (Exception ignored) {}
-
-            try {
-                controller.requestStatus();
-            } catch (Exception e) {
-                LogBus.api(node, "Status(B) ERR: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
-            }
-
-            ui.postDelayed(() -> {
-                try {
-                    if (tabTransportKey != null) {
-                        MediaTransportManager.get(requireContext()).activateExclusive(tabTransportKey, "LIVE_AFTER_B");
-                    }
-                } catch (Exception ignored) {}
-                try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
-            }, 200);
-        });
+         // ✅ B = Status + one-shot LIVE recale (READY / ticket pending)
+ if (btnB != null) btnB.setOnClickListener(v -> {
+ if (controller == null) {
+ reconnectThisRegister(true);
+ return;
+ }
+ runStatusBLikeButton("STATUS_B");
+ });
 
         if (btnC != null) {
             btnC.setOnClickListener(v -> {
@@ -806,13 +813,8 @@ private void attemptAttachIfPossible(boolean verboseLog) {
 
 
 
-        // ✅ One-shot LIVE recale (READY / ticket pending) après attach
-        ui.postDelayed(() -> {
-            try {
-                if (tabTransportKey != null) MediaTransportManager.get(requireContext()).activateExclusive(tabTransportKey, "LIVE_ONE_SHOT");
-            } catch (Exception ignored) {}
-            try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
-        }, 200);
+        // ✅ AUTO après création du TAB: exécuter Status(B) comme le bouton
+ ui.postDelayed(() -> runStatusBLikeButton("AUTO_AFTER_TAB_CREATE"), 250);
 
         if (userInitiated) LogBus.api(node, "Connect TAB: 1 - UI attached");
         scheduleLogRefresh();
