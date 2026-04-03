@@ -1,3 +1,4 @@
+
 package com.pa.lcr.lcp.log;
 
 import java.text.SimpleDateFormat;
@@ -27,7 +28,7 @@ public final class LogBus {
     }
 
     // -------------------------
-    // Global flags (SOURCE UNIQUE)
+    // Global flags
     // -------------------------
     public static volatile boolean SHOW_UI = true;
     public static volatile boolean SHOW_API = true;
@@ -61,21 +62,10 @@ public final class LogBus {
     // -------------------------
     // Emitters
     // -------------------------
-    public static void ui(int node, String msg) {
-        emit(node, Src.UI, msg);
-    }
-
-    public static void api(int node, String msg) {
-        emit(node, Src.API, msg);
-    }
-
-    public static void ioTx(int node, String msg) {
-        emit(node, Src.IO_TX, msg);
-    }
-
-    public static void ioRx(int node, String msg) {
-        emit(node, Src.IO_RX, msg);
-    }
+    public static void ui(int node, String msg) { emit(node, Src.UI, msg); }
+    public static void api(int node, String msg) { emit(node, Src.API, msg); }
+    public static void ioTx(int node, String msg) { emit(node, Src.IO_TX, msg); }
+    public static void ioRx(int node, String msg) { emit(node, Src.IO_RX, msg); }
 
     /**
      * ✅ IMPORTANT: ne pas appeler les listeners sous lock.
@@ -107,9 +97,7 @@ public final class LogBus {
         Iterator<LogEvent> it = BUFFER.descendingIterator();
         while (it.hasNext() && out.size() < maxLines) {
             LogEvent e = it.next();
-            if (e.node == node) {
-                out.add(e);
-            }
+            if (e.node == node) out.add(e);
         }
         Collections.reverse(out);
         return out;
@@ -118,33 +106,27 @@ public final class LogBus {
     // -------------------------
     // Snapshot GLOBAL (pour MainActivity)
     // -------------------------
-    /** Snapshot global des derniers événements (maxLines), sans filtre de temps. */
     public static synchronized List<LogEvent> snapshotGlobal(int maxLines) {
         ArrayList<LogEvent> out = new ArrayList<>(Math.max(16, maxLines));
         Iterator<LogEvent> it = BUFFER.descendingIterator();
-        while (it.hasNext() && out.size() < maxLines) {
-            out.add(it.next());
-        }
+        while (it.hasNext() && out.size() < maxLines) out.add(it.next());
         Collections.reverse(out);
         return out;
     }
 
-    /** Snapshot global des derniers événements (maxLines) filtrés par timestamp >= sinceMs. */
     public static synchronized List<LogEvent> snapshotGlobal(int maxLines, long sinceMs) {
         ArrayList<LogEvent> out = new ArrayList<>(Math.max(16, maxLines));
         Iterator<LogEvent> it = BUFFER.descendingIterator();
         while (it.hasNext() && out.size() < maxLines) {
             LogEvent e = it.next();
-            if (e.ts >= sinceMs) {
-                out.add(e);
-            }
+            if (e.ts >= sinceMs) out.add(e);
         }
         Collections.reverse(out);
         return out;
     }
 
     // -------------------------
-    // Build text UNIQUE (global + tab)
+    // Build text (global + tab)
     // -------------------------
     public static String buildText(List<LogEvent> events) {
         StringBuilder sb = new StringBuilder(8192);
@@ -161,8 +143,8 @@ public final class LogBus {
                 sb.append(df.format(new Date(e.ts))).append(" ");
             }
 
-            // ✅ Node prefix (log général + tab)
-            sb.append('[').append(e.node).append("] ");
+            // ✅ Node prefix
+            sb.append("[").append(e.node).append("] ");
 
             // ✅ FIX: éviter "TX TX:" / "RX RX:"
             String m = (e.msg == null) ? "" : e.msg;
