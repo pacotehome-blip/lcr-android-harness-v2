@@ -266,14 +266,12 @@ private volatile String tabMediaShort = "—";
         @Override public void onLog(String message) { scheduleLogRefresh(); }
 
         @Override
-        @Override
         public void onError(String context, Throwable error) {
             LogBus.api(node, "[ERR][" + context + "] " + (error != null ? error.getMessage() : ""));
             scheduleLogRefresh();
         }
 
 
-        @Override
         @Override
         public void onLiveQty(double net, double gross) {
             ui.post(() -> {
@@ -581,7 +579,7 @@ private volatile String tabMediaShort = "—";
 
         // ✅ B = Status + one-shot LIVE recale (READY / ticket pending)
         if (btnB != null) btnB.setOnClickListener(v -> {
-            
+
             if (controller == null) {
                 reconnectThisRegister(true);
                 return;
