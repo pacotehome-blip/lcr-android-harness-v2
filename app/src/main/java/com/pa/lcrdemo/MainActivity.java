@@ -176,6 +176,7 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
         final int node;
         final int from;
         final String serialId;
+        String qtySuffix; // " | N=.. G=.."
 
         TabSpec(String tabKey, String mediaShort, String transportKey, int node, int from, String serialId) {
             this.tabKey = tabKey;
@@ -294,7 +295,27 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
                 if (p != null) onUsbPortReady(p);
             } else if (UsbReceiver.ACTION_USB_DETACHED.equals(a)) {
                 onUsbDetached();
-            }
+            } else if (ACTION_USB_PERMISSION.equals(a)) {
+            // ✅ Permission USB accordée/refusée
+            try {
+                boolean granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
+                if (!granted) {
+                    logUi(null, "Permission USB refusée");
+                    return;
+                }
+                logUi(null, "Permission USB accordée");
+                // IMPORTANT: le replug crée souvent un port stale -> reset puis rescan + open
+                resetUsbState("PERMISSION_GRANTED");
+                scanUsb();
+                openSelectedUsb();
+            } catch (Exception ignored) {}
+        } else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(a)) {
+            onUsbDetached();
+            resetUsbState("SYS_DETACHED");
+        } else if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(a)) {
+            // rescan seulement, l'ouverture se fait via Open/Ping
+            try { scanUsb(); } catch (Exception ignored) {}
+        }
         }
     };
 
@@ -334,6 +355,9 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
         IntentFilter f = new IntentFilter();
         f.addAction(UsbReceiver.ACTION_USB_READY);
         f.addAction(UsbReceiver.ACTION_USB_DETACHED);
+        f.addAction(ACTION_USB_PERMISSION);
+        f.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
+        f.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
         registerReceiver(usbUiReceiver, f);
 
         LogBus.addListener(mainLogListener);
@@ -656,7 +680,7 @@ private void setupTabsTop() {
         String mediaLabel = ready ? media : (media + "(OFF)");
 
         // ✅ Format: BT(OFF) - 123456 - 250
-        updateRegisterTabLabel(tabKey, tabLabelOf(mediaLabel, spec.node, spec.serialId));
+        updateRegisterTabLabel(tabKey, tabLabelOf(mediaLabel, spec.node, spec.serialId) + (spec.qtySuffix != null ? spec.qtySuffix : ""));
 
         try {
             Fragment f = getSupportFragmentManager().findFragmentByTag("regtab_" + tabKey);
@@ -1218,6 +1242,7 @@ private void setupTabsTop() {
     private static final class NodeScanItem {
         final int lcrnode;
         final String serialId;
+        String qtySuffix; // " | N=.. G=.."
         final String ticketNo;
         final boolean ticketPending;
         final boolean deliveryActive;
@@ -1254,7 +1279,18 @@ private void setupTabsTop() {
     // =========================
     // USB
     // =========================
-    private void scanUsb() {
+    
+    // =========================
+    // ✅ USB reset (detach/replug)
+    // =========================
+    private void resetUsbState(String reason) {
+        try { logUi(null, "USB reset: " + (reason != null ? reason : "-")); } catch (Exception ignored) {}
+        try { if (usbPort != null) usbPort.close(); } catch (Exception ignored) {}
+        usbPort = null;
+        try { UsbSession.clear(); } catch (Exception ignored) {}
+    }
+
+private void scanUsb() {
         usbDevices.clear();
         usbDevices.addAll(usbManager.getDeviceList().values());
         logUi(null, "Scan USB: " + usbDevices.size() + " périphérique(s)");
@@ -1274,6 +1310,18 @@ private void setupTabsTop() {
 
     private void openSelectedUsb() {
         logMedia1("USB Open/Ping");
+
+        // ✅ Replug: reset du port stale avant toute logique
+        try {
+            if (UsbSession.getPort() == null && usbPort != null) {
+                try { usbPort.close(); } catch (Exception ignored) {}
+                usbPort = null;
+            }
+        } catch (Exception ignored) {}
+
+        // ✅ Si liste USB vide, rescanner
+        try { if (usbDevices != null && usbDevices.isEmpty()) scanUsb(); } catch (Exception ignored) {}
+
 
         UsbSerialPort sessionPort = UsbSession.getPort();
         if (sessionPort != null) {
@@ -1784,7 +1832,9 @@ private void setupTabsTop() {
     // =========================
     // ✅ TAB label Net/Gross
     // =========================
-
+    private static String formatQtyLabel(double net, double gross) {
+        return String.format(java.util.Locale.ROOT, " | N=%.2f G=%.2f", net, gross);
+    }
 
 
 private boolean ensureBtConnectPermission() {
@@ -2306,9 +2356,91 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
     // - SUCCÈS: afficher N/G sur le tab
     // - ÉCHEC : effacer N/G du tab
     // =========================
+    public void reportTabQuantitiesFromStatusB(int node, String serialId, String transportKey, double net, double gross) {
+        try {
+            String serial = safeSerial(serialId);
+            TabSpec spec = null;
 
+            // 1) match exact (media,node,serial)
+            if (!serial.isEmpty()) {
+                String media = mediaShortFromTransportKey(transportKey);
+                String key = tabKeyOf(media, node, serial);
+                spec = tabsByKey.get(key);
+            }
 
+            // 2) fallback (node,serial)
+            if (spec == null && !serial.isEmpty()) {
+                for (TabSpec s : tabsByKey.values()) {
+                    if (s == null) continue;
+                    if ((s.node & 0xFF) != (node & 0xFF)) continue;
+                    if (!serial.equalsIgnoreCase(safeSerial(s.serialId))) continue;
+                    spec = s;
+                    break;
+                }
+            }
 
+            // 3) fallback (node,transportKey)
+            if (spec == null) {
+                String tk = (transportKey != null ? transportKey.trim() : "");
+                if (!tk.isEmpty()) {
+                    for (TabSpec s : tabsByKey.values()) {
+                        if (s == null) continue;
+                        if ((s.node & 0xFF) != (node & 0xFF)) continue;
+                        String stk = (s.transportKey != null ? s.transportKey.trim() : "");
+                        if (tk.equalsIgnoreCase(stk)) {
+                            spec = s;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (spec == null) return;
+            spec.qtySuffix = formatQtyLabel(net, gross);
+            String base = tabLabelOf(spec.mediaShort, spec.node, spec.serialId);
+            updateRegisterTabLabel(spec.tabKey, base + spec.qtySuffix);
+        } catch (Exception ignored) {}
+    }
+
+    public void clearTabQuantitiesFromStatusB(int node, String serialId, String transportKey) {
+        try {
+            String serial = safeSerial(serialId);
+            TabSpec spec = null;
+
+            if (!serial.isEmpty()) {
+                String media = mediaShortFromTransportKey(transportKey);
+                String key = tabKeyOf(media, node, serial);
+                spec = tabsByKey.get(key);
+            }
+
+            if (spec == null && !serial.isEmpty()) {
+                for (TabSpec s : tabsByKey.values()) {
+                    if (s == null) continue;
+                    if ((s.node & 0xFF) != (node & 0xFF)) continue;
+                    if (!serial.equalsIgnoreCase(safeSerial(s.serialId))) continue;
+                    spec = s;
+                    break;
+                }
+            }
+
+            if (spec == null) {
+                String tk = (transportKey != null ? transportKey.trim() : "");
+                if (!tk.isEmpty()) {
+                    for (TabSpec s : tabsByKey.values()) {
+                        if (s == null) continue;
+                        if ((s.node & 0xFF) != (node & 0xFF)) continue;
+                        String stk = (s.transportKey != null ? s.transportKey.trim() : "");
+                        if (tk.equalsIgnoreCase(stk)) { spec = s; break; }
+                    }
+                }
+            }
+
+            if (spec == null) return;
+            spec.qtySuffix = null;
+            String base = tabLabelOf(spec.mediaShort, spec.node, spec.serialId);
+            updateRegisterTabLabel(spec.tabKey, base);
+        } catch (Exception ignored) {}
+    }
 
 private void ensureActiveTransport(String transportKey, String reason) {
         try {
