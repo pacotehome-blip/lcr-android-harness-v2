@@ -295,7 +295,21 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
                 if (p != null) onUsbPortReady(p);
             } else if (UsbReceiver.ACTION_USB_DETACHED.equals(a)) {
                 onUsbDetached();
-            }
+            } else if (ACTION_USB_PERMISSION.equals(a)) {
+            // ✅ Permission USB accordée/refusée
+            try {
+                UsbDevice dev = (UsbDevice) intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+                boolean granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
+                if (!granted) {
+                    logUi(null, "Permission USB refusée");
+                    return;
+                }
+                logUi(null, "Permission USB accordée");
+                // refresh device list + attempt open
+                scanUsb();
+                try { openSelectedUsb(); } catch (Exception ignored) {}
+            } catch (Exception ignored) {}
+        }
         }
     };
 
@@ -335,6 +349,7 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
         IntentFilter f = new IntentFilter();
         f.addAction(UsbReceiver.ACTION_USB_READY);
         f.addAction(UsbReceiver.ACTION_USB_DETACHED);
+        f.addAction(ACTION_USB_PERMISSION);
         registerReceiver(usbUiReceiver, f);
 
         LogBus.addListener(mainLogListener);
@@ -1277,6 +1292,19 @@ private void setupTabsTop() {
     private void openSelectedUsb() {
         logMedia1("USB Open/Ping");
 
+        // ✅ Robustesse: si aucun device scanné, rescanner automatiquement
+        try { if (usbDevices != null && usbDevices.isEmpty()) scanUsb(); } catch (Exception ignored) {}
+
+        // ✅ Robustesse: après débranchement/rebranchement, le port cache peut être stale
+        try {
+            UsbSerialPort sp = UsbSession.getPort();
+            if (sp == null && usbPort != null) {
+                try { usbPort.close(); } catch (Exception ignored) {}
+                usbPort = null;
+            }
+        } catch (Exception ignored) {}
+
+
         UsbSerialPort sessionPort = UsbSession.getPort();
         if (sessionPort != null) {
             if (usbPort == null) usbPort = sessionPort;
@@ -1294,6 +1322,12 @@ private void setupTabsTop() {
         }
 
         UsbDevice dev = getSelectedUsbDeviceSafe();
+        // ✅ Auto-select: si un seul device est présent, le sélectionner
+        if (dev == null && usbDevices != null && !usbDevices.isEmpty()) {
+            try { if (spnUsbDevices != null) spnUsbDevices.setSelection(0); } catch (Exception ignored) {}
+            try { dev = usbDevices.get(0); } catch (Exception ignored) {}
+        }
+
         if (dev == null) {
             logUi(null, "Aucun périphérique USB sélectionné");
             logMedia1("USB Open/Ping: ÉCHEC");
