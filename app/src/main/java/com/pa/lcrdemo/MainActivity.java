@@ -1254,19 +1254,7 @@ private void setupTabsTop() {
     // =========================
     // USB
     // =========================
-    
-
-    // =========================
-    // ✅ USB reset (stale port / detach)
-    // =========================
-    private void resetUsbState(String reason) {
-        try { logUi(null, "USB reset: " + (reason != null ? reason : "-")); } catch (Exception ignored) {}
-        try { if (usbPort != null) usbPort.close(); } catch (Exception ignored) {}
-        usbPort = null;
-        try { UsbSession.clear(); } catch (Exception ignored) {}
-        try { if (mediaTransportManager != null) mediaTransportManager.onUsbDetached("USB reset: " + reason); } catch (Exception ignored) {}
-    }
-private void scanUsb() {
+    private void scanUsb() {
         usbDevices.clear();
         usbDevices.addAll(usbManager.getDeviceList().values());
         logUi(null, "Scan USB: " + usbDevices.size() + " périphérique(s)");
@@ -1287,18 +1275,6 @@ private void scanUsb() {
     private void openSelectedUsb() {
         logMedia1("USB Open/Ping");
 
-        // ✅ Robustesse: si aucun device scanné, rescanner automatiquement
-        try { if (usbDevices != null && usbDevices.isEmpty()) scanUsb(); } catch (Exception ignored) {}
-
-        // ✅ Robustesse: après débranchement/rebranchement, le port cache peut être stale
-        try {
-            UsbSerialPort sp = UsbSession.getPort();
-            if (sp == null && usbPort != null) {
-                try { usbPort.close(); } catch (Exception ignored) {}
-                usbPort = null;
-            }
-        } catch (Exception ignored) {}
-
         UsbSerialPort sessionPort = UsbSession.getPort();
         if (sessionPort != null) {
             if (usbPort == null) usbPort = sessionPort;
@@ -1316,12 +1292,6 @@ private void scanUsb() {
         }
 
         UsbDevice dev = getSelectedUsbDeviceSafe();
-
-        // ✅ Auto-select: si un seul device est présent, le sélectionner
-        if (dev == null && usbDevices != null && !usbDevices.isEmpty()) {
-            try { if (spnUsbDevices != null) spnUsbDevices.setSelection(0); } catch (Exception ignored) {}
-            try { dev = usbDevices.get(0); } catch (Exception ignored) {}
-        }
         if (dev == null) {
             logUi(null, "Aucun périphérique USB sélectionné");
             logMedia1("USB Open/Ping: ÉCHEC");
@@ -1364,7 +1334,6 @@ private void scanUsb() {
             logUi(null, "USB prêt");
             logMedia1("USB Open/Ping: OK");
         } catch (Exception e) {
-            resetUsbState("openSelectedUsb fail");
             logErr(null, "Open USB ERR: " + safeMsg(e));
             try { if (usbPort != null) usbPort.close(); } catch (Exception ignored) {}
             usbPort = null;

@@ -267,14 +267,9 @@ private volatile String tabMediaShort = "—";
 
         @Override
         public void onError(String context, Throwable error) {
-            // ✅ Si Status(B) échoue, effacer Net/Gross du label du TAB
-            try {
-                    String c = (context != null) ? context.toLowerCase(java.util.Locale.ROOT) : "";
-                    if (c.contains("status")) {
-                        if (isAdded() && getActivity() instanceof MainActivity) {
-                            String serial = (serialFromArgs != null ? serialFromArgs : "");
-                            String tk = (tabTransportKey != null ? tabTransportKey : transportFromArgs);
-                        }
+            LogBus.api(node, "[ERR][" + context + "] " + (error != null ? error.getMessage() : ""));
+            scheduleLogRefresh();
+        }
                     }
                 }
             } catch (Exception ignored) {}
@@ -285,15 +280,6 @@ private volatile String tabMediaShort = "—";
 
         @Override
         public void onLiveQty(double net, double gross) {
-            // ✅ Si Status(B) (auto ou manuel) a été demandé, mettre à jour le label du TAB
-                try {
-                    if (isAdded() && getActivity() instanceof MainActivity) {
-                        String serial = (serialFromArgs != null ? serialFromArgs : "");
-                        String tk = (tabTransportKey != null ? tabTransportKey : transportFromArgs);
-                    }
-                } catch (Exception ignored) {}
-            }
-
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
 
@@ -598,7 +584,7 @@ private volatile String tabMediaShort = "—";
 
         // ✅ B = Status + one-shot LIVE recale (READY / ticket pending)
         if (btnB != null) btnB.setOnClickListener(v -> {
-
+            
             if (controller == null) {
                 reconnectThisRegister(true);
                 return;
@@ -821,7 +807,7 @@ private void attemptAttachIfPossible(boolean verboseLog) {
 
         syncUiFromController();
         validateHeaderAsync();
-        // ✅ One-shot LIVE recale (READY / ticket pending) après attach
+// ✅ One-shot LIVE recale (READY / ticket pending) après attach
         ui.postDelayed(() -> {
             try {
                 if (tabTransportKey != null) MediaTransportManager.get(requireContext()).activateExclusive(tabTransportKey, "LIVE_ONE_SHOT");
