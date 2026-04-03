@@ -123,8 +123,6 @@ public class RegisterTabFragment extends Fragment {
     // Media status for this TAB (OFF/READY) + pendingReconnect
     private volatile boolean tabMediaReady = true;
     private volatile boolean pendingReconnect = false;
-    
-    // ✅ AUTO Status(B): afficher Net/Gross dans le label du TAB
 private volatile String tabMediaShort = "—";
 
     // Args (tab): serial + transport
@@ -268,29 +266,16 @@ private volatile String tabMediaShort = "—";
         @Override public void onLog(String message) { scheduleLogRefresh(); }
 
         @Override
+        @Override
         public void onError(String context, Throwable error) {
             LogBus.api(node, "[ERR][" + context + "] " + (error != null ? error.getMessage() : ""));
             scheduleLogRefresh();
         }
-                    }
-                }
-            } catch (Exception ignored) {}
 
-            LogBus.api(node, "[ERR][" + context + "] " + (error != null ? error.getMessage() : ""));
-            scheduleLogRefresh();
-        }
 
         @Override
+        @Override
         public void onLiveQty(double net, double gross) {
-            // ✅ Si Status(B) (auto ou manuel) a été demandé, mettre à jour le label du TAB
-                try {
-                    if (isAdded() && getActivity() instanceof MainActivity) {
-                        String serial = (serialFromArgs != null ? serialFromArgs : "");
-                        String tk = (tabTransportKey != null ? tabTransportKey : transportFromArgs);
-                    }
-                } catch (Exception ignored) {}
-            }
-
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
 
@@ -307,6 +292,7 @@ private volatile String tabMediaShort = "—";
                 if (txtQtyGross != null) txtQtyGross.setText("GROSS: " + String.format(Locale.ROOT, fmt, gross));
             });
         }
+
 
         @Override
         public void onLiveStatus(String liveText) {
@@ -595,7 +581,7 @@ private volatile String tabMediaShort = "—";
 
         // ✅ B = Status + one-shot LIVE recale (READY / ticket pending)
         if (btnB != null) btnB.setOnClickListener(v -> {
-
+            
             if (controller == null) {
                 reconnectThisRegister(true);
                 return;
@@ -821,17 +807,6 @@ private void attemptAttachIfPossible(boolean verboseLog) {
 
 
 
-        ui.postDelayed(() -> {
-            try {
-                if (controller == null) return;
-                try {
-                    if (tabTransportKey != null) {
-                    }
-                } catch (Exception ignored) {}
-                controller.requestStatus();
-            } catch (Exception e) {
-            }
-        }, 300);
 
         // ✅ One-shot LIVE recale (READY / ticket pending) après attach
         ui.postDelayed(() -> {
