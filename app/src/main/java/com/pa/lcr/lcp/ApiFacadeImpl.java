@@ -1,12 +1,9 @@
 
 package com.pa.lcr.lcp;
 
-import org.json.JSONObject;
-
 /**
  * Implémentation concrète de l'API.
- * Étape 2 : sélection automatique du média (USB prioritaire, fallback BT),
- * alignée STRICTEMENT avec les signatures existantes.
+ * Alignée strictement avec les signatures réelles du projet.
  */
 public final class ApiFacadeImpl implements ApiFacade {
 
@@ -16,11 +13,11 @@ public final class ApiFacadeImpl implements ApiFacade {
     public ApiFacadeImpl(RegisterSessionManager sessionMgr,
                           DeliveryController delivery) {
         this.sessionMgr = sessionMgr;
-        this.delivery  = delivery;
+        this.delivery   = delivery;
     }
 
     // =========================================================
-    // LCP CONNECT (media-aware, auto USB -> BT)
+    // LCP CONNECT (media auto via couche existante)
     // =========================================================
     @Override
     public ApiResult api_connectLcp(Integer lcrnode_dec,
@@ -28,8 +25,6 @@ public final class ApiFacadeImpl implements ApiFacade {
                                     String media,
                                     String bt_mac) {
         try {
-            // ⚠️ La logique de sélection USB/BT est DEJA intégrée
-            // dans la couche Session / Transport
             sessionMgr.resolveOrCreateForNode(
                 lcrnode_dec != null ? lcrnode_dec : 250,
                 from_dec    != null ? from_dec    : 255
@@ -61,7 +56,13 @@ public final class ApiFacadeImpl implements ApiFacade {
                                         String media,
                                         String bt_mac) {
         try {
-            return delivery.alignOrRecover();
+            delivery.alignOrRecover();   // VOID
+            return ApiResult.okLevel(
+                "Align A: 1 - OK",
+                "DELIVERY",
+                "api_deliveryAlignA"
+            );
+
         } catch (Exception e) {
             return ApiResult.failLevel(
                 "Align A: 0 - FAILED",
@@ -74,7 +75,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // DELIVERY C (Start delivery)
+    // DELIVERY C (Start)
     // =========================================================
     @Override
     public ApiResult api_deliveryStartC(Integer lcrnode_dec,
@@ -84,13 +85,42 @@ public final class ApiFacadeImpl implements ApiFacade {
                                         String media,
                                         String bt_mac) {
         try {
-            return delivery.startDelivery(product1to16, presetNet);
+            delivery.startDelivery(product1to16, presetNet);   // VOID
+            return ApiResult.okLevel(
+                "Start C: 1 - OK",
+                "DELIVERY",
+                "api_deliveryStartC"
+            );
+
         } catch (Exception e) {
             return ApiResult.failLevel(
                 "Start C: 0 - FAILED",
                 "START_FAILED",
                 "DELIVERY",
                 "api_deliveryStartC",
+                e.getMessage()
+            );
+        }
+    }
+
+    // =========================================================
+    // DELIVERY TERMINATE (legacy obligatoire)
+    // =========================================================
+    @Override
+    public ApiResult api_deliveryTerminate(String jobId) {
+        try {
+            delivery.terminate(jobId);
+            return ApiResult.okLevel(
+                "Terminate: 1 - OK",
+                "DELIVERY",
+                "api_deliveryTerminate"
+            );
+        } catch (Exception e) {
+            return ApiResult.failLevel(
+                "Terminate: 0 - FAILED",
+                "TERMINATE_FAILED",
+                "DELIVERY",
+                "api_deliveryTerminate",
                 e.getMessage()
             );
         }
@@ -108,7 +138,6 @@ public final class ApiFacadeImpl implements ApiFacade {
             String expected_compartment) {
 
         try {
-            // Délégation simple pour l’instant
             return delivery.api_registerValidate(
                 numero_livraison,
                 expected_lcrnode_dec,
