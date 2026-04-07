@@ -3,8 +3,8 @@ package com.pa.lcr.lcp;
 
 /**
  * Implémentation concrète de l'API.
- * Alignée strictement avec les signatures réelles de ApiFacade.
- * Compatible terrain (USB / BT / replug).
+ * Strictement alignée avec toutes les signatures de ApiFacade.
+ * Build-proof.
  */
 public final class ApiFacadeImpl implements ApiFacade {
 
@@ -18,7 +18,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // LCP CONNECT (media auto via la couche existante)
+    // LCP CONNECT
     // =========================================================
     @Override
     public ApiResult api_connectLcp(Integer lcrnode_dec,
@@ -49,7 +49,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // DELIVERY A (Status / Align / Recover)
+    // DELIVERY A (Status / Align)
     // =========================================================
     @Override
     public ApiResult api_deliveryAlignA(Integer lcrnode_dec,
@@ -57,7 +57,7 @@ public final class ApiFacadeImpl implements ApiFacade {
                                         String media,
                                         String bt_mac) {
         try {
-            delivery.alignOrRecover(); // void
+            delivery.alignOrRecover();
             return ApiResult.okLevel(
                 "Align A: 1 - OK",
                 "DELIVERY",
@@ -76,7 +76,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // DELIVERY C (Start delivery)
+    // DELIVERY C (Start)
     // =========================================================
     @Override
     public ApiResult api_deliveryStartC(Integer lcrnode_dec,
@@ -86,7 +86,7 @@ public final class ApiFacadeImpl implements ApiFacade {
                                         String media,
                                         String bt_mac) {
         try {
-            delivery.startDelivery(product1to16, presetNet); // void
+            delivery.startDelivery(product1to16, presetNet);
             return ApiResult.okLevel(
                 "Start C: 1 - OK",
                 "DELIVERY",
@@ -105,13 +105,12 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // DELIVERY CONTINUE (legacy abstrait)
+    // DELIVERY CONTINUE (legacy)
     // =========================================================
     @Override
     public ApiResult api_deliveryContinue(String jobId) {
-        // Géré par /v1/delivery/job/continue (niveau job, pas DeliveryController)
         return ApiResult.failLevel(
-            "Continue: not handled by DeliveryController",
+            "Continue: handled by job endpoint",
             "CONTINUE_NOT_SUPPORTED",
             "DELIVERY",
             "api_deliveryContinue"
@@ -119,13 +118,12 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // DELIVERY TERMINATE (legacy abstrait)
+    // DELIVERY TERMINATE (legacy)
     // =========================================================
     @Override
     public ApiResult api_deliveryTerminate(String jobId) {
-        // Géré par /v1/delivery/job/terminate (niveau job)
         return ApiResult.failLevel(
-            "Terminate: not handled by DeliveryController",
+            "Terminate: handled by job endpoint",
             "TERMINATE_NOT_SUPPORTED",
             "DELIVERY",
             "api_deliveryTerminate"
@@ -133,16 +131,29 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // DELIVERY ONE-SHOT START (legacy abstrait)
+    // DELIVERY JOB GET (legacy)
+    // =========================================================
+    @Override
+    public ApiResult api_deliveryJobGet(String jobId) {
+        // Géré par GET /v1/delivery/job/{id}
+        return ApiResult.failLevel(
+            "JobGet: handled by job endpoint",
+            "JOB_GET_NOT_SUPPORTED",
+            "DELIVERY",
+            "api_deliveryJobGet"
+        );
+    }
+
+    // =========================================================
+    // DELIVERY ONE‑SHOT START (legacy)
     // =========================================================
     @Override
     public ApiResult api_deliveryOneShotStart(String numero_livraison,
                                               int product1to16,
                                               double presetNetL,
                                               String compartment) {
-        // Géré par /v1/delivery/oneshot/start (niveau API/job)
         return ApiResult.failLevel(
-            "OneShotStart: not handled by DeliveryController",
+            "OneShotStart: handled by oneshot endpoint",
             "ONESHOT_NOT_SUPPORTED",
             "DELIVERY",
             "api_deliveryOneShotStart"
@@ -150,7 +161,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // REGISTER VALIDATE (legacy abstrait)
+    // REGISTER VALIDATE (legacy)
     // =========================================================
     @Override
     public ApiResult api_registerValidate(String numero_livraison,
