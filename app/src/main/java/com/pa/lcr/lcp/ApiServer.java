@@ -191,8 +191,6 @@ public final class ApiServer {
 
     // =========================
     // ✅ Option B: media gating helper (connectivité seulement)
-    // - Si body contient "media", on vérifie connectivité via api_mediaCheck()
-    // - On NE bloque plus "bt" (plus de "USB only")
     // =========================
     private ApiResult gateMediaIfProvided(JSONObject body) {
         if (body == null) return null;
@@ -203,7 +201,7 @@ public final class ApiServer {
         String btMac = body.optString("bt_mac", body.optString("btMac", "")).trim();
 
         ApiResult check = facade.api_mediaCheck(media, btMac);
-        if (check != null && check.code == 0) { // FAIL => stop immédiat
+        if (check != null && check.code == 0) {
             return check;
         }
         return null;
@@ -237,7 +235,6 @@ public final class ApiServer {
             Integer node = req.queryInt("lcrnode_dec");
             long sinceSeq = req.queryLong("since_seq", 0L);
             long waitMs = req.queryLong("wait_ms", 25_000L);
-            // ✅ SAFE: clamp tick/wait to avoid starving other endpoints (JobGet)
             if (waitMs < 0) waitMs = 0;
             if (waitMs > 2000L) waitMs = 2000L;
             return facade.api_tickWait(node, sinceSeq, (int) waitMs);
@@ -318,29 +315,29 @@ public final class ApiServer {
             return facade.api_dbDump();
         }
 
-// Delivery A (Align/Recover) (media-aware)
-if ("POST".equals(req.method) && "/v1/delivery/A".equals(req.path)) {
-    JSONObject body = req.jsonBody();
-    ApiResult gate = gateMediaIfProvided(body);
-    if (gate != null) return gate;
-    Integer node = parseNodeDec(body);
-    Integer from = parseFromDec(body);
-    String media = body.optString("media", "usb");
-    String btMac = body.optString("bt_mac", body.optString("btMac", "")).trim();
-    return facade.api_deliveryAlignA(node, from, media, btMac);
-}
+        // Delivery A (Align/Recover) (media-aware)
+        if ("POST".equals(req.method) && "/v1/delivery/A".equals(req.path)) {
+            JSONObject body = req.jsonBody();
+            ApiResult gate = gateMediaIfProvided(body);
+            if (gate != null) return gate;
+            Integer node = parseNodeDec(body);
+            Integer from = parseFromDec(body);
+            String media = body.optString("media", "usb");
+            String btMac = body.optString("bt_mac", body.optString("btMac", "")).trim();
+            return facade.api_deliveryAlignA(node, from, media, btMac);
+        }
 
-// Delivery A alias (Align/Recover) (media-aware)
-if ("POST".equals(req.method) && "/v1/delivery/alignA".equals(req.path)) {
-    JSONObject body = req.jsonBody();
-    ApiResult gate = gateMediaIfProvided(body);
-    if (gate != null) return gate;
-    Integer node = parseNodeDec(body);
-    Integer from = parseFromDec(body);
-    String media = body.optString("media", "usb");
-    String btMac = body.optString("bt_mac", body.optString("btMac", "")).trim();
-    return facade.api_deliveryAlignA(node, from, media, btMac);
-}
+        // Delivery A alias (Align/Recover) (media-aware)
+        if ("POST".equals(req.method) && "/v1/delivery/alignA".equals(req.path)) {
+            JSONObject body = req.jsonBody();
+            ApiResult gate = gateMediaIfProvided(body);
+            if (gate != null) return gate;
+            Integer node = parseNodeDec(body);
+            Integer from = parseFromDec(body);
+            String media = body.optString("media", "usb");
+            String btMac = body.optString("bt_mac", body.optString("btMac", "")).trim();
+            return facade.api_deliveryAlignA(node, from, media, btMac);
+        }
 
         // Delivery C (media-aware)
         if ("POST".equals(req.method) && "/v1/delivery/C".equals(req.path)) {
@@ -382,7 +379,7 @@ if ("POST".equals(req.method) && "/v1/delivery/alignA".equals(req.path)) {
             return facade.api_deliveryOneShotStart(node, from, numero, product, preset, compartment, media, btMac);
         }
 
-        // Continue (media-aware)
+        // Continue (JOB-level) ✅ FIX
         if ("POST".equals(req.method) && "/v1/delivery/job/continue".equals(req.path)) {
             JSONObject body = req.jsonBody();
             ApiResult gate = gateMediaIfProvided(body);
@@ -392,13 +389,11 @@ if ("POST".equals(req.method) && "/v1/delivery/alignA".equals(req.path)) {
             if (jobId.isEmpty()) return ApiResult.fail("Continue: 0 - Job invalide", "JOB_ID_EMPTY");
 
             Integer node = parseNodeDec(body);
-            String media = body.optString("media", "usb");
-            String btMac = body.optString("bt_mac", body.optString("btMac", "")).trim();
 
-            return facade.api_deliveryContinue(jobId, node, media, btMac);
+            return facade.api_deliveryContinue(jobId, node); // ✅ FIX
         }
 
-        // Terminate (media-aware)
+        // Terminate (JOB-level) ✅ FIX
         if ("POST".equals(req.method) && "/v1/delivery/job/terminate".equals(req.path)) {
             JSONObject body = req.jsonBody();
             ApiResult gate = gateMediaIfProvided(body);
@@ -408,10 +403,8 @@ if ("POST".equals(req.method) && "/v1/delivery/alignA".equals(req.path)) {
             if (jobId.isEmpty()) return ApiResult.fail("Terminate: 0 - Job invalide", "JOB_ID_EMPTY");
 
             Integer node = parseNodeDec(body);
-            String media = body.optString("media", "usb");
-            String btMac = body.optString("bt_mac", body.optString("btMac", "")).trim();
 
-            return facade.api_deliveryTerminate(jobId, node, media, btMac);
+            return facade.api_deliveryTerminate(jobId, node); // ✅ FIX
         }
 
         // Job GET (pas de media: cache)
@@ -518,7 +511,6 @@ if ("POST".equals(req.method) && "/v1/delivery/alignA".equals(req.path)) {
             try {
                 if (body.length == 0) return new JSONObject();
                 String s = new String(body, StandardCharsets.UTF_8);
-                // Strip UTF-8 BOM (U+FEFF) si présent
                 if (!s.isEmpty() && s.charAt(0) == '\uFEFF') s = s.substring(1);
                 return new JSONObject(s);
             } catch (Exception e) {
@@ -532,7 +524,6 @@ if ("POST".equals(req.method) && "/v1/delivery/alignA".equals(req.path)) {
         int b;
         int state = 0;
 
-        // read headers until CRLFCRLF
         while ((b = in.read()) != -1) {
             headerOut.write(b);
             if (state == 0 && b == '\r') state = 1;
@@ -551,7 +542,6 @@ if ("POST".equals(req.method) && "/v1/delivery/alignA".equals(req.path)) {
         String method = (first.length > 0) ? first[0].trim() : "GET";
         String rawPath = (first.length > 1) ? first[1].trim() : "/";
 
-        // Parse query string
         String path = rawPath;
         Map<String, String> query = new HashMap<>();
         int q = rawPath.indexOf('?');
