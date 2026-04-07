@@ -3,7 +3,7 @@ package com.pa.lcr.lcp;
 
 /**
  * Implémentation concrète de l'API.
- * Alignée strictement avec les signatures réelles du projet.
+ * Strictement alignée avec les signatures réelles du projet.
  */
 public final class ApiFacadeImpl implements ApiFacade {
 
@@ -17,7 +17,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // LCP CONNECT (media auto via couche existante)
+    // LCP CONNECT
     // =========================================================
     @Override
     public ApiResult api_connectLcp(Integer lcrnode_dec,
@@ -56,7 +56,7 @@ public final class ApiFacadeImpl implements ApiFacade {
                                         String media,
                                         String bt_mac) {
         try {
-            delivery.alignOrRecover();   // VOID
+            delivery.alignOrRecover(); // void
             return ApiResult.okLevel(
                 "Align A: 1 - OK",
                 "DELIVERY",
@@ -85,7 +85,7 @@ public final class ApiFacadeImpl implements ApiFacade {
                                         String media,
                                         String bt_mac) {
         try {
-            delivery.startDelivery(product1to16, presetNet);   // VOID
+            delivery.startDelivery(product1to16, presetNet); // void
             return ApiResult.okLevel(
                 "Start C: 1 - OK",
                 "DELIVERY",
@@ -104,30 +104,35 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // DELIVERY TERMINATE (legacy obligatoire)
+    // DELIVERY CONTINUE (legacy abstrait)
     // =========================================================
     @Override
-    public ApiResult api_deliveryTerminate(String jobId) {
-        try {
-            delivery.terminate(jobId);
-            return ApiResult.okLevel(
-                "Terminate: 1 - OK",
-                "DELIVERY",
-                "api_deliveryTerminate"
-            );
-        } catch (Exception e) {
-            return ApiResult.failLevel(
-                "Terminate: 0 - FAILED",
-                "TERMINATE_FAILED",
-                "DELIVERY",
-                "api_deliveryTerminate",
-                e.getMessage()
-            );
-        }
+    public ApiResult api_deliveryContinue(String jobId) {
+        // Géré par /v1/delivery/job/continue (niveau job, pas DeliveryController)
+        return ApiResult.failLevel(
+            "Continue: not handled by DeliveryController",
+            "CONTINUE_NOT_SUPPORTED",
+            "DELIVERY",
+            "api_deliveryContinue"
+        );
     }
 
     // =========================================================
-    // REGISTER VALIDATE (legacy obligatoire)
+    // DELIVERY TERMINATE (legacy abstrait)
+    // =========================================================
+    @Override
+    public ApiResult api_deliveryTerminate(String jobId) {
+        // Géré par /v1/delivery/job/terminate (niveau job)
+        return ApiResult.failLevel(
+            "Terminate: not handled by DeliveryController",
+            "TERMINATE_NOT_SUPPORTED",
+            "DELIVERY",
+            "api_deliveryTerminate"
+        );
+    }
+
+    // =========================================================
+    // REGISTER VALIDATE (legacy abstrait)
     // =========================================================
     @Override
     public ApiResult api_registerValidate(
