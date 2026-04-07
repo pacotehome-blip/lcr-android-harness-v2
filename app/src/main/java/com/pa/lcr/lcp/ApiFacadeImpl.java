@@ -3,8 +3,7 @@ package com.pa.lcr.lcp;
 
 /**
  * Implémentation concrète de l'API.
- * Strictement alignée avec toutes les signatures de ApiFacade.
- * Build-proof.
+ * Strictement alignée avec TOUTES les signatures de ApiFacade.
  */
 public final class ApiFacadeImpl implements ApiFacade {
 
@@ -76,7 +75,24 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // DELIVERY C (Start)
+    // DELIVERY C (LEGACY mono-registre OBLIGATOIRE)
+    // =========================================================
+    @Override
+    public ApiResult api_deliveryStartC(int product1to16,
+                                        double presetNet) {
+        // Délégation vers la version complète (node / media aware)
+        return api_deliveryStartC(
+            250,
+            255,
+            product1to16,
+            presetNet,
+            "auto",
+            null
+        );
+    }
+
+    // =========================================================
+    // DELIVERY C (node / media aware)
     // =========================================================
     @Override
     public ApiResult api_deliveryStartC(Integer lcrnode_dec,
@@ -135,7 +151,6 @@ public final class ApiFacadeImpl implements ApiFacade {
     // =========================================================
     @Override
     public ApiResult api_deliveryJobGet(String jobId) {
-        // Géré par GET /v1/delivery/job/{id}
         return ApiResult.failLevel(
             "JobGet: handled by job endpoint",
             "JOB_GET_NOT_SUPPORTED",
@@ -145,7 +160,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // DELIVERY ONE‑SHOT START (legacy)
+    // DELIVERY ONE-SHOT START (legacy)
     // =========================================================
     @Override
     public ApiResult api_deliveryOneShotStart(String numero_livraison,
