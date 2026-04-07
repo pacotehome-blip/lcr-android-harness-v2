@@ -3,7 +3,8 @@ package com.pa.lcr.lcp;
 
 /**
  * Implémentation concrète de l'API.
- * Strictement alignée avec les signatures réelles du projet.
+ * Alignée strictement avec les signatures réelles de ApiFacade.
+ * Compatible terrain (USB / BT / replug).
  */
 public final class ApiFacadeImpl implements ApiFacade {
 
@@ -11,13 +12,13 @@ public final class ApiFacadeImpl implements ApiFacade {
     private final DeliveryController delivery;
 
     public ApiFacadeImpl(RegisterSessionManager sessionMgr,
-                          DeliveryController delivery) {
+                         DeliveryController delivery) {
         this.sessionMgr = sessionMgr;
         this.delivery   = delivery;
     }
 
     // =========================================================
-    // LCP CONNECT
+    // LCP CONNECT (media auto via la couche existante)
     // =========================================================
     @Override
     public ApiResult api_connectLcp(Integer lcrnode_dec,
@@ -48,7 +49,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // DELIVERY A (Status / Align)
+    // DELIVERY A (Status / Align / Recover)
     // =========================================================
     @Override
     public ApiResult api_deliveryAlignA(Integer lcrnode_dec,
@@ -75,7 +76,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // DELIVERY C (Start)
+    // DELIVERY C (Start delivery)
     // =========================================================
     @Override
     public ApiResult api_deliveryStartC(Integer lcrnode_dec,
@@ -132,16 +133,31 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
+    // DELIVERY ONE-SHOT START (legacy abstrait)
+    // =========================================================
+    @Override
+    public ApiResult api_deliveryOneShotStart(String numero_livraison,
+                                              int product1to16,
+                                              double presetNetL,
+                                              String compartment) {
+        // Géré par /v1/delivery/oneshot/start (niveau API/job)
+        return ApiResult.failLevel(
+            "OneShotStart: not handled by DeliveryController",
+            "ONESHOT_NOT_SUPPORTED",
+            "DELIVERY",
+            "api_deliveryOneShotStart"
+        );
+    }
+
+    // =========================================================
     // REGISTER VALIDATE (legacy abstrait)
     // =========================================================
     @Override
-    public ApiResult api_registerValidate(
-            String numero_livraison,
-            Integer expected_lcrnode_dec,
-            String expected_serial_id,
-            Integer expected_product_number,
-            String expected_compartment) {
-
+    public ApiResult api_registerValidate(String numero_livraison,
+                                          Integer expected_lcrnode_dec,
+                                          String expected_serial_id,
+                                          Integer expected_product_number,
+                                          String expected_compartment) {
         try {
             return delivery.api_registerValidate(
                 numero_livraison,
