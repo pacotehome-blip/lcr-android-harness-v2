@@ -2,204 +2,262 @@
 package com.pa.lcr.lcp;
 
 /**
- * Implémentation concrète de l'API.
- * Strictement alignée avec TOUTES les signatures de ApiFacade.
+ * API-Face: contrat entre ApiServer et la logique métier.
+ *
+ * Objectif:
+ * - Garder une compatibilité avec la façade mono-registre existante
+ * - Ajouter des variantes node-aware (B2 multi-registre)
+ * - ✅ Option B: ajouter des overloads media-aware (media + bt_mac) pour USB/BT
+ *
+ * Convention:
+ * - lcrnode_dec: 1..250 (null -> default 250)
+ * - from_dec: 0..255 (null -> default 255)
+ * - media: "usb" "bt" "wifi" (wifi = futur)
+ * - bt_mac requis si media="bt"
  */
-public final class ApiFacadeImpl implements ApiFacade {
+public interface ApiFacade {
 
-    private final RegisterSessionManager sessionMgr;
-    private final DeliveryController delivery;
+    // =========================================================
+    // USB (global)
+    // =========================================================
+    ApiResult api_scanUsb();
+    ApiResult api_openPingUsb();
 
-    public ApiFacadeImpl(RegisterSessionManager sessionMgr,
-                         DeliveryController delivery) {
-        this.sessionMgr = sessionMgr;
-        this.delivery   = delivery;
+    // =========================================================
+    // ✅ Media check (USB/BT)
+    // =========================================================
+    default ApiResult api_mediaCheck(String media, String bt_mac) {
+        return ApiResult.fail(
+            "MediaCheck: 0 - Not supported (legacy facade).",
+            "MEDIA_NOT_SUPPORTED"
+        );
     }
 
     // =========================================================
-    // LCP CONNECT
+    // LCP connect (legacy mono-registre)
     // =========================================================
-    @Override
-    public ApiResult api_connectLcp(Integer lcrnode_dec,
-                                    Integer from_dec,
-                                    String media,
-                                    String bt_mac) {
-        try {
-            sessionMgr.resolveOrCreateForNode(
-                lcrnode_dec != null ? lcrnode_dec : 250,
-                from_dec    != null ? from_dec    : 255
-            );
+    ApiResult api_connectLcp();
 
-            return ApiResult.okLevel(
-                "Connect: 1 - OK",
-                "LCP",
-                "api_connectLcp"
-            );
+    // ✅ Node-aware default (B2)
+    default ApiResult api_connectLcp(Integer lcrnode_dec, Integer from_dec) {
+        return api_connectLcp();
+    }
 
-        } catch (Exception e) {
-            return ApiResult.failLevel(
-                "Connect: 0 - FAILED",
-                "CONNECT_FAILED",
-                "LCP",
-                "api_connectLcp",
-                e.getMessage()
-            );
-        }
+    // ✅ Media-aware default (Option B)
+    default ApiResult api_connectLcp(
+            Integer lcrnode_dec,
+            Integer from_dec,
+            String media,
+            String bt_mac) {
+        return api_connectLcp(lcrnode_dec, from_dec);
     }
 
     // =========================================================
-    // DELIVERY A (Status / Align)
+    // Align / Recover (A) (legacy mono-registre)
     // =========================================================
-    @Override
-    public ApiResult api_deliveryAlignA(Integer lcrnode_dec,
-                                        Integer from_dec,
-                                        String media,
-                                        String bt_mac) {
-        try {
-            delivery.alignOrRecover();
-            return ApiResult.okLevel(
-                "Align A: 1 - OK",
-                "DELIVERY",
-                "api_deliveryAlignA"
-            );
+    ApiResult api_deliveryAlignA();
 
-        } catch (Exception e) {
-            return ApiResult.failLevel(
-                "Align A: 0 - FAILED",
-                "ALIGN_FAILED",
-                "DELIVERY",
-                "api_deliveryAlignA",
-                e.getMessage()
-            );
-        }
+    // ✅ Node-aware default (B2)
+    default ApiResult api_deliveryAlignA(Integer lcrnode_dec, Integer from_dec) {
+        return api_deliveryAlignA();
+    }
+
+    // ✅ Media-aware default (Option B)
+    default ApiResult api_deliveryAlignA(
+            Integer lcrnode_dec,
+            Integer from_dec,
+            String media,
+            String bt_mac) {
+        return api_deliveryAlignA(lcrnode_dec, from_dec);
     }
 
     // =========================================================
-    // DELIVERY C (LEGACY mono-registre OBLIGATOIRE)
+    // DB (global)
     // =========================================================
-    @Override
-    public ApiResult api_deliveryStartC(int product1to16,
-                                        double presetNet) {
-        // Délégation vers la version complète (node / media aware)
-        return api_deliveryStartC(
-            250,
-            255,
+    ApiResult api_dbDump();
+
+    // =========================================================
+    // Delivery (legacy mono-registre)
+    // =========================================================
+    ApiResult api_deliveryStartC(int product1to16, double presetNet);
+
+    // ✅ Node-aware default (B2)
+    default ApiResult api_deliveryStartC(
+            Integer lcrnode_dec,
+            Integer from_dec,
+            int product1to16,
+            double presetNet) {
+        return api_deliveryStartC(product1to16, presetNet);
+    }
+
+    // ✅ Media-aware default (Option B)
+    default ApiResult api_deliveryStartC(
+            Integer lcrnode_dec,
+            Integer from_dec,
+            int product1to16,
+            double presetNet,
+            String media,
+            String bt_mac) {
+        return api_deliveryStartC(lcrnode_dec, from_dec, product1to16, presetNet);
+    }
+
+    // =========================================================
+    // Delivery Job
+    // =========================================================
+    ApiResult api_deliveryJobGet(String jobId);
+
+    // ✅ Node-aware default (B2)
+    default ApiResult api_deliveryJobGet(String jobId, Integer lcrnode_dec) {
+        return api_deliveryJobGet(jobId);
+    }
+
+    // =========================================================
+    // Delivery OneShot + controls (legacy mono-registre)
+    // =========================================================
+    ApiResult api_deliveryOneShotStart(
+            String numero_livraison,
+            int product1to16,
+            double presetNetL,
+            String compartment
+    );
+
+    // ✅ Node-aware default (B2)
+    default ApiResult api_deliveryOneShotStart(
+            Integer lcrnode_dec,
+            Integer from_dec,
+            String numero_livraison,
+            int product1to16,
+            double presetNetL,
+            String compartment) {
+        return api_deliveryOneShotStart(
+            numero_livraison,
             product1to16,
-            presetNet,
-            "auto",
-            null
+            presetNetL,
+            compartment
+        );
+    }
+
+    // ✅ Media-aware default (Option B)
+    default ApiResult api_deliveryOneShotStart(
+            Integer lcrnode_dec,
+            Integer from_dec,
+            String numero_livraison,
+            int product1to16,
+            double presetNetL,
+            String compartment,
+            String media,
+            String bt_mac) {
+        return api_deliveryOneShotStart(
+            lcrnode_dec,
+            from_dec,
+            numero_livraison,
+            product1to16,
+            presetNetL,
+            compartment
+        );
+    }
+
+    ApiResult api_deliveryContinue(String jobId);
+
+    // ✅ Node-aware default (B2)
+    default ApiResult api_deliveryContinue(String jobId, Integer lcrnode_dec) {
+        return api_deliveryContinue(jobId);
+    }
+
+    ApiResult api_deliveryTerminate(String jobId);
+
+    // ✅ Node-aware default (B2)
+    default ApiResult api_deliveryTerminate(String jobId, Integer lcrnode_dec) {
+        return api_deliveryTerminate(jobId);
+    }
+
+    // =========================================================
+    // ✅ validateRegister (legacy signature)
+    // =========================================================
+    ApiResult api_registerValidate(
+            String numero_livraison,
+            Integer expected_lcrnode_dec,
+            String expected_serial_id,
+            Integer expected_product_number,
+            String expected_compartment
+    );
+
+    // ✅ Node-aware default (B2)
+    default ApiResult api_registerValidate(
+            String numero_livraison,
+            Integer expected_lcrnode_dec,
+            Integer from_dec,
+            String expected_serial_id,
+            Integer expected_product_number,
+            String expected_compartment) {
+        return api_registerValidate(
+            numero_livraison,
+            expected_lcrnode_dec,
+            expected_serial_id,
+            expected_product_number,
+            expected_compartment
+        );
+    }
+
+    // ✅ Media-aware default (Option B)
+    default ApiResult api_registerValidate(
+            String numero_livraison,
+            Integer expected_lcrnode_dec,
+            Integer from_dec,
+            String expected_serial_id,
+            Integer expected_product_number,
+            String expected_compartment,
+            String media,
+            String bt_mac) {
+        return api_registerValidate(
+            numero_livraison,
+            expected_lcrnode_dec,
+            from_dec,
+            expected_serial_id,
+            expected_product_number,
+            expected_compartment
         );
     }
 
     // =========================================================
-    // DELIVERY C (node / media aware)
+    // TickBus (B+) - long-poll tick change (cache-only)
     // =========================================================
-    @Override
-    public ApiResult api_deliveryStartC(Integer lcrnode_dec,
-                                        Integer from_dec,
-                                        int product1to16,
-                                        double presetNet,
-                                        String media,
-                                        String bt_mac) {
-        try {
-            delivery.startDelivery(product1to16, presetNet);
-            return ApiResult.okLevel(
-                "Start C: 1 - OK",
-                "DELIVERY",
-                "api_deliveryStartC"
-            );
-
-        } catch (Exception e) {
-            return ApiResult.failLevel(
-                "Start C: 0 - FAILED",
-                "START_FAILED",
-                "DELIVERY",
-                "api_deliveryStartC",
-                e.getMessage()
-            );
-        }
-    }
-
-    // =========================================================
-    // DELIVERY CONTINUE (legacy)
-    // =========================================================
-    @Override
-    public ApiResult api_deliveryContinue(String jobId) {
-        return ApiResult.failLevel(
-            "Continue: handled by job endpoint",
-            "CONTINUE_NOT_SUPPORTED",
-            "DELIVERY",
-            "api_deliveryContinue"
+    default ApiResult api_tickWait(Long since_seq, Integer wait_ms) {
+        return ApiResult.fail(
+            "Tick: 0 - Not supported (legacy facade).",
+            "TICK_NOT_SUPPORTED"
         );
     }
 
-    // =========================================================
-    // DELIVERY TERMINATE (legacy)
-    // =========================================================
-    @Override
-    public ApiResult api_deliveryTerminate(String jobId) {
-        return ApiResult.failLevel(
-            "Terminate: handled by job endpoint",
-            "TERMINATE_NOT_SUPPORTED",
-            "DELIVERY",
-            "api_deliveryTerminate"
-        );
+    default ApiResult api_tickWait(
+            Integer lcrnode_dec,
+            Long since_seq,
+            Integer wait_ms) {
+        return api_tickWait(since_seq, wait_ms);
     }
 
     // =========================================================
-    // DELIVERY JOB GET (legacy)
+    // Ticket reprint current
     // =========================================================
-    @Override
-    public ApiResult api_deliveryJobGet(String jobId) {
-        return ApiResult.failLevel(
-            "JobGet: handled by job endpoint",
-            "JOB_GET_NOT_SUPPORTED",
-            "DELIVERY",
-            "api_deliveryJobGet"
+    default ApiResult api_ticketReprintCurrent() {
+        return ApiResult.fail(
+            "Reprint: 0 - Not supported (legacy facade).",
+            "REPRINT_NOT_SUPPORTED"
         );
     }
 
-    // =========================================================
-    // DELIVERY ONE-SHOT START (legacy)
-    // =========================================================
-    @Override
-    public ApiResult api_deliveryOneShotStart(String numero_livraison,
-                                              int product1to16,
-                                              double presetNetL,
-                                              String compartment) {
-        return ApiResult.failLevel(
-            "OneShotStart: handled by oneshot endpoint",
-            "ONESHOT_NOT_SUPPORTED",
-            "DELIVERY",
-            "api_deliveryOneShotStart"
-        );
+    default ApiResult api_ticketReprintCurrent(
+            Integer lcrnode_dec,
+            Integer from_dec) {
+        return api_ticketReprintCurrent();
     }
 
-    // =========================================================
-    // REGISTER VALIDATE (legacy)
-    // =========================================================
-    @Override
-    public ApiResult api_registerValidate(String numero_livraison,
-                                          Integer expected_lcrnode_dec,
-                                          String expected_serial_id,
-                                          Integer expected_product_number,
-                                          String expected_compartment) {
-        try {
-            return delivery.api_registerValidate(
-                numero_livraison,
-                expected_lcrnode_dec,
-                expected_serial_id,
-                expected_product_number,
-                expected_compartment
-            );
-        } catch (Exception e) {
-            return ApiResult.failLevel(
-                "RegisterValidate: 0 - FAILED",
-                "REGISTER_VALIDATE_FAILED",
-                "REGISTER",
-                "api_registerValidate",
-                e.getMessage()
-            );
-        }
+    // ✅ Media-aware default (Option B)
+    default ApiResult api_ticketReprintCurrent(
+            Integer lcrnode_dec,
+            Integer from_dec,
+            String media,
+            String bt_mac) {
+        return api_ticketReprintCurrent(lcrnode_dec, from_dec);
     }
 }
