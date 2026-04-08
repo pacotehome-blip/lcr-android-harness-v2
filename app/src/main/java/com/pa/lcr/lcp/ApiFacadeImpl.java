@@ -10,16 +10,6 @@ import org.json.JSONObject;
 
 import java.util.Locale;
 
-/**
- * ApiFacadeImpl
- *
- * Correctifs:
- * - Respect réel du paramètre media (usb/bt/auto) pour /lcp/connect et pour les opérations A/C.
- * - OPTION B: sélection automatique du média (USB > BT actif > READY).
- * - BT sans bt_mac: si bt_mac absent, on utilise le transport BT ACTIF.
- * - Aucune ouverture de transport ici (respect strict du modèle existant).
- * - Session LCP pinnée sur le transport choisi via RegisterSessionManager.getOrCreate().
- */
 public final class ApiFacadeImpl implements ApiFacade {
 
     private final RegisterSessionManager sessionMgr;
@@ -33,16 +23,8 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // ---------------------------------------------------------
-    // Helpers media
+    // Helpers
     // ---------------------------------------------------------
-
-    private static String norm(String s) {
-        return (s == null) ? "" : s.trim();
-    }
-
-    private static String normLower(String s) {
-        return norm(s).toLowerCase(Locale.ROOT);
-    }
 
     private static boolean isBtKey(String k) {
         return k != null && k.toUpperCase(Locale.ROOT).startsWith("BT:");
@@ -74,7 +56,31 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // ---------------------------------------------------------
-    // Media check (OPTION B)
+    // ✅ USB — méthodes abstraites du contrat
+    // ---------------------------------------------------------
+
+    @Override
+    public ApiResult api_scanUsb() {
+        return ApiResult.failLevel(
+                "USB Scan: not supported via API",
+                "USB_SCAN_NOT_SUPPORTED",
+                "USB",
+                "api_scanUsb"
+        );
+    }
+
+    @Override
+    public ApiResult api_openPingUsb() {
+        return ApiResult.failLevel(
+                "USB OpenPing: not supported via API",
+                "USB_OPENPING_NOT_SUPPORTED",
+                "USB",
+                "api_openPingUsb"
+        );
+    }
+
+    // ---------------------------------------------------------
+    // Media check (Option B)
     // ---------------------------------------------------------
 
     @Override
@@ -101,7 +107,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // ---------------------------------------------------------
-    // LCP CONNECT (OPTION B)
+    // LCP CONNECT
     // ---------------------------------------------------------
 
     @Override
@@ -149,7 +155,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // ---------------------------------------------------------
-    // DELIVERY A / C
+    // DELIVERY
     // ---------------------------------------------------------
 
     @Override
@@ -164,16 +170,6 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     @Override
-    public ApiResult api_deliveryAlignA(Integer lcrnode_dec,
-                                       Integer from_dec,
-                                       String media,
-                                       String bt_mac) {
-        ApiResult c = api_connectLcp(lcrnode_dec, from_dec, media, bt_mac);
-        if (c == null || c.code != 0) return c;
-        return api_deliveryAlignA();
-    }
-
-    @Override
     public ApiResult api_deliveryStartC(int product1to16, double presetNet) {
         try {
             delivery.startDelivery(product1to16, presetNet);
@@ -183,22 +179,6 @@ public final class ApiFacadeImpl implements ApiFacade {
                     "START_FAILED", "DELIVERY", "api_deliveryStartC", e.getMessage());
         }
     }
-
-    @Override
-    public ApiResult api_deliveryStartC(Integer lcrnode_dec,
-                                       Integer from_dec,
-                                       int product1to16,
-                                       double presetNet,
-                                       String media,
-                                       String bt_mac) {
-        ApiResult c = api_connectLcp(lcrnode_dec, from_dec, media, bt_mac);
-        if (c == null || c.code != 0) return c;
-        return api_deliveryStartC(product1to16, presetNet);
-    }
-
-    // ---------------------------------------------------------
-    // ✅ MÉTHODE MANQUANTE — OBLIGATOIRE
-    // ---------------------------------------------------------
 
     @Override
     public ApiResult api_deliveryOneShotStart(String numero_livraison,
@@ -212,23 +192,19 @@ public final class ApiFacadeImpl implements ApiFacade {
     // JOB / DB / REGISTER
     // ---------------------------------------------------------
 
-    @Override
-    public ApiResult api_deliveryJobGet(String jobId) {
+    @Override public ApiResult api_deliveryJobGet(String jobId) {
         return ApiResult.fail("Job get not supported", "JOB_NOT_SUPPORTED");
     }
 
-    @Override
-    public ApiResult api_deliveryContinue(String jobId) {
+    @Override public ApiResult api_deliveryContinue(String jobId) {
         return ApiResult.fail("Continue not supported", "CONTINUE_NOT_SUPPORTED");
     }
 
-    @Override
-    public ApiResult api_deliveryTerminate(String jobId) {
+    @Override public ApiResult api_deliveryTerminate(String jobId) {
         return ApiResult.fail("Terminate not supported", "TERMINATE_NOT_SUPPORTED");
     }
 
-    @Override
-    public ApiResult api_dbDump() {
+    @Override public ApiResult api_dbDump() {
         return ApiResult.fail("DB dump not supported", "DB_DUMP_NOT_SUPPORTED");
     }
 
