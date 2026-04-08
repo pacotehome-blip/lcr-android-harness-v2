@@ -1,8 +1,12 @@
 
-package com.pa.lcr.lcp;package com * ApiFacadeImpl
+package com.pa.lcr.lcp;
+
+/**
+ * ApiFacadeImpl
  *
  * Implémentation STRICTE du contrat ApiFacade,
- * alignée avec le DeliveryController réel.
+ * alignée avec les méthodes réellement exposées
+ * par DeliveryController et RegisterSessionManager.
  *
  * Aucune API inventée.
  * Aucune logique métier déplacée.
@@ -36,20 +40,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // Media check
-    // =========================================================
-
-    @Override
-    public ApiResult api_mediaCheck(String media, String bt_mac) {
-        // La logique réelle est déjà gérée plus bas dans la stack
-        return ApiResult.fail(
-                "MediaCheck: 0 - Not supported (legacy facade).",
-                "MEDIA_NOT_SUPPORTED"
-        );
-    }
-
-    // =========================================================
-    // LCP connect
+    // LCP connect (legacy + node-aware via default methods)
     // =========================================================
 
     @Override
@@ -141,7 +132,6 @@ public final class ApiFacadeImpl implements ApiFacade {
             double presetNetL,
             String compartment
     ) {
-        // OneShot est traité dans le controller via le flow normal
         return ApiResult.fail(
                 "OneShot: 0 - Not supported in legacy facade",
                 "ONESHOT_NOT_SUPPORTED"
@@ -149,7 +139,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // Job
+    // Job (legacy)
     // =========================================================
 
     @Override
@@ -177,7 +167,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // ✅ validateRegister (OBLIGATOIRE - legacy)
+    // ✅ validateRegister (OBLIGATOIRE – signature legacy)
     // =========================================================
 
     @Override
@@ -208,7 +198,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // DB
+    // DB (global)
     // =========================================================
 
     @Override
@@ -219,6 +209,3 @@ public final class ApiFacadeImpl implements ApiFacade {
         );
     }
 }
-
-
-/**
