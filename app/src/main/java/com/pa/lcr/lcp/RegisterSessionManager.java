@@ -47,6 +47,10 @@ public final class RegisterSessionManager {
     }
 
     private final Context appCtx;
+
+    // ✅ CORRECTIF AJOUTÉ (requis par ApiFacadeImpl)
+    public Context getAppContext() { return appCtx; }
+
     private final DeliveryLogStore store;
 
     // ✅ Option B: key = transportKey + ":" + node
@@ -362,9 +366,6 @@ public final class RegisterSessionManager {
         }
     }
 
-    /**
-     * Multiplexeur de listeners : UI + LogBus + Scheduler.
-     */
     private static final class MuxListener implements DeliveryControllerPort.Listener {
         private final CopyOnWriteArrayList<DeliveryControllerPort.Listener> listeners =
                 new CopyOnWriteArrayList<>();
@@ -385,7 +386,7 @@ public final class RegisterSessionManager {
             }
         }
 
-        @Override public void onProductsUpdated(java.util.List<ProductUiItem> products, int activeIndex0) {
+        @Override public void onProductsUpdated(List<ProductUiItem> products, int activeIndex0) {
             for (DeliveryControllerPort.Listener l : listeners) {
                 try { l.onProductsUpdated(products, activeIndex0); } catch (Exception ignored) {}
             }
@@ -422,13 +423,6 @@ public final class RegisterSessionManager {
         }
     }
 
-    /**
-     * Scheduler central par node.
-     *
-     * v7:
-     * - cadence gérée ici (pas dans le TAB)
-     * - on poll LIVE (requestLiveSample) et STATUS à cadence stable quand UI abonnée
-     */
     private static final class NodeScheduler implements DeliveryControllerPort.Listener {
         private final int node;
         private final ScheduledExecutorService exec;
@@ -442,13 +436,11 @@ public final class RegisterSessionManager {
         private volatile long liveBackoffMs = 0L;
         private volatile long statusBackoffMs = 0L;
 
-        // v7: backoff adaptatif basé sur TickBus (seq change-driven)
         private volatile long lastTickSeqSeen = -1L;
         private volatile int noChangeCount = 0;
 
-        // v7: cadences (stables)
-        private static final long LIVE_MS = 350;        // ajuste si besoin BT/USB
-        private static final long STATUS_MS = 2500; // v7: réduit les ERR status pendant RUNNING
+        private static final long LIVE_MS = 350;
+        private static final long STATUS_MS = 2500;
 
         NodeScheduler(int node) {
             this.node = node;
@@ -484,8 +476,6 @@ public final class RegisterSessionManager {
             DeliveryState st = c.getState();
             if (st == DeliveryState.DISCONNECTED) return;
 
-            // ✅ Règle: en CONNECTED (READY / Ticket pending), on ne poll pas.
-            // Le LIVE est recalé par des one-shots (Connect/B/A/END) côté UI.
             if (st == DeliveryState.CONNECTED || st == DeliveryState.PRESTART || st == DeliveryState.ENDING) {
                 return;
             }
@@ -493,9 +483,8 @@ public final class RegisterSessionManager {
             boolean running = (st == DeliveryState.RUNNING_FLOWING) || (st == DeliveryState.RUNNING_PAUSED);
             if (!running) return;
 
-            // ✅ Backoff basé sur "changement vs pas de changement" (TickBus seq).
             try {
-                ApiResult tr = c.api_tickSnapshot(); // cache-only
+                ApiResult tr = c.api_tickSnapshot();
                 JSONObject td = (tr != null) ? tr.data : null;
                 long seq = (td != null) ? td.optLong("seq", -1L) : -1L;
                 if (seq >= 0) {
@@ -504,11 +493,9 @@ public final class RegisterSessionManager {
                     } else {
                         noChangeCount = 0;
                         lastTickSeqSeen = seq;
-                        // reset backoff sur changement
                         liveBackoffMs = 0L;
                         statusBackoffMs = 0L;
                     }
-                    // si aucun changement répété, augmenter doucement le backoff (max 2000ms)
                     if (noChangeCount >= 3) {
                         liveBackoffMs = Math.min(2000, Math.max(liveBackoffMs, 200));
                         liveBackoffMs = Math.min(2000, liveBackoffMs + 200);
@@ -522,7 +509,6 @@ public final class RegisterSessionManager {
 
             long now = System.currentTimeMillis();
 
-            // LIVE (flow on/off + NET/GROSS) — cadence adaptative
             long liveInterval = LIVE_MS + liveBackoffMs;
             if (now - lastLiveMs >= liveInterval) {
                 lastLiveMs = now;
@@ -532,7 +518,6 @@ public final class RegisterSessionManager {
                 } catch (Exception ignored) {}
             }
 
-            // STATUS pendant RUNNING seulement — plus lent + backoff si stable
             long stInterval = STATUS_MS + statusBackoffMs;
             if (now - lastStatusMs >= stInterval) {
                 lastStatusMs = now;
@@ -547,7 +532,7 @@ public final class RegisterSessionManager {
             if (state == DeliveryState.CONNECTED) resetBackoff();
         }
 
-        @Override public void onProductsUpdated(java.util.List<ProductUiItem> products, int activeIndex0) { }
+        @Override public void onProductsUpdated(List<ProductUiItem> products, int activeIndex0) { }
         @Override public void onLog(String message) { }
         @Override public void onError(String context, Throwable error) { }
         @Override public void onLiveQty(double net, double gross) { }
@@ -559,9 +544,6 @@ public final class RegisterSessionManager {
         }
     }
 
-    /**
-     * Sink LogBus: route UI/API/IO et injecte backoff rc=0x26.
-     */
     private static final class LogBusSink implements DeliveryControllerPort.Listener {
         private final int node;
         private final NodeScheduler scheduler;
@@ -575,7 +557,7 @@ public final class RegisterSessionManager {
             LogBus.ui(node, "STATE=" + (state != null ? state.name() : "null"));
         }
 
-        @Override public void onProductsUpdated(java.util.List<ProductUiItem> products, int activeIndex0) { }
+        @Override public void onProductsUpdated(List<ProductUiItem> products, int activeIndex0) { }
 
         @Override public void onLog(String message) {
             if (message == null) return;
