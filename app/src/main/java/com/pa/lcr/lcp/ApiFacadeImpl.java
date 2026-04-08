@@ -15,8 +15,9 @@ import java.util.Locale;
  *
  * Correctifs:
  * - Respect réel du paramètre media (usb/bt/auto) pour /lcp/connect et pour les opérations A/C.
- * - OPTION B: auto-connect BT (sans UI) si transport BT connu mais non ouvert.
+ * - OPTION B: sélection automatique du média (USB > BT actif > READY).
  * - BT sans bt_mac: si bt_mac absent, on utilise le transport BT ACTIF.
+ * - Aucune ouverture de transport ici (respect strict du modèle existant).
  * - Session LCP pinnée sur le transport choisi via RegisterSessionManager.getOrCreate().
  */
 public final class ApiFacadeImpl implements ApiFacade {
@@ -45,18 +46,6 @@ public final class ApiFacadeImpl implements ApiFacade {
 
     private static boolean isBtKey(String k) {
         return k != null && k.toUpperCase(Locale.ROOT).startsWith("BT:");
-    }
-
-    /**
-     * Résout la clé BT: soit depuis bt_mac, soit depuis le transport BT actif.
-     */
-    private static String resolveBtKeyFromMacOrActive(String btMac) {
-        String mac = norm(btMac);
-        if (!mac.isEmpty()) {
-            return MediaTransportManager.btKey(mac);
-        }
-        String active = MediaTransportManager.getActiveKeyStatic();
-        return isBtKey(active) ? active : null;
     }
 
     private MediaTransportManager mtm() {
@@ -97,7 +86,7 @@ public final class ApiFacadeImpl implements ApiFacade {
                         "ERR_NO_MTM", "api_mediaCheck", "");
             }
 
-            TransportIo io = mtm.autoConnect(media, bt_mac, 2000);
+            TransportIo io = mtm.autoSelectConnect(media, bt_mac);
             if (io == null || !io.isOpen()) {
                 return failMedia("MediaCheck: 0 - média non connecté",
                         "ERR_MEDIA_NOT_CONNECTED", "api_mediaCheck", media);
@@ -136,7 +125,7 @@ public final class ApiFacadeImpl implements ApiFacade {
                         "ERR_NO_MTM", "api_connectLcp", "");
             }
 
-            TransportIo io = mtm.autoConnect(media, bt_mac, 8000);
+            TransportIo io = mtm.autoSelectConnect(media, bt_mac);
             if (io == null || !io.isOpen()) {
                 return failMedia("Connect LCP: 0 - Aucun média connectable",
                         "ERR_NO_MEDIA_CONNECTABLE", "api_connectLcp", media);
@@ -211,19 +200,23 @@ public final class ApiFacadeImpl implements ApiFacade {
     // JOB / DB / REGISTER (inchangé)
     // ---------------------------------------------------------
 
-    @Override public ApiResult api_deliveryJobGet(String jobId) {
+    @Override
+    public ApiResult api_deliveryJobGet(String jobId) {
         return ApiResult.fail("Job get not supported", "JOB_NOT_SUPPORTED");
     }
 
-    @Override public ApiResult api_deliveryContinue(String jobId) {
+    @Override
+    public ApiResult api_deliveryContinue(String jobId) {
         return ApiResult.fail("Continue not supported", "CONTINUE_NOT_SUPPORTED");
     }
 
-    @Override public ApiResult api_deliveryTerminate(String jobId) {
+    @Override
+    public ApiResult api_deliveryTerminate(String jobId) {
         return ApiResult.fail("Terminate not supported", "TERMINATE_NOT_SUPPORTED");
     }
 
-    @Override public ApiResult api_dbDump() {
+    @Override
+    public ApiResult api_dbDump() {
         return ApiResult.fail("DB dump not supported", "DB_DUMP_NOT_SUPPORTED");
     }
 
