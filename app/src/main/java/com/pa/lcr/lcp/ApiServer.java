@@ -191,19 +191,36 @@ public final class ApiServer {
 
     // =========================
     // ✅ Option B: media gating helper (connectivité seulement)
+    // ✅ CORRECTION INTÉGRÉE ICI
     // =========================
     private ApiResult gateMediaIfProvided(JSONObject body) {
         if (body == null) return null;
 
-        String media = body.optString("media", "").trim();
-        if (media.isEmpty()) return null;
+        String mediaRaw = body.optString("media", "").trim();
+        if (mediaRaw.isEmpty()) return null;
 
+        String media = mediaRaw.toLowerCase(Locale.ROOT);
         String btMac = body.optString("bt_mac", body.optString("btMac", "")).trim();
 
-        ApiResult check = facade.api_mediaCheck(media, btMac);
+        // ✅ Ne jamais bloquer sur "auto" (stratégie), le métier décidera.
+        if ("auto".equals(media)) return null;
+
+        // (optionnel mais safe) si media inconnu -> laisser le métier gérer (ou retourner invalide)
+        // Ici on laisse tel quel: on passe au check.
+        ApiResult check = facade.api_mediaCheck(mediaRaw, btMac);
+
+        // ✅ Si check dit "KO", on bloque SAUF dans un cas:
+        // - media=bt
+        // - bt_mac absent
+        // - err=ERR_BT_MAC_REQUIRED
+        // Dans ce cas, on laisse passer pour Option B (résolution via BT actif côté métier).
         if (check != null && check.code == 0) {
-            return check;
+            if ("bt".equals(media) && btMac.isEmpty() && "ERR_BT_MAC_REQUIRED".equals(check.err)) {
+                return null; // ✅ correction: ne pas bloquer
+            }
+            return check; // blocage normal
         }
+
         return null;
     }
 
