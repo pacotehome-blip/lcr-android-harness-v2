@@ -149,7 +149,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // ---------------------------------------------------------
-    // DELIVERY A / C (inchangé)
+    // DELIVERY A / C
     // ---------------------------------------------------------
 
     @Override
@@ -197,7 +197,19 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // ---------------------------------------------------------
-    // JOB / DB / REGISTER (inchangé)
+    // ✅ MÉTHODE MANQUANTE — OBLIGATOIRE
+    // ---------------------------------------------------------
+
+    @Override
+    public ApiResult api_deliveryOneShotStart(String numero_livraison,
+                                             int product1to16,
+                                             double presetNetL,
+                                             String compartment) {
+        return ApiResult.fail("OneShot not supported", "ONESHOT_NOT_SUPPORTED");
+    }
+
+    // ---------------------------------------------------------
+    // JOB / DB / REGISTER
     // ---------------------------------------------------------
 
     @Override
