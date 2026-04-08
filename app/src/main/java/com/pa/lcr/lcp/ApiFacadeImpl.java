@@ -10,6 +10,24 @@ import org.json.JSONObject;
 
 import java.util.Locale;
 
+/**
+ * ApiFacadeImpl
+ *
+ * Règles MEDIA (CONTRAT FINAL):
+ *
+ * media = "bt"
+ *   - s'il existe un BT appairé / actif / READY -> utiliser automatiquement (MAC déduit)
+ *   - sinon -> fallback USB
+ *   - sinon -> erreur
+ *
+ * media = "usb"
+ *   - USB prêt -> OK
+ *   - sinon -> erreur
+ *
+ * ✅ bt_mac N'EST JAMAIS REQUIS côté API
+ * ✅ La résolution MAC est INTERNE
+ * ✅ Processus transparent pour Field Service et le livreur
+ */
 public final class ApiFacadeImpl implements ApiFacade {
 
     private final RegisterSessionManager sessionMgr;
@@ -22,13 +40,9 @@ public final class ApiFacadeImpl implements ApiFacade {
         this.appCtx = (sessionMgr != null) ? sessionMgr.getAppContext() : null;
     }
 
-    // ---------------------------------------------------------
+    // =========================================================
     // Helpers
-    // ---------------------------------------------------------
-
-    private static boolean isBtKey(String k) {
-        return k != null && k.toUpperCase(Locale.ROOT).startsWith("BT:");
-    }
+    // =========================================================
 
     private MediaTransportManager mtm() {
         return (appCtx != null) ? MediaTransportManager.get(appCtx) : null;
@@ -37,7 +51,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     private static String mediaOfKey(String key) {
         if (key == null) return "unknown";
         if (MediaTransportManager.KEY_USB.equals(key)) return "usb";
-        if (isBtKey(key)) return "bt";
+        if (key.startsWith("BT:")) return "bt";
         return "unknown";
     }
 
@@ -51,134 +65,165 @@ public final class ApiFacadeImpl implements ApiFacade {
         return ApiResult.okLevel(msg, "MEDIA", where, d);
     }
 
-    private static ApiResult failMedia(String msg, String err, String where, String detail) {
-        return ApiResult.failLevel(msg, err, "MEDIA", where, detail);
+    private static ApiResult failMedia(String msg, String err, String where) {
+        return ApiResult.failLevel(msg, err, "MEDIA", where, null);
     }
 
-    // ---------------------------------------------------------
-    // ✅ USB — méthodes abstraites du contrat
-    // ---------------------------------------------------------
+    // =========================================================
+    // USB (contrat)
+    // =========================================================
 
     @Override
     public ApiResult api_scanUsb() {
-        return ApiResult.failLevel(
-                "USB Scan: not supported via API",
-                "USB_SCAN_NOT_SUPPORTED",
-                "USB",
-                "api_scanUsb"
-        );
+        return ApiResult.fail("USB scan not supported via API", "USB_SCAN_NOT_SUPPORTED");
     }
 
     @Override
     public ApiResult api_openPingUsb() {
-        return ApiResult.failLevel(
-                "USB OpenPing: not supported via API",
-                "USB_OPENPING_NOT_SUPPORTED",
-                "USB",
-                "api_openPingUsb"
-        );
+        return ApiResult.fail("USB open-ping not supported via API", "USB_OPENPING_NOT_SUPPORTED");
     }
 
-    // ---------------------------------------------------------
-    // Media check (Option B)
-    // ---------------------------------------------------------
+    // =========================================================
+    // MEDIA CHECK (✅ AUTO BT + FALLBACK USB)
+    // =========================================================
 
     @Override
     public ApiResult api_mediaCheck(String media, String bt_mac) {
-        try {
-            MediaTransportManager mtm = mtm();
-            if (mtm == null) {
-                return failMedia("MediaCheck: 0 - MTM absent",
-                        "ERR_NO_MTM", "api_mediaCheck", "");
-            }
-
-            TransportIo io = mtm.autoSelectConnect(media, bt_mac);
-            if (io == null || !io.isOpen()) {
-                return failMedia("MediaCheck: 0 - média non connecté",
-                        "ERR_MEDIA_NOT_CONNECTED", "api_mediaCheck", media);
-            }
-
-            return okWithTransport("MediaCheck: 1 - connecté", "api_mediaCheck", io);
-
-        } catch (Exception e) {
-            return failMedia("MediaCheck: 0 - erreur",
-                    "ERR_MEDIA_CHECK", "api_mediaCheck", e.getMessage());
+        MediaTransportManager mtm = mtm();
+        if (mtm == null) {
+            return failMedia("MediaCheck: 0 - MTM absent", "ERR_NO_MTM", "api_mediaCheck");
         }
+
+        String m = (media != null) ? media.trim().toLowerCase(Locale.ROOT) : "usb";
+
+        // ---- BT demandé: résolution automatique ----
+        if ("bt".equals(m)) {
+
+            // 1) tenter BT actif / READY automatiquement
+            TransportIo bt = mtm.autoSelectConnect("bt", null);
+            if (bt != null && bt.isOpen()) {
+                return okWithTransport("MediaCheck: 1 - BT actif", "api_mediaCheck", bt);
+            }
+
+            // 2) fallback USB
+            TransportIo usb = mtm.getByKey(MediaTransportManager.KEY_USB);
+            if (usb != null && usb.isOpen()) {
+                return okWithTransport("MediaCheck: 1 - USB fallback", "api_mediaCheck", usb);
+            }
+
+            return failMedia("MediaCheck: 0 - Aucun média prêt", "ERR_NO_MEDIA_READY", "api_mediaCheck");
+        }
+
+        // ---- USB demandé explicitement ----
+        if ("usb".equals(m)) {
+            TransportIo usb = mtm.getByKey(MediaTransportManager.KEY_USB);
+            if (usb != null && usb.isOpen()) {
+                return okWithTransport("MediaCheck: 1 - USB prêt", "api_mediaCheck", usb);
+            }
+            return failMedia("MediaCheck: 0 - USB non prêt", "ERR_USB_NOT_CONNECTED", "api_mediaCheck");
+        }
+
+        return failMedia("MediaCheck: 0 - media invalide", "ERR_MEDIA_INVALID", "api_mediaCheck");
     }
 
-    // ---------------------------------------------------------
-    // LCP CONNECT
-    // ---------------------------------------------------------
+    // =========================================================
+    // LCP CONNECT (✅ AUTO BT + FALLBACK USB)
+    // =========================================================
 
     @Override
     public ApiResult api_connectLcp() {
-        return api_connectLcp(250, 255, "auto", null);
+        return api_connectLcp(250, 255, "bt", null);
     }
 
     @Override
-    public ApiResult api_connectLcp(Integer lcrnode_dec,
-                                    Integer from_dec,
-                                    String media,
-                                    String bt_mac) {
+    public ApiResult api_connectLcp(Integer lcrnode_dec, Integer from_dec,
+                                    String media, String bt_mac) {
+
+        MediaTransportManager mtm = mtm();
+        if (mtm == null) {
+            return failMedia("Connect LCP: 0 - MTM absent", "ERR_NO_MTM", "api_connectLcp");
+        }
 
         int node = (lcrnode_dec != null) ? (lcrnode_dec & 0xFF) : 250;
         int from = (from_dec != null) ? (from_dec & 0xFF) : 255;
 
-        try {
-            MediaTransportManager mtm = mtm();
-            if (mtm == null) {
-                return failMedia("Connect LCP: 0 - MTM absent",
-                        "ERR_NO_MTM", "api_connectLcp", "");
-            }
+        String m = (media != null) ? media.trim().toLowerCase(Locale.ROOT) : "bt";
+        TransportIo io = null;
 
-            TransportIo io = mtm.autoSelectConnect(media, bt_mac);
+        // ---- BT auto ----
+        if ("bt".equals(m)) {
+            io = mtm.autoSelectConnect("bt", null);
             if (io == null || !io.isOpen()) {
-                return failMedia("Connect LCP: 0 - Aucun média connectable",
-                        "ERR_NO_MEDIA_CONNECTABLE", "api_connectLcp", media);
+                io = mtm.getByKey(MediaTransportManager.KEY_USB); // fallback
             }
-
-            if (!mtm.activateExclusive(io.getKey(), "API_CONNECT_LCP")) {
-                return failMedia("Connect LCP: 0 - Activation échouée",
-                        "ERR_TRANSPORT_NOT_READY", "api_connectLcp", io.getKey());
-            }
-
-            if (sessionMgr != null) {
-                sessionMgr.getOrCreate(io.getKey(), node, from, io);
-            }
-
-            return okWithTransport("Connect LCP: 1 - OK", "api_connectLcp", io);
-
-        } catch (Exception e) {
-            return failMedia("Connect LCP: 0 - erreur",
-                    "ERR_CONNECT_LCP", "api_connectLcp", e.getMessage());
         }
+
+        // ---- USB explicite ----
+        if (io == null && "usb".equals(m)) {
+            io = mtm.getByKey(MediaTransportManager.KEY_USB);
+        }
+
+        if (io == null || !io.isOpen()) {
+            return failMedia("Connect LCP: 0 - Aucun média connectable",
+                    "ERR_NO_MEDIA_CONNECTABLE", "api_connectLcp");
+        }
+
+        if (!mtm.activateExclusive(io.getKey(), "API_CONNECT_LCP")) {
+            return failMedia("Connect LCP: 0 - Activation échouée",
+                    "ERR_TRANSPORT_NOT_READY", "api_connectLcp");
+        }
+
+        if (sessionMgr != null) {
+            sessionMgr.getOrCreate(io.getKey(), node, from, io);
+        }
+
+        return okWithTransport("Connect LCP: 1 - OK", "api_connectLcp", io);
     }
 
-    // ---------------------------------------------------------
-    // DELIVERY
-    // ---------------------------------------------------------
+    // =========================================================
+    // DELIVERY A / C
+    // =========================================================
 
     @Override
     public ApiResult api_deliveryAlignA() {
         try {
             delivery.alignOrRecover();
-            return ApiResult.okLevel("Align A: 1 - OK", "DELIVERY", "api_deliveryAlignA");
+            return ApiResult.ok("Align A: 1 - OK");
         } catch (Exception e) {
-            return ApiResult.failLevel("Align A: 0 - FAILED",
-                    "ALIGN_FAILED", "DELIVERY", "api_deliveryAlignA", e.getMessage());
+            return ApiResult.fail("Align A failed", "ALIGN_FAILED");
         }
+    }
+
+    @Override
+    public ApiResult api_deliveryAlignA(Integer lcrnode, Integer from,
+                                       String media, String bt_mac) {
+        ApiResult c = api_connectLcp(lcrnode, from, media, bt_mac);
+        if (c == null || c.code != 1) return c;
+        return api_deliveryAlignA();
     }
 
     @Override
     public ApiResult api_deliveryStartC(int product1to16, double presetNet) {
         try {
             delivery.startDelivery(product1to16, presetNet);
-            return ApiResult.okLevel("Start C: 1 - OK", "DELIVERY", "api_deliveryStartC");
+            return ApiResult.ok("Start C: 1 - OK");
         } catch (Exception e) {
-            return ApiResult.failLevel("Start C: 0 - FAILED",
-                    "START_FAILED", "DELIVERY", "api_deliveryStartC", e.getMessage());
+            return ApiResult.fail("Start C failed", "START_FAILED");
         }
     }
+
+    @Override
+    public ApiResult api_deliveryStartC(Integer lcrnode, Integer from,
+                                       int product1to16, double presetNet,
+                                       String media, String bt_mac) {
+        ApiResult c = api_connectLcp(lcrnode, from, media, bt_mac);
+        if (c == null || c.code != 1) return c;
+        return api_deliveryStartC(product1to16, presetNet);
+    }
+
+    // =========================================================
+    // Required contract stubs
+    // =========================================================
 
     @Override
     public ApiResult api_deliveryOneShotStart(String numero_livraison,
@@ -187,10 +232,6 @@ public final class ApiFacadeImpl implements ApiFacade {
                                              String compartment) {
         return ApiResult.fail("OneShot not supported", "ONESHOT_NOT_SUPPORTED");
     }
-
-    // ---------------------------------------------------------
-    // JOB / DB / REGISTER
-    // ---------------------------------------------------------
 
     @Override public ApiResult api_deliveryJobGet(String jobId) {
         return ApiResult.fail("Job get not supported", "JOB_NOT_SUPPORTED");
@@ -223,8 +264,7 @@ public final class ApiFacadeImpl implements ApiFacade {
                     expected_compartment
             );
         } catch (Exception e) {
-            return ApiResult.fail("RegisterValidate failed",
-                    "REGISTER_VALIDATE_FAILED");
+            return ApiResult.fail("RegisterValidate failed", "REGISTER_VALIDATE_FAILED");
         }
     }
 }
