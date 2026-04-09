@@ -14,13 +14,17 @@ import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 
 /**
- * ApiFacadeImpl — FINAL (FIX COMPILE)
+ * ApiFacadeImpl — FINAL
  *
- * - Essaye TOUS les BT READY, un par un
- * - STOP dès qu’un registre est trouvé
- * - Puis USB
- * - STOP dès succès
+ * Règles FIGÉES :
+ * - Essayer TOUS les BT READY, un par un
+ * - STOP immédiat dès qu’un registre est trouvé
+ * - Ensuite essayer USB
+ * - STOP immédiat si USB valide
  * - Échec final seulement si rien trouvé
+ *
+ * Aucune dépendance à activeKey.
+ * Aucune demande de MAC au client.
  */
 public final class ApiFacadeImpl implements ApiFacade {
 
@@ -49,7 +53,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // Media check (diagnostic)
+    // Media check (diagnostic adaptateur uniquement)
     // =========================================================
 
     @Override
@@ -71,8 +75,7 @@ public final class ApiFacadeImpl implements ApiFacade {
 
         if ("bt".equals(m)) {
             for (TransportSnapshot snap : mtm.listSnapshots()) {
-                if (snap == null) continue;
-                if (snap.key == null) continue;
+                if (snap == null || snap.key == null) continue;
                 if (!snap.key.toUpperCase(Locale.ROOT).startsWith("BT:")) continue;
                 if (snap.status == TransportStatus.READY) {
                     return ApiResult.ok("MediaCheck: bt OK", null);
@@ -103,6 +106,7 @@ public final class ApiFacadeImpl implements ApiFacade {
                                    Integer from_dec,
                                    String media,
                                    String bt_mac) {
+
         int node = (lcrnode_dec != null) ? lcrnode_dec : DEFAULT_NODE;
         int from = (from_dec != null) ? from_dec : DEFAULT_FROM;
 
@@ -119,7 +123,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // Align A
+    // Align / Recover (A)
     // =========================================================
 
     @Override
@@ -137,6 +141,7 @@ public final class ApiFacadeImpl implements ApiFacade {
                                         Integer from_dec,
                                         String media,
                                         String bt_mac) {
+
         int node = (lcrnode_dec != null) ? lcrnode_dec : DEFAULT_NODE;
         int from = (from_dec != null) ? from_dec : DEFAULT_FROM;
 
@@ -168,6 +173,7 @@ public final class ApiFacadeImpl implements ApiFacade {
                                         double presetNet,
                                         String media,
                                         String bt_mac) {
+
         int node = (lcrnode_dec != null) ? lcrnode_dec : DEFAULT_NODE;
         int from = (from_dec != null) ? from_dec : DEFAULT_FROM;
 
@@ -184,7 +190,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // ✅ FIX MANQUANT — api_deliveryTerminate(String)
+    // TERMINATE — signatures OBLIGATOIRES
     // =========================================================
 
     @Override
@@ -194,6 +200,7 @@ public final class ApiFacadeImpl implements ApiFacade {
 
     @Override
     public ApiResult api_deliveryTerminate(String jobId, Integer lcrnode_dec) {
+
         int node = (lcrnode_dec != null) ? lcrnode_dec : DEFAULT_NODE;
 
         DeliveryController dc = selectController(node, DEFAULT_FROM, "auto", rsm.getExpectedSerial(node));
@@ -209,7 +216,73 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // Orchestration finale BT* → USB
+    // REGISTER VALIDATE — signatures OBLIGATOIRES
+    // =========================================================
+
+    @Override
+    public ApiResult api_registerValidate(
+            String numero_livraison,
+            Integer expected_lcrnode_dec,
+            String expected_serial_id,
+            Integer expected_product_number,
+            String expected_compartment
+    ) {
+        return api_registerValidate(
+                numero_livraison,
+                expected_lcrnode_dec,
+                DEFAULT_FROM,
+                expected_serial_id,
+                expected_product_number,
+                expected_compartment,
+                "auto",
+                ""
+        );
+    }
+
+    @Override
+    public ApiResult api_registerValidate(
+            String numero_livraison,
+            Integer expected_lcrnode_dec,
+            Integer from_dec,
+            String expected_serial_id,
+            Integer expected_product_number,
+            String expected_compartment,
+            String media,
+            String bt_mac
+    ) {
+
+        int node = (expected_lcrnode_dec != null) ? expected_lcrnode_dec : DEFAULT_NODE;
+        int from = (from_dec != null) ? from_dec : DEFAULT_FROM;
+
+        String expectedSerial =
+                (expected_serial_id != null && !expected_serial_id.trim().isEmpty())
+                        ? expected_serial_id.trim()
+                        : null;
+
+        if (expectedSerial != null) {
+            rsm.bindExpectedSerial(node, expectedSerial);
+        }
+
+        DeliveryController dc = selectController(node, from, media, expectedSerial);
+        if (dc == null) {
+            return ApiResult.fail("Validate: aucun registre trouvé (BT/USB)", "ERR_NO_REGISTER_FOUND");
+        }
+
+        try {
+            return dc.api_registerValidate(
+                    numero_livraison,
+                    node,
+                    expectedSerial,
+                    expected_product_number,
+                    expected_compartment
+            );
+        } catch (Exception e) {
+            return ApiResult.fail("Validate: erreur", "ERR_VALIDATE", errDetail(e, dc));
+        }
+    }
+
+    // =========================================================
+    // ORCHESTRATION CENTRALE (BT* → USB)
     // =========================================================
 
     private DeliveryController selectController(int node,
@@ -222,64 +295,44 @@ public final class ApiFacadeImpl implements ApiFacade {
 
         String m = normMedia(media, "auto");
 
-        // BT d'abord sauf media=usb
+        // 1) TOUS les BT READY
         if (!"usb".equals(m)) {
-            DeliveryController dcBt = tryAllBt(mtm, node, from, expectedSerial);
-            if (dcBt != null) return dcBt; // ✅ STOP
-        }
+            for (TransportSnapshot snap : mtm.listSnapshots()) {
+                if (snap == null || snap.key == null) continue;
+                if (!snap.key.toUpperCase(Locale.ROOT).startsWith("BT:")) continue;
+                if (snap.status != TransportStatus.READY) continue;
 
-        DeliveryController dcUsb = tryUsb(mtm, node, from, expectedSerial);
-        if (dcUsb != null) return dcUsb; // ✅ STOP
+                mtm.activateExclusive(snap.key, "API_BT_SCAN");
 
-        return null;
-    }
+                TransportIo io = mtm.getByKey(snap.key);
+                if (io == null || !io.isOpen()) continue;
 
-    private DeliveryController tryAllBt(MediaTransportManager mtm,
-                                       int node,
-                                       int from,
-                                       String expectedSerial) {
+                String serial = probeSerial80(io, node, from);
+                if (serial == null) continue;
+                if (expectedSerial != null && !expectedSerial.equals(serial)) continue;
 
-        for (TransportSnapshot snap : mtm.listSnapshots()) {
-            if (snap == null) continue;
-            if (snap.key == null) continue;
-            if (!snap.key.toUpperCase(Locale.ROOT).startsWith("BT:")) continue;
-            if (snap.status != TransportStatus.READY) continue;
-
-            mtm.activateExclusive(snap.key, "API_BT_SCAN");
-
-            TransportIo io = mtm.getByKey(snap.key);
-            if (io == null || !io.isOpen()) continue;
-
-            String serial = probeSerial80(io, node, from);
-            if (serial == null) continue;
-            if (expectedSerial != null && !expectedSerial.equals(serial)) continue;
-
-            DeliveryController dc = rsm.getOrCreate(io.getKey(), node, from, io);
-            if (dc != null) {
-                dc.setActiveMedia("bt");
-                return dc;
+                // ✅ STOP IMMÉDIAT
+                DeliveryController dc = rsm.getOrCreate(io.getKey(), node, from, io);
+                if (dc != null) {
+                    dc.setActiveMedia("bt");
+                    return dc;
+                }
             }
         }
-        return null;
-    }
 
-    private DeliveryController tryUsb(MediaTransportManager mtm,
-                                     int node,
-                                     int from,
-                                     String expectedSerial) {
-
-        TransportIo io = mtm.getByKey(MediaTransportManager.KEY_USB);
-        if (io == null || !io.isOpen()) return null;
-
-        String serial = probeSerial80(io, node, from);
-        if (serial == null) return null;
-        if (expectedSerial != null && !expectedSerial.equals(serial)) return null;
-
-        DeliveryController dc = rsm.getOrCreate(io.getKey(), node, from, io);
-        if (dc != null) {
-            dc.setActiveMedia("usb");
-            return dc;
+        // 2) USB
+        TransportIo ioUsb = mtm.getByKey(MediaTransportManager.KEY_USB);
+        if (ioUsb != null && ioUsb.isOpen()) {
+            String serial = probeSerial80(ioUsb, node, from);
+            if (serial != null && (expectedSerial == null || expectedSerial.equals(serial))) {
+                DeliveryController dc = rsm.getOrCreate(ioUsb.getKey(), node, from, ioUsb);
+                if (dc != null) {
+                    dc.setActiveMedia("usb");
+                    return dc; // ✅ STOP
+                }
+            }
         }
+
         return null;
     }
 
