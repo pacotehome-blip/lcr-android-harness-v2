@@ -12,15 +12,14 @@ import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 
 /**
- * ApiFacadeImpl — FINAL TERRAIN
+ * ApiFacadeImpl — MODE "UNE COMMANDE"
  *
- * Comportement FIGÉ :
- *  - L’APK fournit la liste des BT visibles
- *  - L’API les essaie un par un, dans cet ordre
- *  - CONNECTE LCP sur chaque BT
- *  - ENSUITE valide le registre
- *  - STOP immédiat dès qu’un registre est trouvé
- *  - USB seulement si AUCUN BT ne contient de registre
+ * /lcp/connect fait :
+ *   - activation BT
+ *   - connect LCP
+ *   - scan registre
+ *   - lecture serial #80
+ *   - STOP dès succès
  */
 public final class ApiFacadeImpl implements ApiFacade {
 
@@ -35,60 +34,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // Global (non gérés ici)
-    // =========================================================
-
-    @Override
-    public ApiResult api_scanUsb() {
-        return ApiResult.fail("USB Scan not supported", "USB_SCAN_NOT_SUPPORTED");
-    }
-
-    @Override
-    public ApiResult api_openPingUsb() {
-        return ApiResult.fail("USB OpenPing not supported", "USB_OPENPING_NOT_SUPPORTED");
-    }
-
-    @Override
-    public ApiResult api_dbDump() {
-        return ApiResult.fail("DB Dump not supported", "DB_DUMP_NOT_SUPPORTED");
-    }
-
-    // =========================================================
-    // Media check (diagnostic seulement)
-    // =========================================================
-
-    @Override
-    public ApiResult api_mediaCheck(String media, String bt_mac) {
-        MediaTransportManager mtm = getMtm();
-        if (mtm == null) {
-            return ApiResult.fail("MediaCheck: MTM null", "ERR_MEDIA_MTM_NULL");
-        }
-
-        String m = normMedia(media, "usb");
-
-        if ("bt".equals(m)) {
-            for (TransportSnapshot s : mtm.listSnapshots()) {
-                if (s != null && s.key != null &&
-                    s.key.startsWith("BT:") &&
-                    s.status == TransportStatus.READY) {
-                    return ApiResult.ok("MediaCheck: BT OK", null);
-                }
-            }
-            return ApiResult.fail("BT not ready", "ERR_BT_NOT_READY");
-        }
-
-        if ("usb".equals(m)) {
-            TransportIo io = mtm.getByKey(MediaTransportManager.KEY_USB);
-            return (io != null && io.isOpen())
-                    ? ApiResult.ok("MediaCheck: USB OK", null)
-                    : ApiResult.fail("USB not ready", "ERR_USB_NOT_READY");
-        }
-
-        return ApiResult.fail("Invalid media", "ERR_MEDIA_INVALID");
-    }
-
-    // =========================================================
-    // CONNECT
+    // CONNECT = TOUT LE PARCOURS
     // =========================================================
 
     @Override
@@ -97,201 +43,109 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     @Override
-    public ApiResult api_connectLcp(Integer node, Integer from) {
-        return api_connectLcp(node, from, "auto", "");
+    public ApiResult api_connectLcp(Integer nodeIn, Integer fromIn) {
+        return api_connectLcp(nodeIn, fromIn, "auto", "");
     }
 
     @Override
-    public ApiResult api_connectLcp(Integer node, Integer from, String media, String bt) {
-        DeliveryController dc = selectController(
-                node != null ? node : DEFAULT_NODE,
-                from != null ? from : DEFAULT_FROM,
-                media,
-                rsm.getExpectedSerial(node != null ? node : DEFAULT_NODE)
-        );
-        if (dc == null) {
-            return ApiResult.fail("No register found", "ERR_NO_REGISTER_FOUND");
-        }
-        return dc.api_connectLcp();
-    }
-
-    // =========================================================
-    // Align A / Delivery C / OneShot
-    // =========================================================
-
-    @Override public ApiResult api_deliveryAlignA() {
-        return api_deliveryAlignA(DEFAULT_NODE, DEFAULT_FROM, "auto", "");
-    }
-
-    @Override public ApiResult api_deliveryAlignA(Integer n, Integer f) {
-        return api_deliveryAlignA(n, f, "auto", "");
-    }
-
-    @Override
-    public ApiResult api_deliveryAlignA(Integer n, Integer f, String m, String b) {
-        DeliveryController dc = selectController(n, f, m, rsm.getExpectedSerial(n));
-        if (dc == null) return ApiResult.fail("No register found", "ERR_NO_REGISTER_FOUND");
-        return dc.api_deliveryAlignA();
-    }
-
-    @Override
-    public ApiResult api_deliveryStartC(int p, double v) {
-        return api_deliveryStartC(DEFAULT_NODE, DEFAULT_FROM, p, v, "auto", "");
-    }
-
-    @Override
-    public ApiResult api_deliveryStartC(Integer n, Integer f, int p, double v, String m, String b) {
-        DeliveryController dc = selectController(n, f, m, rsm.getExpectedSerial(n));
-        if (dc == null) return ApiResult.fail("No register found", "ERR_NO_REGISTER_FOUND");
-        return dc.api_deliveryStartC(p, v);
-    }
-
-    @Override
-    public ApiResult api_deliveryOneShotStart(String num, int p, double v, String c) {
-        return api_deliveryOneShotStart(DEFAULT_NODE, DEFAULT_FROM, num, p, v, c, "auto", "");
-    }
-
-    @Override
-    public ApiResult api_deliveryOneShotStart(Integer n, Integer f, String num, int p, double v, String c, String m, String b) {
-        DeliveryController dc = selectController(n, f, m, rsm.getExpectedSerial(n));
-        if (dc == null) return ApiResult.fail("No register found", "ERR_NO_REGISTER_FOUND");
-        return dc.api_deliveryOneShotStart(num, p, v, c);
-    }
-
-    // =========================================================
-    // Job
-    // =========================================================
-
-    @Override
-    public ApiResult api_deliveryJobGet(String j) {
-        return api_deliveryJobGet(j, DEFAULT_NODE);
-    }
-
-    @Override
-    public ApiResult api_deliveryJobGet(String j, Integer n) {
-        DeliveryController dc = selectcontrollerForJob(n);
-        if (dc == null) return ApiResult.fail("No register found", "ERR_NO_REGISTER_FOUND");
-        return dc.api_deliveryJobGet(j);
-    }
-
-    @Override public ApiResult api_deliveryContinue(String j) {
-        return api_deliveryContinue(j, DEFAULT_NODE);
-    }
-
-    @Override
-    public ApiResult api_deliveryContinue(String j, Integer n) {
-        DeliveryController dc = selectcontrollerForJob(n);
-        if (dc == null) return ApiResult.fail("No register found", "ERR_NO_REGISTER_FOUND");
-        return dc.api_deliveryContinue(j);
-    }
-
-    @Override public ApiResult api_deliveryTerminate(String j) {
-        return api_deliveryTerminate(j, DEFAULT_NODE);
-    }
-
-    @Override
-    public ApiResult api_deliveryTerminate(String j, Integer n) {
-        DeliveryController dc = selectcontrollerForJob(n);
-        if (dc == null) return ApiResult.fail("No register found", "ERR_NO_REGISTER_FOUND");
-        return dc.api_deliveryTerminate(j);
-    }
-
-    // =========================================================
-    // Register validate
-    // =========================================================
-
-    @Override
-    public ApiResult api_registerValidate(String num, Integer n, String s, Integer p, String c) {
-        return api_registerValidate(num, n, DEFAULT_FROM, s, p, c, "auto", "");
-    }
-
-    @Override
-    public ApiResult api_registerValidate(String num, Integer n, Integer f, String s, Integer p, String c, String m, String b) {
-        if (s != null) rsm.bindExpectedSerial(n != null ? n : DEFAULT_NODE, s);
-        DeliveryController dc = selectController(n, f, m, s);
-        if (dc == null) return ApiResult.fail("No register found", "ERR_NO_REGISTER_FOUND");
-        return dc.api_registerValidate(num, n, s, p, c);
-    }
-
-    // =========================================================
-    // ORCHESTRATION CENTRALE — CŒUR DU COMPORTEMENT
-    // =========================================================
-
-    private DeliveryController selectController(Integer nodeIn,
-                                               Integer fromIn,
-                                               String media,
-                                               String expectedSerial) {
+    public ApiResult api_connectLcp(Integer nodeIn, Integer fromIn, String media, String bt) {
 
         int node = nodeIn != null ? nodeIn : DEFAULT_NODE;
         int from = fromIn != null ? fromIn : DEFAULT_FROM;
 
         MediaTransportManager mtm = getMtm();
-        if (mtm == null) return null;
+        if (mtm == null) {
+            return ApiResult.fail("MTM null", "ERR_MEDIA_MTM_NULL");
+        }
 
-        // === BT D’ABORD (ordre APK) ============================
-        if (!"usb".equals(normMedia(media, "auto"))) {
+        String m = normMedia(media, "auto");
+
+        // =============================
+        // BT D’ABORD (MODE AUTO / BT)
+        // =============================
+        if (!"usb".equals(m)) {
             for (TransportSnapshot snap : mtm.listSnapshots()) {
+
                 if (snap == null || snap.key == null) continue;
                 if (!snap.key.startsWith("BT:")) continue;
                 if (snap.status != TransportStatus.READY) continue;
 
-                mtm.activateExclusive(snap.key, "API_BT_TRY");
+                // 1️⃣ activer BT (comme UI)
+                mtm.activateExclusive(snap.key, "API_BT_AUTO");
 
                 TransportIo io = mtm.getByKey(snap.key);
                 if (io == null || !io.isOpen()) continue;
 
-                DeliveryController dc = rsm.getOrCreate(io.getKey(), node, from, io);
+                // 2️⃣ créer controller
+                DeliveryController dc =
+                        rsm.getOrCreate(io.getKey(), node, from, io);
                 if (dc == null) continue;
 
-                // ✅ 1. CONNECTER LCP SUR CE BT
+                // 3️⃣ connect LCP
                 ApiResult cr = dc.api_connectLcp();
                 if (cr == null || cr.code == 0) continue;
 
-                // ✅ 2. ENSUITE valider le registre
-                String serial = probeSerial80(io, node, from);
-                if (serial == null ||
-                    (expectedSerial != null && !expectedSerial.equals(serial))) {
-                    continue;
-                }
+                // 4️⃣ lire serial (#80)
+                String serial = readSerial80(io, node, from);
+                if (serial == null) continue;
 
+                // ✅ SUCCÈS TOTAL
                 dc.setActiveMedia("bt");
-                return dc; // ✅ STOP IMMÉDIAT
+                return ApiResult.ok(
+                        "CONNECTED BT serial=" + serial,
+                        null
+                );
             }
         }
 
-        // === USB EN DERNIER ===================================
+        // =============================
+        // USB (EN DERNIER)
+        // =============================
         TransportIo usb = mtm.getByKey(MediaTransportManager.KEY_USB);
         if (usb != null && usb.isOpen()) {
-            DeliveryController dc = rsm.getOrCreate(usb.getKey(), node, from, usb);
+
+            DeliveryController dc =
+                    rsm.getOrCreate(usb.getKey(), node, from, usb);
+
             if (dc != null) {
-                String serial = probeSerial80(usb, node, from);
-                if (serial != null &&
-                    (expectedSerial == null || expectedSerial.equals(serial))) {
-                    dc.setActiveMedia("usb");
-                    return dc;
+                ApiResult cr = dc.api_connectLcp();
+                if (cr != null && cr.code == 1) {
+
+                    String serial = readSerial80(usb, node, from);
+                    if (serial != null) {
+                        dc.setActiveMedia("usb");
+                        return ApiResult.ok(
+                                "CONNECTED USB serial=" + serial,
+                                null
+                        );
+                    }
                 }
             }
         }
 
-        return null;
-    }
-
-    private DeliveryController selectcontrollerForJob(Integer n) {
-        int node = n != null ? n : DEFAULT_NODE;
-        return selectController(node, DEFAULT_FROM, "auto",
-                rsm.getExpectedSerial(node));
+        return ApiResult.fail(
+                "No register found on BT or USB",
+                "ERR_NO_REGISTER_FOUND"
+        );
     }
 
     // =========================================================
-    // Utils
+    // UTILS
     // =========================================================
 
-    private String probeSerial80(TransportIo io, int node, int from) {
+    private String readSerial80(TransportIo io, int node, int from) {
         try {
             LcpLink link = new LcpLink(io, node, from, true);
             byte[] b = link.opGetField(80, PROBE_SERIAL_TIMEOUT_MS);
             if (b == null || b.length == 0) return null;
-            return new String(b, StandardCharsets.UTF_8).trim();
+
+            String s = new String(b, StandardCharsets.UTF_8)
+                    .replace("\u0000", "")
+                    .replace("\r", "")
+                    .replace("\n", "")
+                    .trim();
+
+            return s.isEmpty() ? null : s;
         } catch (Exception e) {
             return null;
         }
@@ -307,8 +161,71 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     private static String normMedia(String m, String def) {
-        return (m == null || m.trim().isEmpty())
-                ? def
-                : m.toLowerCase(Locale.ROOT);
+        if (m == null || m.trim().isEmpty()) return def;
+        return m.toLowerCase(Locale.ROOT);
+    }
+
+    // =========================================================
+    // Le reste est inchangé / passthrough
+    // =========================================================
+
+    @Override public ApiResult api_mediaCheck(String m, String b) {
+        return ApiResult.fail("Use connect", "USE_CONNECT");
+    }
+
+    @Override public ApiResult api_scanUsb() {
+        return ApiResult.fail("Not used", "NOT_USED");
+    }
+
+    @Override public ApiResult api_openPingUsb() {
+        return ApiResult.fail("Not used", "NOT_USED");
+    }
+
+    @Override public ApiResult api_dbDump() {
+        return ApiResult.fail("Not supported", "NOT_SUPPORTED");
+    }
+
+    @Override public ApiResult api_deliveryAlignA() {
+        DeliveryController dc = rsm.getActiveController();
+        return dc != null ? dc.api_deliveryAlignA()
+                : ApiResult.fail("No active", "ERR_NO_ACTIVE_MEDIA");
+    }
+
+    @Override public ApiResult api_deliveryStartC(int p, double v) {
+        DeliveryController dc = rsm.getActiveController();
+        return dc != null ? dc.api_deliveryStartC(p, v)
+                : ApiResult.fail("No active", "ERR_NO_ACTIVE_MEDIA");
+    }
+
+    @Override public ApiResult api_deliveryOneShotStart(String n, int p, double v, String c) {
+        DeliveryController dc = rsm.getActiveController();
+        return dc != null ? dc.api_deliveryOneShotStart(n, p, v, c)
+                : ApiResult.fail("No active", "ERR_NO_ACTIVE_MEDIA");
+    }
+
+    @Override public ApiResult api_deliveryJobGet(String j) {
+        DeliveryController dc = rsm.getActiveController();
+        return dc != null ? dc.api_deliveryJobGet(j)
+                : ApiResult.fail("No active", "ERR_NO_ACTIVE_MEDIA");
+    }
+
+    @Override public ApiResult api_deliveryContinue(String j) {
+        DeliveryController dc = rsm.getActiveController();
+        return dc != null ? dc.api_deliveryContinue(j)
+                : ApiResult.fail("No active", "ERR_NO_ACTIVE_MEDIA");
+    }
+
+    @Override public ApiResult api_deliveryTerminate(String j) {
+        DeliveryController dc = rsm.getActiveController();
+        return dc != null ? dc.api_deliveryTerminate(j)
+                : ApiResult.fail("No active", "ERR_NO_ACTIVE_MEDIA");
+    }
+
+    @Override
+    public ApiResult api_registerValidate(String num, Integer n, String s, Integer p, String c) {
+        DeliveryController dc = rsm.getActiveController();
+        return dc != null
+                ? dc.api_registerValidate(num, n, s, p, c)
+                : ApiResult.fail("No active", "ERR_NO_ACTIVE_MEDIA");
     }
 }
