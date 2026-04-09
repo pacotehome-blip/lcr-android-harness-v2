@@ -16,11 +16,10 @@ import java.util.Locale;
 /**
  * ApiFacadeImpl — FINAL ABSOLU
  *
- * - Essaye TOUS les BT READY (un par un)
+ * - Multi-BT réel (tous les BT READY)
  * - STOP immédiat dès qu’un registre est trouvé
- * - Ensuite USB
- * - STOP immédiat si USB valide
- * - Échec final seulement si rien trouvé
+ * - Fallback USB
+ * - Toutes les signatures ApiFacade implémentées
  */
 public final class ApiFacadeImpl implements ApiFacade {
 
@@ -35,21 +34,26 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // USB (global)
+    // USB / DB globals
     // =========================================================
 
     @Override
     public ApiResult api_scanUsb() {
-        return ApiResult.fail("USB Scan: not handled here", "USB_SCAN_NOT_SUPPORTED");
+        return ApiResult.fail("USB Scan not supported", "USB_SCAN_NOT_SUPPORTED");
     }
 
     @Override
     public ApiResult api_openPingUsb() {
-        return ApiResult.fail("USB OpenPing: not handled here", "USB_OPENPING_NOT_SUPPORTED");
+        return ApiResult.fail("USB OpenPing not supported", "USB_OPENPING_NOT_SUPPORTED");
+    }
+
+    @Override
+    public ApiResult api_dbDump() {
+        return ApiResult.fail("DB dump not supported here", "DB_DUMP_NOT_SUPPORTED");
     }
 
     // =========================================================
-    // Media check (diagnostic)
+    // Media check
     // =========================================================
 
     @Override
@@ -63,24 +67,23 @@ public final class ApiFacadeImpl implements ApiFacade {
 
         if ("usb".equals(m)) {
             TransportIo io = mtm.getByKey(MediaTransportManager.KEY_USB);
-            if (io != null && io.isOpen()) {
-                return ApiResult.ok("MediaCheck: usb OK", null);
-            }
-            return ApiResult.fail("MediaCheck: usb not ready", "ERR_USB_NOT_READY");
+            return (io != null && io.isOpen())
+                    ? ApiResult.ok("MediaCheck: usb OK", null)
+                    : ApiResult.fail("USB not ready", "ERR_USB_NOT_READY");
         }
 
         if ("bt".equals(m)) {
-            for (TransportSnapshot snap : mtm.listSnapshots()) {
-                if (snap == null || snap.key == null) continue;
-                if (!snap.key.toUpperCase(Locale.ROOT).startsWith("BT:")) continue;
-                if (snap.status == TransportStatus.READY) {
+            for (TransportSnapshot s : mtm.listSnapshots()) {
+                if (s != null && s.key != null &&
+                    s.key.startsWith("BT:") &&
+                    s.status == TransportStatus.READY) {
                     return ApiResult.ok("MediaCheck: bt OK", null);
                 }
             }
-            return ApiResult.fail("MediaCheck: bt not ready", "ERR_BT_NOT_READY");
+            return ApiResult.fail("BT not ready", "ERR_BT_NOT_READY");
         }
 
-        return ApiResult.fail("MediaCheck: invalid media", "ERR_MEDIA_INVALID");
+        return ApiResult.fail("Invalid media", "ERR_MEDIA_INVALID");
     }
 
     // =========================================================
@@ -93,31 +96,20 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     @Override
-    public ApiResult api_connectLcp(Integer lcrnode_dec, Integer from_dec) {
-        return api_connectLcp(lcrnode_dec, from_dec, "auto", "");
+    public ApiResult api_connectLcp(Integer node, Integer from) {
+        return api_connectLcp(node, from, "auto", "");
     }
 
     @Override
-    public ApiResult api_connectLcp(Integer lcrnode_dec,
-                                   Integer from_dec,
-                                   String media,
-                                   String bt_mac) {
-
-        int node = (lcrnode_dec != null) ? lcrnode_dec : DEFAULT_NODE;
-        int from = (from_dec != null) ? from_dec : DEFAULT_FROM;
-
-        DeliveryController dc =
-                selectController(node, from, media, rsm.getExpectedSerial(node));
-
-        if (dc == null) {
-            return ApiResult.fail("Connect: aucun registre trouvé (BT/USB)", "ERR_NO_REGISTER_FOUND");
-        }
-
-        try {
-            return dc.api_connectLcp();
-        } catch (Exception e) {
-            return ApiResult.fail("Connect: erreur", "ERR_CONNECT", errDetail(e, dc));
-        }
+    public ApiResult api_connectLcp(Integer node, Integer from, String media, String bt) {
+        DeliveryController dc = selectController(
+                node != null ? node : DEFAULT_NODE,
+                from != null ? from : DEFAULT_FROM,
+                media,
+                rsm.getExpectedSerial(node != null ? node : DEFAULT_NODE)
+        );
+        if (dc == null) return ApiResult.fail("No register found", "ERR_NO_REGISTER_FOUND");
+        return dc.api_connectLcp();
     }
 
     // =========================================================
@@ -128,18 +120,18 @@ public final class ApiFacadeImpl implements ApiFacade {
         return api_deliveryAlignA(DEFAULT_NODE, DEFAULT_FROM, "auto", "");
     }
 
-    @Override public ApiResult api_deliveryAlignA(Integer node, Integer from) {
-        return api_deliveryAlignA(node, from, "auto", "");
+    @Override public ApiResult api_deliveryAlignA(Integer n, Integer f) {
+        return api_deliveryAlignA(n, f, "auto", "");
     }
 
-    @Override public ApiResult api_deliveryAlignA(Integer node, Integer from, String media, String bt) {
+    @Override public ApiResult api_deliveryAlignA(Integer n, Integer f, String m, String b) {
         DeliveryController dc = selectController(
-                node != null ? node : DEFAULT_NODE,
-                from != null ? from : DEFAULT_FROM,
-                media,
-                rsm.getExpectedSerial(node != null ? node : DEFAULT_NODE)
+                n != null ? n : DEFAULT_NODE,
+                f != null ? f : DEFAULT_FROM,
+                m,
+                rsm.getExpectedSerial(n != null ? n : DEFAULT_NODE)
         );
-        if (dc == null) return ApiResult.fail("AlignA: aucun registre trouvé", "ERR_NO_REGISTER_FOUND");
+        if (dc == null) return ApiResult.fail("No register found", "ERR_NO_REGISTER_FOUND");
         return dc.api_deliveryAlignA();
     }
 
@@ -148,20 +140,20 @@ public final class ApiFacadeImpl implements ApiFacade {
     // =========================================================
 
     @Override
-    public ApiResult api_deliveryStartC(int prod, double preset) {
-        return api_deliveryStartC(DEFAULT_NODE, DEFAULT_FROM, prod, preset, "auto", "");
+    public ApiResult api_deliveryStartC(int p, double v) {
+        return api_deliveryStartC(DEFAULT_NODE, DEFAULT_FROM, p, v, "auto", "");
     }
 
     @Override
-    public ApiResult api_deliveryStartC(Integer node, Integer from, int prod, double preset, String media, String bt) {
+    public ApiResult api_deliveryStartC(Integer n, Integer f, int p, double v, String m, String b) {
         DeliveryController dc = selectController(
-                node != null ? node : DEFAULT_NODE,
-                from != null ? from : DEFAULT_FROM,
-                media,
-                rsm.getExpectedSerial(node != null ? node : DEFAULT_NODE)
+                n != null ? n : DEFAULT_NODE,
+                f != null ? f : DEFAULT_FROM,
+                m,
+                rsm.getExpectedSerial(n != null ? n : DEFAULT_NODE)
         );
-        if (dc == null) return ApiResult.fail("DeliveryC: aucun registre trouvé", "ERR_NO_REGISTER_FOUND");
-        return dc.api_deliveryStartC(prod, preset);
+        if (dc == null) return ApiResult.fail("No register found", "ERR_NO_REGISTER_FOUND");
+        return dc.api_deliveryStartC(p, v);
     }
 
     // =========================================================
@@ -169,83 +161,63 @@ public final class ApiFacadeImpl implements ApiFacade {
     // =========================================================
 
     @Override
-    public ApiResult api_deliveryOneShotStart(String num, int prod, double preset, String comp) {
-        return api_deliveryOneShotStart(DEFAULT_NODE, DEFAULT_FROM, num, prod, preset, comp, "auto", "");
+    public ApiResult api_deliveryOneShotStart(String num, int p, double v, String c) {
+        return api_deliveryOneShotStart(DEFAULT_NODE, DEFAULT_FROM, num, p, v, c, "auto", "");
     }
 
     @Override
-    public ApiResult api_deliveryOneShotStart(Integer node, Integer from, String num, int prod, double preset, String comp, String media, String bt) {
+    public ApiResult api_deliveryOneShotStart(Integer n, Integer f, String num, int p, double v, String c, String m, String b) {
         DeliveryController dc = selectController(
-                node != null ? node : DEFAULT_NODE,
-                from != null ? from : DEFAULT_FROM,
-                media,
-                rsm.getExpectedSerial(node != null ? node : DEFAULT_NODE)
+                n != null ? n : DEFAULT_NODE,
+                f != null ? f : DEFAULT_FROM,
+                m,
+                rsm.getExpectedSerial(n != null ? n : DEFAULT_NODE)
         );
-        if (dc == null) return ApiResult.fail("OneShot: aucun registre trouvé", "ERR_NO_REGISTER_FOUND");
-        return dc.api_deliveryOneShotStart(num, prod, preset, comp);
+        if (dc == null) return ApiResult.fail("No register found", "ERR_NO_REGISTER_FOUND");
+        return dc.api_deliveryOneShotStart(num, p, v, c);
     }
 
     // =========================================================
-    // JobGet
+    // JobGet / Continue / Terminate
     // =========================================================
 
-    @Override
-    public ApiResult api_deliveryJobGet(String jobId) {
-        return api_deliveryJobGet(jobId, DEFAULT_NODE);
+    @Override public ApiResult api_deliveryJobGet(String j) {
+        return api_deliveryJobGet(j, DEFAULT_NODE);
     }
 
-    @Override
-    public ApiResult api_deliveryJobGet(String jobId, Integer node) {
+    @Override public ApiResult api_deliveryJobGet(String j, Integer n) {
         DeliveryController dc = selectController(
-                node != null ? node : DEFAULT_NODE,
-                DEFAULT_FROM,
-                "auto",
-                rsm.getExpectedSerial(node != null ? node : DEFAULT_NODE)
+                n != null ? n : DEFAULT_NODE, DEFAULT_FROM, "auto",
+                rsm.getExpectedSerial(n != null ? n : DEFAULT_NODE)
         );
-        if (dc == null) return ApiResult.fail("JobGet: aucun registre trouvé", "ERR_NO_REGISTER_FOUND");
-        return dc.api_deliveryJobGet(jobId);
+        if (dc == null) return ApiResult.fail("No register found", "ERR_NO_REGISTER_FOUND");
+        return dc.api_deliveryJobGet(j);
     }
 
-    // =========================================================
-    // Continue
-    // =========================================================
-
-    @Override
-    public ApiResult api_deliveryContinue(String jobId) {
-        return api_deliveryContinue(jobId, DEFAULT_NODE);
+    @Override public ApiResult api_deliveryContinue(String j) {
+        return api_deliveryContinue(j, DEFAULT_NODE);
     }
 
-    @Override
-    public ApiResult api_deliveryContinue(String jobId, Integer node) {
+    @Override public ApiResult api_deliveryContinue(String j, Integer n) {
         DeliveryController dc = selectController(
-                node != null ? node : DEFAULT_NODE,
-                DEFAULT_FROM,
-                "auto",
-                rsm.getExpectedSerial(node != null ? node : DEFAULT_NODE)
+                n != null ? n : DEFAULT_NODE, DEFAULT_FROM, "auto",
+                rsm.getExpectedSerial(n != null ? n : DEFAULT_NODE)
         );
-        if (dc == null) return ApiResult.fail("Continue: aucun registre trouvé", "ERR_NO_REGISTER_FOUND");
-        return dc.api_deliveryContinue(jobId);
+        if (dc == null) return ApiResult.fail("No register found", "ERR_NO_REGISTER_FOUND");
+        return dc.api_deliveryContinue(j);
     }
 
-    // =========================================================
-    // Terminate
-    // =========================================================
-
-    @Override
-    public ApiResult api_deliveryTerminate(String jobId) {
-        return api_deliveryTerminate(jobId, DEFAULT_NODE);
+    @Override public ApiResult api_deliveryTerminate(String j) {
+        return api_deliveryTerminate(j, DEFAULT_NODE);
     }
 
-    @Override
-    public ApiResult api_deliveryTerminate(String jobId, Integer node) {
+    @Override public ApiResult api_deliveryTerminate(String j, Integer n) {
         DeliveryController dc = selectController(
-                node != null ? node : DEFAULT_NODE,
-                DEFAULT_FROM,
-                "auto",
-                rsm.getExpectedSerial(node != null ? node : DEFAULT_NODE)
+                n != null ? n : DEFAULT_NODE, DEFAULT_FROM, "auto",
+                rsm.getExpectedSerial(n != null ? n : DEFAULT_NODE)
         );
-        if (dc == null) return ApiResult.fail("Terminate: aucun registre trouvé", "ERR_NO_REGISTER_FOUND");
-        return dc.api_deliveryTerminate(jobId);
+        if (dc == null) return ApiResult.fail("No register found", "ERR_NO_REGISTER_FOUND");
+        return dc.api_deliveryTerminate(j);
     }
 
     // =========================================================
@@ -253,25 +225,25 @@ public final class ApiFacadeImpl implements ApiFacade {
     // =========================================================
 
     @Override
-    public ApiResult api_registerValidate(String num, Integer node, String serial, Integer prod, String comp) {
-        return api_registerValidate(num, node, DEFAULT_FROM, serial, prod, comp, "auto", "");
+    public ApiResult api_registerValidate(String num, Integer n, String s, Integer p, String c) {
+        return api_registerValidate(num, n, DEFAULT_FROM, s, p, c, "auto", "");
     }
 
     @Override
-    public ApiResult api_registerValidate(String num, Integer node, Integer from, String serial, Integer prod, String comp, String media, String bt) {
-        if (serial != null) rsm.bindExpectedSerial(node != null ? node : DEFAULT_NODE, serial);
+    public ApiResult api_registerValidate(String num, Integer n, Integer f, String s, Integer p, String c, String m, String b) {
+        if (s != null) rsm.bindExpectedSerial(n != null ? n : DEFAULT_NODE, s);
         DeliveryController dc = selectController(
-                node != null ? node : DEFAULT_NODE,
-                from != null ? from : DEFAULT_FROM,
-                media,
-                serial
+                n != null ? n : DEFAULT_NODE,
+                f != null ? f : DEFAULT_FROM,
+                m,
+                s
         );
-        if (dc == null) return ApiResult.fail("Validate: aucun registre trouvé", "ERR_NO_REGISTER_FOUND");
-        return dc.api_registerValidate(num, node, serial, prod, comp);
+        if (dc == null) return ApiResult.fail("No register found", "ERR_NO_REGISTER_FOUND");
+        return dc.api_registerValidate(num, n, s, p, c);
     }
 
     // =========================================================
-    // Orchestration centrale
+    // Core orchestration
     // =========================================================
 
     private DeliveryController selectController(int node, int from, String media, String expectedSerial) {
