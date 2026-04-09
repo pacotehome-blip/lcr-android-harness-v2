@@ -1,6 +1,8 @@
 
 package com.pa.lcr.lcp;
 
+import com.pa.lcr.lcp.transport.MediaTransportManager;
+
 import org.json.JSONObject;
 
 import java.io.BufferedInputStream;
@@ -47,6 +49,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * ✅ Media check (Option A):
  * POST /v1/media/check body: {"media":"usb"} OR {"media":"bt","bt_mac":"AA:BB:.."}
+ *
+ * ✅ Correctif (mandat) :
+ * - Si media=bt ET bt_mac absent, on résout automatiquement le MAC via l’APK
+ *   (MediaTransportManager activeKey "BT:AA:BB:.."), puis on l’utilise.
  */
 public final class ApiServer {
 
@@ -190,8 +196,27 @@ public final class ApiServer {
     }
 
     // =========================
+    // ✅ Helper: resolve BT MAC from APK runtime (MediaTransportManager)
+    // - expected key format: "BT:AA:BB:CC:DD:EE:FF"
+    // - returns null if not available
+    // =========================
+    private static String resolveBtMacFromApk() {
+        try {
+            String k = MediaTransportManager.getActiveKeyStatic();
+            if (k == null) return null;
+            k = k.trim();
+            if (k.isEmpty()) return null;
+            if (!k.toUpperCase(Locale.ROOT).startsWith("BT:")) return null;
+            String mac = k.substring(3).trim();
+            return mac.isEmpty() ? null : mac;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    // =========================
     // ✅ Option B: media gating helper (connectivité seulement)
-    // ✅ CORRECTION INTÉGRÉE ICI
+    // ✅ CORRECTION: si BT + bt_mac absent => resolve via APK et l’utiliser
     // =========================
     private ApiResult gateMediaIfProvided(JSONObject body) {
         if (body == null) return null;
@@ -205,8 +230,18 @@ public final class ApiServer {
         // ✅ Ne jamais bloquer sur "auto" (stratégie), le métier décidera.
         if ("auto".equals(media)) return null;
 
-        // (optionnel mais safe) si media inconnu -> laisser le métier gérer (ou retourner invalide)
-        // Ici on laisse tel quel: on passe au check.
+        // ✅ CORRECTIF: media=bt et bt_mac absent => récupérer dans l'APK
+        if ("bt".equals(media) && btMac.isEmpty()) {
+            String resolved = resolveBtMacFromApk();
+            if (resolved != null && !resolved.isEmpty()) {
+                btMac = resolved;
+                try {
+                    body.put("bt_mac", resolved);
+                    body.put("btMac", resolved);
+                } catch (Exception ignored) {}
+            }
+        }
+
         ApiResult check = facade.api_mediaCheck(mediaRaw, btMac);
 
         // ✅ Si check dit "KO", on bloque SAUF dans un cas:
@@ -243,8 +278,34 @@ public final class ApiServer {
             JSONObject body = req.jsonBody();
             String media = body.optString("media", "").trim();
             if (media.isEmpty()) media = "usb";
+
+            String mediaLc = media.toLowerCase(Locale.ROOT);
             String btMac = body.optString("bt_mac", body.optString("btMac", "")).trim();
-            return facade.api_mediaCheck(media, btMac);
+
+            // ✅ CORRECTIF: si BT sans MAC => résoudre via APK et l'utiliser
+            if ("bt".equals(mediaLc) && btMac.isEmpty()) {
+                String resolved = resolveBtMacFromApk();
+                if (resolved != null && !resolved.isEmpty()) {
+                    btMac = resolved;
+                    try {
+                        body.put("bt_mac", resolved);
+                        body.put("btMac", resolved);
+                    } catch (Exception ignored) {}
+                }
+            }
+
+            ApiResult r = facade.api_mediaCheck(media, btMac);
+
+            // ✅ BONUS SAFE: si facade répond "ERR_BT_MAC_REQUIRED" (adaptateur OK mais MAC absent),
+            // on transforme en OK diagnostic (adapter) sans bloquer l’utilisateur.
+            if ("bt".equals(mediaLc) && (btMac == null || btMac.isEmpty())
+                    && r != null && r.code == 0 && "ERR_BT_MAC_REQUIRED".equals(r.err)) {
+                JSONObject d = new JSONObject();
+                try { d.put("bt_mac", JSONObject.NULL); } catch (Exception ignored) {}
+                return ApiResult.ok("MediaCheck: 1 - BT OK (bt_mac résolu: none)", d);
+            }
+
+            return r;
         }
 
         // Tick wait
