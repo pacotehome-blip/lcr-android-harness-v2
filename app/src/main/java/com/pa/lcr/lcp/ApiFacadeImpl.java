@@ -14,7 +14,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 
 /**
- * ApiFacadeImpl — FINAL COMPLET
+ * ApiFacadeImpl — FINAL COMPLET (TOUTES signatures ApiFacade)
  *
  * Règles FIGÉES :
  * - Essayer TOUS les BT READY, un par un
@@ -50,7 +50,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // Media check (diagnostic adaptateur uniquement)
+    // Media check (diagnostic adaptateur)
     // =========================================================
 
     @Override
@@ -107,9 +107,14 @@ public final class ApiFacadeImpl implements ApiFacade {
         int node = (lcrnode_dec != null) ? lcrnode_dec : DEFAULT_NODE;
         int from = (from_dec != null) ? from_dec : DEFAULT_FROM;
 
-        DeliveryController dc = selectController(node, from, media, rsm.getExpectedSerial(node));
+        DeliveryController dc =
+                selectController(node, from, media, rsm.getExpectedSerial(node));
+
         if (dc == null) {
-            return ApiResult.fail("Connect: aucun registre trouvé (BT/USB)", "ERR_NO_REGISTER_FOUND");
+            return ApiResult.fail(
+                    "Connect: aucun registre trouvé (BT/USB)",
+                    "ERR_NO_REGISTER_FOUND"
+            );
         }
 
         try {
@@ -120,7 +125,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // Align / Recover (A)
+    // Delivery Align A
     // =========================================================
 
     @Override
@@ -142,9 +147,14 @@ public final class ApiFacadeImpl implements ApiFacade {
         int node = (lcrnode_dec != null) ? lcrnode_dec : DEFAULT_NODE;
         int from = (from_dec != null) ? from_dec : DEFAULT_FROM;
 
-        DeliveryController dc = selectController(node, from, media, rsm.getExpectedSerial(node));
+        DeliveryController dc =
+                selectController(node, from, media, rsm.getExpectedSerial(node));
+
         if (dc == null) {
-            return ApiResult.fail("AlignA: aucun registre trouvé (BT/USB)", "ERR_NO_REGISTER_FOUND");
+            return ApiResult.fail(
+                    "AlignA: aucun registre trouvé (BT/USB)",
+                    "ERR_NO_REGISTER_FOUND"
+            );
         }
 
         try {
@@ -160,7 +170,14 @@ public final class ApiFacadeImpl implements ApiFacade {
 
     @Override
     public ApiResult api_deliveryStartC(int product1to16, double presetNet) {
-        return api_deliveryStartC(DEFAULT_NODE, DEFAULT_FROM, product1to16, presetNet, "auto", "");
+        return api_deliveryStartC(
+                DEFAULT_NODE,
+                DEFAULT_FROM,
+                product1to16,
+                presetNet,
+                "auto",
+                ""
+        );
     }
 
     @Override
@@ -174,20 +191,93 @@ public final class ApiFacadeImpl implements ApiFacade {
         int node = (lcrnode_dec != null) ? lcrnode_dec : DEFAULT_NODE;
         int from = (from_dec != null) ? from_dec : DEFAULT_FROM;
 
-        DeliveryController dc = selectController(node, from, media, rsm.getExpectedSerial(node));
+        DeliveryController dc =
+                selectController(node, from, media, rsm.getExpectedSerial(node));
+
         if (dc == null) {
-            return ApiResult.fail("DeliveryC: aucun registre trouvé (BT/USB)", "ERR_NO_REGISTER_FOUND");
+            return ApiResult.fail(
+                    "DeliveryC: aucun registre trouvé (BT/USB)",
+                    "ERR_NO_REGISTER_FOUND"
+            );
         }
 
         try {
             return dc.api_deliveryStartC(product1to16, presetNet);
         } catch (Exception e) {
-            return ApiResult.fail("DeliveryC: erreur", "ERR_DELIVERY_C", errDetail(e, dc));
+            return ApiResult.fail(
+                    "DeliveryC: erreur",
+                    "ERR_DELIVERY_C",
+                    errDetail(e, dc)
+            );
         }
     }
 
     // =========================================================
-    // CONTINUE — signatures OBLIGATOIRES
+    // ✅ OneShot — signature LEGACY OBLIGATOIRE
+    // =========================================================
+
+    @Override
+    public ApiResult api_deliveryOneShotStart(
+            String numero_livraison,
+            int product1to16,
+            double presetNetL,
+            String compartment
+    ) {
+        return api_deliveryOneShotStart(
+                DEFAULT_NODE,
+                DEFAULT_FROM,
+                numero_livraison,
+                product1to16,
+                presetNetL,
+                compartment,
+                "auto",
+                ""
+        );
+    }
+
+    @Override
+    public ApiResult api_deliveryOneShotStart(
+            Integer lcrnode_dec,
+            Integer from_dec,
+            String numero_livraison,
+            int product1to16,
+            double presetNetL,
+            String compartment,
+            String media,
+            String bt_mac
+    ) {
+
+        int node = (lcrnode_dec != null) ? lcrnode_dec : DEFAULT_NODE;
+        int from = (from_dec != null) ? from_dec : DEFAULT_FROM;
+
+        DeliveryController dc =
+                selectController(node, from, media, rsm.getExpectedSerial(node));
+
+        if (dc == null) {
+            return ApiResult.fail(
+                    "OneShot: aucun registre trouvé (BT/USB)",
+                    "ERR_NO_REGISTER_FOUND"
+            );
+        }
+
+        try {
+            return dc.api_deliveryOneShotStart(
+                    numero_livraison,
+                    product1to16,
+                    presetNetL,
+                    compartment
+            );
+        } catch (Exception e) {
+            return ApiResult.fail(
+                    "OneShot: erreur",
+                    "ERR_ONESHOT",
+                    errDetail(e, dc)
+            );
+        }
+    }
+
+    // =========================================================
+    // Continue
     // =========================================================
 
     @Override
@@ -200,20 +290,29 @@ public final class ApiFacadeImpl implements ApiFacade {
 
         int node = (lcrnode_dec != null) ? lcrnode_dec : DEFAULT_NODE;
 
-        DeliveryController dc = selectController(node, DEFAULT_FROM, "auto", rsm.getExpectedSerial(node));
+        DeliveryController dc =
+                selectController(node, DEFAULT_FROM, "auto", rsm.getExpectedSerial(node));
+
         if (dc == null) {
-            return ApiResult.fail("Continue: aucun registre trouvé", "ERR_NO_REGISTER_FOUND");
+            return ApiResult.fail(
+                    "Continue: aucun registre trouvé",
+                    "ERR_NO_REGISTER_FOUND"
+            );
         }
 
         try {
             return dc.api_deliveryContinue(jobId);
         } catch (Exception e) {
-            return ApiResult.fail("Continue: erreur", "ERR_CONTINUE", errDetail(e, dc));
+            return ApiResult.fail(
+                    "Continue: erreur",
+                    "ERR_CONTINUE",
+                    errDetail(e, dc)
+            );
         }
     }
 
     // =========================================================
-    // TERMINATE — signatures OBLIGATOIRES
+    // Terminate
     // =========================================================
 
     @Override
@@ -226,20 +325,29 @@ public final class ApiFacadeImpl implements ApiFacade {
 
         int node = (lcrnode_dec != null) ? lcrnode_dec : DEFAULT_NODE;
 
-        DeliveryController dc = selectController(node, DEFAULT_FROM, "auto", rsm.getExpectedSerial(node));
+        DeliveryController dc =
+                selectController(node, DEFAULT_FROM, "auto", rsm.getExpectedSerial(node));
+
         if (dc == null) {
-            return ApiResult.fail("Terminate: aucun registre trouvé", "ERR_NO_REGISTER_FOUND");
+            return ApiResult.fail(
+                    "Terminate: aucun registre trouvé",
+                    "ERR_NO_REGISTER_FOUND"
+            );
         }
 
         try {
             return dc.api_deliveryTerminate(jobId);
         } catch (Exception e) {
-            return ApiResult.fail("Terminate: erreur", "ERR_TERMINATE", errDetail(e, dc));
+            return ApiResult.fail(
+                    "Terminate: erreur",
+                    "ERR_TERMINATE",
+                    errDetail(e, dc)
+            );
         }
     }
 
     // =========================================================
-    // REGISTER VALIDATE — signatures OBLIGATOIRES
+    // Register validate
     // =========================================================
 
     @Override
@@ -286,9 +394,14 @@ public final class ApiFacadeImpl implements ApiFacade {
             rsm.bindExpectedSerial(node, expectedSerial);
         }
 
-        DeliveryController dc = selectController(node, from, media, expectedSerial);
+        DeliveryController dc =
+                selectController(node, from, media, expectedSerial);
+
         if (dc == null) {
-            return ApiResult.fail("Validate: aucun registre trouvé (BT/USB)", "ERR_NO_REGISTER_FOUND");
+            return ApiResult.fail(
+                    "Validate: aucun registre trouvé (BT/USB)",
+                    "ERR_NO_REGISTER_FOUND"
+            );
         }
 
         try {
@@ -300,7 +413,11 @@ public final class ApiFacadeImpl implements ApiFacade {
                     expected_compartment
             );
         } catch (Exception e) {
-            return ApiResult.fail("Validate: erreur", "ERR_VALIDATE", errDetail(e, dc));
+            return ApiResult.fail(
+                    "Validate: erreur",
+                    "ERR_VALIDATE",
+                    errDetail(e, dc)
+            );
         }
     }
 
@@ -308,17 +425,19 @@ public final class ApiFacadeImpl implements ApiFacade {
     // ORCHESTRATION CENTRALE (BT* → USB)
     // =========================================================
 
-    private DeliveryController selectController(int node,
-                                               int from,
-                                               String media,
-                                               String expectedSerial) {
+    private DeliveryController selectController(
+            int node,
+            int from,
+            String media,
+            String expectedSerial
+    ) {
 
         MediaTransportManager mtm = getMtm();
         if (mtm == null) return null;
 
         String m = normMedia(media, "auto");
 
-        // 1) TOUS les BT READY
+        // 1) BT READY
         if (!"usb".equals(m)) {
             for (TransportSnapshot snap : mtm.listSnapshots()) {
                 if (snap == null || snap.key == null) continue;
@@ -334,7 +453,9 @@ public final class ApiFacadeImpl implements ApiFacade {
                 if (serial == null) continue;
                 if (expectedSerial != null && !expectedSerial.equals(serial)) continue;
 
-                DeliveryController dc = rsm.getOrCreate(io.getKey(), node, from, io);
+                DeliveryController dc =
+                        rsm.getOrCreate(io.getKey(), node, from, io);
+
                 if (dc != null) {
                     dc.setActiveMedia("bt");
                     return dc; // ✅ STOP IMMÉDIAT
@@ -346,8 +467,12 @@ public final class ApiFacadeImpl implements ApiFacade {
         TransportIo ioUsb = mtm.getByKey(MediaTransportManager.KEY_USB);
         if (ioUsb != null && ioUsb.isOpen()) {
             String serial = probeSerial80(ioUsb, node, from);
-            if (serial != null && (expectedSerial == null || expectedSerial.equals(serial))) {
-                DeliveryController dc = rsm.getOrCreate(ioUsb.getKey(), node, from, ioUsb);
+            if (serial != null &&
+                (expectedSerial == null || expectedSerial.equals(serial))) {
+
+                DeliveryController dc =
+                        rsm.getOrCreate(ioUsb.getKey(), node, from, ioUsb);
+
                 if (dc != null) {
                     dc.setActiveMedia("usb");
                     return dc; // ✅ STOP IMMÉDIAT
