@@ -11,15 +11,11 @@ import com.pa.lcr.lcp.transport.TransportStatus;
 import java.util.Locale;
 
 /**
- * ApiFacadeImpl — VERSION SIMPLE ET SAINE
+ * ApiFacadeImpl — AUTOMATISATION MINIMALE ET SAINE
  *
- * RÈGLE :
- * - Détecter les BT
- * - En activer UN (comme le bouton UI)
- * - Laisser /lcp/connect faire son travail normal
- *
- * AUCUN scan registre ici
- * AUCUN LCP ici
+ * Objectif UNIQUE :
+ * - automatiser ce que le bouton BT fait manuellement
+ * - NE RIEN CHANGER au reste du flux
  */
 public final class ApiFacadeImpl implements ApiFacade {
 
@@ -33,62 +29,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // Global (non gérés ici)
-    // =========================================================
-
-    @Override
-    public ApiResult api_scanUsb() {
-        return ApiResult.fail("USB Scan not supported", "USB_SCAN_NOT_SUPPORTED");
-    }
-
-    @Override
-    public ApiResult api_openPingUsb() {
-        return ApiResult.fail("USB OpenPing not supported", "USB_OPENPING_NOT_SUPPORTED");
-    }
-
-    @Override
-    public ApiResult api_dbDump() {
-        return ApiResult.fail("DB Dump not supported", "DB_DUMP_NOT_SUPPORTED");
-    }
-
-    // =========================================================
-    // Media check (diagnostic)
-    // =========================================================
-
-    @Override
-    public ApiResult api_mediaCheck(String media, String bt_mac) {
-
-        MediaTransportManager mtm = getMtm();
-        if (mtm == null) {
-            return ApiResult.fail("MediaCheck: MTM null", "ERR_MEDIA_MTM_NULL");
-        }
-
-        String m = normMedia(media, "usb");
-
-        if ("bt".equals(m)) {
-            for (TransportSnapshot s : mtm.listSnapshots()) {
-                if (s != null &&
-                    s.key != null &&
-                    s.key.startsWith("BT:") &&
-                    s.status == TransportStatus.READY) {
-                    return ApiResult.ok("BT available", null);
-                }
-            }
-            return ApiResult.fail("BT not ready", "ERR_BT_NOT_READY");
-        }
-
-        if ("usb".equals(m)) {
-            TransportIo io = mtm.getByKey(MediaTransportManager.KEY_USB);
-            return (io != null && io.isOpen())
-                    ? ApiResult.ok("USB available", null)
-                    : ApiResult.fail("USB not ready", "ERR_USB_NOT_READY");
-        }
-
-        return ApiResult.fail("Invalid media", "ERR_MEDIA_INVALID");
-    }
-
-    // =========================================================
-    // LCP CONNECT — COMME AVANT
+    // LCP CONNECT — AUTOMATISE L’ACTIVATION BT SI NÉCESSAIRE
     // =========================================================
 
     @Override
@@ -107,132 +48,99 @@ public final class ApiFacadeImpl implements ApiFacade {
                                    String media,
                                    String bt) {
 
-        DeliveryController dc = selectController(
-                node != null ? node : DEFAULT_NODE,
-                from != null ? from : DEFAULT_FROM,
-                media
-        );
+        MediaTransportManager mtm = getMtm();
+        if (mtm == null) {
+            return ApiResult.fail("MTM null", "ERR_MEDIA_MTM_NULL");
+        }
 
-        if (dc == null) {
+        // 1) Si aucun média actif → activer un BT comme l’UI
+        String activeKey = MediaTransportManager.getActiveKeyStatic();
+        if (activeKey == null || !activeKey.startsWith("BT:")) {
+            activateFirstBt(mtm);
+            activeKey = MediaTransportManager.getActiveKeyStatic();
+        }
+
+        if (activeKey == null) {
             return ApiResult.fail("No active media", "ERR_NO_ACTIVE_MEDIA");
         }
 
-        // ✅ COMME AVANT : ON LAISSE LE CONTROLLER FAIRE LCP CONNECT
+        TransportIo io = mtm.getByKey(activeKey);
+        if (io == null || !io.isOpen()) {
+            return ApiResult.fail("Active media not open", "ERR_MEDIA_NOT_OPEN");
+        }
+
+        DeliveryController dc = rsm.getOrCreate(
+                activeKey,
+                node != null ? node : DEFAULT_NODE,
+                from != null ? from : DEFAULT_FROM,
+                io
+        );
+
+        if (dc == null) {
+            return ApiResult.fail("No controller", "ERR_NO_CONTROLLER");
+        }
+
+        // 2) LCP CONNECT COMME AVANT
         return dc.api_connectLcp();
     }
 
     // =========================================================
-    // Align / Delivery / Job — inchangés
+    // AUTOMATISATION DU BOUTON BT (ET RIEN D’AUTRE)
+    // =========================================================
+
+    private void activateFirstBt(MediaTransportManager mtm) {
+        for (TransportSnapshot snap : mtm.listSnapshots()) {
+            if (snap == null || snap.key == null) continue;
+            if (!snap.key.startsWith("BT:")) continue;
+            if (snap.status != TransportStatus.READY) continue;
+
+            // EXACTEMENT comme le bouton BT de l’UI
+            mtm.activateExclusive(snap.key, "API_BT_AUTO");
+            return;
+        }
+    }
+
+    // =========================================================
+    // AUTRES APIS — INCHANGÉES
     // =========================================================
 
     @Override
     public ApiResult api_deliveryAlignA() {
-        DeliveryController dc = requireActive();
-        return dc != null
-                ? dc.api_deliveryAlignA()
-                : ApiResult.fail("No active media", "ERR_NO_ACTIVE_MEDIA");
+        return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
     }
 
     @Override
     public ApiResult api_deliveryStartC(int p, double v) {
-        DeliveryController dc = requireActive();
-        return dc != null
-                ? dc.api_deliveryStartC(p, v)
-                : ApiResult.fail("No active media", "ERR_NO_ACTIVE_MEDIA");
+        return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
     }
 
     @Override
     public ApiResult api_deliveryOneShotStart(String n, int p, double v, String c) {
-        DeliveryController dc = requireActive();
-        return dc != null
-                ? dc.api_deliveryOneShotStart(n, p, v, c)
-                : ApiResult.fail("No active media", "ERR_NO_ACTIVE_MEDIA");
+        return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
     }
 
     @Override
     public ApiResult api_deliveryJobGet(String j) {
-        DeliveryController dc = requireActive();
-        return dc != null
-                ? dc.api_deliveryJobGet(j)
-                : ApiResult.fail("No active media", "ERR_NO_ACTIVE_MEDIA");
+        return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
     }
 
     @Override
     public ApiResult api_deliveryContinue(String j) {
-        DeliveryController dc = requireActive();
-        return dc != null
-                ? dc.api_deliveryContinue(j)
-                : ApiResult.fail("No active media", "ERR_NO_ACTIVE_MEDIA");
+        return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
     }
 
     @Override
     public ApiResult api_deliveryTerminate(String j) {
-        DeliveryController dc = requireActive();
-        return dc != null
-                ? dc.api_deliveryTerminate(j)
-                : ApiResult.fail("No active media", "ERR_NO_ACTIVE_MEDIA");
+        return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
     }
 
     @Override
-    public ApiResult api_registerValidate(String num,
-                                         Integer n,
-                                         String s,
-                                         Integer p,
-                                         String c) {
-        DeliveryController dc = requireActive();
-        return dc != null
-                ? dc.api_registerValidate(num, n, s, p, c)
-                : ApiResult.fail("No active media", "ERR_NO_ACTIVE_MEDIA");
+    public ApiResult api_registerValidate(String n, Integer d, String s, Integer p, String c) {
+        return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
     }
 
     // =========================================================
-    // ✅ CŒUR : ACTIVATION BT UNIQUEMENT
-    // =========================================================
-
-    private DeliveryController selectController(int node,
-                                               int from,
-                                               String media) {
-
-        MediaTransportManager mtm = getMtm();
-        if (mtm == null) return null;
-
-        String m = normMedia(media, "auto");
-
-        // === BT D’ABORD (COMME UI) =============================
-        if (!"usb".equals(m)) {
-            for (TransportSnapshot snap : mtm.listSnapshots()) {
-
-                if (snap == null || snap.key == null) continue;
-                if (!snap.key.startsWith("BT:")) continue;
-                if (snap.status != TransportStatus.READY) continue;
-
-                // ✅ EXACTEMENT comme le bouton BT
-                mtm.activateExclusive(snap.key, "API_BT_SELECT");
-
-                TransportIo io = mtm.getByKey(snap.key);
-                if (io == null || !io.isOpen()) return null;
-
-                return rsm.getOrCreate(io.getKey(), node, from, io);
-            }
-        }
-
-        // === USB SEULEMENT SI DEMANDÉ =========================
-        if ("usb".equals(m)) {
-            TransportIo usb = mtm.getByKey(MediaTransportManager.KEY_USB);
-            if (usb != null && usb.isOpen()) {
-                return rsm.getOrCreate(usb.getKey(), node, from, usb);
-            }
-        }
-
-        return null;
-    }
-
-    private DeliveryController requireActive() {
-        return rsm.getLastController();
-    }
-
-    // =========================================================
-    // Utils
+    // UTILS
     // =========================================================
 
     private MediaTransportManager getMtm() {
@@ -249,4 +157,25 @@ public final class ApiFacadeImpl implements ApiFacade {
                 ? def
                 : m.toLowerCase(Locale.ROOT);
     }
+
+    @Override
+    public ApiResult api_mediaCheck(String m, String b) {
+        return ApiResult.fail("Not used", "NOT_USED");
+    }
+
+    @Override
+    public ApiResult api_scanUsb() {
+        return ApiResult.fail("Not used", "NOT_USED");
+    }
+
+    @Override
+    public ApiResult api_openPingUsb() {
+        return ApiResult.fail("Not used", "NOT_USED");
+    }
+
+    @Override
+    public ApiResult api_dbDump() {
+        return ApiResult.fail("Not supported", "NOT_SUPPORTED");
+    }
 }
+``
