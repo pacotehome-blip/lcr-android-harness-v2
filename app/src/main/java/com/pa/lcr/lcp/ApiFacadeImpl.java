@@ -14,7 +14,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 
 /**
- * ApiFacadeImpl — FINAL
+ * ApiFacadeImpl — FINAL COMPLET
  *
  * Règles FIGÉES :
  * - Essayer TOUS les BT READY, un par un
@@ -22,9 +22,6 @@ import java.util.Locale;
  * - Ensuite essayer USB
  * - STOP immédiat si USB valide
  * - Échec final seulement si rien trouvé
- *
- * Aucune dépendance à activeKey.
- * Aucune demande de MAC au client.
  */
 public final class ApiFacadeImpl implements ApiFacade {
 
@@ -190,6 +187,32 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
+    // CONTINUE — signatures OBLIGATOIRES
+    // =========================================================
+
+    @Override
+    public ApiResult api_deliveryContinue(String jobId) {
+        return api_deliveryContinue(jobId, DEFAULT_NODE);
+    }
+
+    @Override
+    public ApiResult api_deliveryContinue(String jobId, Integer lcrnode_dec) {
+
+        int node = (lcrnode_dec != null) ? lcrnode_dec : DEFAULT_NODE;
+
+        DeliveryController dc = selectController(node, DEFAULT_FROM, "auto", rsm.getExpectedSerial(node));
+        if (dc == null) {
+            return ApiResult.fail("Continue: aucun registre trouvé", "ERR_NO_REGISTER_FOUND");
+        }
+
+        try {
+            return dc.api_deliveryContinue(jobId);
+        } catch (Exception e) {
+            return ApiResult.fail("Continue: erreur", "ERR_CONTINUE", errDetail(e, dc));
+        }
+    }
+
+    // =========================================================
     // TERMINATE — signatures OBLIGATOIRES
     // =========================================================
 
@@ -311,11 +334,10 @@ public final class ApiFacadeImpl implements ApiFacade {
                 if (serial == null) continue;
                 if (expectedSerial != null && !expectedSerial.equals(serial)) continue;
 
-                // ✅ STOP IMMÉDIAT
                 DeliveryController dc = rsm.getOrCreate(io.getKey(), node, from, io);
                 if (dc != null) {
                     dc.setActiveMedia("bt");
-                    return dc;
+                    return dc; // ✅ STOP IMMÉDIAT
                 }
             }
         }
@@ -328,7 +350,7 @@ public final class ApiFacadeImpl implements ApiFacade {
                 DeliveryController dc = rsm.getOrCreate(ioUsb.getKey(), node, from, ioUsb);
                 if (dc != null) {
                     dc.setActiveMedia("usb");
-                    return dc; // ✅ STOP
+                    return dc; // ✅ STOP IMMÉDIAT
                 }
             }
         }
