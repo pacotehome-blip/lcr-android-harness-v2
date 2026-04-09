@@ -11,11 +11,11 @@ import com.pa.lcr.lcp.transport.TransportStatus;
 import java.util.Locale;
 
 /**
- * ApiFacadeImpl — AUTOMATISATION MINIMALE ET SAINE
+ * ApiFacadeImpl — AUTOMATISATION MINIMALE
  *
- * Objectif UNIQUE :
- * - automatiser ce que le bouton BT fait manuellement
- * - NE RIEN CHANGER au reste du flux
+ * But UNIQUE :
+ * - automatiser l’activation BT (comme le bouton UI)
+ * - laisser /lcp/connect fonctionner comme quand c’est fait manuellement
  */
 public final class ApiFacadeImpl implements ApiFacade {
 
@@ -29,7 +29,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // LCP CONNECT — AUTOMATISE L’ACTIVATION BT SI NÉCESSAIRE
+    // LCP CONNECT — COMME AVANT + AUTO-ACTIVATION BT
     // =========================================================
 
     @Override
@@ -53,7 +53,7 @@ public final class ApiFacadeImpl implements ApiFacade {
             return ApiResult.fail("MTM null", "ERR_MEDIA_MTM_NULL");
         }
 
-        // 1) Si aucun média actif → activer un BT comme l’UI
+        // 1) Si aucun média actif, activer automatiquement un BT (comme UI)
         String activeKey = MediaTransportManager.getActiveKeyStatic();
         if (activeKey == null || !activeKey.startsWith("BT:")) {
             activateFirstBt(mtm);
@@ -80,7 +80,7 @@ public final class ApiFacadeImpl implements ApiFacade {
             return ApiResult.fail("No controller", "ERR_NO_CONTROLLER");
         }
 
-        // 2) LCP CONNECT COMME AVANT
+        // 2) EXACTEMENT COMME AVANT
         return dc.api_connectLcp();
     }
 
@@ -90,18 +90,19 @@ public final class ApiFacadeImpl implements ApiFacade {
 
     private void activateFirstBt(MediaTransportManager mtm) {
         for (TransportSnapshot snap : mtm.listSnapshots()) {
-            if (snap == null || snap.key == null) continue;
+            if (snap == null) continue;
+            if (snap.key == null) continue;
             if (!snap.key.startsWith("BT:")) continue;
             if (snap.status != TransportStatus.READY) continue;
 
-            // EXACTEMENT comme le bouton BT de l’UI
+            // EXACTEMENT le comportement du bouton BT de l’UI
             mtm.activateExclusive(snap.key, "API_BT_AUTO");
             return;
         }
     }
 
     // =========================================================
-    // AUTRES APIS — INCHANGÉES
+    // AUTRES APIS — INCHANGÉES / BLOQUÉES SI PAS CONNECTÉ
     // =========================================================
 
     @Override
@@ -178,4 +179,3 @@ public final class ApiFacadeImpl implements ApiFacade {
         return ApiResult.fail("Not supported", "NOT_SUPPORTED");
     }
 }
-``
