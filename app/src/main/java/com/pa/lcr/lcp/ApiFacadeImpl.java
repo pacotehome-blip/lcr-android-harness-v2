@@ -17,6 +17,7 @@ import java.util.Locale;
  * ApiFacadeImpl — FINAL ABSOLU
  *
  * - Multi-BT réel (tous les BT READY)
+ * - CONNECTER le BT avant validation du registre
  * - STOP immédiat dès qu’un registre est trouvé
  * - Fallback USB
  * - Toutes les signatures ApiFacade implémentées
@@ -116,15 +117,18 @@ public final class ApiFacadeImpl implements ApiFacade {
     // Align A
     // =========================================================
 
-    @Override public ApiResult api_deliveryAlignA() {
+    @Override
+    public ApiResult api_deliveryAlignA() {
         return api_deliveryAlignA(DEFAULT_NODE, DEFAULT_FROM, "auto", "");
     }
 
-    @Override public ApiResult api_deliveryAlignA(Integer n, Integer f) {
+    @Override
+    public ApiResult api_deliveryAlignA(Integer n, Integer f) {
         return api_deliveryAlignA(n, f, "auto", "");
     }
 
-    @Override public ApiResult api_deliveryAlignA(Integer n, Integer f, String m, String b) {
+    @Override
+    public ApiResult api_deliveryAlignA(Integer n, Integer f, String m, String b) {
         DeliveryController dc = selectController(
                 n != null ? n : DEFAULT_NODE,
                 f != null ? f : DEFAULT_FROM,
@@ -178,7 +182,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // JobGet / Continue / Terminate
+    // Job / Continue / Terminate
     // =========================================================
 
     @Override public ApiResult api_deliveryJobGet(String j) {
@@ -186,10 +190,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     @Override public ApiResult api_deliveryJobGet(String j, Integer n) {
-        DeliveryController dc = selectController(
-                n != null ? n : DEFAULT_NODE, DEFAULT_FROM, "auto",
-                rsm.getExpectedSerial(n != null ? n : DEFAULT_NODE)
-        );
+        DeliveryController dc = selectcontrollerForJob(n);
         if (dc == null) return ApiResult.fail("No register found", "ERR_NO_REGISTER_FOUND");
         return dc.api_deliveryJobGet(j);
     }
@@ -199,10 +200,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     @Override public ApiResult api_deliveryContinue(String j, Integer n) {
-        DeliveryController dc = selectController(
-                n != null ? n : DEFAULT_NODE, DEFAULT_FROM, "auto",
-                rsm.getExpectedSerial(n != null ? n : DEFAULT_NODE)
-        );
+        DeliveryController dc = selectcontrollerForJob(n);
         if (dc == null) return ApiResult.fail("No register found", "ERR_NO_REGISTER_FOUND");
         return dc.api_deliveryContinue(j);
     }
@@ -212,10 +210,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     @Override public ApiResult api_deliveryTerminate(String j, Integer n) {
-        DeliveryController dc = selectController(
-                n != null ? n : DEFAULT_NODE, DEFAULT_FROM, "auto",
-                rsm.getExpectedSerial(n != null ? n : DEFAULT_NODE)
-        );
+        DeliveryController dc = selectcontrollerForJob(n);
         if (dc == null) return ApiResult.fail("No register found", "ERR_NO_REGISTER_FOUND");
         return dc.api_deliveryTerminate(j);
     }
@@ -243,7 +238,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // Core orchestration
+    // Core orchestration (BT connect → validate → STOP)
     // =========================================================
 
     private DeliveryController selectController(int node, int from, String media, String expectedSerial) {
@@ -251,6 +246,7 @@ public final class ApiFacadeImpl implements ApiFacade {
         MediaTransportManager mtm = getMtm();
         if (mtm == null) return null;
 
+        // === BT FIRST =====================================================
         if (!"usb".equals(normMedia(media, "auto"))) {
             for (TransportSnapshot snap : mtm.listSnapshots()) {
                 if (snap == null || snap.key == null) continue;
@@ -262,21 +258,43 @@ public final class ApiFacadeImpl implements ApiFacade {
                 TransportIo io = mtm.getByKey(snap.key);
                 if (io == null || !io.isOpen()) continue;
 
-                String s = probeSerial80(io, node, from);
-                if (s == null || (expectedSerial != null && !expectedSerial.equals(s))) continue;
+                DeliveryController dc = rsm.getOrCreate(io.getKey(), node, from, io);
+                if (dc == null) continue;
 
-                return rsm.getOrCreate(io.getKey(), node, from, io);
+                // ✅ CONNECTER LCP D’ABORD
+                ApiResult cr = dc.api_connectLcp();
+                if (cr == null || cr.code == 0) continue;
+
+                // ✅ PUIS VALIDER LE REGISTRE
+                String serial = probeSerial80(io, node, from);
+                if (serial == null || (expectedSerial != null && !expectedSerial.equals(serial))) continue;
+
+                dc.setActiveMedia("bt");
+                return dc; // ✅ STOP IMMÉDIAT
             }
         }
 
+        // === USB ==========================================================
         TransportIo usb = mtm.getByKey(MediaTransportManager.KEY_USB);
         if (usb != null && usb.isOpen()) {
-            String s = probeSerial80(usb, node, from);
-            if (s != null && (expectedSerial == null || expectedSerial.equals(s))) {
-                return rsm.getOrCreate(usb.getKey(), node, from, usb);
+
+            DeliveryController dc = rsm.getOrCreate(usb.getKey(), node, from, usb);
+            if (dc != null) {
+
+                String serial = probeSerial80(usb, node, from);
+                if (serial != null && (expectedSerial == null || expectedSerial.equals(serial))) {
+                    dc.setActiveMedia("usb");
+                    return dc;
+                }
             }
         }
+
         return null;
+    }
+
+    private DeliveryController selectcontrollerForJob(Integer n) {
+        int node = n != null ? n : DEFAULT_NODE;
+        return selectController(node, DEFAULT_FROM, "auto", rsm.getExpectedSerial(node));
     }
 
     private String probeSerial80(TransportIo io, int node, int from) {
@@ -301,14 +319,5 @@ public final class ApiFacadeImpl implements ApiFacade {
 
     private static String normMedia(String m, String def) {
         return (m == null || m.trim().isEmpty()) ? def : m.toLowerCase(Locale.ROOT);
-    }
-
-    private JSONObject errDetail(Exception e, DeliveryController dc) {
-        JSONObject d = new JSONObject();
-        try {
-            d.put("detail", e.getMessage());
-            d.put("transport_key", rsm.findTransportKeyForController(dc));
-        } catch (Exception ignored) {}
-        return d;
     }
 }
