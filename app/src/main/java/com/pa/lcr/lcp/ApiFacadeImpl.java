@@ -6,33 +6,26 @@ import android.content.Context;
 import com.pa.lcr.lcp.transport.MediaTransportManager;
 import com.pa.lcr.lcp.transport.TransportIo;
 import com.pa.lcr.lcp.transport.TransportSnapshot;
+import com.pa.lcr.lcp.transport.TransportStatus;
 
 import org.json.JSONObject;
 
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Locale;
 
 /**
- * ApiFacadeImpl — FINAL
+ * ApiFacadeImpl — FINAL (FIX COMPILE)
  *
- * Règle d’or (FIGÉE) :
- * - Essayer TOUS les BT READY, un par un
- * - STOP immédiat dès qu’un registre valide est trouvé
- * - Ensuite seulement, essayer USB
- * - STOP immédiat si USB valide
- * - Échec final uniquement si aucun registre n’est trouvé
- *
- * Aucune demande de MAC au client.
- * Aucun scan inutile après succès.
+ * - Essaye TOUS les BT READY, un par un
+ * - STOP dès qu’un registre est trouvé
+ * - Puis USB
+ * - STOP dès succès
+ * - Échec final seulement si rien trouvé
  */
 public final class ApiFacadeImpl implements ApiFacade {
 
     private static final int DEFAULT_NODE = 250;
     private static final int DEFAULT_FROM = 255;
-
-    // Timeout court pour probe registre (#80)
     private static final int PROBE_SERIAL_TIMEOUT_MS = 700;
 
     private final RegisterSessionManager rsm;
@@ -56,7 +49,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // Media check (diagnostic adaptateur uniquement)
+    // Media check (diagnostic)
     // =========================================================
 
     @Override
@@ -77,15 +70,12 @@ public final class ApiFacadeImpl implements ApiFacade {
         }
 
         if ("bt".equals(m)) {
-            // Diagnostic seulement : adaptateur/transport READY suffit
-            for (TransportSnapshot s : mtm.listSnapshots()) {
-                if (s == null) continue;
-                if (s.key == null) continue;
-                if (!s.key.toUpperCase(Locale.ROOT).startsWith("BT:")) continue;
-                if (s.status == TransportSnapshot.Status.READY) {
-                    JSONObject d = new JSONObject();
-                    try { d.put("media", "bt"); } catch (Exception ignored) {}
-                    return ApiResult.ok("MediaCheck: bt OK", d);
+            for (TransportSnapshot snap : mtm.listSnapshots()) {
+                if (snap == null) continue;
+                if (snap.key == null) continue;
+                if (!snap.key.toUpperCase(Locale.ROOT).startsWith("BT:")) continue;
+                if (snap.status == TransportStatus.READY) {
+                    return ApiResult.ok("MediaCheck: bt OK", null);
                 }
             }
             return ApiResult.fail("MediaCheck: bt not ready", "ERR_BT_NOT_READY");
@@ -129,7 +119,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // Align / Recover (A)
+    // Align A
     // =========================================================
 
     @Override
@@ -194,75 +184,34 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // validateRegister
+    // ✅ FIX MANQUANT — api_deliveryTerminate(String)
     // =========================================================
 
     @Override
-    public ApiResult api_registerValidate(String numero_livraison,
-                                         Integer expected_lcrnode_dec,
-                                         String expected_serial_id,
-                                         Integer expected_product_number,
-                                         String expected_compartment) {
-        return api_registerValidate(
-                numero_livraison,
-                expected_lcrnode_dec,
-                DEFAULT_FROM,
-                expected_serial_id,
-                expected_product_number,
-                expected_compartment,
-                "auto",
-                ""
-        );
+    public ApiResult api_deliveryTerminate(String jobId) {
+        return api_deliveryTerminate(jobId, DEFAULT_NODE);
     }
 
     @Override
-    public ApiResult api_registerValidate(String numero_livraison,
-                                         Integer expected_lcrnode_dec,
-                                         Integer from_dec,
-                                         String expected_serial_id,
-                                         Integer expected_product_number,
-                                         String expected_compartment,
-                                         String media,
-                                         String bt_mac) {
-        int node = (expected_lcrnode_dec != null) ? expected_lcrnode_dec : DEFAULT_NODE;
-        int from = (from_dec != null) ? from_dec : DEFAULT_FROM;
+    public ApiResult api_deliveryTerminate(String jobId, Integer lcrnode_dec) {
+        int node = (lcrnode_dec != null) ? lcrnode_dec : DEFAULT_NODE;
 
-        String expectedSerial =
-                (expected_serial_id != null && !expected_serial_id.trim().isEmpty())
-                        ? expected_serial_id.trim()
-                        : null;
-
-        if (expectedSerial != null) {
-            rsm.bindExpectedSerial(node, expectedSerial);
-        }
-
-        DeliveryController dc = selectController(node, from, media, expectedSerial);
+        DeliveryController dc = selectController(node, DEFAULT_FROM, "auto", rsm.getExpectedSerial(node));
         if (dc == null) {
-            return ApiResult.fail("Validate: aucun registre trouvé (BT/USB)", "ERR_NO_REGISTER_FOUND");
+            return ApiResult.fail("Terminate: aucun registre trouvé", "ERR_NO_REGISTER_FOUND");
         }
 
         try {
-            return dc.api_registerValidate(
-                    numero_livraison,
-                    node,
-                    expectedSerial,
-                    expected_product_number,
-                    expected_compartment
-            );
+            return dc.api_deliveryTerminate(jobId);
         } catch (Exception e) {
-            return ApiResult.fail("Validate: erreur", "ERR_VALIDATE", errDetail(e, dc));
+            return ApiResult.fail("Terminate: erreur", "ERR_TERMINATE", errDetail(e, dc));
         }
     }
 
     // =========================================================
-    // ================= ORCHESTRATION CENTRALE =================
+    // Orchestration finale BT* → USB
     // =========================================================
 
-    /**
-     * Orchestration FINALE :
-     * - Tous les BT READY, un par un (STOP dès succès)
-     * - Puis USB (STOP dès succès)
-     */
     private DeliveryController selectController(int node,
                                                int from,
                                                String media,
@@ -273,17 +222,15 @@ public final class ApiFacadeImpl implements ApiFacade {
 
         String m = normMedia(media, "auto");
 
-        // 1) BT d'abord sauf si media=usb explicite
+        // BT d'abord sauf media=usb
         if (!"usb".equals(m)) {
             DeliveryController dcBt = tryAllBt(mtm, node, from, expectedSerial);
-            if (dcBt != null) return dcBt; // ✅ STOP IMMÉDIAT
+            if (dcBt != null) return dcBt; // ✅ STOP
         }
 
-        // 2) USB
         DeliveryController dcUsb = tryUsb(mtm, node, from, expectedSerial);
-        if (dcUsb != null) return dcUsb; // ✅ STOP IMMÉDIAT
+        if (dcUsb != null) return dcUsb; // ✅ STOP
 
-        // 3) Échec final
         return null;
     }
 
@@ -296,22 +243,17 @@ public final class ApiFacadeImpl implements ApiFacade {
             if (snap == null) continue;
             if (snap.key == null) continue;
             if (!snap.key.toUpperCase(Locale.ROOT).startsWith("BT:")) continue;
-            if (snap.status != TransportSnapshot.Status.READY) continue;
+            if (snap.status != TransportStatus.READY) continue;
 
-            String key = snap.key;
+            mtm.activateExclusive(snap.key, "API_BT_SCAN");
 
-            // Activer CE BT
-            mtm.activateExclusive(key, "API_BT_SCAN");
-
-            TransportIo io = mtm.getByKey(key);
+            TransportIo io = mtm.getByKey(snap.key);
             if (io == null || !io.isOpen()) continue;
 
             String serial = probeSerial80(io, node, from);
             if (serial == null) continue;
-
             if (expectedSerial != null && !expectedSerial.equals(serial)) continue;
 
-            // ✅ REGISTRE TROUVÉ → STOP
             DeliveryController dc = rsm.getOrCreate(io.getKey(), node, from, io);
             if (dc != null) {
                 dc.setActiveMedia("bt");
@@ -331,19 +273,18 @@ public final class ApiFacadeImpl implements ApiFacade {
 
         String serial = probeSerial80(io, node, from);
         if (serial == null) return null;
-
         if (expectedSerial != null && !expectedSerial.equals(serial)) return null;
 
         DeliveryController dc = rsm.getOrCreate(io.getKey(), node, from, io);
         if (dc != null) {
             dc.setActiveMedia("usb");
-            return dc; // ✅ STOP
+            return dc;
         }
         return null;
     }
 
     // =========================================================
-    // Utilitaires
+    // Utils
     // =========================================================
 
     private String probeSerial80(TransportIo io, int node, int from) {
@@ -367,8 +308,7 @@ public final class ApiFacadeImpl implements ApiFacade {
     private MediaTransportManager getMtm() {
         try {
             Context ctx = rsm.getAppContext();
-            if (ctx == null) return null;
-            return MediaTransportManager.get(ctx);
+            return (ctx != null) ? MediaTransportManager.get(ctx) : null;
         } catch (Exception ignored) {
             return null;
         }
