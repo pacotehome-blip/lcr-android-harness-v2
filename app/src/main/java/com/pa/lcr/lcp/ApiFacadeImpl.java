@@ -26,7 +26,7 @@ public final class ApiFacadeImpl implements ApiFacade {
 
     private final RegisterSessionManager rsm;
 
-    // ✅ état local, sans dépendance externe
+    // État local (pas de méthode inventée dans RSM)
     private volatile DeliveryController activeController;
 
     public ApiFacadeImpl(RegisterSessionManager rsm) {
@@ -34,8 +34,18 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // ✅ CONNECT = UNE COMMANDE BOUT‑EN‑BOUT + TEST
+    // CONNECT — UNE COMMANDE BOUT-EN-BOUT + TEST
     // =========================================================
+
+    @Override
+    public ApiResult api_connectLcp() {
+        return api_connectLcp(DEFAULT_NODE, DEFAULT_FROM, "auto", "");
+    }
+
+    @Override
+    public ApiResult api_connectLcp(Integer n, Integer f) {
+        return api_connectLcp(n, f, "auto", "");
+    }
 
     @Override
     public ApiResult api_connectLcp(Integer nodeIn, Integer fromIn, String media, String bt) {
@@ -45,17 +55,13 @@ public final class ApiFacadeImpl implements ApiFacade {
 
         MediaTransportManager mtm = getMtm();
         if (mtm == null) {
-            return ApiResult.fail(
-                    "API_FACADE_IMPL_HIT - MTM null",
-                    "ERR_MEDIA_MTM_NULL"
-            );
+            return ApiResult.fail("API_FACADE_IMPL_HIT - MTM null", "ERR_MEDIA_MTM_NULL");
         }
 
-        // ===== TEST VISUEL AVANT TOUT =====
         StringBuilder trace = new StringBuilder();
         trace.append("API_FACADE_IMPL_HIT | ");
 
-        // ===== BT D’ABORD =====
+        // ==== BT d’abord ====
         for (TransportSnapshot snap : mtm.listSnapshots()) {
 
             if (snap == null || snap.key == null) continue;
@@ -64,7 +70,6 @@ public final class ApiFacadeImpl implements ApiFacade {
 
             trace.append("TRY ").append(snap.key).append(" | ");
 
-            // activer BT (comme UI)
             mtm.activateExclusive(snap.key, "API_BT_AUTO");
 
             TransportIo io = mtm.getByKey(snap.key);
@@ -84,12 +89,12 @@ public final class ApiFacadeImpl implements ApiFacade {
             activeController = dc;
 
             return ApiResult.ok(
-                    trace.toString() + "SUCCESS BT serial=" + serial,
+                    trace + "SUCCESS BT serial=" + serial,
                     null
             );
         }
 
-        // ===== USB EN DERNIER =====
+        // ==== USB en dernier ====
         TransportIo usb = mtm.getByKey(MediaTransportManager.KEY_USB);
         if (usb != null && usb.isOpen()) {
 
@@ -104,7 +109,7 @@ public final class ApiFacadeImpl implements ApiFacade {
                         dc.setActiveMedia("usb");
                         activeController = dc;
                         return ApiResult.ok(
-                                trace.toString() + "SUCCESS USB serial=" + serial,
+                                trace + "SUCCESS USB serial=" + serial,
                                 null
                         );
                     }
@@ -113,27 +118,17 @@ public final class ApiFacadeImpl implements ApiFacade {
         }
 
         return ApiResult.fail(
-                trace.toString() + "NO_REGISTER_FOUND",
+                trace + "NO_REGISTER_FOUND",
                 "ERR_NO_REGISTER_FOUND"
         );
     }
 
     // =========================================================
-    // AUTRES APIS = utilisent le controller actif
+    // APIs DÉPENDANTES DU CONTROLLER ACTIF
     // =========================================================
 
     private DeliveryController requireActive() {
         return activeController;
-    }
-
-    @Override
-    public ApiResult api_connectLcp() {
-        return api_connectLcp(DEFAULT_NODE, DEFAULT_FROM, "auto", "");
-    }
-
-    @Override
-    public ApiResult api_connectLcp(Integer n, Integer f) {
-        return api_connectLcp(n, f, "auto", "");
     }
 
     @Override
@@ -149,6 +144,39 @@ public final class ApiFacadeImpl implements ApiFacade {
         DeliveryController dc = requireActive();
         return dc != null
                 ? dc.api_deliveryStartC(p, v)
+                : ApiResult.fail("API_FACADE_IMPL_HIT - no active", "ERR_NO_ACTIVE_MEDIA");
+    }
+
+    @Override
+    public ApiResult api_deliveryOneShotStart(String n, int p, double v, String c) {
+        DeliveryController dc = requireActive();
+        return dc != null
+                ? dc.api_deliveryOneShotStart(n, p, v, c)
+                : ApiResult.fail("API_FACADE_IMPL_HIT - no active", "ERR_NO_ACTIVE_MEDIA");
+    }
+
+    @Override
+    public ApiResult api_deliveryJobGet(String j) {
+        DeliveryController dc = requireActive();
+        return dc != null
+                ? dc.api_deliveryJobGet(j)
+                : ApiResult.fail("API_FACADE_IMPL_HIT - no active", "ERR_NO_ACTIVE_MEDIA");
+    }
+
+    @Override
+    public ApiResult api_deliveryContinue(String j) {
+        DeliveryController dc = requireActive();
+        return dc != null
+                ? dc.api_deliveryContinue(j)
+                : ApiResult.fail("API_FACADE_IMPL_HIT - no active", "ERR_NO_ACTIVE_MEDIA");
+    }
+
+    // ✅ MÉTHODE MANQUANTE — CAUSE DU BUILD FAIL
+    @Override
+    public ApiResult api_deliveryTerminate(String j) {
+        DeliveryController dc = requireActive();
+        return dc != null
+                ? dc.api_deliveryTerminate(j)
                 : ApiResult.fail("API_FACADE_IMPL_HIT - no active", "ERR_NO_ACTIVE_MEDIA");
     }
 
@@ -188,6 +216,12 @@ public final class ApiFacadeImpl implements ApiFacade {
         }
     }
 
+    private static String normMedia(String m, String def) {
+        return (m == null || m.trim().isEmpty())
+                ? def
+                : m.toLowerCase(Locale.ROOT);
+    }
+
     // =========================================================
     // NON UTILISÉS
     // =========================================================
@@ -206,10 +240,5 @@ public final class ApiFacadeImpl implements ApiFacade {
 
     @Override public ApiResult api_dbDump() {
         return ApiResult.fail("API_FACADE_IMPL_HIT - not supported", "NOT_SUPPORTED");
-    }
-
-    private static String normMedia(String m, String def) {
-        if (m == null || m.trim().isEmpty()) return def;
-        return m.toLowerCase(Locale.ROOT);
     }
 }
