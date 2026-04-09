@@ -12,14 +12,11 @@ import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 
 /**
- * ApiFacadeImpl — VERSION CORRIGÉE (SANS API INVENTÉE)
+ * ApiFacadeImpl — COPY/PASTE TESTABLE
  *
- * /lcp/connect :
- *  - liste BT visibles
- *  - active BT
- *  - connect LCP
- *  - lit le serial (#80)
- *  - STOP dès succès
+ * TEST INTÉGRÉ :
+ *  - Si ce fichier est exécuté, la réponse contiendra :
+ *    "API_FACADE_IMPL_HIT"
  */
 public final class ApiFacadeImpl implements ApiFacade {
 
@@ -29,7 +26,7 @@ public final class ApiFacadeImpl implements ApiFacade {
 
     private final RegisterSessionManager rsm;
 
-    // ✅ ÉTAT GÉRÉ PAR LA FAÇADE (ET PAS PAR LE RSM)
+    // ✅ état local, sans dépendance externe
     private volatile DeliveryController activeController;
 
     public ApiFacadeImpl(RegisterSessionManager rsm) {
@@ -37,18 +34,8 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // CONNECT = PARCOURS COMPLET
+    // ✅ CONNECT = UNE COMMANDE BOUT‑EN‑BOUT + TEST
     // =========================================================
-
-    @Override
-    public ApiResult api_connectLcp() {
-        return api_connectLcp(DEFAULT_NODE, DEFAULT_FROM, "auto", "");
-    }
-
-    @Override
-    public ApiResult api_connectLcp(Integer nodeIn, Integer fromIn) {
-        return api_connectLcp(nodeIn, fromIn, "auto", "");
-    }
 
     @Override
     public ApiResult api_connectLcp(Integer nodeIn, Integer fromIn, String media, String bt) {
@@ -58,46 +45,48 @@ public final class ApiFacadeImpl implements ApiFacade {
 
         MediaTransportManager mtm = getMtm();
         if (mtm == null) {
-            return ApiResult.fail("MTM null", "ERR_MEDIA_MTM_NULL");
+            return ApiResult.fail(
+                    "API_FACADE_IMPL_HIT - MTM null",
+                    "ERR_MEDIA_MTM_NULL"
+            );
         }
 
-        String m = normMedia(media, "auto");
+        // ===== TEST VISUEL AVANT TOUT =====
+        StringBuilder trace = new StringBuilder();
+        trace.append("API_FACADE_IMPL_HIT | ");
 
         // ===== BT D’ABORD =====
-        if (!"usb".equals(m)) {
-            for (TransportSnapshot snap : mtm.listSnapshots()) {
-                if (snap == null || snap.key == null) continue;
-                if (!snap.key.startsWith("BT:")) continue;
-                if (snap.status != TransportStatus.READY) continue;
+        for (TransportSnapshot snap : mtm.listSnapshots()) {
 
-                // 1) activer BT (comme UI)
-                mtm.activateExclusive(snap.key, "API_BT_AUTO");
+            if (snap == null || snap.key == null) continue;
+            if (!snap.key.startsWith("BT:")) continue;
+            if (snap.status != TransportStatus.READY) continue;
 
-                TransportIo io = mtm.getByKey(snap.key);
-                if (io == null || !io.isOpen()) continue;
+            trace.append("TRY ").append(snap.key).append(" | ");
 
-                // 2) créer controller
-                DeliveryController dc =
-                        rsm.getOrCreate(io.getKey(), node, from, io);
-                if (dc == null) continue;
+            // activer BT (comme UI)
+            mtm.activateExclusive(snap.key, "API_BT_AUTO");
 
-                // 3) connect LCP
-                ApiResult cr = dc.api_connectLcp();
-                if (cr == null || cr.code == 0) continue;
+            TransportIo io = mtm.getByKey(snap.key);
+            if (io == null || !io.isOpen()) continue;
 
-                // 4) lire serial
-                String serial = readSerial80(io, node, from);
-                if (serial == null) continue;
+            DeliveryController dc =
+                    rsm.getOrCreate(io.getKey(), node, from, io);
+            if (dc == null) continue;
 
-                // ✅ SUCCESS
-                dc.setActiveMedia("bt");
-                activeController = dc;
+            ApiResult cr = dc.api_connectLcp();
+            if (cr == null || cr.code == 0) continue;
 
-                return ApiResult.ok(
-                        "CONNECTED BT serial=" + serial,
-                        null
-                );
-            }
+            String serial = readSerial80(io, node, from);
+            if (serial == null) continue;
+
+            dc.setActiveMedia("bt");
+            activeController = dc;
+
+            return ApiResult.ok(
+                    trace.toString() + "SUCCESS BT serial=" + serial,
+                    null
+            );
         }
 
         // ===== USB EN DERNIER =====
@@ -110,15 +99,12 @@ public final class ApiFacadeImpl implements ApiFacade {
             if (dc != null) {
                 ApiResult cr = dc.api_connectLcp();
                 if (cr != null && cr.code == 1) {
-
                     String serial = readSerial80(usb, node, from);
                     if (serial != null) {
-
                         dc.setActiveMedia("usb");
                         activeController = dc;
-
                         return ApiResult.ok(
-                                "CONNECTED USB serial=" + serial,
+                                trace.toString() + "SUCCESS USB serial=" + serial,
                                 null
                         );
                     }
@@ -127,13 +113,13 @@ public final class ApiFacadeImpl implements ApiFacade {
         }
 
         return ApiResult.fail(
-                "No register found on BT or USB",
+                trace.toString() + "NO_REGISTER_FOUND",
                 "ERR_NO_REGISTER_FOUND"
         );
     }
 
     // =========================================================
-    // LES AUTRES APIs UTILISENT LE CONTROLLER ACTIF
+    // AUTRES APIS = utilisent le controller actif
     // =========================================================
 
     private DeliveryController requireActive() {
@@ -141,45 +127,29 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     @Override
+    public ApiResult api_connectLcp() {
+        return api_connectLcp(DEFAULT_NODE, DEFAULT_FROM, "auto", "");
+    }
+
+    @Override
+    public ApiResult api_connectLcp(Integer n, Integer f) {
+        return api_connectLcp(n, f, "auto", "");
+    }
+
+    @Override
     public ApiResult api_deliveryAlignA() {
         DeliveryController dc = requireActive();
-        return dc != null ? dc.api_deliveryAlignA()
-                : ApiResult.fail("No active controller", "ERR_NO_ACTIVE_MEDIA");
+        return dc != null
+                ? dc.api_deliveryAlignA()
+                : ApiResult.fail("API_FACADE_IMPL_HIT - no active", "ERR_NO_ACTIVE_MEDIA");
     }
 
     @Override
     public ApiResult api_deliveryStartC(int p, double v) {
         DeliveryController dc = requireActive();
-        return dc != null ? dc.api_deliveryStartC(p, v)
-                : ApiResult.fail("No active controller", "ERR_NO_ACTIVE_MEDIA");
-    }
-
-    @Override
-    public ApiResult api_deliveryOneShotStart(String n, int p, double v, String c) {
-        DeliveryController dc = requireActive();
-        return dc != null ? dc.api_deliveryOneShotStart(n, p, v, c)
-                : ApiResult.fail("No active controller", "ERR_NO_ACTIVE_MEDIA");
-    }
-
-    @Override
-    public ApiResult api_deliveryJobGet(String j) {
-        DeliveryController dc = requireActive();
-        return dc != null ? dc.api_deliveryJobGet(j)
-                : ApiResult.fail("No active controller", "ERR_NO_ACTIVE_MEDIA");
-    }
-
-    @Override
-    public ApiResult api_deliveryContinue(String j) {
-        DeliveryController dc = requireActive();
-        return dc != null ? dc.api_deliveryContinue(j)
-                : ApiResult.fail("No active controller", "ERR_NO_ACTIVE_MEDIA");
-    }
-
-    @Override
-    public ApiResult api_deliveryTerminate(String j) {
-        DeliveryController dc = requireActive();
-        return dc != null ? dc.api_deliveryTerminate(j)
-                : ApiResult.fail("No active controller", "ERR_NO_ACTIVE_MEDIA");
+        return dc != null
+                ? dc.api_deliveryStartC(p, v)
+                : ApiResult.fail("API_FACADE_IMPL_HIT - no active", "ERR_NO_ACTIVE_MEDIA");
     }
 
     @Override
@@ -187,7 +157,7 @@ public final class ApiFacadeImpl implements ApiFacade {
         DeliveryController dc = requireActive();
         return dc != null
                 ? dc.api_registerValidate(num, n, s, p, c)
-                : ApiResult.fail("No active controller", "ERR_NO_ACTIVE_MEDIA");
+                : ApiResult.fail("API_FACADE_IMPL_HIT - no active", "ERR_NO_ACTIVE_MEDIA");
     }
 
     // =========================================================
@@ -199,7 +169,6 @@ public final class ApiFacadeImpl implements ApiFacade {
             LcpLink link = new LcpLink(io, node, from, true);
             byte[] b = link.opGetField(80, PROBE_SERIAL_TIMEOUT_MS);
             if (b == null || b.length == 0) return null;
-
             return new String(b, StandardCharsets.UTF_8)
                     .replace("\u0000", "")
                     .replace("\r", "")
@@ -219,28 +188,28 @@ public final class ApiFacadeImpl implements ApiFacade {
         }
     }
 
-    private static String normMedia(String m, String def) {
-        if (m == null || m.trim().isEmpty()) return def;
-        return m.toLowerCase(Locale.ROOT);
-    }
-
     // =========================================================
     // NON UTILISÉS
     // =========================================================
 
     @Override public ApiResult api_mediaCheck(String m, String b) {
-        return ApiResult.fail("Use /lcp/connect", "USE_CONNECT");
+        return ApiResult.fail("API_FACADE_IMPL_HIT - use connect", "USE_CONNECT");
     }
 
     @Override public ApiResult api_scanUsb() {
-        return ApiResult.fail("Not supported", "NOT_SUPPORTED");
+        return ApiResult.fail("API_FACADE_IMPL_HIT - not supported", "NOT_SUPPORTED");
     }
 
     @Override public ApiResult api_openPingUsb() {
-        return ApiResult.fail("Not supported", "NOT_SUPPORTED");
+        return ApiResult.fail("API_FACADE_IMPL_HIT - not supported", "NOT_SUPPORTED");
     }
 
     @Override public ApiResult api_dbDump() {
-        return ApiResult.fail("Not supported", "NOT_SUPPORTED");
+        return ApiResult.fail("API_FACADE_IMPL_HIT - not supported", "NOT_SUPPORTED");
+    }
+
+    private static String normMedia(String m, String def) {
+        if (m == null || m.trim().isEmpty()) return def;
+        return m.toLowerCase(Locale.ROOT);
     }
 }
