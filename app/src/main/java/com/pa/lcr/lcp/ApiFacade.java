@@ -18,6 +18,26 @@ package com.pa.lcr.lcp;
 public interface ApiFacade {
 
     // =========================================================
+    // ✅ BT (debug/ops)
+    // =========================================================
+
+    /** Optionnel: liste snapshots transports (utile debug/ops). */
+    default ApiResult api_btList() {
+        return ApiResult.fail(
+                "BT list: 0 - Not supported (legacy facade).",
+                "BT_LIST_NOT_SUPPORTED"
+        );
+    }
+
+    /** ✅ Décision figée: active automatiquement le premier BT READY (sans body). */
+    default ApiResult api_btActivate() {
+        return ApiResult.fail(
+                "BT activate: 0 - Not supported (legacy facade).",
+                "BT_ACTIVATE_NOT_SUPPORTED"
+        );
+    }
+
+    // =========================================================
     // USB (global)
     // =========================================================
     ApiResult api_scanUsb();
@@ -28,8 +48,8 @@ public interface ApiFacade {
     // =========================================================
     default ApiResult api_mediaCheck(String media, String bt_mac) {
         return ApiResult.fail(
-            "MediaCheck: 0 - Not supported (legacy facade).",
-            "MEDIA_NOT_SUPPORTED"
+                "MediaCheck: 0 - Not supported (legacy facade).",
+                "MEDIA_NOT_SUPPORTED"
         );
     }
 
@@ -130,10 +150,10 @@ public interface ApiFacade {
             double presetNetL,
             String compartment) {
         return api_deliveryOneShotStart(
-            numero_livraison,
-            product1to16,
-            presetNetL,
-            compartment
+                numero_livraison,
+                product1to16,
+                presetNetL,
+                compartment
         );
     }
 
@@ -148,12 +168,12 @@ public interface ApiFacade {
             String media,
             String bt_mac) {
         return api_deliveryOneShotStart(
-            lcrnode_dec,
-            from_dec,
-            numero_livraison,
-            product1to16,
-            presetNetL,
-            compartment
+                lcrnode_dec,
+                from_dec,
+                numero_livraison,
+                product1to16,
+                presetNetL,
+                compartment
         );
     }
 
@@ -191,11 +211,11 @@ public interface ApiFacade {
             Integer expected_product_number,
             String expected_compartment) {
         return api_registerValidate(
-            numero_livraison,
-            expected_lcrnode_dec,
-            expected_serial_id,
-            expected_product_number,
-            expected_compartment
+                numero_livraison,
+                expected_lcrnode_dec,
+                expected_serial_id,
+                expected_product_number,
+                expected_compartment
         );
     }
 
@@ -210,12 +230,12 @@ public interface ApiFacade {
             String media,
             String bt_mac) {
         return api_registerValidate(
-            numero_livraison,
-            expected_lcrnode_dec,
-            from_dec,
-            expected_serial_id,
-            expected_product_number,
-            expected_compartment
+                numero_livraison,
+                expected_lcrnode_dec,
+                from_dec,
+                expected_serial_id,
+                expected_product_number,
+                expected_compartment
         );
     }
 
@@ -224,8 +244,8 @@ public interface ApiFacade {
     // =========================================================
     default ApiResult api_tickWait(Long since_seq, Integer wait_ms) {
         return ApiResult.fail(
-            "Tick: 0 - Not supported (legacy facade).",
-            "TICK_NOT_SUPPORTED"
+                "Tick: 0 - Not supported (legacy facade).",
+                "TICK_NOT_SUPPORTED"
         );
     }
 
@@ -241,8 +261,8 @@ public interface ApiFacade {
     // =========================================================
     default ApiResult api_ticketReprintCurrent() {
         return ApiResult.fail(
-            "Reprint: 0 - Not supported (legacy facade).",
-            "REPRINT_NOT_SUPPORTED"
+                "Reprint: 0 - Not supported (legacy facade).",
+                "REPRINT_NOT_SUPPORTED"
         );
     }
 
