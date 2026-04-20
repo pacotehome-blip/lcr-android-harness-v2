@@ -22,16 +22,16 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * API-Face HTTP Server a voir
+ * API-Face HTTP Server (VERSION COMPLÈTE)
  *
  * - Bind strict: 127.0.0.1 only (no LAN)
  * - Port: 8765
  * - Trace: REQ/RESP dans le log principal (via ApiLogSink)
  * - Calls: via ApiFacade
  *
- * Endpoints:
- * GET /v1/ping
- * GET /v1/usb/scan
+ * Endpoints HISTORIQUES (inchangés) :
+ * GET  /v1/ping
+ * GET  /v1/usb/scan
  * POST /v1/usb/open-ping
  * POST /v1/lcp/connect
  * POST /v1/register/validate
@@ -39,26 +39,19 @@ import java.util.concurrent.atomic.AtomicInteger;
  * POST /v1/delivery/alignA
  * POST /v1/delivery/C
  * POST /v1/delivery/oneshot/start
- * GET /v1/delivery/job/{jobId}
+ * GET  /v1/delivery/job/{jobId}
  * POST /v1/delivery/job/continue
  * POST /v1/delivery/job/terminate
  * POST /v1/db/dump
+ * GET  /v1/tick/wait
+ * POST /v1/media/check
  *
- * ✅ BT debug/ops:
+ * AJOUTS MINIMAUX (MANDAT) :
  * GET  /v1/bt/list
- * POST /v1/bt/activate   (sans body)
- *
- * ✅ Tick (B+):
- * GET /v1/tick/wait?lcrnode_dec=250&since_seq=123&wait_ms=25000
- *
- * ✅ Media check (Option A):
- * POST /v1/media/check body: {"media":"usb"} OR {"media":"bt","bt_mac":"AA:BB:.."}
- *
- * ✅ Correctif (mandat) :
- * - Si media=bt ET bt_mac absent, on résout automatiquement le MAC via l’APK
- *   (MediaTransportManager activeKey "BT:AA:BB:.."), puis on l’utilise.
+ * POST /v1/bt/activate
  */
 public final class ApiServer {
+
 
     public interface ApiLogSink { void onApiLine(String line); }
 
@@ -66,16 +59,16 @@ public final class ApiServer {
     private final ApiLogSink trace;
     private final int port;
 
+
     private ServerSocket serverSocket;
     private ExecutorService acceptor;
     private ExecutorService workers;
     private volatile boolean running = false;
 
-    // Thread-safe RID sequence (pool workers)
-    private final AtomicInteger ridSeq = new AtomicInteger(0);
 
-    // Un seul appel à la fois vers le registre (évite chevauchements côté LCP)
+    private final AtomicInteger ridSeq = new AtomicInteger(0);
     private final Object lcpLock = new Object();
+
 
     public ApiServer(ApiFacade facade, ApiLogSink trace, int port) {
         this.facade = facade;
@@ -83,16 +76,18 @@ public final class ApiServer {
         this.port = port;
     }
 
+
     public synchronized boolean isRunning() { return running; }
 
     public synchronized void start() throws Exception {
         if (running) return;
         InetAddress loopback = InetAddress.getByName("127.0.0.1");
         serverSocket = new ServerSocket(port, 50, loopback);
-        workers = Executors.newFixedThreadPool(8); // ✅ more workers (tick/wait long-poll + jobget)
+        workers = Executors.newFixedThreadPool(8);
         acceptor = Executors.newSingleThreadExecutor();
         running = true;
         t("[API " + ts() + "] START http://127.0.0.1:" + port);
+
 
         acceptor.execute(() -> {
             while (running) {
@@ -122,10 +117,8 @@ public final class ApiServer {
         String remote = String.valueOf(s.getInetAddress());
         long t0 = System.currentTimeMillis();
         try {
-            // Default timeout (sera ajusté pour tick/wait après parsing)
             try { s.setSoTimeout(10_000); } catch (Exception ignored) {}
 
-            // Double verrou: n'accepte que loopback
             if (s.getInetAddress() == null || !s.getInetAddress().isLoopbackAddress()) {
                 t("[API " + ts() + "][RID=" + rid + "] REJECT remote=" + remote);
                 writeJson(s, 403, ApiResult.fail("API: 0 - Forbidden (loopback only)", "NOT_LOOPBACK").toJson());
@@ -136,32 +129,25 @@ public final class ApiServer {
             OutputStream out = s.getOutputStream();
             HttpReq req = readHttpRequest(in);
 
-            // Ajuster le timeout socket pour tick/wait (long-poll)
             if (isTickWait(req)) {
                 long waitMs = req.queryLong("wait_ms", 25_000L);
-                // ✅ SAFE: clamp tick/wait to avoid starving other endpoints (JobGet)
                 if (waitMs < 0) waitMs = 0;
                 if (waitMs > 2000L) waitMs = 2000L;
                 try { s.setSoTimeout((int) Math.min(15_000, waitMs + 8_000)); } catch (Exception ignored) {}
             }
 
+
             t("[API " + ts() + "][RID=" + rid + "] REQ " + req.method + " " + req.path + " body=" + shrink(req.body));
+
 
             ApiResult ar;
             JSONObject resp;
             int status;
 
             try {
-                // Ne PAS lock lcpLock pour tick/wait (cache-only)
-                if (isTickWait(req)) {
-                    ar = route(req);
-                } else {
-                    synchronized (lcpLock) {
-                        ar = route(req);
-                    }
-                }
+                if (isTickWait(req)) ar = route(req);
+                else synchronized (lcpLock) { ar = route(req); }
 
-                // HTTP status mapping basé sur ApiResult
                 if (ar != null && ar.code == 0) {
                     if ("TICKET_PENDING".equals(ar.err)) status = 422;
                     else status = 400;
@@ -169,9 +155,10 @@ public final class ApiServer {
                     status = 200;
                 }
 
-                resp = (ar != null)
-                        ? ar.toJson()
+
+                resp = (ar != null) ? ar.toJson()
                         : ApiResult.fail("API: 0 - Internal error", "INTERNAL").toJson();
+
 
             } catch (Exception e) {
                 status = 500;
@@ -180,27 +167,29 @@ public final class ApiServer {
                 resp = ApiResult.fail("API: 0 - Internal error", "INTERNAL", d).toJson();
             }
 
+
             writeJson(out, status, resp);
 
             long dt = System.currentTimeMillis() - t0;
             t("[API " + ts() + "][RID=" + rid + "] RESP " + status + " dt=" + dt + "ms json=" + shrink(resp.toString()));
 
+
         } catch (Exception e) {
             t("[API " + ts() + "][RID=" + rid + "] ERROR " + safeMsg(e) + " remote=" + remote);
-            try {
-                writeJson(s, 500, ApiResult.fail("API: 0 - Internal error", "INTERNAL").toJson());
-            } catch (Exception ignored) {}
+            try { writeJson(s, 500, ApiResult.fail("API: 0 - Internal error", "INTERNAL").toJson()); } catch (Exception ignored) {}
         } finally {
             try { s.close(); } catch (Exception ignored) {}
         }
     }
 
+
     private static boolean isTickWait(HttpReq req) {
         return "GET".equals(req.method) && "/v1/tick/wait".equals(req.path);
     }
 
+
     // =========================
-    // ✅ Helper: resolve BT MAC from APK runtime (MediaTransportManager)
+    // ✅ Helper: resolve BT MAC from APK runtime
     // =========================
     private static String resolveBtMacFromApk() {
         try {
@@ -216,48 +205,48 @@ public final class ApiServer {
         }
     }
 
+
     // =========================
     // ✅ Option B: media gating helper (connectivité seulement)
     // =========================
     private ApiResult gateMediaIfProvided(JSONObject body) {
         if (body == null) return null;
 
+
         String mediaRaw = body.optString("media", "").trim();
         if (mediaRaw.isEmpty()) return null;
+
 
         String media = mediaRaw.toLowerCase(Locale.ROOT);
         String btMac = body.optString("bt_mac", body.optString("btMac", "")).trim();
 
-        // ✅ Ne jamais bloquer sur "auto" (stratégie)
+
         if ("auto".equals(media)) return null;
 
-        // ✅ CORRECTIF: media=bt et bt_mac absent => récupérer dans l'APK
+
         if ("bt".equals(media) && btMac.isEmpty()) {
             String resolved = resolveBtMacFromApk();
             if (resolved != null && !resolved.isEmpty()) {
                 btMac = resolved;
-                try {
-                    body.put("bt_mac", resolved);
-                    body.put("btMac", resolved);
-                } catch (Exception ignored) {}
+                try { body.put("bt_mac", resolved); body.put("btMac", resolved); } catch (Exception ignored) {}
             }
         }
 
-        ApiResult check = facade.api_mediaCheck(mediaRaw, btMac);
 
+        ApiResult check = facade.api_mediaCheck(mediaRaw, btMac);
         if (check != null && check.code == 0) {
-            if ("bt".equals(media) && btMac.isEmpty() && "ERR_BT_MAC_REQUIRED".equals(check.err)) {
-                return null; // ✅ correction: ne pas bloquer
-            }
+            if ("bt".equals(media) && btMac.isEmpty() && "ERR_BT_MAC_REQUIRED".equals(check.err)) return null;
             return check;
         }
         return null;
     }
 
+
     // =========================
-    // Routing
+    // ROUTING (COMPLET)
     // =========================
     private ApiResult route(HttpReq req) throws Exception {
+
 
         // Health
         if ("GET".equals(req.method) && "/v1/ping".equals(req.path)) {
@@ -268,49 +257,43 @@ public final class ApiServer {
             return ApiResult.ok("PING: 1 - OK", d);
         }
 
-        // ✅ BT list (optionnel debug/ops)
+
+        // ✅ BT list
         if ("GET".equals(req.method) && "/v1/bt/list".equals(req.path)) {
             return facade.api_btList();
         }
 
-        // ✅ BT activate (sans body) — EXACT bouton UI "Connect BT"
+
+        // ✅ BT activate (auto)
         if ("POST".equals(req.method) && "/v1/bt/activate".equals(req.path)) {
             return facade.api_btActivate();
         }
 
+
         // Media check
         if ("POST".equals(req.method) && "/v1/media/check".equals(req.path)) {
             JSONObject body = req.jsonBody();
-            String media = body.optString("media", "").trim();
-            if (media.isEmpty()) media = "usb";
-
-            String mediaLc = media.toLowerCase(Locale.ROOT);
+            String media = body.optString("media", "usb");
             String btMac = body.optString("bt_mac", body.optString("btMac", "")).trim();
-
-            // ✅ CORRECTIF: si BT sans MAC => résoudre via APK et l'utiliser
-            if ("bt".equals(mediaLc) && btMac.isEmpty()) {
+            if ("bt".equals(media.toLowerCase(Locale.ROOT)) && btMac.isEmpty()) {
                 String resolved = resolveBtMacFromApk();
                 if (resolved != null && !resolved.isEmpty()) {
                     btMac = resolved;
-                    try {
-                        body.put("bt_mac", resolved);
-                        body.put("btMac", resolved);
-                    } catch (Exception ignored) {}
+                    try { body.put("bt_mac", resolved); body.put("btMac", resolved); } catch (Exception ignored) {}
                 }
             }
 
-            ApiResult r = facade.api_mediaCheck(media, btMac);
 
-            // ✅ BONUS SAFE: si facade répond "ERR_BT_MAC_REQUIRED"
-            if ("bt".equals(mediaLc) && (btMac == null || btMac.isEmpty())
+            ApiResult r = facade.api_mediaCheck(media, btMac);
+            if ("bt".equals(media.toLowerCase(Locale.ROOT)) && btMac.isEmpty()
                     && r != null && r.code == 0 && "ERR_BT_MAC_REQUIRED".equals(r.err)) {
                 JSONObject d = new JSONObject();
                 try { d.put("bt_mac", JSONObject.NULL); } catch (Exception ignored) {}
                 return ApiResult.ok("MediaCheck: 1 - BT OK (bt_mac résolu: none)", d);
             }
-
             return r;
         }
+
 
         // Tick wait
         if (isTickWait(req)) {
@@ -322,21 +305,25 @@ public final class ApiServer {
             return facade.api_tickWait(node, sinceSeq, (int) waitMs);
         }
 
+
         // USB scan
         if ("GET".equals(req.method) && "/v1/usb/scan".equals(req.path)) {
             return facade.api_scanUsb();
         }
+
 
         // USB open-ping
         if ("POST".equals(req.method) && "/v1/usb/open-ping".equals(req.path)) {
             return facade.api_openPingUsb();
         }
 
-        // LCP connect (media-aware) — inchangé
+
+        // LCP connect
         if ("POST".equals(req.method) && "/v1/lcp/connect".equals(req.path)) {
             JSONObject body = req.jsonBody();
             ApiResult gate = gateMediaIfProvided(body);
             if (gate != null) return gate;
+
 
             Integer node = parseNodeDec(body);
             Integer from = parseFromDec(body);
@@ -345,8 +332,156 @@ public final class ApiServer {
             return facade.api_connectLcp(node, from, media, btMac);
         }
 
-        // ... le reste de ton route() est inchangé (register/validate, delivery, etc.)
-        // (je le garde identique à ta version; si tu veux je te recolle la fin aussi)
+        // Register validate
+        if ("POST".equals(req.method) && "/v1/register/validate".equals(req.path)) {
+            JSONObject body = req.jsonBody();
+            ApiResult gate = gateMediaIfProvided(body);
+            if (gate != null) return gate;
+
+
+            String numero = body.optString("numero_livraison", body.optString("numeroLivraison", ""));
+            if (numero != null && numero.trim().isEmpty()) numero = null;
+
+
+            Integer node = parseNodeDec(body);
+            Integer from = parseFromDec(body);
+
+
+            String expectedSerial = body.optString("expected_serial_id", body.optString("serial_id", "")).trim();
+            if (expectedSerial.isEmpty()) expectedSerial = null;
+
+
+            Integer product = null;
+            if (body.has("expected_product_number")) product = body.optInt("expected_product_number", 0);
+            else if (body.has("product_number")) product = body.optInt("product_number", 0);
+            if (product != null && product == 0) product = null;
+
+
+            String compartment = null;
+            try {
+                Object c = body.opt("expected_compartment");
+                if (c == null || c == JSONObject.NULL) c = body.opt("compartment");
+                if (c != null && c != JSONObject.NULL) compartment = String.valueOf(c);
+            } catch (Exception ignored) {}
+
+
+            String media = body.optString("media", "usb");
+            String btMac = body.optString("bt_mac", body.optString("btMac", "")).trim();
+
+
+            return facade.api_registerValidate(numero, node, from, expectedSerial, product, compartment, media, btMac);
+        }
+
+        // Delivery A
+        if ("POST".equals(req.method) && "/v1/delivery/A".equals(req.path)) {
+            JSONObject body = req.jsonBody();
+            ApiResult gate = gateMediaIfProvided(body);
+            if (gate != null) return gate;
+            Integer node = parseNodeDec(body);
+            Integer from = parseFromDec(body);
+            String media = body.optString("media", "usb");
+            String btMac = body.optString("bt_mac", body.optString("btMac", "")).trim();
+            return facade.api_deliveryAlignA(node, from, media, btMac);
+        }
+        // Delivery A alias
+        if ("POST".equals(req.method) && "/v1/delivery/alignA".equals(req.path)) {
+            JSONObject body = req.jsonBody();
+            ApiResult gate = gateMediaIfProvided(body);
+            if (gate != null) return gate;
+            Integer node = parseNodeDec(body);
+            Integer from = parseFromDec(body);
+            String media = body.optString("media", "usb");
+            String btMac = body.optString("bt_mac", body.optString("btMac", "")).trim();
+            return facade.api_deliveryAlignA(node, from, media, btMac);
+        }
+
+
+        // Delivery C
+        if ("POST".equals(req.method) && "/v1/delivery/C".equals(req.path)) {
+            JSONObject body = req.jsonBody();
+            ApiResult gate = gateMediaIfProvided(body);
+            if (gate != null) return gate;
+            Integer node = parseNodeDec(body);
+            Integer from = parseFromDec(body);
+            int product = body.optInt("product1to16", body.optInt("productId", 1));
+            double presetNet = body.optDouble("presetNet", 0.0);
+            String media = body.optString("media", "usb");
+            String btMac = body.optString("bt_mac", body.optString("btMac", "")).trim();
+            return facade.api_deliveryStartC(node, from, product, presetNet, media, btMac);
+        }
+
+
+        // OneShot start
+        if ("POST".equals(req.method) && "/v1/delivery/oneshot/start".equals(req.path)) {
+            JSONObject body = req.jsonBody();
+            ApiResult gate = gateMediaIfProvided(body);
+            if (gate != null) return gate;
+
+
+            Integer node = parseNodeDec(body);
+            Integer from = parseFromDec(body);
+            String numero = body.optString("numero_livraison", body.optString("numeroLivraison", ""));
+            int product = body.optInt("product1to16", body.optInt("product", body.optInt("productId", 1)));
+            double preset = body.optDouble("presetNet", body.optDouble("presetNetL", body.optDouble("preset", 0.0)));
+
+
+            String compartment = null;
+            try {
+                Object c = body.opt("compartment");
+                if (c != null && c != JSONObject.NULL) compartment = String.valueOf(c);
+            } catch (Exception ignored) {}
+
+
+            String media = body.optString("media", "usb");
+            String btMac = body.optString("bt_mac", body.optString("btMac", "")).trim();
+
+
+            return facade.api_deliveryOneShotStart(node, from, numero, product, preset, compartment, media, btMac);
+        }
+
+
+        // Continue job
+        if ("POST".equals(req.method) && "/v1/delivery/job/continue".equals(req.path)) {
+            JSONObject body = req.jsonBody();
+            ApiResult gate = gateMediaIfProvided(body);
+            if (gate != null) return gate;
+
+
+            String jobId = body.optString("jobId", "").trim();
+            if (jobId.isEmpty()) return ApiResult.fail("Continue: 0 - Job invalide", "JOB_ID_EMPTY");
+            Integer node = parseNodeDec(body);
+            return facade.api_deliveryContinue(jobId, node);
+        }
+
+
+        // Terminate job
+        if ("POST".equals(req.method) && "/v1/delivery/job/terminate".equals(req.path)) {
+            JSONObject body = req.jsonBody();
+            ApiResult gate = gateMediaIfProvided(body);
+            if (gate != null) return gate;
+
+
+            String jobId = body.optString("jobId", "").trim();
+            if (jobId.isEmpty()) return ApiResult.fail("Terminate: 0 - Job invalide", "JOB_ID_EMPTY");
+            Integer node = parseNodeDec(body);
+            return facade.api_deliveryTerminate(jobId, node);
+        }
+
+
+        // Job GET
+        if ("GET".equals(req.method) && req.path.startsWith("/v1/delivery/job/")) {
+            String jobId = req.path.substring("/v1/delivery/job/".length()).trim();
+            if (jobId.isEmpty()) return ApiResult.fail("Job: 0 - Invalide", "JOB_ID_EMPTY");
+            Integer node = req.queryInt("lcrnode_dec");
+            return facade.api_deliveryJobGet(jobId, node);
+        }
+
+
+        // DB dump
+        if ("POST".equals(req.method) && "/v1/db/dump".equals(req.path)) {
+            return facade.api_dbDump();
+        }
+
 
         JSONObject d = new JSONObject();
         try { d.put("path", req.path).put("method", req.method); } catch (Exception ignored) {}
@@ -354,7 +489,7 @@ public final class ApiServer {
     }
 
     // =========================
-    // Helpers: parse node/from from JSON body
+    // Helpers: parse node/from
     // =========================
     private static Integer parseNodeDec(JSONObject body) {
         if (body == null) return null;
@@ -366,6 +501,7 @@ public final class ApiServer {
         return to;
     }
 
+
     private static Integer parseFromDec(JSONObject body) {
         if (body == null) return null;
         Integer f = null;
@@ -375,15 +511,18 @@ public final class ApiServer {
         return f;
     }
 
+
     // =========================
-    // HTTP write helpers
+    // HTTP helpers
     // =========================
     private void writeJson(Socket s, int status, JSONObject json) throws Exception {
         writeJson(s.getOutputStream(), status, json);
     }
 
+
     private void writeJson(OutputStream out, int status, JSONObject json) throws Exception {
         byte[] body = json.toString().getBytes(StandardCharsets.UTF_8);
+
 
         String statusText =
                 (status == 200) ? "OK" :
@@ -392,25 +531,29 @@ public final class ApiServer {
                                         (status == 404) ? "Not Found" :
                                                 (status == 422) ? "Unprocessable Entity" : "Internal Server Error";
 
+
         String headers =
-                "HTTP/1.1 " + status + " " + statusText + "\r\n" +
-                        "Content-Type: application/json; charset=utf-8\r\n" +
-                        "Content-Length: " + body.length + "\r\n" +
-                        "Connection: close\r\n\r\n";
+                "HTTP/1.1 " + status + " " + statusText + "\r" +
+                        "Content-Type: application/json; charset=utf-8\r" +
+                        "Content-Length: " + body.length + "\r" +
+                        "Connection: close\r\r";
+
 
         out.write(headers.getBytes(StandardCharsets.UTF_8));
         out.write(body);
         out.flush();
     }
 
+
     // =========================
-    // Minimal HTTP parsing (avec query map)
+    // Minimal HTTP parsing
     // =========================
     private static final class HttpReq {
         final String method;
-        final String path; // sans query
+        final String path;
         final byte[] body;
         final Map<String, String> query;
+
 
         HttpReq(String method, String path, byte[] body, Map<String, String> query) {
             this.method = method;
@@ -418,6 +561,7 @@ public final class ApiServer {
             this.body = (body == null) ? new byte[0] : body;
             this.query = (query == null) ? new HashMap<>() : query;
         }
+
 
         Integer queryInt(String key) {
             try {
@@ -430,6 +574,7 @@ public final class ApiServer {
             }
         }
 
+
         long queryLong(String key, long def) {
             try {
                 String v = query.get(key);
@@ -439,6 +584,7 @@ public final class ApiServer {
                 return def;
             }
         }
+
 
         JSONObject jsonBody() {
             try {
@@ -452,28 +598,33 @@ public final class ApiServer {
         }
     }
 
+
     private static HttpReq readHttpRequest(BufferedInputStream in) throws Exception {
         ByteArrayOutputStream headerOut = new ByteArrayOutputStream();
         int b;
         int state = 0;
 
+
         while ((b = in.read()) != -1) {
             headerOut.write(b);
             if (state == 0 && b == '\r') state = 1;
-            else if (state == 1 && b == '\n') state = 2;
+            else if (state == 1 && b == '') state = 2;
             else if (state == 2 && b == '\r') state = 3;
-            else if (state == 3 && b == '\n') break;
+            else if (state == 3 && b == '') break;
             else state = 0;
             if (headerOut.size() > 16_384) break;
         }
 
+
         String header = headerOut.toString(StandardCharsets.UTF_8.name());
-        String[] lines = header.split("\r\n");
+        String[] lines = header.split("\r");
         if (lines.length == 0) throw new Exception("bad request");
+
 
         String[] first = lines[0].split(" ");
         String method = (first.length > 0) ? first[0].trim() : "GET";
         String rawPath = (first.length > 1) ? first[1].trim() : "/";
+
 
         String path = rawPath;
         Map<String, String> query = new HashMap<>();
@@ -489,6 +640,7 @@ public final class ApiServer {
             }
         }
 
+
         int contentLength = 0;
         for (String line : lines) {
             String ll = line.toLowerCase(Locale.ROOT);
@@ -497,6 +649,7 @@ public final class ApiServer {
                 try { contentLength = Integer.parseInt(v); } catch (Exception ignored) {}
             }
         }
+
 
         byte[] body = new byte[0];
         if (contentLength > 0) {
@@ -509,8 +662,10 @@ public final class ApiServer {
             }
         }
 
+
         return new HttpReq(method, path, body, query);
     }
+
 
     // =========================
     // Trace helpers
@@ -519,13 +674,16 @@ public final class ApiServer {
         if (trace != null) trace.onApiLine(s);
     }
 
+
     private int nextRid() {
         return ridSeq.incrementAndGet();
     }
 
+
     private static String ts() {
         return new SimpleDateFormat("HH:mm:ss.SSS", Locale.CANADA_FRENCH).format(new Date());
     }
+
 
     private static String shrink(byte[] body) {
         if (body == null || body.length == 0) return "{}";
@@ -533,12 +691,14 @@ public final class ApiServer {
         return shrink(s);
     }
 
+
     private static String shrink(String s) {
         if (s == null) return "";
-        s = s.replace("\r", "").replace("\n", "");
+        s = s.replace("\r", "").replace("", "");
         if (s.length() > 300) return s.substring(0, 300) + "...";
         return s;
     }
+
 
     private static String safeMsg(Exception e) {
         if (e == null) return "";
