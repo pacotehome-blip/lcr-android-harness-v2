@@ -166,98 +166,127 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
 		return ApiResult.ok("BT activate: 1 - OK", d);
 	}
 
-	// =========================================================
-	// ✅ Media Auto-Connect (API) — implémentation JAVA (compilable)
-	// Alignée EXACTEMENT avec le comportement du UI
-	// =========================================================
-	// @Override
-	public ApiResult api_mediaAutoConnect(Integer lcrnode_dec, Integer from_dec) {
-		int node = normNode(lcrnode_dec);
-		int from = normFrom(from_dec);
 
-		// A) Priorité absolue : média déjà actif (BT ou USB) + LCP OK
-		try {
-			String activeKey = MediaTransportManager.getActiveKeyStatic();
-			if (activeKey != null && !activeKey.trim().isEmpty()) {
-				TransportIo io = (mediaMgr != null) ? mediaMgr.getByKey(activeKey) : null;
-				if (io != null && io.isOpen()) {
-					DeliveryController dc = sessions.getOrCreate(activeKey, node, from, io);
-					if (dc != null) {
-						ApiResult r = dc.api_connectLcp();
-						if (r != null && r.code == 1) {
-							JSONObject d = new JSONObject();
-							d.put("media", activeKey.startsWith("BT:") ? "bt" : "usb");
-							d.put("transportKey", activeKey);
-							return ApiResult.ok("Media auto-connect: 1 - OK (already connected)", d);
-						}
-					}
-				}
-			}
-		} catch (Exception ignored) {}
+    // =========================================================
+    // ✅ Media Auto-Connect (API) — VERSION FINALE JAVA
+    // - Amorçage BT inclus
+    // - Alignée EXACTEMENT avec le comportement du UI
+    // - AUCUNE modification du UI
+    // =========================================================
+    public ApiResult api_mediaAutoConnect(Integer lcrnode_dec, Integer from_dec) {
+        int node = normNode(lcrnode_dec);
+        int from = normFrom(from_dec);
 
-		// B) Parcours de TOUS les BT pairés (ordre APK)
-		if (mediaMgr != null) {
-			for (TransportSnapshot snap : mediaMgr.listSnapshots()) {
-				if (snap == null) continue;
-				if (snap.key == null || !snap.key.startsWith("BT:")) continue;
-				if (snap.status != TransportStatus.READY) continue;
+        // -----------------------------------------------------
+        // A) PRIORITÉ ABSOLUE : média déjà actif (BT ou USB)
+        //    → si TransportIo ouvert, on le prend TEL QUEL
+        // -----------------------------------------------------
+        try {
+            String activeKey = MediaTransportManager.getActiveKeyStatic();
+            if (activeKey != null && !activeKey.trim().isEmpty()) {
+                TransportIo io = (mediaMgr != null) ? mediaMgr.getByKey(activeKey) : null;
+                if (io != null && io.isOpen()) {
+                    DeliveryController dc = sessions.getOrCreate(activeKey, node, from, io);
+                    if (dc != null) {
+                        JSONObject d = new JSONObject();
+                        d.put("media", activeKey.startsWith("BT:") ? "bt" : "usb");
+                        d.put("transportKey", activeKey);
+                        return ApiResult.ok("Media auto-connect: 1 - OK (already connected)", d);
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
 
-				try {
-					mediaMgr.activateExclusive(snap.key, "API_AUTO_CONNECT");
+        // -----------------------------------------------------
+        // B) AMORÇAGE BT : si aucun BT n'est connu du runtime
+        //    → forcer UNE activation BT
+        // -----------------------------------------------------
+        try {
+            boolean hasBtRuntime = false;
+            if (mediaMgr != null) {
+                for (TransportSnapshot s : mediaMgr.listSnapshots()) {
+                    if (s != null && s.key != null && s.key.startsWith("BT:")) {
+                        hasBtRuntime = true;
+                        break;
+                    }
+                }
+                if (!hasBtRuntime) {
+                    // Amorçage explicite comme le UI
+                    api_btActivate();
+                }
+            }
+        } catch (Exception ignored) {}
 
-					TransportIo io = mediaMgr.getByKey(snap.key);
-					if (io != null && io.isOpen()) {
-						DeliveryController dc = sessions.getOrCreate(snap.key, node, from, io);
-						if (dc != null) {
-							ApiResult r = dc.api_connectLcp();
-							if (r != null && r.code == 1) {
-								JSONObject d = new JSONObject();
-								d.put("media", "bt");
-								d.put("transportKey", snap.key);
-								return ApiResult.ok("Media auto-connect: 1 - OK (BT)", d);
-							}
-						}
-					}
-				} catch (Exception ignored) {}
-			}
-		}
+        // -----------------------------------------------------
+        // C) SCAN DE TOUS LES BT PAIRÉS (ordre APK)
+        //    → activer → tester → LCP
+        // -----------------------------------------------------
+        if (mediaMgr != null) {
+            for (TransportSnapshot snap : mediaMgr.listSnapshots()) {
+                if (snap == null) continue;
+                if (snap.key == null || !snap.key.startsWith("BT:")) continue;
 
-		// C) Fallback USB (par défaut)
-		try {
-			TransportIo io = (mediaMgr != null) ? mediaMgr.getByKey(MediaTransportManager.KEY_USB) : null;
-			if (io != null && io.isOpen()) {
-				DeliveryController dc = sessions.getOrCreate(MediaTransportManager.KEY_USB, node, from, io);
-				if (dc != null) {
-					ApiResult r = dc.api_connectLcp();
-					if (r != null && r.code == 1) {
-						JSONObject d = new JSONObject();
-						d.put("media", "usb");
-						d.put("transportKey", "USB");
-						return ApiResult.ok("Media auto-connect: 1 - OK (USB)", d);
-					}
-				}
-			}
+                try {
+                    mediaMgr.activateExclusive(snap.key, "API_AUTO_CONNECT");
 
-			ApiResult ping = api_openPingUsb();
-			if (ping != null && ping.code == 1) {
-				TransportIo io2 = (mediaMgr != null) ? mediaMgr.getByKey(MediaTransportManager.KEY_USB) : null;
-				if (io2 != null && io2.isOpen()) {
-					DeliveryController dc2 = sessions.getOrCreate(MediaTransportManager.KEY_USB, node, from, io2);
-					if (dc2 != null) {
-						ApiResult r2 = dc2.api_connectLcp();
-						if (r2 != null && r2.code == 1) {
-							JSONObject d = new JSONObject();
-							d.put("media", "usb");
-							d.put("transportKey", "USB");
-							return ApiResult.ok("Media auto-connect: 1 - OK (USB after open)", d);
-						}
-					}
-				}
-			}
-		} catch (Exception ignored) {}
+                    TransportIo io = mediaMgr.getByKey(snap.key);
+                    if (io != null && io.isOpen()) {
+                        DeliveryController dc = sessions.getOrCreate(snap.key, node, from, io);
+                        if (dc != null) {
+                            ApiResult r = dc.api_connectLcp();
+                            if (r != null && r.code == 1) {
+                                JSONObject d = new JSONObject();
+                                d.put("media", "bt");
+                                d.put("transportKey", snap.key);
+                                return ApiResult.ok("Media auto-connect: 1 - OK (BT)", d);
+                            }
+                        }
+                    }
+                } catch (Exception ignored) {}
+            }
+        }
 
-		return ApiResult.fail("Media auto-connect: 0 - No media available", "ERR_NO_MEDIA_AVAILABLE");
-	}
+        // -----------------------------------------------------
+        // D) FALLBACK USB (par défaut)
+        // -----------------------------------------------------
+        try {
+        TransportIo io = (mediaMgr != null)
+                ? mediaMgr.getByKey(MediaTransportManager.KEY_USB)
+                : null;
+
+        if (io != null && io.isOpen()) {
+            DeliveryController dc = sessions.getOrCreate(MediaTransportManager.KEY_USB, node, from, io);
+            if (dc != null) {
+                JSONObject d = new JSONObject();
+                d.put("media", "usb");
+                d.put("transportKey", "USB");
+                return ApiResult.ok("Media auto-connect: 1 - OK (USB)", d);
+            }
+        }
+
+        ApiResult ping = api_openPingUsb();
+        if (ping != null && ping.code == 1) {
+            TransportIo io2 = (mediaMgr != null)
+                    ? mediaMgr.getByKey(MediaTransportManager.KEY_USB)
+                    : null;
+            if (io2 != null && io2.isOpen()) {
+                DeliveryController dc2 = sessions.getOrCreate(MediaTransportManager.KEY_USB, node, from, io2);
+                if (dc2 != null) {
+                    JSONObject d = new JSONObject();
+                    d.put("media", "usb");
+                    d.put("transportKey", "USB");
+                    return ApiResult.ok("Media auto-connect: 1 - OK (USB after open)", d);
+                }
+            }
+        }
+        } catch (Exception ignored) {}
+
+            // -----------------------------------------------------
+            // E) RIEN DE DISPONIBLE
+            // -----------------------------------------------------
+            return ApiResult.fail("Media auto-connect: 0 - No media available", "ERR_NO_MEDIA_AVAILABLE");
+        }
+
 
 	// =========================================================
 	// ✅ LCP CONNECT — MEDIA‑AWARE (USB / BT)
