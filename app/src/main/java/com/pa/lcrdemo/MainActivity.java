@@ -53,7 +53,6 @@ import com.pa.lcr.lcp.ApiServer;
 import com.pa.lcr.lcp.LcpLink;
 import com.pa.lcr.lcp.MultiRegisterApiFacadeImpl;
 import com.pa.lcr.lcp.RegisterSessionManager;
-import com.pa.lcr.lcp.ApiFacadeImpl;
 import com.pa.lcr.lcp.log.LogBus;
 import com.pa.lcr.lcp.storage.DeliveryDb;
 import com.pa.lcr.lcp.storage.DeliveryLogStore;
@@ -1466,7 +1465,7 @@ private void scanUsb() {
             return;
         }
         try {
-            ApiFacade facade = new ApiFacadeImpl(registerSessionManager);;
+            apiFacade facade = new MultiRegisterApiFacadeImpl(this);
             apiServer = new ApiServer(facade, this::onApiLine, API_PORT);
             apiServer.start();
             refreshApiStatus();
