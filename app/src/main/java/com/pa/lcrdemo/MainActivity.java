@@ -1465,7 +1465,7 @@ private void scanUsb() {
             return;
         }
         try {
-            ApiFacade facade = ApiFacadeImpl(registerSessionManager);;
+            ApiFacade facade = new ApiFacadeImpl(registerSessionManager);;
             apiServer = new ApiServer(facade, this::onApiLine, API_PORT);
             apiServer.start();
             refreshApiStatus();
