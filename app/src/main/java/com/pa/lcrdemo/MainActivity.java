@@ -53,6 +53,7 @@ import com.pa.lcr.lcp.ApiServer;
 import com.pa.lcr.lcp.LcpLink;
 import com.pa.lcr.lcp.MultiRegisterApiFacadeImpl;
 import com.pa.lcr.lcp.RegisterSessionManager;
+import com.pa.lcr.lcp.ApiFacadeImpl;
 import com.pa.lcr.lcp.log.LogBus;
 import com.pa.lcr.lcp.storage.DeliveryDb;
 import com.pa.lcr.lcp.storage.DeliveryLogStore;
