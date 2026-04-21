@@ -259,6 +259,15 @@ public final class ApiServer {
             }
             return r;
         }
+        
+        // Media auto-connect (API automation, aligné UI)
+        if ("POST".equals(req.method) && "/v1/media/auto-connect".equals(req.path)) {
+            JSONObject body = req.jsonBody();
+            Integer node = parseNodeDec(body);
+            Integer from = parseFromDec(body);
+            return facade.api_mediaAutoConnect(node, from);
+        }
+
 
         // Tick wait
         if (isTickWait(req)) {
