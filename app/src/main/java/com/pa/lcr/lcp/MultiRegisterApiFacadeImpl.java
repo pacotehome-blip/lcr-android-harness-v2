@@ -26,6 +26,10 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+import com.pa.lcr.lcp.transport.TransportSnapshot;
+import com.pa.lcr.lcp.transport.TransportStatus;
+
+
 public final class MultiRegisterApiFacadeImpl implements ApiFacade {
 
     // Auto-tab: broadcast vers UI pour créer un tab si absent (no focus)
@@ -113,6 +117,55 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             return ApiResult.fail("MediaCheck: 0 - Failed", "ERR_MEDIA_CHECK_FAILED", d);
         }
     }
+
+
+	// =========================================================
+	// ✅ BT ACTIVATE — délégation vers MediaTransportManager
+	// (même logique que ApiFacadeImpl, mais intégrée au multi-registre)
+	// =========================================================
+	@Override
+	public ApiResult api_btActivate() {
+		if (mediaMgr == null) {
+			return ApiResult.fail("MTM null", "ERR_MEDIA_MTM_NULL");
+		}
+
+		TransportSnapshot chosen = null;
+		try {
+			for (TransportSnapshot snap : mediaMgr.listSnapshots()) {
+				if (snap == null) continue;
+				if (snap.key == null) continue;
+				if (!snap.key.startsWith("BT:")) continue;
+				if (snap.status != TransportStatus.READY) continue;
+				chosen = snap;
+				break; // premier BT READY (ordre APK)
+			}
+		} catch (Exception e) {
+			JSONObject d = new JSONObject();
+			try { d.put("detail", e.getMessage()); } catch (Exception ignored) {}
+			return ApiResult.fail("BT enumerate failed", "ERR_BT_ENUM_FAILED", d);
+		}
+
+		if (chosen == null || chosen.key == null) {
+			return ApiResult.fail("No BT READY", "ERR_NO_BT_READY");
+		}
+
+		try {
+			mediaMgr.activateExclusive(chosen.key, "API_BT_AUTO");
+		} catch (Exception e) {
+			JSONObject d = new JSONObject();
+			try { d.put("detail", e.getMessage()); } catch (Exception ignored) {}
+			return ApiResult.fail("BT activate failed", "ERR_BT_ACTIVATE_FAILED", d);
+		}
+
+		JSONObject d = new JSONObject();
+		try {
+			d.put("transportKey", chosen.key);
+			d.put("activeKey", MediaTransportManager.getActiveKeyStatic());
+		} catch (Exception ignored) {}
+
+		return ApiResult.ok("BT activate: 1 - OK", d);
+	}
+
 
     // =========================
     // USB global
