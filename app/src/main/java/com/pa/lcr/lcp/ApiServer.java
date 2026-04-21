@@ -265,7 +265,8 @@ public final class ApiServer {
             JSONObject body = req.jsonBody();
             Integer node = parseNodeDec(body);
             Integer from = parseFromDec(body);
-            return facade.api_mediaAutoConnect(node, from);
+            //old return facade.api_mediaAutoConnect(node, from);
+            return ((MultiRegisterApiFacadeImpl) facade).api_mediaAutoConnect(node, from);
         }
 
 
