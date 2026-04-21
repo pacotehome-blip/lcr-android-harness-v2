@@ -170,7 +170,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
 	// ✅ Media Auto-Connect (API) — implémentation JAVA (compilable)
 	// Alignée EXACTEMENT avec le comportement du UI
 	// =========================================================
-	@Override
+	// @Override
 	public ApiResult api_mediaAutoConnect(Integer lcrnode_dec, Integer from_dec) {
 		int node = normNode(lcrnode_dec);
 		int from = normFrom(from_dec);
