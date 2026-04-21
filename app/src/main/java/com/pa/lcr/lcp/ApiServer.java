@@ -87,7 +87,7 @@ public final class ApiServer {
                     Socket s = serverSocket.accept();
                     workers.execute(() -> handleClient(s));
                 } catch (Exception e) {
-                    if (running) t("[API " + ts() + "][RID=" + rid + "] accept error: " + safeMsg(e));
+                    if (running) t("[API " + ts() + "] accept error: " + safeMsg(e));
                 }
             }
         });
