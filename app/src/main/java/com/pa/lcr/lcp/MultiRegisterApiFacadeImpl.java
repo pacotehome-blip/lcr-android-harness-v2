@@ -165,6 +165,52 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
 
 		return ApiResult.ok("BT activate: 1 - OK", d);
 	}
+	
+	// =========================================================
+	// ✅ LCP CONNECT — MEDIA‑AWARE (USB / BT)
+	// =========================================================
+	@Override
+	public ApiResult api_connectLcp(
+			Integer lcrnode_dec,
+			Integer from_dec,
+			String media,
+			String bt_mac) {
+
+		int node = normNode(lcrnode_dec);
+		int from = normFrom(from_dec);
+		String m = (media == null) ? "usb" : media.trim().toLowerCase(Locale.ROOT);
+		if (m.isEmpty()) m = "usb";
+
+		// --- USB (comportement legacy inchangé)
+		if ("usb".equals(m)) {
+			DeliveryController dc = requireSession(node, from);
+			if (dc == null)
+				return ApiResult.fail("Connect LCP: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
+			return dc.api_connectLcp();
+		}
+
+		// --- BT
+		if ("bt".equals(m) || "bluetooth".equals(m)) {
+			if (bt_mac == null || bt_mac.trim().isEmpty()) {
+				return ApiResult.fail("Connect LCP: 0 - bt_mac requis", "ERR_BT_MAC_REQUIRED");
+			}
+
+			String key = MediaTransportManager.btKey(bt_mac.trim());
+			TransportIo io = (mediaMgr != null) ? mediaMgr.getByKey(key) : null;
+			if (io == null || !io.isOpen()) {
+				return ApiResult.fail("Connect LCP: 0 - BT non connecté", "ERR_BT_NOT_CONNECTED");
+			}
+
+			DeliveryController dc = sessions.getOrCreate(key, node, from, io);
+			if (dc == null) {
+				return ApiResult.fail("Connect LCP: 0 - Controller introuvable", "NO_CONTROLLER");
+			}
+
+			return dc.api_connectLcp();
+		}
+
+		return ApiResult.fail("Connect LCP: 0 - media invalide", "ERR_MEDIA_INVALID");
+	}
 
 
     // =========================
