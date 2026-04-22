@@ -1,6 +1,16 @@
 
 package com.pa.lcr.lcp;
 
+import java.util.UUID;
+import java.util.Set;
+import java.util.Comparator;
+import java.util.ArrayList;
+import java.io.OutputStream;
+import java.io.InputStream;
+import org.json.JSONArray;
+import android.bluetooth.BluetoothSocket;
+import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothAdapter;
 import android.content.Context;
 import android.content.Intent;
 import android.hardware.usb.UsbDevice;
@@ -50,7 +60,48 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     private volatile int lastNodeHint = 250;
     private volatile int lastFromHint = 255;
 
-    public MultiRegisterApiFacadeImpl(Context ctx) {
+    
+
+    // =========================================================
+    // ✅ BT autonome: bonded -> RFCOMM/SPP -> publish TransportIo -> activateExclusive
+    // =========================================================
+    private static final UUID SPP_UUID =
+            UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
+
+    private BluetoothAdapter btAdapterSafe() {
+        try { return BluetoothAdapter.getDefaultAdapter(); }
+        catch (Exception ignored) { return null; }
+    }
+
+    /** Liste les BT pairés (bonded) triés par MAC (ordre stable). */
+    private ArrayList<BluetoothDevice> listBondedSorted() {
+        BluetoothAdapter ad = btAdapterSafe();
+        ArrayList<BluetoothDevice> out = new ArrayList<>();
+        if (ad == null) return out;
+        try {
+            Set<BluetoothDevice> bonded = ad.getBondedDevices();
+            if (bonded != null) {
+                for (BluetoothDevice d : bonded) {
+                    if (d == null) continue;
+                    String mac = d.getAddress();
+                    if (mac == null || mac.trim().isEmpty()) continue;
+                    out.add(d);
+                }
+            }
+        } catch (Exception ignored) {}
+        out.sort(Comparator.comparing(d -> d.getAddress().toUpperCase(Locale.ROOT)));
+        return out;
+    }
+
+    /** Retourne la clé BT:... à utiliser : bt_mac si fourni, sinon activeKey (si BT). */
+    private String resolveBtKeyOrActive(String bt_mac) {
+        String mac = (bt_mac == null) ? "" : bt_mac.trim();
+        if (!mac.isEmpty()) return MediaTransportManager.btKey(mac);
+        String activeKey = MediaTransportManager.getActiveKeyStatic();
+        if (activeKey != null && activeKey.startsWith("BT:")) return activeKey;
+        return null;
+    }
+public MultiRegisterApiFacadeImpl(Context ctx) {
         this.appCtx = ctx.getApplicationContext();
         this.usbManager = (UsbManager) this.appCtx.getSystemService(Context.USB_SERVICE);
         this.sessions = RegisterSessionManager.get(this.appCtx);
@@ -83,11 +134,11 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             }
 
             if ("bt".equals(m) || "bluetooth".equals(m)) {
-                String mac = (bt_mac == null) ? "" : bt_mac.trim();
-                if (mac.isEmpty()) {
-                    return ApiResult.fail("MediaCheck: 0 - bt_mac requis", "ERR_BT_MAC_REQUIRED", d);
+                String key = resolveBtKeyOrActive(bt_mac);
+                if (key == null) {
+                    d.put("connected", 0);
+                    return ApiResult.fail("MediaCheck: 0 - Aucun BT actif", "ERR_NO_ACTIVE_BT", d);
                 }
-                String key = MediaTransportManager.btKey(mac);
                 d.put("transportKey", key);
 
                 if (mediaMgr == null) {
@@ -118,6 +169,49 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         }
     }
 
+    // =========================================================
+    // ✅ BT LIST — bonded + runtime (diagnostic)
+    // =========================================================
+    @Override
+    public ApiResult api_btList() {
+        if (mediaMgr == null) {
+            return ApiResult.fail("MTM null", "ERR_MEDIA_MTM_NULL");
+        }
+        JSONObject d = new JSONObject();
+        JSONArray bondedArr = new JSONArray();
+        JSONArray runtimeArr = new JSONArray();
+
+        try {
+            for (BluetoothDevice dev : listBondedSorted()) {
+                JSONObject o = new JSONObject();
+                try { o.put("name", dev.getName() != null ? dev.getName() : JSONObject.NULL); } catch (Exception ignored) {}
+                try { o.put("mac", dev.getAddress() != null ? dev.getAddress() : JSONObject.NULL); } catch (Exception ignored) {}
+                bondedArr.put(o);
+            }
+        } catch (Exception e) {
+            JSONObject ed = new JSONObject();
+            try { ed.put("detail", e.getMessage()); } catch (Exception ignored) {}
+            return ApiResult.fail("BT list failed", "ERR_BT_LIST_FAILED", ed);
+        }
+
+        try {
+            for (TransportSnapshot s : mediaMgr.listSnapshots()) {
+                if (s == null || s.key == null) continue;
+                if (!s.key.startsWith("BT:")) continue;
+                JSONObject o = new JSONObject();
+                try { o.put("key", s.key); } catch (Exception ignored) {}
+                try { o.put("status", s.status != null ? String.valueOf(s.status) : JSONObject.NULL); } catch (Exception ignored) {}
+                runtimeArr.put(o);
+            }
+        } catch (Exception ignored) {}
+
+        try { d.put("bonded", bondedArr); } catch (Exception ignored) {}
+        try { d.put("runtime", runtimeArr); } catch (Exception ignored) {}
+        try { d.put("activeKey", MediaTransportManager.getActiveKeyStatic()); } catch (Exception ignored) {}
+        return ApiResult.ok("BT list: 1 - OK", d);
+    }
+
+
 
 	// =========================================================
 	// ✅ BT ACTIVATE — délégation vers MediaTransportManager
@@ -128,6 +222,82 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
 		if (mediaMgr == null) {
 			return ApiResult.fail("MTM null", "ERR_MEDIA_MTM_NULL");
 		}
+
+		// 0) Si un BT actif est déjà open, activer seulement
+		try {
+			String activeKey = MediaTransportManager.getActiveKeyStatic();
+			if (activeKey != null && activeKey.startsWith("BT:")) {
+				TransportIo io0 = mediaMgr.getByKey(activeKey);
+				if (io0 != null && io0.isOpen()) {
+					mediaMgr.activateExclusive(activeKey, "API_BT_AUTO");
+					JSONObject d = new JSONObject();
+					d.put("transportKey", activeKey);
+					d.put("activeKey", MediaTransportManager.getActiveKeyStatic());
+					return ApiResult.ok("BT activate: 1 - OK (already open)", d);
+				}
+			}
+		} catch (Exception ignored) {}
+
+		// 1) Bonded -> connect SPP -> publish -> activate
+		ArrayList<BluetoothDevice> bonded = listBondedSorted();
+		if (bonded.isEmpty()) {
+			return ApiResult.fail("BT activate: 0 - Aucun BT pairé", "ERR_NO_BONDED_BT");
+		}
+
+		JSONObject lastErr = null;
+		for (BluetoothDevice dev : bonded) {
+			if (dev == null) continue;
+			String mac = dev.getAddress();
+			if (mac == null || mac.trim().isEmpty()) continue;
+			String key = MediaTransportManager.btKey(mac);
+
+			// déjà ouvert en runtime ?
+			try {
+				TransportIo existing = mediaMgr.getByKey(key);
+				if (existing != null && existing.isOpen()) {
+					mediaMgr.activateExclusive(key, "API_BT_AUTO");
+					JSONObject d = new JSONObject();
+					d.put("transportKey", key);
+					d.put("activeKey", MediaTransportManager.getActiveKeyStatic());
+					return ApiResult.ok("BT activate: 1 - OK (already open)", d);
+				}
+			} catch (Exception ignored) {}
+
+			BluetoothSocket sock = null;
+			try {
+				sock = dev.createRfcommSocketToServiceRecord(SPP_UUID);
+				sock.connect();
+				InputStream in = sock.getInputStream();
+				OutputStream out = sock.getOutputStream();
+
+				// publier TransportIo dans MediaTransportManager
+				mediaMgr.onBtConnected(dev, sock, in, out, "BT ready (API)");
+
+				boolean ok = mediaMgr.activateExclusive(key, "API_BT_AUTO");
+				if (!ok) {
+					try { sock.close(); } catch (Exception ignored2) {}
+					return ApiResult.fail("BT activate failed", "ERR_BT_ACTIVATE_FAILED");
+				}
+
+				JSONObject d = new JSONObject();
+				d.put("transportKey", key);
+				d.put("activeKey", MediaTransportManager.getActiveKeyStatic());
+				return ApiResult.ok("BT activate: 1 - OK", d);
+
+			} catch (Exception e) {
+				try { if (sock != null) sock.close(); } catch (Exception ignored) {}
+				lastErr = new JSONObject();
+				try { lastErr.put("mac", mac); } catch (Exception ignored) {}
+				try { lastErr.put("detail", e.getMessage()); } catch (Exception ignored) {}
+			}
+		}
+
+		if (lastErr != null) {
+			return ApiResult.fail("BT activate: 0 - Connexion échouée", "ERR_BT_CONNECT_FAILED", lastErr);
+		}
+		return ApiResult.fail("BT activate: 0 - Connexion échouée", "ERR_BT_CONNECT_FAILED");
+	}
+
 
 		TransportSnapshot chosen = null;
 		try {
@@ -313,11 +483,12 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
 
 		// --- BT
 		if ("bt".equals(m) || "bluetooth".equals(m)) {
-			if (bt_mac == null || bt_mac.trim().isEmpty()) {
-				return ApiResult.fail("Connect LCP: 0 - bt_mac requis", "ERR_BT_MAC_REQUIRED");
+			String key = resolveBtKeyOrActive(bt_mac);
+			if (key == null) {
+				return ApiResult.fail("Connect LCP: 0 - Aucun BT actif (appelle bt/activate)", "ERR_NO_ACTIVE_BT");
 			}
 
-			String key = MediaTransportManager.btKey(bt_mac.trim());
+			
 			TransportIo io = (mediaMgr != null) ? mediaMgr.getByKey(key) : null;
 			if (io == null || !io.isOpen()) {
 				return ApiResult.fail("Connect LCP: 0 - BT non connecté", "ERR_BT_NOT_CONNECTED");
@@ -427,12 +598,13 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
 
                 // publier la session globale
                 UsbSession.set(dev, port);
-                    // ✅ Publish USB transport to MediaTransportManager (so UI+API share the same TransportIo)
-                    try {
-                        if (mediaMgr != null) {
-                            mediaMgr.onUsbReady(dev, port, "USB ready (API open-ping)");
-                        }
-                    } catch (Exception ignored) {}
+
+                // ✅ Publish USB transport to MediaTransportManager
+                try {
+                    if (mediaMgr != null) {
+                        mediaMgr.onUsbReady(dev, port, "USB ready (API open-ping)");
+                    }
+                } catch (Exception ignored) {}
 
                 // signaler à l’UI que l’USB est prêt (tabs auto-attach)
                 try {
@@ -464,12 +636,8 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         }
     }
 
-
-
     // =========================
     // ✅ Option 3: Média OFF — bloquer START seulement si DELIVERY_ACTIVE=0
-    // - Si DELIVERY_ACTIVE=1: retourner RECOVER (pendingReconnect)
-    // - Si DELIVERY_ACTIVE=0: retourner MEDIA_NOT_READY (bloque START)
     // =========================
     private static final int MASK_DELIVERY_ACTIVE = 0x0008; // 0x28
 
@@ -499,9 +667,14 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
 
         try {
             if ("bt".equals(m) || "bluetooth".equals(m)) {
-                String mac = (btMac == null) ? "" : btMac.trim();
-                tk = MediaTransportManager.btKey(mac);
-                io = (mediaMgr != null) ? mediaMgr.getByKey(tk) : null;
+                String key = resolveBtKeyOrActive(btMac);
+                if (key == null) {
+                    tk = "BT:";
+                    io = null;
+                } else {
+                    tk = key;
+                    io = (mediaMgr != null) ? mediaMgr.getByKey(tk) : null;
+                }
             } else {
                 tk = MediaTransportManager.KEY_USB;
                 io = (mediaMgr != null) ? mediaMgr.getByKey(tk) : null;
@@ -514,12 +687,10 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
 
         try { ready = (io != null && io.isOpen()); } catch (Exception ignored) {}
 
-        // 1) si prêt: getOrCreate sur ce transport
         if (ready) {
             try { dc = sessions.getOrCreate(tk, node, from, io); } catch (Exception ignored) {}
         }
 
-        // 2) si non prêt: tenter un controller existant (cache)
         if (dc == null) {
             try { dc = sessions.getController(tk, node); } catch (Exception ignored) {}
         }
@@ -527,7 +698,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         boolean delActiveCache = false;
         try {
             if (dc != null) {
-                ApiResult r = dc.api_tickSnapshot(); // cache-only côté controller
+                ApiResult r = dc.api_tickSnapshot();
                 JSONObject d = (r != null) ? r.data : null;
                 int delCode = (d != null) ? d.optInt("delCode", 0) : 0;
                 delActiveCache = (delCode & MASK_DELIVERY_ACTIVE) != 0;
@@ -567,12 +738,6 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         } catch (Exception ignored) {}
     }
 
-    /**
-     * Retourne:
-     * - null si OK pour procéder
-     * - ApiResult FAIL si media OFF et delivery inactive (bloque START)
-     * - ApiResult OK (RECOVER) si media OFF et delivery active
-     */
     private ApiResult option3_startGate(MediaCtx mc, int node, String opName) {
         try {
             JSONObject d = new JSONObject();
@@ -602,9 +767,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             return null;
         }
     }
-    // =========================
-    // Helpers
-    // =========================
+
     private static int normNode(Integer n) {
         if (n == null) return 250;
         int v = n;
@@ -620,7 +783,6 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     }
 
     private void notifyNodeSeen(int node, int from) {
-        // update hints
         lastNodeHint = node;
         lastFromHint = from;
         try {
@@ -654,25 +816,16 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         } catch (Exception ignored) {}
     }
 
-    /**
-     * ✅ FIX NO_CONTROLLER:
-     * - Priorité à nodeDec s'il est fourni (query param / body)
-     * - Sinon fallback jobToNode (recordJobId)
-     * - Sinon fallback lastNodeHint
-     * - From: priorité à jobToFrom si disponible, sinon lastFromHint
-     */
     private DeliveryController resolveJobController(String jobId, Integer nodeDec) {
         if (jobId == null || jobId.trim().isEmpty()) return null;
 
-        // 1) node explicite -> priorité
         Integer node = nodeDec;
         if (node != null) {
             int n = normNode(node);
-            int f = lastFromHint; // default/hint
+            int f = lastFromHint;
             return requireSession(n, f);
         }
 
-        // 2) mapping job->node
         Integer mappedNode = jobToNode.get(jobId);
         Integer mappedFrom = jobToFrom.get(jobId);
         if (mappedNode != null) {
@@ -681,15 +834,11 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             return requireSession(n, f);
         }
 
-        // 3) fallback sur hint
         int n = lastNodeHint;
         int f = lastFromHint;
         return requireSession(n, f);
     }
 
-    // =========================
-    // Legacy wrappers REQUIRED by ApiFacade (abstract methods)
-    // =========================
     @Override public ApiResult api_connectLcp() { return api_connectLcp(null, null); }
     @Override public ApiResult api_deliveryAlignA() { return api_deliveryAlignA(null, null); }
     @Override public ApiResult api_deliveryStartC(int product1to16, double presetNet) { return api_deliveryStartC(null, null, product1to16, presetNet); }
@@ -700,7 +849,6 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     @Override public ApiResult api_deliveryContinue(String jobId) { return api_deliveryContinue(jobId, null); }
     @Override public ApiResult api_deliveryTerminate(String jobId) { return api_deliveryTerminate(jobId, null); }
 
-    // ✅ NEW: legacy wrapper ticket reprint current
     @Override public ApiResult api_ticketReprintCurrent() { return api_ticketReprintCurrent(null, null); }
 
     @Override
@@ -713,9 +861,6 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                 expected_serial_id, expected_product_number, expected_compartment);
     }
 
-    // =========================
-    // Node-aware operations (B2: create if missing)
-    // =========================
     @Override
     public ApiResult api_connectLcp(Integer lcrnode_dec, Integer from_dec) {
         int node = normNode(lcrnode_dec);
@@ -739,9 +884,6 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         return api_deliveryStartC(lcrnode_dec, from_dec, product1to16, presetNet, "usb", null);
     }
 
-    /**
-     * ✅ Option 3 (media-aware): START C
-     */
     public ApiResult api_deliveryStartC(Integer lcrnode_dec, Integer from_dec, int product1to16, double presetNet,
                                        String media, String bt_mac) {
         int node = normNode(lcrnode_dec);
@@ -761,19 +903,15 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         return r;
     }
 
-
     @Override
     public ApiResult api_deliveryOneShotStart(Integer lcrnode_dec, Integer from_dec,
-            String numero_livraison, int product1to16, double presetNetL, String compartment) {
+                                             String numero_livraison, int product1to16, double presetNetL, String compartment) {
         return api_deliveryOneShotStart(lcrnode_dec, from_dec, numero_livraison, product1to16, presetNetL, compartment, "usb", null);
     }
 
-    /**
-     * ✅ Option 3 (media-aware): OneShot START
-     */
     public ApiResult api_deliveryOneShotStart(Integer lcrnode_dec, Integer from_dec,
-            String numero_livraison, int product1to16, double presetNetL, String compartment,
-            String media, String bt_mac) {
+                                             String numero_livraison, int product1to16, double presetNetL, String compartment,
+                                             String media, String bt_mac) {
         int node = normNode(lcrnode_dec);
         int from = normFrom(from_dec);
 
@@ -790,7 +928,6 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         recordJobId(r, node, from);
         return r;
     }
-
 
     @Override
     public ApiResult api_deliveryContinue(String jobId, Integer lcrnode_dec) {
@@ -828,9 +965,6 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                 expected_serial_id, expected_product_number, expected_compartment);
     }
 
-    // =========================================================
-    // ✅ NEW: Ticket reprint current (node-aware)
-    // =========================================================
     @Override
     public ApiResult api_ticketReprintCurrent(Integer lcrnode_dec, Integer from_dec) {
         int node = normNode(lcrnode_dec);
@@ -856,13 +990,10 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         }
     }
 
-    // =========================================================
-    // ✅ NEW: Tick wait (B+): net/gross OR dev/prn OR delCode/delStatus OR state changes
-    // =========================================================
     @Override
     public ApiResult api_tickWait(Integer lcrnode_dec, Long since_seq, Integer wait_ms) {
         int node = normNode(lcrnode_dec);
-        int from = lastFromHint; // default/hint
+        int from = lastFromHint;
         long since = (since_seq != null) ? since_seq : 0L;
         long wait = (wait_ms != null) ? wait_ms.longValue() : 25_000L;
         DeliveryController dc = requireSession(node, from);
@@ -872,60 +1003,53 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         return dc.api_tickWait(since, wait);
     }
 
+    private ApiResult failTransportLevel(String media, String btMac, String where) {
+        String m = (media == null) ? "usb" : media.trim().toLowerCase(Locale.ROOT);
+        JSONObject d = new JSONObject();
+        try { d.put("level", "MEDIA"); } catch (Exception ignored) {}
+        try { d.put("where", where); } catch (Exception ignored) {}
+        try { d.put("media", m); } catch (Exception ignored) {}
 
-// =========================
-// ✅ A2: erreurs par niveau (MEDIA) pour transport non prêt
-// =========================
-private ApiResult failTransportLevel(String media, String btMac, String where) {
-    String m = (media == null) ? "usb" : media.trim().toLowerCase(Locale.ROOT);
-    JSONObject d = new JSONObject();
-    try { d.put("level", "MEDIA"); } catch (Exception ignored) {}
-    try { d.put("where", where); } catch (Exception ignored) {}
-    try { d.put("media", m); } catch (Exception ignored) {}
-
-    if ("usb".equals(m)) {
-        return ApiResult.fail("Transport: 0 - USB non connecté", "ERR_USB_NOT_CONNECTED", d);
-    }
-    if ("bt".equals(m) || "bluetooth".equals(m)) {
-        if (btMac == null || btMac.trim().isEmpty()) {
-            return ApiResult.fail("Transport: 0 - bt_mac requis", "ERR_BT_MAC_REQUIRED", d);
+        if ("usb".equals(m)) {
+            return ApiResult.fail("Transport: 0 - USB non connecté", "ERR_USB_NOT_CONNECTED", d);
         }
-        try { d.put("bt_mac", btMac.trim()); } catch (Exception ignored) {}
-        return ApiResult.fail("Transport: 0 - BT non connecté", "ERR_BT_NOT_CONNECTED", d);
-    }
-    return ApiResult.fail("Transport: 0 - media invalide", "ERR_MEDIA_INVALID", d);
-}
-
-
-// =========================================================
-// ✅ NEW: Delivery AlignA (media-aware) for API endpoint /v1/delivery/A
-// =========================================================
-@Override
-public ApiResult api_deliveryAlignA(Integer lcrnode_dec, Integer from_dec, String media, String bt_mac) {
-    int node = normNode(lcrnode_dec);
-    int from = normFrom(from_dec);
-    String m = (media == null) ? "usb" : media.trim().toLowerCase(Locale.ROOT);
-    if (m.isEmpty()) m = "usb";
-
-    if ("usb".equals(m)) {
-        DeliveryController dc = requireSession(node, from);
-        if (dc == null) return ApiResult.fail("Align A: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
-        return dc.api_deliveryAlignA();
-    }
-    if ("bt".equals(m) || "bluetooth".equals(m)) {
-        if (bt_mac == null || bt_mac.trim().isEmpty()) {
-            return ApiResult.fail("Align A: 0 - bt_mac requis", "ERR_BT_MAC_REQUIRED");
+        if ("bt".equals(m) || "bluetooth".equals(m)) {
+            String key = resolveBtKeyOrActive(btMac);
+            if (key == null) {
+                return ApiResult.fail("Transport: 0 - Aucun BT actif", "ERR_NO_ACTIVE_BT", d);
+            }
+            try { d.put("transportKey", key); } catch (Exception ignored) {}
+            return ApiResult.fail("Transport: 0 - BT non connecté", "ERR_BT_NOT_CONNECTED", d);
         }
-        String key = MediaTransportManager.btKey(bt_mac.trim());
-        TransportIo io = (mediaMgr != null) ? mediaMgr.getByKey(key) : null;
-        if (io == null || !io.isOpen()) {
-            return ApiResult.fail("Align A: 0 - BT non connecté", "ERR_BT_NOT_CONNECTED");
-        }
-        DeliveryController dc = sessions.getOrCreate(key, node, from, io);
-        if (dc == null) return ApiResult.fail("Align A: 0 - BT non prêt.", "ERR_BT_NOT_CONNECTED");
-        return dc.api_deliveryAlignA();
+        return ApiResult.fail("Transport: 0 - media invalide", "ERR_MEDIA_INVALID", d);
     }
-    return ApiResult.fail("Align A: 0 - media invalide", "ERR_MEDIA_INVALID");
-}
-}
 
+    @Override
+    public ApiResult api_deliveryAlignA(Integer lcrnode_dec, Integer from_dec, String media, String bt_mac) {
+        int node = normNode(lcrnode_dec);
+        int from = normFrom(from_dec);
+        String m = (media == null) ? "usb" : media.trim().toLowerCase(Locale.ROOT);
+        if (m.isEmpty()) m = "usb";
+
+        if ("usb".equals(m)) {
+            DeliveryController dc = requireSession(node, from);
+            if (dc == null) return ApiResult.fail("Align A: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
+            return dc.api_deliveryAlignA();
+        }
+        if ("bt".equals(m) || "bluetooth".equals(m)) {
+            String key = resolveBtKeyOrActive(bt_mac);
+            if (key == null) {
+                return ApiResult.fail("Align A: 0 - Aucun BT actif (appelle bt/activate)", "ERR_NO_ACTIVE_BT");
+            }
+            
+            TransportIo io = (mediaMgr != null) ? mediaMgr.getByKey(key) : null;
+            if (io == null || !io.isOpen()) {
+                return ApiResult.fail("Align A: 0 - BT non connecté", "ERR_BT_NOT_CONNECTED");
+            }
+            DeliveryController dc = sessions.getOrCreate(key, node, from, io);
+            if (dc == null) return ApiResult.fail("Align A: 0 - BT non prêt.", "ERR_BT_NOT_CONNECTED");
+            return dc.api_deliveryAlignA();
+        }
+        return ApiResult.fail("Align A: 0 - media invalide", "ERR_MEDIA_INVALID");
+    }
+}

@@ -187,31 +187,13 @@ public final class ApiServer {
     }
 
     private ApiResult gateMediaIfProvided(JSONObject body) {
-        if (body == null) return null;
-
-        String mediaRaw = body.optString("media", "").trim();
-        if (mediaRaw.isEmpty()) return null;
-
-        String media = mediaRaw.toLowerCase(Locale.ROOT);
-        String btMac = body.optString("bt_mac", body.optString("btMac", "")).trim();
-
-        if ("auto".equals(media)) return null;
-
-        if ("bt".equals(media) && btMac.isEmpty()) {
-            String resolved = resolveBtMacFromApk();
-            if (resolved != null && !resolved.isEmpty()) {
-                btMac = resolved;
-                try { body.put("bt_mac", resolved); body.put("btMac", resolved); } catch (Exception ignored) {}
-            }
-        }
-
-        ApiResult check = facade.api_mediaCheck(mediaRaw, btMac);
-        if (check != null && check.code == 0) {
-            if ("bt".equals(media) && btMac.isEmpty() && "ERR_BT_MAC_REQUIRED".equals(check.err)) return null;
-            return check;
-        }
+        // ✅ CORRECTIF FINAL – BT_AUTONOME
+        // ApiServer ne décide jamais du média ni du BT.
+        // Toute la logique (media, bt, activeKey, recover)
+        // est centralisée dans MultiRegisterApiFacadeImpl.
         return null;
     }
+
 
     // =========================
     // ROUTING (COMPLET)
