@@ -5,7 +5,6 @@ import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothSocket;
 import android.content.Context;
 import android.hardware.usb.UsbDevice;
-
 import com.hoho.android.usbserial.driver.UsbSerialPort;
 
 import java.io.InputStream;
@@ -22,7 +21,9 @@ public final class MediaTransportManager {
     public static MediaTransportManager get(Context ctx) {
         if (INSTANCE != null) return INSTANCE;
         synchronized (MediaTransportManager.class) {
-            if (INSTANCE == null) INSTANCE = new MediaTransportManager(ctx.getApplicationContext());
+            if (INSTANCE == null) {
+                INSTANCE = new MediaTransportManager(ctx.getApplicationContext());
+            }
         }
         return INSTANCE;
     }
@@ -91,13 +92,20 @@ public final class MediaTransportManager {
         }
 
         long nextGen = h.getGenerationId() + 1;
-
         String name = (dev != null && dev.getName() != null) ? dev.getName() : "(no-name)";
         String desc = (description != null)
                 ? description
                 : ("BT SPP " + name + " " + (mac != null ? mac : ""));
 
-        TransportIo io = new BtSppTransportIo(key, socket, in, out, desc, nextGen);
+        TransportIo io = new BtSppTransportIo(
+                key,
+                socket,
+                in,
+                out,
+                desc,
+                nextGen
+        );
+
         h.setConnected(io, io.describe());
     }
 
@@ -135,11 +143,16 @@ public final class MediaTransportManager {
         for (TransportHandle h : handles.values()) {
             if (h == null) continue;
             if (h.getKey().equals(key)) continue;
-            try { h.setSuspended(reason); } catch (Exception ignored) {}
+            try {
+                h.setSuspended(reason);
+            } catch (Exception ignored) {}
         }
 
         activeKey = key;
-        try { target.setActive(reason); } catch (Exception ignored) {}
+        try {
+            target.setActive(reason);
+        } catch (Exception ignored) {}
+
         return true;
     }
 
@@ -148,7 +161,9 @@ public final class MediaTransportManager {
         if (key.equals(activeKey)) activeKey = null;
     }
 
-    public String getActiveKey() { return activeKey; }
+    public String getActiveKey() {
+        return activeKey;
+    }
 
     public static String getActiveKeyStatic() {
         return (INSTANCE != null) ? INSTANCE.activeKey : null;
@@ -191,7 +206,6 @@ public final class MediaTransportManager {
                 }
             }
         }
-
         for (TransportHandle h : handles.values()) {
             if (h != null
                     && h.getStatus() == TransportStatus.READY
@@ -211,8 +225,10 @@ public final class MediaTransportManager {
         if (key == null) return null;
         TransportHandle h = handles.get(key);
         if (h == null) return null;
-        if (h.getStatus() == TransportStatus.ERROR || h.getStatus() == TransportStatus.DISCONNECTED)
+        if (h.getStatus() == TransportStatus.ERROR
+                || h.getStatus() == TransportStatus.DISCONNECTED)
             return null;
+
         TransportIo io = h.getIo();
         if (io == null || !io.isOpen()) return null;
         return io;
@@ -221,6 +237,7 @@ public final class MediaTransportManager {
     // =========================================================
     // ✅ OPTION B — sélection automatique SANS ouvrir le transport
     // =========================================================
+
     public TransportIo autoSelectConnect(String media, String btMac) {
         String m = (media != null) ? media.trim().toLowerCase(Locale.ROOT) : "auto";
 
