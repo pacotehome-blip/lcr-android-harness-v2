@@ -858,6 +858,17 @@ public MultiRegisterApiFacadeImpl(Context ctx) {
     }
 
 
+    private String probeSerial(TransportIo io, int nodeDec, int fromDec) {
+        try {
+            LcpLink tmp = new LcpLink(io, nodeDec, fromDec, true);
+            byte[] b = tmp.opGetField(80, 500);
+            if (b == null || b.length == 0) return null;
+            return new String(b, java.nio.charset.StandardCharsets.UTF_8).trim();
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
     private DeliveryController requireSession(Integer nodeDec, Integer fromDec) {
         UsbSerialPort port = UsbSession.getPort();
         if (port == null) return null;
