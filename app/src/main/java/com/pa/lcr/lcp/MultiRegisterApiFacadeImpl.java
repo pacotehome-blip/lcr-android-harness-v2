@@ -433,8 +433,18 @@ public MultiRegisterApiFacadeImpl(Context ctx) {
 
 		int node = normNode(lcrnode_dec);
 		int from = normFrom(from_dec);
-		String m = (media == null) ? "usb" : media.trim().toLowerCase(Locale.ROOT);
-		if (m.isEmpty()) m = "usb";
+// pac		String m = (media == null) ? "usb" : media.trim().toLowerCase(Locale.ROOT);
+//		if (m.isEmpty()) m = "usb";
+
+        String m = (media == null) ? null : media.trim().toLowerCase(Locale.ROOT);
+        if (m == null || m.isEmpty()) {
+            String activeKey = MediaTransportManager.getActiveKeyStatic();
+            if (activeKey != null && activeKey.startsWith("BT:")) {
+                m = "bt";
+            } else {
+                m = "usb";
+            }
+        }
 
 		// --- USB (comportement legacy inchangé)
 		if ("usb".equals(m)) {
