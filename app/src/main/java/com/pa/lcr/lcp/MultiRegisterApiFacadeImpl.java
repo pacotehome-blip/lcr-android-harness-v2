@@ -761,6 +761,18 @@ public MultiRegisterApiFacadeImpl(Context ctx) {
         } catch (Exception ignored) {}
     }
 
+    private void notifyNodeSeenFull(int node, int from, String serial, String transportKey) {
+        try {
+            Intent i = new Intent(ACTION_NODE_SEEN);
+            i.setPackage(appCtx.getPackageName());
+            i.putExtra("node", node);
+            i.putExtra("from", from);
+            if (serial != null) i.putExtra("serial", serial);
+            if (transportKey != null) i.putExtra("transport", transportKey);
+            appCtx.sendBroadcast(i);
+        } catch (Exception ignored) {}
+    }
+
 
     private DeliveryController requireSession(Integer nodeDec, Integer fromDec) {
         UsbSerialPort port = UsbSession.getPort();
