@@ -299,50 +299,13 @@ public MultiRegisterApiFacadeImpl(Context ctx) {
 	}
 
 
-		TransportSnapshot chosen = null;
-		try {
-			for (TransportSnapshot snap : mediaMgr.listSnapshots()) {
-				if (snap == null) continue;
-				if (snap.key == null) continue;
-				if (!snap.key.startsWith("BT:")) continue;
-				if (snap.status != TransportStatus.READY) continue;
-				chosen = snap;
-				break; // premier BT READY (ordre APK)
-			}
-		} catch (Exception e) {
-			JSONObject d = new JSONObject();
-			try { d.put("detail", e.getMessage()); } catch (Exception ignored) {}
-			return ApiResult.fail("BT enumerate failed", "ERR_BT_ENUM_FAILED", d);
-		}
-
-		if (chosen == null || chosen.key == null) {
-			return ApiResult.fail("No BT READY", "ERR_NO_BT_READY");
-		}
-
-		try {
-			mediaMgr.activateExclusive(chosen.key, "API_BT_AUTO");
-		} catch (Exception e) {
-			JSONObject d = new JSONObject();
-			try { d.put("detail", e.getMessage()); } catch (Exception ignored) {}
-			return ApiResult.fail("BT activate failed", "ERR_BT_ACTIVATE_FAILED", d);
-		}
-
-		JSONObject d = new JSONObject();
-		try {
-			d.put("transportKey", chosen.key);
-			d.put("activeKey", MediaTransportManager.getActiveKeyStatic());
-		} catch (Exception ignored) {}
-
-		return ApiResult.ok("BT activate: 1 - OK", d);
-	}
-
-
     // =========================================================
     // ✅ Media Auto-Connect (API) — VERSION FINALE JAVA
     // - Amorçage BT inclus
     // - Alignée EXACTEMENT avec le comportement du UI
     // - AUCUNE modification du UI
     // =========================================================
+    
     public ApiResult api_mediaAutoConnect(Integer lcrnode_dec, Integer from_dec) {
         int node = normNode(lcrnode_dec);
         int from = normFrom(from_dec);
