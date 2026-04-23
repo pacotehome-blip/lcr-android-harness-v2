@@ -462,6 +462,10 @@ public MultiRegisterApiFacadeImpl(Context ctx) {
 				return ApiResult.fail("Connect LCP: 0 - Controller introuvable", "NO_CONTROLLER");
 			}
 
+            String serial = sessions.getExpectedSerial(node);
+            String transportKey = key;
+            notifyNodeSeenFull(node, from, serial, transportKey);
+
 			return dc.api_connectLcp();
 		}
 
@@ -757,13 +761,19 @@ public MultiRegisterApiFacadeImpl(Context ctx) {
         } catch (Exception ignored) {}
     }
 
+
     private DeliveryController requireSession(Integer nodeDec, Integer fromDec) {
         UsbSerialPort port = UsbSession.getPort();
         if (port == null) return null;
         int n = normNode(nodeDec);
         int f = normFrom(fromDec);
-        notifyNodeSeen(n, f);
-        return sessions.getOrCreate(n, f, port);
+        DeliveryController dc = sessions.getOrCreate(n, f, port);   // AJOUT
+        if (dc != null) {                                           // AJOUT
+            String serial = sessions.getExpectedSerial(n);          // AJOUT
+            String transportKey = MediaTransportManager.KEY_USB;    // AJOUT
+            notifyNodeSeenFull(n, f, serial, transportKey);         // AJOUT
+        }                                                           // AJOUT
+        return dc;
     }
 
     private void recordJobId(ApiResult r, int node, int from) {
@@ -1011,6 +1021,9 @@ public MultiRegisterApiFacadeImpl(Context ctx) {
             }
             DeliveryController dc = sessions.getOrCreate(key, node, from, io);
             if (dc == null) return ApiResult.fail("Align A: 0 - BT non prêt.", "ERR_BT_NOT_CONNECTED");
+            String serial = sessions.getExpectedSerial(node);
+            String transportKey = key;
+            notifyNodeSeenFull(node, from, serial, transportKey);
             return dc.api_deliveryAlignA();
         }
         return ApiResult.fail("Align A: 0 - media invalide", "ERR_MEDIA_INVALID");
