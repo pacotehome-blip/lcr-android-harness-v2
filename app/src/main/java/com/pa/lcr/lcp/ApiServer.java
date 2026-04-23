@@ -416,6 +416,16 @@ public final class ApiServer {
         if ("POST".equals(req.method) && "/v1/db/dump".equals(req.path)) {
             return facade.api_dbDump();
         }
+		
+	// Route pour /v1/register/connect-auto
+	if ("POST".equals(req.method) && "/v1/register/connect-auto".equals(req.path)) {
+		JSONObject body = req.jsonBody();
+		String serialId = (body != null && body.has("serialId")) ? body.optString("serialId", null) : null;
+		Integer lcrnode = (body != null && body.has("lcrnode")) ? body.optInt("lcrnode", 0) : null;
+		if (lcrnode != null && lcrnode == 0) lcrnode = null;
+		return facade.api_registerConnectAuto(serialId, lcrnode);
+	}
+
 
         JSONObject d = new JSONObject();
         try { d.put("path", req.path).put("method", req.method); } catch (Exception ignored) {}
