@@ -481,6 +481,80 @@ public MultiRegisterApiFacadeImpl(Context ctx) {
 
 		return ApiResult.fail("Connect LCP: 0 - media invalide", "ERR_MEDIA_INVALID");
 	}
+	// =========================================================
+	// ✅ One Stop connect register (USB / BT)
+	// =========================================================
+
+    public ApiResult api_registerConnectAuto(String serialId, Integer lcrnode) {
+        // 1. Déterminer le média actif
+        String activeKey = MediaTransportManager.getActiveKeyStatic();
+        String mediaKey = null;
+        if (activeKey != null && activeKey.startsWith("BT:")) {
+            mediaKey = activeKey;
+        } else {
+            mediaKey = MediaTransportManager.KEY_USB;
+        }
+        TransportIo io = mediaMgr.getByKey(mediaKey);
+        if (io == null || !io.isOpen()) {
+            return ApiResult.fail("Aucun média actif (BT ou USB)", "ERR_MEDIA_NOT_READY");
+        }
+
+        // 2. Essayer de connecter le registre sur le média actif
+        for (int node = 1; node <= 250; node++) {
+            String serial = probeSerial(io, node, 255);
+            boolean matchSerial = serialId != null && serial != null && serial.equals(serialId);
+            boolean matchNode = lcrnode != null && node == lcrnode;
+            if (matchSerial || matchNode) {
+                DeliveryController dc = sessions.getOrCreate(mediaKey, node, 255, io);
+                ApiResult tick = (dc != null) ? dc.api_tickSnapshot() : null;
+                double net = (tick != null && tick.data != null) ? tick.data.optDouble("net", 0.0) : 0.0;
+                double gross = (tick != null && tick.data != null) ? tick.data.optDouble("gross", 0.0) : 0.0;
+                String statut = (tick != null && tick.data != null) ? tick.data.optString("statut", "?") : "?";
+                // Broadcast pour tab UI
+                notifyNodeSeenFull(node, 255, serial, mediaKey);
+                JSONObject d = new JSONObject();
+                d.put("node", node);
+                d.put("serial", serial);
+                d.put("media", mediaKey.startsWith("BT:") ? "bt" : "usb");
+                d.put("statut", statut);
+                d.put("net", net);
+                d.put("gross", gross);
+                return ApiResult.ok("Registre trouvé sur " + (mediaKey.startsWith("BT:") ? "BT" : "USB"), d);
+            }
+        }
+
+        // 3. Si non trouvé, scanner l’autre média
+        String otherKey = mediaKey.startsWith("BT:") ? MediaTransportManager.KEY_USB : resolveBtKeyOrActive(null);
+        TransportIo ioOther = mediaMgr.getByKey(otherKey);
+        if (ioOther != null && ioOther.isOpen()) {
+            for (int node = 1; node <= 250; node++) {
+                String serial = probeSerial(ioOther, node, 255);
+                boolean matchSerial = serialId != null && serial != null && serial.equals(serialId);
+                boolean matchNode = lcrnode != null && node == lcrnode;
+                if (matchSerial || matchNode) {
+                    DeliveryController dc = sessions.getOrCreate(otherKey, node, 255, ioOther);
+                    ApiResult tick = (dc != null) ? dc.api_tickSnapshot() : null;
+                    double net = (tick != null && tick.data != null) ? tick.data.optDouble("net", 0.0) : 0.0;
+                    double gross = (tick != null && tick.data != null) ? tick.data.optDouble("gross", 0.0) : 0.0;
+                    String statut = (tick != null && tick.data != null) ? tick.data.optString("statut", "?") : "?";
+                    notifyNodeSeenFull(node, 255, serial, otherKey);
+                    JSONObject d = new JSONObject();
+                    d.put("node", node);
+                    d.put("serial", serial);
+                    d.put("media", otherKey.startsWith("BT:") ? "bt" : "usb");
+                    d.put("statut", statut);
+                    d.put("net", net);
+                    d.put("gross", gross);
+                    return ApiResult.ok("Registre trouvé sur " + (otherKey.startsWith("BT:") ? "BT" : "USB"), d);
+                }
+            }
+        }
+
+        // 4. Rien trouvé
+        JSONObject d = new JSONObject();
+        d.put("scanSuggested", true);
+        return ApiResult.fail("Registre non trouvé sur BT ou USB", "ERR_REGISTER_NOT_FOUND", d);
+    }
 
 
     // =========================
@@ -999,7 +1073,8 @@ public MultiRegisterApiFacadeImpl(Context ctx) {
     }
 
     private ApiResult failTransportLevel(String media, String btMac, String where) {
-        String m = (media == null) ? "usb" : media.trim().toLowerCase(Locale.ROOT);
+        
+        ? "usb" : media.trim().toLowerCase(Locale.ROOT);
         JSONObject d = new JSONObject();
         try { d.put("level", "MEDIA"); } catch (Exception ignored) {}
         try { d.put("where", where); } catch (Exception ignored) {}
