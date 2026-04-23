@@ -1073,8 +1073,7 @@ public MultiRegisterApiFacadeImpl(Context ctx) {
     }
 
     private ApiResult failTransportLevel(String media, String btMac, String where) {
-        
-        ? "usb" : media.trim().toLowerCase(Locale.ROOT);
+        String m = (media == null) ? "usb" : media.trim().toLowerCase(Locale.ROOT);
         JSONObject d = new JSONObject();
         try { d.put("level", "MEDIA"); } catch (Exception ignored) {}
         try { d.put("where", where); } catch (Exception ignored) {}
