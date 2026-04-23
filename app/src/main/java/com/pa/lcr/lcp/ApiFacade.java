@@ -41,7 +41,8 @@ public interface ApiFacade {
     // USB (global)
     // =========================================================
     ApiResult api_scanUsb();
-    ApiResult api_openPingUsb();
+	ApiResult api_registerConnectAuto(String serialId, Integer lcrnode);
+	ApiResult api_openPingUsb();
 
     // =========================================================
     // ✅ Media check (USB/BT)
