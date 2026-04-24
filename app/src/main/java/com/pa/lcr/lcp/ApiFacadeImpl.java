@@ -3,9 +3,39 @@ package com.pa.lcr.lcp;
 
 import android.content.Context;
 
+import com.pa.lcr.lcp.transport.TransportIo;
+import com.pa.lcr.lcp.transport.TransportSnapshot;
+import com.pa.lcr.lcp.transport.TransportStatus;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.util.Locale;
+
+
 import com.pa.lcr.lcp.transport.MediaTransportManager;
 
+        try { activeKey = MediaTransportManager.getActiveKeyStatic(); } catch (Exception ignored) {}
 
+        try {
+            for (TransportSnapshot snap : mtm.listSnapshots()) {
+                if (snap == null) continue;
+                JSONObject o = new JSONObject();
+                try { o.put("key", snap.key != null ? snap.key : JSONObject.NULL); } catch (Exception ignored) {}
+                try { o.put("status", snap.status != null ? String.valueOf(snap.status) : JSONObject.NULL); } catch (Exception ignored) {}
+                arr.put(o);
+            }
+        } catch (Exception e) {
+            JSONObject ed = new JSONObject();
+            try { ed.put("detail", e.getMessage()); } catch (Exception ignored) {}
+            return ApiResult.fail("BT list failed", "ERR_BT_LIST_FAILED", ed);
+        }
+
+        try { d.put("activeKey", activeKey != null ? activeKey : JSONObject.NULL); } catch (Exception ignored) {}
+        try { d.put("snapshots", arr); } catch (Exception ignored) {}
+
+        return ApiResult.ok("BT list: 1 - OK", d);
+    }
 
     // =========================================================
     // ✅ BT ACTIVATE (sans body) — EXACTEMENT "Connect BT" UI
@@ -60,10 +90,18 @@ import com.pa.lcr.lcp.transport.MediaTransportManager;
         return ApiResult.ok("BT activate: 1 - OK", d);
     }
 
+
+
     // =========================================================
     // LCP CONNECT — COMME EN MANUEL SUR MÉDIA DÉJÀ ACTIF
     // ❌ pas d'auto-activation BT ici
     // =========================================================
+
+    @Override
+    public ApiResult api_registerConnectAuto(String serialId, Integer lcrnode) {
+        return ApiResult.fail("registerConnectAuto: 0 - Not supported (mono-registre)", "NOT_SUPPORTED");
+    }
+
 
     @Override
     public ApiResult api_connectLcp() {
@@ -217,14 +255,6 @@ import com.pa.lcr.lcp.transport.MediaTransportManager;
                 : m.toLowerCase(Locale.ROOT);
     }
 }
-import com.pa.lcr.lcp.transport.TransportIo;
-import com.pa.lcr.lcp.transport.TransportSnapshot;
-import com.pa.lcr.lcp.transport.TransportStatus;
-
-import org.json.JSONArray;
-import org.json.JSONObject;
-
-import java.util.Locale;
 
 /**
  * ApiFacadeImpl — AUTOMATISATION MINIMALE
@@ -260,4 +290,3 @@ public final class ApiFacadeImpl implements ApiFacade {
 
         JSONObject d = new JSONObject();
         JSONArray arr = new JSONArray();
-
