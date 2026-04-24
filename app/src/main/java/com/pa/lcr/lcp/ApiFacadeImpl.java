@@ -4,6 +4,7 @@ package com.pa.lcr.lcp;
 import android.content.Context;
 
 import com.pa.lcr.lcp.transport.MediaTransportManager;
+
         try { activeKey = MediaTransportManager.getActiveKeyStatic(); } catch (Exception ignored) {}
 
         try {
