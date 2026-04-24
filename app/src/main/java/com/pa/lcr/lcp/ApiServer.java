@@ -186,6 +186,45 @@ public final class ApiServer {
         }
     }
 
+    // =========================
+    // Helpers: default media = activeKey (Option 2)
+    // - Si body.media est fourni -> respecter
+    // - Sinon: BT si activeKey commence par BT:, sinon USB
+    // =========================
+    private static String resolveMediaDefault(JSONObject body) {
+        try {
+            String m = (body != null) ? body.optString("media", "") : "";
+            if (m != null) m = m.trim().toLowerCase(Locale.ROOT);
+            if (m != null && !m.isEmpty()) return m;
+            String activeKey = MediaTransportManager.getActiveKeyStatic();
+            if (activeKey != null) {
+                String ak = activeKey.trim().toUpperCase(Locale.ROOT);
+                if (ak.startsWith("BT:")) return "bt";
+            }
+            return "usb";
+        } catch (Exception ignored) {
+            return "usb";
+        }
+    }
+
+    private static String resolveBtMacDefault(JSONObject body) {
+        try {
+            String btMac = (body != null)
+                    ? body.optString("bt_mac", body.optString("btMac", ""))
+                    : "";
+            if (btMac != null) btMac = btMac.trim();
+            if (btMac != null && !btMac.isEmpty()) return btMac;
+            String resolved = resolveBtMacFromApk();
+            return (resolved != null) ? resolved.trim() : "";
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    private static JSONObject safeBody(JSONObject body) {
+        return (body != null) ? body : new JSONObject();
+    }
+
     private ApiResult gateMediaIfProvided(JSONObject body) {
         // ✅ CORRECTIF FINAL – BT_AUTONOME
         // ApiServer ne décide jamais du média ni du BT.
@@ -221,9 +260,9 @@ public final class ApiServer {
 
         // Media check
         if ("POST".equals(req.method) && "/v1/media/check".equals(req.path)) {
-            JSONObject body = req.jsonBody();
-            String media = body.optString("media", "usb");
-            String btMac = body.optString("bt_mac", body.optString("btMac", "")).trim();
+            JSONObject body = safeBody(req.jsonBody());
+            String media = resolveMediaDefault(body);
+            String btMac = resolveBtMacDefault(body);
             if ("bt".equals(media.toLowerCase(Locale.ROOT)) && btMac.isEmpty()) {
                 String resolved = resolveBtMacFromApk();
                 if (resolved != null && !resolved.isEmpty()) {
@@ -244,7 +283,7 @@ public final class ApiServer {
         
         // Media auto-connect (API automation, aligné UI)
         if ("POST".equals(req.method) && "/v1/media/auto-connect".equals(req.path)) {
-            JSONObject body = req.jsonBody();
+            JSONObject body = safeBody(req.jsonBody());
             Integer node = parseNodeDec(body);
             Integer from = parseFromDec(body);
             //old return facade.api_mediaAutoConnect(node, from);
@@ -274,20 +313,20 @@ public final class ApiServer {
 
         // LCP connect
         if ("POST".equals(req.method) && "/v1/lcp/connect".equals(req.path)) {
-            JSONObject body = req.jsonBody();
+            JSONObject body = safeBody(req.jsonBody());
             ApiResult gate = gateMediaIfProvided(body);
             if (gate != null) return gate;
 
             Integer node = parseNodeDec(body);
             Integer from = parseFromDec(body);
-            String media = body.optString("media", "usb");
-            String btMac = body.optString("bt_mac", body.optString("btMac", "")).trim();
+            String media = resolveMediaDefault(body);
+            String btMac = resolveBtMacDefault(body);
             return facade.api_connectLcp(node, from, media, btMac);
         }
 
         // Register validate
         if ("POST".equals(req.method) && "/v1/register/validate".equals(req.path)) {
-            JSONObject body = req.jsonBody();
+            JSONObject body = safeBody(req.jsonBody());
             ApiResult gate = gateMediaIfProvided(body);
             if (gate != null) return gate;
 
@@ -312,53 +351,53 @@ public final class ApiServer {
                 if (c != null && c != JSONObject.NULL) compartment = String.valueOf(c);
             } catch (Exception ignored) {}
 
-            String media = body.optString("media", "usb");
-            String btMac = body.optString("bt_mac", body.optString("btMac", "")).trim();
+            String media = resolveMediaDefault(body);
+            String btMac = resolveBtMacDefault(body);
 
             return facade.api_registerValidate(numero, node, from, expectedSerial, product, compartment, media, btMac);
         }
 
         // Delivery A
         if ("POST".equals(req.method) && "/v1/delivery/A".equals(req.path)) {
-            JSONObject body = req.jsonBody();
+            JSONObject body = safeBody(req.jsonBody());
             ApiResult gate = gateMediaIfProvided(body);
             if (gate != null) return gate;
             Integer node = parseNodeDec(body);
             Integer from = parseFromDec(body);
-            String media = body.optString("media", "usb");
-            String btMac = body.optString("bt_mac", body.optString("btMac", "")).trim();
+            String media = resolveMediaDefault(body);
+            String btMac = resolveBtMacDefault(body);
             return facade.api_deliveryAlignA(node, from, media, btMac);
         }
 
         // Delivery A alias
         if ("POST".equals(req.method) && "/v1/delivery/alignA".equals(req.path)) {
-            JSONObject body = req.jsonBody();
+            JSONObject body = safeBody(req.jsonBody());
             ApiResult gate = gateMediaIfProvided(body);
             if (gate != null) return gate;
             Integer node = parseNodeDec(body);
             Integer from = parseFromDec(body);
-            String media = body.optString("media", "usb");
-            String btMac = body.optString("bt_mac", body.optString("btMac", "")).trim();
+            String media = resolveMediaDefault(body);
+            String btMac = resolveBtMacDefault(body);
             return facade.api_deliveryAlignA(node, from, media, btMac);
         }
 
         // Delivery C
         if ("POST".equals(req.method) && "/v1/delivery/C".equals(req.path)) {
-            JSONObject body = req.jsonBody();
+            JSONObject body = safeBody(req.jsonBody());
             ApiResult gate = gateMediaIfProvided(body);
             if (gate != null) return gate;
             Integer node = parseNodeDec(body);
             Integer from = parseFromDec(body);
             int product = body.optInt("product1to16", body.optInt("productId", 1));
             double presetNet = body.optDouble("presetNet", 0.0);
-            String media = body.optString("media", "usb");
-            String btMac = body.optString("bt_mac", body.optString("btMac", "")).trim();
+            String media = resolveMediaDefault(body);
+            String btMac = resolveBtMacDefault(body);
             return facade.api_deliveryStartC(node, from, product, presetNet, media, btMac);
         }
 
         // OneShot start
         if ("POST".equals(req.method) && "/v1/delivery/oneshot/start".equals(req.path)) {
-            JSONObject body = req.jsonBody();
+            JSONObject body = safeBody(req.jsonBody());
             ApiResult gate = gateMediaIfProvided(body);
             if (gate != null) return gate;
 
@@ -374,15 +413,15 @@ public final class ApiServer {
                 if (c != null && c != JSONObject.NULL) compartment = String.valueOf(c);
             } catch (Exception ignored) {}
 
-            String media = body.optString("media", "usb");
-            String btMac = body.optString("bt_mac", body.optString("btMac", "")).trim();
+            String media = resolveMediaDefault(body);
+            String btMac = resolveBtMacDefault(body);
 
             return facade.api_deliveryOneShotStart(node, from, numero, product, preset, compartment, media, btMac);
         }
 
         // Continue job - WITH VALIDATION
         if ("POST".equals(req.method) && "/v1/delivery/job/continue".equals(req.path)) {
-            JSONObject body = req.jsonBody();
+            JSONObject body = safeBody(req.jsonBody());
             ApiResult gate = gateMediaIfProvided(body);
             if (gate != null) return gate;
 
@@ -394,7 +433,7 @@ public final class ApiServer {
 
         // Terminate job - WITH VALIDATION
         if ("POST".equals(req.method) && "/v1/delivery/job/terminate".equals(req.path)) {
-            JSONObject body = req.jsonBody();
+            JSONObject body = safeBody(req.jsonBody());
             ApiResult gate = gateMediaIfProvided(body);
             if (gate != null) return gate;
 
@@ -419,7 +458,7 @@ public final class ApiServer {
 		
 	// Route pour /v1/register/connect-auto
 	if ("POST".equals(req.method) && "/v1/register/connect-auto".equals(req.path)) {
-		JSONObject body = req.jsonBody();
+		JSONObject body = safeBody(req.jsonBody());
 		String serialId = (body != null && body.has("serialId")) ? body.optString("serialId", null) : null;
 		Integer lcrnode = (body != null && body.has("lcrnode")) ? body.optInt("lcrnode", 0) : null;
 		if (lcrnode != null && lcrnode == 0) lcrnode = null;
