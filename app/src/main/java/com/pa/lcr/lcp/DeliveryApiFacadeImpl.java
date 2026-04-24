@@ -43,12 +43,6 @@ public final class DeliveryApiFacadeImpl implements ApiFacade {
   }
   
   @Override
-        public ApiResult api_registerConnectAuto(String serialId, Integer lcrnode) {
-        return ApiResult.fail("registerConnectAuto: 0 - Not supported (mono-registre)", "NOT_SUPPORTED");
-  }
-
-
-  @Override
   public ApiResult api_openPingUsb() {
     if (controller == null) {
       return ApiResult.fail(
