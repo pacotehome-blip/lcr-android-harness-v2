@@ -1486,7 +1486,7 @@ private void scanUsb() {
         logMedia1("USB Detached");
 
         try { UsbSession.clear(); } catch (Exception ignore) {}
-        stopApiServer("USB detached");
+        //stopApiServer("USB detached");
 
         // ✅ Multi-média: ne pas détruire les tabs BT.
         // Retirer uniquement les tabs USB (et leurs fragments) de manière explicite (A1).
