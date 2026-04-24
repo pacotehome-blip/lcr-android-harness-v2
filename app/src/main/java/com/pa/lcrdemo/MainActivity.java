@@ -88,7 +88,10 @@ public class MainActivity extends AppCompatActivity {
 
     public static final String ACTION_USB_PERMISSION = "com.pa.lcrdemo.USB_PERMISSION";
 
-    private UsbManager usbManager;
+    
+    // ✅ Reçu de l\'API (MultiRegisterApiFacadeImpl.notifyNodeSeenFull)
+    private static final String ACTION_NODE_SEEN = "com.pa.lcrdemo.ACTION_NODE_SEEN";
+private UsbManager usbManager;
     private final List<UsbDevice> usbDevices = new ArrayList<>();
     private UsbSerialPort usbPort; // cache local (la vérité = UsbSession.getPort())
 
@@ -290,32 +293,80 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
             if (intent == null) return;
             String a = intent.getAction();
             if (a == null) return;
+
             if (UsbReceiver.ACTION_USB_READY.equals(a)) {
                 UsbSerialPort p = UsbSession.getPort();
                 if (p != null) onUsbPortReady(p);
+
             } else if (UsbReceiver.ACTION_USB_DETACHED.equals(a)) {
                 onUsbDetached();
+
             } else if (ACTION_USB_PERMISSION.equals(a)) {
-            // ✅ Permission USB accordée/refusée
-            try {
-                boolean granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
-                if (!granted) {
-                    logUi(null, "Permission USB refusée");
-                    return;
-                }
-                logUi(null, "Permission USB accordée");
-                // IMPORTANT: le replug crée souvent un port stale -> reset puis rescan + open
-                resetUsbState("PERMISSION_GRANTED");
-                scanUsb();
-                openSelectedUsb();
-            } catch (Exception ignored) {}
-        } else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(a)) {
-            onUsbDetached();
-            resetUsbState("SYS_DETACHED");
-        } else if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(a)) {
-            // rescan seulement, l'ouverture se fait via Open/Ping
-            try { scanUsb(); } catch (Exception ignored) {}
-        }
+                // ✅ Permission USB accordée/refusée
+                try {
+                    boolean granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
+                    if (!granted) {
+                        logUi(null, "Permission USB refusée");
+                        return;
+                    }
+                    logUi(null, "Permission USB accordée");
+                    // IMPORTANT: le replug crée souvent un port stale -> reset puis rescan + open
+                    resetUsbState("PERMISSION_GRANTED");
+                    scanUsb();
+                    openSelectedUsb();
+                } catch (Exception ignored) {}
+
+            } else if (ACTION_NODE_SEEN.equals(a)) {
+                // ✅ Reçu de /register/connect-auto (BT ou USB) -> upsert tab (anti-doublon + migration média)
+                try {
+                    int node = intent.getIntExtra("node", 0);
+                    int from = intent.getIntExtra("from", 255);
+                    String serial = intent.getStringExtra("serial");
+                    String transportKey = intent.getStringExtra("transport");
+
+                    if (node < 1 || node > 250) return;
+
+                    serial = (serial != null) ? serial.trim() : "";
+                    if (!isPlausibleSerial(serial)) {
+                        logUi(null, "NODE_SEEN ignoré: serial invalide: " + serial + " (node=" + node + ")");
+                        return;
+                    }
+
+                    if (transportKey == null) transportKey = "";
+                    transportKey = transportKey.trim();
+                    if (transportKey.isEmpty()) {
+                        // fallback best-effort
+                        transportKey = MediaTransportManager.getActiveKeyStatic();
+                        if (transportKey == null) transportKey = "";
+                    }
+
+                    // Focus intelligent (ne vole pas le focus inutilement)
+                    String regKey = regKeyOf(node, serial);
+                    String oldTabKey = regKeyToTabKey.get(regKey);
+                    String mediaShort = mediaShortFromTransportKey(transportKey);
+                    String newTabKey = tabKeyOf(mediaShort, node, serial);
+
+                    boolean focus = (currentTabKey == null)
+                            || (oldTabKey != null && oldTabKey.equals(currentTabKey))
+                            || newTabKey.equals(currentTabKey);
+
+                    // ✅ Utilise la mécanique existante (migration média incluse)
+                    upsertRegisterTabFromScan(transportKey, node, from, serial, focus);
+
+                    // Rafraîchir label (OFF/READY)
+                    final String k = tabKeyOf(mediaShortFromTransportKey(transportKey), node, serial);
+                    ui.postDelayed(() -> refreshOneTabMediaStatus(k), 80);
+
+                } catch (Exception ignored) {}
+
+            } else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(a)) {
+                onUsbDetached();
+                resetUsbState("SYS_DETACHED");
+
+            } else if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(a)) {
+                // rescan seulement, l'ouverture se fait via Open/Ping
+                try { scanUsb(); } catch (Exception ignored) {}
+            }
         }
     };
 
@@ -358,6 +409,8 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
         f.addAction(ACTION_USB_PERMISSION);
         f.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
         f.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
+        // ✅ AJOUT: signal API -> UI (BT/USB)
+        f.addAction(ACTION_NODE_SEEN);
         registerReceiver(usbUiReceiver, f);
 
         LogBus.addListener(mainLogListener);
