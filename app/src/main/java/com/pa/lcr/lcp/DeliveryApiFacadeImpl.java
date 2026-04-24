@@ -30,7 +30,10 @@ public final class DeliveryApiFacadeImpl implements ApiFacade {
     this.logStore = new DeliveryLogStore(this.appCtx);
     this.logStore.purgeOlderThanDaysAsync(7);
   }
-
+@Override
+public ApiResult api_deliveryAlignA() {
+    return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
+}
   @Override
   public ApiResult api_scanUsb() {
     if (controller == null) {
