@@ -30,10 +30,14 @@ public final class DeliveryApiFacadeImpl implements ApiFacade {
     this.logStore = new DeliveryLogStore(this.appCtx);
     this.logStore.purgeOlderThanDaysAsync(7);
   }
-@Override
-public ApiResult api_deliveryAlignA() {
-    return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
-}
+  @Override
+  public ApiResult api_registerConnectAuto(String serialId, Integer lcrnode) {
+      return ApiResult.fail(
+          "registerConnectAuto: 0 - Not supported (mono-registre)",
+          "NOT_SUPPORTED"
+      );    
+  }
+  
   @Override
   public ApiResult api_scanUsb() {
     if (controller == null) {
