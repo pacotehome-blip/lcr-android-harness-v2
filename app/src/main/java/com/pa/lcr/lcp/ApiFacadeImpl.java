@@ -136,10 +136,10 @@ public ApiResult api_registerConnectAuto(String serialId, Integer lcrnode) {
     // DELIVERY STUBS
     // =========================================================
 
-    @Override
-    public ApiResult api_deliveryAlignA(Integer lcrnode_dec, Integer from_dec, String media, String bt_mac) {
-        return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
-    }
+@Override
+public ApiResult api_deliveryAlignA() {
+    return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
+}
 
     @Override
     public ApiResult api_deliveryStartC(int p, double v) {
