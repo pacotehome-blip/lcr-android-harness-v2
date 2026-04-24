@@ -19,6 +19,7 @@ import java.util.TimeZone;
  * DeliveryController.api_deliveryJobGet().
  * - La façade reste "thin" pour éviter de faire le travail 2 fois.
  */
+
 public final class DeliveryApiFacadeImpl implements ApiFacade {
 
   private final DeliveryController controller;
