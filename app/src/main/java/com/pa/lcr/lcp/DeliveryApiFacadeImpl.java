@@ -9,6 +9,7 @@ import com.pa.lcr.lcp.transport.MediaTransportManager;
 // ✅ BT ACTIVATE (sans body) — EXACTEMENT "Connect BT" UI
 // (N'ouvre PAS un BT pairé : active uniquement un transport runtime READY)
 // =========================================================
+
 @Override
 public ApiResult api_btActivate() {
 MediaTransportManager mtm = getMtm();
