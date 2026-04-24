@@ -82,10 +82,13 @@ public final class ApiFacadeImpl implements ApiFacade {
     // LCP CONNECT
     // =========================================================
 
-    @Override
-    public ApiResult api_registerConnectAuto(String serialId, Integer lcrnode) {
-        return ApiResult.fail("Not supported", "NOT_SUPPORTED");
-    }
+@Override
+public ApiResult api_registerConnectAuto(String serialId, Integer lcrnode) {
+    return ApiResult.fail(
+        "registerConnectAuto: 0 - Not supported (mono-registre)",
+        "NOT_SUPPORTED"
+    );
+}
 
     @Override
     public ApiResult api_connectLcp() {
@@ -133,10 +136,10 @@ public final class ApiFacadeImpl implements ApiFacade {
     // DELIVERY STUBS
     // =========================================================
 
-    @Override
-    public ApiResult api_deliveryAlignA(Integer lcrnode_dec, Integer from_dec, String media, String bt_mac) {
-        return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
-    }
+@Override
+public ApiResult api_deliveryAlignA() {
+    return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
+}
 
     @Override
     public ApiResult api_deliveryStartC(int p, double v) {
