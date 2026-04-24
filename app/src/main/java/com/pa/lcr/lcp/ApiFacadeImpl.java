@@ -3,33 +3,85 @@ package com.pa.lcr.lcp;
 
 import android.content.Context;
 
-import com.pa.lcr.lcp.transport.MediaTransportManager;
-import com.pa.lcr.lcp.transport.TransportIo;
-import com.pa.lcr.lcp.transport.TransportSnapshot;
-import com.pa.lcr.lcp.transport.TransportStatus;
+import null;import com.pa.lcr.lcp.transport.MediaTransportManager;
+        try { activeKey = MediaTransportManager.getActiveKeyStatic(); } catch (Exception ignored) {}
 
-import java.util.Locale;
+        try {
+            for (TransportSnapshot snap : mtm.listSnapshots()) {
+                if (snap == null) continue;
+                JSONObject o = new JSONObject();
+                try { o.put("key", snap.key != null ? snap.key : JSONObject.NULL); } catch (Exception ignored) {}
+                try { o.put("status", snap.status != null ? String.valueOf(snap.status) : JSONObject.NULL); } catch (Exception ignored) {}
+                arr.put(o);
+            }
+        } catch (Exception e) {
+            JSONObject ed = new JSONObject();
+            try { ed.put("detail", e.getMessage()); } catch (Exception ignored) {}
+            return ApiResult.fail("BT list failed", "ERR_BT_LIST_FAILED", ed);
+        }
 
-/**
- * ApiFacadeImpl — AUTOMATISATION MINIMALE
- *
- * But UNIQUE :
- * - automatiser l’activation BT (comme le bouton UI)
- * - laisser /lcp/connect fonctionner comme quand c’est fait manuellement
- */
-public final class ApiFacadeImpl implements ApiFacade {
+        try { d.put("activeKey", activeKey != null ? activeKey : JSONObject.NULL); } catch (Exception ignored) {}
+        try { d.put("snapshots", arr); } catch (Exception ignored) {}
 
-    private static final int DEFAULT_NODE = 250;
-    private static final int DEFAULT_FROM = 255;
-
-    private final RegisterSessionManager rsm;
-
-    public ApiFacadeImpl(RegisterSessionManager rsm) {
-        this.rsm = rsm;
+        return ApiResult.ok("BT list: 1 - OK", d);
     }
 
     // =========================================================
-    // LCP CONNECT — COMME AVANT + AUTO-ACTIVATION BT
+    // ✅ BT ACTIVATE (sans body) — EXACTEMENT "Connect BT" UI
+    // (N'ouvre PAS un BT pairé : active uniquement un transport runtime READY)
+    // =========================================================
+    @Override
+    public ApiResult api_btActivate() {
+        MediaTransportManager mtm = getMtm();
+        if (mtm == null) {
+            return ApiResult.fail("MTM null", "ERR_MEDIA_MTM_NULL");
+        }
+
+        TransportSnapshot chosen = null;
+
+        try {
+            for (TransportSnapshot snap : mtm.listSnapshots()) {
+                if (snap == null) continue;
+                if (snap.key == null) continue;
+                if (!snap.key.startsWith("BT:")) continue;
+                if (snap.status != TransportStatus.READY) continue;
+                chosen = snap;
+                break; // premier READY (ordre APK)
+            }
+        } catch (Exception e) {
+            JSONObject ed = new JSONObject();
+            try { ed.put("detail", e.getMessage()); } catch (Exception ignored) {}
+            return ApiResult.fail("BT enumerate failed", "ERR_BT_ENUM_FAILED", ed);
+        }
+
+        if (chosen == null || chosen.key == null) {
+            return ApiResult.fail("No BT READY", "ERR_NO_BT_READY");
+        }
+
+        try {
+            boolean ok = mtm.activateExclusive(chosen.key, "API_BT_AUTO");
+            if (!ok) {
+                return ApiResult.fail("BT activate failed", "ERR_BT_ACTIVATE_FAILED");
+            }
+        } catch (Exception e) {
+            JSONObject ed = new JSONObject();
+            try { ed.put("detail", e.getMessage()); } catch (Exception ignored) {}
+            return ApiResult.fail("BT activate failed", "ERR_BT_ACTIVATE_FAILED", ed);
+        }
+
+        String activeKey = null;
+        try { activeKey = MediaTransportManager.getActiveKeyStatic(); } catch (Exception ignored) {}
+
+        JSONObject d = new JSONObject();
+        try { d.put("transportKey", chosen.key); } catch (Exception ignored) {}
+        try { d.put("activeKey", activeKey != null ? activeKey : JSONObject.NULL); } catch (Exception ignored) {}
+
+        return ApiResult.ok("BT activate: 1 - OK", d);
+    }
+
+    // =========================================================
+    // LCP CONNECT — COMME EN MANUEL SUR MÉDIA DÉJÀ ACTIF
+    // ❌ pas d'auto-activation BT ici
     // =========================================================
 
     @Override
@@ -53,14 +105,9 @@ public final class ApiFacadeImpl implements ApiFacade {
             return ApiResult.fail("MTM null", "ERR_MEDIA_MTM_NULL");
         }
 
-        // 1) Si aucun média actif, activer automatiquement un BT (comme UI)
+        // ✅ Décision figée: /lcp/connect n'active rien, il utilise le média déjà actif.
         String activeKey = MediaTransportManager.getActiveKeyStatic();
-        if (activeKey == null || !activeKey.startsWith("BT:")) {
-            activateFirstBt(mtm);
-            activeKey = MediaTransportManager.getActiveKeyStatic();
-        }
-
-        if (activeKey == null) {
+        if (activeKey == null || activeKey.trim().isEmpty()) {
             return ApiResult.fail("No active media", "ERR_NO_ACTIVE_MEDIA");
         }
 
@@ -69,40 +116,21 @@ public final class ApiFacadeImpl implements ApiFacade {
             return ApiResult.fail("Active media not open", "ERR_MEDIA_NOT_OPEN");
         }
 
-        DeliveryController dc = rsm.getOrCreate(
-                activeKey,
-                node != null ? node : DEFAULT_NODE,
-                from != null ? from : DEFAULT_FROM,
-                io
-        );
+        int n = (node != null) ? node : DEFAULT_NODE;
+        int f = (from != null) ? from : DEFAULT_FROM;
 
+        DeliveryController dc = rsm.getOrCreate(activeKey, n, f, io);
         if (dc == null) {
             return ApiResult.fail("No controller", "ERR_NO_CONTROLLER");
         }
 
-        // 2) EXACTEMENT COMME AVANT
+        // EXACTEMENT COMME AVANT
         return dc.api_connectLcp();
     }
 
     // =========================================================
-    // AUTOMATISATION DU BOUTON BT (ET RIEN D’AUTRE)
-    // =========================================================
-
-    private void activateFirstBt(MediaTransportManager mtm) {
-        for (TransportSnapshot snap : mtm.listSnapshots()) {
-            if (snap == null) continue;
-            if (snap.key == null) continue;
-            if (!snap.key.startsWith("BT:")) continue;
-            if (snap.status != TransportStatus.READY) continue;
-
-            // EXACTEMENT le comportement du bouton BT de l’UI
-            mtm.activateExclusive(snap.key, "API_BT_AUTO");
-            return;
-        }
-    }
-
-    // =========================================================
     // AUTRES APIS — INCHANGÉES / BLOQUÉES SI PAS CONNECTÉ
+    // (ApiFacadeImpl n'est pas la façade "livraison complète")
     // =========================================================
 
     @Override
@@ -141,23 +169,32 @@ public final class ApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
-    // UTILS
+    // (Optionnel selon ton interface ApiFacade) — stubs sûrs
     // =========================================================
 
-    private MediaTransportManager getMtm() {
-        try {
-            Context ctx = rsm.getAppContext();
-            return ctx != null ? MediaTransportManager.get(ctx) : null;
-        } catch (Exception e) {
-            return null;
-        }
+    @Override
+    public ApiResult api_ticketReprintCurrent() {
+        return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
     }
 
-    private static String normMedia(String m, String def) {
-        return (m == null || m.trim().isEmpty())
-                ? def
-                : m.toLowerCase(Locale.ROOT);
+    @Override
+    public ApiResult api_tickWait(Integer lcrnode_dec, Long since_seq, Integer wait_ms) {
+        return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
     }
+
+    @Override
+    public ApiResult api_deliveryAlignA(Integer lcrnode_dec, Integer from_dec, String media, String bt_mac) {
+        return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
+    }
+
+	@Override
+	public ApiResult api_registerConnectAuto(String serialId, Integer lcrnode) {
+		return ApiResult.fail("registerConnectAuto: 0 - Not supported (mono-registre)", "NOT_SUPPORTED");
+	}
+
+    // =========================================================
+    // MEDIA / USB / DB — non utilisés ici (façade minimale)
+    // =========================================================
 
     @Override
     public ApiResult api_mediaCheck(String m, String b) {
@@ -178,4 +215,68 @@ public final class ApiFacadeImpl implements ApiFacade {
     public ApiResult api_dbDump() {
         return ApiResult.fail("Not supported", "NOT_SUPPORTED");
     }
+
+    // =========================================================
+    // UTILS
+    // =========================================================
+
+    private MediaTransportManager getMtm() {
+        try {
+            Context ctx = rsm.getAppContext();
+            return ctx != null ? MediaTransportManager.get(ctx) : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    @SuppressWarnings("unused")
+    private static String normMedia(String m, String def) {
+        return (m == null || m.trim().isEmpty())
+                ? def
+                : m.toLowerCase(Locale.ROOT);
+    }
 }
+import com.pa.lcr.lcp.transport.TransportIo;
+import com.pa.lcr.lcp.transport.TransportSnapshot;
+import com.pa.lcr.lcp.transport.TransportStatus;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.util.Locale;
+
+/**
+ * ApiFacadeImpl — AUTOMATISATION MINIMALE
+ *
+ * Décision figée:
+ * - POST /v1/bt/activate (sans body) fait EXACTEMENT le bouton UI "Connect BT":
+ *   MediaTransportManager.activateExclusive(btKey, "API_BT_AUTO")
+ *   (prendre le premier BT READY selon l'ordre APK)
+ *
+ * - /v1/lcp/connect reste "comme en manuel" sur le média déjà actif:
+ *   ❌ pas d'auto activation BT ici
+ */
+public final class ApiFacadeImpl implements ApiFacade {
+
+    private static final int DEFAULT_NODE = 250;
+    private static final int DEFAULT_FROM = 255;
+
+    private final RegisterSessionManager rsm;
+
+    public ApiFacadeImpl(RegisterSessionManager rsm) {
+        this.rsm = rsm;
+    }
+
+    // =========================================================
+    // ✅ BT LIST (debug/ops) — RUNTIME UNIQUEMENT (snapshots)
+    // =========================================================
+    @Override
+    public ApiResult api_btList() {
+        MediaTransportManager mtm = getMtm();
+        if (mtm == null) {
+            return ApiResult.fail("MTM null", "ERR_MEDIA_MTM_NULL");
+        }
+
+        JSONObject d = new JSONObject();
+        JSONArray arr = new JSONArray();
+

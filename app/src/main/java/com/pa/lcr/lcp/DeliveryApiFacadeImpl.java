@@ -152,6 +152,13 @@ public final class DeliveryApiFacadeImpl implements ApiFacade {
       return ApiResult.fail("DB Dump: 0 - Failed", "DB_DUMP_FAIL", d);
     }
   }
+  
+
+	@Override
+	public ApiResult api_registerConnectAuto(String serialId, Integer lcrnode) {
+		return ApiResult.fail("registerConnectAuto: 0 - Not supported (mono-registre)", "NOT_SUPPORTED");
+	}
+
 
   // =========================================================
   // ✅ COMMIT 2: Registre prêt / validateRegister
