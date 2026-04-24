@@ -485,7 +485,7 @@ public MultiRegisterApiFacadeImpl(Context ctx) {
 	}
 	// =========================================================
 	// ✅ One Stop connect register (BT / USB) — CONNECT-AUTO
-	// Objectif:
+	// Objectif:     
 	// - Activer BT pairé au besoin
 	// - Essayer le média actif puis fallback sur l’autre
 	// - Chercher le registre par lcrnode (et/ou serialId si fourni)
