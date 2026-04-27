@@ -745,10 +745,6 @@ public final class ApiServer {
         return s;
     }
 
-    private int nextRid() {
-        return ridSeq.incrementAndGet();
-    }
-
     private static String safeMsg(Exception e) {
         if (e == null) return "";
         String m = e.getMessage();
