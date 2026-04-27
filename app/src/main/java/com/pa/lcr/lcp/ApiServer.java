@@ -1,9 +1,9 @@
 
 package com.pa.lcr.lcp;
 
-
 import com.pa.lcr.lcp.transport.MediaTransportManager;
 import org.json.JSONObject;
+
 import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
@@ -12,7 +12,6 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
-import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Locale;
@@ -29,12 +28,17 @@ import java.util.function.Supplier;
  * - Trace: REQ/RESP dans le log principal (via ApiLogSink)
  *
  * ✅ OPTION 2 :
- *   - Sur toutes les routes media-aware: si body.media absent -> media = activeKey (BT si activeKey=BT:..., sinon USB)
+ *   - Sur toutes les routes media-aware: si body.media absent -> media = activeKey
+ *     (BT si activeKey=BT:..., sinon USB)
  *
  * ✅ AUTO-HEAL GLOBAL :
  *   - Sur toutes les routes SAUF /v1/register/connect-auto :
  *     si l'opération échoue car "registre/session/média pas prêt",
  *     on tente 3x /register/connect-auto (via facade.api_registerConnectAuto) puis on réessaie.
+ *
+ * IMPORTANT (FIX):
+ *   - media/btMac DOIVENT être recalculés à chaque tentative (dans la lambda),
+ *     sinon on reste "collé" sur USB même après auto-connect BT.
  */
 public final class ApiServer {
 
@@ -112,7 +116,6 @@ public final class ApiServer {
 
             ApiResult result;
             try {
-                // TickWait: lock
                 if (isTickWait(req)) {
                     synchronized (lcpLock) {
                         result = route(req);
@@ -145,7 +148,7 @@ public final class ApiServer {
     }
 
     // =========================
-    // Ping local (NE PAS dépendre de ApiFacade)
+    // Ping local (ne dépend pas de ApiFacade)
     // =========================
     private ApiResult pingLocal() {
         JSONObject d = new JSONObject();
@@ -171,8 +174,6 @@ public final class ApiServer {
 
     // =========================
     // Helpers: default media = activeKey (Option 2)
-    // - Si body.media est fourni -> respecter
-    // - Sinon: BT si activeKey commence par BT:, sinon USB
     // =========================
     private static String resolveMediaDefault(JSONObject body) {
         try {
@@ -212,8 +213,6 @@ public final class ApiServer {
 
     // =========================================================
     // Auto-heal (global): 3 tentatives connect-auto avant de réessayer l'opération
-    // - S'applique à toutes les routes SAUF /register/connect-auto
-    // - Déclenchement uniquement sur erreurs "session/média/registre pas prêt"
     // =========================================================
     private static final int AUTO_CONNECT_MAX_TRIES = 3;
     private static final long AUTO_CONNECT_DELAY_MS = 250;
@@ -277,7 +276,6 @@ public final class ApiServer {
         Integer node = extractAutoNode(body, null);
         String serial = extractAutoSerial(body);
 
-        // Sans hint (node/serial), on ne peut pas faire connect-auto ciblé -> on retourne l'erreur telle quelle.
         if (node == null && (serial == null || serial.isEmpty())) {
             return r0;
         }
@@ -303,7 +301,6 @@ public final class ApiServer {
             sleepQuiet(AUTO_CONNECT_DELAY_MS);
         }
 
-        // Echec après 3 tentatives: enrichir la dernière réponse (diagnostic).
         try {
             if (lastOp != null && lastOp.data != null) {
                 lastOp.data.put("autoConnectUsed", true);
@@ -316,12 +313,11 @@ public final class ApiServer {
     }
 
     private ApiResult gateMediaIfProvided(JSONObject body) {
-        // Laisse MultiRegisterApiFacadeImpl gérer la logique média/activeKey
         return null;
     }
 
     // =========================
-    // ROUTING (COMPLET)
+    // ROUTING
     // =========================
     private ApiResult route(HttpReq req) throws Exception {
 
@@ -335,12 +331,12 @@ public final class ApiServer {
             return withAutoConnectRetry(null, facade::api_scanUsb);
         }
 
-        // ✅ BT list
+        // BT list
         if ("GET".equals(req.method) && "/v1/bt/list".equals(req.path)) {
             return withAutoConnectRetry(null, facade::api_btList);
         }
 
-        // ✅ BT activate (auto)
+        // BT activate
         if ("POST".equals(req.method) && "/v1/bt/activate".equals(req.path)) {
             return withAutoConnectRetry(null, facade::api_btActivate);
         }
@@ -348,26 +344,26 @@ public final class ApiServer {
         // Media check
         if ("POST".equals(req.method) && "/v1/media/check".equals(req.path)) {
             JSONObject body = safeBody(req.jsonBody());
-            String media = resolveMediaDefault(body);
-            String btMac = resolveBtMacDefault(body);
+            return withAutoConnectRetry(body, () -> {
+                String media = resolveMediaDefault(body);
+                String btMac = resolveBtMacDefault(body);
 
-            // compat: si on check BT sans mac explicite, on déduit de l'activeKey
-            if ("bt".equals(media.toLowerCase(Locale.ROOT)) && (btMac == null || btMac.trim().isEmpty())) {
-                String resolved = resolveBtMacFromApk();
-                if (resolved != null && !resolved.isEmpty()) btMac = resolved;
-            }
-            final String m = media;
-            final String b = btMac;
-            return withAutoConnectRetry(body, () -> facade.api_mediaCheck(m, b));
+                if ("bt".equals(media.toLowerCase(Locale.ROOT)) && (btMac == null || btMac.trim().isEmpty())) {
+                    String resolved = resolveBtMacFromApk();
+                    if (resolved != null && !resolved.isEmpty()) btMac = resolved;
+                }
+                return facade.api_mediaCheck(media, btMac);
+            });
         }
 
         // Media auto-connect (ALIAS -> register/connect-auto)
-        // ⚠️ ApiFacade n'a pas api_mediaAutoConnect(...), donc on l'aligne sur connect-auto.
         if ("POST".equals(req.method) && "/v1/media/auto-connect".equals(req.path)) {
             JSONObject body = safeBody(req.jsonBody());
-            String serialId = extractAutoSerial(body);
-            Integer node = extractAutoNode(body, parseNodeDec(body));
-            return withAutoConnectRetry(body, () -> facade.api_registerConnectAuto(serialId, node));
+            return withAutoConnectRetry(body, () -> {
+                String serialId = extractAutoSerial(body);
+                Integer node = extractAutoNode(body, parseNodeDec(body));
+                return facade.api_registerConnectAuto(serialId, node);
+            });
         }
 
         // USB open-ping
@@ -375,7 +371,7 @@ public final class ApiServer {
             return withAutoConnectRetry(null, facade::api_openPingUsb);
         }
 
-        // LCP connect (media-aware by default = activeKey)
+        // LCP connect  ✅ FIX: media/btMac recalculés à chaque tentative
         if ("POST".equals(req.method) && "/v1/lcp/connect".equals(req.path)) {
             JSONObject body = safeBody(req.jsonBody());
             ApiResult gate = gateMediaIfProvided(body);
@@ -383,13 +379,15 @@ public final class ApiServer {
 
             Integer node = parseNodeDec(body);
             Integer from = parseFromDec(body);
-            String media = resolveMediaDefault(body);
-            String btMac = resolveBtMacDefault(body);
 
-            return withAutoConnectRetry(body, () -> facade.api_connectLcp(node, from, media, btMac));
+            return withAutoConnectRetry(body, () -> {
+                String media = resolveMediaDefault(body);
+                String btMac = resolveBtMacDefault(body);
+                return facade.api_connectLcp(node, from, media, btMac);
+            });
         }
 
-        // Register validate (media-aware by default = activeKey)
+        // Register validate ✅ FIX: media/btMac recalculés à chaque tentative
         if ("POST".equals(req.method) && "/v1/register/validate".equals(req.path)) {
             JSONObject body = safeBody(req.jsonBody());
             ApiResult gate = gateMediaIfProvided(body);
@@ -416,22 +414,19 @@ public final class ApiServer {
                 if (c != null && c != JSONObject.NULL) compartment = String.valueOf(c);
             } catch (Exception ignored) {}
 
-            String media = resolveMediaDefault(body);
-            String btMac = resolveBtMacDefault(body);
-
             final String fNumero = numero;
             final String fExpectedSerial = expectedSerial;
             final Integer fProduct = product;
             final String fCompartment = compartment;
-            final String fMedia = media;
-            final String fBtMac = btMac;
 
-            return withAutoConnectRetry(body, () ->
-                    facade.api_registerValidate(fNumero, node, from, fExpectedSerial, fProduct, fCompartment, fMedia, fBtMac)
-            );
+            return withAutoConnectRetry(body, () -> {
+                String media = resolveMediaDefault(body);
+                String btMac = resolveBtMacDefault(body);
+                return facade.api_registerValidate(fNumero, node, from, fExpectedSerial, fProduct, fCompartment, media, btMac);
+            });
         }
 
-        // Delivery A (alias alignA)
+        // Delivery A (alias alignA) ✅ FIX
         if ("POST".equals(req.method) && "/v1/delivery/A".equals(req.path)) {
             JSONObject body = safeBody(req.jsonBody());
             ApiResult gate = gateMediaIfProvided(body);
@@ -439,13 +434,15 @@ public final class ApiServer {
 
             Integer node = parseNodeDec(body);
             Integer from = parseFromDec(body);
-            String media = resolveMediaDefault(body);
-            String btMac = resolveBtMacDefault(body);
 
-            return withAutoConnectRetry(body, () -> facade.api_deliveryAlignA(node, from, media, btMac));
+            return withAutoConnectRetry(body, () -> {
+                String media = resolveMediaDefault(body);
+                String btMac = resolveBtMacDefault(body);
+                return facade.api_deliveryAlignA(node, from, media, btMac);
+            });
         }
 
-        // Delivery alignA
+        // Delivery alignA ✅ FIX
         if ("POST".equals(req.method) && "/v1/delivery/alignA".equals(req.path)) {
             JSONObject body = safeBody(req.jsonBody());
             ApiResult gate = gateMediaIfProvided(body);
@@ -453,13 +450,15 @@ public final class ApiServer {
 
             Integer node = parseNodeDec(body);
             Integer from = parseFromDec(body);
-            String media = resolveMediaDefault(body);
-            String btMac = resolveBtMacDefault(body);
 
-            return withAutoConnectRetry(body, () -> facade.api_deliveryAlignA(node, from, media, btMac));
+            return withAutoConnectRetry(body, () -> {
+                String media = resolveMediaDefault(body);
+                String btMac = resolveBtMacDefault(body);
+                return facade.api_deliveryAlignA(node, from, media, btMac);
+            });
         }
 
-        // Delivery C
+        // Delivery C ✅ FIX
         if ("POST".equals(req.method) && "/v1/delivery/C".equals(req.path)) {
             JSONObject body = safeBody(req.jsonBody());
             ApiResult gate = gateMediaIfProvided(body);
@@ -470,13 +469,14 @@ public final class ApiServer {
             int product = body.optInt("product1to16", body.optInt("productId", 1));
             double presetNet = body.optDouble("presetNet", 0.0);
 
-            String media = resolveMediaDefault(body);
-            String btMac = resolveBtMacDefault(body);
-
-            return withAutoConnectRetry(body, () -> facade.api_deliveryStartC(node, from, product, presetNet, media, btMac));
+            return withAutoConnectRetry(body, () -> {
+                String media = resolveMediaDefault(body);
+                String btMac = resolveBtMacDefault(body);
+                return facade.api_deliveryStartC(node, from, product, presetNet, media, btMac);
+            });
         }
 
-        // OneShot start
+        // OneShot start ✅ FIX
         if ("POST".equals(req.method) && "/v1/delivery/oneshot/start".equals(req.path)) {
             JSONObject body = safeBody(req.jsonBody());
             ApiResult gate = gateMediaIfProvided(body);
@@ -495,18 +495,17 @@ public final class ApiServer {
                 if (c != null && c != JSONObject.NULL) compartment = String.valueOf(c);
             } catch (Exception ignored) {}
 
-            String media = resolveMediaDefault(body);
-            String btMac = resolveBtMacDefault(body);
-
             final String fNumero = numero;
             final String fCompartment = compartment;
 
-            return withAutoConnectRetry(body, () ->
-                    facade.api_deliveryOneShotStart(node, from, fNumero, product, presetNetL, fCompartment, media, btMac)
-            );
+            return withAutoConnectRetry(body, () -> {
+                String media = resolveMediaDefault(body);
+                String btMac = resolveBtMacDefault(body);
+                return facade.api_deliveryOneShotStart(node, from, fNumero, product, presetNetL, fCompartment, media, btMac);
+            });
         }
 
-        // Delivery job get (GET /v1/delivery/job/...) : conservé
+        // Delivery job get
         if ("GET".equals(req.method) && req.path != null && req.path.startsWith("/v1/delivery/job/")) {
             String jobId = req.path.substring("/v1/delivery/job/".length());
             if (jobId != null && jobId.trim().isEmpty()) jobId = null;
@@ -560,7 +559,6 @@ public final class ApiServer {
                 }
             } catch (Exception ignored) {}
 
-            // body-hint pour permettre auto-heal si node fourni dans la query
             JSONObject bodyHint = new JSONObject();
             try { if (node != null) bodyHint.put("lcrnode_dec", node); } catch (Exception ignored) {}
 
@@ -745,6 +743,10 @@ public final class ApiServer {
         s = s.replace("\r", "").replace("\n", "");
         if (s.length() > 300) return s.substring(0, 300) + "...";
         return s;
+    }
+
+    private int nextRid() {
+        return ridSeq.incrementAndGet();
     }
 
     private static String safeMsg(Exception e) {
