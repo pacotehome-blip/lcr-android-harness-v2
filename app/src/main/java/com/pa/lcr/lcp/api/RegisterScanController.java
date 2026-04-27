@@ -1,8 +1,14 @@
 
 package com.pa.lcr.lcp.api;
 
-public final class RegisterScanController {import com.pa.lcr.lcp.LcpLink;
+import com.pa.lcr.lcp.LcpLink;
+import com.pa.lcr.lcp.ApiResult;
+import com.pa.lcr.lcp.discovery.DiscoveredRegisterStore;
+import com.pa.lcr.lcp.transport.MediaTransportManager;
+import com.pa.lcr.lcp.transport.TransportIo;
+import org.json.JSONObject;
 
+public final class RegisterScanController {
     private final MediaTransportManager mediaMgr;
     private final DiscoveredRegisterStore discovered;
 
@@ -17,31 +23,23 @@ public final class RegisterScanController {import com.pa.lcr.lcp.LcpLink;
      * - Scan lcrnode 1..250
      * - Lire #80 (numéro de série)
      * - AUCUNE connexion
+     * - Ajoute chaque registre trouvé dans la table locale
+     * - Notifie l'UI via MultiRegisterApiFacadeImpl.emitRegisterState(...)
      */
     public ApiResult scan() {
-
         for (String transportKey : mediaMgr.listKeys()) {
-
             TransportIo io = mediaMgr.getByKey(transportKey);
             if (io == null || !io.isOpen()) continue;
-
-            String media =
-                    transportKey.startsWith("BT:") ? "bt" : "usb";
-
+            String media = transportKey.startsWith("BT:") ? "bt" : "usb";
             for (int node = 1; node <= 250; node++) {
-
                 String serial = probeSerial(io, node, 255);
                 if (serial == null || serial.isEmpty()) continue;
-
-                discovered.upsert(
-                        serial,
-                        node,
-                        media,
-                        transportKey
-                );
+                discovered.upsert(serial, node, media, transportKey);
+                // Notifie l'UI (tab dynamique) via la méthode centrale
+                MultiRegisterApiFacadeImpl facade = MultiRegisterApiFacadeImpl.getInstance();
+                facade.emitRegisterState(node, 255, serial, transportKey, null, false);
             }
         }
-
         return ApiResult.ok("SCAN_REGISTER_DONE", null);
     }
 
@@ -55,8 +53,3 @@ public final class RegisterScanController {import com.pa.lcr.lcp.LcpLink;
         }
     }
 }
-``
-import com.pa.lcr.lcp.ApiResult;
-import com.pa.lcr.lcp.discovery.DiscoveredRegisterStore;
-import com.pa.lcr.lcp.transport.MediaTransportManager;
-import com.pa.lcr.lcp.transport.TransportIo;
