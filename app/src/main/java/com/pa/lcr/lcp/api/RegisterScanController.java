@@ -3,10 +3,13 @@ package com.pa.lcr.lcp.api;
 
 import com.pa.lcr.lcp.ApiResult;
 import com.pa.lcr.lcp.LcpLink;
-import com.pa.lcr.lcp.MultiRegisterApiFacadeImpl;
 import com.pa.lcr.lcp.discovery.DiscoveredRegisterStore;
 import com.pa.lcr.lcp.transport.MediaTransportManager;
 import com.pa.lcr.lcp.transport.TransportIo;
+import com.pa.lcr.lcp.transport.TransportSnapshot;
+import com.pa.lcr.lcp.transport.TransportStatus;
+
+import java.util.List;
 
 public final class RegisterScanController {
 
@@ -21,16 +24,6 @@ public final class RegisterScanController {
         this.discovered = discovered;
     }
 
-    /**
-     * SCAN REGISTRES
-     * - Scan tous les médias READY (USB / BT)
-     * - Scan nodes 1..250
-     * - Lit #80 (serial)
-     * - Chaque registre découvert :
-     *   - est persisté
-     *   - est connecté AUTOMATIQUEMENT
-     *   - notifie l’UI via la façade (même logique que connect-auto)
-     */
     public ApiResult scan() {
 
         if (mediaMgr == null) {
@@ -40,13 +33,21 @@ public final class RegisterScanController {
             );
         }
 
-        for (String transportKey : mediaMgr.listKeys()) {
+        List<TransportSnapshot> snaps = mediaMgr.listSnapshots();
+        if (snaps == null) {
+            return ApiResult.ok("SCAN_REGISTER_DONE", null);
+        }
 
-            TransportIo io = mediaMgr.getByKey(transportKey);
+        for (TransportSnapshot snap : snaps) {
+
+            if (snap == null) continue;
+            if (snap.status != TransportStatus.READY) continue;
+
+            TransportIo io = mediaMgr.getByKey(snap.key);
             if (io == null || !io.isOpen()) continue;
 
             String media =
-                    transportKey != null && transportKey.startsWith("BT:")
+                    snap.key != null && snap.key.startsWith("BT:")
                             ? "bt"
                             : "usb";
 
@@ -55,18 +56,9 @@ public final class RegisterScanController {
                 String serial = probeSerial(io, node, 255);
                 if (serial == null || serial.isEmpty()) continue;
 
-                // 1️⃣ Persist discovery
                 try {
-                    discovered.upsert(serial, node, media, transportKey);
+                    discovered.upsert(serial, node, media, snap.key);
                 } catch (Exception ignored) {
-                }
-
-                // 2️⃣ ✅ LOGIQUE OFFICIELLE — même chemin que connect-auto
-                MultiRegisterApiFacadeImpl facade =
-                        MultiRegisterApiFacadeImpl.getInstance();
-
-                if (facade != null) {
-                    facade.api_registerConnectAuto(serial, node);
                 }
             }
         }
@@ -74,9 +66,6 @@ public final class RegisterScanController {
         return ApiResult.ok("SCAN_REGISTER_DONE", null);
     }
 
-    /**
-     * Lecture du numéro de série (#80)
-     */
     private String probeSerial(TransportIo io, int node, int from) {
         try {
             LcpLink link = new LcpLink(io, node, from, true);
