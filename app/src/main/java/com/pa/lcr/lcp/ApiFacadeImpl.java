@@ -1,3 +1,4 @@
+
 package com.pa.lcr.lcp;
 
 import android.content.Context;
@@ -7,11 +8,18 @@ import com.pa.lcr.lcp.transport.TransportSnapshot;
 import com.pa.lcr.lcp.transport.TransportStatus;
 import com.pa.lcr.lcp.transport.MediaTransportManager;
 
-import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.util.Locale;
 
+/**
+ * ApiFacadeImpl (mono historique) — corrigé pour déléguer au multi-média lorsque disponible.
+ *
+ * Objectif:
+ * - Conserver le comportement existant de BT activate + connectLcp sur media actif
+ * - Mais ne plus bloquer les routes multi (connect-auto, validate, delivery, etc.)
+ *   => délégation vers MultiRegisterApiFacadeImpl.
+ */
 public final class ApiFacadeImpl implements ApiFacade {
 
     private static final int DEFAULT_NODE = 250;
@@ -19,12 +27,19 @@ public final class ApiFacadeImpl implements ApiFacade {
 
     private final RegisterSessionManager rsm;
 
+    // ✅ Délégation vers la façade multi-média
+    private final MultiRegisterApiFacadeImpl multi;
+
     public ApiFacadeImpl(RegisterSessionManager rsm) {
         this.rsm = rsm;
+
+        Context ctx = null;
+        try { ctx = (rsm != null) ? rsm.getAppContext() : null; } catch (Exception ignored) {}
+        this.multi = (ctx != null) ? new MultiRegisterApiFacadeImpl(ctx) : null;
     }
 
     // =========================================================
-    // BT ACTIVATE
+    // BT ACTIVATE (conservé tel quel)
     // =========================================================
     @Override
     public ApiResult api_btActivate() {
@@ -34,14 +49,12 @@ public final class ApiFacadeImpl implements ApiFacade {
         }
 
         TransportSnapshot chosen = null;
-
         try {
             for (TransportSnapshot snap : mtm.listSnapshots()) {
                 if (snap == null) continue;
                 if (snap.key == null) continue;
                 if (!snap.key.startsWith("BT:")) continue;
                 if (snap.status != TransportStatus.READY) continue;
-
                 chosen = snap;
                 break;
             }
@@ -67,29 +80,28 @@ public final class ApiFacadeImpl implements ApiFacade {
         }
 
         String activeKey = null;
-        try {
-            activeKey = MediaTransportManager.getActiveKeyStatic();
-        } catch (Exception ignored) {}
+        try { activeKey = MediaTransportManager.getActiveKeyStatic(); } catch (Exception ignored) {}
 
         JSONObject d = new JSONObject();
         try { d.put("transportKey", chosen.key); } catch (Exception ignored) {}
         try { d.put("activeKey", activeKey != null ? activeKey : JSONObject.NULL); } catch (Exception ignored) {}
-
         return ApiResult.ok("BT activate: OK", d);
     }
 
     // =========================================================
-    // LCP CONNECT
+    // REGISTER CONNECT-AUTO  ✅ délégation multi
     // =========================================================
+    @Override
+    public ApiResult api_registerConnectAuto(String serialId, Integer lcrnode) {
+        if (multi == null) {
+            return ApiResult.fail("registerConnectAuto: 0 - multi facade null", "ERR_MULTI_FACADE_NULL");
+        }
+        return multi.api_registerConnectAuto(serialId, lcrnode);
+    }
 
-@Override
-public ApiResult api_registerConnectAuto(String serialId, Integer lcrnode) {
-    return ApiResult.fail(
-        "registerConnectAuto: 0 - Not supported (mono-registre)",
-        "NOT_SUPPORTED"
-    );
-}
-
+    // =========================================================
+    // LCP CONNECT (conservé: connect sur le media actif)
+    // =========================================================
     @Override
     public ApiResult api_connectLcp() {
         return api_connectLcp(DEFAULT_NODE, DEFAULT_FROM, "auto", "");
@@ -102,9 +114,9 @@ public ApiResult api_registerConnectAuto(String serialId, Integer lcrnode) {
 
     @Override
     public ApiResult api_connectLcp(Integer node,
-                                     Integer from,
-                                     String media,
-                                     String bt) {
+                                   Integer from,
+                                   String media,
+                                   String bt) {
 
         MediaTransportManager mtm = getMtm();
         if (mtm == null) {
@@ -128,87 +140,97 @@ public ApiResult api_registerConnectAuto(String serialId, Integer lcrnode) {
         if (dc == null) {
             return ApiResult.fail("No controller", "ERR_NO_CONTROLLER");
         }
-
         return dc.api_connectLcp();
     }
 
     // =========================================================
-    // DELIVERY STUBS
+    // DELIVERY / JOB / VALIDATE ✅ délégation multi
     // =========================================================
 
-@Override
-public ApiResult api_deliveryAlignA() {
-    return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
-}
+    @Override
+    public ApiResult api_deliveryAlignA() {
+        if (multi == null) return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
+        return multi.api_deliveryAlignA();
+    }
 
     @Override
     public ApiResult api_deliveryStartC(int p, double v) {
-        return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
+        if (multi == null) return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
+        return multi.api_deliveryStartC(p, v);
     }
 
     @Override
     public ApiResult api_deliveryOneShotStart(String n, int p, double v, String c) {
-        return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
+        if (multi == null) return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
+        return multi.api_deliveryOneShotStart(n, p, v, c);
     }
 
     @Override
     public ApiResult api_deliveryJobGet(String j) {
-        return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
+        if (multi == null) return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
+        return multi.api_deliveryJobGet(j);
     }
 
     @Override
     public ApiResult api_deliveryContinue(String j) {
-        return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
+        if (multi == null) return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
+        return multi.api_deliveryContinue(j);
     }
 
     @Override
     public ApiResult api_deliveryTerminate(String j) {
-        return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
+        if (multi == null) return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
+        return multi.api_deliveryTerminate(j);
     }
 
     @Override
     public ApiResult api_registerValidate(String n, Integer d, String s, Integer p, String c) {
-        return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
+        if (multi == null) return ApiResult.fail("Call after connect", "NO_ACTIVE_MEDIA");
+        return multi.api_registerValidate(n, d, s, p, c);
     }
 
     // =========================================================
-    // OTHER STUBS
+    // Autres endpoints utiles (délégation multi)
     // =========================================================
-
     @Override
     public ApiResult api_ticketReprintCurrent() {
-        return ApiResult.fail("Not used", "NOT_USED");
+        if (multi == null) return ApiResult.fail("Not used", "NOT_USED");
+        return multi.api_ticketReprintCurrent();
     }
 
     @Override
     public ApiResult api_tickWait(Integer lcrnode_dec, Long since_seq, Integer wait_ms) {
-        return ApiResult.fail("Not used", "NOT_USED");
+        if (multi == null) return ApiResult.fail("Not used", "NOT_USED");
+        return multi.api_tickWait(lcrnode_dec, since_seq, wait_ms);
     }
 
     @Override
     public ApiResult api_mediaCheck(String m, String b) {
-        return ApiResult.fail("Not used", "NOT_USED");
+        if (multi == null) return ApiResult.fail("Not used", "NOT_USED");
+        return multi.api_mediaCheck(m, b);
     }
 
     @Override
     public ApiResult api_scanUsb() {
-        return ApiResult.fail("Not used", "NOT_USED");
+        if (multi == null) return ApiResult.fail("Not used", "NOT_USED");
+        return multi.api_scanUsb();
     }
 
     @Override
     public ApiResult api_openPingUsb() {
-        return ApiResult.fail("Not used", "NOT_USED");
+        if (multi == null) return ApiResult.fail("Not used", "NOT_USED");
+        return multi.api_openPingUsb();
     }
 
     @Override
     public ApiResult api_dbDump() {
-        return ApiResult.fail("Not supported", "NOT_SUPPORTED");
+        if (multi == null) return ApiResult.fail("Not supported", "NOT_SUPPORTED");
+        return multi.api_dbDump();
     }
 
     // =========================================================
     // UTILS
     // =========================================================
-
     private MediaTransportManager getMtm() {
         try {
             Context ctx = rsm.getAppContext();
