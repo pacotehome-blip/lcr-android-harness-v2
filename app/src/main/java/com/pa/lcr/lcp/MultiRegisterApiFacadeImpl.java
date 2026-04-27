@@ -1165,23 +1165,12 @@ public MultiRegisterApiFacadeImpl(Context ctx) {
                                          String expected_serial_id,
                                          Integer expected_product_number,
                                          String expected_compartment) {
-
-        // Option 2: activeKey décide (BT si activeKey=BT:..., sinon USB)
-        String activeKey = MediaTransportManager.getActiveKeyStatic();
-        String media = (activeKey != null && activeKey.startsWith("BT:")) ? "bt" : "usb";
-        String btMac = null;
-        if ("bt".equals(media) && activeKey != null && activeKey.startsWith("BT:")) {
-            btMac = activeKey.substring(3).trim();
-        }
-
-        return api_registerValidate(numero_livraison,
-                expected_lcrnode_dec,
-                from_dec,
-                expected_serial_id,
-                expected_product_number,
-                expected_compartment,
-                media,
-                btMac);
+        int node = normNode(expected_lcrnode_dec);
+        int from = normFrom(from_dec);
+        DeliveryController dc = requireSession(node, from);
+        if (dc == null) return ApiResult.fail("Validate: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
+        return dc.api_registerValidate(numero_livraison, expected_lcrnode_dec,
+                expected_serial_id, expected_product_number, expected_compartment);
     }
 
     @Override
