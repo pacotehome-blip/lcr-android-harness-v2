@@ -1,10 +1,7 @@
 
 package com.pa.lcr.lcp;
 
-import com.pa.lcr.lcp.transport.MediaTransportManager;
-import org.json.JSONObject;
-
-import java.io.BufferedInputStream;
+import com.pa.lcr.lcp.transport.MediaTransport.BufferedInputStream;import com.pa.lcr.lcp.transport.MediaTransportManager;
 import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
 import java.net.InetAddress;
@@ -12,6 +9,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Locale;
@@ -22,32 +20,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
 /**
- * - API-Face HTTP Server (VERSION COMPLÈTE)
+ * API-Face HTTP Server
  * - Bind strict: 127.0.0.1 only (no LAN)
- * - Port: 8765
+ * - Port: fourni par MainActivity (API_PORT)
  * - Trace: REQ/RESP dans le log principal (via ApiLogSink)
- * - Calls: via ApiFacade
- * - Endpoints HISTORIQUES :
- *   - GET  /v1/ping
- *   - GET  /v1/usb/scan
- *   - POST /v1/usb/open-ping
- *   - POST /v1/lcp/connect
- *   - POST /v1/register/validate
- *   - POST /v1/delivery/A
- *   - POST /v1/delivery/alignA
- *   - POST /v1/delivery/C
- *   - POST /v1/delivery/oneshot/start
- *   - GET  /v1/delivery/job/
- *   - POST /v1/delivery/job/continue
- *   - POST /v1/delivery/job/terminate
- *   - POST /v1/db/dump
- *   - GET  /v1/tick/wait
- *   - POST /v1/media/check
- *   - POST /v1/media/auto-connect
- * - AJOUTS MINIMAUX (MANDAT) :
- *   - GET  /v1/bt/list
- *   - POST /v1/bt/activate
- *   - POST /v1/register/connect-auto
  *
  * ✅ OPTION 2 :
  *   - Sur toutes les routes media-aware: si body.media absent -> media = activeKey (BT si activeKey=BT:..., sinon USB)
@@ -133,6 +109,7 @@ public final class ApiServer {
 
             ApiResult result;
             try {
+                // TickWait: lock
                 if (isTickWait(req)) {
                     synchronized (lcpLock) {
                         result = route(req);
@@ -162,6 +139,17 @@ public final class ApiServer {
 
     private static boolean isTickWait(HttpReq req) {
         return "GET".equals(req.method) && "/v1/tick/wait".equals(req.path);
+    }
+
+    // =========================
+    // Ping local (NE PAS dépendre de ApiFacade)
+    // =========================
+    private ApiResult pingLocal() {
+        JSONObject d = new JSONObject();
+        try { d.put("version", "v1"); } catch (Exception ignored) {}
+        try { d.put("bind", "127.0.0.1"); } catch (Exception ignored) {}
+        try { d.put("port", port); } catch (Exception ignored) {}
+        return ApiResult.ok("PING: 1 - OK", d);
     }
 
     private static String resolveBtMacFromApk() {
@@ -325,10 +313,7 @@ public final class ApiServer {
     }
 
     private ApiResult gateMediaIfProvided(JSONObject body) {
-        // ✅ CORRECTIF FINAL – BT_AUTONOME
-        // ApiServer ne décide jamais du média ni du BT.
-        // Toute la logique (media, bt, activeKey, recover)
-        // est centralisée dans MultiRegisterApiFacadeImpl.
+        // Laisse MultiRegisterApiFacadeImpl gérer la logique média/activeKey
         return null;
     }
 
@@ -337,24 +322,24 @@ public final class ApiServer {
     // =========================
     private ApiResult route(HttpReq req) throws Exception {
 
-        // Ping
+        // Ping (local)
         if ("GET".equals(req.method) && "/v1/ping".equals(req.path)) {
-            return withAutoConnectRetry(null, () -> facade.api_ping());
+            return withAutoConnectRetry(null, this::pingLocal);
         }
 
         // USB scan
         if ("GET".equals(req.method) && "/v1/usb/scan".equals(req.path)) {
-            return withAutoConnectRetry(null, () -> facade.api_scanUsb());
+            return withAutoConnectRetry(null, facade::api_scanUsb);
         }
 
         // ✅ BT list
         if ("GET".equals(req.method) && "/v1/bt/list".equals(req.path)) {
-            return withAutoConnectRetry(null, () -> facade.api_btList());
+            return withAutoConnectRetry(null, facade::api_btList);
         }
 
         // ✅ BT activate (auto)
         if ("POST".equals(req.method) && "/v1/bt/activate".equals(req.path)) {
-            return withAutoConnectRetry(null, () -> facade.api_btActivate());
+            return withAutoConnectRetry(null, facade::api_btActivate);
         }
 
         // Media check
@@ -373,17 +358,18 @@ public final class ApiServer {
             return withAutoConnectRetry(body, () -> facade.api_mediaCheck(m, b));
         }
 
-        // Media auto-connect (si présent dans ton ApiFacade)
+        // Media auto-connect (ALIAS -> register/connect-auto)
+        // ⚠️ ApiFacade n'a pas api_mediaAutoConnect(...), donc on l'aligne sur connect-auto.
         if ("POST".equals(req.method) && "/v1/media/auto-connect".equals(req.path)) {
             JSONObject body = safeBody(req.jsonBody());
-            Integer node = parseNodeDec(body);
-            Integer from = parseFromDec(body);
-            return withAutoConnectRetry(body, () -> facade.api_mediaAutoConnect(node, from));
+            String serialId = extractAutoSerial(body);
+            Integer node = extractAutoNode(body, parseNodeDec(body));
+            return withAutoConnectRetry(body, () -> facade.api_registerConnectAuto(serialId, node));
         }
 
         // USB open-ping
         if ("POST".equals(req.method) && "/v1/usb/open-ping".equals(req.path)) {
-            return withAutoConnectRetry(null, () -> facade.api_openPingUsb());
+            return withAutoConnectRetry(null, facade::api_openPingUsb);
         }
 
         // LCP connect (media-aware by default = activeKey)
@@ -549,7 +535,7 @@ public final class ApiServer {
 
         // DB dump
         if ("POST".equals(req.method) && "/v1/db/dump".equals(req.path)) {
-            return withAutoConnectRetry(null, () -> facade.api_dbDump());
+            return withAutoConnectRetry(null, facade::api_dbDump);
         }
 
         // Tick wait
@@ -582,7 +568,7 @@ public final class ApiServer {
             return withAutoConnectRetry(bodyHint, () -> facade.api_tickWait(fNode, fSince, fWait));
         }
 
-        // ✅ /v1/register/connect-auto (MANDAT) — EXCLU de l'auto-heal (sinon récursion)
+        // ✅ /v1/register/connect-auto — EXCLU de l'auto-heal (sinon récursion)
         if ("POST".equals(req.method) && "/v1/register/connect-auto".equals(req.path)) {
             JSONObject body = safeBody(req.jsonBody());
             String serialId = (body.has("serialId")) ? body.optString("serialId", null) : null;
@@ -764,3 +750,5 @@ public final class ApiServer {
         return (m == null) ? e.getClass().getSimpleName() : m;
     }
 }
+import org.json.JSONObject;
+
