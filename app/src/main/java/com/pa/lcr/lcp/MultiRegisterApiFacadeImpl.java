@@ -1164,13 +1164,75 @@ public MultiRegisterApiFacadeImpl(Context ctx) {
                                          Integer from_dec,
                                          String expected_serial_id,
                                          Integer expected_product_number,
-                                         String expected_compartment) {
+                                         String expected_compartment,
+                                         String media,
+                                         String bt_mac) {
         int node = normNode(expected_lcrnode_dec);
         int from = normFrom(from_dec);
-        DeliveryController dc = requireSession(node, from);
-        if (dc == null) return ApiResult.fail("Validate: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
-        return dc.api_registerValidate(numero_livraison, expected_lcrnode_dec,
-                expected_serial_id, expected_product_number, expected_compartment);
+
+        // Option 2: media par défaut = activeKey
+        String m = (media == null) ? null : media.trim().toLowerCase(Locale.ROOT);
+        if (m == null || m.isEmpty() || "auto".equals(m)) {
+            String activeKey = MediaTransportManager.getActiveKeyStatic();
+            if (activeKey != null && activeKey.startsWith("BT:")) {
+                m = "bt";
+            } else {
+                m = "usb";
+            }
+        }
+
+        String btMac = (bt_mac == null) ? "" : bt_mac.trim();
+        if (("bt".equals(m) || "bluetooth".equals(m)) && btMac.isEmpty()) {
+            String activeKey = MediaTransportManager.getActiveKeyStatic();
+            if (activeKey != null && activeKey.startsWith("BT:")) {
+                btMac = activeKey.substring(3).trim();
+            }
+        }
+
+        MediaCtx mc = resolveMediaCtx(m, btMac, node, from);
+        if (mc == null || !mc.mediaReady || mc.dc == null) {
+            return failTransportLevel(m, btMac, "register/validate");
+        }
+
+        // Notifier UI (utile si la validation est appelée avant connect-auto)
+        try {
+            String serial = (expected_serial_id != null && !expected_serial_id.trim().isEmpty())
+                    ? expected_serial_id.trim()
+                    : sessions.getExpectedSerial(node);
+            notifyNodeSeenFull(node, from, serial, mc.transportKey);
+        } catch (Exception ignored) {}
+
+        return mc.dc.api_registerValidate(numero_livraison,
+                expected_lcrnode_dec,
+                expected_serial_id,
+                expected_product_number,
+                expected_compartment);
+    }
+
+    @Override
+    public ApiResult api_registerValidate(String numero_livraison,
+                                         Integer expected_lcrnode_dec,
+                                         Integer from_dec,
+                                         String expected_serial_id,
+                                         Integer expected_product_number,
+                                         String expected_compartment) {
+
+        // Option 2: activeKey décide (BT si activeKey=BT:..., sinon USB)
+        String activeKey = MediaTransportManager.getActiveKeyStatic();
+        String media = (activeKey != null && activeKey.startsWith("BT:")) ? "bt" : "usb";
+        String btMac = null;
+        if ("bt".equals(media) && activeKey != null && activeKey.startsWith("BT:")) {
+            btMac = activeKey.substring(3).trim();
+        }
+
+        return api_registerValidate(numero_livraison,
+                expected_lcrnode_dec,
+                from_dec,
+                expected_serial_id,
+                expected_product_number,
+                expected_compartment,
+                media,
+                btMac);
     }
 
     @Override
