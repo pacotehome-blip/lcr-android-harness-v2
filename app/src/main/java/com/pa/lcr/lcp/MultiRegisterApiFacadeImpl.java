@@ -575,7 +575,7 @@ public MultiRegisterApiFacadeImpl(Context ctx) {
 			} catch (Exception ignored) {}
 
 			// 2.5) Notifier UI pour création/rafraîchissement tab (anti-doublon côté UI)
-			try { notifyNodeSeenFull(node, from, serial, transportKey); } catch (Exception ignored) {}
+			try { emitRegisterState(node, from, serial, transportKey, snap, false); } catch (Exception ignored) {}
 
 			// 2.6) Réponse API complète
 			JSONObject d = new JSONObject();
@@ -1179,102 +1179,18 @@ public MultiRegisterApiFacadeImpl(Context ctx) {
                                          String expected_serial_id,
                                          Integer expected_product_number,
                                          String expected_compartment) {
-        int node = normNode(expected_lcrnode_dec);
-        int from = normFrom(from_dec);
-        DeliveryController dc = requireSession(node, from);
-        if (dc == null) return ApiResult.fail("Validate: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
-        return dc.api_registerValidate(numero_livraison, expected_lcrnode_dec,
-                expected_serial_id, expected_product_number, expected_compartment);
-    }
-
-    @Override
-    public ApiResult api_ticketReprintCurrent(Integer lcrnode_dec, Integer from_dec) {
-        int node = normNode(lcrnode_dec);
-        int from = normFrom(from_dec);
-        DeliveryController dc = requireSession(node, from);
-        if (dc == null) return ApiResult.fail("Reprint: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
-        return dc.api_ticketReprintCurrent();
-    }
-
-    @Override
-    public ApiResult api_dbDump() {
-        try {
-            String name = "lcr_delivery_" + DeliveryApiFacadeImpl.utcStampPublic() + ".json";
-            boolean ok = sessions.getStore().dumpJsonToDownloads(appCtx, name);
-            if (!ok) return ApiResult.fail("DB Dump: 0 - Failed", "DB_DUMP_FAIL");
-            JSONObject d = new JSONObject();
-            d.put("fileName", name);
-            return ApiResult.ok("DB Dump: 1 - OK", d);
-        } catch (Exception e) {
-            JSONObject d = new JSONObject();
-            try { d.put("detail", (e.getMessage() != null) ? e.getMessage() : ""); } catch (Exception ignored) {}
-            return ApiResult.fail("DB Dump: 0 - Failed", "DB_DUMP_FAIL", d);
+        String activeKey = MediaTransportManager.getActiveKeyStatic();
+        String media = (activeKey != null && activeKey.startsWith("BT:")) ? "bt" : "usb";
+        String btMac = null;
+        if ("bt".equals(media) && activeKey != null && activeKey.startsWith("BT:")) {
+            btMac = activeKey.substring(3).trim();
         }
+        return api_registerValidate(numero_livraison,
+                expected_lcrnode_dec,
+                from_dec,
+                expected_serial_id,
+                expected_product_number,
+                expected_compartment,
+                media,
+                btMac);
     }
-
-    @Override
-    public ApiResult api_tickWait(Integer lcrnode_dec, Long since_seq, Integer wait_ms) {
-        int node = normNode(lcrnode_dec);
-        int from = lastFromHint;
-        long since = (since_seq != null) ? since_seq : 0L;
-        long wait = (wait_ms != null) ? wait_ms.longValue() : 25_000L;
-        DeliveryController dc = requireSession(node, from);
-        if (dc == null) {
-            return ApiResult.fail("Tick: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
-        }
-        return dc.api_tickWait(since, wait);
-    }
-
-    private ApiResult failTransportLevel(String media, String btMac, String where) {
-        String m = (media == null) ? "usb" : media.trim().toLowerCase(Locale.ROOT);
-        JSONObject d = new JSONObject();
-        try { d.put("level", "MEDIA"); } catch (Exception ignored) {}
-        try { d.put("where", where); } catch (Exception ignored) {}
-        try { d.put("media", m); } catch (Exception ignored) {}
-
-        if ("usb".equals(m)) {
-            return ApiResult.fail("Transport: 0 - USB non connecté", "ERR_USB_NOT_CONNECTED", d);
-        }
-        if ("bt".equals(m) || "bluetooth".equals(m)) {
-            String key = resolveBtKeyOrActive(btMac);
-            if (key == null) {
-                return ApiResult.fail("Transport: 0 - Aucun BT actif", "ERR_NO_ACTIVE_BT", d);
-            }
-            try { d.put("transportKey", key); } catch (Exception ignored) {}
-            return ApiResult.fail("Transport: 0 - BT non connecté", "ERR_BT_NOT_CONNECTED", d);
-        }
-        return ApiResult.fail("Transport: 0 - media invalide", "ERR_MEDIA_INVALID", d);
-    }
-
-    @Override
-    public ApiResult api_deliveryAlignA(Integer lcrnode_dec, Integer from_dec, String media, String bt_mac) {
-        int node = normNode(lcrnode_dec);
-        int from = normFrom(from_dec);
-        String m = (media == null) ? "usb" : media.trim().toLowerCase(Locale.ROOT);
-        if (m.isEmpty()) m = "usb";
-
-        if ("usb".equals(m)) {
-            DeliveryController dc = requireSession(node, from);
-            if (dc == null) return ApiResult.fail("Align A: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
-            return dc.api_deliveryAlignA();
-        }
-        if ("bt".equals(m) || "bluetooth".equals(m)) {
-            String key = resolveBtKeyOrActive(bt_mac);
-            if (key == null) {
-                return ApiResult.fail("Align A: 0 - Aucun BT actif (appelle bt/activate)", "ERR_NO_ACTIVE_BT");
-            }
-            
-            TransportIo io = (mediaMgr != null) ? mediaMgr.getByKey(key) : null;
-            if (io == null || !io.isOpen()) {
-                return ApiResult.fail("Align A: 0 - BT non connecté", "ERR_BT_NOT_CONNECTED");
-            }
-            DeliveryController dc = sessions.getOrCreate(key, node, from, io);
-            if (dc == null) return ApiResult.fail("Align A: 0 - BT non prêt.", "ERR_BT_NOT_CONNECTED");
-            String serial = sessions.getExpectedSerial(node);
-            String transportKey = key;
-            notifyNodeSeenFull(node, from, serial, transportKey);
-            return dc.api_deliveryAlignA();
-        }
-        return ApiResult.fail("Align A: 0 - media invalide", "ERR_MEDIA_INVALID");
-    }
-}
