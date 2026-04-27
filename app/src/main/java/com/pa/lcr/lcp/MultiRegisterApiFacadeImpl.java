@@ -103,79 +103,6 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         if (activeKey != null && activeKey.startsWith("BT:")) return activeKey;
         return null;
     }
-
-    // =========================================================
-    // ✅ Assure qu'un BT (bonded) est ouvert dans MediaTransportManager pour ce MAC
-    // - Si déjà open -> activateExclusive
-    // - Sinon -> connect SPP et publish dans MediaTransportManager
-    // =========================================================
-    private ApiResult ensureBtConnectedByMac(String mac, String reason) {
-        if (mediaMgr == null) {
-            return ApiResult.fail("BT ensure: 0 - MTM null", "ERR_MEDIA_MTM_NULL");
-        }
-        String m = (mac == null) ? "" : mac.trim();
-        if (m.isEmpty()) {
-            return ApiResult.fail("BT ensure: 0 - MAC vide", "ERR_BT_MAC_EMPTY");
-        }
-        String key = MediaTransportManager.btKey(m);
-
-        // Déjà open ?
-        try {
-            TransportIo io0 = mediaMgr.getByKey(key);
-            if (io0 != null && io0.isOpen()) {
-                try { mediaMgr.activateExclusive(key, reason != null ? reason : "BT_SCAN"); } catch (Exception ignored) {}
-                JSONObject d = new JSONObject();
-                try { d.put("transportKey", key); } catch (Exception ignored) {}
-                try { d.put("activeKey", MediaTransportManager.getActiveKeyStatic()); } catch (Exception ignored) {}
-                return ApiResult.ok("BT ensure: 1 - OK (already open)", d);
-            }
-        } catch (Exception ignored) {}
-
-        // Trouver le device dans bonded
-        BluetoothDevice target = null;
-        try {
-            for (BluetoothDevice dev : listBondedSorted()) {
-                if (dev == null) continue;
-                String a = dev.getAddress();
-                if (a != null && a.equalsIgnoreCase(m)) {
-                    target = dev;
-                    break;
-                }
-            }
-        } catch (Exception ignored) {}
-
-        if (target == null) {
-            JSONObject d = new JSONObject();
-            try { d.put("mac", m); } catch (Exception ignored) {}
-            return ApiResult.fail("BT ensure: 0 - Device non pairé", "ERR_BT_NOT_BONDED", d);
-        }
-
-        // Connecter SPP
-        BluetoothSocket sock = null;
-        try {
-            sock = target.createRfcommSocketToServiceRecord(SPP_UUID);
-            sock.connect();
-
-            InputStream in = sock.getInputStream();
-            OutputStream out = sock.getOutputStream();
-
-            mediaMgr.onBtConnected(target, sock, in, out, "BT ready (" + (reason != null ? reason : "BT_SCAN") + ")");
-            try { mediaMgr.activateExclusive(key, reason != null ? reason : "BT_SCAN"); } catch (Exception ignored) {}
-
-            JSONObject d = new JSONObject();
-            try { d.put("transportKey", key); } catch (Exception ignored) {}
-            try { d.put("activeKey", MediaTransportManager.getActiveKeyStatic()); } catch (Exception ignored) {}
-            return ApiResult.ok("BT ensure: 1 - OK", d);
-
-        } catch (Exception e) {
-            try { if (sock != null) sock.close(); } catch (Exception ignored) {}
-            JSONObject d = new JSONObject();
-            try { d.put("mac", m); } catch (Exception ignored) {}
-            try { d.put("detail", e.getMessage()); } catch (Exception ignored) {}
-            return ApiResult.fail("BT ensure: 0 - Connexion échouée", "ERR_BT_CONNECT_FAILED", d);
-        }
-    }
-
 public MultiRegisterApiFacadeImpl(Context ctx) {
         this.appCtx = ctx.getApplicationContext();
         this.usbManager = (UsbManager) this.appCtx.getSystemService(Context.USB_SERVICE);
@@ -567,236 +494,120 @@ public MultiRegisterApiFacadeImpl(Context ctx) {
 	// - Si introuvable: ERR_REGISTER_NOT_FOUND + proposition /v1/register/scan-auto (nodes 1..250)
 	// =========================================================
 	public ApiResult api_registerConnectAuto(String serialId, Integer lcrnode) {
-        final int from = 255;
-        final boolean hasNode = (lcrnode != null && lcrnode.intValue() != 0);
-        final boolean hasSerial = (serialId != null && !serialId.trim().isEmpty());
+		final int from = 255;
+		final boolean hasNode = (lcrnode != null && lcrnode.intValue() != 0);
+		final boolean hasSerial = (serialId != null && !serialId.trim().isEmpty());
 
-        // On privilégie le node fourni. Si absent, on tente un hint (dernier node observé) sans scanner 1..250.
-        final int node = hasNode ? normNode(lcrnode) : normNode(lastNodeHint);
+		// On privilégie le node fourni. Si absent, on tente un hint (dernier node observé) sans scanner 1..250.
+		final int node = hasNode ? normNode(lcrnode) : normNode(lastNodeHint);
 
-        // Si serialId fourni sans lcrnode -> connect-auto ne scanne pas 1..250. Propose scan-auto.
-        if (!hasNode && hasSerial) {
-            JSONObject d = new JSONObject();
-            try { d.put("serialId", serialId); } catch (Exception ignored) {}
-            try { d.put("scanSuggested", true); } catch (Exception ignored) {}
-            try { d.put("scanEndpoint", "/v1/register/scan-auto"); } catch (Exception ignored) {}
-            try { d.put("reason", "serialId fourni sans lcrnode; connect-auto ne scanne pas 1..250"); } catch (Exception ignored) {}
-            return ApiResult.fail("Registre non trouvé (lcrnode requis ou scan-auto)", "ERR_REGISTER_NOT_FOUND", d);
-        }
+		// Si l’appel ne fournit NI node NI serial => on fait un essai sur le hint, mais on ne scanne pas les nodes ici.
+		// Le scan 1..250 est réservé à /register/scan-auto.
+		if (!hasNode && !hasSerial) {
+			// ok: tentative sur node hint (ci-dessus)
+		} else if (!hasNode && hasSerial) {
+			// Serial sans node => on ne scanne pas ici; propose scan-auto.
+			JSONObject d = new JSONObject();
+			try { d.put("serialId", serialId); } catch (Exception ignored) {}
+			try { d.put("scanSuggested", true); } catch (Exception ignored) {}
+			try { d.put("scanEndpoint", "/v1/register/scan-auto"); } catch (Exception ignored) {}
+			try { d.put("reason", "serialId fourni sans lcrnode; connect-auto ne scanne pas 1..250"); } catch (Exception ignored) {}
+			return ApiResult.fail("Registre non trouvé (lcrnode requis ou scan-auto)", "ERR_REGISTER_NOT_FOUND", d);
+		}
 
-        ArrayList<String> tried = new ArrayList<>();
+		// 1) Construire la liste des médias à essayer (actif d’abord, puis autres ouverts). Fallback automatique.
+		ArrayList<String> tried = new ArrayList<>();
+		ArrayList<String> candidates = listCandidateTransportKeysForAutoConnect();
 
-        // =========================================================
-        // ✅ Mode robuste: si serialId est fourni, scanner les BT pairés
-        // - Valider par #80 (serial) sur le node
-        // - Si mismatch -> BT suivant
-        // - Fallback USB ensuite
-        // =========================================================
-        if (hasSerial) {
-            final String want = serialId.trim();
+		// 2) Essayer chaque média candidat
+		for (String key : candidates) {
+			if (key == null || key.trim().isEmpty()) continue;
+			String transportKey = key.trim();
+			TransportIo io = null;
+			try {
+				if (mediaMgr != null) {
+					try { mediaMgr.activateExclusive(transportKey, "REGISTER_CONNECT_AUTO"); } catch (Exception ignored) {}
+					io = mediaMgr.getByKey(transportKey);
+				}
+			} catch (Exception ignored) {}
+			tried.add(transportKey);
+			if (io == null || !safeIsOpen(io)) continue;
 
-            // 1) Scan BT bonded
-            try {
-                ArrayList<BluetoothDevice> bonded = listBondedSorted();
-                for (BluetoothDevice dev : bonded) {
-                    if (dev == null) continue;
-                    String mac = dev.getAddress();
-                    if (mac == null || mac.trim().isEmpty()) continue;
+			// 2.1) Probe #80 (serial) sur le node ciblé
+			String serial = probeSerial(io, node, from);
+			if (serial == null || serial.trim().isEmpty()) {
+				continue;
+			}
+			serial = serial.trim();
 
-                    String btKey = MediaTransportManager.btKey(mac);
-                    if (!tried.contains(btKey)) tried.add(btKey);
+			// 2.2) Si serialId fourni, valider le match
+			if (hasSerial) {
+				String want = serialId.trim();
+				if (!want.equals(serial)) {
+					continue;
+				}
+			}
 
-                    ApiResult en = ensureBtConnectedByMac(mac, "REGISTER_CONNECT_AUTO_SCAN");
-                    if (en == null || en.code != 1) {
-                        continue;
-                    }
+			// 2.3) Créer/obtenir la session + tenter un connect LCP (best-effort)
+			DeliveryController dc = null;
+			try { dc = sessions.getOrCreate(transportKey, node, from, io); } catch (Exception ignored) {}
+			try { if (dc != null) dc.api_connectLcp(); } catch (Exception ignored) {}
 
-                    TransportIo io = (mediaMgr != null) ? mediaMgr.getByKey(btKey) : null;
-                    if (io == null || !safeIsOpen(io)) continue;
+			// 2.4) Snapshot statut + Net/Gross (best-effort)
+			JSONObject snap = null;
+			try {
+				ApiResult tick = (dc != null) ? dc.api_tickSnapshot() : null;
+				snap = (tick != null) ? tick.data : null;
+			} catch (Exception ignored) {}
 
-                    // Probe serial #80
-                    String serial = probeSerial(io, node, from);
-                    if (serial == null) continue;
-                    serial = serial.trim();
-                    if (serial.isEmpty()) continue;
+			double net = 0.0;
+			double gross = 0.0;
+			int delCode = 0;
+			String statusText = "?";
+			try {
+				if (snap != null) {
+					net = snap.optDouble("net", 0.0);
+					gross = snap.optDouble("gross", 0.0);
+					delCode = snap.optInt("delCode", 0);
+					// compat: certains payloads utilisent 'statut', d'autres 'status'/'state'
+					statusText = snap.optString("statut", null);
+					if (statusText == null || statusText.trim().isEmpty()) statusText = snap.optString("status", null);
+					if (statusText == null || statusText.trim().isEmpty()) statusText = snap.optString("state", "?");
+				}
+			} catch (Exception ignored) {}
 
-                    if (!want.equals(serial)) {
-                        // mismatch -> next BT
-                        continue;
-                    }
+			// 2.5) Notifier UI pour création/rafraîchissement tab (anti-doublon côté UI)
+			try { notifyNodeSeenFull(node, from, serial, transportKey); } catch (Exception ignored) {}
 
-                    // Match -> session + connect LCP best-effort
-                    DeliveryController dc = null;
-                    try { dc = sessions.getOrCreate(btKey, node, from, io); } catch (Exception ignored) {}
-                    try { if (dc != null) dc.api_connectLcp(); } catch (Exception ignored) {}
+			// 2.6) Réponse API complète
+			JSONObject d = new JSONObject();
+			safePut(d, "node", node);
+			safePut(d, "from", from);
+			safePut(d, "serial", serial);
+			safePut(d, "serialId", serial);
+			safePut(d, "transportKey", transportKey);
+			safePut(d, "activeKey", MediaTransportManager.getActiveKeyStatic());
+			safePut(d, "media", transportKey.toUpperCase(Locale.ROOT).startsWith("BT:") ? "bt" : "usb");
+			safePut(d, "status", statusText);
+			safePut(d, "statut", statusText);
+			safePut(d, "delCode", delCode);
+			safePut(d, "net", net);
+			safePut(d, "gross", gross);
+			safePut(d, "ui", "UPSERT_TAB");
+			return ApiResult.ok("Registre trouvé sur " + (transportKey.toUpperCase(Locale.ROOT).startsWith("BT:") ? "BT" : "USB"), d);
+		}
 
-                    // Snapshot statut + Net/Gross (best-effort)
-                    JSONObject snap = null;
-                    try {
-                        ApiResult tick = (dc != null) ? dc.api_tickSnapshot() : null;
-                        snap = (tick != null) ? tick.data : null;
-                    } catch (Exception ignored) {}
-
-                    double net = 0.0;
-                    double gross = 0.0;
-                    int delCode = 0;
-                    String statusText = "?";
-                    try {
-                        if (snap != null) {
-                            net = snap.optDouble("net", 0.0);
-                            gross = snap.optDouble("gross", 0.0);
-                            delCode = snap.optInt("delCode", 0);
-                            statusText = snap.optString("statut", null);
-                            if (statusText == null || statusText.trim().isEmpty()) statusText = snap.optString("status", null);
-                            if (statusText == null || statusText.trim().isEmpty()) statusText = snap.optString("state", "?");
-                        }
-                    } catch (Exception ignored) {}
-
-                    // UI upsert tab
-                    try { notifyNodeSeenFull(node, from, serial, btKey); } catch (Exception ignored) {}
-
-                    JSONObject d = new JSONObject();
-                    safePut(d, "node", node);
-                    safePut(d, "from", from);
-                    safePut(d, "serial", serial);
-                    safePut(d, "serialId", serial);
-                    safePut(d, "transportKey", btKey);
-                    safePut(d, "activeKey", MediaTransportManager.getActiveKeyStatic());
-                    safePut(d, "media", "bt");
-                    safePut(d, "status", statusText);
-                    safePut(d, "statut", statusText);
-                    safePut(d, "delCode", delCode);
-                    safePut(d, "net", net);
-                    safePut(d, "gross", gross);
-                    safePut(d, "ui", "UPSERT_TAB");
-
-                    return ApiResult.ok("Registre trouvé sur BT", d);
-                }
-            } catch (Exception ignored) {}
-
-            // 2) Fallback USB (si prêt)
-            try {
-                String usbKey = MediaTransportManager.KEY_USB;
-                if (!tried.contains(usbKey)) tried.add(usbKey);
-
-                TransportIo usbIo = (mediaMgr != null) ? mediaMgr.getByKey(usbKey) : null;
-                if (usbIo == null || !safeIsOpen(usbIo)) {
-                    try { api_openPingUsb(); } catch (Exception ignored) {}
-                    usbIo = (mediaMgr != null) ? mediaMgr.getByKey(usbKey) : null;
-                }
-
-                if (usbIo != null && safeIsOpen(usbIo)) {
-                    String serial = probeSerial(usbIo, node, from);
-                    if (serial != null && want.equals(serial.trim())) {
-                        DeliveryController dc = null;
-                        try { dc = sessions.getOrCreate(usbKey, node, from, usbIo); } catch (Exception ignored) {}
-                        try { if (dc != null) dc.api_connectLcp(); } catch (Exception ignored) {}
-
-                        try { notifyNodeSeenFull(node, from, want, usbKey); } catch (Exception ignored) {}
-
-                        JSONObject d = new JSONObject();
-                        safePut(d, "node", node);
-                        safePut(d, "from", from);
-                        safePut(d, "serial", want);
-                        safePut(d, "serialId", want);
-                        safePut(d, "transportKey", "USB");
-                        safePut(d, "activeKey", MediaTransportManager.getActiveKeyStatic());
-                        safePut(d, "media", "usb");
-                        safePut(d, "ui", "UPSERT_TAB");
-                        return ApiResult.ok("Registre trouvé sur USB", d);
-                    }
-                }
-            } catch (Exception ignored) {}
-
-            // 3) Rien trouvé
-            JSONObject d = new JSONObject();
-            safePut(d, "node", node);
-            safePut(d, "from", from);
-            safePut(d, "serialId", want);
-            safePut(d, "lcrnode", node);
-            safePut(d, "scanSuggested", true);
-            safePut(d, "scanEndpoint", "/v1/register/scan-auto");
-            safePut(d, "tried", new JSONArray(tried));
-            return ApiResult.fail("Registre non trouvé sur BT ou USB", "ERR_REGISTER_NOT_FOUND", d);
-        }
-
-        // =========================================================
-        // Mode courant: serialId absent -> média actif d'abord + fallback
-        // =========================================================
-        ArrayList<String> candidates = listCandidateTransportKeysForAutoConnect();
-
-        for (String key : candidates) {
-            if (key == null || key.trim().isEmpty()) continue;
-            String transportKey = key.trim();
-            TransportIo io = null;
-            try {
-                if (mediaMgr != null) {
-                    try { mediaMgr.activateExclusive(transportKey, "REGISTER_CONNECT_AUTO"); } catch (Exception ignored) {}
-                    io = mediaMgr.getByKey(transportKey);
-                }
-            } catch (Exception ignored) {}
-            tried.add(transportKey);
-            if (io == null || !safeIsOpen(io)) continue;
-
-            String serial = probeSerial(io, node, from);
-            if (serial == null || serial.trim().isEmpty()) {
-                continue;
-            }
-            serial = serial.trim();
-
-            DeliveryController dc = null;
-            try { dc = sessions.getOrCreate(transportKey, node, from, io); } catch (Exception ignored) {}
-            try { if (dc != null) dc.api_connectLcp(); } catch (Exception ignored) {}
-
-            JSONObject snap = null;
-            try {
-                ApiResult tick = (dc != null) ? dc.api_tickSnapshot() : null;
-                snap = (tick != null) ? tick.data : null;
-            } catch (Exception ignored) {}
-
-            double net = 0.0;
-            double gross = 0.0;
-            int delCode = 0;
-            String statusText = "?";
-            try {
-                if (snap != null) {
-                    net = snap.optDouble("net", 0.0);
-                    gross = snap.optDouble("gross", 0.0);
-                    delCode = snap.optInt("delCode", 0);
-                    statusText = snap.optString("statut", null);
-                    if (statusText == null || statusText.trim().isEmpty()) statusText = snap.optString("status", null);
-                    if (statusText == null || statusText.trim().isEmpty()) statusText = snap.optString("state", "?");
-                }
-            } catch (Exception ignored) {}
-
-            try { notifyNodeSeenFull(node, from, serial, transportKey); } catch (Exception ignored) {}
-
-            JSONObject d = new JSONObject();
-            safePut(d, "node", node);
-            safePut(d, "from", from);
-            safePut(d, "serial", serial);
-            safePut(d, "serialId", serial);
-            safePut(d, "transportKey", transportKey);
-            safePut(d, "activeKey", MediaTransportManager.getActiveKeyStatic());
-            safePut(d, "media", transportKey.toUpperCase(Locale.ROOT).startsWith("BT:") ? "bt" : "usb");
-            safePut(d, "status", statusText);
-            safePut(d, "statut", statusText);
-            safePut(d, "delCode", delCode);
-            safePut(d, "net", net);
-            safePut(d, "gross", gross);
-            safePut(d, "ui", "UPSERT_TAB");
-            return ApiResult.ok("Registre trouvé sur " + (transportKey.toUpperCase(Locale.ROOT).startsWith("BT:") ? "BT" : "USB"), d);
-        }
-
-        JSONObject d = new JSONObject();
-        safePut(d, "node", node);
-        safePut(d, "from", from);
-        if (hasNode) safePut(d, "lcrnode", node);
-        safePut(d, "scanSuggested", true);
-        safePut(d, "scanEndpoint", "/v1/register/scan-auto");
-        safePut(d, "tried", new JSONArray(tried));
-        return ApiResult.fail("Registre non trouvé sur BT ou USB", "ERR_REGISTER_NOT_FOUND", d);
-    }
+		// 3) Rien trouvé sur BT/USB: proposer scan-auto (nodes 1..250)
+		JSONObject d = new JSONObject();
+		safePut(d, "node", node);
+		safePut(d, "from", from);
+		if (hasSerial) safePut(d, "serialId", serialId.trim());
+		if (hasNode) safePut(d, "lcrnode", node);
+		safePut(d, "scanSuggested", true);
+		safePut(d, "scanEndpoint", "/v1/register/scan-auto");
+		safePut(d, "tried", new JSONArray(tried));
+		return ApiResult.fail("Registre non trouvé sur BT ou USB", "ERR_REGISTER_NOT_FOUND", d);
+	}
 
 	// -------------------------
 	// Helpers (connect-auto)
@@ -1354,12 +1165,23 @@ public MultiRegisterApiFacadeImpl(Context ctx) {
                                          String expected_serial_id,
                                          Integer expected_product_number,
                                          String expected_compartment) {
-        int node = normNode(expected_lcrnode_dec);
-        int from = normFrom(from_dec);
-        DeliveryController dc = requireSession(node, from);
-        if (dc == null) return ApiResult.fail("Validate: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
-        return dc.api_registerValidate(numero_livraison, expected_lcrnode_dec,
-                expected_serial_id, expected_product_number, expected_compartment);
+
+        // Option 2: activeKey décide (BT si activeKey=BT:..., sinon USB)
+        String activeKey = MediaTransportManager.getActiveKeyStatic();
+        String media = (activeKey != null && activeKey.startsWith("BT:")) ? "bt" : "usb";
+        String btMac = null;
+        if ("bt".equals(media) && activeKey != null && activeKey.startsWith("BT:")) {
+            btMac = activeKey.substring(3).trim();
+        }
+
+        return api_registerValidate(numero_livraison,
+                expected_lcrnode_dec,
+                from_dec,
+                expected_serial_id,
+                expected_product_number,
+                expected_compartment,
+                media,
+                btMac);
     }
 
     @Override
