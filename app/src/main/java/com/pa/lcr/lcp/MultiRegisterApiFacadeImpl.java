@@ -435,9 +435,6 @@ public MultiRegisterApiFacadeImpl(Context ctx) {
 
 		int node = normNode(lcrnode_dec);
 		int from = normFrom(from_dec);
-// pac		String m = (media == null) ? "usb" : media.trim().toLowerCase(Locale.ROOT);
-//		if (m.isEmpty()) m = "usb";
-
         String m = (media == null) ? null : media.trim().toLowerCase(Locale.ROOT);
         if (m == null || m.isEmpty()) {
             String activeKey = MediaTransportManager.getActiveKeyStatic();
@@ -483,6 +480,99 @@ public MultiRegisterApiFacadeImpl(Context ctx) {
 
 		return ApiResult.fail("Connect LCP: 0 - media invalide", "ERR_MEDIA_INVALID");
 	}
+
+
+	// =========================================================
+	// ✅ Répertorier tous les registres et les déposer en table si non existant)
+	// =========================================================
+	@Override
+	public ApiResult api_registerConnectAuto(String serialId, Integer lcrnode) {
+
+		if (serialId == null || serialId.trim().isEmpty()) {
+			return ApiResult.fail("serialId obligatoire",
+					"ERR_SERIAL_REQUIRED");
+		}
+
+		final String wanted = serialId.trim();
+		final int node = normNode(lcrnode);
+		final int from = 255;
+
+		// =====================================================
+		// FAST‑PATH : registre déjà connecté
+		// =====================================================
+		DeliveryController existing =
+				sessions.getControllerBySerial(wanted);
+
+		if (existing != null && existing.isConnected()) {
+
+			ApiResult snap = existing.api_tickSnapshot();
+			JSONObject d = snap != null ? snap.data : new JSONObject();
+
+			safePut(d, "serialId", wanted);
+			safePut(d, "lcrnode", node);
+			safePut(d, "transportKey",
+					existing.getTransportKey());
+			safePut(d, "media",
+					existing.getTransportKey().startsWith("BT:")
+							? "bt" : "usb");
+			safePut(d, "alreadyConnected", true);
+
+			return ApiResult.ok(
+					"Registre déjà connecté",
+					d
+			);
+		}
+
+		// =====================================================
+		// Recherche ciblée BT (serial obligatoire)
+		// =====================================================
+		for (String btKey : mediaMgr.listBtKeys()) {
+
+			TransportIo io = mediaMgr.getByKey(btKey);
+			if (io == null || !io.isOpen()) continue;
+
+			String found = probeSerial(io, node, from);
+			if (!wanted.equals(found)) continue;
+
+			// MATCH
+			DeliveryController dc =
+					sessions.getOrCreate(btKey, node, from, io);
+			dc.api_connectLcp();
+
+			// ✅ ajout dynamique à la table "découverts"
+			discoveredStore.upsert(
+					wanted,
+					node,
+					"bt",
+					btKey
+			);
+
+			JSONObject d = new JSONObject();
+			safePut(d, "serialId", wanted);
+			safePut(d, "lcrnode", node);
+			safePut(d, "media", "bt");
+			safePut(d, "transportKey", btKey);
+			safePut(d, "addedToDiscovered", true);
+
+			return ApiResult.ok(
+					"Registre trouvé et connecté",
+					d
+			);
+		}
+
+		JSONObject d = new JSONObject();
+		safePut(d, "serialId", wanted);
+		safePut(d, "lcrnode", node);
+		safePut(d, "scanSuggested", true);
+
+		return ApiResult.fail(
+				"Registre non trouvé",
+				"ERR_REGISTER_NOT_FOUND",
+				d
+		);
+	}
+
+
 	// =========================================================
 	// ✅ One Stop connect register (BT / USB) — CONNECT-AUTO
 	// Objectif:     
@@ -985,6 +1075,22 @@ public MultiRegisterApiFacadeImpl(Context ctx) {
         } catch (Exception ignored) {}
     }
 
+	// =========================================================
+	// ✅ CENTRAL: UI upsert + enrichissement état API (net/gross/ticket)
+	// snap peut être null (ex: RegisterScanController)
+	// =========================================================
+	private void emitRegisterState(int node, int from, String serialId, String transportKey,
+								   JSONObject snap, boolean alreadyConnected) {
+		notifyNodeSeenFull(node, from, serialId, transportKey);
+		if (snap == null) return;
+		try {
+			snap.put("serialId", serialId);
+			snap.put("lcrnode", node);
+			snap.put("transportKey", transportKey);
+			snap.put("media", transportKey != null && transportKey.startsWith("BT:") ? "bt" : "usb");
+			snap.put("alreadyConnected", alreadyConnected);
+		} catch (Exception ignored) {}
+	}
 
     private String probeSerial(TransportIo io, int nodeDec, int fromDec) {
         try {
