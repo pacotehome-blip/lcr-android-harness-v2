@@ -1,3 +1,4 @@
+
 package com.pa.lcr.lcp;
 
 import com.pa.lcr.lcp.transport.MediaTransportManager;
@@ -18,35 +19,43 @@ import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 
 /**
- * API-Face HTTP Server (VERSION COMPLÈTE)
- *
+ * - API-Face HTTP Server (VERSION COMPLÈTE)
  * - Bind strict: 127.0.0.1 only (no LAN)
  * - Port: 8765
  * - Trace: REQ/RESP dans le log principal (via ApiLogSink)
  * - Calls: via ApiFacade
+ * - Endpoints HISTORIQUES :
+ *   - GET  /v1/ping
+ *   - GET  /v1/usb/scan
+ *   - POST /v1/usb/open-ping
+ *   - POST /v1/lcp/connect
+ *   - POST /v1/register/validate
+ *   - POST /v1/delivery/A
+ *   - POST /v1/delivery/alignA
+ *   - POST /v1/delivery/C
+ *   - POST /v1/delivery/oneshot/start
+ *   - GET  /v1/delivery/job/
+ *   - POST /v1/delivery/job/continue
+ *   - POST /v1/delivery/job/terminate
+ *   - POST /v1/db/dump
+ *   - GET  /v1/tick/wait
+ *   - POST /v1/media/check
+ *   - POST /v1/media/auto-connect
+ * - AJOUTS MINIMAUX (MANDAT) :
+ *   - GET  /v1/bt/list
+ *   - POST /v1/bt/activate
+ *   - POST /v1/register/connect-auto
  *
- * Endpoints HISTORIQUES (inchangés) :
- * GET  /v1/ping
- * GET  /v1/usb/scan
- * POST /v1/usb/open-ping
- * POST /v1/lcp/connect
- * POST /v1/register/validate
- * POST /v1/delivery/A
- * POST /v1/delivery/alignA
- * POST /v1/delivery/C
- * POST /v1/delivery/oneshot/start
- * GET  /v1/delivery/job/{jobId}
- * POST /v1/delivery/job/continue
- * POST /v1/delivery/job/terminate
- * POST /v1/db/dump
- * GET  /v1/tick/wait
- * POST /v1/media/check
+ * ✅ OPTION 2 :
+ *   - Sur toutes les routes media-aware: si body.media absent -> media = activeKey (BT si activeKey=BT:..., sinon USB)
  *
- * AJOUTS MINIMAUX (MANDAT) :
- * GET  /v1/bt/list
- * POST /v1/bt/activate
+ * ✅ AUTO-HEAL GLOBAL :
+ *   - Sur toutes les routes SAUF /v1/register/connect-auto :
+ *     si l'opération échoue car "registre/session/média pas prêt",
+ *     on tente 3x /register/connect-auto (via facade.api_registerConnectAuto) puis on réessaie.
  */
 public final class ApiServer {
 
@@ -87,7 +96,7 @@ public final class ApiServer {
                     Socket s = serverSocket.accept();
                     workers.execute(() -> handleClient(s));
                 } catch (Exception e) {
-                    if (running) t("[API " + ts() + "] accept error: " + safeMsg(e));
+                    if (running) t("[API " + ts() + "] accept ERR: " + safeMsg(e));
                 }
             }
         });
@@ -108,61 +117,44 @@ public final class ApiServer {
         int rid = nextRid();
         String remote = String.valueOf(s.getInetAddress());
         long t0 = System.currentTimeMillis();
+
         try {
             try { s.setSoTimeout(10_000); } catch (Exception ignored) {}
 
-            if (s.getInetAddress() == null || !s.getInetAddress().isLoopbackAddress()) {
-                t("[API " + ts() + "][RID=" + rid + "] REJECT remote=" + remote);
-                writeJson(s, 403, ApiResult.fail("API: 0 - Forbidden (loopback only)", "NOT_LOOPBACK").toJson());
-                return;
-            }
-
             BufferedInputStream in = new BufferedInputStream(s.getInputStream());
-            OutputStream out = s.getOutputStream();
             HttpReq req = readHttpRequest(in);
+            if (req == null) return;
 
-            if (isTickWait(req)) {
-                long waitMs = req.queryLong("wait_ms", 25_000L);
-                if (waitMs < 0) waitMs = 0;
-                if (waitMs > 2000L) waitMs = 2000L;
-                try { s.setSoTimeout((int) Math.min(15_000, waitMs + 8_000)); } catch (Exception ignored) {}
-            }
+            long t1 = System.currentTimeMillis();
 
-            t("[API " + ts() + "][RID=" + rid + "] REQ " + req.method + " " + req.path + " body=" + shrink(req.body));
+            String shortBody = shrink(req.body);
+            t("[API " + ts() + "] REQ #" + rid + " " + remote + " " + req.method + " " + req.path +
+                    (shortBody.isEmpty() ? "" : (" body=" + shortBody)));
 
-            ApiResult ar;
-            JSONObject resp;
-            int status;
-
+            ApiResult result;
             try {
-                if (isTickWait(req)) ar = route(req);
-                else synchronized (lcpLock) { ar = route(req); }
-
-                if (ar != null && ar.code == 0) {
-                    if ("TICKET_PENDING".equals(ar.err)) status = 422;
-                    else status = 400;
+                if (isTickWait(req)) {
+                    synchronized (lcpLock) {
+                        result = route(req);
+                    }
                 } else {
-                    status = 200;
+                    result = route(req);
                 }
-
-                resp = (ar != null) ? ar.toJson()
-                        : ApiResult.fail("API: 0 - Internal error", "INTERNAL").toJson();
-
             } catch (Exception e) {
-                status = 500;
                 JSONObject d = new JSONObject();
                 try { d.put("detail", safeMsg(e)); } catch (Exception ignored) {}
-                resp = ApiResult.fail("API: 0 - Internal error", "INTERNAL", d).toJson();
+                result = ApiResult.fail("API: 0 - Exception", "EXCEPTION", d);
             }
 
-            writeJson(out, status, resp);
+            JSONObject json = (result != null) ? result.toJson() : ApiResult.fail("API: 0 - Null", "NULL").toJson();
+            writeJson(s, 200, json);
 
-            long dt = System.currentTimeMillis() - t0;
-            t("[API " + ts() + "][RID=" + rid + "] RESP " + status + " dt=" + dt + "ms json=" + shrink(resp.toString()));
+            long t2 = System.currentTimeMillis();
+            t("[API " + ts() + "] RESP #" + rid + " " + (t2 - t1) + "ms total=" + (t2 - t0) +
+                    "ms -> " + shrink(json.toString()));
 
         } catch (Exception e) {
-            t("[API " + ts() + "][RID=" + rid + "] ERROR " + safeMsg(e) + " remote=" + remote);
-            try { writeJson(s, 500, ApiResult.fail("API: 0 - Internal error", "INTERNAL").toJson()); } catch (Exception ignored) {}
+            t("[API " + ts() + "] IO ERR #" + rid + ": " + safeMsg(e));
         } finally {
             try { s.close(); } catch (Exception ignored) {}
         }
@@ -196,6 +188,7 @@ public final class ApiServer {
             String m = (body != null) ? body.optString("media", "") : "";
             if (m != null) m = m.trim().toLowerCase(Locale.ROOT);
             if (m != null && !m.isEmpty()) return m;
+
             String activeKey = MediaTransportManager.getActiveKeyStatic();
             if (activeKey != null) {
                 String ak = activeKey.trim().toUpperCase(Locale.ROOT);
@@ -214,6 +207,7 @@ public final class ApiServer {
                     : "";
             if (btMac != null) btMac = btMac.trim();
             if (btMac != null && !btMac.isEmpty()) return btMac;
+
             String resolved = resolveBtMacFromApk();
             return (resolved != null) ? resolved.trim() : "";
         } catch (Exception ignored) {
@@ -225,6 +219,111 @@ public final class ApiServer {
         return (body != null) ? body : new JSONObject();
     }
 
+    // =========================================================
+    // Auto-heal (global): 3 tentatives connect-auto avant de réessayer l'opération
+    // - S'applique à toutes les routes SAUF /register/connect-auto
+    // - Déclenchement uniquement sur erreurs "session/média/registre pas prêt"
+    // =========================================================
+    private static final int AUTO_CONNECT_MAX_TRIES = 3;
+    private static final long AUTO_CONNECT_DELAY_MS = 250;
+
+    private static boolean shouldRetryViaConnectAuto(ApiResult r) {
+        if (r == null) return true;
+        if (r.code == 1) return false;
+
+        String err = (r.err != null) ? r.err : "";
+        String msg = (r.msg != null) ? r.msg : "";
+        String e = err.toUpperCase(Locale.ROOT);
+        String m = msg.toUpperCase(Locale.ROOT);
+
+        if (e.contains("ERR_REGISTER_NOT_FOUND")) return true;
+        if (e.contains("ERR_MEDIA_NOT_READY")) return true;
+        if (e.contains("ERR_USB_PORT_NOT_READY")) return true;
+        if (e.contains("ERR_USB_NOT_CONNECTED")) return true;
+        if (e.contains("ERR_BT_NOT_CONNECTED")) return true;
+        if (e.contains("ERR_LCP_NOT_CONNECTED")) return true;
+        if (e.contains("ERR_SESSION")) return true;
+
+        if (m.contains("NON PRÊT") || m.contains("NOT READY")) return true;
+
+        return false;
+    }
+
+    private static Integer extractAutoNode(JSONObject body, Integer fallback) {
+        Integer n = parseNodeDec(body);
+        if (n != null) return n;
+        if (body != null && body.has("lcrnode")) {
+            int v = body.optInt("lcrnode", 0);
+            if (v != 0) return v;
+        }
+        return fallback;
+    }
+
+    private static String extractAutoSerial(JSONObject body) {
+        if (body == null) return null;
+
+        String s = body.optString("serialId", "").trim();
+        if (s.isEmpty()) s = body.optString("serial_id", "").trim();
+        if (s.isEmpty()) s = body.optString("expected_serial_id", "").trim();
+
+        return s.isEmpty() ? null : s;
+    }
+
+    private static void sleepQuiet(long ms) {
+        try { Thread.sleep(ms); } catch (Exception ignored) {}
+    }
+
+    /**
+     * Wrapper générique:
+     * - Exécute op
+     * - Si échec "session/média/registre pas prêt", tente 3x connect-auto puis réessaie op
+     * - IMPORTANT: NE JAMAIS l'utiliser sur /register/connect-auto
+     */
+    private ApiResult withAutoConnectRetry(JSONObject body, Supplier<ApiResult> op) {
+        ApiResult r0 = op.get();
+        if (!shouldRetryViaConnectAuto(r0)) return r0;
+
+        Integer node = extractAutoNode(body, null);
+        String serial = extractAutoSerial(body);
+
+        // Sans hint (node/serial), on ne peut pas faire connect-auto ciblé -> on retourne l'erreur telle quelle.
+        if (node == null && (serial == null || serial.isEmpty())) {
+            return r0;
+        }
+
+        ApiResult lastAuto = null;
+        ApiResult lastOp = r0;
+
+        for (int i = 1; i <= AUTO_CONNECT_MAX_TRIES; i++) {
+            lastAuto = facade.api_registerConnectAuto(serial, node);
+            if (lastAuto != null && lastAuto.code == 1) {
+                ApiResult r2 = op.get();
+                lastOp = r2;
+                if (r2 != null && r2.code == 1) {
+                    try {
+                        if (r2.data != null) {
+                            r2.data.put("autoConnectUsed", true);
+                            r2.data.put("autoConnectTries", i);
+                        }
+                    } catch (Exception ignored) {}
+                    return r2;
+                }
+            }
+            sleepQuiet(AUTO_CONNECT_DELAY_MS);
+        }
+
+        // Echec après 3 tentatives: enrichir la dernière réponse (diagnostic).
+        try {
+            if (lastOp != null && lastOp.data != null) {
+                lastOp.data.put("autoConnectUsed", true);
+                lastOp.data.put("autoConnectTries", AUTO_CONNECT_MAX_TRIES);
+                if (lastAuto != null) lastOp.data.put("autoConnectLast", lastAuto.toJson());
+            }
+        } catch (Exception ignored) {}
+
+        return (lastOp != null) ? lastOp : r0;
+    }
+
     private ApiResult gateMediaIfProvided(JSONObject body) {
         // ✅ CORRECTIF FINAL – BT_AUTONOME
         // ApiServer ne décide jamais du média ni du BT.
@@ -233,29 +332,29 @@ public final class ApiServer {
         return null;
     }
 
-
     // =========================
     // ROUTING (COMPLET)
     // =========================
     private ApiResult route(HttpReq req) throws Exception {
 
-        // Health
+        // Ping
         if ("GET".equals(req.method) && "/v1/ping".equals(req.path)) {
-            JSONObject d = new JSONObject();
-            d.put("version", "v1");
-            d.put("bind", "127.0.0.1");
-            d.put("port", port);
-            return ApiResult.ok("PING: 1 - OK", d);
+            return withAutoConnectRetry(null, () -> facade.api_ping());
+        }
+
+        // USB scan
+        if ("GET".equals(req.method) && "/v1/usb/scan".equals(req.path)) {
+            return withAutoConnectRetry(null, () -> facade.api_scanUsb());
         }
 
         // ✅ BT list
         if ("GET".equals(req.method) && "/v1/bt/list".equals(req.path)) {
-            return facade.api_btList();
+            return withAutoConnectRetry(null, () -> facade.api_btList());
         }
 
         // ✅ BT activate (auto)
         if ("POST".equals(req.method) && "/v1/bt/activate".equals(req.path)) {
-            return facade.api_btActivate();
+            return withAutoConnectRetry(null, () -> facade.api_btActivate());
         }
 
         // Media check
@@ -263,55 +362,31 @@ public final class ApiServer {
             JSONObject body = safeBody(req.jsonBody());
             String media = resolveMediaDefault(body);
             String btMac = resolveBtMacDefault(body);
-            if ("bt".equals(media.toLowerCase(Locale.ROOT)) && btMac.isEmpty()) {
-                String resolved = resolveBtMacFromApk();
-                if (resolved != null && !resolved.isEmpty()) {
-                    btMac = resolved;
-                    try { body.put("bt_mac", resolved); body.put("btMac", resolved); } catch (Exception ignored) {}
-                }
-            }
 
-            ApiResult r = facade.api_mediaCheck(media, btMac);
-            if ("bt".equals(media.toLowerCase(Locale.ROOT)) && btMac.isEmpty()
-                    && r != null && r.code == 0 && "ERR_BT_MAC_REQUIRED".equals(r.err)) {
-                JSONObject d = new JSONObject();
-                try { d.put("bt_mac", JSONObject.NULL); } catch (Exception ignored) {}
-                return ApiResult.ok("MediaCheck: 1 - BT OK (bt_mac résolu: none)", d);
+            // compat: si on check BT sans mac explicite, on déduit de l'activeKey
+            if ("bt".equals(media.toLowerCase(Locale.ROOT)) && (btMac == null || btMac.trim().isEmpty())) {
+                String resolved = resolveBtMacFromApk();
+                if (resolved != null && !resolved.isEmpty()) btMac = resolved;
             }
-            return r;
+            final String m = media;
+            final String b = btMac;
+            return withAutoConnectRetry(body, () -> facade.api_mediaCheck(m, b));
         }
-        
-        // Media auto-connect (API automation, aligné UI)
+
+        // Media auto-connect (si présent dans ton ApiFacade)
         if ("POST".equals(req.method) && "/v1/media/auto-connect".equals(req.path)) {
             JSONObject body = safeBody(req.jsonBody());
             Integer node = parseNodeDec(body);
             Integer from = parseFromDec(body);
-            //old return facade.api_mediaAutoConnect(node, from);
-            return ((MultiRegisterApiFacadeImpl) facade).api_mediaAutoConnect(node, from);
-        }
-
-
-        // Tick wait
-        if (isTickWait(req)) {
-            Integer node = req.queryInt("lcrnode_dec");
-            long sinceSeq = req.queryLong("since_seq", 0L);
-            long waitMs = req.queryLong("wait_ms", 25_000L);
-            if (waitMs < 0) waitMs = 0;
-            if (waitMs > 2000L) waitMs = 2000L;
-            return facade.api_tickWait(node, sinceSeq, (int) waitMs);
-        }
-
-        // USB scan
-        if ("GET".equals(req.method) && "/v1/usb/scan".equals(req.path)) {
-            return facade.api_scanUsb();
+            return withAutoConnectRetry(body, () -> facade.api_mediaAutoConnect(node, from));
         }
 
         // USB open-ping
         if ("POST".equals(req.method) && "/v1/usb/open-ping".equals(req.path)) {
-            return facade.api_openPingUsb();
+            return withAutoConnectRetry(null, () -> facade.api_openPingUsb());
         }
 
-        // LCP connect
+        // LCP connect (media-aware by default = activeKey)
         if ("POST".equals(req.method) && "/v1/lcp/connect".equals(req.path)) {
             JSONObject body = safeBody(req.jsonBody());
             ApiResult gate = gateMediaIfProvided(body);
@@ -321,10 +396,11 @@ public final class ApiServer {
             Integer from = parseFromDec(body);
             String media = resolveMediaDefault(body);
             String btMac = resolveBtMacDefault(body);
-            return facade.api_connectLcp(node, from, media, btMac);
+
+            return withAutoConnectRetry(body, () -> facade.api_connectLcp(node, from, media, btMac));
         }
 
-        // Register validate
+        // Register validate (media-aware by default = activeKey)
         if ("POST".equals(req.method) && "/v1/register/validate".equals(req.path)) {
             JSONObject body = safeBody(req.jsonBody());
             ApiResult gate = gateMediaIfProvided(body);
@@ -354,31 +430,44 @@ public final class ApiServer {
             String media = resolveMediaDefault(body);
             String btMac = resolveBtMacDefault(body);
 
-            return facade.api_registerValidate(numero, node, from, expectedSerial, product, compartment, media, btMac);
+            final String fNumero = numero;
+            final String fExpectedSerial = expectedSerial;
+            final Integer fProduct = product;
+            final String fCompartment = compartment;
+            final String fMedia = media;
+            final String fBtMac = btMac;
+
+            return withAutoConnectRetry(body, () ->
+                    facade.api_registerValidate(fNumero, node, from, fExpectedSerial, fProduct, fCompartment, fMedia, fBtMac)
+            );
         }
 
-        // Delivery A
+        // Delivery A (alias alignA)
         if ("POST".equals(req.method) && "/v1/delivery/A".equals(req.path)) {
             JSONObject body = safeBody(req.jsonBody());
             ApiResult gate = gateMediaIfProvided(body);
             if (gate != null) return gate;
+
             Integer node = parseNodeDec(body);
             Integer from = parseFromDec(body);
             String media = resolveMediaDefault(body);
             String btMac = resolveBtMacDefault(body);
-            return facade.api_deliveryAlignA(node, from, media, btMac);
+
+            return withAutoConnectRetry(body, () -> facade.api_deliveryAlignA(node, from, media, btMac));
         }
 
-        // Delivery A alias
+        // Delivery alignA
         if ("POST".equals(req.method) && "/v1/delivery/alignA".equals(req.path)) {
             JSONObject body = safeBody(req.jsonBody());
             ApiResult gate = gateMediaIfProvided(body);
             if (gate != null) return gate;
+
             Integer node = parseNodeDec(body);
             Integer from = parseFromDec(body);
             String media = resolveMediaDefault(body);
             String btMac = resolveBtMacDefault(body);
-            return facade.api_deliveryAlignA(node, from, media, btMac);
+
+            return withAutoConnectRetry(body, () -> facade.api_deliveryAlignA(node, from, media, btMac));
         }
 
         // Delivery C
@@ -386,13 +475,16 @@ public final class ApiServer {
             JSONObject body = safeBody(req.jsonBody());
             ApiResult gate = gateMediaIfProvided(body);
             if (gate != null) return gate;
+
             Integer node = parseNodeDec(body);
             Integer from = parseFromDec(body);
             int product = body.optInt("product1to16", body.optInt("productId", 1));
             double presetNet = body.optDouble("presetNet", 0.0);
+
             String media = resolveMediaDefault(body);
             String btMac = resolveBtMacDefault(body);
-            return facade.api_deliveryStartC(node, from, product, presetNet, media, btMac);
+
+            return withAutoConnectRetry(body, () -> facade.api_deliveryStartC(node, from, product, presetNet, media, btMac));
         }
 
         // OneShot start
@@ -403,9 +495,10 @@ public final class ApiServer {
 
             Integer node = parseNodeDec(body);
             Integer from = parseFromDec(body);
-            String numero = body.optString("numero_livraison", body.optString("numeroLivraison", ""));
-            int product = body.optInt("product1to16", body.optInt("product", body.optInt("productId", 1)));
-            double preset = body.optDouble("presetNet", body.optDouble("presetNetL", body.optDouble("preset", 0.0)));
+
+            String numero = body.optString("numero_livraison", body.optString("numeroLivraison", "")).trim();
+            int product = body.optInt("product1to16", body.optInt("productId", 1));
+            double presetNetL = body.optDouble("presetNetL", body.optDouble("presetNet", 0.0));
 
             String compartment = null;
             try {
@@ -416,59 +509,90 @@ public final class ApiServer {
             String media = resolveMediaDefault(body);
             String btMac = resolveBtMacDefault(body);
 
-            return facade.api_deliveryOneShotStart(node, from, numero, product, preset, compartment, media, btMac);
+            final String fNumero = numero;
+            final String fCompartment = compartment;
+
+            return withAutoConnectRetry(body, () ->
+                    facade.api_deliveryOneShotStart(node, from, fNumero, product, presetNetL, fCompartment, media, btMac)
+            );
         }
 
-        // Continue job - WITH VALIDATION
+        // Delivery job get (GET /v1/delivery/job/...) : conservé
+        if ("GET".equals(req.method) && req.path != null && req.path.startsWith("/v1/delivery/job/")) {
+            String jobId = req.path.substring("/v1/delivery/job/".length());
+            if (jobId != null && jobId.trim().isEmpty()) jobId = null;
+            final String fJobId = jobId;
+            return withAutoConnectRetry(null, () -> facade.api_deliveryJobGet(fJobId));
+        }
+
+        // Delivery job continue
         if ("POST".equals(req.method) && "/v1/delivery/job/continue".equals(req.path)) {
             JSONObject body = safeBody(req.jsonBody());
-            ApiResult gate = gateMediaIfProvided(body);
-            if (gate != null) return gate;
-
             String jobId = body.optString("jobId", "").trim();
-            if (jobId.isEmpty()) return ApiResult.fail("Continue: 0 - Job invalide", "JOB_ID_EMPTY");
+            if (jobId.isEmpty()) jobId = null;
             Integer node = parseNodeDec(body);
-            return facade.api_deliveryContinue(jobId, node);
+            final String fJobId = jobId;
+            final Integer fNode = node;
+            return withAutoConnectRetry(body, () -> facade.api_deliveryContinue(fJobId, fNode));
         }
 
-        // Terminate job - WITH VALIDATION
+        // Delivery job terminate
         if ("POST".equals(req.method) && "/v1/delivery/job/terminate".equals(req.path)) {
             JSONObject body = safeBody(req.jsonBody());
-            ApiResult gate = gateMediaIfProvided(body);
-            if (gate != null) return gate;
-
             String jobId = body.optString("jobId", "").trim();
-            if (jobId.isEmpty()) return ApiResult.fail("Terminate: 0 - Job invalide", "JOB_ID_EMPTY");
+            if (jobId.isEmpty()) jobId = null;
             Integer node = parseNodeDec(body);
-            return facade.api_deliveryTerminate(jobId, node);
-        }
-
-        // Job GET
-        if ("GET".equals(req.method) && req.path.startsWith("/v1/delivery/job/")) {
-            String jobId = req.path.substring("/v1/delivery/job/".length()).trim();
-            if (jobId.isEmpty()) return ApiResult.fail("Job: 0 - Invalide", "JOB_ID_EMPTY");
-            Integer node = req.queryInt("lcrnode_dec");
-            return facade.api_deliveryJobGet(jobId, node);
+            final String fJobId = jobId;
+            final Integer fNode = node;
+            return withAutoConnectRetry(body, () -> facade.api_deliveryTerminate(fJobId, fNode));
         }
 
         // DB dump
         if ("POST".equals(req.method) && "/v1/db/dump".equals(req.path)) {
-            return facade.api_dbDump();
+            return withAutoConnectRetry(null, () -> facade.api_dbDump());
         }
-		
-	// Route pour /v1/register/connect-auto
-	if ("POST".equals(req.method) && "/v1/register/connect-auto".equals(req.path)) {
-		JSONObject body = safeBody(req.jsonBody());
-		String serialId = (body != null && body.has("serialId")) ? body.optString("serialId", null) : null;
-		Integer lcrnode = (body != null && body.has("lcrnode")) ? body.optInt("lcrnode", 0) : null;
-		if (lcrnode != null && lcrnode == 0) lcrnode = null;
-		return facade.api_registerConnectAuto(serialId, lcrnode);
-	}
 
+        // Tick wait
+        if ("GET".equals(req.method) && "/v1/tick/wait".equals(req.path)) {
+            Integer node = null;
+            Long since = null;
+            Integer wait = null;
+            try {
+                if (req.query != null) {
+                    String n = req.query.get("lcrnode_dec");
+                    if (n == null) n = req.query.get("lcrnode");
+                    if (n != null && !n.trim().isEmpty()) node = Integer.parseInt(n.trim());
 
-        JSONObject d = new JSONObject();
-        try { d.put("path", req.path).put("method", req.method); } catch (Exception ignored) {}
-        return ApiResult.fail("API: 0 - Not found", "NOT_FOUND", d);
+                    String s = req.query.get("since_seq");
+                    if (s != null && !s.trim().isEmpty()) since = Long.parseLong(s.trim());
+
+                    String w = req.query.get("wait_ms");
+                    if (w != null && !w.trim().isEmpty()) wait = Integer.parseInt(w.trim());
+                }
+            } catch (Exception ignored) {}
+
+            // body-hint pour permettre auto-heal si node fourni dans la query
+            JSONObject bodyHint = new JSONObject();
+            try { if (node != null) bodyHint.put("lcrnode_dec", node); } catch (Exception ignored) {}
+
+            final Integer fNode = node;
+            final Long fSince = since;
+            final Integer fWait = wait;
+
+            return withAutoConnectRetry(bodyHint, () -> facade.api_tickWait(fNode, fSince, fWait));
+        }
+
+        // ✅ /v1/register/connect-auto (MANDAT) — EXCLU de l'auto-heal (sinon récursion)
+        if ("POST".equals(req.method) && "/v1/register/connect-auto".equals(req.path)) {
+            JSONObject body = safeBody(req.jsonBody());
+            String serialId = (body.has("serialId")) ? body.optString("serialId", null) : null;
+            Integer lcrnode = (body.has("lcrnode")) ? body.optInt("lcrnode", 0) : null;
+            if (lcrnode != null && lcrnode == 0) lcrnode = null;
+            return facade.api_registerConnectAuto(serialId, lcrnode);
+        }
+
+        return ApiResult.fail("API: 0 - Not found", "NOT_FOUND",
+                new JSONObject().put("path", req.path));
     }
 
     // =========================
@@ -502,21 +626,11 @@ public final class ApiServer {
 
     private void writeJson(OutputStream out, int status, JSONObject json) throws Exception {
         byte[] body = json.toString().getBytes(StandardCharsets.UTF_8);
-
-        String statusText =
-                (status == 200) ? "OK" :
-                        (status == 400) ? "Bad Request" :
-                                (status == 403) ? "Forbidden" :
-                                        (status == 404) ? "Not Found" :
-                                                (status == 422) ? "Unprocessable Entity" : "Internal Server Error";
-
-        String headers =
-                "HTTP/1.1 " + status + " " + statusText + "\r\n" +
-                        "Content-Type: application/json; charset=utf-8\r\n" +
-                        "Content-Length: " + body.length + "\r\n" +
-                        "Connection: close\r\n\r\n";
-
-        out.write(headers.getBytes(StandardCharsets.UTF_8));
+        String hdr = "HTTP/1.1 " + status + " OK\r\n" +
+                "Content-Type: application/json; charset=utf-8\r\n" +
+                "Content-Length: " + body.length + "\r\n" +
+                "Connection: close\r\n\r\n";
+        out.write(hdr.getBytes(StandardCharsets.UTF_8));
         out.write(body);
         out.flush();
     }
@@ -533,39 +647,18 @@ public final class ApiServer {
         HttpReq(String method, String path, byte[] body, Map<String, String> query) {
             this.method = method;
             this.path = path;
-            this.body = (body == null) ? new byte[0] : body;
-            this.query = (query == null) ? new HashMap<>() : query;
-        }
-
-        Integer queryInt(String key) {
-            try {
-                String v = query.get(key);
-                if (v == null) return null;
-                int n = Integer.parseInt(v.trim());
-                return (n == 0) ? null : n;
-            } catch (Exception e) {
-                return null;
-            }
-        }
-
-        long queryLong(String key, long def) {
-            try {
-                String v = query.get(key);
-                if (v == null) return def;
-                return Long.parseLong(v.trim());
-            } catch (Exception e) {
-                return def;
-            }
+            this.body = body;
+            this.query = query;
         }
 
         JSONObject jsonBody() {
             try {
-                if (body.length == 0) return new JSONObject();
-                String s = new String(body, StandardCharsets.UTF_8);
-                if (!s.isEmpty() && s.charAt(0) == '\uFEFF') s = s.substring(1);
+                if (body == null || body.length == 0) return null;
+                String s = new String(body, StandardCharsets.UTF_8).trim();
+                if (s.isEmpty()) return null;
                 return new JSONObject(s);
             } catch (Exception e) {
-                return new JSONObject();
+                return null;
             }
         }
     }
@@ -574,7 +667,6 @@ public final class ApiServer {
         ByteArrayOutputStream headerOut = new ByteArrayOutputStream();
         int b;
         int state = 0;
-
         while ((b = in.read()) != -1) {
             headerOut.write(b);
             if (state == 0 && b == '\r') state = 1;
@@ -586,44 +678,52 @@ public final class ApiServer {
         }
 
         String header = headerOut.toString(StandardCharsets.UTF_8.name());
-        String[] lines = header.split("\r\n");
-        if (lines.length == 0) throw new Exception("bad request");
+        if (header == null || header.trim().isEmpty()) return null;
 
-        String[] first = lines[0].split(" ");
-        String method = (first.length > 0) ? first[0].trim() : "GET";
-        String rawPath = (first.length > 1) ? first[1].trim() : "/";
+        String[] lines = header.split("\n");
+        if (lines.length == 0) return null;
 
-        String path = rawPath;
+        String[] first = lines[0].trim().split(" ");
+        if (first.length < 2) return null;
+        String method = first[0].trim().toUpperCase(Locale.ROOT);
+        String fullPath = first[1].trim();
+
+        String path = fullPath;
         Map<String, String> query = new HashMap<>();
-        int q = rawPath.indexOf('?');
+        int q = fullPath.indexOf('?');
         if (q >= 0) {
-            path = rawPath.substring(0, q);
-            String qs = rawPath.substring(q + 1);
+            path = fullPath.substring(0, q);
+            String qs = fullPath.substring(q + 1);
             for (String kv : qs.split("&")) {
-                if (kv == null || kv.trim().isEmpty()) continue;
                 int eq = kv.indexOf('=');
-                if (eq > 0) query.put(kv.substring(0, eq), kv.substring(eq + 1));
-                else query.put(kv.trim(), "1");
+                if (eq > 0) {
+                    String k = kv.substring(0, eq);
+                    String v = kv.substring(eq + 1);
+                    query.put(k, v);
+                } else if (!kv.trim().isEmpty()) {
+                    query.put(kv.trim(), "");
+                }
             }
         }
 
         int contentLength = 0;
-        for (String line : lines) {
-            String ll = line.toLowerCase(Locale.ROOT);
-            if (ll.startsWith("content-length:")) {
-                String v = line.substring("content-length:".length()).trim();
-                try { contentLength = Integer.parseInt(v); } catch (Exception ignored) {}
+        for (String l : lines) {
+            String s = l.trim();
+            if (s.toLowerCase(Locale.ROOT).startsWith("content-length:")) {
+                try {
+                    contentLength = Integer.parseInt(s.substring("content-length:".length()).trim());
+                } catch (Exception ignored) {}
             }
         }
 
-        byte[] body = new byte[0];
-        if (contentLength > 0) {
+        byte[] body = null;
+        if (contentLength > 0 && contentLength < 1_000_000) {
             body = new byte[contentLength];
-            int read = 0;
-            while (read < contentLength) {
-                int r = in.read(body, read, contentLength - read);
-                if (r <= 0) break;
-                read += r;
+            int off = 0;
+            while (off < contentLength) {
+                int r = in.read(body, off, contentLength - off);
+                if (r < 0) break;
+                off += r;
             }
         }
 
@@ -646,7 +746,7 @@ public final class ApiServer {
     }
 
     private static String shrink(byte[] body) {
-        if (body == null || body.length == 0) return "{}";
+        if (body == null || body.length == 0) return "";
         String s = new String(body, StandardCharsets.UTF_8);
         return shrink(s);
     }
