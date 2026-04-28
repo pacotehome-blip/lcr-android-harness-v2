@@ -365,18 +365,18 @@ public final class ApiServer {
                 return facade.api_mediaCheck(media, btMac);
             });
         }
+   
 
-        
-        // Register scan (USB + BT)
+        // ✅ Register scan (USB + BT)
         if ("POST".equals(req.method) && "/v1/register/scan".equals(req.path)) {
             RegisterScanController ctrl = new RegisterScanController(
-                    MediaTransportManager.get(appContext),
+                    MediaTransportManager.get(null),
                     DiscoveredRegisterStore.get()
             );
             return withAutoConnectRetry(null, ctrl::scan);
         }
 
-// Media auto-connect (ALIAS -> register/connect-auto)
+        // Media auto-connect (ALIAS -> register/connect-auto)
         if ("POST".equals(req.method) && "/v1/media/auto-connect".equals(req.path)) {
             JSONObject body = safeBody(req.jsonBody());
             return withAutoConnectRetry(body, () -> {
