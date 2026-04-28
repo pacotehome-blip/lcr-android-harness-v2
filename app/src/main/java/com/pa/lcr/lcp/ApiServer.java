@@ -66,6 +66,20 @@ public final class ApiServer {
         this.port = port;
     }
 
+    private final DiscoveredRegisterStore discoveredStore;
+
+    public ApiServer(
+            ApiFacade facade,
+            DiscoveredRegisterStore discoveredStore,
+            ApiLogSink trace,
+            int port
+    ) {
+        this.facade = facade;
+        this.discoveredStore = discoveredStore;
+        this.trace = trace;
+        this.port = port;
+    }
+
     public synchronized boolean isRunning() { return running; }
 
     public synchronized void start() throws Exception {
@@ -366,7 +380,7 @@ public final class ApiServer {
         if ("POST".equals(req.method) && "/v1/register/scan".equals(req.path)) {
             RegisterScanController ctrl = new RegisterScanController(
                     MediaTransportManager.get(null),
-                    DiscoveredRegisterStore.get("api")
+                    discoveredStore
             );
             return withAutoConnectRetry(null, ctrl::scan);
         }
