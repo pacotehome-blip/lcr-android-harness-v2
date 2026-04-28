@@ -21,6 +21,10 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
+import com.pa.lcr.lcp.api.RegisterScanController;
+import com.pa.lcr.lcp.discovery.DiscoveredRegisterStore;
+
+
 /**
  * API-Face HTTP Server
  * - Bind strict: 127.0.0.1 only (no LAN)
