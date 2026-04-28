@@ -366,7 +366,7 @@ public final class ApiServer {
         if ("POST".equals(req.method) && "/v1/register/scan".equals(req.path)) {
             RegisterScanController ctrl = new RegisterScanController(
                     MediaTransportManager.get(null),
-                    DiscoveredRegisterStore.get()
+                    DiscoveredRegisterStore.("api")
             );
             return withAutoConnectRetry(null, ctrl::scan);
         }
