@@ -212,15 +212,6 @@ public final class ApiServer {
     }
 
 
-    // ------------------------------------------------------------------
-    // REGISTER SCAN
-    // ------------------------------------------------------------------
-    case "POST /v1/register/scan":
-            return new RegisterScanController(
-                MediaTransportManager.get(appContext),
-                DiscoveredRegisterStore.get()
-        ).scan();
-
     // =========================================================
     // Auto-heal (global): 3 tentatives connect-auto avant de réessayer l'opération
     // =========================================================
