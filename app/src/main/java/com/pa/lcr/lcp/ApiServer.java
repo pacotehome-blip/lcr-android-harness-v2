@@ -3,6 +3,9 @@ package com.pa.lcr.lcp;
 
 import com.pa.lcr.lcp.transport.MediaTransportManager;
 import org.json.JSONObject;
+import java.util.Set;
+import java.util.HashSet;
+import org.json.JSONArray;
 
 import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
@@ -210,13 +213,6 @@ public final class ApiServer {
     private static JSONObject safeBody(JSONObject body) {
         return (body != null) ? body : new JSONObject();
     }
-
-
-    // ------------------------------------------------------------------
-    // REGISTER SCAN
-    // ------------------------------------------------------------------
-    
-
     // =========================================================
     // Auto-heal (global): 3 tentatives connect-auto avant de réessayer l'opération
     // =========================================================
@@ -575,7 +571,63 @@ public final class ApiServer {
             return withAutoConnectRetry(bodyHint, () -> facade.api_tickWait(fNode, fSince, fWait));
         }
 
-        // ✅ /v1/register/connect-auto — EXCLU de l'auto-heal (sinon récursion)
+        
+        // Register scan-auto (BT/USB) : scan nodes 1..250 et retourne la liste des registres détectés
+        // - Utilise connect-auto pour chaque node afin de respecter la logique multi-média + UI dynamique
+        // - Body optionnel: { "startNode":1, "endNode":250 }
+        if ("POST".equals(req.method) && "/v1/register/scan-auto".equals(req.path)) {
+            JSONObject body = safeBody(req.jsonBody());
+            int start = body.has("startNode") ? body.optInt("startNode", 1) : 1;
+            int end = body.has("endNode") ? body.optInt("endNode", 250) : 250;
+            if (start < 1) start = 1;
+            if (end > 250) end = 250;
+            if (end < start) { int tmp = start; start = end; end = tmp; }
+
+            JSONArray regs = new JSONArray();
+            Set<String> seenSerial = new HashSet<>();
+
+            for (int node = start; node <= end; node++) {
+                ApiResult ar;
+                try {
+                    ar = facade.api_registerConnectAuto(null, node);
+                } catch (Exception e) {
+                    continue;
+                }
+                if (ar == null || ar.code != 1) continue;
+
+                JSONObject d = (ar.data != null) ? ar.data : new JSONObject();
+
+                // Déduplication par numéro de série si présent
+                String serial = null;
+                try {
+                    serial = d.optString("serialId", d.optString("serial_id", d.optString("serial", "")));
+                    if (serial != null) serial = serial.trim();
+                } catch (Exception ignored) {}
+                if (serial != null && !serial.isEmpty()) {
+                    if (seenSerial.contains(serial)) continue;
+                    seenSerial.add(serial);
+                }
+
+                regs.put(d);
+            }
+
+            if (regs.length() == 0) {
+                JSONObject d = new JSONObject();
+                try { d.put("startNode", start); } catch (Exception ignored) {}
+                try { d.put("endNode", end); } catch (Exception ignored) {}
+                try { d.put("suggestion", "Aucun registre trouvé sur BT ou USB. Vérifier médias READY, puis relancer scan-auto."); } catch (Exception ignored) {}
+                return ApiResult.fail("ScanAuto: 0 - Aucun registre trouvé sur BT ou USB", "NO_REGISTER_FOUND", d);
+            }
+
+            JSONObject out = new JSONObject();
+            try { out.put("startNode", start); } catch (Exception ignored) {}
+            try { out.put("endNode", end); } catch (Exception ignored) {}
+            try { out.put("count", regs.length()); } catch (Exception ignored) {}
+            try { out.put("registers", regs); } catch (Exception ignored) {}
+            return ApiResult.ok("ScanAuto: 1 - OK", out);
+        }
+
+// ✅ /v1/register/connect-auto — EXCLU de l'auto-heal (sinon récursion)
         if ("POST".equals(req.method) && "/v1/register/connect-auto".equals(req.path)) {
             JSONObject body = safeBody(req.jsonBody());
             String serialId = (body.has("serialId")) ? body.optString("serialId", null) : null;
