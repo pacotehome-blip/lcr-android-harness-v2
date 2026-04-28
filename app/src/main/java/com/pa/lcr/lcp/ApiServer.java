@@ -2,14 +2,6 @@
 package com.pa.lcr.lcp;
 
 import com.pa.lcr.lcp.transport.MediaTransportManager;
-import java.util.List;
-import java.util.ArrayList;
-import java.lang.reflect.Field;
-import org.json.JSONArray;
-import com.pa.lcr.lcp.transport.TransportStatus;
-import com.pa.lcr.lcp.transport.TransportSnapshot;
-import com.pa.lcr.lcp.transport.TransportIo;
-import com.pa.lcr.lcp.LcpLink;
 import org.json.JSONObject;
 
 import java.io.BufferedInputStream;
@@ -223,7 +215,39 @@ public final class ApiServer {
     // ------------------------------------------------------------------
     // REGISTER SCAN
     // ------------------------------------------------------------------
+    case "POST /v1/register/scan":
+            return new RegisterScanController(
+                MediaTransportManager.get(appContext),
+                DiscoveredRegisterStore.get()
+        ).scan();
 
+    // =========================================================
+    // Auto-heal (global): 3 tentatives connect-auto avant de réessayer l'opération
+    // =========================================================
+    private static final int AUTO_CONNECT_MAX_TRIES = 3;
+    private static final long AUTO_CONNECT_DELAY_MS = 250;
+
+    private static boolean shouldRetryViaConnectAuto(ApiResult r) {
+        if (r == null) return true;
+        if (r.code == 1) return false;
+
+        String err = (r.err != null) ? r.err : "";
+        String msg = (r.msg != null) ? r.msg : "";
+        String e = err.toUpperCase(Locale.ROOT);
+        String m = msg.toUpperCase(Locale.ROOT);
+
+        if (e.contains("ERR_REGISTER_NOT_FOUND")) return true;
+        if (e.contains("ERR_MEDIA_NOT_READY")) return true;
+        if (e.contains("ERR_USB_PORT_NOT_READY")) return true;
+        if (e.contains("ERR_USB_NOT_CONNECTED")) return true;
+        if (e.contains("ERR_BT_NOT_CONNECTED")) return true;
+        if (e.contains("ERR_LCP_NOT_CONNECTED")) return true;
+        if (e.contains("ERR_SESSION")) return true;
+
+        if (m.contains("NON PRÊT") || m.contains("NOT READY")) return true;
+
+        return false;
+    }
 
     private static Integer extractAutoNode(JSONObject body, Integer fallback) {
         Integer n = parseNodeDec(body);
@@ -342,93 +366,7 @@ public final class ApiServer {
             });
         }
 
-        
-        // Register scan (USB + BT) — retourne la liste des registres détectés
-        // - Parcourt les transports READY (USB + BT)
-        // - Scan nodes (default 1..250), lit #80 (serial)
-        // - Pour chaque registre détecté: appelle /register/connect-auto via facade (UI upsert + connect)
-        if ("POST".equals(req.method) && "/v1/register/scan".equals(req.path)) {
-            JSONObject body = safeBody(req.jsonBody());
-            int from = normFrom(body.has("from_dec") ? body.optInt("from_dec", 255) : 255);
-            int start = body.has("startNode") ? body.optInt("startNode", 1) : 1;
-            int end = body.has("endNode") ? body.optInt("endNode", 250) : 250;
-            if (start < 1) start = 1;
-            if (end > 250) end = 250;
-            if (end < start) { int tmp = start; start = end; end = tmp; }
-
-            // Récupérer l'instance MTM sans dépendre d'un Context (INSTANCE déjà initialisée côté APK)
-            MediaTransportManager mtm = null;
-            try {
-                Field f = MediaTransportManager.class.getDeclaredField("INSTANCE");
-                f.setAccessible(true);
-                mtm = (MediaTransportManager) f.get(null);
-            } catch (Exception ignored) {}
-
-            if (mtm == null) {
-                JSONObject d = new JSONObject();
-                try { d.put("detail", "MediaTransportManager INSTANCE null (app non initialisée?)"); } catch (Exception ignored) {}
-                return ApiResult.fail("Register scan: 0 - MTM null", "ERR_MEDIA_MTM_NULL", d);
-            }
-
-            JSONArray found = new JSONArray();
-            JSONArray transports = new JSONArray();
-
-            try {
-                List<TransportSnapshot> snaps = mtm.listSnapshots();
-                if (snaps != null) {
-                    for (TransportSnapshot snap : snaps) {
-                        if (snap == null || snap.key == null) continue;
-                        if (snap.status != TransportStatus.READY) continue;
-
-                        String transportKey = snap.key;
-                        transports.put(transportKey);
-
-                        TransportIo io = mtm.getByKey(transportKey);
-                        if (io == null || !io.isOpen()) continue;
-
-                        String media = transportKey.toUpperCase(Locale.ROOT).startsWith("BT:") ? "bt" : "usb";
-
-                        for (int node = start; node <= end; node++) {
-                            String serial = null;
-                            try {
-                                LcpLink link = new LcpLink(io, node, from, true);
-                                byte[] raw = link.opGetField(80, 400);
-                                if (raw != null && raw.length > 0) {
-                                    serial = new String(raw, java.nio.charset.StandardCharsets.UTF_8).trim();
-                                }
-                            } catch (Exception ignored2) {}
-
-                            if (serial == null || serial.isEmpty()) continue;
-
-                            // Appeler la logique officielle (connect-auto) pour: connect + UI upsert
-                            try { facade.api_registerConnectAuto(serial, node); } catch (Exception ignored3) {}
-
-                            JSONObject o = new JSONObject();
-                            try { o.put("serialId", serial); } catch (Exception ignored4) {}
-                            try { o.put("lcrnode", node); } catch (Exception ignored4) {}
-                            try { o.put("from", from); } catch (Exception ignored4) {}
-                            try { o.put("media", media); } catch (Exception ignored4) {}
-                            try { o.put("transportKey", transportKey); } catch (Exception ignored4) {}
-                            found.put(o);
-                        }
-                    }
-                }
-            } catch (Exception e) {
-                JSONObject d = new JSONObject();
-                try { d.put("detail", safeMsg(e)); } catch (Exception ignored) {}
-                return ApiResult.fail("Register scan: 0 - Failed", "ERR_REGISTER_SCAN_FAILED", d);
-            }
-
-            JSONObject d = new JSONObject();
-            try { d.put("from", from); } catch (Exception ignored) {}
-            try { d.put("startNode", start); } catch (Exception ignored) {}
-            try { d.put("endNode", end); } catch (Exception ignored) {}
-            try { d.put("transports", transports); } catch (Exception ignored) {}
-            try { d.put("registers", found); } catch (Exception ignored) {}
-            return ApiResult.ok("Register scan: 1 - OK", d);
-        }
-
-// Media auto-connect (ALIAS -> register/connect-auto)
+        // Media auto-connect (ALIAS -> register/connect-auto)
         if ("POST".equals(req.method) && "/v1/media/auto-connect".equals(req.path)) {
             JSONObject body = safeBody(req.jsonBody());
             return withAutoConnectRetry(body, () -> {
@@ -674,12 +612,6 @@ public final class ApiServer {
         else if (body.has("from")) f = body.optInt("from", 0);
         if (f != null && f == 0) f = null;
         return f;
-    }
-
-
-    private static int normFrom(int v) {
-        if (v < 0 || v > 255) return 255;
-        return v;
     }
 
     // =========================
