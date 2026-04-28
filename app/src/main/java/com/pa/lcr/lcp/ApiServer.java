@@ -366,7 +366,17 @@ public final class ApiServer {
             });
         }
 
-        // Media auto-connect (ALIAS -> register/connect-auto)
+        
+        // Register scan (USB + BT)
+        if ("POST".equals(req.method) && "/v1/register/scan".equals(req.path)) {
+            RegisterScanController ctrl = new RegisterScanController(
+                    MediaTransportManager.get(appContext),
+                    DiscoveredRegisterStore.get()
+            );
+            return withAutoConnectRetry(null, ctrl::scan);
+        }
+
+// Media auto-connect (ALIAS -> register/connect-auto)
         if ("POST".equals(req.method) && "/v1/media/auto-connect".equals(req.path)) {
             JSONObject body = safeBody(req.jsonBody());
             return withAutoConnectRetry(body, () -> {
