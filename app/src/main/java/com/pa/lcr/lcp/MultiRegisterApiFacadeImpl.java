@@ -1179,14 +1179,60 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
 
         return ApiResult.fail("Validate: 0 - media invalide", "ERR_MEDIA_INVALID");
     }
-
+    // =========================================================
+    // ✅ TICKET REPRINT — MEDIA-AWARE (USB / BT)
+    // =========================================================
     @Override
     public ApiResult api_ticketReprintCurrent(Integer lcrnode_dec, Integer from_dec) {
+        // Délègue vers la version media-aware avec media=auto
+        return api_ticketReprintCurrent(lcrnode_dec, from_dec, null, null);
+    }
+
+    @Override
+    public ApiResult api_ticketReprintCurrent(
+            Integer lcrnode_dec,
+            Integer from_dec,
+            String media,
+            String bt_mac) {
+
         int node = normNode(lcrnode_dec);
         int from = normFrom(from_dec);
-        DeliveryController dc = requireSession(node, from);
-        if (dc == null) return ApiResult.fail("Reprint: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
-        return dc.api_ticketReprintCurrent();
+
+        // Résoudre le média (auto = activeKey)
+        String m = (media == null) ? "" : media.trim().toLowerCase(Locale.ROOT);
+        if (m.isEmpty() || "auto".equals(m)) {
+            String activeKey = MediaTransportManager.getActiveKeyStatic();
+            m = (activeKey != null && activeKey.startsWith("BT:")) ? "bt" : "usb";
+        }
+
+        // --- USB
+        if ("usb".equals(m)) {
+            DeliveryController dc = requireSession(node, from);
+            if (dc == null) return ApiResult.fail("Reprint: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
+            return dc.api_ticketReprintCurrent();
+        }
+
+        // --- BT
+        if ("bt".equals(m) || "bluetooth".equals(m)) {
+            String key = resolveBtKeyOrActive(bt_mac);
+            if (key == null) {
+                return ApiResult.fail("Reprint: 0 - Aucun BT actif (appelle bt/activate)", "ERR_NO_ACTIVE_BT");
+            }
+
+            TransportIo io = (mediaMgr != null) ? mediaMgr.getByKey(key) : null;
+            if (io == null || !io.isOpen()) {
+                return ApiResult.fail("Reprint: 0 - BT non connecté", "ERR_BT_NOT_CONNECTED");
+            }
+
+            DeliveryController dc = sessions.getOrCreate(key, node, from, io);
+            if (dc == null) {
+                return ApiResult.fail("Reprint: 0 - Controller introuvable", "NO_CONTROLLER");
+            }
+
+            return dc.api_ticketReprintCurrent();
+        }
+
+        return ApiResult.fail("Reprint: 0 - media invalide", "ERR_MEDIA_INVALID");
     }
 
     @Override
