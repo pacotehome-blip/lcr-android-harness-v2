@@ -1,4 +1,3 @@
-
 package com.pa.lcr.lcp.transport;
 
 import android.bluetooth.BluetoothDevice;
@@ -7,14 +6,23 @@ import android.content.Context;
 import android.hardware.usb.UsbDevice;
 import com.hoho.android.usbserial.driver.UsbSerialPort;
 
+import com.pa.lcr.lcp.storage.BtSignalStore;
+
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 public final class MediaTransportManager {
 
     public static final String KEY_USB = "USB";
+
+    // Intervalle de persistance IO (secondes)
+    private static final int IO_SAMPLE_INTERVAL_SEC = 30;
 
     private static volatile MediaTransportManager INSTANCE;
 
@@ -34,9 +42,19 @@ public final class MediaTransportManager {
     // ✅ B1 FSM: un seul transport ACTIVE à la fois
     private volatile String activeKey = null;
 
+    // ✅ Signal BT: store + scheduler
+    private BtSignalStore btSignalStore;
+    private final ScheduledExecutorService scheduler =
+            Executors.newSingleThreadScheduledExecutor();
+    private final Map<String, ScheduledFuture<?>> ioSamplers = new ConcurrentHashMap<>();
+
     private MediaTransportManager(Context appCtx) {
         this.appCtx = appCtx;
         handles.put(KEY_USB, new TransportHandle(KEY_USB));
+        try {
+            btSignalStore = new BtSignalStore(appCtx);
+            btSignalStore.purgeOlderThanDaysAsync(30);
+        } catch (Exception ignored) {}
     }
 
     // ---------------------------------------------------------
@@ -98,19 +116,24 @@ public final class MediaTransportManager {
                 : ("BT SPP " + name + " " + (mac != null ? mac : ""));
 
         TransportIo io = new BtSppTransportIo(
-                key,
-                socket,
-                in,
-                out,
-                desc,
-                nextGen
+                key, socket, in, out, desc, nextGen
         );
 
         h.setConnected(io, io.describe());
+
+        // ✅ Démarrer le sampler IO périodique pour ce transport BT
+        startIoSampler(key);
     }
 
     public synchronized void onBtDisconnected(String mac, String reason) {
         String key = btKey(mac);
+
+        // ✅ Persister snapshot IO final avant déconnexion
+        persistIoSnapshot(key, BtSignalStore.SOURCE_IO_DISCONNECT);
+
+        // ✅ Arrêter le sampler
+        stopIoSampler(key);
+
         TransportHandle h = handles.get(key);
         if (h == null) return;
         h.setDisconnected(reason != null ? reason : "BT disconnected");
@@ -143,15 +166,11 @@ public final class MediaTransportManager {
         for (TransportHandle h : handles.values()) {
             if (h == null) continue;
             if (h.getKey().equals(key)) continue;
-            try {
-                h.setSuspended(reason);
-            } catch (Exception ignored) {}
+            try { h.setSuspended(reason); } catch (Exception ignored) {}
         }
 
         activeKey = key;
-        try {
-            target.setActive(reason);
-        } catch (Exception ignored) {}
+        try { target.setActive(reason); } catch (Exception ignored) {}
 
         return true;
     }
@@ -161,9 +180,7 @@ public final class MediaTransportManager {
         if (key.equals(activeKey)) activeKey = null;
     }
 
-    public String getActiveKey() {
-        return activeKey;
-    }
+    public String getActiveKey() { return activeKey; }
 
     public static String getActiveKeyStatic() {
         return (INSTANCE != null) ? INSTANCE.activeKey : null;
@@ -193,7 +210,6 @@ public final class MediaTransportManager {
         return out;
     }
 
-    /** Retourne le premier transport READY selon l'ordre donné. */
     public TransportIo pickReady(List<String> preferredKeys) {
         if (preferredKeys != null) {
             for (String k : preferredKeys) {
@@ -217,9 +233,7 @@ public final class MediaTransportManager {
         return null;
     }
 
-    public TransportIo getAnyReady() {
-        return pickReady(null);
-    }
+    public TransportIo getAnyReady() { return pickReady(null); }
 
     public TransportIo getByKey(String key) {
         if (key == null) return null;
@@ -228,41 +242,176 @@ public final class MediaTransportManager {
         if (h.getStatus() == TransportStatus.ERROR
                 || h.getStatus() == TransportStatus.DISCONNECTED)
             return null;
-
         TransportIo io = h.getIo();
         if (io == null || !io.isOpen()) return null;
         return io;
     }
 
-    // =========================================================
-    // ✅ OPTION B — sélection automatique SANS ouvrir le transport
-    // =========================================================
-
     public TransportIo autoSelectConnect(String media, String btMac) {
         String m = (media != null) ? media.trim().toLowerCase(Locale.ROOT) : "auto";
-
-        // USB explicite
-        if ("usb".equals(m)) {
-            return getByKey(KEY_USB);
-        }
-
-        // BT explicite
+        if ("usb".equals(m)) return getByKey(KEY_USB);
         if ("bt".equals(m)) {
-            String key = (btMac != null && !btMac.isEmpty())
-                    ? btKey(btMac)
-                    : activeKey;
+            String key = (btMac != null && !btMac.isEmpty()) ? btKey(btMac) : activeKey;
             return getByKey(key);
         }
-
-        // auto: USB > BT actif > n'importe quel READY
         TransportIo usb = getByKey(KEY_USB);
         if (usb != null) return usb;
-
         if (activeKey != null && activeKey.startsWith("BT:")) {
             TransportIo bt = getByKey(activeKey);
             if (bt != null) return bt;
         }
-
         return getAnyReady();
+    }
+
+    // =========================================================
+    // ✅ BT Signal — IO sampler périodique
+    // =========================================================
+
+    private void startIoSampler(final String key) {
+        stopIoSampler(key); // arrêter si déjà en cours
+        try {
+            ScheduledFuture<?> f = scheduler.scheduleAtFixedRate(
+                    () -> persistIoSnapshot(key, BtSignalStore.SOURCE_IO_SAMPLE),
+                    IO_SAMPLE_INTERVAL_SEC,
+                    IO_SAMPLE_INTERVAL_SEC,
+                    TimeUnit.SECONDS
+            );
+            ioSamplers.put(key, f);
+        } catch (Exception ignored) {}
+    }
+
+    private void stopIoSampler(String key) {
+        ScheduledFuture<?> f = ioSamplers.remove(key);
+        if (f != null) {
+            try { f.cancel(false); } catch (Exception ignored) {}
+        }
+    }
+
+    /**
+     * Persiste un snapshot IO en DB pour la clé BT donnée.
+     * Appelé périodiquement et à la déconnexion.
+     */
+    private void persistIoSnapshot(String key, String source) {
+        try {
+            if (btSignalStore == null) return;
+            TransportHandle h = handles.get(key);
+            if (h == null) return;
+            TransportIo raw = h.getIo();
+            if (!(raw instanceof BtSppTransportIo)) return;
+            BtSppTransportIo bt = (BtSppTransportIo) raw;
+
+            BtSppTransportIo.IoSnapshot snap = bt.snapshotCounters();
+            if (snap.samples <= 0) return; // rien à persister
+
+            String mac = bt.getMac();
+            boolean deliveryActive = isDeliveryActiveForKey(key);
+
+            btSignalStore.insertIoSampleAsync(
+                    mac, key,
+                    snap.errors,
+                    snap.timeouts,
+                    snap.samples,
+                    snap.latencyAvgMs,
+                    deliveryActive,
+                    source
+            );
+
+            // Reset compteurs après persistance périodique seulement
+            // (pas à la déconnexion pour garder les stats finales)
+            if (BtSignalStore.SOURCE_IO_SAMPLE.equals(source)) {
+                bt.resetCounters();
+            }
+        } catch (Exception ignored) {}
+    }
+
+    /**
+     * Vérifie si une livraison est active pour ce transport.
+     * Heuristique: activeKey correspond à ce transport.
+     */
+    private boolean isDeliveryActiveForKey(String key) {
+        try {
+            return key != null && key.equals(activeKey);
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    // =========================================================
+    // ✅ BT Signal — RSSI (appelé depuis MainActivity après scan)
+    // =========================================================
+
+    /**
+     * Persiste un résultat RSSI obtenu via BluetoothDevice.ACTION_FOUND.
+     * À appeler depuis MainActivity dans le BroadcastReceiver de découverte BT.
+     */
+    public void onBtRssiScanned(String mac, int rssi, boolean deliveryActive) {
+        try {
+            if (btSignalStore == null) return;
+            if (mac == null || mac.trim().isEmpty()) return;
+            String key = btKey(mac);
+            btSignalStore.insertScanAsync(mac, key, rssi, deliveryActive);
+        } catch (Exception ignored) {}
+    }
+
+    // =========================================================
+    // ✅ BT Signal — lecture pour API
+    // =========================================================
+
+    /**
+     * Retourne le dernier signal connu pour un transport BT actif.
+     * Utilisé par l'endpoint GET /v1/bt/signal
+     */
+    public org.json.JSONObject getBtSignal(String btMac) {
+        try {
+            if (btSignalStore == null) return null;
+            String mac = (btMac != null && !btMac.trim().isEmpty())
+                    ? btMac.trim().toUpperCase(Locale.ROOT)
+                    : extractMacFromActiveKey();
+            if (mac == null || mac.isEmpty()) return null;
+            return btSignalStore.getLatestByMac(mac);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    /**
+     * Retourne tous les signaux BT connus (toutes MACs).
+     * Utilisé par l'endpoint GET /v1/bt/signal (sans mac)
+     */
+    public org.json.JSONArray getAllBtSignals() {
+        try {
+            if (btSignalStore == null) return new org.json.JSONArray();
+            return btSignalStore.getAllLatest();
+        } catch (Exception ignored) {
+            return new org.json.JSONArray();
+        }
+    }
+
+    /**
+     * Snapshot IO temps réel (sans DB) pour la clé BT active.
+     * Retourne null si aucun transport BT actif.
+     */
+    public BtSppTransportIo.IoSnapshot getLiveIoSnapshot(String key) {
+        try {
+            if (key == null) key = activeKey;
+            if (key == null || !key.startsWith("BT:")) return null;
+            TransportHandle h = handles.get(key);
+            if (h == null) return null;
+            TransportIo raw = h.getIo();
+            if (!(raw instanceof BtSppTransportIo)) return null;
+            return ((BtSppTransportIo) raw).snapshotCounters();
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private String extractMacFromActiveKey() {
+        try {
+            String k = activeKey;
+            if (k == null || !k.startsWith("BT:")) return null;
+            return k.substring(3).trim().toUpperCase(Locale.ROOT);
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 }

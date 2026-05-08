@@ -1,10 +1,11 @@
-
 package com.pa.lcr.lcp.transport;
 
 import android.bluetooth.BluetoothSocket;
 
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 public final class BtSppTransportIo implements TransportIo {
 
@@ -16,6 +17,16 @@ public final class BtSppTransportIo implements TransportIo {
     private final long generationId;
 
     private volatile boolean closed = false;
+
+    // =========================================================
+    // ✅ Compteurs IO pour qualité signal indirecte
+    // =========================================================
+    private final AtomicInteger ioErrors    = new AtomicInteger(0);
+    private final AtomicInteger ioTimeouts  = new AtomicInteger(0);
+    private final AtomicInteger ioSamples   = new AtomicInteger(0);
+    private final AtomicLong    ioLatencySum = new AtomicLong(0L);
+    // Timestamp de début de session (pour calcul durée)
+    private final long sessionStartMs = System.currentTimeMillis();
 
     public BtSppTransportIo(String key,
                             BluetoothSocket socket,
@@ -45,43 +56,152 @@ public final class BtSppTransportIo implements TransportIo {
 
     @Override public long getGenerationId() { return generationId; }
 
+    // =========================================================
+    // ✅ Accesseurs compteurs IO (lecture thread-safe)
+    // =========================================================
+    public int getIoErrors()   { return ioErrors.get(); }
+    public int getIoTimeouts() { return ioTimeouts.get(); }
+    public int getIoSamples()  { return ioSamples.get(); }
+
+    public int getIoLatencyAvgMs() {
+        int s = ioSamples.get();
+        if (s <= 0) return 0;
+        return (int)(ioLatencySum.get() / s);
+    }
+
+    public long getSessionStartMs() { return sessionStartMs; }
+
+    /** Extrait la MAC depuis la clé "BT:AA:BB:CC:DD:EE:FF" */
+    public String getMac() {
+        if (key == null) return "";
+        String k = key.trim();
+        if (k.toUpperCase().startsWith("BT:")) return k.substring(3).trim();
+        return k;
+    }
+
+    /**
+     * Snapshot atomique des compteurs IO.
+     * Utile pour persister en DB sans race condition.
+     */
+    public IoSnapshot snapshotCounters() {
+        return new IoSnapshot(
+                ioErrors.get(),
+                ioTimeouts.get(),
+                ioSamples.get(),
+                getIoLatencyAvgMs(),
+                sessionStartMs
+        );
+    }
+
+    /** Remet les compteurs à zéro (ex. après persistance périodique) */
+    public void resetCounters() {
+        ioErrors.set(0);
+        ioTimeouts.set(0);
+        ioSamples.set(0);
+        ioLatencySum.set(0L);
+    }
+
+    // =========================================================
+    // Snapshot immuable
+    // =========================================================
+    public static final class IoSnapshot {
+        public final int errors;
+        public final int timeouts;
+        public final int samples;
+        public final int latencyAvgMs;
+        public final long sessionStartMs;
+
+        public IoSnapshot(int errors, int timeouts, int samples,
+                          int latencyAvgMs, long sessionStartMs) {
+            this.errors = errors;
+            this.timeouts = timeouts;
+            this.samples = samples;
+            this.latencyAvgMs = latencyAvgMs;
+            this.sessionStartMs = sessionStartMs;
+        }
+    }
+
+    // =========================================================
+    // write — avec mesure latence + compteurs
+    // =========================================================
     @Override
     public int write(byte[] data, int timeoutMs) throws Exception {
         if (closed || out == null) return -1;
         if (data == null || data.length == 0) return 0;
-        out.write(data);
-        out.flush();
-        return data.length;
+        long t0 = System.currentTimeMillis();
+        try {
+            out.write(data);
+            out.flush();
+            long lat = System.currentTimeMillis() - t0;
+            ioSamples.incrementAndGet();
+            ioLatencySum.addAndGet(lat);
+            return data.length;
+        } catch (Exception e) {
+            ioErrors.incrementAndGet();
+            throw e;
+        }
     }
 
+    // =========================================================
+    // read — avec détection timeout + compteurs
+    // =========================================================
     @Override
     public int read(byte[] buffer, int timeoutMs) throws Exception {
         if (closed || in == null) return -1;
         if (buffer == null || buffer.length == 0) return 0;
 
-        // timeoutMs: 0 => non-bloquant, <0 => bloquant, >0 => timeout
+        // bloquant
         if (timeoutMs < 0) {
-            return in.read(buffer); // bloquant
+            try {
+                long t0 = System.currentTimeMillis();
+                int n = in.read(buffer);
+                long lat = System.currentTimeMillis() - t0;
+                ioSamples.incrementAndGet();
+                ioLatencySum.addAndGet(lat);
+                return n;
+            } catch (Exception e) {
+                ioErrors.incrementAndGet();
+                throw e;
+            }
         }
 
         final long deadline = System.currentTimeMillis() + timeoutMs;
+        long t0 = System.currentTimeMillis();
 
         while (true) {
             int avail = 0;
             try { avail = in.available(); } catch (Exception ignored) {}
 
             if (avail > 0) {
-                int toRead = Math.min(avail, buffer.length);
-                return in.read(buffer, 0, toRead);
+                try {
+                    int toRead = Math.min(avail, buffer.length);
+                    int n = in.read(buffer, 0, toRead);
+                    long lat = System.currentTimeMillis() - t0;
+                    ioSamples.incrementAndGet();
+                    ioLatencySum.addAndGet(lat);
+                    return n;
+                } catch (Exception e) {
+                    ioErrors.incrementAndGet();
+                    throw e;
+                }
             }
 
             if (timeoutMs == 0) return 0;
-            if (System.currentTimeMillis() >= deadline) return 0;
+
+            if (System.currentTimeMillis() >= deadline) {
+                // timeout non-bloquant: on ne compte pas comme erreur
+                // sauf si on avait demandé des données (timeoutMs > 0)
+                if (timeoutMs > 50) ioTimeouts.incrementAndGet();
+                return 0;
+            }
 
             try { Thread.sleep(5); } catch (InterruptedException ie) { return 0; }
         }
     }
 
+    // =========================================================
+    // close
+    // =========================================================
     @Override
     public void close() {
         if (closed) return;

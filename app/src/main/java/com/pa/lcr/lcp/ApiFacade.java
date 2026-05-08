@@ -1,4 +1,3 @@
-
 package com.pa.lcr.lcp;
 
 /**
@@ -21,7 +20,6 @@ public interface ApiFacade {
     // ✅ BT (debug/ops)
     // =========================================================
 
-    /** Optionnel: liste snapshots transports (utile debug/ops). */
     default ApiResult api_btList() {
         return ApiResult.fail(
                 "BT list: 0 - Not supported (legacy facade).",
@@ -29,7 +27,6 @@ public interface ApiFacade {
         );
     }
 
-    /** ✅ Décision figée: active automatiquement le premier BT READY (sans body). */
     default ApiResult api_btActivate() {
         return ApiResult.fail(
                 "BT activate: 0 - Not supported (legacy facade).",
@@ -38,11 +35,40 @@ public interface ApiFacade {
     }
 
     // =========================================================
+    // ✅ BT Signal (RSSI + qualité IO)
+    // =========================================================
+
+    /**
+     * GET /v1/bt/signal
+     * Retourne le dernier signal BT connu (RSSI + score IO) depuis la DB.
+     * bt_mac optionnel — si absent, utilise le transport BT actif.
+     */
+    default ApiResult api_btSignalGet(String bt_mac) {
+        return ApiResult.fail(
+                "BT signal: 0 - Not supported (legacy facade).",
+                "BT_SIGNAL_NOT_SUPPORTED"
+        );
+    }
+
+    /**
+     * POST /v1/bt/signal/scan
+     * Déclenche un scan RSSI ponctuel via BluetoothAdapter.startDiscovery().
+     * ⚠️ Bloqué si une livraison est active (sauf perte de connexion détectée).
+     * bt_mac optionnel — si absent, scanne tous les appareils pairés.
+     */
+    default ApiResult api_btSignalScan(String bt_mac) {
+        return ApiResult.fail(
+                "BT signal scan: 0 - Not supported (legacy facade).",
+                "BT_SIGNAL_SCAN_NOT_SUPPORTED"
+        );
+    }
+
+    // =========================================================
     // USB (global)
     // =========================================================
     ApiResult api_scanUsb();
-	ApiResult api_registerConnectAuto(String serialId, Integer lcrnode);
-	ApiResult api_openPingUsb();
+    ApiResult api_registerConnectAuto(String serialId, Integer lcrnode);
+    ApiResult api_openPingUsb();
 
     // =========================================================
     // ✅ Media check (USB/BT)
@@ -59,12 +85,10 @@ public interface ApiFacade {
     // =========================================================
     ApiResult api_connectLcp();
 
-    // ✅ Node-aware default (B2)
     default ApiResult api_connectLcp(Integer lcrnode_dec, Integer from_dec) {
         return api_connectLcp();
     }
 
-    // ✅ Media-aware default (Option B)
     default ApiResult api_connectLcp(
             Integer lcrnode_dec,
             Integer from_dec,
@@ -74,16 +98,14 @@ public interface ApiFacade {
     }
 
     // =========================================================
-    // Align / Recover (A) (legacy mono-registre)
+    // Align / Recover (A)
     // =========================================================
     ApiResult api_deliveryAlignA();
 
-    // ✅ Node-aware default (B2)
     default ApiResult api_deliveryAlignA(Integer lcrnode_dec, Integer from_dec) {
         return api_deliveryAlignA();
     }
 
-    // ✅ Media-aware default (Option B)
     default ApiResult api_deliveryAlignA(
             Integer lcrnode_dec,
             Integer from_dec,
@@ -102,7 +124,6 @@ public interface ApiFacade {
     // =========================================================
     ApiResult api_deliveryStartC(int product1to16, double presetNet);
 
-    // ✅ Node-aware default (B2)
     default ApiResult api_deliveryStartC(
             Integer lcrnode_dec,
             Integer from_dec,
@@ -111,7 +132,6 @@ public interface ApiFacade {
         return api_deliveryStartC(product1to16, presetNet);
     }
 
-    // ✅ Media-aware default (Option B)
     default ApiResult api_deliveryStartC(
             Integer lcrnode_dec,
             Integer from_dec,
@@ -127,13 +147,12 @@ public interface ApiFacade {
     // =========================================================
     ApiResult api_deliveryJobGet(String jobId);
 
-    // ✅ Node-aware default (B2)
     default ApiResult api_deliveryJobGet(String jobId, Integer lcrnode_dec) {
         return api_deliveryJobGet(jobId);
     }
 
     // =========================================================
-    // Delivery OneShot + controls (legacy mono-registre)
+    // Delivery OneShot + controls
     // =========================================================
     ApiResult api_deliveryOneShotStart(
             String numero_livraison,
@@ -142,7 +161,6 @@ public interface ApiFacade {
             String compartment
     );
 
-    // ✅ Node-aware default (B2)
     default ApiResult api_deliveryOneShotStart(
             Integer lcrnode_dec,
             Integer from_dec,
@@ -151,14 +169,9 @@ public interface ApiFacade {
             double presetNetL,
             String compartment) {
         return api_deliveryOneShotStart(
-                numero_livraison,
-                product1to16,
-                presetNetL,
-                compartment
-        );
+                numero_livraison, product1to16, presetNetL, compartment);
     }
 
-    // ✅ Media-aware default (Option B)
     default ApiResult api_deliveryOneShotStart(
             Integer lcrnode_dec,
             Integer from_dec,
@@ -169,31 +182,24 @@ public interface ApiFacade {
             String media,
             String bt_mac) {
         return api_deliveryOneShotStart(
-                lcrnode_dec,
-                from_dec,
-                numero_livraison,
-                product1to16,
-                presetNetL,
-                compartment
-        );
+                lcrnode_dec, from_dec,
+                numero_livraison, product1to16, presetNetL, compartment);
     }
 
     ApiResult api_deliveryContinue(String jobId);
 
-    // ✅ Node-aware default (B2)
     default ApiResult api_deliveryContinue(String jobId, Integer lcrnode_dec) {
         return api_deliveryContinue(jobId);
     }
 
     ApiResult api_deliveryTerminate(String jobId);
 
-    // ✅ Node-aware default (B2)
     default ApiResult api_deliveryTerminate(String jobId, Integer lcrnode_dec) {
         return api_deliveryTerminate(jobId);
     }
 
     // =========================================================
-    // ✅ validateRegister (legacy signature)
+    // validateRegister
     // =========================================================
     ApiResult api_registerValidate(
             String numero_livraison,
@@ -203,7 +209,6 @@ public interface ApiFacade {
             String expected_compartment
     );
 
-    // ✅ Node-aware default (B2)
     default ApiResult api_registerValidate(
             String numero_livraison,
             Integer expected_lcrnode_dec,
@@ -212,15 +217,10 @@ public interface ApiFacade {
             Integer expected_product_number,
             String expected_compartment) {
         return api_registerValidate(
-                numero_livraison,
-                expected_lcrnode_dec,
-                expected_serial_id,
-                expected_product_number,
-                expected_compartment
-        );
+                numero_livraison, expected_lcrnode_dec,
+                expected_serial_id, expected_product_number, expected_compartment);
     }
 
-    // ✅ Media-aware default (Option B)
     default ApiResult api_registerValidate(
             String numero_livraison,
             Integer expected_lcrnode_dec,
@@ -231,17 +231,12 @@ public interface ApiFacade {
             String media,
             String bt_mac) {
         return api_registerValidate(
-                numero_livraison,
-                expected_lcrnode_dec,
-                from_dec,
-                expected_serial_id,
-                expected_product_number,
-                expected_compartment
-        );
+                numero_livraison, expected_lcrnode_dec, from_dec,
+                expected_serial_id, expected_product_number, expected_compartment);
     }
 
     // =========================================================
-    // TickBus (B+) - long-poll tick change (cache-only)
+    // TickBus
     // =========================================================
     default ApiResult api_tickWait(Long since_seq, Integer wait_ms) {
         return ApiResult.fail(
@@ -273,7 +268,6 @@ public interface ApiFacade {
         return api_ticketReprintCurrent();
     }
 
-    // ✅ Media-aware default (Option B)
     default ApiResult api_ticketReprintCurrent(
             Integer lcrnode_dec,
             Integer from_dec,

@@ -110,6 +110,10 @@ private UsbManager usbManager;
     private Button btnBtDisconnect;
     private TextView txtBtStatus;
 
+    // ✅ BT Signal UI
+    private Button btnBtSignalScan;
+    private TextView txtBtSignalResult;
+    
 // ===== CONFIGURE: Scan registres (par média) =====
 private Button btnScanUsbRegs;
 private TextView txtUsbRegsFound;
@@ -130,7 +134,10 @@ private Button btnBtConnect1, btnBtConnect2;
     private static final int REQ_ENABLE_BT = 9103;
     
  // ✅ Android 9 (API 28) : permission Storage legacy pour écrire dans /Download
+ //private static final int REQ_STORAGE_LEGACY = 9104;
+ //private final ExecutorService btExec = Executors.newSingleThreadExecutor();
  private static final int REQ_STORAGE_LEGACY = 9104;
+ private static final int REQ_LOCATION_BT_SIGNAL = 9105; // ✅ BT signal scan
 private final ExecutorService btExec = Executors.newSingleThreadExecutor();
     private BluetoothAdapter btAdapter;
     private final List<BluetoothDevice> btBonded = new ArrayList<>();
@@ -473,6 +480,10 @@ tabRegisters = findViewById(R.id.tabRegisters);
         btnBtConnect = findViewById(R.id.btnBtConnect);
         btnBtDisconnect = findViewById(R.id.btnBtDisconnect);
         txtBtStatus = findViewById(R.id.txtBtStatus);
+       
+        // ✅ BT Signal
+        btnBtSignalScan = findViewById(R.id.btnBtSignalScan);
+        txtBtSignalResult = findViewById(R.id.txtBtSignalResult);   
 
         // CONFIGURE: scan registres (par média)
         btnScanUsbRegs = findViewById(R.id.btnScanUsbRegs);
@@ -600,6 +611,55 @@ ensureRegisterTab(250, 255, true);
         if (btnBtRefresh != null) btnBtRefresh.setOnClickListener(v -> refreshBondedBtList());
         if (btnBtConnect != null) btnBtConnect.setOnClickListener(v -> btConnectSelected());
         if (btnBtDisconnect != null) btnBtDisconnect.setOnClickListener(v -> btDisconnect());
+        // ✅ BT Signal scan
+        if (btnBtSignalScan != null) {
+            btnBtSignalScan.setOnClickListener(v -> {
+                if (!ensureLocationPermissionForBtScan(true)) {
+                    if (txtBtSignalResult != null)
+                        txtBtSignalResult.setText("Permission localisation requise pour le scan RSSI");
+                    return;
+                }
+                if (txtBtSignalResult != null) txtBtSignalResult.setText("Scan RSSI en cours...");
+                btnBtSignalScan.setEnabled(false);
+                scanExec.execute(() -> {
+                    try {
+                        MultiRegisterApiFacadeImpl facade = new MultiRegisterApiFacadeImpl(MainActivity.this);
+                        com.pa.lcr.lcp.ApiResult r = facade.api_btSignalScan(lastBtMac);
+                        String txt;
+                        if (r != null && r.code == 1) {
+                            JSONObject d = r.data;
+                            JSONArray scanned = (d != null) ? d.optJSONArray("scanned") : null;
+                            StringBuilder sb = new StringBuilder();
+                            sb.append("Scan RSSI — ").append(r.msg).append("\n");
+                            if (scanned != null) {
+                                for (int i = 0; i < scanned.length(); i++) {
+                                    JSONObject row = scanned.optJSONObject(i);
+                                    if (row == null) continue;
+                                    sb.append("• ").append(row.optString("name", "?"))
+                                      .append("  MAC=").append(row.optString("mac", "?"))
+                                      .append("  RSSI=").append(row.optInt("rssi", 0)).append(" dBm")
+                                      .append("  (").append(row.optString("rssi_quality", "?")).append(")\n");
+                                }
+                            }
+                            txt = sb.toString().trim();
+                        } else {
+                            txt = "Scan RSSI: " + (r != null ? r.msg : "null");
+                        }
+                        final String fTxt = txt;
+                        ui.post(() -> {
+                            if (txtBtSignalResult != null) txtBtSignalResult.setText(fTxt);
+                            btnBtSignalScan.setEnabled(true);
+                        });
+                    } catch (Exception e) {
+                        ui.post(() -> {
+                            if (txtBtSignalResult != null) txtBtSignalResult.setText("Scan RSSI ERR: " + safeMsg(e));
+                            btnBtSignalScan.setEnabled(true);
+                        });
+                    }
+                });
+            });
+        }
+        
 
         // CONFIGURE: scan registres par média
         if (btnScanUsbRegs != null) btnScanUsbRegs.setOnClickListener(v -> scanRegistersUsbOnly());
@@ -2106,6 +2166,12 @@ private boolean ensureBtConnectPermission() {
 		}
 		return;
 	}
+        if (requestCode == REQ_LOCATION_BT_SIGNAL) {
+            boolean ok = (grantResults != null && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED);
+            if (ok) logMedia1("BT Signal: permission localisation accordée");
+            else { logMedia1("BT Signal: permission localisation refusée"); toast("Permission localisation requise pour le scan RSSI BT"); }
+            return;
+        }
 
 if (requestCode == 9101) {
             boolean ok = (grantResults != null && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED);
@@ -2115,6 +2181,28 @@ if (requestCode == 9101) {
         }
     }
 
+    /**
+     * ✅ Permission localisation requise pour BluetoothAdapter.startDiscovery() (scan RSSI).
+     * Android 6-11 : ACCESS_FINE_LOCATION
+     * Android 12+  : BLUETOOTH_SCAN
+     */
+    private boolean ensureLocationPermissionForBtScan(boolean prompt) {
+        try {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                int p = ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN);
+                if (p == PackageManager.PERMISSION_GRANTED) return true;
+                if (!prompt) return false;
+                ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.BLUETOOTH_SCAN}, REQ_LOCATION_BT_SIGNAL);
+                return false;
+            }
+            int p = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION);
+            if (p == PackageManager.PERMISSION_GRANTED) return true;
+            if (!prompt) return false;
+            ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, REQ_LOCATION_BT_SIGNAL);
+            return false;
+        } catch (Exception ignored) { return false; }
+    }
 
 // =========================
 // CONFIGURE: Ajout manuel (2 registres par média)

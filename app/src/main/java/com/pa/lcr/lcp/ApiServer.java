@@ -570,6 +570,25 @@ public final class ApiServer {
             return ApiResult.ok("ScanAuto: 1 - OK", out);
         }
 
+        // ✅ BT Signal — lecture (RSSI + IO score)
+        if ("GET".equals(req.method) && "/v1/bt/signal".equals(req.path)) {
+            String btMac = null;
+            try {
+                if (req.query != null) btMac = req.query.get("bt_mac");
+            } catch (Exception ignored) {}
+            final String fBtMac = btMac;
+            return withAutoConnectRetry(null, () -> facade.api_btSignalGet(fBtMac));
+        }
+
+        // ✅ BT Signal — scan RSSI ponctuel (bloqué si livraison active)
+        if ("POST".equals(req.method) && "/v1/bt/signal/scan".equals(req.path)) {
+            JSONObject body = safeBody(req.jsonBody());
+            String btMac = body.optString("bt_mac", "").trim();
+            if (btMac.isEmpty()) btMac = null;
+            final String fBtMac = btMac;
+            return facade.api_btSignalScan(fBtMac); // PAS de withAutoConnectRetry (scan indépendant)
+        }
+
         // ✅ Ticket reprint (MEDIA-AWARE)
         if ("POST".equals(req.method) && "/v1/ticket/reprint".equals(req.path)) {
             JSONObject body = safeBody(req.jsonBody());
@@ -581,8 +600,8 @@ public final class ApiServer {
                 // 1) Forcer la session sur le bon média (BT ou USB)
                 ApiResult c = facade.api_connectLcp(node, from, media, btMac);
                 if (c == null || c.code != 1) return c;
-                // 2) Reprint sur la session courante
-                return facade.api_ticketReprintCurrent(node, from);
+                // 2) Reprint avec media+btMac explicites
+                return facade.api_ticketReprintCurrent(node, from, media, btMac);
             });
         }
 

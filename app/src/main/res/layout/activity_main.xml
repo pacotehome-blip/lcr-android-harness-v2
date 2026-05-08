@@ -316,14 +316,13 @@
                         android:text="—"/>
                 </ScrollView>
 
-
                 <!-- USB: Ajout manuel (max 2 registres) -->
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="10dp"
                     android:text="USB — Ajout manuel (max 2 registres)"
- android:textColor="#FFFFFF"
+                    android:textColor="#FFFFFF"
                     android:textStyle="bold"
                     android:textSize="13sp"/>
 
@@ -350,8 +349,8 @@
                             android:inputType="number"
                             android:hint="Node (1..250)"
                             android:textSize="14sp"
- android:textColor="#FFFFFF"
- android:textColorHint="#CCFFFFFF"/>
+                            android:textColor="#FFFFFF"
+                            android:textColorHint="#CCFFFFFF"/>
 
                         <Button
                             android:id="@+id/btnUsbConnect1"
@@ -359,7 +358,7 @@
                             android:layout_height="wrap_content"
                             android:layout_marginStart="8dp"
                             android:text="Connect"
- android:textColor="#FFFFFF"/>
+                            android:textColor="#FFFFFF"/>
                     </LinearLayout>
 
                     <TextView
@@ -391,8 +390,8 @@
                             android:inputType="number"
                             android:hint="Node (1..250)"
                             android:textSize="14sp"
- android:textColor="#FFFFFF"
- android:textColorHint="#CCFFFFFF"/>
+                            android:textColor="#FFFFFF"
+                            android:textColorHint="#CCFFFFFF"/>
 
                         <Button
                             android:id="@+id/btnUsbConnect2"
@@ -400,7 +399,7 @@
                             android:layout_height="wrap_content"
                             android:layout_marginStart="8dp"
                             android:text="Connect"
- android:textColor="#FFFFFF"/>
+                            android:textColor="#FFFFFF"/>
                     </LinearLayout>
 
                     <TextView
@@ -467,6 +466,23 @@
                     android:text="BT : —"
                     android:textSize="12sp"/>
 
+                <!-- ✅ BT Signal RSSI -->
+                <Button
+                    android:id="@+id/btnBtSignalScan"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="Scan Signal RSSI BT"/>
+
+                <TextView
+                    android:id="@+id/txtBtSignalResult"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:typeface="monospace"
+                    android:textSize="12sp"
+                    android:text="—"/>
+
                 <Button
                     android:id="@+id/btnScanBtRegs"
                     android:layout_width="match_parent"
@@ -493,14 +509,13 @@
                         android:text="—"/>
                 </ScrollView>
 
-
                 <!-- BT: Ajout manuel (max 2 registres) -->
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="10dp"
                     android:text="BT — Ajout manuel (max 2 registres)"
- android:textColor="#FFFFFF"
+                    android:textColor="#FFFFFF"
                     android:textStyle="bold"
                     android:textSize="13sp"/>
 
@@ -527,8 +542,8 @@
                             android:inputType="number"
                             android:hint="Node (1..250)"
                             android:textSize="14sp"
- android:textColor="#FFFFFF"
- android:textColorHint="#CCFFFFFF"/>
+                            android:textColor="#FFFFFF"
+                            android:textColorHint="#CCFFFFFF"/>
 
                         <Button
                             android:id="@+id/btnBtConnect1"
@@ -536,7 +551,7 @@
                             android:layout_height="wrap_content"
                             android:layout_marginStart="8dp"
                             android:text="Connect"
- android:textColor="#FFFFFF"/>
+                            android:textColor="#FFFFFF"/>
                     </LinearLayout>
 
                     <TextView
@@ -568,8 +583,8 @@
                             android:inputType="number"
                             android:hint="Node (1..250)"
                             android:textSize="14sp"
- android:textColor="#FFFFFF"
- android:textColorHint="#CCFFFFFF"/>
+                            android:textColor="#FFFFFF"
+                            android:textColorHint="#CCFFFFFF"/>
 
                         <Button
                             android:id="@+id/btnBtConnect2"
@@ -577,7 +592,7 @@
                             android:layout_height="wrap_content"
                             android:layout_marginStart="8dp"
                             android:text="Connect"
- android:textColor="#FFFFFF"/>
+                            android:textColor="#FFFFFF"/>
                     </LinearLayout>
 
                     <TextView
@@ -592,7 +607,7 @@
 
                 </LinearLayout>
 
-                <!-- Wi‑Fi -->
+                <!-- Wi-Fi -->
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
