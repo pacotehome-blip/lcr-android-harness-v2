@@ -570,13 +570,20 @@ public final class ApiServer {
             return ApiResult.ok("ScanAuto: 1 - OK", out);
         }
 
-        // ✅ Ticket reprint
+        // ✅ Ticket reprint (MEDIA-AWARE)
         if ("POST".equals(req.method) && "/v1/ticket/reprint".equals(req.path)) {
             JSONObject body = safeBody(req.jsonBody());
             Integer node = parseNodeDec(body);
             Integer from = parseFromDec(body);
-            return withAutoConnectRetry(body,
-                    () -> facade.api_ticketReprintCurrent(node, from));
+            return withAutoConnectRetry(body, () -> {
+                String media = resolveMediaDefault(body);
+                String btMac = resolveBtMacDefault(body);
+                // 1) Forcer la session sur le bon média (BT ou USB)
+                ApiResult c = facade.api_connectLcp(node, from, media, btMac);
+                if (c == null || c.code != 1) return c;
+                // 2) Reprint sur la session courante
+                return facade.api_ticketReprintCurrent(node, from);
+            });
         }
 
         // ✅ /v1/register/connect-auto — EXCLU de l'auto-heal (sinon récursion)
