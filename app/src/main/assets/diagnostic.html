@@ -213,7 +213,7 @@ var CMDS = {
 var cur = null, logs = [];
 
 function port() { return document.getElementById('iPort').value.trim() || '8765'; }
-function base() { return 'http://' + window.location.hostname + ':' + port() + '/v1'; }
+function base() { return 'http://' + window.location.hostname + ':' + port(); }
 
 function sel(id) {
   cur = id;
