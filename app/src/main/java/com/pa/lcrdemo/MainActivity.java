@@ -1579,7 +1579,7 @@ private void scanUsb() {
         }
         try {
             ApiFacade facade = new MultiRegisterApiFacadeImpl(this);
-            apiServer = new ApiServer(facade, this::onApiLine, API_PORT);
+            apiServer = new ApiServer(facade, this::onApiLine, API_PORT, this);
             apiServer.start();
             refreshApiStatus();
             toast("API démarrée (127.0.0.1:" + API_PORT + ")");
