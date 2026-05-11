@@ -402,54 +402,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             if (targets.isEmpty()) {
                 return ApiResult.fail("BT Signal Scan: 0 - Aucun appareil pairé", "ERR_NO_BONDED_BT");
             }
-            // 3) Cas A : BT déjà connecté → RSSI via connexion active (pas de discovery)
-            String activeKey = MediaTransportManager.getActiveKeyStatic();
-            boolean btAlreadyConnected = (activeKey != null && activeKey.startsWith("BT:"));
-
-            if (btAlreadyConnected) {
-                String connectedMac = activeKey.substring(3);
-                JSONArray scanned = new JSONArray();
-                for (BluetoothDevice dev : targets) {
-                    String devMac = dev.getAddress().toUpperCase(Locale.ROOT);
-                    if (!devMac.equals(connectedMac.toUpperCase(Locale.ROOT))) continue;
-                    int rssi = -999;
-                    try {
-                        java.lang.reflect.Method m = dev.getClass().getMethod("readRemoteRssi");
-                        Object r = m.invoke(dev);
-                        if (r instanceof Integer) rssi = (Integer) r;
-                    } catch (Exception ignored) {}
-                    if (rssi == -999) {
-                        JSONObject last = btSignalStore.getLatestByMac(devMac);
-                        if (last != null) rssi = last.optInt("rssi", -999);
-                    }
-                    String quality = BtSignalStore.rssiQuality(rssi);
-                    if (rssi != -999) mediaMgr.onBtRssiScanned(devMac, rssi, deliveryActive);
-                    JSONObject row = new JSONObject();
-                    try {
-                        row.put("mac", devMac);
-                        row.put("name", dev.getName() != null ? dev.getName() : JSONObject.NULL);
-                        row.put("rssi", rssi);
-                        row.put("rssi_quality", rssi != -999 ? quality : "INCONNU");
-                        row.put("source", rssi != -999 ? "CONNECTED_ACTIVE" : "DB_LAST");
-                        row.put("ts_ms", System.currentTimeMillis());
-                    } catch (Exception ignored) {}
-                    scanned.put(row);
-                }
-                JSONObject result = new JSONObject();
-                result.put("scanned", scanned);
-                result.put("count", scanned.length());
-                result.put("completed", 1);
-                result.put("delivery_active", deliveryActive ? 1 : 0);
-                result.put("connection_lost", connectionLost ? 1 : 0);
-                result.put("mode", "CONNECTED_ACTIVE");
-                if (scanned.length() == 0) {
-                    return ApiResult.fail("BT Signal Scan: 0 - Appareil connecté non trouvé dans targets",
-                            "ERR_BT_CONNECTED_NOT_IN_TARGETS", result);
-                }
-                return ApiResult.ok("BT Signal Scan: 1 - OK (connexion active)", result);
-            }
-
-            // 3) Cas B : Aucun BT connecté → startDiscovery() avec latch (timeout 12s)
+            // 3) Scan via startDiscovery() — fonctionne même avec SPP actif
             final JSONArray scanned = new JSONArray();
             final CountDownLatch latch = new CountDownLatch(1);
             final AtomicReference<BroadcastReceiver> receiverRef = new AtomicReference<>();
@@ -509,10 +462,31 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             filter.addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED);
             appCtx.registerReceiver(receiver, filter);
 
-            // Annuler un scan en cours si nécessaire
+            // Annuler seulement si déjà en cours
             if (adapter.isDiscovering()) adapter.cancelDiscovery();
-            adapter.startDiscovery();
-
+            boolean scanStarted = adapter.startDiscovery();
+            if (!scanStarted) {
+                JSONArray dbScanned = new JSONArray();
+                for (BluetoothDevice dev : targets) {
+                    String devMac = dev.getAddress().toUpperCase(Locale.ROOT);
+                    JSONObject last = btSignalStore.getLatestByMac(devMac);
+                    JSONObject row = new JSONObject();
+                    row.put("mac", devMac);
+                    row.put("name", dev.getName() != null ? dev.getName() : JSONObject.NULL);
+                    row.put("rssi", last != null ? last.optInt("rssi", -999) : -999);
+                    row.put("rssi_quality", last != null ? last.optString("rssi_quality", "INCONNU") : "INCONNU");
+                    row.put("source", "DB_LAST");
+                    row.put("ts_ms", System.currentTimeMillis());
+                    dbScanned.put(row);
+                }
+                JSONObject result = new JSONObject();
+                result.put("scanned", dbScanned);
+                result.put("count", dbScanned.length());
+                result.put("completed", 0);
+                result.put("mode", "DB_FALLBACK");
+                result.put("delivery_active", deliveryActive ? 1 : 0);
+                return ApiResult.ok("BT Signal Scan: 1 - OK (DB fallback)", result);
+            }
             // Attendre résultats (max 12 secondes)
             boolean completed = latch.await(12, TimeUnit.SECONDS);
 
