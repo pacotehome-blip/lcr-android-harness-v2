@@ -419,7 +419,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                         if (r instanceof Integer) rssi = (Integer) r;
                     } catch (Exception ignored) {}
                     if (rssi == -999) {
-                        JSONObject last = btSignalStore.getLastSignal(devMac);
+                        JSONObject last = btSignalStore.getLatestByMac(devMac);
                         if (last != null) rssi = last.optInt("rssi", -999);
                     }
                     String quality = BtSignalStore.rssiQuality(rssi);
