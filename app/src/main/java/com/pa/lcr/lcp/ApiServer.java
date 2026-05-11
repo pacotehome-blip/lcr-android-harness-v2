@@ -668,7 +668,7 @@ public final class ApiServer {
 
     private String loadDiagnosticHtml() {
         try {
-            InputStream is = appCtx.getAssets().open("diagnostic.html");
+            java.io.InputStream is = appCtx.getAssets().open("diagnostic.html");
             byte[] buf = new byte[is.available()];
             is.read(buf);
             is.close();
