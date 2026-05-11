@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LCR — Diagnostic Support</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#f0f2f5;color:#1a1d26;font-family:'Segoe UI',Arial,sans-serif;font-size:13px;line-height:1.5}
+:root{
+  --g:#00a86b;--r:#e03450;--y:#e6a800;--b:#2979ff;
+  --bg:#f0f2f5;--card:#ffffff;--card2:#f7f8fa;
+  --border:#dde1ea;--border2:#c5cad8;
+  --text:#1a1d26;--muted:#6b7280;--dim:#9ca3af
+}
+header{
+  background:#fff;border-bottom:1px solid var(--border);
+  padding:12px 16px;display:flex;align-items:center;
+  justify-content:space-between;flex-wrap:wrap;gap:10px;
+  position:sticky;top:0;z-index:100;
+  box-shadow:0 1px 4px rgba(0,0,0,0.07)
+}
+.logo{font-size:15px;font-weight:700;color:var(--g);font-family:monospace}
+.logo span{color:var(--muted);font-weight:400}
+.conn{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.conn label{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em}
+.conn input{
+  background:var(--card2);border:1px solid var(--border2);border-radius:5px;
+  color:var(--text);font-family:monospace;font-size:12px;
+  padding:5px 9px;width:80px;outline:none
+}
+.conn input:focus{border-color:var(--g)}
+.btn{
+  background:var(--g);color:#fff;border:none;border-radius:5px;
+  font-size:12px;font-weight:600;padding:6px 14px;cursor:pointer;transition:opacity .15s
+}
+.btn:hover{opacity:.85}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--dim);flex-shrink:0;transition:background .3s}
+.dot.ok{background:var(--g);box-shadow:0 0 5px var(--g)}
+.dot.err{background:var(--r);box-shadow:0 0 5px var(--r)}
+.stxt{font-size:11px;color:var(--muted)}
+.layout{display:grid;grid-template-columns:230px 1fr;min-height:calc(100vh - 53px)}
+.side{
+  background:#fff;border-right:1px solid var(--border);
+  padding:10px 0;overflow-y:auto;
+  position:sticky;top:53px;height:calc(100vh - 53px)
+}
+.sec{padding:10px 14px 4px;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;font-weight:600}
+.cb{
+  display:flex;align-items:center;gap:7px;width:100%;
+  background:none;border:none;border-left:3px solid transparent;
+  color:var(--muted);font-size:12px;padding:8px 14px;
+  cursor:pointer;text-align:left;transition:all .12s
+}
+.cb:hover{background:var(--card2);color:var(--text);border-left-color:var(--border2)}
+.cb.act{background:#e8f5f0;color:var(--g);border-left-color:var(--g);font-weight:600}
+.tag{font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;flex-shrink:0;letter-spacing:.04em;font-family:monospace}
+.tg{background:#e3edff;color:var(--b)}
+.tp{background:#e6f7f1;color:var(--g)}
+.main{padding:18px;display:flex;flex-direction:column;gap:14px;max-width:820px}
+.panel{background:#fff;border:1px solid var(--border);border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.05)}
+.ph{padding:12px 16px;border-bottom:1px solid var(--border);background:var(--card2);display:flex;align-items:center;gap:10px}
+.pt{font-size:13px;font-weight:600;flex:1;color:var(--text)}
+.ps{font-size:11px;color:var(--muted);font-family:monospace}
+.pb{padding:14px 16px}
+.fr{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+.fr label{font-size:11px;color:var(--muted);font-weight:500;width:130px;flex-shrink:0}
+.fr input,.fr select{
+  background:var(--card2);border:1px solid var(--border2);border-radius:5px;
+  color:var(--text);font-family:monospace;font-size:12px;
+  padding:6px 10px;flex:1;min-width:120px;outline:none
+}
+.fr input:focus,.fr select:focus{border-color:var(--g)}
+.fh{font-size:11px;color:var(--dim);margin-left:140px;margin-top:-6px;margin-bottom:10px}
+.bx{
+  background:var(--g);color:#fff;border:none;border-radius:6px;
+  font-size:13px;font-weight:600;padding:8px 20px;cursor:pointer;margin-top:6px;
+  transition:opacity .15s,transform .1s
+}
+.bx:hover{opacity:.88;transform:translateY(-1px)}
+.bx:active{transform:translateY(0)}
+.bx:disabled{opacity:.4;cursor:not-allowed;transform:none}
+.rp{background:#fff;border:1px solid var(--border);border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.05)}
+.rh{padding:10px 14px;border-bottom:1px solid var(--border);background:var(--card2);display:flex;align-items:center;justify-content:space-between;gap:8px}
+.rt{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:600}
+.badge{font-size:11px;font-weight:700;padding:3px 10px;border-radius:20px;font-family:monospace}
+.bok{background:#e6f7f1;color:var(--g)}
+.berr{background:#fdeaed;color:var(--r)}
+.bwait{background:#e3edff;color:var(--b)}
+.rtime{font-size:11px;color:var(--dim);font-family:monospace}
+.rb{padding:12px 16px;font-family:monospace;font-size:12px;white-space:pre-wrap;word-break:break-all;max-height:380px;overflow-y:auto;color:#2d3748;line-height:1.7;background:#f8f9fb;border-top:1px solid var(--border)}
+.re{padding:30px 16px;text-align:center;color:var(--dim);font-size:12px}
+.rssiw{background:var(--card2);border:1px solid var(--border);border-radius:6px;padding:12px 16px;margin-bottom:8px}
+.rsl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px;font-weight:600}
+.rsbw{height:10px;background:#e5e7eb;border-radius:5px;overflow:hidden;margin-bottom:6px}
+.rsb{height:100%;border-radius:5px;transition:width .5s,background .5s}
+.rsv{display:flex;justify-content:space-between;font-family:monospace;font-size:12px}
+.rg{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;padding:12px 16px 0}
+.rc{background:var(--card2);border:1px solid var(--border);border-radius:6px;padding:10px 12px}
+.rl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px;font-weight:600}
+.rv{font-family:monospace;font-size:15px;font-weight:700;color:var(--text)}
+.rok{color:var(--g)}.rerr{color:var(--r)}.rwarn{color:var(--y)}
+.log{background:#fff;border:1px solid var(--border);border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.05)}
+.lh{padding:10px 14px;border-bottom:1px solid var(--border);background:var(--card2);display:flex;align-items:center;justify-content:space-between}
+.lt{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:600}
+.lc{background:none;border:1px solid var(--border2);border-radius:4px;color:var(--muted);font-size:11px;padding:3px 9px;cursor:pointer}
+.lc:hover{color:var(--text)}
+.lb{padding:10px 14px;font-family:monospace;font-size:11px;max-height:180px;overflow-y:auto;color:var(--muted);line-height:1.8}
+.ll{display:flex;gap:10px}
+.lts{color:var(--dim);flex-shrink:0}
+.lok{color:var(--g)}.lerr{color:var(--r)}
+.pl{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:50px 16px;color:var(--dim);font-size:13px;text-align:center}
+.sp{display:inline-block;width:12px;height:12px;border:2px solid var(--border2);border-top-color:var(--g);border-radius:50%;animation:spin .6s linear infinite;vertical-align:middle}
+@keyframes spin{to{transform:rotate(360deg)}}
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+.key{color:#0f766e}.str{color:#059669}.num{color:#d97706}.bool{color:#2979ff}.null{color:#e03450}
+@media(max-width:600px){
+  .layout{grid-template-columns:1fr}
+  .side{position:static;height:auto;max-height:210px;border-right:none;border-bottom:1px solid var(--border)}
+  .main{padding:10px}
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">LCR <span>/ Diagnostic Support</span></div>
+  <div class="conn">
+    <label>Port</label>
+    <input id="iPort" value="8765">
+    <div class="dot" id="dot"></div>
+    <span class="stxt" id="stxt">—</span>
+    <button class="btn" onclick="doPing()">Ping</button>
+  </div>
+</header>
+
+<div class="layout">
+  <nav class="side">
+    <div class="sec">Diagnostic</div>
+    <button class="cb" onclick="sel('ping')"><span class="tag tg">GET</span>/v1/ping</button>
+
+    <div class="sec">BT Signal</div>
+    <button class="cb" onclick="sel('bt_scan')"><span class="tag tp">POST</span>/v1/bt/signal/scan</button>
+    <button class="cb" onclick="sel('bt_get')"><span class="tag tg">GET</span>/v1/bt/signal</button>
+
+    <div class="sec">Bluetooth</div>
+    <button class="cb" onclick="sel('bt_list')"><span class="tag tg">GET</span>/v1/bt/list</button>
+    <button class="cb" onclick="sel('bt_act')"><span class="tag tp">POST</span>/v1/bt/activate</button>
+
+    <div class="sec">USB</div>
+    <button class="cb" onclick="sel('usb_scan')"><span class="tag tg">GET</span>/v1/usb/scan</button>
+    <button class="cb" onclick="sel('usb_ping')"><span class="tag tp">POST</span>/v1/usb/open-ping</button>
+
+    <div class="sec">Média</div>
+    <button class="cb" onclick="sel('media_check')"><span class="tag tp">POST</span>/v1/media/check</button>
+    <button class="cb" onclick="sel('media_auto')"><span class="tag tp">POST</span>/v1/media/auto-connect</button>
+
+    <div class="sec">Registre</div>
+    <button class="cb" onclick="sel('lcp_connect')"><span class="tag tp">POST</span>/v1/lcp/connect</button>
+    <button class="cb" onclick="sel('align')"><span class="tag tp">POST</span>/v1/delivery/alignA</button>
+
+    <div class="sec">Base de données</div>
+    <button class="cb" onclick="sel('db_dump')"><span class="tag tp">POST</span>/v1/db/dump</button>
+  </nav>
+
+  <div class="main">
+    <div id="ca">
+      <div class="pl">
+        <div style="font-size:32px">🛠</div>
+        <div style="font-weight:600;color:#374151">Sélectionnez une commande</div>
+        <div style="font-size:11px">Configurez le port en haut, cliquez Ping pour tester la connexion</div>
+      </div>
+    </div>
+
+    <div class="rp" id="rp" style="display:none">
+      <div class="rh">
+        <span class="rt">Réponse</span>
+        <span class="badge bwait" id="rb">—</span>
+        <span class="rtime" id="rtime"></span>
+      </div>
+      <div id="rssiSec" style="display:none;padding:12px 16px 0"></div>
+      <div id="sumSec" style="display:none"></div>
+      <div class="rb" id="rbody"><div class="re">Aucune réponse</div></div>
+    </div>
+
+    <div class="log">
+      <div class="lh">
+        <span class="lt">Journal des appels</span>
+        <button class="lc" onclick="clrLog()">Effacer</button>
+      </div>
+      <div class="lb" id="lb"><div style="color:var(--dim)">Aucune activité</div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+var CMDS = {
+  ping:        { m:'GET',  p:'/v1/ping',              l:'Ping API',          f:[] },
+  bt_scan:     { m:'POST', p:'/v1/bt/signal/scan',     l:'Scan RSSI BT',      f:[{k:'bt_mac',      l:'MAC BT',    h:'Vide = tous les appairés — ex: 00:01:95:C9:BF:87', t:'text'}] },
+  bt_get:      { m:'GET',  p:'/v1/bt/signal',          l:'Dernier signal DB', f:[{k:'bt_mac',      l:'MAC BT',    h:'Vide = BT actif', t:'text'}] },
+  bt_list:     { m:'GET',  p:'/v1/bt/list',            l:'Liste BT appairés', f:[] },
+  bt_act:      { m:'POST', p:'/v1/bt/activate',        l:'Activer BT',        f:[] },
+  usb_scan:    { m:'GET',  p:'/v1/usb/scan',           l:'Scan USB',          f:[] },
+  usb_ping:    { m:'POST', p:'/v1/usb/open-ping',      l:'Ping USB',          f:[] },
+  media_check: { m:'POST', p:'/v1/media/check',        l:'Vérifier média',    f:[{k:'media',       l:'Média',     h:'usb ou bt', t:'select', o:['usb','bt']},{k:'bt_mac', l:'MAC BT', h:'Si média = bt', t:'text'}] },
+  media_auto:  { m:'POST', p:'/v1/media/auto-connect', l:'Auto-connexion',    f:[{k:'lcrnode_dec', l:'Node LCP',  h:'250 par défaut', t:'number'}] },
+  lcp_connect: { m:'POST', p:'/v1/lcp/connect',        l:'Connexion LCP',     f:[{k:'lcrnode_dec', l:'Node LCP',  h:'250 par défaut', t:'number'},{k:'media', l:'Média', h:'usb ou bt', t:'select', o:['usb','bt']}] },
+  align:       { m:'POST', p:'/v1/delivery/alignA',    l:'Alignement A',      f:[{k:'lcrnode_dec', l:'Node LCP',  h:'250 par défaut', t:'number'},{k:'media', l:'Média', h:'usb ou bt', t:'select', o:['usb','bt']}] },
+  db_dump:     { m:'POST', p:'/v1/db/dump',            l:'Export DB',         f:[] }
+};
+
+var cur = null, logs = [];
+
+function port() { return document.getElementById('iPort').value.trim() || '8765'; }
+function base() { return 'http://' + window.location.hostname + ':' + port() + '/v1'; }
+
+function sel(id) {
+  cur = id;
+  document.querySelectorAll('.cb').forEach(function(b) {
+    b.classList.remove('act');
+    if (b.getAttribute('onclick') === "sel('" + id + "')") b.classList.add('act');
+  });
+  render(id);
+}
+
+function render(id) {
+  var c = CMDS[id]; if (!c) return;
+  var mc = c.m === 'GET' ? 'tg' : 'tp';
+  var fh = '';
+  c.f.forEach(function(f) {
+    if (f.t === 'select') {
+      var opts = (f.o || []).map(function(o) { return '<option>' + o + '</option>'; }).join('');
+      fh += '<div class="fr"><label>' + f.l + '</label><select id="f_' + f.k + '">' + opts + '</select></div>';
+    } else {
+      fh += '<div class="fr"><label>' + f.l + '</label><input id="f_' + f.k + '" type="' + (f.t || 'text') + '" placeholder="' + (f.h || '') + '"></div>';
+    }
+    if (f.h) fh += '<div class="fh">' + f.h + '</div>';
+  });
+  document.getElementById('ca').innerHTML =
+    '<div class="panel">' +
+      '<div class="ph"><span class="tag ' + mc + '">' + c.m + '</span><span class="pt">' + c.l + '</span><span class="ps">' + c.p + '</span></div>' +
+      '<div class="pb">' + (fh || '<div style="font-size:12px;color:var(--dim);margin-bottom:10px">Aucun paramètre requis</div>') +
+      '<button class="bx" id="bx" onclick="execCmd()">&#9654; Exécuter</button></div>' +
+    '</div>';
+  document.getElementById('rp').style.display = 'none';
+}
+
+function execCmd() {
+  if (!cur) return;
+  var c = CMDS[cur];
+  var bx = document.getElementById('bx');
+  bx.disabled = true;
+  bx.innerHTML = '<span class="sp"></span> En cours…';
+
+  var body = {};
+  c.f.forEach(function(f) {
+    var el = document.getElementById('f_' + f.k);
+    if (el) { var v = el.value.trim(); if (v) body[f.k] = f.t === 'number' ? parseInt(v) : v; }
+  });
+
+  var url = base() + c.p;
+  if (c.m === 'GET' && body.bt_mac) url += '?bt_mac=' + encodeURIComponent(body.bt_mac);
+
+  var t0 = Date.now();
+  var xhr = new XMLHttpRequest();
+  xhr.open(c.m, url, true);
+  if (c.m === 'POST') xhr.setRequestHeader('Content-Type', 'application/json');
+  xhr.timeout = 15000;
+
+  xhr.onload = function() {
+    var ms = Date.now() - t0;
+    try {
+      var j = JSON.parse(xhr.responseText);
+      showResp(j, ms);
+      addLog(c.m, c.p, j.code === 1 ? 'ok' : 'err', ms);
+    } catch(e) {
+      showErr('JSON invalide: ' + xhr.responseText.slice(0, 80), ms);
+      addLog(c.m, c.p, 'err', ms, 'JSON invalide');
+    }
+    bx.disabled = false; bx.innerHTML = '&#9654; Exécuter';
+  };
+  xhr.onerror = function() {
+    var ms = Date.now() - t0;
+    showErr('Connexion refusée — vérifiez que l\'API est démarrée', ms);
+    addLog(c.m, c.p, 'err', ms, 'Connexion refusée');
+    bx.disabled = false; bx.innerHTML = '&#9654; Exécuter';
+  };
+  xhr.ontimeout = function() {
+    showErr('Timeout (15s) — API non accessible', Date.now() - t0);
+    addLog(c.m, c.p, 'err', Date.now() - t0, 'Timeout');
+    bx.disabled = false; bx.innerHTML = '&#9654; Exécuter';
+  };
+  xhr.send(c.m === 'POST' ? JSON.stringify(body) : null);
+}
+
+function showResp(j, ms) {
+  var rp = document.getElementById('rp'); rp.style.display = 'block';
+  var rb = document.getElementById('rb');
+  rb.className = 'badge ' + (j.code === 1 ? 'bok' : 'berr');
+  rb.textContent = j.code === 1 ? '✓ OK' : '✗ FAIL';
+  document.getElementById('rtime').textContent = ms + ' ms';
+  var rssiSec = document.getElementById('rssiSec');
+  var sumSec  = document.getElementById('sumSec');
+  rssiSec.style.display = 'none'; sumSec.style.display = 'none';
+  var d = j.data || {};
+  var sc = d.scanned;
+  if (sc && sc.length) {
+    rssiSec.style.display = 'block';
+    rssiSec.innerHTML = sc.map(rssiCard).join('');
+  } else if (d.rssi !== undefined) {
+    rssiSec.style.display = 'block';
+    rssiSec.innerHTML = rssiCard(d);
+  }
+  if (d.io_score) {
+    sumSec.style.display = 'block';
+    sumSec.innerHTML = '<div class="rg">' + sumCards(d) + '</div>';
+  }
+  document.getElementById('rbody').innerHTML = hl(JSON.stringify(j, null, 2));
+}
+
+function showErr(msg, ms) {
+  var rp = document.getElementById('rp'); rp.style.display = 'block';
+  document.getElementById('rb').className = 'badge berr';
+  document.getElementById('rb').textContent = '✗ ERREUR';
+  document.getElementById('rtime').textContent = ms + ' ms';
+  document.getElementById('rssiSec').style.display = 'none';
+  document.getElementById('sumSec').style.display  = 'none';
+  document.getElementById('rbody').innerHTML =
+    '<span style="color:var(--r)">' + esc(msg) + '</span>\n\n' +
+    '<span style="color:var(--dim)">Vérifiez:\n• Port: ' + port() +
+    '\n• API démarrée (onglet API-Face → Start)\n• ADB forward depuis PC: adb -d forward tcp:' + port() + ' tcp:8765</span>';
+}
+
+function rssiCard(r) {
+  var rs  = (r.rssi !== undefined) ? r.rssi : -999;
+  var q   = r.rssi_quality || '?';
+  var n   = r.name || r.mac || '?';
+  var mac = r.mac || '';
+  var src = r.source || '';
+  var pct = Math.max(0, Math.min(100, ((rs + 100) / 60) * 100));
+  var col = rs >= -60 ? '#00a86b' : rs >= -70 ? '#2979ff' : rs >= -80 ? '#e6a800' : rs >= -90 ? '#ff6d00' : '#e03450';
+  var qcls = rs >= -60 ? 'rok' : rs >= -70 ? '' : rs >= -80 ? 'rwarn' : 'rerr';
+  return '<div class="rssiw">' +
+    '<div class="rsl">' + esc(n) + (mac ? ' — ' + esc(mac) : '') +
+      (src ? ' <span style="color:var(--dim);font-size:9px">[' + esc(src) + ']</span>' : '') + '</div>' +
+    '<div class="rsbw"><div class="rsb" style="width:' + pct + '%;background:' + col + '"></div></div>' +
+    '<div class="rsv"><span class="rv ' + qcls + '">' + (rs === -999 ? 'N/A' : rs + ' dBm') + '</span>' +
+    '<span style="color:' + col + ';font-weight:600">' + esc(q) + '</span></div></div>';
+}
+
+function sumCards(d) {
+  var cs = [
+    { l:'IO Score',     v: d.io_score || '—',               c: scls(d.io_score) },
+    { l:'Erreurs IO',   v: d.io_errors || 0,                c: d.io_errors  > 0 ? 'rwarn' : 'rok' },
+    { l:'Timeouts',     v: d.io_timeouts || 0,              c: d.io_timeouts > 0 ? 'rerr'  : 'rok' },
+    { l:'Latence moy',  v: (d.io_latency_avg_ms || 0) + ' ms', c: '' },
+    { l:'Échantillons', v: d.io_samples || 0,               c: '' }
+  ];
+  return cs.map(function(c) {
+    return '<div class="rc"><div class="rl">' + c.l + '</div><div class="rv ' + c.c + '">' + esc(String(c.v)) + '</div></div>';
+  }).join('');
+}
+
+function scls(s) {
+  if (!s) return '';
+  if (s === 'EXCELLENT' || s === 'BON') return 'rok';
+  if (s === 'MOYEN') return 'rwarn';
+  return 'rerr';
+}
+
+function doPing() {
+  var d = document.getElementById('dot'), st = document.getElementById('stxt');
+  d.className = 'dot'; st.textContent = '…';
+  var t0 = Date.now();
+  var xhr = new XMLHttpRequest();
+  xhr.open('GET', base() + '/ping', true);
+  xhr.timeout = 5000;
+  xhr.onload = function() {
+    var ms = Date.now() - t0;
+    try {
+      var j = JSON.parse(xhr.responseText);
+      if (j.code === 1) { d.className = 'dot ok'; st.textContent = 'OK — ' + ms + 'ms'; addLog('GET', '/v1/ping', 'ok', ms); }
+      else              { d.className = 'dot err'; st.textContent = 'FAIL'; addLog('GET', '/v1/ping', 'err', ms); }
+    } catch(e) { d.className = 'dot err'; st.textContent = 'Erreur JSON'; }
+  };
+  xhr.onerror   = function() { d.className = 'dot err'; st.textContent = 'Hors ligne';  addLog('GET', '/v1/ping', 'err', Date.now()-t0, 'Connexion refusée'); };
+  xhr.ontimeout = function() { d.className = 'dot err'; st.textContent = 'Timeout';     addLog('GET', '/v1/ping', 'err', Date.now()-t0, 'Timeout'); };
+  xhr.send();
+}
+
+function addLog(m, p, s, ms, detail) {
+  var n = new Date();
+  var ts = n.toTimeString().slice(0,8) + '.' + String(n.getMilliseconds()).padStart(3,'0');
+  logs.unshift({ ts:ts, m:m, p:p, s:s, ms:ms, d:detail });
+  if (logs.length > 50) logs.pop();
+  renderLog();
+}
+
+function renderLog() {
+  var el = document.getElementById('lb');
+  if (!logs.length) { el.innerHTML = '<div style="color:var(--dim)">Aucune activité</div>'; return; }
+  el.innerHTML = logs.map(function(e) {
+    var cls = e.s === 'ok' ? 'lok' : 'lerr';
+    var ic  = e.s === 'ok' ? '✓' : '✗';
+    var det = e.d ? ' — ' + esc(String(e.d).slice(0,60)) : '';
+    return '<div class="ll"><span class="lts">' + e.ts + '</span><span class="' + cls + '">' + ic + ' ' + e.m + ' ' + esc(e.p) + ' ' + e.ms + 'ms' + det + '</span></div>';
+  }).join('');
+}
+
+function clrLog() { logs = []; renderLog(); }
+
+function hl(s) {
+  return esc(s)
+    .replace(/"([^"]+)":/g, '<span class="key">"$1"</span>:')
+    .replace(/: "([^"]*)"/g, ': <span class="str">"$1"</span>')
+    .replace(/: (\d+\.?\d*)/g, ': <span class="num">$1</span>')
+    .replace(/: (true|false)/g, ': <span class="bool">$1</span>')
+    .replace(/: (null)/g, ': <span class="null">$1</span>');
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// Auto-detect port depuis URL
+(function() {
+  var p = window.location.port;
+  if (p) document.getElementById('iPort').value = p;
+})();
+</script>
+</body>
+</html>
