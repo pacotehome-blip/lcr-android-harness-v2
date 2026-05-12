@@ -448,7 +448,8 @@ function execCmd() {
   var xhr = new XMLHttpRequest();
   xhr.open(c.m, url, true);
   if (c.m === 'POST') xhr.setRequestHeader('Content-Type', 'application/json');
-  xhr.timeout = 20000;
+  // scan-auto peut prendre plusieurs minutes (250 nodes)
+  xhr.timeout = (cur === 'reg_scan_auto') ? 300000 : 20000;
 
   xhr.onload = function() {
     var ms = Date.now() - t0;
