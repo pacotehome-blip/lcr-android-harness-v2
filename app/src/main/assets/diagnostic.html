@@ -362,6 +362,30 @@ function render(id) {
     if (f.h) fh += '<div class="fh">' + f.h + '</div>';
   });
   var descHtml = c.desc ? '<div class="pdesc">' + esc(c.desc) + '</div>' : '';
+  var cmdBlock =
+    '<div class="panel" style="margin-top:12px">' +
+      '<div class="ph" style="justify-content:space-between">' +
+        '<span class="pt" style="font-size:12px">&#128196; Commandes FieldService</span>' +
+        '<span style="font-size:10px;color:var(--muted)">Copier-coller dans PowerShell ou terminal</span>' +
+      '</div>' +
+      '<div class="pb" style="display:flex;flex-direction:column;gap:10px">' +
+        '<div>' +
+          '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">' +
+            '<span style="font-size:10px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.08em">PowerShell</span>' +
+            '<button onclick="copyCmd('ps')" style="background:none;border:1px solid var(--border2);border-radius:4px;color:var(--muted);font-size:10px;padding:2px 9px;cursor:pointer;font-family:monospace">Copier</button>' +
+          '</div>' +
+          '<pre id="cmdPs" style="background:#f8f9fb;border:1px solid var(--border);border-radius:6px;padding:10px 12px;font-family:monospace;font-size:11px;color:#1a1d26;white-space:pre-wrap;word-break:break-all;margin:0;line-height:1.6"></pre>' +
+        '</div>' +
+        '<div>' +
+          '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">' +
+            '<span style="font-size:10px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.08em">curl</span>' +
+            '<button onclick="copyCmd('curl')" style="background:none;border:1px solid var(--border2);border-radius:4px;color:var(--muted);font-size:10px;padding:2px 9px;cursor:pointer;font-family:monospace">Copier</button>' +
+          '</div>' +
+          '<pre id="cmdCurl" style="background:#f8f9fb;border:1px solid var(--border);border-radius:6px;padding:10px 12px;font-family:monospace;font-size:11px;color:#1a1d26;white-space:pre-wrap;word-break:break-all;margin:0;line-height:1.6"></pre>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+
   document.getElementById('ca').innerHTML =
     '<div class="panel">' +
       '<div class="ph">' +
@@ -374,8 +398,20 @@ function render(id) {
         (fh || '<div style="font-size:12px;color:var(--dim);margin-bottom:10px">Aucun paramètre requis</div>') +
         '<button class="bx" id="bx" onclick="execCmd()">&#9654; Exécuter</button>' +
       '</div>' +
-    '</div>';
+    '</div>' +
+    cmdBlock;
+
   document.getElementById('rp').style.display = 'none';
+
+  // Wire inputs to refresh commands
+  setTimeout(function() {
+    updateCmds();
+    var inputs = document.querySelectorAll('#ca input, #ca select');
+    inputs.forEach(function(el) {
+      el.addEventListener('input', updateCmds);
+      el.addEventListener('change', updateCmds);
+    });
+  }, 60);
 }
 
 function execCmd() {
@@ -577,6 +613,7 @@ function renderLog() {
 
 function clrLog() { logs = []; renderLog(); }
 
+
 function hl(s) {
   return esc(s)
     .replace(/"([^"]+)":/g, '<span class="key">"$1"</span>:')
@@ -590,10 +627,79 @@ function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+// ===================== COMMANDES FIELDSERVICE =====================
+function buildCmdParams() {
+  if (!cur) return { url: '', body: null };
+  var c = CMDS[cur];
+  var body = {}, query = {};
+  if (c.f) c.f.forEach(function(f) {
+    var el = document.getElementById('f_' + f.k);
+    if (!el) return;
+    var v = el.value.trim(); if (!v) return;
+    var val = f.t === 'number' ? parseInt(v) : v;
+    if (f.inQuery) query[f.k] = v;
+    else if (f.inPath) query['__path__'] = v;
+    else body[f.k] = val;
+  });
+  var url = base() + c.p;
+  if (query['__path__']) { url = url + query['__path__']; delete query['__path__']; }
+  var qkeys = Object.keys(query);
+  if (qkeys.length > 0) url += '?' + qkeys.map(function(k) { return encodeURIComponent(k) + '=' + encodeURIComponent(query[k]); }).join('&');
+  if (c.m === 'GET' && body.bt_mac) { url += (url.indexOf('?') >= 0 ? '&' : '?') + 'bt_mac=' + encodeURIComponent(body.bt_mac); delete body.bt_mac; }
+  return { url: url, body: c.m === 'POST' ? JSON.stringify(body, null, 2) : null, method: c.m };
+}
+
+function updateCmds() {
+  if (!cur) return;
+  var psEl   = document.getElementById('cmdPs');
+  var curlEl = document.getElementById('cmdCurl');
+  if (!psEl || !curlEl) return;
+  var r = buildCmdParams();
+  var ps, curl;
+  if (r.method === 'POST') {
+    var bodyOneLine = r.body ? r.body.replace(/\s+/g,' ').trim() : '{}';
+    ps   = '$BASE = "http://127.0.0.1:' + port() + '/v1"\n\n'
+         + 'Invoke-WebRequest -Method POST "$BASE' + CMDS[cur].p + '" `\n'
+         + '  -ContentType "application/json" `\n'
+         + "  -Body '" + bodyOneLine + "' `\n"
+         + '  -UseBasicParsing';
+    curl = 'curl -X POST "' + r.url + '" \\\n'
+         + '  -H "Content-Type: application/json" \\\n'
+         + "  -d '" + bodyOneLine + "'";
+  } else {
+    ps   = '$BASE = "http://127.0.0.1:' + port() + '/v1"\n\n'
+         + 'Invoke-WebRequest -Method GET "' + r.url + '" -UseBasicParsing';
+    curl = 'curl -X GET "' + r.url + '"';
+  }
+  psEl.textContent   = ps;
+  curlEl.textContent = curl;
+}
+
+function copyCmd(type) {
+  var el = document.getElementById(type === 'ps' ? 'cmdPs' : 'cmdCurl');
+  if (!el) return;
+  var txt = el.textContent;
+  var btn = event.target;
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(txt).then(function() {
+      btn.textContent = '✓ Copié'; setTimeout(function() { btn.textContent = 'Copier'; }, 1500);
+    }).catch(function() { fallbackCopy(txt, btn); });
+  } else { fallbackCopy(txt, btn); }
+}
+
+function fallbackCopy(txt, btn) {
+  var ta = document.createElement('textarea');
+  ta.value = txt; ta.style.position = 'fixed'; ta.style.opacity = '0';
+  document.body.appendChild(ta); ta.select();
+  try { document.execCommand('copy'); if(btn){btn.textContent='✓ Copié';setTimeout(function(){btn.textContent='Copier';},1500);} } catch(e) {}
+  document.body.removeChild(ta);
+}
+
 // Auto-detect port depuis URL
 (function() {
   var p = window.location.port;
   if (p) document.getElementById('iPort').value = p;
+  document.getElementById('iPort').addEventListener('input', updateCmds);
 })();
 </script>
 </body>
