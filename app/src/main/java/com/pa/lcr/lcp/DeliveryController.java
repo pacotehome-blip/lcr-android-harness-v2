@@ -2693,6 +2693,7 @@ safeJsonPut(result, "ticket_no", job.ticketNo);
 safeJsonPut(result, "serial_id", job.serialId);
 safeJsonPut(result, "compartment", job.compartment == null ? JSONObject.NULL : job.compartment);
 safeJsonPut(result, "product_number", job.productNumber);
+safeJsonPut(result, "sale_no", job.saleNo);
 
 String uid = (job.numeroLivraison == null ? "" : job.numeroLivraison) + "-" + job.ticketNo;
 job.deliveryUid = uid;
@@ -2721,7 +2722,13 @@ safeJsonPut(result, "gross_delta", grossDeltaU);
 safeJsonPut(result, "net_delta", netDeltaU);
 
 safeJsonPut(result, "inventory_written", JSONObject.NULL);
-safeJsonPut(result, "host_printed", true);
+safeJsonPut(result, "host_printed", false); // ✅ false = pas encore imprimé par FieldService
+safeJsonPut(result, "ticket_ready_to_print", true); // ✅ signal pour FieldService
+
+// ✅ FieldService printing info
+safeJsonPut(result, "fs_action_required", "PRINT_TICKET");
+safeJsonPut(result, "fs_net_l",   netDeltaU / scale);
+safeJsonPut(result, "fs_gross_l", grossDeltaU / scale);
 
 // ✅ Litres
 safeJsonPut(result, "gross_total_start_l", grossStartU / scale);
