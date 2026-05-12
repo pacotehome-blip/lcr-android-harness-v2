@@ -2430,7 +2430,52 @@ job.presetNetL_requested = presetNetL;
 
         return ApiResult.ok("Terminate: 1 - END sent", data);
     }
+    public ApiResult api_deliveryStatusB() {
+        try {
+            // Exactement ce que fait le bouton B dans le UI
+            requestStatus();
+            Thread.sleep(200);
+            requestLiveSample();
 
+            int[] ds = lcpDeliveryStatus();
+            int delCode = ds[1];
+            ensureDigits();
+            double scale = Math.pow(10, cachedDigits);
+
+            int g = beI32(lcpGetField(FIELD_GROSS_COUNT));
+            int n = beI32(lcpGetField(FIELD_NET_COUNT));
+            double netL   = (n & 0xFFFFFFFFL) / scale;
+            double grossL = (g & 0xFFFFFFFFL) / scale;
+
+            boolean deliveryActive = (delCode & DC_DELIVERY_ACTIVE) != 0;
+            boolean flowActive     = (delCode & DC_FLOW_ACTIVE) != 0;
+            boolean ticketPending  = (delCode & DC_TICKET_PENDING) != 0;
+
+            JSONObject data = new JSONObject();
+            safeJsonPut(data, "deliveryActive",  deliveryActive ? 1 : 0);
+            safeJsonPut(data, "flowActive",      flowActive ? 1 : 0);
+            safeJsonPut(data, "ticketPending",   ticketPending ? 1 : 0);
+            safeJsonPut(data, "net",             netL);
+            safeJsonPut(data, "gross",           grossL);
+            safeJsonPut(data, "net_l",           netL);
+            safeJsonPut(data, "gross_l",         grossL);
+            safeJsonPut(data, "decimals",        cachedDigits);
+            safeJsonPut(data, "delCode",         delCode);
+            safeJsonPut(data, "state",           state != null ? state.name() : "UNKNOWN");
+            safeJsonPut(data, "ts_ms",           System.currentTimeMillis());
+
+            try {
+                JSONObject tick = buildTickJsonSnapshot();
+                safeJsonPut(data, "tick", tick);
+            } catch (Exception ignored) {}
+
+            return ApiResult.ok("StatusB: 1 - OK", data);
+        } catch (Exception e) {
+            JSONObject d = new JSONObject();
+            safeJsonPut(d, "detail", e.getMessage() != null ? e.getMessage() : "");
+            return ApiResult.fail("StatusB: 0 - Read error", "STATUS_B_READ_FAIL", d);
+        }
+    }
     public ApiResult api_deliveryJobGet(String jobId) {
         ApiJob job;
         synchronized (apiJobs) { job = apiJobs.get(jobId); }

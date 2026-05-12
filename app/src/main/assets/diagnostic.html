@@ -121,6 +121,7 @@ header{background:#fff;border-bottom:1px solid var(--border);padding:12px 16px;d
     <button class="cb act" onclick="toggleJobPanel()" id="btnJobPanel"><span style="font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;background:#fdeaed;color:#e03450;font-family:monospace;flex-shrink:0">LIVE</span>Surveiller job</button>
 
     <div class="sec">Livraison</div>
+    <button class="cb" onclick="sel('delivery_b')"><span class="tag tp">POST</span>/v1/delivery/B</button>
     <button class="cb" onclick="sel('delivery_align')"><span class="tag tp">POST</span>/v1/delivery/A</button>
     <button class="cb" onclick="sel('delivery_alignA')"><span class="tag tp">POST</span>/v1/delivery/alignA</button>
     <button class="cb" onclick="sel('delivery_c')"><span class="tag tp">POST</span>/v1/delivery/C</button>
@@ -295,6 +296,15 @@ var CMDS = {
     f:[
       {k:'startNode', l:'Node début', h:'1 par défaut', t:'number'},
       {k:'endNode', l:'Node fin', h:'250 par défaut', t:'number'}
+    ]
+  },
+  delivery_b: {
+    m:'POST', p:'/v1/delivery/B', l:'Status B — net/gross live',
+    desc:'Équivalent du bouton B dans le UI — requestStatus() + requestLiveSample(). Retourne net, gross, deliveryActive, flowActive, ticketPending.',
+    f:[
+      {k:'lcrnode_dec', l:'Node LCP', h:'250 par défaut', t:'number'},
+      {k:'media', l:'Média', h:'usb ou bt', t:'select', o:['','usb','bt']},
+      {k:'bt_mac', l:'MAC BT', h:'Requis si média = bt', t:'text'}
     ]
   },
   delivery_align: {

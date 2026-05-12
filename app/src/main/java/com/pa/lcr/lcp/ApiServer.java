@@ -409,6 +409,19 @@ public final class ApiServer {
                 return facade.api_deliveryAlignA(node, from, media, btMac);
             });
         }
+        // ✅ Delivery B — statut live (net/gross temps réel)
+        if ("POST".equals(req.method) && "/v1/delivery/B".equals(req.path)) {
+            JSONObject body = safeBody(req.jsonBody());
+            ApiResult gate = gateMediaIfProvided(body);
+            if (gate != null) return gate;
+            Integer node = parseNodeDec(body);
+            Integer from = parseFromDec(body);
+            return withAutoConnectRetry(body, () -> {
+                String media = resolveMediaDefault(body);
+                String btMac = resolveBtMacDefault(body);
+                return facade.api_deliveryStatusB(node, from, media, btMac);
+            });
+        }
 
         // Delivery alignA
         if ("POST".equals(req.method) && "/v1/delivery/alignA".equals(req.path)) {
@@ -423,6 +436,7 @@ public final class ApiServer {
                 return facade.api_deliveryAlignA(node, from, media, btMac);
             });
         }
+
 
         // Delivery C
         if ("POST".equals(req.method) && "/v1/delivery/C".equals(req.path)) {

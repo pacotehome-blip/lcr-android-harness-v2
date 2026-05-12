@@ -97,6 +97,10 @@ public interface ApiFacade {
         return api_connectLcp(lcrnode_dec, from_dec);
     }
 
+    default ApiResult api_deliveryStatusB(Integer lcrnode_dec, Integer from_dec, String media, String bt_mac) {
+        return ApiResult.fail("api_deliveryStatusB: not supported", "NOT_SUPPORTED");
+    }
+    
     // =========================================================
     // Align / Recover (A)
     // =========================================================
