@@ -117,6 +117,9 @@ header{background:#fff;border-bottom:1px solid var(--border);padding:12px 16px;d
     <button class="cb" onclick="sel('reg_connect_auto')"><span class="tag tp">POST</span>/v1/register/connect-auto</button>
     <button class="cb" onclick="sel('reg_scan_auto')"><span class="tag tp">POST</span>/v1/register/scan-auto</button>
 
+    <div class="sec">&#9889; Job Actif</div>
+    <button class="cb act" onclick="toggleJobPanel()" id="btnJobPanel"><span style="font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;background:#fdeaed;color:#e03450;font-family:monospace;flex-shrink:0">LIVE</span>Surveiller job</button>
+
     <div class="sec">Livraison</div>
     <button class="cb" onclick="sel('delivery_align')"><span class="tag tp">POST</span>/v1/delivery/A</button>
     <button class="cb" onclick="sel('delivery_alignA')"><span class="tag tp">POST</span>/v1/delivery/alignA</button>
@@ -142,6 +145,53 @@ header{background:#fff;border-bottom:1px solid var(--border);padding:12px 16px;d
         <div style="font-size:32px">🛠</div>
         <div style="font-weight:600;color:#374151">Sélectionnez une commande</div>
         <div style="font-size:11px">Configurez le port en haut, cliquez Ping pour tester la connexion</div>
+      </div>
+    </div>
+
+    <!-- ✅ PANNEAU JOB ACTIF -->
+    <div id="jobPanel" class="panel" style="border-left:3px solid var(--g)">
+      <div class="ph" style="justify-content:space-between;flex-wrap:wrap;gap:8px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <span id="jobStateDot" style="width:10px;height:10px;border-radius:50%;background:var(--dim);flex-shrink:0"></span>
+          <span class="pt" style="font-size:13px" id="jobStateLabel">Job — En attente...</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-family:monospace;font-size:10px;color:var(--muted)" id="jobId">—</span>
+          <button onclick="toggleJobPoll()" id="btnJobPoll" style="background:var(--g);color:#fff;border:none;border-radius:5px;font-size:11px;font-weight:600;padding:4px 12px;cursor:pointer">&#9646;&#9646; Pause</button>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:12px 16px">
+        <div class="rc">
+          <div class="rl">Net (L)</div>
+          <div class="rv rok" id="jobNet">—</div>
+        </div>
+        <div class="rc">
+          <div class="rl">Gross (L)</div>
+          <div class="rv" id="jobGross">—</div>
+        </div>
+        <div class="rc">
+          <div class="rl">Node LCP</div>
+          <div class="rv" id="jobNode">—</div>
+        </div>
+        <div class="rc">
+          <div class="rl">Serial</div>
+          <div class="rv" id="jobSerial">—</div>
+        </div>
+      </div>
+      <div style="padding:0 16px 14px;display:flex;gap:8px;flex-wrap:wrap">
+        <button onclick="jobAction('continue')" id="btnJobContinue"
+          style="background:#2979ff;color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:600;padding:7px 16px;cursor:pointer;opacity:.5" disabled>
+          &#9654; Continuer
+        </button>
+        <button onclick="jobAction('terminate')" id="btnJobTerminate"
+          style="background:#e03450;color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:600;padding:7px 16px;cursor:pointer;opacity:.5" disabled>
+          &#9632; Terminer
+        </button>
+        <button onclick="jobAction('reprint')" id="btnJobReprint"
+          style="background:#6b7280;color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:600;padding:7px 16px;cursor:pointer;opacity:.5" disabled>
+          &#128438; Reprint ticket
+        </button>
+        <span id="jobActionMsg" style="font-size:11px;color:var(--muted);align-self:center"></span>
       </div>
     </div>
 
@@ -696,11 +746,188 @@ function fallbackCopy(txt, btn) {
   document.body.removeChild(ta);
 }
 
+// ===================== JOB ACTIF =====================
+var jobPollInterval = null;
+var jobPolling = true;
+var activeJobId = null;
+var activeJobNode = null;
+var activeJobSerial = null;
+var lastTickSeq = null;
+
+function toggleJobPanel() {
+  // already visible by default — just scroll to it
+  document.getElementById('jobPanel').scrollIntoView({behavior:'smooth'});
+}
+
+function toggleJobPoll() {
+  var btn = document.getElementById('btnJobPoll');
+  if (jobPolling) {
+    jobPolling = false;
+    if (jobPollInterval) { clearInterval(jobPollInterval); jobPollInterval = null; }
+    btn.textContent = '▶ Reprendre';
+    btn.style.background = '#6b7280';
+  } else {
+    jobPolling = true;
+    btn.innerHTML = '&#9646;&#9646; Pause';
+    btn.style.background = 'var(--g)';
+    pollJob();
+    jobPollInterval = setInterval(pollJob, 3000);
+  }
+}
+
+function pollJob() {
+  if (!jobPolling) return;
+  var url = base() + '/v1/tick/wait';
+  var params = [];
+  if (activeJobNode) params.push('lcrnode_dec=' + activeJobNode);
+  if (lastTickSeq !== null) params.push('since_seq=' + lastTickSeq);
+  params.push('wait_ms=2500');
+  if (params.length) url += '?' + params.join('&');
+
+  var xhr = new XMLHttpRequest();
+  xhr.open('GET', url, true);
+  xhr.timeout = 5000;
+  xhr.onload = function() {
+    try {
+      var j = JSON.parse(xhr.responseText);
+      handleTickResponse(j);
+    } catch(e) {}
+  };
+  xhr.onerror = xhr.ontimeout = function() {
+    setJobState('OFFLINE', null);
+  };
+  xhr.send();
+}
+
+function handleTickResponse(j) {
+  if (!j || j.code !== 1) { setJobState('OFFLINE', null); return; }
+  var d = j.data || {};
+  var seq = d.seq; if (seq !== undefined) lastTickSeq = seq;
+
+  // Extract job info
+  var jobId  = d.jobId  || d.job_id  || null;
+  var state  = d.state  || d.deliveryState || null;
+  var node   = d.lcrnode_dec || d.node || activeJobNode;
+  var serial = d.serialId || d.serial_id || activeJobSerial;
+  var net    = d.netL   !== undefined ? d.netL   : (d.net_l   !== undefined ? d.net_l   : null);
+  var gross  = d.grossL !== undefined ? d.grossL : (d.gross_l !== undefined ? d.gross_l : null);
+
+  if (jobId) { activeJobId = jobId; }
+  if (node)  { activeJobNode = node; }
+  if (serial){ activeJobSerial = serial; }
+
+  setJobState(state, jobId, net, gross, node, serial);
+}
+
+function setJobState(state, jobId, net, gross, node, serial) {
+  var dot   = document.getElementById('jobStateDot');
+  var label = document.getElementById('jobStateLabel');
+  var jidEl = document.getElementById('jobId');
+  var netEl = document.getElementById('jobNet');
+  var groEl = document.getElementById('jobGross');
+  var nodEl = document.getElementById('jobNode');
+  var serEl = document.getElementById('jobSerial');
+
+  var btnCont  = document.getElementById('btnJobContinue');
+  var btnTerm  = document.getElementById('btnJobTerminate');
+  var btnRep   = document.getElementById('btnJobReprint');
+
+  var stateColors = {
+    'RUNNING_FLOWING': 'var(--g)',
+    'RUNNING_PAUSED':  'var(--y)',
+    'CONNECTED':       'var(--b)',
+    'PRESTART':        'var(--b)',
+    'ENDING':          'var(--y)',
+    'DISCONNECTED':    'var(--dim)',
+    'OFFLINE':         'var(--r)'
+  };
+
+  var col = stateColors[state] || 'var(--dim)';
+  if (dot) { dot.style.background = col; dot.style.boxShadow = state && state !== 'OFFLINE' && state !== 'DISCONNECTED' ? '0 0 6px ' + col : 'none'; }
+
+  var stateLabels = {
+    'RUNNING_FLOWING': '🟢 En cours — flux actif',
+    'RUNNING_PAUSED':  '🟡 En pause',
+    'CONNECTED':       '🔵 Connecté',
+    'PRESTART':        '🔵 Pré-démarrage',
+    'ENDING':          '🟡 Fin en cours',
+    'DISCONNECTED':    '⚪ Déconnecté',
+    'OFFLINE':         '🔴 API hors ligne'
+  };
+  if (label) label.textContent = stateLabels[state] || (state ? state : 'En attente...');
+
+  if (jidEl) jidEl.textContent = jobId || activeJobId || '—';
+  if (netEl) netEl.textContent = net !== null && net !== undefined ? parseFloat(net).toFixed(2) + ' L' : '—';
+  if (groEl) groEl.textContent = gross !== null && gross !== undefined ? parseFloat(gross).toFixed(2) + ' L' : '—';
+  if (nodEl) nodEl.textContent = node || activeJobNode || '—';
+  if (serEl) serEl.textContent = serial || activeJobSerial || '—';
+
+  // Enable/disable action buttons
+  var hasJob = !!(jobId || activeJobId);
+  var isActive = state === 'RUNNING_FLOWING' || state === 'RUNNING_PAUSED' || state === 'PRESTART' || state === 'ENDING';
+  var isPaused = state === 'RUNNING_PAUSED';
+
+  if (btnCont)  { btnCont.disabled  = !isPaused;  btnCont.style.opacity  = isPaused  ? '1' : '.4'; }
+  if (btnTerm)  { btnTerm.disabled  = !isActive;  btnTerm.style.opacity  = isActive  ? '1' : '.4'; }
+  if (btnRep)   { btnRep.disabled   = !hasJob;    btnRep.style.opacity   = hasJob    ? '1' : '.4'; }
+}
+
+function jobAction(action) {
+  var jId   = activeJobId;
+  var node  = activeJobNode;
+  var msgEl = document.getElementById('jobActionMsg');
+  if (msgEl) msgEl.textContent = '';
+
+  if (action === 'continue' || action === 'terminate') {
+    if (!jId && !node) { if (msgEl) msgEl.textContent = 'Aucun job actif trouvé'; return; }
+    var url  = base() + '/v1/delivery/job/' + action;
+    var body = {};
+    if (jId)  body.jobId      = jId;
+    if (node) body.lcrnode_dec = parseInt(node);
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', url, true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.timeout = 15000;
+    xhr.onload = function() {
+      try {
+        var j = JSON.parse(xhr.responseText);
+        if (msgEl) msgEl.textContent = j.code === 1 ? '✓ ' + (action === 'continue' ? 'Continué' : 'Terminé') : '✗ ' + j.msg;
+        addLog('POST', '/v1/delivery/job/' + action, j.code === 1 ? 'ok' : 'err', 0);
+      } catch(e) { if (msgEl) msgEl.textContent = '✗ Erreur'; }
+    };
+    xhr.onerror = function() { if (msgEl) msgEl.textContent = '✗ Connexion refusée'; };
+    xhr.send(JSON.stringify(body));
+
+  } else if (action === 'reprint') {
+    var url2 = base() + '/v1/ticket/reprint';
+    var body2 = {};
+    if (node) body2.lcrnode_dec = parseInt(node);
+    var xhr2 = new XMLHttpRequest();
+    xhr2.open('POST', url2, true);
+    xhr2.setRequestHeader('Content-Type', 'application/json');
+    xhr2.timeout = 15000;
+    xhr2.onload = function() {
+      try {
+        var j = JSON.parse(xhr2.responseText);
+        if (msgEl) msgEl.textContent = j.code === 1 ? '✓ Ticket imprimé' : '✗ ' + j.msg;
+        addLog('POST', '/v1/ticket/reprint', j.code === 1 ? 'ok' : 'err', 0);
+      } catch(e) { if (msgEl) msgEl.textContent = '✗ Erreur reprint'; }
+    };
+    xhr2.onerror = function() { if (msgEl) msgEl.textContent = '✗ Connexion refusée'; };
+    xhr2.send(JSON.stringify(body2));
+  }
+}
+
 // Auto-detect port depuis URL
 (function() {
   var p = window.location.port;
   if (p) document.getElementById('iPort').value = p;
   document.getElementById('iPort').addEventListener('input', updateCmds);
+  // Start job polling automatically
+  setTimeout(function() {
+    pollJob();
+    jobPollInterval = setInterval(pollJob, 3000);
+  }, 800);
 })();
 </script>
 </body>
