@@ -405,6 +405,8 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
 
         refreshApiStatus();
         logUi(null, "UI prête — Scan USB requis");
+        // ✅ Démarrage automatique API HTTP au lancement
+        startApiServer();
     }
 
     @Override
