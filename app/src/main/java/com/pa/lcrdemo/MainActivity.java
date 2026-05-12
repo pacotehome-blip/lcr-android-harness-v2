@@ -423,10 +423,61 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
         LogBus.addListener(mainLogListener);
 
         UsbSerialPort p = UsbSession.getPort();
-        if (p != null && usbPort == null) {
-            onUsbPortReady(p);
-        }
+        if (p != null && usbPort == null) onUsbPortReady(p);
         refreshGlobalLogView();
+        // ✅ Rattrapage — sync tabs avec sessions connues (cas arrière-plan)
+        ui.postDelayed(this::syncTabsFromActiveSessions, 400);
+    }
+
+    /**
+     * ✅ Rattrapage UI — synchronise les tabs avec les sessions LCP connues.
+     * Appelé au retour au premier plan pour rattraper les NODE_SEEN manqués en arrière-plan.
+     */
+    private void syncTabsFromActiveSessions() {
+        try {
+            RegisterSessionManager sessions = RegisterSessionManager.get(this);
+            List<String[]> known = sessions.listKnownRegisters();
+            if (known == null || known.isEmpty()) {
+                logUi(null, "syncTabs: aucune session connue");
+                return;
+            }
+            logUi(null, "syncTabs: " + known.size() + " session(s) connue(s)");
+            boolean focused = false;
+            for (String[] reg : known) {
+                if (reg == null || reg.length < 3) continue;
+                int node;
+                try { node = Integer.parseInt(reg[0]); } catch (Exception e) { continue; }
+                String serial      = reg[1];
+                String transportKey = reg[2];
+
+                if (!isPlausibleSerial(serial)) continue;
+
+                // Si pas de transport pinné, prendre le transport actif
+                if (transportKey == null || transportKey.trim().isEmpty()) {
+                    transportKey = MediaTransportManager.getActiveKeyStatic();
+                    if (transportKey == null) transportKey = "";
+                }
+
+                String mediaShort = mediaShortFromTransportKey(transportKey);
+                String tabKey = tabKeyOf(mediaShort, node, serial);
+                boolean exists = tabsByKey.containsKey(tabKey);
+
+                logUi(null, "syncTabs: node=" + node + " serial=" + serial
+                        + " media=" + mediaShort + (exists ? " (existant)" : " (nouveau)"));
+
+                // focus sur le premier tab seulement si aucun tab actif
+                boolean focus = (!focused && currentTabKey == null);
+                upsertRegisterTabFromScan(transportKey, node, 255, serial, focus);
+                if (focus) focused = true;
+
+                // Rafraîchir le statut média
+                final String fTabKey = tabKeyOf(mediaShortFromTransportKey(transportKey), node, serial);
+                ui.postDelayed(() -> refreshOneTabMediaStatus(fTabKey), 100);
+            }
+            refreshAllTabsMediaStatus();
+        } catch (Exception e) {
+            logUi(null, "syncTabs: erreur: " + e.getMessage());
+        }
     }
 
     @Override

@@ -88,7 +88,33 @@ public final class RegisterSessionManager {
         int node = nodeDec & 0xFF;
         return expectedSerialByNode.get(node);
     }
+    /** ✅ Rattrapage UI — retourne toutes les sessions connues (node + serial + transportKey) */
+    public synchronized List<int[]> listKnownNodeSerials() {
+        List<int[]> result = new ArrayList<>();
+        for (Map.Entry<Integer, String> e : expectedSerialByNode.entrySet()) {
+            if (e == null || e.getKey() == null || e.getValue() == null) continue;
+            result.add(new int[]{e.getKey()});
+        }
+        return result;
+    }
 
+    /** ✅ Rattrapage UI — retourne node + serial + transportKey pinné */
+    public synchronized List<String[]> listKnownRegisters() {
+        List<String[]> result = new ArrayList<>();
+        for (Map.Entry<Integer, String> e : expectedSerialByNode.entrySet()) {
+            if (e == null || e.getKey() == null || e.getValue() == null) continue;
+            int node = e.getKey();
+            String serial = e.getValue();
+            String rk = regKey(node, serial);
+            String transport = pinnedTransportByRegKey.get(rk);
+            result.add(new String[]{
+                String.valueOf(node),
+                serial,
+                transport != null ? transport : ""
+            });
+        }
+        return result;
+    }
     private static String key(String transportKey, int nodeDec) {
         int node = nodeDec & 0xFF;
         String k = (transportKey == null || transportKey.trim().isEmpty()) ? "?" : transportKey.trim();
