@@ -800,21 +800,29 @@ function pollJob() {
 }
 
 function handleTickResponse(j) {
-  if (!j || j.code !== 1) { setJobState('OFFLINE', null); return; }
-  var d = j.data || {};
+  var d = j ? (j.data || {}) : {};
   var seq = d.seq; if (seq !== undefined) lastTickSeq = seq;
 
-  // Extract job info
-  var jobId  = d.jobId  || d.job_id  || null;
-  var state  = d.state  || d.deliveryState || null;
-  var node   = d.lcrnode_dec || d.node || activeJobNode;
-  var serial = d.serialId || d.serial_id || activeJobSerial;
-  var net    = d.netL   !== undefined ? d.netL   : (d.net_l   !== undefined ? d.net_l   : null);
-  var gross  = d.grossL !== undefined ? d.grossL : (d.gross_l !== undefined ? d.gross_l : null);
+  // Chercher les données dans data direct ou dans autoConnectLast.data
+  var inner = d;
+  if (d.autoConnectLast && d.autoConnectLast.data) {
+    inner = d.autoConnectLast.data;
+  }
 
-  if (jobId) { activeJobId = jobId; }
-  if (node)  { activeJobNode = node; }
-  if (serial){ activeJobSerial = serial; }
+  // code=0 peut quand même avoir des infos valides dans autoConnectLast
+  var jobId  = inner.jobId  || inner.job_id  || d.jobId  || null;
+  var state  = inner.status || inner.statut  || inner.state || inner.deliveryState || d.state || null;
+  var node   = inner.node   || inner.lcrnode_dec || d.lcrnode_dec || activeJobNode;
+  var serial = inner.serialId || inner.serial_id || inner.serial || d.serialId || activeJobSerial;
+  var net    = inner.net    !== undefined ? inner.net    : (d.netL   !== undefined ? d.netL   : null);
+  var gross  = inner.gross  !== undefined ? inner.gross  : (d.grossL !== undefined ? d.grossL : null);
+
+  // Si pas de state du tout → OFFLINE
+  if (!state) { setJobState('OFFLINE', null); return; }
+
+  if (jobId)  { activeJobId     = jobId; }
+  if (node)   { activeJobNode   = node; }
+  if (serial) { activeJobSerial = serial; }
 
   setJobState(state, jobId, net, gross, node, serial);
 }
