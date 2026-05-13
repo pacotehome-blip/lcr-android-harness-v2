@@ -804,6 +804,11 @@ function toggleJobPoll() {
 
 function pollJob() {
   if (!jobPolling) return;
+  // Si on a un jobId connu → poll direct sur le job
+  if (activeJobId) {
+    pollJobById(activeJobId);
+    return;
+  }
   var url = base() + '/v1/tick/wait';
   var params = [];
   if (activeJobNode) params.push('lcrnode_dec=' + activeJobNode);
@@ -826,6 +831,43 @@ function pollJob() {
   xhr.send();
 }
 
+function pollJobById(jobId) {
+  var url = base() + '/v1/delivery/job/' + encodeURIComponent(jobId);
+  var xhr = new XMLHttpRequest();
+  xhr.open('GET', url, true);
+  xhr.timeout = 5000;
+  xhr.onload = function() {
+    try {
+      var j = JSON.parse(xhr.responseText);
+      if (j.code === 1) {
+        var d = j.data || {};
+        var state  = d.state || d.status || d.statut || null;
+        var net    = d.net   !== undefined ? d.net   : (d.net_l   !== undefined ? d.net_l   : null);
+        var gross  = d.gross !== undefined ? d.gross : (d.gross_l !== undefined ? d.gross_l : null);
+        var node   = d.lcrnode_dec || d.node || activeJobNode;
+        var serial = d.serialId || d.serial_id || activeJobSerial;
+        var seq    = d.seq; if (seq !== undefined) lastTickSeq = seq;
+        if (node)   activeJobNode   = node;
+        if (serial) activeJobSerial = serial;
+        setJobState(state, jobId, net, gross, node, serial);
+        // Si job DONE — effacer jobId pour reprendre le poll tick
+        if (state === 'DONE' || state === 'TERMINATED') {
+          setTimeout(function() {
+            activeJobId = null;
+            setJobState('DISCONNECTED', null, null, null, activeJobNode, activeJobSerial);
+          }, 5000);
+        }
+      } else {
+        // Job introuvable — fallback tick
+        activeJobId = null;
+        setJobState('DISCONNECTED', null);
+      }
+    } catch(e) {}
+  };
+  xhr.onerror = xhr.ontimeout = function() { setJobState('OFFLINE', jobId); };
+  xhr.send();
+}
+
 function handleTickResponse(j) {
   var d = j ? (j.data || {}) : {};
   var seq = d.seq; if (seq !== undefined) lastTickSeq = seq;
@@ -844,8 +886,8 @@ function handleTickResponse(j) {
   var net    = inner.net    !== undefined ? inner.net    : (d.netL   !== undefined ? d.netL   : null);
   var gross  = inner.gross  !== undefined ? inner.gross  : (d.grossL !== undefined ? d.grossL : null);
 
-  // Si pas de state du tout → OFFLINE
-  if (!state) { setJobState('OFFLINE', null); return; }
+  // Si pas de state du tout → OFFLINE mais garder jobId connu
+  if (!state) { setJobState('OFFLINE', activeJobId); return; }
 
   if (jobId)  { activeJobId     = jobId; }
   if (node)   { activeJobNode   = node; }
