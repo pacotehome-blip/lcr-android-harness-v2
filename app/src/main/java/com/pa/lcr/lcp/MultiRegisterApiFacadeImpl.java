@@ -58,8 +58,9 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     private final MediaTransportManager mediaMgr;
 
     // jobId -> node/from
-    private final Map<String, Integer> jobToNode = new ConcurrentHashMap<>();
-    private final Map<String, Integer> jobToFrom = new ConcurrentHashMap<>();
+    private final Map<String, Integer> jobToNode      = new ConcurrentHashMap<>();
+    private final Map<String, Integer> jobToFrom      = new ConcurrentHashMap<>();
+    private final Map<String, String>  jobToTransport = new ConcurrentHashMap<>();
     private volatile int lastNodeHint = 250;
     private volatile int lastFromHint = 255;
 
@@ -1063,22 +1064,61 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     }
 
     private void recordJobId(ApiResult r, int node, int from) {
+        recordJobId(r, node, from, null);
+    }
+
+    private void recordJobId(ApiResult r, int node, int from, String transportKey) {
         try {
             JSONObject j = r.toJson();
             JSONObject data = j.optJSONObject("data");
             if (data == null) return;
             String jobId = data.optString("jobId", "").trim();
-            if (!jobId.isEmpty()) { jobToNode.put(jobId, node); jobToFrom.put(jobId, from); }
+            if (!jobId.isEmpty()) {
+                jobToNode.put(jobId, node);
+                jobToFrom.put(jobId, from);
+                String tk = transportKey != null ? transportKey
+                        : (mediaMgr != null ? MediaTransportManager.getActiveKeyStatic() : null);
+                if (tk != null && !tk.trim().isEmpty()) jobToTransport.put(jobId, tk.trim());
+            }
         } catch (Exception ignored) {}
     }
 
     private DeliveryController resolveJobController(String jobId, Integer nodeDec) {
         if (jobId == null || jobId.trim().isEmpty()) return null;
-        if (nodeDec != null) return requireSession(normNode(nodeDec), lastFromHint);
+
         Integer mappedNode = jobToNode.get(jobId);
         Integer mappedFrom = jobToFrom.get(jobId);
-        if (mappedNode != null) return requireSession(normNode(mappedNode), normFrom(mappedFrom != null ? mappedFrom : lastFromHint));
-        return requireSession(lastNodeHint, lastFromHint);
+        String  mappedKey  = jobToTransport.get(jobId);
+
+        int node = nodeDec != null ? normNode(nodeDec)
+                : (mappedNode != null ? normNode(mappedNode) : lastNodeHint);
+        int from = normFrom(mappedFrom != null ? mappedFrom : lastFromHint);
+
+        // ✅ 1) Transport du job (média-aware)
+        if (mappedKey != null && !mappedKey.trim().isEmpty() && mediaMgr != null) {
+            try {
+                TransportIo io = mediaMgr.getByKey(mappedKey);
+                if (io != null && io.isOpen()) {
+                    DeliveryController dc = sessions.getOrCreate(mappedKey, node, from, io);
+                    if (dc != null) return dc;
+                }
+            } catch (Exception ignored) {}
+        }
+
+        // ✅ 2) Fallback — transport actif
+        try {
+            String activeKey = MediaTransportManager.getActiveKeyStatic();
+            if (activeKey != null && mediaMgr != null) {
+                TransportIo io = mediaMgr.getByKey(activeKey);
+                if (io != null && io.isOpen()) {
+                    DeliveryController dc = sessions.getOrCreate(activeKey, node, from, io);
+                    if (dc != null) return dc;
+                }
+            }
+        } catch (Exception ignored) {}
+
+        // ✅ 3) Dernier fallback USB
+        return requireSession(node, from);
     }
 
     @Override public ApiResult api_connectLcp() { return api_connectLcp(null, null); }
@@ -1122,7 +1162,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         if (gate != null) return gate;
         if (mc.dc == null) return ApiResult.fail("Delivery C: 0 - Controller introuvable", "NO_CONTROLLER");
         ApiResult r = mc.dc.api_deliveryStartC(product1to16, presetNet);
-        recordJobId(r, node, from);
+        recordJobId(r, node, from, mc.transportKey);
         return r;
     }
 
@@ -1138,7 +1178,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         if (gate != null) return gate;
         if (mc.dc == null) return ApiResult.fail("OneShot: 0 - Controller introuvable", "NO_CONTROLLER");
         ApiResult r = mc.dc.api_deliveryOneShotStart(numero_livraison, product1to16, presetNetL, compartment);
-        recordJobId(r, node, from);
+        recordJobId(r, node, from, mc.transportKey);
         return r;
     }
 
