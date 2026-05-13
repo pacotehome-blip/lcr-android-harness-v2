@@ -257,37 +257,37 @@ header{background:#fff;border-bottom:1px solid var(--border);padding:12px 16px;d
 var CMDS = {
   ping: {
     m:'GET', p:'/v1/ping', l:'Ping API',
-    desc:'Test de connectivité — vérifie que l\'API est démarrée', f:[]
+    desc:"Test de connectivité — vérifie que l'API est démarrée", f:[]
   },
   bt_signal_scan: {
     m:'POST', p:'/v1/bt/signal/scan', l:'Scan RSSI BT',
-    desc:'Scan le signal RSSI des appareils BT appairés. Bloqué si livraison active.',
+    desc:"Scan le signal RSSI des appareils BT appairés. Bloqué si livraison active.",
     f:[{k:'bt_mac', l:'MAC BT (optionnel)', h:'Vide = tous les appairés — ex: 00:01:95:C9:BF:87', t:'text'}]
   },
   bt_signal_get: {
     m:'GET', p:'/v1/bt/signal', l:'Dernier signal BT (DB)',
-    desc:'Retourne le dernier RSSI + score IO connu en base de données.',
+    desc:"Retourne le dernier RSSI + score IO connu en base de données.",
     f:[{k:'bt_mac', l:'MAC BT (optionnel)', h:'Vide = BT actif', t:'text', inQuery:true}]
   },
   bt_list: {
     m:'GET', p:'/v1/bt/list', l:'Liste BT appairés',
-    desc:'Liste tous les appareils Bluetooth appairés sur la tablette.', f:[]
+    desc:"Liste tous les appareils Bluetooth appairés sur la tablette.", f:[]
   },
   bt_activate: {
     m:'POST', p:'/v1/bt/activate', l:'Activer BT',
-    desc:'Active le transport Bluetooth.', f:[]
+    desc:"Active le transport Bluetooth.", f:[]
   },
   usb_scan: {
     m:'GET', p:'/v1/usb/scan', l:'Scan USB',
-    desc:'Liste les périphériques USB connectés.', f:[]
+    desc:"Liste les périphériques USB connectés.", f:[]
   },
   usb_ping: {
     m:'POST', p:'/v1/usb/open-ping', l:'Ping USB',
-    desc:'Ouvre et teste la connexion USB.', f:[]
+    desc:"Ouvre et teste la connexion USB.", f:[]
   },
   media_check: {
     m:'POST', p:'/v1/media/check', l:'Vérifier média',
-    desc:'Vérifie l\'état du transport média (USB ou BT).',
+    desc:"Vérifie l'état du transport média (USB ou BT).",
     f:[
       {k:'media', l:'Média', h:'usb ou bt', t:'select', o:['','usb','bt']},
       {k:'bt_mac', l:'MAC BT', h:'Requis si média = bt — ex: 00:01:95:C9:BF:87', t:'text'}
@@ -295,12 +295,12 @@ var CMDS = {
   },
   media_auto: {
     m:'POST', p:'/v1/media/auto-connect', l:'Auto-connexion média',
-    desc:'Connexion automatique au registre sur le meilleur transport disponible.',
+    desc:"Connexion automatique au registre sur le meilleur transport disponible.",
     f:[{k:'lcrnode_dec', l:'Node LCP', h:'250 par défaut', t:'number'}]
   },
   lcp_connect: {
     m:'POST', p:'/v1/lcp/connect', l:'Connexion LCP',
-    desc:'Connexion directe LCP à un registre sur un transport spécifique.',
+    desc:"Connexion directe LCP à un registre sur un transport spécifique.",
     f:[
       {k:'lcrnode_dec', l:'Node LCP', h:'250 par défaut', t:'number'},
       {k:'media', l:'Média', h:'usb ou bt', t:'select', o:['','usb','bt']},
@@ -309,7 +309,7 @@ var CMDS = {
   },
   reg_validate: {
     m:'POST', p:'/v1/register/validate', l:'Valider registre',
-    desc:'Valide la connexion à un registre — lit le serial (#80) et vérifie la correspondance.',
+    desc:"Valide la connexion à un registre — lit le serial (#80) et vérifie la correspondance.",
     f:[
       {k:'lcrnode_dec', l:'Node LCP', h:'250 par défaut', t:'number'},
       {k:'expected_serial_id', l:'Serial attendu', h:'#Série du registre — ex: ABC12345', t:'text'},
@@ -320,7 +320,7 @@ var CMDS = {
   },
   reg_connect_auto: {
     m:'POST', p:'/v1/register/connect-auto', l:'Connect-auto registre',
-    desc:'Connexion automatique au registre par serial ou node — résolution du meilleur transport.',
+    desc:"Connexion automatique au registre par serial ou node — résolution du meilleur transport.",
     f:[
       {k:'serialId', l:'Serial (#Série)', h:'ex: ABC12345', t:'text'},
       {k:'lcrnode', l:'Node LCP', h:'250 par défaut', t:'number'}
@@ -328,7 +328,7 @@ var CMDS = {
   },
   reg_scan_auto: {
     m:'POST', p:'/v1/register/scan-auto', l:'Scan-auto registres',
-    desc:'Scanne les nodes pour trouver tous les registres disponibles sur les transports actifs.',
+    desc:"Scanne les nodes pour trouver tous les registres disponibles sur les transports actifs.",
     f:[
       {k:'startNode', l:'Node début', h:'1 par défaut', t:'number'},
       {k:'endNode', l:'Node fin', h:'250 par défaut', t:'number'}
@@ -336,7 +336,7 @@ var CMDS = {
   },
   printer_status: {
     m:'GET', p:'/v1/printer/status', l:'Statut imprimante',
-    desc:'Retourne le statut de l'imprimante: ONLINE, OFFLINE, TICKET_PENDING, TICKET_PENDING_PRINTER_OFFLINE.',
+    desc:"Retourne le statut de l'imprimante: ONLINE, OFFLINE, TICKET_PENDING, TICKET_PENDING_PRINTER_OFFLINE.",
     f:[
       {k:'lcrnode_dec', l:'Node LCP', h:'250 par défaut', t:'number', inQuery:true},
       {k:'media', l:'Média', h:'usb ou bt', t:'select', o:['','usb','bt'], inQuery:true},
@@ -345,7 +345,7 @@ var CMDS = {
   },
   delivery_b: {
     m:'POST', p:'/v1/delivery/B', l:'Status B — net/gross live',
-    desc:'Équivalent du bouton B dans le UI — requestStatus() + requestLiveSample(). Retourne net, gross, deliveryActive, flowActive, ticketPending.',
+    desc:"Équivalent du bouton B dans le UI — requestStatus() + requestLiveSample(). Retourne net, gross, deliveryActive, flowActive, ticketPending.",
     f:[
       {k:'lcrnode_dec', l:'Node LCP', h:'250 par défaut', t:'number'},
       {k:'media', l:'Média', h:'usb ou bt', t:'select', o:['','usb','bt']},
@@ -354,7 +354,7 @@ var CMDS = {
   },
   delivery_align: {
     m:'POST', p:'/v1/delivery/A', l:'Livraison — Alignement A',
-    desc:'Démarre un alignement (commande A) sur le registre.',
+    desc:"Démarre un alignement (commande A) sur le registre.",
     f:[
       {k:'lcrnode_dec', l:'Node LCP', h:'250 par défaut', t:'number'},
       {k:'media', l:'Média', h:'usb ou bt', t:'select', o:['','usb','bt']},
@@ -363,7 +363,7 @@ var CMDS = {
   },
   delivery_alignA: {
     m:'POST', p:'/v1/delivery/alignA', l:'Livraison — AlignA',
-    desc:'Alias de /v1/delivery/A — alignement.',
+    desc:"Alias de /v1/delivery/A — alignement.",
     f:[
       {k:'lcrnode_dec', l:'Node LCP', h:'250 par défaut', t:'number'},
       {k:'media', l:'Média', h:'usb ou bt', t:'select', o:['','usb','bt']},
@@ -372,7 +372,7 @@ var CMDS = {
   },
   delivery_c: {
     m:'POST', p:'/v1/delivery/C', l:'Livraison — Démarrage C',
-    desc:'Démarre une livraison avec produit et preset.',
+    desc:"Démarre une livraison avec produit et preset.",
     f:[
       {k:'lcrnode_dec',      l:'Node LCP',          h:'250 par défaut', t:'number'},
       {k:'numero_livraison', l:'N° livraison (UID)', h:'ex: LIV-2024-001 — identifiant unique FieldService', t:'text'},
@@ -384,7 +384,7 @@ var CMDS = {
   },
   delivery_oneshot: {
     m:'POST', p:'/v1/delivery/oneshot/start', l:'Livraison OneShot',
-    desc:'Démarre une livraison one-shot avec numéro de livraison et compartiment.',
+    desc:"Démarre une livraison one-shot avec numéro de livraison et compartiment.",
     f:[
       {k:'lcrnode_dec', l:'Node LCP', h:'250 par défaut', t:'number'},
       {k:'numero_livraison', l:'Numéro livraison', h:'ex: LIV-2024-001', t:'text'},
@@ -397,12 +397,12 @@ var CMDS = {
   },
   delivery_job_get: {
     m:'GET', p:'/v1/delivery/job/', l:'Job — Statut',
-    desc:'Retourne le statut d\'un job de livraison par son ID.',
+    desc:"Retourne le statut d'un job de livraison par son ID.",
     f:[{k:'jobId', l:'Job ID', h:'ID retourné par le démarrage livraison', t:'text', inPath:true}]
   },
   delivery_job_continue: {
     m:'POST', p:'/v1/delivery/job/continue', l:'Job — Continuer',
-    desc:'Continue un job de livraison en pause.',
+    desc:"Continue un job de livraison en pause.",
     f:[
       {k:'jobId', l:'Job ID', h:'ID du job à continuer', t:'text'},
       {k:'lcrnode_dec', l:'Node LCP', h:'250 par défaut', t:'number'}
@@ -410,7 +410,7 @@ var CMDS = {
   },
   delivery_job_terminate: {
     m:'POST', p:'/v1/delivery/job/terminate', l:'Job — Terminer',
-    desc:'Termine/annule un job de livraison.',
+    desc:"Termine/annule un job de livraison.",
     f:[
       {k:'jobId', l:'Job ID', h:'ID du job à terminer', t:'text'},
       {k:'lcrnode_dec', l:'Node LCP', h:'250 par défaut', t:'number'}
@@ -418,7 +418,7 @@ var CMDS = {
   },
   ticket_reprint: {
     m:'POST', p:'/v1/ticket/reprint', l:'Reprint ticket',
-    desc:'Réimprime le dernier ticket de livraison sur le registre.',
+    desc:"Réimprime le dernier ticket de livraison sur le registre.",
     f:[
       {k:'lcrnode_dec', l:'Node LCP', h:'250 par défaut', t:'number'},
       {k:'media', l:'Média', h:'usb ou bt', t:'select', o:['','usb','bt']},
@@ -427,7 +427,7 @@ var CMDS = {
   },
   tick_wait: {
     m:'GET', p:'/v1/tick/wait', l:'Tick wait (long-poll)',
-    desc:'Long-polling — attend un changement d\'état sur un node.',
+    desc:"Long-polling — attend un changement d'état sur un node.",
     f:[
       {k:'lcrnode_dec', l:'Node LCP', h:'250 par défaut', t:'number', inQuery:true},
       {k:'since_seq', l:'Since seq', h:'Séquence depuis laquelle attendre', t:'number', inQuery:true},
@@ -436,7 +436,7 @@ var CMDS = {
   },
   db_dump: {
     m:'POST', p:'/v1/db/dump', l:'Export DB',
-    desc:'Exporte le contenu de la base de données en JSON.', f:[]
+    desc:"Exporte le contenu de la base de données en JSON.", f:[]
   }
 };
 
