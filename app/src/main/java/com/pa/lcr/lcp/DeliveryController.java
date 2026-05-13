@@ -2480,6 +2480,64 @@ job.presetNetL_requested = presetNetL;
             return ApiResult.fail("StatusB: 0 - Read error", "STATUS_B_READ_FAIL", d);
         }
     }
+    
+        public ApiResult api_printerStatus() {
+        try {
+            int prn = lastPrnStatusKnown;
+            int dev = lastDevStatusKnown;
+            int tick_no = -1;
+            boolean tickPending = false;
+
+            // Lire delCode pour ticketPending
+            try {
+                int[] ds = lcpDeliveryStatus();
+                int delCode = ds[1];
+                tickPending = (delCode & DC_TICKET_PENDING) != 0;
+                tick_no = beI32(lcpGetField(FIELD_TICKET_NUMBER));
+            } catch (Exception ignored) {}
+
+            // Interpréter prnStatus
+            boolean prnOnline  = (prn == 0);
+            boolean prnOffline = (prn & 64) != 0;
+            boolean devError   = (dev & 32) != 0;
+
+            String prnLabel;
+            if (prn < 0)        prnLabel = "UNKNOWN";
+            else if (prnOnline) prnLabel = "ONLINE";
+            else if (prnOffline)prnLabel = "OFFLINE";
+            else                prnLabel = "ERROR";
+
+            String status;
+            if (tickPending && prnOffline)  status = "TICKET_PENDING_PRINTER_OFFLINE";
+            else if (tickPending)            status = "TICKET_PENDING";
+            else if (prnOffline)             status = "PRINTER_OFFLINE";
+            else if (devError)               status = "DEVICE_ERROR";
+            else                             status = "OK";
+
+            JSONObject data = new JSONObject();
+            safeJsonPut(data, "status",        status);
+            safeJsonPut(data, "printer",       prnLabel);
+            safeJsonPut(data, "prnStatus",     prn);
+            safeJsonPut(data, "devStatus",     dev);
+            safeJsonPut(data, "prnOnline",     prnOnline ? 1 : 0);
+            safeJsonPut(data, "prnOffline",    prnOffline ? 1 : 0);
+            safeJsonPut(data, "devError",      devError ? 1 : 0);
+            safeJsonPut(data, "ticketPending", tickPending ? 1 : 0);
+            safeJsonPut(data, "ts_ms",         System.currentTimeMillis());
+            safeJsonPut(data, "state",         state != null ? state.name() : "UNKNOWN");
+
+            boolean ok = (status.equals("OK") || status.equals("TICKET_PENDING"));
+            return ok
+                ? ApiResult.ok("Printer: 1 - " + status, data)
+                : ApiResult.fail("Printer: 0 - " + status, status, data);
+
+        } catch (Exception e) {
+            JSONObject d = new JSONObject();
+            safeJsonPut(d, "detail", e.getMessage() != null ? e.getMessage() : "");
+            return ApiResult.fail("Printer: 0 - Read error", "PRINTER_READ_FAIL", d);
+        }
+    }
+    
     public ApiResult api_deliveryJobGet(String jobId) {
         ApiJob job;
         synchronized (apiJobs) { job = apiJobs.get(jobId); }

@@ -1320,6 +1320,26 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     }
     
     @Override
+    public ApiResult api_printerStatus(Integer lcrnode_dec, Integer from_dec, String media, String bt_mac) {
+        int node = normNode(lcrnode_dec);
+        int from = normFrom(from_dec);
+        String m = (media == null) ? "usb" : media.trim().toLowerCase(Locale.ROOT);
+        if (m.isEmpty()) m = "usb";
+        if ("bt".equals(m) || "bluetooth".equals(m)) {
+            String key = resolveBtKeyOrActive(bt_mac);
+            if (key == null) return ApiResult.fail("Printer: 0 - Aucun BT actif", "ERR_NO_ACTIVE_BT");
+            TransportIo io = (mediaMgr != null) ? mediaMgr.getByKey(key) : null;
+            if (io == null || !io.isOpen()) return ApiResult.fail("Printer: 0 - BT non connecté", "ERR_BT_NOT_CONNECTED");
+            DeliveryController dc = sessions.getOrCreate(key, node, from, io);
+            if (dc == null) return ApiResult.fail("Printer: 0 - Controller introuvable", "NO_CONTROLLER");
+            return dc.api_printerStatus();
+        }
+        DeliveryController dc = requireSession(node, from);
+        if (dc == null) return ApiResult.fail("Printer: 0 - USB non prêt", "ERR_USB_PORT_NOT_READY");
+        return dc.api_printerStatus();
+    }    
+    
+    @Override
     public ApiResult api_deliveryAlignA(Integer lcrnode_dec, Integer from_dec, String media, String bt_mac) {
         int node = normNode(lcrnode_dec); int from = normFrom(from_dec);
         String m = (media == null) ? "usb" : media.trim().toLowerCase(Locale.ROOT);

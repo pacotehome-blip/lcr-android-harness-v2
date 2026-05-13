@@ -422,7 +422,17 @@ public final class ApiServer {
                 return facade.api_deliveryStatusB(node, from, media, btMac);
             });
         }
-
+        // ✅ Printer status
+        if ("GET".equals(req.method) && "/v1/printer/status".equals(req.path)) {
+            JSONObject body = safeBody(req.jsonBody());
+            Integer node = parseNodeDec(body);
+            Integer from = parseFromDec(body);
+            return withAutoConnectRetry(body, () -> {
+                String media = resolveMediaDefault(body);
+                String btMac = resolveBtMacDefault(body);
+                return facade.api_printerStatus(node, from, media, btMac);
+            });
+        }
         // Delivery alignA
         if ("POST".equals(req.method) && "/v1/delivery/alignA".equals(req.path)) {
             JSONObject body = safeBody(req.jsonBody());

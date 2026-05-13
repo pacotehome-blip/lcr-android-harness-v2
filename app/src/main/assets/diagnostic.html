@@ -120,6 +120,9 @@ header{background:#fff;border-bottom:1px solid var(--border);padding:12px 16px;d
     <div class="sec">&#9889; Job Actif</div>
     <button class="cb act" onclick="toggleJobPanel()" id="btnJobPanel"><span style="font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;background:#fdeaed;color:#e03450;font-family:monospace;flex-shrink:0">LIVE</span>Surveiller job</button>
 
+    <div class="sec">Imprimante</div>
+    <button class="cb" onclick="sel('printer_status')"><span class="tag tg">GET</span>/v1/printer/status</button>
+
     <div class="sec">Livraison</div>
     <button class="cb" onclick="sel('delivery_b')"><span class="tag tp">POST</span>/v1/delivery/B</button>
     <button class="cb" onclick="sel('delivery_align')"><span class="tag tp">POST</span>/v1/delivery/A</button>
@@ -182,6 +185,14 @@ header{background:#fff;border-bottom:1px solid var(--border);padding:12px 16px;d
         <div class="rc">
           <div class="rl">Ticket #</div>
           <div class="rv rok" id="jobTicketNo">—</div>
+        </div>
+        <div class="rc" id="cardTicketPending" style="display:none;border:2px solid #e03450">
+          <div class="rl" style="color:#e03450">⚠ Ticket pending</div>
+          <div class="rv rerr" id="jobTicketPending">IMPRESSION REQUISE</div>
+        </div>
+        <div class="rc" id="cardPrinterStatus" style="border:1px solid var(--border)">
+          <div class="rl">Imprimante</div>
+          <div class="rv" id="jobPrinterStatus">—</div>
         </div>
         <div class="rc">
           <div class="rl">Node LCP</div>
@@ -321,6 +332,15 @@ var CMDS = {
     f:[
       {k:'startNode', l:'Node début', h:'1 par défaut', t:'number'},
       {k:'endNode', l:'Node fin', h:'250 par défaut', t:'number'}
+    ]
+  },
+  printer_status: {
+    m:'GET', p:'/v1/printer/status', l:'Statut imprimante',
+    desc:'Retourne le statut de l'imprimante: ONLINE, OFFLINE, TICKET_PENDING, TICKET_PENDING_PRINTER_OFFLINE.',
+    f:[
+      {k:'lcrnode_dec', l:'Node LCP', h:'250 par défaut', t:'number', inQuery:true},
+      {k:'media', l:'Média', h:'usb ou bt', t:'select', o:['','usb','bt'], inQuery:true},
+      {k:'bt_mac', l:'MAC BT', h:'Requis si média = bt', t:'text', inQuery:true}
     ]
   },
   delivery_b: {
@@ -599,8 +619,10 @@ function showResp(j, ms, c) {
     // ✅ jobId = UUID (clé apiJobs) — delivery_uid = "NUM-ticketNo" (affichage seulement)
     var capturedJobId  = d.jobId || d.job_id || activeJobId || null;
     var capturedDeliveryUid = d.delivery_uid || null;
-    var capturedTicketNo    = d.ticket_no || null;
+    var capturedTicketNo     = d.ticket_no || null;
+    var capturedTicketPending = d.ticketPending !== undefined ? d.ticketPending : (d.ticket_pending !== undefined ? d.ticket_pending : null);
     if (capturedTicketNo) activeTicketNo = capturedTicketNo;
+    if (capturedTicketPending !== null) updateTicketPending(capturedTicketPending);
     var capturedState  = d.state || d.status || d.statut || null;
     var capturedNode   = d.lcrnode_dec || d.node || activeJobNode || null;
     var capturedSerial = d.serialId || d.serial_id || activeJobSerial || null;
@@ -889,9 +911,13 @@ function forceRefresh() {
         if (!state && d.deliveryActive === 0) state = d.ticketPending === 1 ? 'ENDING' : 'CONNECTED';
         if (nodeVal)  activeJobNode   = nodeVal;
         if (serial)   activeJobSerial = serial;
-        var liveStatus  = d.live_status  || null;
-        var pauseReason = d.pause_reason || null;
-        // ticket_no stable — pas mis à jour depuis StatusB
+        var liveStatus   = d.live_status  || null;
+        var pauseReason  = d.pause_reason || null;
+        var tickPending2 = d.ticketPending !== undefined ? d.ticketPending : null;
+        if (tickPending2 !== null) updateTicketPending(tickPending2);
+        var prnSt2 = (d.tick && d.tick.prnStatus !== undefined) ? d.tick.prnStatus : (d.prnStatus !== undefined ? d.prnStatus : -1);
+        var devSt2 = (d.tick && d.tick.devStatus !== undefined) ? d.tick.devStatus : (d.devStatus !== undefined ? d.devStatus : -1);
+        if (prnSt2 >= 0) updatePrinterStatus(prnSt2, devSt2 >= 0 ? devSt2 : 0, tickPending2 === 1);
         setJobState(state, activeJobId, net, gross, nodeVal, serial, liveStatus, pauseReason);
         addLog('POST', '/v1/delivery/B', 'ok', 0);
       } else {
@@ -1005,7 +1031,50 @@ function handleTickResponse(j) {
   var liveStatus  = inner.live_status  || d.live_status  || null;
   var pauseReason = inner.pause_reason || d.pause_reason || null;
   // ticket_no stable — pas mis à jour depuis tick (change seulement sur nouvelle livraison ou impression)
+  var tickPending = inner.ticketPending !== undefined ? inner.ticketPending : (d.ticketPending !== undefined ? d.ticketPending : null);
+  if (tickPending !== null) updateTicketPending(tickPending);
+  // Printer status depuis tick
+  var prnSt = (inner.prnStatus !== undefined) ? inner.prnStatus : (d.prnStatus !== undefined ? d.prnStatus : -1);
+  var devSt = (inner.devStatus !== undefined) ? inner.devStatus : (d.devStatus !== undefined ? d.devStatus : -1);
+  if (prnSt >= 0) updatePrinterStatus(prnSt, devSt >= 0 ? devSt : 0, tickPending === 1);
   setJobState(state, jobId, net, gross, node, serial, liveStatus, pauseReason);
+}
+
+function updatePrinterStatus(prnStatus, devStatus, ticketPending) {
+  var card  = document.getElementById('cardPrinterStatus');
+  var label = document.getElementById('jobPrinterStatus');
+  if (!card || !label) return;
+  var prnOffline = (prnStatus & 64) !== 0;
+  var devError   = (devStatus & 32) !== 0;
+  var txt, col;
+  if (ticketPending && prnOffline) {
+    txt = '⚠ TICKET PENDING + OFFLINE'; col = '#e03450';
+  } else if (prnOffline) {
+    txt = '🔴 OFFLINE'; col = '#e03450';
+  } else if (devError) {
+    txt = '🟠 ERREUR DEVICE'; col = '#e6a800';
+  } else if (prnStatus === 0) {
+    txt = '🟢 ONLINE'; col = 'var(--g)';
+  } else {
+    txt = '❓ prnStatus=' + prnStatus; col = 'var(--muted)';
+  }
+  label.textContent = txt;
+  label.style.color = col;
+  card.style.borderColor = prnOffline || devError ? '#e03450' : 'var(--border)';
+}
+
+function updateTicketPending(val) {
+  var card = document.getElementById('cardTicketPending');
+  var isPending = (val === 1 || val === true || val === '1');
+  if (card) card.style.display = isPending ? 'block' : 'none';
+  // Bloquer bouton Continuer si ticket pending
+  var btnCont = document.getElementById('btnJobContinue');
+  if (btnCont && isPending) {
+    btnCont.disabled = true;
+    btnCont.style.opacity = '.4';
+    btnCont.style.background = '#6b7280';
+    btnCont.textContent = '▶ Continuer (ticket pending)';
+  }
 }
 
 function setJobState(state, jobId, net, gross, node, serial, liveStatus, pauseReason) {

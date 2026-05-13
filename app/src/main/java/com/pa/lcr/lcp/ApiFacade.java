@@ -101,6 +101,10 @@ public interface ApiFacade {
         return ApiResult.fail("api_deliveryStatusB: not supported", "NOT_SUPPORTED");
     }
     
+    default ApiResult api_printerStatus(Integer lcrnode_dec, Integer from_dec, String media, String bt_mac) {
+        return ApiResult.fail("api_printerStatus: not supported", "NOT_SUPPORTED");
+    }    
+    
     // =========================================================
     // Align / Recover (A)
     // =========================================================
