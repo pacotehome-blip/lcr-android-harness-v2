@@ -567,6 +567,23 @@ function showResp(j, ms, c) {
     sumSec.innerHTML = '<div class="rg">' + genericCards(d) + '</div>';
   }
   document.getElementById('rbody').innerHTML = hl(JSON.stringify(j, null, 2));
+
+  // ✅ Capturer jobId automatiquement depuis la réponse de livraison
+  if (j.code === 1 && d) {
+    var capturedJobId = d.delivery_uid || d.jobId || d.job_id || null;
+    var capturedState = d.state || d.status || d.statut || null;
+    var capturedNode  = d.lcrnode_dec || d.node || null;
+    var capturedSerial = d.serialId || d.serial_id || null;
+    var capturedNet   = d.net !== undefined ? d.net : (d.net_l !== undefined ? d.net_l : null);
+    var capturedGross = d.gross !== undefined ? d.gross : (d.gross_l !== undefined ? d.gross_l : null);
+    if (capturedJobId || capturedState) {
+      if (capturedJobId)  activeJobId     = capturedJobId;
+      if (capturedNode)   activeJobNode   = capturedNode;
+      if (capturedSerial) activeJobSerial = capturedSerial;
+      setJobState(capturedState, capturedJobId, capturedNet, capturedGross, capturedNode, capturedSerial);
+      document.getElementById('jobPanel').scrollIntoView({behavior:'smooth'});
+    }
+  }
 }
 
 function showErr(msg, ms) {
@@ -820,7 +837,7 @@ function handleTickResponse(j) {
   }
 
   // code=0 peut quand même avoir des infos valides dans autoConnectLast
-  var jobId  = inner.jobId  || inner.job_id  || d.jobId  || null;
+  var jobId  = inner.jobId  || inner.job_id  || inner.delivery_uid || d.jobId || d.delivery_uid || null;
   var state  = inner.status || inner.statut  || inner.state || inner.deliveryState || d.state || null;
   var node   = inner.node   || inner.lcrnode_dec || d.lcrnode_dec || activeJobNode;
   var serial = inner.serialId || inner.serial_id || inner.serial || d.serialId || activeJobSerial;
