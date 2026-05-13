@@ -2499,9 +2499,7 @@ job.presetNetL_requested = presetNetL;
             // Interpréter prnStatus
             boolean prnOnline  = (prn == 0);
             boolean prnOffline = (prn & 64) != 0;
-            boolean devError   = (dev & 32) != 0;
-            // devStatus=33 est normal (1=OK + 32=flag permanent sur LCR-II)
-            // Vraie erreur = valeur inattendue autre que 0, 1, 32, 33
+
             boolean devError   = (dev > 0) && (dev != 1) && (dev != 32) && (dev != 33);
 
             String prnLabel;
