@@ -374,25 +374,27 @@ var CMDS = {
     m:'POST', p:'/v1/delivery/C', l:'Livraison — Démarrage C',
     desc:"Démarre une livraison avec produit et preset.",
     f:[
-      {k:'lcrnode_dec',      l:'Node LCP',          h:'250 par défaut', t:'number'},
-      {k:'numero_livraison', l:'N° livraison (UID)', h:'ex: LIV-2024-001 — identifiant unique FieldService', t:'text'},
-      {k:'product1to16',     l:'Produit (1-16)',     h:'Numéro de produit 1 à 16', t:'number'},
-      {k:'presetNet',        l:'Preset net (L)',     h:'0 = sans preset', t:'number'},
-      {k:'media',            l:'Média',              h:'usb ou bt', t:'select', o:['','usb','bt']},
-      {k:'bt_mac',           l:'MAC BT',             h:'Requis si média = bt', t:'text'}
+      {k:'lcrnode_dec',        l:'Node LCP',            h:'250 par défaut', t:'number'},
+      {k:'numero_livraison',   l:'N° livraison (UID)',  h:'ex: LIV-2024-001 — identifiant unique FieldService', t:'text'},
+      {k:'expected_serial_id', l:'#Série (optionnel)',  h:'ex: 16466294 — valide que le bon registre est connecté', t:'text'},
+      {k:'product1to16',       l:'Produit (1-16)',      h:'Numéro de produit 1 à 16', t:'number'},
+      {k:'presetNet',          l:'Preset net (L)',      h:'0 = sans preset', t:'number'},
+      {k:'media',              l:'Média',               h:'usb ou bt', t:'select', o:['','usb','bt']},
+      {k:'bt_mac',             l:'MAC BT',              h:'Requis si média = bt', t:'text'}
     ]
   },
   delivery_oneshot: {
     m:'POST', p:'/v1/delivery/oneshot/start', l:'Livraison OneShot',
     desc:"Démarre une livraison one-shot avec numéro de livraison et compartiment.",
     f:[
-      {k:'lcrnode_dec', l:'Node LCP', h:'250 par défaut', t:'number'},
-      {k:'numero_livraison', l:'Numéro livraison', h:'ex: LIV-2024-001', t:'text'},
-      {k:'product1to16', l:'Produit (1-16)', h:'Numéro de produit 1 à 16', t:'number'},
-      {k:'presetNetL', l:'Preset net (L)', h:'0 = sans preset', t:'number'},
-      {k:'compartment', l:'Compartiment', h:'Optionnel', t:'text'},
-      {k:'media', l:'Média', h:'usb ou bt', t:'select', o:['','usb','bt']},
-      {k:'bt_mac', l:'MAC BT', h:'Requis si média = bt', t:'text'}
+      {k:'lcrnode_dec',        l:'Node LCP',           h:'250 par défaut', t:'number'},
+      {k:'numero_livraison',   l:'Numéro livraison',   h:'ex: LIV-2024-001', t:'text'},
+      {k:'expected_serial_id', l:'#Série (optionnel)', h:'ex: 16466294 — valide que le bon registre est connecté', t:'text'},
+      {k:'product1to16',       l:'Produit (1-16)',      h:'Numéro de produit 1 à 16', t:'number'},
+      {k:'presetNetL',         l:'Preset net (L)',      h:'0 = sans preset', t:'number'},
+      {k:'compartment',        l:'Compartiment',        h:'Optionnel', t:'text'},
+      {k:'media',              l:'Média',               h:'usb ou bt', t:'select', o:['','usb','bt']},
+      {k:'bt_mac',             l:'MAC BT',              h:'Requis si média = bt', t:'text'}
     ]
   },
   delivery_job_get: {
