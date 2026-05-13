@@ -1263,8 +1263,9 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     public ApiResult api_deliveryStatusB(Integer lcrnode_dec, Integer from_dec, String media, String bt_mac) {
         int node = normNode(lcrnode_dec);
         int from = normFrom(from_dec);
-        String m = resolveMedia(media);
-        if ("bt".equals(m)) {
+        String m = (media == null) ? "usb" : media.trim().toLowerCase(Locale.ROOT);
+        if (m.isEmpty()) m = "usb";
+        if ("bt".equals(m) || "bluetooth".equals(m)) {
             String key = resolveBtKeyOrActive(bt_mac);
             if (key == null) return ApiResult.fail("StatusB: 0 - Aucun BT actif", "ERR_NO_ACTIVE_BT");
             TransportIo io = (mediaMgr != null) ? mediaMgr.getByKey(key) : null;
@@ -1277,6 +1278,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         if (dc == null) return ApiResult.fail("StatusB: 0 - USB non prêt", "ERR_USB_PORT_NOT_READY");
         return dc.api_deliveryStatusB();
     }
+    
     @Override
     public ApiResult api_deliveryAlignA(Integer lcrnode_dec, Integer from_dec, String media, String bt_mac) {
         int node = normNode(lcrnode_dec); int from = normFrom(from_dec);
