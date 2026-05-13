@@ -354,11 +354,12 @@ var CMDS = {
     m:'POST', p:'/v1/delivery/C', l:'Livraison — Démarrage C',
     desc:'Démarre une livraison avec produit et preset.',
     f:[
-      {k:'lcrnode_dec', l:'Node LCP', h:'250 par défaut', t:'number'},
-      {k:'product1to16', l:'Produit (1-16)', h:'Numéro de produit 1 à 16', t:'number'},
-      {k:'presetNet', l:'Preset net (L)', h:'0 = sans preset', t:'number'},
-      {k:'media', l:'Média', h:'usb ou bt', t:'select', o:['','usb','bt']},
-      {k:'bt_mac', l:'MAC BT', h:'Requis si média = bt', t:'text'}
+      {k:'lcrnode_dec',      l:'Node LCP',          h:'250 par défaut', t:'number'},
+      {k:'numero_livraison', l:'N° livraison (UID)', h:'ex: LIV-2024-001 — identifiant unique FieldService', t:'text'},
+      {k:'product1to16',     l:'Produit (1-16)',     h:'Numéro de produit 1 à 16', t:'number'},
+      {k:'presetNet',        l:'Preset net (L)',     h:'0 = sans preset', t:'number'},
+      {k:'media',            l:'Média',              h:'usb ou bt', t:'select', o:['','usb','bt']},
+      {k:'bt_mac',           l:'MAC BT',             h:'Requis si média = bt', t:'text'}
     ]
   },
   delivery_oneshot: {
@@ -986,8 +987,8 @@ function handleTickResponse(j) {
   }
 
   // code=0 peut quand même avoir des infos valides dans autoConnectLast
-  // ✅ jobId = UUID (clé apiJobs) — ne pas confondre avec delivery_uid
-  var jobId  = inner.jobId || inner.job_id || d.jobId || d.job_id || null;
+  // ✅ jobId = UUID (clé apiJobs) — depuis tick direct ou autoConnectLast
+  var jobId  = d.jobId || inner.jobId || inner.job_id || d.job_id || null;
   var state  = inner.status || inner.statut  || inner.state || inner.deliveryState || d.state || null;
   var node   = inner.node   || inner.lcrnode_dec || d.lcrnode_dec || activeJobNode;
   var serial = inner.serialId || inner.serial_id || inner.serial || d.serialId || activeJobSerial;

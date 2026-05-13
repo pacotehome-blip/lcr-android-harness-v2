@@ -479,6 +479,8 @@ private void reproEvent(String level, String type, String message, JSONObject da
         safeJsonPut(d, "delStatus", t.delStatus);
         safeJsonPut(d, "delCode", t.delCode);
         safeJsonPut(d, "state", t.stateName);
+        // ✅ jobId dans le tick pour FieldService
+        if (lastActiveJobId != null) safeJsonPut(d, "jobId", lastActiveJobId);
         return d;
     }
 
@@ -626,7 +628,8 @@ private void reproEvent(String level, String type, String message, JSONObject da
 
     // ✅ Global job registry: survive controller rebind/recreate (prevents JOB_NOT_FOUND after DONE)
     private static final Map<String, ApiJob> apiJobs = new ConcurrentHashMap<>();
-
+    private volatile String lastActiveJobId = null; // ✅ dernier jobId actif
+    
     public DeliveryController(LcpLink link) {
         this.link = link;
     }
@@ -2250,7 +2253,8 @@ job.presetNetL_requested = presetNetL;
             synchronized (apiJobs) {
                 apiJobs.put(jobId, job);
             }
-
+            lastActiveJobId = jobId; // ✅ mémoriser le dernier jobId actif
+            
             // SQLite
             DeliveryLogStore store = this.logStore;
             if (store != null && serialId != null && !serialId.trim().isEmpty() && ticketNo != null && !ticketNo.trim().isEmpty()) {
