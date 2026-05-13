@@ -568,20 +568,37 @@ function showResp(j, ms, c) {
   }
   document.getElementById('rbody').innerHTML = hl(JSON.stringify(j, null, 2));
 
-  // ✅ Capturer jobId automatiquement depuis la réponse de livraison
-  if (j.code === 1 && d) {
-    var capturedJobId = d.delivery_uid || d.jobId || d.job_id || null;
-    var capturedState = d.state || d.status || d.statut || null;
-    var capturedNode  = d.lcrnode_dec || d.node || null;
-    var capturedSerial = d.serialId || d.serial_id || null;
-    var capturedNet   = d.net !== undefined ? d.net : (d.net_l !== undefined ? d.net_l : null);
-    var capturedGross = d.gross !== undefined ? d.gross : (d.gross_l !== undefined ? d.gross_l : null);
-    if (capturedJobId || capturedState) {
+  // ✅ Capturer jobId + état depuis n'importe quelle réponse de livraison (C, B, oneshot, job/get)
+  if (d) {
+    var capturedJobId  = d.delivery_uid || d.jobId || d.job_id || activeJobId || null;
+    var capturedState  = d.state || d.status || d.statut || null;
+    var capturedNode   = d.lcrnode_dec || d.node || activeJobNode || null;
+    var capturedSerial = d.serialId || d.serial_id || activeJobSerial || null;
+    var capturedNet    = d.net   !== undefined ? d.net   : (d.net_l   !== undefined ? d.net_l   : null);
+    var capturedGross  = d.gross !== undefined ? d.gross : (d.gross_l !== undefined ? d.gross_l : null);
+
+    // Status B — déliveryActive=1 suffit pour mettre à jour le panneau
+    var hasDeliveryInfo = capturedState || d.deliveryActive !== undefined;
+
+    if (hasDeliveryInfo) {
       if (capturedJobId)  activeJobId     = capturedJobId;
       if (capturedNode)   activeJobNode   = capturedNode;
       if (capturedSerial) activeJobSerial = capturedSerial;
+
+      // Si pas de state explicite mais deliveryActive=1 → RUNNING
+      if (!capturedState && d.deliveryActive === 1) {
+        capturedState = d.flowActive === 1 ? 'RUNNING_FLOWING' : 'RUNNING_PAUSED';
+      }
+      if (!capturedState && d.deliveryActive === 0) {
+        capturedState = d.ticketPending === 1 ? 'ENDING' : 'CONNECTED';
+      }
+
       setJobState(capturedState, capturedJobId, capturedNet, capturedGross, capturedNode, capturedSerial);
-      document.getElementById('jobPanel').scrollIntoView({behavior:'smooth'});
+
+      // Scroll vers le panneau seulement si nouveau jobId capturé
+      if (capturedJobId && capturedJobId !== activeJobId) {
+        document.getElementById('jobPanel').scrollIntoView({behavior:'smooth'});
+      }
     }
   }
 }
