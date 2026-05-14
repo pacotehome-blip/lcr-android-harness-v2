@@ -265,6 +265,65 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
+    // ✅ BT DISCONNECT
+    // =========================================================
+    @Override
+    public ApiResult api_btDisconnect(String bt_mac) {
+        try {
+            if (mediaMgr == null) return ApiResult.fail("BT disconnect: 0 - MTM null", "ERR_MEDIA_MTM_NULL");
+            String key = (bt_mac != null && !bt_mac.trim().isEmpty())
+                    ? MediaTransportManager.btKey(bt_mac.trim())
+                    : MediaTransportManager.getActiveKeyStatic();
+            if (key == null || !key.startsWith("BT:"))
+                return ApiResult.fail("BT disconnect: 0 - Aucun BT actif", "ERR_NO_ACTIVE_BT");
+            String mac = key.substring(3);
+            mediaMgr.onBtDisconnected(mac, "API disconnect");
+            JSONObject d = new JSONObject();
+            d.put("transportKey", key);
+            d.put("mac",          mac);
+            d.put("disconnected", 1);
+            return ApiResult.ok("BT disconnect: 1 - OK", d);
+        } catch (Exception e) {
+            JSONObject d = new JSONObject();
+            try { d.put("detail", e.getMessage()); } catch (Exception ignored) {}
+            return ApiResult.fail("BT disconnect: 0 - " + e.getMessage(), "ERR_BT_DISCONNECT", d);
+        }
+    }
+
+    // =========================================================
+    // ✅ BT RESET
+    // =========================================================
+    @Override
+    public ApiResult api_btReset(String bt_mac) {
+        try {
+            if (mediaMgr == null) return ApiResult.fail("BT reset: 0 - MTM null", "ERR_MEDIA_MTM_NULL");
+            String key = (bt_mac != null && !bt_mac.trim().isEmpty())
+                    ? MediaTransportManager.btKey(bt_mac.trim())
+                    : MediaTransportManager.getActiveKeyStatic();
+            String mac = (key != null && key.startsWith("BT:")) ? key.substring(3) : null;
+            // Déconnecter
+            if (mac != null) {
+                try { mediaMgr.onBtDisconnected(mac, "API reset"); } catch (Exception ignored) {}
+            }
+            // Purger la session LCP sur le node par défaut
+            try { sessions.clearNode(lastNodeHint > 0 ? lastNodeHint : 250); } catch (Exception ignored) {}
+            // Réinitialiser jobToTransport pour ce transport
+            if (key != null) {
+                jobToTransport.entrySet().removeIf(e -> key.equals(e.getValue()));
+            }
+            JSONObject d = new JSONObject();
+            d.put("transportKey", key != null ? key : "");
+            d.put("mac",          mac != null ? mac : "");
+            d.put("reset",        1);
+            return ApiResult.ok("BT reset: 1 - OK", d);
+        } catch (Exception e) {
+            JSONObject d = new JSONObject();
+            try { d.put("detail", e.getMessage()); } catch (Exception ignored) {}
+            return ApiResult.fail("BT reset: 0 - " + e.getMessage(), "ERR_BT_RESET", d);
+        }
+    }
+
+    // =========================================================
     // ✅ BT SIGNAL GET — lecture DB + live IO snapshot
     // =========================================================
     @Override

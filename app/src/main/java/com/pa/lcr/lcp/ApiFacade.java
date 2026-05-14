@@ -34,6 +34,20 @@ public interface ApiFacade {
         );
     }
 
+    default ApiResult api_btDisconnect(String bt_mac) {
+        return ApiResult.fail(
+                "BT disconnect: 0 - Not supported (legacy facade).",
+                "BT_DISCONNECT_NOT_SUPPORTED"
+        );
+    }
+
+    default ApiResult api_btReset(String bt_mac) {
+        return ApiResult.fail(
+                "BT reset: 0 - Not supported (legacy facade).",
+                "BT_RESET_NOT_SUPPORTED"
+        );
+    }
+    
     // =========================================================
     // ✅ BT Signal (RSSI + qualité IO)
     // =========================================================

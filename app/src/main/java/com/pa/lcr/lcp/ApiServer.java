@@ -40,6 +40,11 @@ public final class ApiServer {
     private final AtomicInteger ridSeq = new AtomicInteger(0);
     private final Object lcpLock = new Object();
 
+    // ✅ Scan-auto progress tracking
+    private static volatile int     scanAutoProgress = 0;
+    private static volatile int     scanAutoTotal    = 0;
+    private static volatile boolean scanAutoRunning  = false;
+
     public ApiServer(ApiFacade facade, ApiLogSink trace, int port, android.content.Context ctx) {
         this.facade = facade;
         this.trace = trace;
@@ -312,6 +317,20 @@ public final class ApiServer {
         // BT activate
         if ("POST".equals(req.method) && "/v1/bt/activate".equals(req.path)) {
             return withAutoConnectRetry(null, facade::api_btActivate);
+        }
+
+        // ✅ BT disconnect
+        if ("POST".equals(req.method) && "/v1/bt/disconnect".equals(req.path)) {
+            JSONObject body = safeBody(req.jsonBody());
+            String btMac = body != null ? body.optString("bt_mac", "").trim() : "";
+            return facade.api_btDisconnect(btMac.isEmpty() ? null : btMac);
+        }
+
+        // ✅ BT reset
+        if ("POST".equals(req.method) && "/v1/bt/reset".equals(req.path)) {
+            JSONObject body = safeBody(req.jsonBody());
+            String btMac = body != null ? body.optString("bt_mac", "").trim() : "";
+            return facade.api_btReset(btMac.isEmpty() ? null : btMac);
         }
 
         // Media check
@@ -643,7 +662,14 @@ public final class ApiServer {
             JSONArray regs = new JSONArray();
             Set<String> seenSerial = new HashSet<>();
 
+            // ✅ Progress tracking
+            int scanTotal = end - start + 1;
+            scanAutoTotal    = scanTotal;
+            scanAutoProgress = 0;
+            scanAutoRunning  = true;
+
             for (int node = start; node <= end; node++) {
+                scanAutoProgress = node - start + 1;
                 ApiResult ar;
                 try {
                     ar = facade.api_registerConnectAuto(null, node);
@@ -666,20 +692,36 @@ public final class ApiServer {
                 regs.put(d);
             }
 
+            scanAutoRunning = false;
+
             if (regs.length() == 0) {
                 JSONObject d = new JSONObject();
-                try { d.put("startNode", start); } catch (Exception ignored) {}
-                try { d.put("endNode", end); } catch (Exception ignored) {}
+                try { d.put("startNode",  start); } catch (Exception ignored) {}
+                try { d.put("endNode",    end); } catch (Exception ignored) {}
+                try { d.put("scanned",    scanTotal); } catch (Exception ignored) {}
                 try { d.put("suggestion", "Aucun registre trouvé sur BT ou USB. Vérifier médias READY, puis relancer scan-auto."); } catch (Exception ignored) {}
                 return ApiResult.fail("ScanAuto: 0 - Aucun registre trouvé sur BT ou USB", "NO_REGISTER_FOUND", d);
             }
 
             JSONObject out = new JSONObject();
             try { out.put("startNode", start); } catch (Exception ignored) {}
-            try { out.put("endNode", end); } catch (Exception ignored) {}
-            try { out.put("count", regs.length()); } catch (Exception ignored) {}
+            try { out.put("endNode",   end); } catch (Exception ignored) {}
+            try { out.put("scanned",   scanTotal); } catch (Exception ignored) {}
+            try { out.put("count",     regs.length()); } catch (Exception ignored) {}
             try { out.put("registers", regs); } catch (Exception ignored) {}
-            return ApiResult.ok("ScanAuto: 1 - OK", out);
+            return ApiResult.ok("ScanAuto: 1 - OK (" + regs.length() + "/" + scanTotal + " nodes scannés)", out);
+        }
+
+        // ✅ Scan-auto progress
+        if ("GET".equals(req.method) && "/v1/register/scan-progress".equals(req.path)) {
+            JSONObject d = new JSONObject();
+            try {
+                d.put("running",  scanAutoRunning  ? 1 : 0);
+                d.put("progress", scanAutoProgress);
+                d.put("total",    scanAutoTotal);
+                d.put("pct",      scanAutoTotal > 0 ? (scanAutoProgress * 100 / scanAutoTotal) : 0);
+            } catch (Exception ignored) {}
+            return ApiResult.ok("ScanProgress: 1 - OK", d);
         }
 
         // ✅ BT Signal — lecture (RSSI + IO score)

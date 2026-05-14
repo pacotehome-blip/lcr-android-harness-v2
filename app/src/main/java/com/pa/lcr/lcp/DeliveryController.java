@@ -2095,8 +2095,25 @@ public ApiResult api_registerValidate(
                 return ApiResult.ok("Delivery StartC: 1 - Not ready for C (use A)", data);
             }
 
+            // ✅ Générer jobId UUID comme OneShot
+            String jobId = java.util.UUID.randomUUID().toString();
+            ApiJob job = new ApiJob();
+            job.jobId = jobId;
+            job.product1to16 = product1to16;
+            job.presetNetL = presetNet;
+            job.startMs = System.currentTimeMillis();
+            synchronized (apiJobs) { apiJobs.put(jobId, job); }
+            lastActiveJobId = jobId;
+
             startDelivery(product1to16, presetNet);
-            safeJsonPut(data, "next", "POLL");
+            safeJsonPut(data, "jobId",        jobId);
+            String tno = "";
+            try { tno = readTicketNo23(); } catch (Exception ignored) {}
+            safeJsonPut(data, "delivery_uid", "-" + (tno.isEmpty() ? "?" : tno));
+            safeJsonPut(data, "ticket_no",    tno.isEmpty() ? JSONObject.NULL : tno);
+            safeJsonPut(data, "media",        "bt");
+            safeJsonPut(data, "state",        "CONNECTED");
+            safeJsonPut(data, "next",         "POLL");
             return ApiResult.ok("Delivery StartC: 1 - Start requested", data);
 
         } catch (Exception e) {

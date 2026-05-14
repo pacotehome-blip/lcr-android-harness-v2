@@ -102,6 +102,8 @@ header{background:#fff;border-bottom:1px solid var(--border);padding:12px 16px;d
     <div class="sec">Bluetooth</div>
     <button class="cb" onclick="sel('bt_list')"><span class="tag tg">GET</span>/v1/bt/list</button>
     <button class="cb" onclick="sel('bt_activate')"><span class="tag tp">POST</span>/v1/bt/activate</button>
+    <button class="cb" onclick="sel('bt_disconnect')"><span class="tag tp">POST</span>/v1/bt/disconnect</button>
+    <button class="cb" onclick="sel('bt_reset')"><span class="tag tp">POST</span>/v1/bt/reset</button>
 
     <div class="sec">USB</div>
     <button class="cb" onclick="sel('usb_scan')"><span class="tag tg">GET</span>/v1/usb/scan</button>
@@ -116,6 +118,7 @@ header{background:#fff;border-bottom:1px solid var(--border);padding:12px 16px;d
     <button class="cb" onclick="sel('reg_validate')"><span class="tag tp">POST</span>/v1/register/validate</button>
     <button class="cb" onclick="sel('reg_connect_auto')"><span class="tag tp">POST</span>/v1/register/connect-auto</button>
     <button class="cb" onclick="sel('reg_scan_auto')"><span class="tag tp">POST</span>/v1/register/scan-auto</button>
+    <button class="cb" onclick="sel('reg_scan_progress')"><span class="tag tg">GET</span>/v1/register/scan-progress</button>
 
     <div class="sec">&#9889; Job Actif</div>
     <button class="cb act" onclick="toggleJobPanel()" id="btnJobPanel"><span style="font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;background:#fdeaed;color:#e03450;font-family:monospace;flex-shrink:0">LIVE</span>Surveiller job</button>
@@ -283,6 +286,20 @@ var CMDS = {
     m:'GET', p:'/v1/bt/list', l:'Liste BT appairés',
     desc:"Liste tous les appareils Bluetooth appairés sur la tablette.", f:[]
   },
+  bt_disconnect: {
+    m:'POST', p:'/v1/bt/disconnect', l:'Déconnecter BT',
+    desc:"Déconnecte le transport Bluetooth actif.",
+    f:[
+      {k:'bt_mac', l:'MAC BT (optionnel)', h:'Vide = BT actif', t:'text'}
+    ]
+  },
+  bt_reset: {
+    m:'POST', p:'/v1/bt/reset', l:'Reset BT',
+    desc:"Réinitialise le transport Bluetooth — déconnecte et vide le buffer.",
+    f:[
+      {k:'bt_mac', l:'MAC BT (optionnel)', h:'Vide = BT actif', t:'text'}
+    ]
+  },
   bt_activate: {
     m:'POST', p:'/v1/bt/activate', l:'Activer BT',
     desc:"Active le transport Bluetooth. bt_mac ou bt_name optionnel — si absent, essaie tous les appairés.",
@@ -310,15 +327,19 @@ var CMDS = {
   media_auto: {
     m:'POST', p:'/v1/media/auto-connect', l:'Auto-connexion média',
     desc:"Connexion automatique au registre sur le meilleur transport disponible.",
-    f:[{k:'lcrnode_dec', l:'Node LCP', h:'250 par défaut', t:'number'}]
+    f:[
+      {k:'lcrnode_dec',        l:'Node LCP',           h:'250 par défaut', t:'number'},
+      {k:'expected_serial_id', l:'#Série (optionnel)',  h:'ex: 16466294 — valide le bon registre', t:'text'}
+    ]
   },
   lcp_connect: {
     m:'POST', p:'/v1/lcp/connect', l:'Connexion LCP',
     desc:"Connexion directe LCP à un registre sur un transport spécifique.",
     f:[
-      {k:'lcrnode_dec', l:'Node LCP', h:'250 par défaut', t:'number'},
-      {k:'media', l:'Média', h:'usb ou bt', t:'select', o:['','usb','bt']},
-      {k:'bt_mac', l:'MAC BT', h:'Requis si média = bt', t:'text'}
+      {k:'lcrnode_dec',        l:'Node LCP',           h:'250 par défaut', t:'number'},
+      {k:'expected_serial_id', l:'#Série (optionnel)',  h:'ex: 16466294 — valide le bon registre', t:'text'},
+      {k:'media',              l:'Média',               h:'usb ou bt', t:'select', o:['','usb','bt']},
+      {k:'bt_mac',             l:'MAC BT',              h:'Requis si média = bt', t:'text'}
     ]
   },
   reg_validate: {
@@ -339,6 +360,11 @@ var CMDS = {
       {k:'serialId', l:'Serial (#Série)', h:'ex: ABC12345', t:'text'},
       {k:'lcrnode', l:'Node LCP', h:'250 par défaut', t:'number'}
     ]
+  },
+  reg_scan_progress: {
+    m:'GET', p:'/v1/register/scan-progress', l:'Progression scan-auto',
+    desc:"Retourne la progression du scan en cours (node actuel / total).",
+    f:[]
   },
   reg_scan_auto: {
     m:'POST', p:'/v1/register/scan-auto', l:'Scan-auto registres',
@@ -607,6 +633,8 @@ function execCmd() {
   var bx = document.getElementById('bx');
   bx.disabled = true;
   bx.innerHTML = '<span class="sp"></span> En cours…';
+  // ✅ Si scan-auto → démarrer poll de progression
+  if (cur === 'reg_scan_auto') startScanProgressPoll();
 
   var body = {}, query = {};
   c.f.forEach(function(f) {
@@ -800,6 +828,43 @@ function scls(s) {
   return 'rerr';
 }
 
+// ===================== SCAN PROGRESS =====================
+var scanProgressInterval = null;
+
+function startScanProgressPoll() {
+  stopScanProgressPoll();
+  scanProgressInterval = setInterval(pollScanProgress, 1000);
+}
+
+function stopScanProgressPoll() {
+  if (scanProgressInterval) { clearInterval(scanProgressInterval); scanProgressInterval = null; }
+}
+
+function pollScanProgress() {
+  var xhr = new XMLHttpRequest();
+  xhr.open('GET', base() + '/v1/register/scan-progress', true);
+  xhr.timeout = 3000;
+  xhr.onload = function() {
+    try {
+      var j = JSON.parse(xhr.responseText);
+      if (j.code === 1 && j.data) {
+        var d = j.data;
+        var running = d.running === 1;
+        var pct = d.pct || 0;
+        var prog = d.progress || 0;
+        var total = d.total || 0;
+        var bx = document.getElementById('bx');
+        if (bx && running) {
+          bx.innerHTML = '<span class="sp"></span> Scan ' + prog + '/' + total + ' (' + pct + '%)';
+        }
+        if (!running) stopScanProgressPoll();
+      }
+    } catch(e) { stopScanProgressPoll(); }
+  };
+  xhr.onerror = xhr.ontimeout = function() { stopScanProgressPoll(); };
+  xhr.send();
+}
+
 function doPing() {
   var d = document.getElementById('dot'), st = document.getElementById('stxt');
   d.className = 'dot'; st.textContent = '…';
@@ -811,8 +876,15 @@ function doPing() {
     var ms = Date.now() - t0;
     try {
       var j = JSON.parse(xhr.responseText);
-      if (j.code === 1) { d.className = 'dot ok'; st.textContent = 'OK — ' + ms + 'ms'; addLog('GET', '/v1/ping', 'ok', ms); }
-      else              { d.className = 'dot err'; st.textContent = 'FAIL'; addLog('GET', '/v1/ping', 'err', ms); }
+      if (j.code === 1) {
+        d.className = 'dot ok'; st.textContent = 'OK — ' + ms + 'ms';
+        addLog('GET', '/v1/ping', 'ok', ms);
+        // ✅ Réinitialiser le panneau Job Actif si reconnexion détectée
+        resetJobPanelIfNeeded();
+      } else {
+        d.className = 'dot err'; st.textContent = 'FAIL';
+        addLog('GET', '/v1/ping', 'err', ms);
+      }
     } catch(e) { d.className = 'dot err'; st.textContent = 'Erreur JSON'; }
   };
   xhr.onerror   = function() { d.className = 'dot err'; st.textContent = 'Hors ligne';  addLog('GET', '/v1/ping', 'err', Date.now()-t0, 'Refusée'); };
@@ -884,9 +956,11 @@ function updateCmds() {
   if (!psEl || !curlEl) return;
   var r = buildCmdParams();
   var ps, curl;
+  // $BASE = host only, CMDS[cur].p starts with /v1/
+  var baseUrl = 'http://127.0.0.1:' + port();
   if (r.method === 'POST') {
     var bodyOneLine = r.body ? r.body.replace(/\s+/g,' ').trim() : '{}';
-    ps   = '$BASE = "http://127.0.0.1:' + port() + '/v1"\n\n'
+    ps   = '$BASE = "' + baseUrl + '"\n\n'
          + 'Invoke-WebRequest -Method POST "$BASE' + CMDS[cur].p + '" `\n'
          + '  -ContentType "application/json" `\n'
          + "  -Body '" + bodyOneLine + "' `\n"
@@ -895,8 +969,8 @@ function updateCmds() {
          + '  -H "Content-Type: application/json" \\\n'
          + "  -d '" + bodyOneLine + "'";
   } else {
-    ps   = '$BASE = "http://127.0.0.1:' + port() + '/v1"\n\n'
-         + 'Invoke-WebRequest -Method GET "' + r.url + '" -UseBasicParsing';
+    ps   = '$BASE = "' + baseUrl + '"\n\n'
+         + 'Invoke-WebRequest -Method GET "$BASE' + CMDS[cur].p + '" -UseBasicParsing';
     curl = 'curl -X GET "' + r.url + '"';
   }
   psEl.textContent   = ps;
@@ -1121,6 +1195,24 @@ function handleTickResponse(j) {
   setJobState(state, jobId, net, gross, node, serial, liveStatus, pauseReason);
 }
 
+function resetJobPanelIfNeeded() {
+  // Si le dernier état connu était OFFLINE ou erreur — forcer un refresh
+  var dot = document.getElementById('jobStateDot');
+  if (!dot) return;
+  var col = dot.style.background;
+  // Si état était OFFLINE/erreur → réinitialiser variables et forcer StatusB
+  if (activeJobId === null && (col === 'var(--r)' || col === 'rgb(224, 52, 80)')) {
+    activeJobId     = null;
+    activeJobNode   = activeJobNode || 250;
+    activeTicketNo  = null;
+    lastTickSeq     = null;
+    // Reset printer card
+    updatePrinterStatus(0, 1, false);
+    // Force refresh
+    setTimeout(forceRefresh, 500);
+  }
+}
+
 function updatePrinterStatus(prnStatus, devStatus, ticketPending) {
   var card  = document.getElementById('cardPrinterStatus');
   var label = document.getElementById('jobPrinterStatus');
@@ -1223,8 +1315,11 @@ function setJobState(state, jobId, net, gross, node, serial, liveStatus, pauseRe
   if (jidEl) jidEl.textContent = (_uid && _jid)
     ? (_uid + ' (' + _jid + ')')
     : (_jid || _tnoLabel);
-  if (netEl) netEl.textContent = net   !== null && net   !== undefined ? parseFloat(net).toFixed(2)   + ' L' : '—';
-  if (groEl) groEl.textContent = gross !== null && gross !== undefined ? parseFloat(gross).toFixed(2) + ' L' : '—';
+  // Sanity check — valeur aberrante (overflow) → afficher N/A
+  var netSane   = (net   !== null && net   !== undefined && Math.abs(parseFloat(net))   < 999999) ? parseFloat(net)   : null;
+  var grossSane = (gross !== null && gross !== undefined && Math.abs(parseFloat(gross)) < 999999) ? parseFloat(gross) : null;
+  if (netEl) netEl.textContent = netSane   !== null ? netSane.toFixed(2)   + ' L' : (net   !== null ? '⚠ ' + net   : '—');
+  if (groEl) groEl.textContent = grossSane !== null ? grossSane.toFixed(2) + ' L' : (gross !== null ? '⚠ ' + gross : '—');
   var tnoEl = document.getElementById('jobTicketNo');
   if (tnoEl) tnoEl.textContent = activeTicketNo || '—';
   if (nodEl) nodEl.textContent = node   || activeJobNode   || '—';
