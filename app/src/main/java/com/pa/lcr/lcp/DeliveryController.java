@@ -2436,11 +2436,9 @@ job.presetNetL_requested = presetNetL;
     }
     public ApiResult api_deliveryStatusB() {
         try {
-            // Exactement ce que fait le bouton B dans le UI
-            requestStatus();
-            Thread.sleep(200);
-            requestLiveSample();
-
+            // ✅ Lecture directe via lcpOpLock — même verrou que UI
+            // PAS de requestStatus()/requestLiveSample() qui lancent des threads async
+            // et créent des collisions de trames BT avec le UI
             int[] ds = lcpDeliveryStatus();
             int delCode = ds[1];
             ensureDigits();
@@ -2448,8 +2446,21 @@ job.presetNetL_requested = presetNetL;
 
             int g = beI32(lcpGetField(FIELD_GROSS_COUNT));
             int n = beI32(lcpGetField(FIELD_NET_COUNT));
-            double netL   = (n & 0xFFFFFFFFL) / scale;
-            double grossL = (g & 0xFFFFFFFFL) / scale;
+
+            // ✅ Sanity check — overflow protection (unsigned 32-bit → signé Java)
+            long nLong = (n & 0xFFFFFFFFL);
+            long gLong = (g & 0xFFFFFFFFL);
+            // Si valeur > 1 million de litres → probablement overflow/corruption
+            double netL   = (nLong / scale > 1_000_000.0) ? -1.0 : nLong / scale;
+            double grossL = (gLong / scale > 1_000_000.0) ? -1.0 : gLong / scale;
+
+            // Mettre à jour lastDev/PrnStatus depuis un readFullStatus non-intrusif
+            try {
+                FullStatus fs = readFullStatus("api_statusB");
+                lastDevStatusKnown = fs.devStatus;
+                lastPrnStatusKnown = fs.prnStatus;
+
+            } catch (Exception ignored) {}
 
             boolean deliveryActive = (delCode & DC_DELIVERY_ACTIVE) != 0;
             boolean flowActive     = (delCode & DC_FLOW_ACTIVE) != 0;
@@ -2459,10 +2470,10 @@ job.presetNetL_requested = presetNetL;
             safeJsonPut(data, "deliveryActive",  deliveryActive ? 1 : 0);
             safeJsonPut(data, "flowActive",      flowActive ? 1 : 0);
             safeJsonPut(data, "ticketPending",   ticketPending ? 1 : 0);
-            safeJsonPut(data, "net",             netL);
-            safeJsonPut(data, "gross",           grossL);
-            safeJsonPut(data, "net_l",           netL);
-            safeJsonPut(data, "gross_l",         grossL);
+            safeJsonPut(data, "net",             netL >= 0 ? netL : JSONObject.NULL);
+            safeJsonPut(data, "gross",           grossL >= 0 ? grossL : JSONObject.NULL);
+            safeJsonPut(data, "net_l",           netL >= 0 ? netL : JSONObject.NULL);
+            safeJsonPut(data, "gross_l",         grossL >= 0 ? grossL : JSONObject.NULL);
             safeJsonPut(data, "decimals",        cachedDigits);
             safeJsonPut(data, "delCode",         delCode);
             safeJsonPut(data, "state",           state != null ? state.name() : "UNKNOWN");
@@ -2471,9 +2482,10 @@ job.presetNetL_requested = presetNetL;
             try {
                 JSONObject tick = buildTickJsonSnapshot();
                 safeJsonPut(data, "tick", tick);
-            } catch (Exception ignored) {}
+            } catch (Exception ignored2) {}
 
             return ApiResult.ok("StatusB: 1 - OK", data);
+
         } catch (Exception e) {
             JSONObject d = new JSONObject();
             safeJsonPut(d, "detail", e.getMessage() != null ? e.getMessage() : "");
