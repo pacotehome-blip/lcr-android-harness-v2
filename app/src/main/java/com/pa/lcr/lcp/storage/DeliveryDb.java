@@ -1,4 +1,3 @@
-
 package com.pa.lcr.lcp.storage;
 import android.content.Context;
 import android.database.Cursor;
@@ -16,7 +15,8 @@ public class DeliveryDb extends SQLiteOpenHelper {
  // v2: add time columns to delivery_summary + index
  // v3: add media_profile/media_event
  // v4: add structured error columns to delivery_event (event_level/event_code/event_where/detail_short)
- public static final int DB_VERSION = 4;
+ // v5: add truck_profile + truck_drift tables
+ public static final int DB_VERSION = 5;
  private static final String TAG = "DeliveryDb";
  public DeliveryDb(Context context) {
  super(context, DB_NAME, null, DB_VERSION);
@@ -47,6 +47,8 @@ public class DeliveryDb extends SQLiteOpenHelper {
  createDeliveryTables(db);
  // ✅ v3: media tables MUST be created on fresh install too
  createMediaTables(db);
+ // ✅ v5: truck profile + drift tables
+ createTruckTables(db);
  }
  @Override
  public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
@@ -62,6 +64,8 @@ public class DeliveryDb extends SQLiteOpenHelper {
  // v3 tables
  if (oldVersion < 3) {
  createMediaTables(db);
+ // ✅ v5: truck profile + drift tables
+ createTruckTables(db);
  }
  // v4 columns (structured error fields in delivery_event)
  if (oldVersion < 4) {
@@ -71,6 +75,11 @@ public class DeliveryDb extends SQLiteOpenHelper {
  addColumnIfMissing(db, "delivery_event", "detail_short", "TEXT");
  db.execSQL("CREATE INDEX IF NOT EXISTS idx_event_level_ts ON delivery_event(event_level, ts);");
  db.execSQL("CREATE INDEX IF NOT EXISTS idx_event_code_ts ON delivery_event(event_code, ts);");
+ }
+ }
+ // v5 tables
+ if (oldVersion < 5) {
+ createTruckTables(db);
  }
  }
  // =========================================================
@@ -193,6 +202,41 @@ public class DeliveryDb extends SQLiteOpenHelper {
  ");"
  );
  db.execSQL("CREATE INDEX IF NOT EXISTS idx_media_event_ts ON media_event(ts);");
+ }
+ // =========================================================
+ // Truck profile tables (v5)
+ // =========================================================
+ private static void createTruckTables(SQLiteDatabase db) {
+ db.execSQL(
+ "CREATE TABLE IF NOT EXISTS truck_profile (" +
+ "truck_id TEXT PRIMARY KEY," +
+ "bt_mac TEXT," +
+ "bt_name TEXT," +
+ "lcrnode_dec INTEGER," +
+ "serial_id TEXT," +
+ "default_product INTEGER," +
+ "compartments TEXT," + // JSON array ex: [{"id":1,"name":"gaz"},{"id":2,"name":"diesel1"}]
+ "notes TEXT," +
+ "active INTEGER NOT NULL DEFAULT 0," +
+ "ts_created_ms INTEGER NOT NULL," +
+ "ts_updated_ms INTEGER NOT NULL" +
+ ");"
+ );
+ db.execSQL("CREATE INDEX IF NOT EXISTS idx_truck_active ON truck_profile(active);");
+ db.execSQL(
+ "CREATE TABLE IF NOT EXISTS truck_drift (" +
+ "id INTEGER PRIMARY KEY AUTOINCREMENT," +
+ "truck_id TEXT NOT NULL," +
+ "field_name TEXT NOT NULL," + // ex: bt_mac, serial_id, lcrnode_dec
+ "expected_value TEXT," +
+ "actual_value TEXT," +
+ "delivery_uid TEXT," +
+ "acknowledged INTEGER NOT NULL DEFAULT 0," +
+ "ts_ms INTEGER NOT NULL" +
+ ");"
+ );
+ db.execSQL("CREATE INDEX IF NOT EXISTS idx_drift_truck ON truck_drift(truck_id, ts_ms);");
+ db.execSQL("CREATE INDEX IF NOT EXISTS idx_drift_ack ON truck_drift(acknowledged);");
  }
  // =========================================================
  // Column helper

@@ -139,6 +139,16 @@ header{background:#fff;border-bottom:1px solid var(--border);padding:12px 16px;d
     <div class="sec">Tick</div>
     <button class="cb" onclick="sel('tick_wait')"><span class="tag tg">GET</span>/v1/tick/wait</button>
 
+    <div class="sec">&#128666; Profils Camion</div>
+    <button class="cb" onclick="sel('profile_save')"><span class="tag tp">POST</span>/v1/profile/save</button>
+    <button class="cb" onclick="sel('profile_list')"><span class="tag tg">GET</span>/v1/profile/list</button>
+    <button class="cb" onclick="sel('profile_active')"><span class="tag tg">GET</span>/v1/profile/active</button>
+    <button class="cb" onclick="sel('profile_activate')"><span class="tag tp">POST</span>/v1/profile/activate</button>
+    <button class="cb" onclick="sel('profile_validate')"><span class="tag tp">POST</span>/v1/profile/validate</button>
+    <button class="cb" onclick="sel('profile_drift')"><span class="tag tg">GET</span>/v1/profile/drift</button>
+    <button class="cb" onclick="sel('profile_acknowledge')"><span class="tag tp">POST</span>/v1/profile/acknowledge</button>
+    <button class="cb" onclick="sel('profile_delete')"><span class="tag tp">POST</span>/v1/profile/delete</button>
+
     <div class="sec">Base de données</div>
     <button class="cb" onclick="sel('db_dump')"><span class="tag tp">POST</span>/v1/db/dump</button>
   </nav>
@@ -275,7 +285,11 @@ var CMDS = {
   },
   bt_activate: {
     m:'POST', p:'/v1/bt/activate', l:'Activer BT',
-    desc:"Active le transport Bluetooth.", f:[]
+    desc:"Active le transport Bluetooth. bt_mac ou bt_name optionnel — si absent, essaie tous les appairés.",
+    f:[
+      {k:'bt_mac',  l:'MAC BT (optionnel)',  h:'ex: 00:01:95:C9:BF:87 — cible un appareil spécifique', t:'text'},
+      {k:'bt_name', l:'Nom BT (optionnel)',  h:'ex: AWD-C9BF87 — cible par nom', t:'text'}
+    ]
   },
   usb_scan: {
     m:'GET', p:'/v1/usb/scan', l:'Scan USB',
@@ -434,6 +448,71 @@ var CMDS = {
       {k:'lcrnode_dec', l:'Node LCP', h:'250 par défaut', t:'number', inQuery:true},
       {k:'since_seq', l:'Since seq', h:'Séquence depuis laquelle attendre', t:'number', inQuery:true},
       {k:'wait_ms', l:'Wait (ms)', h:'Timeout attente — ex: 5000', t:'number', inQuery:true}
+    ]
+  },
+  profile_save: {
+    m:'POST', p:'/v1/profile/save', l:'Sauvegarder profil camion',
+    desc:"Crée ou met à jour un profil camion avec ses identifiants BT, node LCP, serial et compartiments.",
+    f:[
+      {k:'truck_id',        l:'ID Camion',          h:'ex: CAMION-12 — identifiant unique', t:'text'},
+      {k:'bt_mac',          l:'MAC BT',              h:'ex: 00:01:95:C9:BF:87', t:'text'},
+      {k:'bt_name',         l:'Nom BT',              h:'ex: AWD-C9BF87', t:'text'},
+      {k:'lcrnode_dec',     l:'Node LCP',            h:'ex: 250', t:'number'},
+      {k:'serial_id',       l:'#Série registre',     h:'ex: 16466294', t:'text'},
+      {k:'default_product', l:'Produit défaut',      h:'1 à 16', t:'number'},
+      {k:'compartments',    l:'Compartiments (JSON)', h:'ex: [{"id":1,"name":"gaz"},{"id":2,"name":"diesel1"}]', t:'text'},
+      {k:'notes',           l:'Notes',               h:'Optionnel', t:'text'}
+    ]
+  },
+  profile_list: {
+    m:'GET', p:'/v1/profile/list', l:'Lister profils camion',
+    desc:"Retourne tous les profils camion enregistrés dans la tablette.",
+    f:[]
+  },
+  profile_active: {
+    m:'GET', p:'/v1/profile/active', l:'Profil actif courant',
+    desc:"Retourne le profil camion actif — celui qui est actuellement sélectionné.",
+    f:[]
+  },
+  profile_activate: {
+    m:'POST', p:'/v1/profile/activate', l:'Activer profil camion',
+    desc:"Active un profil et connecte automatiquement le BT associé.",
+    f:[
+      {k:'truck_id', l:'ID Camion', h:'ex: CAMION-12', t:'text'}
+    ]
+  },
+  profile_validate: {
+    m:'POST', p:'/v1/profile/validate', l:'Valider profil (drift)',
+    desc:"Compare les identifiants réels vs le profil enregistré et détecte les divergences. Retourne notify_required=true si divergence.",
+    f:[
+      {k:'truck_id',         l:'ID Camion',          h:'ex: CAMION-12', t:'text'},
+      {k:'actual_bt_mac',    l:'MAC BT réelle',       h:'ex: 00:01:95:C9:BF:87', t:'text'},
+      {k:'actual_bt_name',   l:'Nom BT réel',         h:'ex: AWD-C9BF87', t:'text'},
+      {k:'actual_lcrnode',   l:'Node LCP réel',       h:'ex: 250', t:'number'},
+      {k:'actual_serial_id', l:'#Série réel',         h:'ex: 16466294', t:'text'},
+      {k:'delivery_uid',     l:'UID livraison',       h:'Optionnel — lier la divergence à une livraison', t:'text'}
+    ]
+  },
+  profile_drift: {
+    m:'GET', p:'/v1/profile/drift', l:'Divergences détectées',
+    desc:"Liste les divergences détectées entre les profils enregistrés et la réalité terrain.",
+    f:[
+      {k:'truck_id',     l:'ID Camion',          h:'Optionnel — filtre par camion', t:'text', inQuery:true},
+      {k:'only_unacked', l:'Non-acquittées seul', h:'1 = seulement non-acquittées (défaut), 0 = toutes', t:'number', inQuery:true}
+    ]
+  },
+  profile_acknowledge: {
+    m:'POST', p:'/v1/profile/acknowledge', l:'Acquitter divergences',
+    desc:"Marque les divergences comme prises en charge par la répartition.",
+    f:[
+      {k:'truck_id', l:'ID Camion', h:'Optionnel — acquitte toutes si absent', t:'text'}
+    ]
+  },
+  profile_delete: {
+    m:'POST', p:'/v1/profile/delete', l:'Supprimer profil camion',
+    desc:"Supprime définitivement un profil camion.",
+    f:[
+      {k:'truck_id', l:'ID Camion', h:'ex: CAMION-12', t:'text'}
     ]
   },
   db_dump: {

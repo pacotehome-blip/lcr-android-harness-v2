@@ -523,6 +523,85 @@ public final class ApiServer {
             return withAutoConnectRetry(null, facade::api_dbDump);
         }
 
+        // ✅ Truck Profile — save
+        if ("POST".equals(req.method) && "/v1/profile/save".equals(req.path)) {
+            JSONObject body = safeBody(req.jsonBody());
+            String truckId      = body != null ? body.optString("truck_id",        "").trim() : "";
+            String btMac        = body != null ? body.optString("bt_mac",          "").trim() : "";
+            String btName       = body != null ? body.optString("bt_name",         "").trim() : "";
+            String serialId     = body != null ? body.optString("serial_id",       "").trim() : "";
+            String compartments = body != null ? body.optString("compartments",    "").trim() : "";
+            String notes        = body != null ? body.optString("notes",           "").trim() : "";
+            Integer lcrnode     = body != null ? (body.has("lcrnode_dec") ? body.optInt("lcrnode_dec") : null) : null;
+            Integer defProduct  = body != null ? (body.has("default_product") ? body.optInt("default_product") : null) : null;
+            return facade.api_profileSave(
+                    truckId.isEmpty() ? null : truckId,
+                    btMac.isEmpty()   ? null : btMac,
+                    btName.isEmpty()  ? null : btName,
+                    lcrnode, serialId.isEmpty() ? null : serialId,
+                    defProduct, compartments.isEmpty() ? null : compartments,
+                    notes.isEmpty() ? null : notes);
+        }
+
+        // ✅ Truck Profile — list
+        if ("GET".equals(req.method) && "/v1/profile/list".equals(req.path)) {
+            return facade.api_profileList();
+        }
+
+        // ✅ Truck Profile — active
+        if ("GET".equals(req.method) && "/v1/profile/active".equals(req.path)) {
+            return facade.api_profileActive();
+        }
+
+        // ✅ Truck Profile — activate
+        if ("POST".equals(req.method) && "/v1/profile/activate".equals(req.path)) {
+            JSONObject body = safeBody(req.jsonBody());
+            String truckId = body != null ? body.optString("truck_id", "").trim() : "";
+            if (truckId.isEmpty()) return ApiResult.fail("Profile: 0 - truck_id requis", "ERR_TRUCK_ID_REQUIRED");
+            return facade.api_profileActivate(truckId);
+        }
+
+        // ✅ Truck Profile — validate (drift detection)
+        if ("POST".equals(req.method) && "/v1/profile/validate".equals(req.path)) {
+            JSONObject body = safeBody(req.jsonBody());
+            String truckId     = body != null ? body.optString("truck_id",         "").trim() : "";
+            String actualMac   = body != null ? body.optString("actual_bt_mac",    "").trim() : "";
+            String actualName  = body != null ? body.optString("actual_bt_name",   "").trim() : "";
+            String actualSerial= body != null ? body.optString("actual_serial_id", "").trim() : "";
+            String delivUid    = body != null ? body.optString("delivery_uid",     "").trim() : "";
+            Integer actualNode = body != null ? (body.has("actual_lcrnode") ? body.optInt("actual_lcrnode") : null) : null;
+            return facade.api_profileValidate(
+                    truckId.isEmpty()      ? null : truckId,
+                    actualMac.isEmpty()    ? null : actualMac,
+                    actualName.isEmpty()   ? null : actualName,
+                    actualNode,
+                    actualSerial.isEmpty() ? null : actualSerial,
+                    delivUid.isEmpty()     ? null : delivUid);
+        }
+
+        // ✅ Truck Profile — drift list
+        if ("GET".equals(req.method) && "/v1/profile/drift".equals(req.path)) {
+            String truckId    = req.query != null ? req.query.getOrDefault("truck_id", "").trim() : "";
+            String unackedStr = req.query != null ? req.query.getOrDefault("only_unacked", "1").trim() : "1";
+            boolean onlyUnacked = !"0".equals(unackedStr);
+            return facade.api_profileDrift(truckId.isEmpty() ? null : truckId, onlyUnacked);
+        }
+
+        // ✅ Truck Profile — acknowledge drifts
+        if ("POST".equals(req.method) && "/v1/profile/acknowledge".equals(req.path)) {
+            JSONObject body = safeBody(req.jsonBody());
+            String truckId = body != null ? body.optString("truck_id", "").trim() : "";
+            return facade.api_profileAcknowledge(truckId.isEmpty() ? null : truckId);
+        }
+
+        // ✅ Truck Profile — delete
+        if ("POST".equals(req.method) && "/v1/profile/delete".equals(req.path)) {
+            JSONObject body = safeBody(req.jsonBody());
+            String truckId = body != null ? body.optString("truck_id", "").trim() : "";
+            if (truckId.isEmpty()) return ApiResult.fail("Profile: 0 - truck_id requis", "ERR_TRUCK_ID_REQUIRED");
+            return facade.api_profileDelete(truckId);
+        }
+
         // Tick wait
         if ("GET".equals(req.method) && "/v1/tick/wait".equals(req.path)) {
             Integer node = null;

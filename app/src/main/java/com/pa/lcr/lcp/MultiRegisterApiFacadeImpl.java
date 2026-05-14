@@ -71,6 +71,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     // BT Signal store (accès direct pour scan RSSI)
     // =========================================================
     private final BtSignalStore btSignalStore;
+    private final com.pa.lcr.lcp.storage.TruckProfileStore truckProfileStore;
 
     private BluetoothAdapter btAdapterSafe() {
         try { return BluetoothAdapter.getDefaultAdapter(); }
@@ -110,6 +111,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         this.sessions = RegisterSessionManager.get(this.appCtx);
         this.mediaMgr = MediaTransportManager.get(this.appCtx);
         this.btSignalStore = new BtSignalStore(this.appCtx);
+        this.truckProfileStore = new com.pa.lcr.lcp.storage.TruckProfileStore(this.appCtx);
     }
 
     // =========================
@@ -1360,5 +1362,153 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             return dc.api_deliveryAlignA();
         }
         return ApiResult.fail("Align A: 0 - media invalide", "ERR_MEDIA_INVALID");
+    }
+
+    // =========================================================
+    // ✅ Truck Profile
+    // =========================================================
+
+    @Override
+    public ApiResult api_profileSave(String truck_id, String bt_mac, String bt_name,
+                                      Integer lcrnode_dec, String serial_id,
+                                      Integer default_product, String compartments_json,
+                                      String notes) {
+        try {
+            if (truck_id == null || truck_id.trim().isEmpty())
+                return ApiResult.fail("Profile: 0 - truck_id requis", "ERR_TRUCK_ID_REQUIRED");
+            org.json.JSONArray comp = null;
+            if (compartments_json != null && !compartments_json.trim().isEmpty()) {
+                try { comp = new org.json.JSONArray(compartments_json); } catch (Exception ignored) {}
+            }
+            JSONObject result = truckProfileStore.saveProfile(
+                    truck_id.trim(), bt_mac, bt_name, lcrnode_dec,
+                    serial_id, default_product, comp, notes);
+            if (result == null) return ApiResult.fail("Profile: 0 - Erreur sauvegarde", "ERR_PROFILE_SAVE");
+            return ApiResult.ok("Profile: 1 - Sauvegardé", result);
+        } catch (Exception e) {
+            return ApiResult.fail("Profile: 0 - " + e.getMessage(), "ERR_PROFILE_SAVE");
+        }
+    }
+
+    @Override
+    public ApiResult api_profileList() {
+        try {
+            org.json.JSONArray list = truckProfileStore.listProfiles();
+            JSONObject d = new JSONObject();
+            d.put("profiles", list);
+            d.put("count", list.length());
+            return ApiResult.ok("Profile: 1 - " + list.length() + " profil(s)", d);
+        } catch (Exception e) {
+            return ApiResult.fail("Profile: 0 - " + e.getMessage(), "ERR_PROFILE_LIST");
+        }
+    }
+
+    @Override
+    public ApiResult api_profileActive() {
+        try {
+            JSONObject profile = truckProfileStore.getActiveProfile();
+            if (profile == null) return ApiResult.fail("Profile: 0 - Aucun profil actif", "ERR_NO_ACTIVE_PROFILE");
+            return ApiResult.ok("Profile: 1 - Profil actif", profile);
+        } catch (Exception e) {
+            return ApiResult.fail("Profile: 0 - " + e.getMessage(), "ERR_PROFILE_ACTIVE");
+        }
+    }
+
+    @Override
+    public ApiResult api_profileActivate(String truck_id) {
+        try {
+            if (truck_id == null || truck_id.trim().isEmpty())
+                return ApiResult.fail("Profile: 0 - truck_id requis", "ERR_TRUCK_ID_REQUIRED");
+            JSONObject profile = truckProfileStore.activateProfile(truck_id.trim());
+            if (profile == null)
+                return ApiResult.fail("Profile: 0 - Profil introuvable: " + truck_id, "ERR_PROFILE_NOT_FOUND");
+            // Auto-connect BT si mac disponible
+            String btMac = profile.optString("bt_mac", null);
+            String btName = profile.optString("bt_name", null);
+            JSONObject connectResult = null;
+            if (btMac != null && !btMac.trim().isEmpty()) {
+                try {
+                    ApiResult btResult = api_btActivate(btMac, btName);
+                    if (btResult != null) connectResult = btResult.toJson();
+                } catch (Exception ignored) {}
+            }
+            JSONObject d = new JSONObject();
+            d.put("truck_id",      truck_id);
+            d.put("profile",       profile);
+            d.put("bt_connected",  connectResult != null ? 1 : 0);
+            d.put("bt_result",     connectResult);
+            return ApiResult.ok("Profile: 1 - Activé: " + truck_id, d);
+        } catch (Exception e) {
+            return ApiResult.fail("Profile: 0 - " + e.getMessage(), "ERR_PROFILE_ACTIVATE");
+        }
+    }
+
+    @Override
+    public ApiResult api_profileValidate(String truck_id, String actual_bt_mac,
+                                          String actual_bt_name, Integer actual_lcrnode,
+                                          String actual_serial_id, String delivery_uid) {
+        try {
+            if (truck_id == null || truck_id.trim().isEmpty())
+                return ApiResult.fail("Profile: 0 - truck_id requis", "ERR_TRUCK_ID_REQUIRED");
+            JSONObject result = truckProfileStore.validateAndDetectDrift(
+                    truck_id.trim(), actual_bt_mac, actual_bt_name,
+                    actual_lcrnode, actual_serial_id, delivery_uid);
+            if (result == null)
+                return ApiResult.fail("Profile: 0 - Erreur validation", "ERR_PROFILE_VALIDATE");
+            boolean hasDrift = result.optInt("drift_count", 0) > 0;
+            String msg = hasDrift
+                    ? "Profile: 1 - " + result.optInt("drift_count") + " divergence(s) détectée(s)"
+                    : "Profile: 1 - OK aucune divergence";
+            return ApiResult.ok(msg, result);
+        } catch (Exception e) {
+            return ApiResult.fail("Profile: 0 - " + e.getMessage(), "ERR_PROFILE_VALIDATE");
+        }
+    }
+
+    @Override
+    public ApiResult api_profileDrift(String truck_id, boolean only_unacked) {
+        try {
+            org.json.JSONArray drifts = truckProfileStore.getDrifts(truck_id, only_unacked);
+            JSONObject d = new JSONObject();
+            d.put("truck_id",    truck_id);
+            d.put("drifts",      drifts);
+            d.put("count",       drifts.length());
+            d.put("only_unacked", only_unacked ? 1 : 0);
+            return ApiResult.ok("Profile Drift: 1 - " + drifts.length() + " divergence(s)", d);
+        } catch (Exception e) {
+            return ApiResult.fail("Profile Drift: 0 - " + e.getMessage(), "ERR_PROFILE_DRIFT");
+        }
+    }
+
+    @Override
+    public ApiResult api_profileAcknowledge(String truck_id) {
+        try {
+            boolean ok = truckProfileStore.acknowledgeDrift(truck_id);
+            JSONObject d = new JSONObject();
+            d.put("truck_id",     truck_id);
+            d.put("acknowledged", ok ? 1 : 0);
+            return ok
+                    ? ApiResult.ok("Profile: 1 - Divergences acquittées", d)
+                    : ApiResult.fail("Profile: 0 - Erreur acquittement", "ERR_PROFILE_ACK", d);
+        } catch (Exception e) {
+            return ApiResult.fail("Profile: 0 - " + e.getMessage(), "ERR_PROFILE_ACK");
+        }
+    }
+
+    @Override
+    public ApiResult api_profileDelete(String truck_id) {
+        try {
+            if (truck_id == null || truck_id.trim().isEmpty())
+                return ApiResult.fail("Profile: 0 - truck_id requis", "ERR_TRUCK_ID_REQUIRED");
+            boolean ok = truckProfileStore.deleteProfile(truck_id.trim());
+            JSONObject d = new JSONObject();
+            d.put("truck_id", truck_id);
+            d.put("deleted",  ok ? 1 : 0);
+            return ok
+                    ? ApiResult.ok("Profile: 1 - Supprimé: " + truck_id, d)
+                    : ApiResult.fail("Profile: 0 - Profil introuvable: " + truck_id, "ERR_PROFILE_NOT_FOUND", d);
+        } catch (Exception e) {
+            return ApiResult.fail("Profile: 0 - " + e.getMessage(), "ERR_PROFILE_DELETE");
+        }
     }
 }

@@ -283,4 +283,87 @@ public interface ApiFacade {
             String bt_mac) {
         return api_ticketReprintCurrent(lcrnode_dec, from_dec);
     }
+
+    // =========================================================
+    // ✅ Truck Profile
+    // =========================================================
+
+    /**
+     * POST /v1/profile/save
+     * Crée ou met à jour un profil camion.
+     */
+    default ApiResult api_profileSave(
+            String truck_id,
+            String bt_mac,
+            String bt_name,
+            Integer lcrnode_dec,
+            String serial_id,
+            Integer default_product,
+            String compartments_json,
+            String notes) {
+        return ApiResult.fail("api_profileSave: not supported", "NOT_SUPPORTED");
+    }
+
+    /**
+     * GET /v1/profile/list
+     * Liste tous les profils camion.
+     */
+    default ApiResult api_profileList() {
+        return ApiResult.fail("api_profileList: not supported", "NOT_SUPPORTED");
+    }
+
+    /**
+     * GET /v1/profile/active
+     * Retourne le profil actif courant.
+     */
+    default ApiResult api_profileActive() {
+        return ApiResult.fail("api_profileActive: not supported", "NOT_SUPPORTED");
+    }
+
+    /**
+     * POST /v1/profile/activate
+     * Active un profil et connecte le BT + node automatiquement.
+     */
+    default ApiResult api_profileActivate(String truck_id) {
+        return ApiResult.fail("api_profileActivate: not supported", "NOT_SUPPORTED");
+    }
+
+    /**
+     * POST /v1/profile/validate
+     * Valide les identifiants vs le profil et détecte les divergences.
+     */
+    default ApiResult api_profileValidate(
+            String truck_id,
+            String actual_bt_mac,
+            String actual_bt_name,
+            Integer actual_lcrnode,
+            String actual_serial_id,
+            String delivery_uid) {
+        return ApiResult.fail("api_profileValidate: not supported", "NOT_SUPPORTED");
+    }
+
+    /**
+     * GET /v1/profile/drift
+     * Liste les divergences détectées (non-acknowledges par défaut).
+     */
+    default ApiResult api_profileDrift(String truck_id, boolean only_unacked) {
+        return ApiResult.fail("api_profileDrift: not supported", "NOT_SUPPORTED");
+    }
+
+    /**
+     * POST /v1/profile/acknowledge
+     * Marque les divergences comme prises en charge par la répartition.
+     */
+    default ApiResult api_profileAcknowledge(String truck_id) {
+        return ApiResult.fail("api_profileAcknowledge: not supported", "NOT_SUPPORTED");
+    }
+
+    /**
+     * DELETE /v1/profile/{truck_id}
+     * Supprime un profil camion.
+     */
+    default ApiResult api_profileDelete(String truck_id) {
+        return ApiResult.fail("api_profileDelete: not supported", "NOT_SUPPORTED");
+    }
+    
 }
