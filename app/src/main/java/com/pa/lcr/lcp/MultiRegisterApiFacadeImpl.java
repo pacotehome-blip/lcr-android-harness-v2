@@ -1428,7 +1428,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             JSONObject connectResult = null;
             if (btMac != null && !btMac.trim().isEmpty()) {
                 try {
-                    ApiResult btResult = api_btActivate(btMac, btName);
+                    ApiResult btResult = api_btActivate();
                     if (btResult != null) connectResult = btResult.toJson();
                 } catch (Exception ignored) {}
             }
