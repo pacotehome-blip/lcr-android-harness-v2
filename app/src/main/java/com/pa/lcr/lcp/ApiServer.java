@@ -425,6 +425,19 @@ public final class ApiServer {
             return withAutoConnectRetry(body, () -> {
                 String media = resolveMediaDefault(body);
                 String btMac = resolveBtMacDefault(body);
+                // ✅ Validation #série optionnelle
+                String expSerial = body != null ? body.optString("expected_serial_id","").trim() : "";
+                if (!expSerial.isEmpty()) {
+                    ApiResult sc = facade.api_connectLcp(node, from, media, btMac);
+                    if (sc != null && sc.code == 1 && sc.data != null) {
+                        String actualSerial = sc.data.optString("serialId", sc.data.optString("serial_id","")).trim();
+                        if (!actualSerial.isEmpty() && !expSerial.equalsIgnoreCase(actualSerial)) {
+                            JSONObject ed = new JSONObject();
+                            try { ed.put("expected_serial_id", expSerial); ed.put("actual_serial_id", actualSerial); ed.put("node", node); } catch (Exception ignored) {}
+                            return ApiResult.fail("Serial mismatch: attendu=" + expSerial + " réel=" + actualSerial, "ERR_SERIAL_MISMATCH", ed);
+                        }
+                    }
+                }
                 return facade.api_deliveryAlignA(node, from, media, btMac);
             });
         }
@@ -438,6 +451,19 @@ public final class ApiServer {
             return withAutoConnectRetry(body, () -> {
                 String media = resolveMediaDefault(body);
                 String btMac = resolveBtMacDefault(body);
+                // ✅ Validation #série optionnelle
+                String expSerial = body != null ? body.optString("expected_serial_id","").trim() : "";
+                if (!expSerial.isEmpty()) {
+                    ApiResult sc = facade.api_connectLcp(node, from, media, btMac);
+                    if (sc != null && sc.code == 1 && sc.data != null) {
+                        String actualSerial = sc.data.optString("serialId", sc.data.optString("serial_id","")).trim();
+                        if (!actualSerial.isEmpty() && !expSerial.equalsIgnoreCase(actualSerial)) {
+                            JSONObject ed = new JSONObject();
+                            try { ed.put("expected_serial_id", expSerial); ed.put("actual_serial_id", actualSerial); ed.put("node", node); } catch (Exception ignored) {}
+                            return ApiResult.fail("Serial mismatch: attendu=" + expSerial + " réel=" + actualSerial, "ERR_SERIAL_MISMATCH", ed);
+                        }
+                    }
+                }
                 return facade.api_deliveryStatusB(node, from, media, btMac);
             });
         }
@@ -462,6 +488,19 @@ public final class ApiServer {
             return withAutoConnectRetry(body, () -> {
                 String media = resolveMediaDefault(body);
                 String btMac = resolveBtMacDefault(body);
+                // ✅ Validation #série optionnelle
+                String expSerial = body != null ? body.optString("expected_serial_id","").trim() : "";
+                if (!expSerial.isEmpty()) {
+                    ApiResult sc = facade.api_connectLcp(node, from, media, btMac);
+                    if (sc != null && sc.code == 1 && sc.data != null) {
+                        String actualSerial = sc.data.optString("serialId", sc.data.optString("serial_id","")).trim();
+                        if (!actualSerial.isEmpty() && !expSerial.equalsIgnoreCase(actualSerial)) {
+                            JSONObject ed = new JSONObject();
+                            try { ed.put("expected_serial_id", expSerial); ed.put("actual_serial_id", actualSerial); ed.put("node", node); } catch (Exception ignored) {}
+                            return ApiResult.fail("Serial mismatch: attendu=" + expSerial + " réel=" + actualSerial, "ERR_SERIAL_MISMATCH", ed);
+                        }
+                    }
+                }
                 return facade.api_deliveryAlignA(node, from, media, btMac);
             });
         }
@@ -754,6 +793,16 @@ public final class ApiServer {
                 // 1) Forcer la session sur le bon média (BT ou USB)
                 ApiResult c = facade.api_connectLcp(node, from, media, btMac);
                 if (c == null || c.code != 1) return c;
+                // ✅ Validation #série optionnelle
+                String expSerial = body != null ? body.optString("expected_serial_id","").trim() : "";
+                if (!expSerial.isEmpty() && c.data != null) {
+                    String actualSerial = c.data.optString("serialId", c.data.optString("serial_id","")).trim();
+                    if (!actualSerial.isEmpty() && !expSerial.equalsIgnoreCase(actualSerial)) {
+                        JSONObject ed = new JSONObject();
+                        try { ed.put("expected_serial_id", expSerial); ed.put("actual_serial_id", actualSerial); } catch (Exception ignored) {}
+                        return ApiResult.fail("Serial mismatch: attendu=" + expSerial + " réel=" + actualSerial, "ERR_SERIAL_MISMATCH", ed);
+                    }
+                }
                 // 2) Reprint avec media+btMac explicites
                 return facade.api_ticketReprintCurrent(node, from, media, btMac);
             });

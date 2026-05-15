@@ -387,27 +387,30 @@ var CMDS = {
     m:'POST', p:'/v1/delivery/B', l:'Status B — net/gross live',
     desc:"Équivalent du bouton B dans le UI — requestStatus() + requestLiveSample(). Retourne net, gross, deliveryActive, flowActive, ticketPending.",
     f:[
-      {k:'lcrnode_dec', l:'Node LCP', h:'250 par défaut', t:'number'},
-      {k:'media', l:'Média', h:'usb ou bt', t:'select', o:['','usb','bt']},
-      {k:'bt_mac', l:'MAC BT', h:'Requis si média = bt', t:'text'}
+      {k:'lcrnode_dec',        l:'Node LCP',           h:'250 par défaut', t:'number'},
+      {k:'expected_serial_id', l:'#Série (optionnel)',  h:'ex: 16466294 — valide le bon registre', t:'text'},
+      {k:'media',              l:'Média',               h:'usb ou bt', t:'select', o:['','usb','bt']},
+      {k:'bt_mac',             l:'MAC BT',              h:'Requis si média = bt', t:'text'}
     ]
   },
   delivery_align: {
     m:'POST', p:'/v1/delivery/A', l:'Livraison — Alignement A',
     desc:"Démarre un alignement (commande A) sur le registre.",
     f:[
-      {k:'lcrnode_dec', l:'Node LCP', h:'250 par défaut', t:'number'},
-      {k:'media', l:'Média', h:'usb ou bt', t:'select', o:['','usb','bt']},
-      {k:'bt_mac', l:'MAC BT', h:'Requis si média = bt', t:'text'}
+      {k:'lcrnode_dec',        l:'Node LCP',           h:'250 par défaut', t:'number'},
+      {k:'expected_serial_id', l:'#Série (optionnel)',  h:'ex: 16466294 — valide le bon registre', t:'text'},
+      {k:'media',              l:'Média',               h:'usb ou bt', t:'select', o:['','usb','bt']},
+      {k:'bt_mac',             l:'MAC BT',              h:'Requis si média = bt', t:'text'}
     ]
   },
   delivery_alignA: {
     m:'POST', p:'/v1/delivery/alignA', l:'Livraison — AlignA',
     desc:"Alias de /v1/delivery/A — alignement.",
     f:[
-      {k:'lcrnode_dec', l:'Node LCP', h:'250 par défaut', t:'number'},
-      {k:'media', l:'Média', h:'usb ou bt', t:'select', o:['','usb','bt']},
-      {k:'bt_mac', l:'MAC BT', h:'Requis si média = bt', t:'text'}
+      {k:'lcrnode_dec',        l:'Node LCP',           h:'250 par défaut', t:'number'},
+      {k:'expected_serial_id', l:'#Série (optionnel)',  h:'ex: 16466294 — valide le bon registre', t:'text'},
+      {k:'media',              l:'Média',               h:'usb ou bt', t:'select', o:['','usb','bt']},
+      {k:'bt_mac',             l:'MAC BT',              h:'Requis si média = bt', t:'text'}
     ]
   },
   delivery_c: {
@@ -462,9 +465,10 @@ var CMDS = {
     m:'POST', p:'/v1/ticket/reprint', l:'Reprint ticket',
     desc:"Réimprime le dernier ticket de livraison sur le registre.",
     f:[
-      {k:'lcrnode_dec', l:'Node LCP', h:'250 par défaut', t:'number'},
-      {k:'media', l:'Média', h:'usb ou bt', t:'select', o:['','usb','bt']},
-      {k:'bt_mac', l:'MAC BT', h:'Requis si média = bt', t:'text'}
+      {k:'lcrnode_dec',        l:'Node LCP',           h:'250 par défaut', t:'number'},
+      {k:'expected_serial_id', l:'#Série (optionnel)',  h:'ex: 16466294 — valide le bon registre', t:'text'},
+      {k:'media',              l:'Média',               h:'usb ou bt', t:'select', o:['','usb','bt']},
+      {k:'bt_mac',             l:'MAC BT',              h:'Requis si média = bt', t:'text'}
     ]
   },
   tick_wait: {
