@@ -2496,6 +2496,8 @@ job.presetNetL_requested = presetNetL;
             safeJsonPut(data, "delCode",         delCode);
             safeJsonPut(data, "state",           state != null ? state.name() : "UNKNOWN");
             safeJsonPut(data, "ts_ms",           System.currentTimeMillis());
+            // ✅ jobId — dernier job actif connu
+            if (lastActiveJobId != null) safeJsonPut(data, "jobId", lastActiveJobId);            
 
             try {
                 JSONObject tick = buildTickJsonSnapshot();
