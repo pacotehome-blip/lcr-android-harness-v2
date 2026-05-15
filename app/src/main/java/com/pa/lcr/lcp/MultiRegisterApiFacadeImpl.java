@@ -744,12 +744,8 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         if (!hasNode && !hasSerial) {
             // ok
         } else if (!hasNode && hasSerial) {
-            JSONObject d = new JSONObject();
-            try { d.put("serialId", serialId); } catch (Exception ignored) {}
-            try { d.put("scanSuggested", true); } catch (Exception ignored) {}
-            try { d.put("scanEndpoint", "/v1/register/scan-auto"); } catch (Exception ignored) {}
-            try { d.put("reason", "serialId fourni sans lcrnode; connect-auto ne scanne pas 1..250"); } catch (Exception ignored) {}
-            return ApiResult.fail("Registre non trouvé (lcrnode requis ou scan-auto)", "ERR_REGISTER_NOT_FOUND", d);
+            // ✅ Serial sans node — essayer le node par défaut (lastNodeHint ou 250)
+            // Si non trouvé, suggérer scan-auto
         }
 
         ArrayList<String> tried = new ArrayList<>();
@@ -772,7 +768,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             if (serial == null || serial.trim().isEmpty()) continue;
             serial = serial.trim();
 
-            if (hasSerial && !serialId.trim().equals(serial)) continue;
+            if (hasSerial && !serialId.trim().equalsIgnoreCase(serial)) continue;
 
             DeliveryController dc = null;
             try { dc = sessions.getOrCreate(transportKey, node, from, io); } catch (Exception ignored) {}
@@ -798,36 +794,69 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                 }
             } catch (Exception ignored) {}
 
-            try { emitRegisterState(node, from, serial, transportKey, snap, false); } catch (Exception ignored) {}
+           try { emitRegisterState(node, from, serial, transportKey, snap, false); } catch (Exception ignored) {}
 
+            // ✅ Registre trouvé dans la boucle — retourner directement
             JSONObject d = new JSONObject();
-            safePut(d, "node", node);
-            safePut(d, "from", from);
-            safePut(d, "serial", serial);
-            safePut(d, "serialId", serial);
+            safePut(d, "node",         node);
+            safePut(d, "from",         from);
+            safePut(d, "serial",       serial);
+            safePut(d, "serialId",     serial);
             safePut(d, "transportKey", transportKey);
-            safePut(d, "activeKey", MediaTransportManager.getActiveKeyStatic());
-            safePut(d, "media", transportKey.toUpperCase(Locale.ROOT).startsWith("BT:") ? "bt" : "usb");
-            safePut(d, "status", statusText);
-            safePut(d, "statut", statusText);
-            safePut(d, "delCode", delCode);
-            safePut(d, "net", net);
-            safePut(d, "gross", gross);
-            safePut(d, "ui", "UPSERT_TAB");
+            safePut(d, "activeKey",    MediaTransportManager.getActiveKeyStatic());
+            safePut(d, "media",        transportKey.toUpperCase(Locale.ROOT).startsWith("BT:") ? "bt" : "usb");
+            safePut(d, "status",       statusText);
+            safePut(d, "statut",       statusText);
+            safePut(d, "delCode",      delCode);
+            safePut(d, "net",          net);
+            safePut(d, "gross",        gross);
+            safePut(d, "ui",           "UPSERT_TAB");
             return ApiResult.ok("Registre trouvé sur " + (transportKey.toUpperCase(Locale.ROOT).startsWith("BT:") ? "BT" : "USB"), d);
         }
 
-        JSONObject d = new JSONObject();
-        safePut(d, "node", node);
-        safePut(d, "from", from);
-        if (hasSerial) safePut(d, "serialId", serialId.trim());
-        if (hasNode) safePut(d, "lcrnode", node);
-        safePut(d, "scanSuggested", true);
-        safePut(d, "scanEndpoint", "/v1/register/scan-auto");
-        safePut(d, "tried", new JSONArray(tried));
-        return ApiResult.fail("Registre non trouvé sur BT ou USB", "ERR_REGISTER_NOT_FOUND", d);
-    }
+        // ✅ Dernier essai — retourner ce qui est connecté même si serial ne correspond pas
+        String activeKey = MediaTransportManager.getActiveKeyStatic();
+        if (activeKey != null && mediaMgr != null) {
+            try {
+                TransportIo activeIo = mediaMgr.getByKey(activeKey);
+                if (activeIo != null && safeIsOpen(activeIo)) {
+                    String foundSerial = probeSerial(activeIo, node, from);
+                    if (foundSerial != null && !foundSerial.trim().isEmpty()) {
+                        DeliveryController activeDc = sessions.getOrCreate(activeKey, node, from, activeIo);
+                        if (activeDc != null) activeDc.api_connectLcp();
+                        JSONObject d2 = new JSONObject();
+                        safePut(d2, "node",            node);
+                        safePut(d2, "from",            from);
+                        safePut(d2, "serial",          foundSerial.trim());
+                        safePut(d2, "serialId",        foundSerial.trim());
+                        safePut(d2, "transportKey",    activeKey);
+                        safePut(d2, "activeKey",       activeKey);
+                        safePut(d2, "media",           activeKey.toUpperCase(Locale.ROOT).startsWith("BT:") ? "bt" : "usb");
+                        safePut(d2, "serial_mismatch", hasSerial && !serialId.trim().equalsIgnoreCase(foundSerial.trim()) ? 1 : 0);
+                        safePut(d2, "expected_serial", hasSerial ? serialId.trim() : null);
+                        safePut(d2, "ui",              "UPSERT_TAB");
+                        String msg2 = (hasSerial && !serialId.trim().equalsIgnoreCase(foundSerial.trim()))
+                                ? "Registre trouvé mais serial différent — attendu=" + serialId + " réel=" + foundSerial
+                                : "Registre trouvé sur " + (activeKey.startsWith("BT:") ? "BT" : "USB");
+                        return (hasSerial && !serialId.trim().equalsIgnoreCase(foundSerial.trim()))
+                                ? ApiResult.fail(msg2, "ERR_SERIAL_MISMATCH", d2)
+                                : ApiResult.ok(msg2, d2);
+                    }
+                }
+            } catch (Exception ignored) {}
+        }
 
+        JSONObject dn = new JSONObject();
+        safePut(dn, "node",          node);
+        safePut(dn, "from",          from);
+        if (hasSerial) safePut(dn, "serialId", serialId.trim());
+        if (hasNode)   safePut(dn, "lcrnode",  node);
+        safePut(dn, "scanSuggested", true);
+        safePut(dn, "scanEndpoint",  "/v1/register/scan-auto");
+        safePut(dn, "tried",         new JSONArray(tried));
+        return ApiResult.fail("Registre non trouvé sur BT ou USB", "ERR_REGISTER_NOT_FOUND", dn);
+    }
+    
     private ArrayList<String> listCandidateTransportKeysForAutoConnect() {
         ArrayList<String> keys = new ArrayList<>();
         try {
