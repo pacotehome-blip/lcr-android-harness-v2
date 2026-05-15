@@ -74,6 +74,14 @@ header{background:#fff;border-bottom:1px solid var(--border);padding:12px 16px;d
 .sp{display:inline-block;width:12px;height:12px;border:2px solid var(--border2);border-top-color:var(--g);border-radius:50%;animation:spin .6s linear infinite;vertical-align:middle}
 @keyframes spin{to{transform:rotate(360deg)}}
 ::-webkit-scrollbar{width:5px;height:5px}::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+.ex-panel{background:#f8f9fb;border:1px solid var(--border);border-radius:6px;overflow:hidden;margin-top:10px}
+.ex-head{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;cursor:pointer;user-select:none;background:var(--card2)}
+.ex-head:hover{background:#eef0f4}
+.ex-title{font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+.ex-toggle{font-size:16px;color:var(--muted);font-weight:300;line-height:1}
+.ex-body{display:none;padding:10px 12px;font-family:monospace;font-size:11px;white-space:pre-wrap;word-break:break-all;color:#2d3748;line-height:1.6;border-top:1px solid var(--border)}
+.ex-body.ok-body{border-left:3px solid var(--g)}
+.ex-body.err-body{border-left:3px solid var(--r)}
 .key{color:#0f766e}.str{color:#059669}.num{color:#d97706}.bool{color:#2979ff}.null{color:#e03450}
 @media(max-width:600px){.layout{grid-template-columns:1fr}.side{position:static;height:auto;max-height:220px;border-right:none;border-bottom:1px solid var(--border)}.main{padding:10px}}
 </style>
@@ -620,6 +628,28 @@ function render(id) {
 
   document.getElementById('rp').style.display = 'none';
 
+  // ✅ Ajouter bloc exemples si disponible
+  var ex = EXAMPLES[id];
+  if (ex) {
+    var exHtml =
+      '<div class="ex-panel">' +
+        '<div class="ex-head" onclick="toggleEx('ok_'+''+id+'')">' +
+          '<span class="ex-title">&#43; Exemple succès</span>' +
+          '<span class="ex-toggle" id="tog_ok_'+id+'">&#43;</span>' +
+        '</div>' +
+        '<div class="ex-body ok-body" id="ok_'+id+'">' + hl(JSON.stringify(ex.ok, null, 2)) + '</div>' +
+      '</div>' +
+      '<div class="ex-panel" style="margin-top:6px">' +
+        '<div class="ex-head" onclick="toggleEx('err_'+''+id+'')">' +
+          '<span class="ex-title">&#43; Exemple erreur</span>' +
+          '<span class="ex-toggle" id="tog_err_'+id+'">&#43;</span>' +
+        '</div>' +
+        '<div class="ex-body err-body" id="err_'+id+'">' + hl(JSON.stringify(ex.err, null, 2)) + '</div>' +
+      '</div>';
+    var ca = document.getElementById('ca');
+    if (ca) ca.innerHTML += exHtml;
+  }
+
   // Wire inputs to refresh commands
   setTimeout(function() {
     updateCmds();
@@ -833,6 +863,165 @@ function scls(s) {
   if (s === 'EXCELLENT' || s === 'BON') return 'rok';
   if (s === 'MOYEN') return 'rwarn';
   return 'rerr';
+}
+
+
+// ===================== EXEMPLES PAYLOAD =====================
+var EXAMPLES = {
+  ping: {
+    ok: {"code":1,"msg":"PING: 1 - OK","err":null,"data":{"version":"v1","bind":"127.0.0.1","port":8765}},
+    err: {"code":0,"msg":"API: 0 - Not found","err":"NOT_FOUND","data":{"path":"/v1/ping"}}
+  },
+  bt_signal_scan: {
+    ok: {"code":1,"msg":"BT Signal Scan: 1 - OK","err":null,"data":{"scanned":[{"mac":"00:01:95:C9:BF:87","name":"AWD-C9BF87","rssi":-43,"rssi_quality":"EXCELLENT","ts_ms":1778793728257},{"mac":"00:01:95:87:72:A1","name":"SD1000v2.0.8-8772A1-TEST","rssi":-8,"rssi_quality":"EXCELLENT","ts_ms":1778793728570},{"mac":"00:21:79:DF:0A:9C","name":"Test 3","rssi":-61,"rssi_quality":"BON","ts_ms":1778793732821}],"count":3,"completed":1,"delivery_active":0,"connection_lost":0}},
+    err: {"code":0,"msg":"BT Signal Scan: 0 - Bloque (livraison active)","err":"ERR_SCAN_BLOCKED_DELIVERY","data":{}}
+  },
+  bt_signal_get: {
+    ok: {"code":1,"msg":"BT Signal: 1 - OK","err":null,"data":{"mac":"00:01:95:87:72:A1","transportKey":"BT:00:01:95:87:72:A1","connected":0,"rssi":null,"rssi_quality":"INCONNU","last_scan_ms":null,"io_score_db":"INCONNU","io_score_live":"INCONNU","io_errors_live":0,"io_timeouts_live":0,"io_latency_avg_ms_live":0,"io_samples_live":0,"session_start_ms":null}},
+    err: {"code":0,"msg":"BT signal: 0 - Not supported","err":"BT_SIGNAL_NOT_SUPPORTED","data":{}}
+  },
+  bt_list: {
+    ok: {"code":1,"msg":"BT list: 1 - OK","err":null,"data":{"bonded":[{"name":"SD1000v2.0.8-8772A1-TEST","mac":"00:01:95:87:72:A1"},{"name":"AWD-C9BF87","mac":"00:01:95:C9:BF:87"},{"name":"Test 3","mac":"00:21:79:DF:0A:9C"}],"runtime":[]}},
+    err: {"code":0,"msg":"BT list: 0 - Not supported","err":"BT_LIST_NOT_SUPPORTED","data":{}}
+  },
+  bt_activate: {
+    ok: {"code":1,"msg":"BT activate: 1 - OK","err":null,"data":{"transportKey":"BT:00:01:95:87:72:A1","activeKey":"BT:00:01:95:87:72:A1"}},
+    err: {"code":0,"msg":"BT activate: 0 - Connexion echouee","err":"ERR_BT_CONNECT_FAILED","data":{"mac":"00:01:95:87:72:A1","detail":"Connection refused"}}
+  },
+  bt_disconnect: {
+    ok: {"code":1,"msg":"BT disconnect: 1 - OK","err":null,"data":{"transportKey":"BT:00:01:95:87:72:A1","mac":"00:01:95:87:72:A1","disconnected":1}},
+    err: {"code":0,"msg":"BT disconnect: 0 - Aucun BT actif","err":"ERR_NO_ACTIVE_BT","data":{}}
+  },
+  bt_reset: {
+    ok: {"code":1,"msg":"BT reset: 1 - OK","err":null,"data":{"transportKey":"BT:00:01:95:87:72:A1","mac":"00:01:95:87:72:A1","reset":1}},
+    err: {"code":0,"msg":"BT reset: 0 - MTM null","err":"ERR_MEDIA_MTM_NULL","data":{}}
+  },
+  usb_scan: {
+    ok: {"code":1,"msg":"Scan USB: 1 - Registre detecte (USB device present)","err":null,"data":{"usb_devices":1}},
+    err: {"code":0,"msg":"Scan USB: 0 - Aucun peripherique USB","err":"ERR_USB_NO_DEVICE","data":{"usb_devices":0}}
+  },
+  usb_ping: {
+    ok: {"code":1,"msg":"Open/Ping USB: 1 - USB pret (port ouvert)","err":null,"data":{"usb_ready":1}},
+    err: {"code":0,"msg":"Open/Ping USB: 0 - USB non disponible","err":"ERR_USB_NOT_READY","data":{}}
+  },
+  media_check: {
+    ok: {"code":1,"msg":"MediaCheck: 1 - USB connecte","err":null,"data":{"media":"usb","transportKey":"USB","connected":1}},
+    err: {"code":0,"msg":"MediaCheck: 0 - Aucun media disponible","err":"ERR_NO_MEDIA_AVAILABLE","data":{}}
+  },
+  media_auto: {
+    ok: {"code":1,"msg":"Registre trouve sur USB","err":null,"data":{"node":250,"from":255,"serial":"16466294","serialId":"16466294","transportKey":"USB","activeKey":"USB","media":"usb","status":"CONNECTED","statut":"CONNECTED","delCode":928,"net":55.5,"gross":56.8,"ui":"UPSERT_TAB"}},
+    err: {"code":0,"msg":"Registre non trouve sur BT ou USB","err":"ERR_REGISTER_NOT_FOUND","data":{"node":250,"scanSuggested":true,"scanEndpoint":"/v1/register/scan-auto","tried":["BT:00:01:95:87:72:A1"]}}
+  },
+  lcp_connect: {
+    ok: {"code":1,"msg":"Connect LCP: 1 - CONNECTED pret a livrer (Faire C)","err":null,"data":{"deliveryActive":0,"flowActive":0,"ticketPending":0,"next":"C"}},
+    err: {"code":0,"msg":"Connect LCP: 0 - USB non pret","err":"ERR_USB_PORT_NOT_READY","data":{}}
+  },
+  printer_status: {
+    ok: {"code":1,"msg":"Printer: 1 - OK","err":null,"data":{"status":"OK","printer":"ONLINE","prnStatus":0,"devStatus":33,"prnOnline":1,"prnOffline":0,"devError":0,"ticketPending":0,"ts_ms":1778796781218,"state":"CONNECTED"}},
+    err: {"code":0,"msg":"Printer: 0 - PRINTER_OFFLINE","err":"PRINTER_OFFLINE","data":{"status":"TICKET_PENDING_PRINTER_OFFLINE","printer":"OFFLINE","prnStatus":64,"devStatus":33,"prnOnline":0,"prnOffline":1,"devError":0,"ticketPending":1,"state":"CONNECTED"}}
+  },
+  delivery_b: {
+    ok: {"code":1,"msg":"StatusB: 1 - OK","err":null,"data":{"deliveryActive":1,"flowActive":1,"ticketPending":1,"net":0,"gross":0,"net_l":0,"gross_l":0,"decimals":1,"delCode":301,"state":"RUNNING_FLOWING","ts_ms":1778857754819,"jobId":"448ced58-33cd-45b8-97f3-f024f7ef78c6","tick":{"has_tick":1,"seq":19,"ts_ms":1778857657091,"net":0,"gross":0,"devStatus":1,"prnStatus":64,"delCode":301,"state":"RUNNING_FLOWING","jobId":"448ced58-33cd-45b8-97f3-f024f7ef78c6"}}},
+    err: {"code":0,"msg":"StatusB: 0 - Read error","err":"STATUS_B_READ_FAIL","data":{"detail":"Timeout waiting LCP response"}}
+  },
+  delivery_align: {
+    ok: {"code":1,"msg":"Align A: 1 - Align/Recover executed","err":null,"data":{"deliveryActive":0,"flowActive":0,"ticketPending":0,"next":"C","state":"CONNECTED","live_status":"LIVE: CONNECTED - Ready"}},
+    err: {"code":0,"msg":"Align A: 0 - BT non connecte","err":"ERR_BT_NOT_CONNECTED","data":{}}
+  },
+  delivery_alignA: {
+    ok: {"code":1,"msg":"Align A: 1 - Align/Recover executed","err":null,"data":{"deliveryActive":0,"flowActive":0,"ticketPending":0,"next":"C","state":"CONNECTED","live_status":"LIVE: CONNECTED - Ready"}},
+    err: {"code":0,"msg":"Align A: 0 - BT non connecte","err":"ERR_BT_NOT_CONNECTED","data":{}}
+  },
+  delivery_c: {
+    ok: {"code":1,"msg":"Delivery StartC: 1 - Start requested","err":null,"data":{"product":1,"preset_net":50,"deliveryActive":0,"flowActive":0,"ticketPending":0,"jobId":"448ced58-33cd-45b8-97f3-f024f7ef78c6","delivery_uid":"-10415","ticket_no":"10415","media":"bt","state":"CONNECTED","next":"POLL"}},
+    err: {"code":0,"msg":"Delivery StartC: 0 - orchestration error","err":"STARTC_FAIL","data":{"detail":"Timeout waiting LCP response"}}
+  },
+  delivery_oneshot: {
+    ok: {"code":1,"msg":"Delivery OneShot: 1 - ARMED (preset OK, waiting)","err":null,"data":{"jobId":"ad6e8b9e-e258-421b-8a9b-c5e2d30ac60d","media":"bt","numero_livraison":"liv-20250514-004","ticket_no":"10416","sale_no":"1960","serial_id":"16466294","delivery_uid":"liv-20250514-004-10416","autoA_attempted":0,"autoA_success":0,"preset_requested":50,"preset_applied":50,"decimals":1,"armed":1,"state":"CONNECTED","live_status":"LIVE: CONNECTED - ARMED (en attente CONTINUER)","available_actions":["CONTINUER","TERMINER"]}},
+    err: {"code":0,"msg":"Delivery OneShot: 0 - Livraison deja active","err":"ERR_DELIVERY_ALREADY_ACTIVE","data":{"state":"RUNNING_FLOWING"}}
+  },
+  delivery_job_get: {
+    ok: {"code":1,"msg":"Job: 1 - OK","err":null,"data":{"jobId":"ad6e8b9e-e258-421b-8a9b-c5e2d30ac60d","state":"RUNNING_FLOWING","state_job":"RUNNING","net":25.3,"gross":26.1,"ticket_no":"10416","serial_id":"16466294","media":"bt"}},
+    err: {"code":0,"msg":"Job: 0 - Not found","err":"JOB_NOT_FOUND","data":{"jobId":"ad6e8b9e-e258-421b-8a9b-c5e2d30ac60d"}}
+  },
+  delivery_job_continue: {
+    ok: {"code":1,"msg":"Continue: 1 - RUN sent","err":null,"data":{"jobId":"ad6e8b9e-e258-421b-8a9b-c5e2d30ac60d","state":"RUNNING_FLOWING"}},
+    err: {"code":0,"msg":"Continue: 0 - Controller introuvable","err":"NO_CONTROLLER","data":{}}
+  },
+  delivery_job_terminate: {
+    ok: {"code":1,"msg":"Terminate: 1 - OK","err":null,"data":{"jobId":"ad6e8b9e-e258-421b-8a9b-c5e2d30ac60d","state":"DONE","net_delta_l":25.3,"gross_delta_l":26.1,"ticket_no":"10416","serial_id":"16466294"}},
+    err: {"code":0,"msg":"Terminate: 0 - Controller introuvable (node/job)","err":"NO_CONTROLLER","data":{}}
+  },
+  ticket_reprint: {
+    ok: {"code":1,"msg":"Reprint: 1 - OK","err":null,"data":{"ticket_no":"10416","serial_id":"16466294"}},
+    err: {"code":0,"msg":"Reprint: 0 - ticketPending=0","err":"ERR_NO_TICKET_PENDING","data":{}}
+  },
+  tick_wait: {
+    ok: {"code":1,"msg":"Tick: 1 - OK","err":null,"data":{"seq":26,"ts_ms":1778857657091,"net":7.0,"gross":7.2,"devStatus":1,"prnStatus":0,"delCode":301,"state":"RUNNING_FLOWING","jobId":"448ced58-33cd-45b8-97f3-f024f7ef78c6"}},
+    err: {"code":0,"msg":"Tick: 0 - USB non pret","err":"ERR_USB_PORT_NOT_READY","data":{"autoConnectUsed":true,"autoConnectTries":3}}
+  },
+  reg_validate: {
+    ok: {"code":1,"msg":"Validate: 1 - READY","err":null,"data":{"numero_livraison":null,"lcrnode_dec":250,"lcrnode_hex":"0xFA","from_dec":255,"deliveryActive":0,"flowActive":0,"ticketPending":0,"ticket_no":"10413","sale_no":"1957","serial_id":"16466294","active_product":1,"expected_product_number":1,"serial_match":1,"product_ok":1,"compartment_ok":1,"ready":1,"serialId":"16466294","lcrnode":250,"transportKey":"USB","media":"usb","alreadyConnected":false}},
+    err: {"code":0,"msg":"Serial mismatch: attendu=99999 reel=16466294","err":"ERR_SERIAL_MISMATCH","data":{"expected_serial_id":"99999","actual_serial_id":"16466294"}}
+  },
+  reg_connect_auto: {
+    ok: {"code":1,"msg":"Registre trouve sur USB","err":null,"data":{"node":250,"from":255,"serial":"16466294","serialId":"16466294","transportKey":"USB","activeKey":"USB","media":"usb","status":"CONNECTED","statut":"CONNECTED","delCode":928,"net":55.5,"gross":56.8,"ui":"UPSERT_TAB"}},
+    err: {"code":0,"msg":"Registre non trouve sur BT ou USB","err":"ERR_REGISTER_NOT_FOUND","data":{"scanSuggested":true,"scanEndpoint":"/v1/register/scan-auto"}}
+  },
+  reg_scan_auto: {
+    ok: {"code":1,"msg":"ScanAuto: 1 - OK (1/250 nodes scannes)","err":null,"data":{"startNode":1,"endNode":250,"scanned":250,"count":1,"registers":[{"node":250,"serial":"16466294","serialId":"16466294","transportKey":"USB","activeKey":"USB","media":"usb","status":"CONNECTED","statut":"CONNECTED","delCode":928,"net":55.5,"gross":56.8,"ui":"UPSERT_TAB"}]}},
+    err: {"code":0,"msg":"ScanAuto: 0 - Aucun registre trouve","err":"NO_REGISTER_FOUND","data":{"startNode":1,"endNode":250,"scanned":250,"suggestion":"Verifier medias READY, puis relancer scan-auto."}}
+  },
+  reg_scan_progress: {
+    ok: {"code":1,"msg":"ScanProgress: 1 - OK","err":null,"data":{"running":1,"progress":127,"total":250,"pct":50}},
+    err: {"code":1,"msg":"ScanProgress: 1 - OK","err":null,"data":{"running":0,"progress":0,"total":0,"pct":0}}
+  },
+  profile_save: {
+    ok: {"code":1,"msg":"Profile: 1 - Sauvegarde","err":null,"data":{"truck_id":"CAMION-12","saved":1,"ts_ms":1778793728257}},
+    err: {"code":0,"msg":"Profile: 0 - truck_id requis","err":"ERR_TRUCK_ID_REQUIRED","data":{}}
+  },
+  profile_list: {
+    ok: {"code":1,"msg":"Profile: 1 - 1 profil(s)","err":null,"data":{"profiles":[{"truck_id":"CAMION-12","bt_mac":"00:01:95:87:72:A1","bt_name":"SD1000v2.0.8-8772A1-TEST","lcrnode_dec":250,"serial_id":"16466294","default_product":1,"active":1,"compartments":[{"id":1,"name":"gaz"},{"id":2,"name":"diesel1"}]}],"count":1}},
+    err: {"code":1,"msg":"Profile: 1 - 0 profil(s)","err":null,"data":{"profiles":[],"count":0}}
+  },
+  profile_active: {
+    ok: {"code":1,"msg":"Profile: 1 - Profil actif","err":null,"data":{"truck_id":"CAMION-12","bt_mac":"00:01:95:87:72:A1","lcrnode_dec":250,"serial_id":"16466294","active":1}},
+    err: {"code":0,"msg":"Profile: 0 - Aucun profil actif","err":"ERR_NO_ACTIVE_PROFILE","data":{}}
+  },
+  profile_activate: {
+    ok: {"code":1,"msg":"Profile: 1 - Active: CAMION-12","err":null,"data":{"truck_id":"CAMION-12","bt_connected":1}},
+    err: {"code":0,"msg":"Profile: 0 - Profil introuvable: CAMION-99","err":"ERR_PROFILE_NOT_FOUND","data":{}}
+  },
+  profile_validate: {
+    ok: {"code":1,"msg":"Profile: 1 - OK aucune divergence","err":null,"data":{"truck_id":"CAMION-12","profile_found":1,"drifts":[],"drift_count":0,"notify_required":false}},
+    err: {"code":1,"msg":"Profile: 1 - 1 divergence(s) detectee(s)","err":null,"data":{"truck_id":"CAMION-12","drifts":[{"field":"bt_mac","expected_value":"00:00:00:00:00:01","actual_value":"00:01:95:87:72:A1","message":"Divergence detectee: bt_mac"}],"drift_count":1,"notify_required":true}}
+  },
+  profile_drift: {
+    ok: {"code":1,"msg":"Profile Drift: 1 - 1 divergence(s)","err":null,"data":{"drifts":[{"id":1,"truck_id":"CAMION-12","field_name":"bt_mac","expected_value":"00:00:00:00:00:01","actual_value":"00:01:95:87:72:A1","acknowledged":0,"ts_ms":1778793728257}],"count":1}},
+    err: {"code":1,"msg":"Profile Drift: 1 - 0 divergence(s)","err":null,"data":{"drifts":[],"count":0}}
+  },
+  profile_acknowledge: {
+    ok: {"code":1,"msg":"Profile: 1 - Divergences acquittees","err":null,"data":{"truck_id":"CAMION-12","acknowledged":1}},
+    err: {"code":0,"msg":"Profile: 0 - Erreur acquittement","err":"ERR_PROFILE_ACK","data":{}}
+  },
+  profile_delete: {
+    ok: {"code":1,"msg":"Profile: 1 - Supprime: CAMION-12","err":null,"data":{"truck_id":"CAMION-12","deleted":1}},
+    err: {"code":0,"msg":"Profile: 0 - Profil introuvable: CAMION-99","err":"ERR_PROFILE_NOT_FOUND","data":{}}
+  },
+  db_dump: {
+    ok: {"code":1,"msg":"DB dump: 1 - OK","err":null,"data":{"tables":["delivery_summary","delivery_attempt","delivery_event","truck_profile","truck_drift"],"row_counts":{"delivery_summary":42,"truck_profile":1}}},
+    err: {"code":0,"msg":"DB dump: 0 - Error","err":"ERR_DB_DUMP","data":{}}
+  }
+};
+
+// ===================== EXEMPLE TOGGLE =====================
+function toggleEx(id) {
+  var el  = document.getElementById(id);
+  var tog = document.getElementById('tog_' + id);
+  if (!el) return;
+  var open = el.style.display === 'block';
+  el.style.display  = open ? 'none' : 'block';
+  if (tog) tog.innerHTML = open ? '&#43;' : '&#8722;';
 }
 
 // ===================== SCAN PROGRESS =====================
