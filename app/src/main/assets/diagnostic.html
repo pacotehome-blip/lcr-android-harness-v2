@@ -729,15 +729,18 @@ function showResp(j, ms, c) {
 
   // ✅ Capturer jobId + état depuis n'importe quelle réponse de livraison (C, B, oneshot, job/get)
   if (d) {
-    // ✅ jobId = UUID (clé apiJobs) — delivery_uid = "NUM-ticketNo" (affichage seulement)
-    var capturedJobId  = d.jobId || d.job_id || activeJobId || null;
+    // ✅ jobId = UUID — chercher dans data, tick, autoConnectLast
+    var _dtick = d.tick || {};
+    var _inner2 = (d.autoConnectLast && d.autoConnectLast.data) ? d.autoConnectLast.data : {};
+    var _itick  = _inner2.tick || {};
+    var capturedJobId  = d.jobId || _dtick.jobId || _inner2.jobId || _itick.jobId || d.job_id || activeJobId || null;
     var capturedDeliveryUid = d.delivery_uid || null;
     var capturedTicketNo     = d.ticket_no || null;
     var capturedTicketPending = d.ticketPending !== undefined ? d.ticketPending : (d.ticket_pending !== undefined ? d.ticket_pending : null);
     if (capturedTicketNo) activeTicketNo = capturedTicketNo;
     if (capturedTicketPending !== null) updateTicketPending(capturedTicketPending);
     var capturedState  = d.state || d.status || d.statut || null;
-    var capturedNode   = d.lcrnode_dec || d.node || activeJobNode || null;
+    var capturedNode   = d.lcrnode_dec || d.node || d.lcrnode || activeJobNode || null;
     var capturedSerial = d.serialId || d.serial_id || activeJobSerial || null;
     var capturedNet    = d.net   !== undefined ? d.net   : (d.net_l   !== undefined ? d.net_l   : null);
     var capturedGross  = d.gross !== undefined ? d.gross : (d.gross_l !== undefined ? d.gross_l : null);
@@ -1172,8 +1175,9 @@ function handleTickResponse(j) {
   }
 
   // code=0 peut quand même avoir des infos valides dans autoConnectLast
-  // ✅ jobId = UUID (clé apiJobs) — depuis tick direct ou autoConnectLast
-  var jobId  = d.jobId || inner.jobId || inner.job_id || d.job_id || null;
+  // ✅ jobId = UUID — chercher dans data, tick, autoConnectLast
+  var _tk   = d.tick || {};
+  var jobId = d.jobId || _tk.jobId || inner.jobId || inner.job_id || d.job_id || null;
   var state  = inner.status || inner.statut  || inner.state || inner.deliveryState || d.state || null;
   var node   = inner.node   || inner.lcrnode_dec || d.lcrnode_dec || activeJobNode;
   var serial = inner.serialId || inner.serial_id || inner.serial || d.serialId || activeJobSerial;
