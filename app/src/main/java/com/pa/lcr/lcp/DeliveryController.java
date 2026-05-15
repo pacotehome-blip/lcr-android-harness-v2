@@ -2097,14 +2097,15 @@ public ApiResult api_registerValidate(
 
             // ✅ Générer jobId UUID comme OneShot
             String jobId = java.util.UUID.randomUUID().toString();
-            ApiJob job = new ApiJob();
-            job.jobId = jobId;
-            job.product1to16 = product1to16;
-            job.presetNetL = presetNet;
-            job.startMs = System.currentTimeMillis();
+            ApiJob job = new ApiJob(jobId);
+            job.productNumber    = product1to16;
+            job.presetNetL_requested = presetNet;
+            job.presetNetL_applied   = presetNet;
+            job.startMs          = System.currentTimeMillis();
+            job.media            = "bt";
             synchronized (apiJobs) { apiJobs.put(jobId, job); }
             lastActiveJobId = jobId;
-
+            
             startDelivery(product1to16, presetNet);
             safeJsonPut(data, "jobId",        jobId);
             String tno = "";

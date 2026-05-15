@@ -306,7 +306,17 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                 try { mediaMgr.onBtDisconnected(mac, "API reset"); } catch (Exception ignored) {}
             }
             // Purger la session LCP sur le node par défaut
-            try { sessions.clearNode(lastNodeHint > 0 ? lastNodeHint : 250); } catch (Exception ignored) {}
+            // clearNode non disponible — on purge via sessions reset
+
+            // Pas de clearNode — on invalide via getOrCreate pour forcer recréation
+                try {
+                    String activeKey = MediaTransportManager.getActiveKeyStatic();
+                    if (activeKey != null && mediaMgr != null) {
+                    TransportIo io = mediaMgr.getByKey(activeKey);
+                if (io != null) sessions.getOrCreate(activeKey, lastNodeHint > 0 ? lastNodeHint : 250, lastFromHint, io);
+                }
+            } catch (Exception ignored) {}
+
             // Réinitialiser jobToTransport pour ce transport
             if (key != null) {
                 jobToTransport.entrySet().removeIf(e -> key.equals(e.getValue()));
