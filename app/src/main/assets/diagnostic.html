@@ -628,26 +628,47 @@ function render(id) {
 
   document.getElementById('rp').style.display = 'none';
 
-  // ✅ Ajouter bloc exemples si disponible
+// ✅ Ajouter bloc exemples si disponible
   var ex = EXAMPLES[id];
   if (ex) {
-    var exHtml =
-      '<div class="ex-panel">' +
-        '<div class="ex-head" onclick="toggleEx('ok_'+''+id+'')">' +
-          '<span class="ex-title">&#43; Exemple succès</span>' +
-          '<span class="ex-toggle" id="tog_ok_'+id+'">&#43;</span>' +
-        '</div>' +
-        '<div class="ex-body ok-body" id="ok_'+id+'">' + hl(JSON.stringify(ex.ok, null, 2)) + '</div>' +
-      '</div>' +
-      '<div class="ex-panel" style="margin-top:6px">' +
-        '<div class="ex-head" onclick="toggleEx('err_'+''+id+'')">' +
-          '<span class="ex-title">&#43; Exemple erreur</span>' +
-          '<span class="ex-toggle" id="tog_err_'+id+'">&#43;</span>' +
-        '</div>' +
-        '<div class="ex-body err-body" id="err_'+id+'">' + hl(JSON.stringify(ex.err, null, 2)) + '</div>' +
-      '</div>';
+    var exDiv = document.createElement('div');
+    // OK panel
+    var okPanel = document.createElement('div');
+    okPanel.className = 'ex-panel';
+    var okHead = document.createElement('div');
+    okHead.className = 'ex-head';
+    okHead.innerHTML = '<span class="ex-title">&#43; Exemple succes</span><span class="ex-toggle">&#43;</span>';
+    var okBody = document.createElement('div');
+    okBody.className = 'ex-body ok-body';
+    okBody.innerHTML = hl(JSON.stringify(ex.ok, null, 2));
+    okHead.addEventListener('click', function() {
+      var open = okBody.style.display === 'block';
+      okBody.style.display = open ? 'none' : 'block';
+      okHead.querySelector('.ex-toggle').innerHTML = open ? '&#43;' : '&#8722;';
+    });
+    okPanel.appendChild(okHead);
+    okPanel.appendChild(okBody);
+    // ERR panel
+    var errPanel = document.createElement('div');
+    errPanel.className = 'ex-panel';
+    errPanel.style.marginTop = '6px';
+    var errHead = document.createElement('div');
+    errHead.className = 'ex-head';
+    errHead.innerHTML = '<span class="ex-title">&#43; Exemple erreur</span><span class="ex-toggle">&#43;</span>';
+    var errBody = document.createElement('div');
+    errBody.className = 'ex-body err-body';
+    errBody.innerHTML = hl(JSON.stringify(ex.err, null, 2));
+    errHead.addEventListener('click', function() {
+      var open = errBody.style.display === 'block';
+      errBody.style.display = open ? 'none' : 'block';
+      errHead.querySelector('.ex-toggle').innerHTML = open ? '&#43;' : '&#8722;';
+    });
+    errPanel.appendChild(errHead);
+    errPanel.appendChild(errBody);
+    exDiv.appendChild(okPanel);
+    exDiv.appendChild(errPanel);
     var ca = document.getElementById('ca');
-    if (ca) ca.innerHTML += exHtml;
+    if (ca) ca.appendChild(exDiv);
   }
 
   // Wire inputs to refresh commands
