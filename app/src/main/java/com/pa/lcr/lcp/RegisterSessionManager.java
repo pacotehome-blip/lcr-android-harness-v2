@@ -282,17 +282,13 @@ public final class RegisterSessionManager {
 
         LcpLink link;
         if (isLc3) {
-            // Utiliser nodeId du registre LC3 si disponible
             int lc3Node = (identity.nodeId > 0) ? identity.nodeId : node;
-            link = new Lc3LinkAdapter(new Lc3Link(io), lc3Node, from);
-
-            // Enregistrer le serial LC3 comme serial attendu
+            link = new Lc3Link(io);  // Lc3Link extends LcpLink directement
             if (identity.serialId != null && !identity.serialId.isEmpty()) {
                 expectedSerialByNode.put(lc3Node, identity.serialId);
                 pinnedTransportByRegKey.put(regKey(lc3Node, identity.serialId), tk);
-                android.util.Log.i("RSM", "LC3 identifié: node=" + lc3Node
-                        + " serial=" + identity.serialId
-                        + " truck=" + identity.truckNo);
+                android.util.Log.i("RSM", "LC3: node=" + lc3Node
+                        + " serial=" + identity.serialId);
             }
         } else {
             link = new LcpLink(io, node, from, true);
