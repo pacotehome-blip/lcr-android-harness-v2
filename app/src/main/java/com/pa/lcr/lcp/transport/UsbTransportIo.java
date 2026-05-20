@@ -39,8 +39,9 @@ public final class UsbTransportIo implements TransportIo {
                 @Override
                 public void onNewData(byte[] data) {
                     if (data == null) return;
+                    android.util.Log.d("UsbTransportIo", "onNewData n=" + data.length);
                     for (byte b : data) {
-                        rxBuffer.offerLast(b);   // drop si buffer plein (65536)
+                        rxBuffer.offerLast(b);
                     }
                 }
                 @Override
@@ -115,3 +116,4 @@ public final class UsbTransportIo implements TransportIo {
         try { port.close(); } catch (Exception ignored) {}
     }
 }
+
