@@ -39,7 +39,7 @@ import java.util.regex.Pattern;
  *   DC_FLOW_ACTIVE     0x0004 → NET change entre deux polls
  *   DC_DELIVERY_ACTIVE 0x0008 → NET VOLUME LITRES visible en Mode 1
  */
-public final class Lc3Link {
+public final class Lc3Link implements RegisterLink {
 
     // ── Constantes transport ──────────────────────────────────────────────
     private static final byte[] CMD_POLL_A = {(byte)0x1B,(byte)0x7C,(byte)0xE3,
@@ -138,7 +138,8 @@ public final class Lc3Link {
     public int    getToAddr()                { return 0; }
     public int    getHostAddr()              { return 0; }
     public String getTransportKey()          { return io != null ? io.getKey() : null; }
-    public long   getGenerationId()          { return io != null ? io.getGenerationId() : 0L; }
+    public long   getGenerationId()           { return io != null ? io.getGenerationId() : 0L; }
+    @Override
     public long   getTransportGenerationId() { return getGenerationId(); }
 
     // ── opGetMachineStatus ────────────────────────────────────────────────
@@ -147,9 +148,9 @@ public final class Lc3Link {
      * devStatus = 0 (OK), prnStatus = 0 (imprimante LC3 toujours OK côté registre)
      * delStatus/delCode = opDeliveryStatus()
      */
-    public MachineStatus opGetMachineStatus() throws IOException {
+    public LcpLink.MachineStatus opGetMachineStatus() throws IOException {
         int[] ds = opDeliveryStatus();
-        return new MachineStatus(0, 0, 0, ds[0], ds[1]);
+        return new LcpLink.MachineStatus(0, 0, 0, ds[0], ds[1]);
     }
 
     // ── opDeliveryStatus ──────────────────────────────────────────────────
@@ -461,8 +462,14 @@ public final class Lc3Link {
     }
 
     private void write(byte[] data) throws IOException {
-        if (io.write(data, 2000) < 0) {
-            throw new TransportException("Lc3Link: write failed");
+        try {
+            if (io.write(data, 2000) < 0) {
+                throw new LcpLink.TransportException("Lc3Link: write failed");
+            }
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new LcpLink.TransportException("Lc3Link: write error", e);
         }
     }
 
@@ -471,15 +478,20 @@ public final class Lc3Link {
         byte[] result = new byte[0];
         long deadline = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < deadline) {
-            int n = io.read(tmp, 50);
-            if (n < 0) throw new TransportException("Lc3Link: transport closed");
-            if (n > 0) {
-                byte[] next = new byte[result.length + n];
-                System.arraycopy(result, 0, next, 0, result.length);
-                System.arraycopy(tmp, 0, next, result.length, n);
-                result = next;
-                // Prolonger si données arrivent encore
-                deadline = Math.max(deadline, System.currentTimeMillis() + 200);
+            try {
+                int n = io.read(tmp, 50);
+                if (n < 0) throw new LcpLink.TransportException("Lc3Link: transport closed");
+                if (n > 0) {
+                    byte[] next = new byte[result.length + n];
+                    System.arraycopy(result, 0, next, 0, result.length);
+                    System.arraycopy(tmp, 0, next, result.length, n);
+                    result = next;
+                    deadline = Math.max(deadline, System.currentTimeMillis() + 200);
+                }
+            } catch (IOException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new LcpLink.TransportException("Lc3Link: read error", e);
             }
         }
         return result;
@@ -570,7 +582,7 @@ public final class Lc3Link {
     // ── Utilitaires ───────────────────────────────────────────────────────
     private void checkOpen() throws IOException {
         if (closed || !io.isOpen())
-            throw new TransportException("Lc3Link: transport fermé");
+            throw new LcpLink.TransportException("Lc3Link: transport fermé");
     }
 
     private static byte[] encodeU32(int v) {
