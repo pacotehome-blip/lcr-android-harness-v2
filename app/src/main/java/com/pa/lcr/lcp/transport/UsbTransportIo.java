@@ -3,7 +3,6 @@ package com.pa.lcr.lcp.transport;
 import com.hoho.android.usbserial.driver.UsbSerialPort;
 import com.hoho.android.usbserial.util.SerialInputOutputManager;
 
-import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingDeque;
 
 /**
@@ -49,11 +48,7 @@ public final class UsbTransportIo implements TransportIo {
                     android.util.Log.w("UsbTransportIo", "IoManager error: " + e.getMessage());
                 }
             });
-            Executors.newSingleThreadExecutor(r -> {
-                Thread t = new Thread(r, "UsbTransportIo-IoMgr");
-                t.setDaemon(true);
-                return t;
-            }).submit(ioManager);
+            ioManager.start();
             android.util.Log.i("UsbTransportIo", "SerialInputOutputManager démarré");
         } catch (Exception e) {
             android.util.Log.w("UsbTransportIo", "startIoManager failed: " + e.getMessage());
