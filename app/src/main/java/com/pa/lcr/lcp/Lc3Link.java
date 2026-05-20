@@ -480,7 +480,7 @@ public class Lc3Link extends LcpLink {
             for (String line : scr8.split("\n")) {
                 if (line.contains("APPLICATION")) {
                     model    = line.trim();
-                    serialId = "LC3:" + nodeId;
+                    serialId = "LC3-" + nodeId;
                     break;
                 }
             }
