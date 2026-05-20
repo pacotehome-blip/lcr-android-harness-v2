@@ -269,18 +269,31 @@ public final class RegisterSessionManager {
         }
 
         // ── Détection automatique LCR-II vs LC3 ──────────────────
-        LcpLink link;
-        boolean isLc3 = false;
+        Lc3Link.RegisterIdentity identity = null;
         try {
-            isLc3 = Lc3Link.probe(io);
+            identity = Lc3Link.probeAndIdentify(io);
         } catch (Exception probeEx) {
-            android.util.Log.w("RSM", "probe LC3 exception: " + probeEx.getMessage());
+            android.util.Log.w("RSM", "probeAndIdentify exception: " + probeEx.getMessage());
         }
-        android.util.Log.i("RSM", "probe → " + (isLc3 ? "LC3 (Lc3LinkAdapter)" : "LCR-II (LcpLink)")
-                + "  transport=" + tk + "  node=" + node);
 
+        boolean isLc3 = (identity != null && identity.isLc3);
+        android.util.Log.i("RSM", "probe → " + (identity != null ? identity.toString() : "null")
+                + "  transport=" + tk);
+
+        LcpLink link;
         if (isLc3) {
-            link = new Lc3LinkAdapter(new Lc3Link(io), node, from);
+            // Utiliser nodeId du registre LC3 si disponible
+            int lc3Node = (identity.nodeId > 0) ? identity.nodeId : node;
+            link = new Lc3LinkAdapter(new Lc3Link(io), lc3Node, from);
+
+            // Enregistrer le serial LC3 comme serial attendu
+            if (identity.serialId != null && !identity.serialId.isEmpty()) {
+                expectedSerialByNode.put(lc3Node, identity.serialId);
+                pinnedTransportByRegKey.put(regKey(lc3Node, identity.serialId), tk);
+                android.util.Log.i("RSM", "LC3 identifié: node=" + lc3Node
+                        + " serial=" + identity.serialId
+                        + " truck=" + identity.truckNo);
+            }
         } else {
             link = new LcpLink(io, node, from, true);
         }

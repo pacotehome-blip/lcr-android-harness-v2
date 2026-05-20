@@ -1,639 +1,829 @@
 package com.pa.lcr.lcp;
 
-import android.content.Context;
-
-import com.hoho.android.usbserial.driver.UsbSerialPort;
-import com.pa.lcr.lcp.log.LogBus;
-import com.pa.lcr.lcp.storage.DeliveryLogStore;
-import com.pa.lcr.lcp.transport.MediaTransportManager;
 import com.pa.lcr.lcp.transport.TransportIo;
-import com.pa.lcr.lcp.transport.TransportSnapshot;
-import com.pa.lcr.lcp.transport.TransportStatus;
 
-import org.json.JSONObject;
-
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.util.LinkedHashMap;
-import java.util.Map;
-import java.util.List;
-import java.util.ArrayList;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
- * RegisterSessionManager — v7 finale (node + serial -> 1 média attaché)
+ * Lc3Link — Implémentation LC3 LectroCount³ compatible DeliveryController.
  *
- * ✅ Option B (TransportIo strict): sessions indexées par transportKey + ":" + node
- * ✅ v7: pin média par registre (node + serial #80) => resolveOrCreateForNode()
- * ✅ LogBus: chaque log porte le node (le tab filtre snapshotForNode(node))
- * ✅ Compat UI legacy maintenue
+ * Même API publique que LcpLink. DeliveryController ne sait pas qu'il parle à un LC3.
+ *
+ * Protocole: VT-100 via TCP/NPort (RS-232 9600 8N1)
+ *
+ * Séquences validées terrain (PCAP awevv5/awevv6 + tests 2026-05-20):
+ *   Poll NET  : E3 06 + E3 05 → réponse VT-100 "NET VOLUME LITRES X.X"
+ *   Navigation: Ctrl+L + ENTER → Ctrl+N + mode + ENTER → Ctrl+D
+ *   Delivery  : Ctrl+D → '1'+ENTER → '11'+ENTER → preset+ENTER → Ctrl+B
+ *   Print     : Ctrl+P (0x10)
+ *   Stop      : Ctrl+S (0x13)
+ *
+ * Mapping opGetField:
+ *   #0  ACTIVE_PRODUCT  → état interne (setField stocke, getField retourne)
+ *   #6  PRESET_NET      → état interne
+ *   #17 GROSS_TOTAL     → Mode 3 TOTAL GROSS VOLUME
+ *   #18 NET_TOTAL       → Mode 3 TOTAL NET VOLUME
+ *   #22 SALE_NUMBER     → Mode 3 SALE NUMBER
+ *   #23 TICKET_NUMBER   → Mode 3 TICKET NUMBER
+ *   #39 DECIMALS        → fixe = 1 (résolution 0.1L validée Mode 3)
+ *   #44 GROSS_COUNT     → E3 06+05 poll NET (LC3 n'a qu'un compteur)
+ *   #45 NET_COUNT       → E3 06+05 poll NET
+ *   #80 SERIAL_ID       → Mode 8 APPLICATION string
+ *
+ * DC_* bits de opDeliveryStatus:
+ *   DC_TICKET_PENDING  0x0001 → "PUSH START TO RESUME" ou "PRESET STOP"
+ *   DC_FLOW_ACTIVE     0x0004 → NET change entre deux polls
+ *   DC_DELIVERY_ACTIVE 0x0008 → NET VOLUME LITRES visible en Mode 1
  */
-public final class RegisterSessionManager {
+public final class Lc3Link implements RegisterLink {
 
-    private static volatile RegisterSessionManager INSTANCE;
+    // ── Constantes transport ──────────────────────────────────────────────
+    private static final byte[] CMD_POLL_A = {(byte)0x1B,(byte)0x7C,(byte)0xE3,
+                                               (byte)0x06,(byte)0xE4,(byte)0xA9,(byte)0xCB};
+    private static final byte[] CMD_POLL_B = {(byte)0x1B,(byte)0x7C,(byte)0xE3,
+                                               (byte)0x05,(byte)0xE4,(byte)0xA9,(byte)0xC8};
+    private static final byte[] CMD_SCREEN = {(byte)0x1B,(byte)0x7C,(byte)0xE3,
+                                               (byte)0x07,(byte)0xE4,(byte)0xA9,(byte)0xCA};
 
-    public static RegisterSessionManager get(Context ctx) {
-        if (INSTANCE == null) {
-            synchronized (RegisterSessionManager.class) {
-                if (INSTANCE == null) {
-                    INSTANCE = new RegisterSessionManager(ctx.getApplicationContext());
-                }
+    private static final byte VT_M1    = 0x0C;  // Ctrl+L → retour Mode 1
+    private static final byte VT_ENTER = 0x0D;
+    private static final byte VT_DOWN  = 0x04;  // Ctrl+D → champ suivant
+    private static final byte VT_MODE  = 0x0E;  // Ctrl+N → ENTER MODE NO.
+    private static final byte VT_START = 0x02;  // Ctrl+B → START livraison
+    private static final byte VT_STOP  = 0x13;  // Ctrl+S → STOP
+    private static final byte VT_PRINT = 0x10;  // Ctrl+P → PRINT
+
+    // ── DC bits (identique DeliveryController) ───────────────────────────
+    public static final int DC_TICKET_PENDING  = 0x0001;
+    public static final int DC_FLOW_ACTIVE     = 0x0004;
+    public static final int DC_DELIVERY_ACTIVE = 0x0008;
+
+    // ── Champs opGetField (identique DeliveryController) ─────────────────
+    private static final int FIELD_ACTIVE_PRODUCT = 0;
+    private static final int FIELD_PRESET_NET     = 6;
+    private static final int FIELD_GROSS_TOTAL    = 17;
+    private static final int FIELD_NET_TOTAL      = 18;
+    private static final int FIELD_SALE_NUMBER    = 22;
+    private static final int FIELD_TICKET_NUMBER  = 23;
+    private static final int FIELD_DECIMALS       = 39;
+    private static final int FIELD_GROSS_COUNT    = 44;
+    private static final int FIELD_NET_COUNT      = 45;
+    private static final int FIELD_SERIAL_ID      = 80;
+
+    // ── Commandes opIssueCommand ──────────────────────────────────────────
+    private static final int CMD_RUN               = 0x00;
+    private static final int CMD_END               = 0x02;
+    private static final int CMD_PRINT_LAST_TICKET = 0x06;
+
+    // ── Regex ─────────────────────────────────────────────────────────────
+    private static final Pattern RE_NET =
+            Pattern.compile("NET VOLUME LITRES\\s+([\\d.]+)");
+    private static final Pattern RE_FIELD =
+            Pattern.compile("^(.+?)\\s{2,}([\\d.]+)\\s*\\.?\\s*$");
+
+    // ── Transport ─────────────────────────────────────────────────────────
+    private final TransportIo io;
+    private volatile boolean closed = false;
+
+    // ── État interne (setField stocke, getField retourne) ─────────────────
+    private volatile int    pendingProduct = 11;   // PRODUCT CODE
+    private volatile long   pendingPreset  = 0;    // PRESET_NET (U32 × 10^decimals)
+    private volatile int    accessCode     = 1;    // ACCESS NUMBER
+
+    // ── Dernier NET poll (pour DC_FLOW_ACTIVE) ────────────────────────────
+    private volatile float  lastNetPoll    = -1f;
+
+    // ── Trace — utilise LcpLink.TraceSink pour compatibilité RegisterLink ──
+    private volatile LcpLink.TraceSink traceSink;
+    @Override
+    public void setTraceSink(LcpLink.TraceSink sink) { this.traceSink = sink; }
+    private void t(String s) { LcpLink.TraceSink ts = traceSink; if (ts != null) ts.onTrace(s); }
+
+    // ── Compat LcpLink (champs hérités) ───────────────────────────────────
+    public static final class TransportException extends IOException {
+        public TransportException(String msg) { super(msg); }
+        public TransportException(String msg, Throwable cause) { super(msg, cause); }
+    }
+
+    /** MachineStatus compatible LcpLink. */
+    public static final class MachineStatus {
+        public final int rc;
+        public final int devStatus;
+        public final int prnStatus;
+        public final int delStatus;
+        public final int delCode;
+        public MachineStatus(int rc, int dev, int prn, int ds, int dc) {
+            this.rc = rc; this.devStatus = dev; this.prnStatus = prn;
+            this.delStatus = ds; this.delCode = dc;
+        }
+    }
+
+    // ── Constructeur ──────────────────────────────────────────────────────
+    public Lc3Link(TransportIo io) {
+        this.io = io;
+    }
+
+    // ── Lifecycle ─────────────────────────────────────────────────────────
+    public boolean isClosed()           { return closed || !io.isOpen(); }
+    public void    softClose()          { closed = true; }
+    public void    close()              { closed = true; try { io.close(); } catch (Exception ignored) {} }
+    public void    drainInput(int ms)   { /* NO-OP */ }
+    public void    forceSyncNext(String reason) { /* NO-OP */ }
+
+    // Compat LcpLink getters
+    public int    getToAddr()                { return 0; }
+    public int    getHostAddr()              { return 0; }
+    public String getTransportKey()          { return io != null ? io.getKey() : null; }
+    public long   getGenerationId()           { return io != null ? io.getGenerationId() : 0L; }
+    @Override
+    public long   getTransportGenerationId() { return getGenerationId(); }
+
+    // ── opGetMachineStatus ────────────────────────────────────────────────
+    /**
+     * Compatible LcpLink.opGetMachineStatus().
+     * devStatus = 0 (OK), prnStatus = 0 (imprimante LC3 toujours OK côté registre)
+     * delStatus/delCode = opDeliveryStatus()
+     */
+    public LcpLink.MachineStatus opGetMachineStatus() throws IOException {
+        int[] ds = opDeliveryStatus();
+        return new LcpLink.MachineStatus(0, 0, 0, ds[0], ds[1]);
+    }
+
+    // ── opDeliveryStatus ──────────────────────────────────────────────────
+    /**
+     * Retourne [delStatus, delCode].
+     * Lit l'écran via E3 06+05 et décode les DC_* bits depuis le texte VT-100.
+     *
+     * DC_DELIVERY_ACTIVE : NET VOLUME LITRES visible (livraison en cours)
+     * DC_FLOW_ACTIVE     : NET a changé depuis le dernier poll
+     * DC_TICKET_PENDING  : PUSH START TO RESUME ou PRESET STOP
+     */
+    public int[] opDeliveryStatus() throws IOException {
+        String scr = pollScreen();
+        int delCode = 0;
+
+        if (scr.contains("PUSH START TO RESUME") ||
+            scr.contains("PRESET STOP") ||
+            scr.contains("PUSH PRINT")) {
+            delCode |= DC_TICKET_PENDING;
+        }
+
+        Matcher m = RE_NET.matcher(scr);
+        if (m.find()) {
+            delCode |= DC_DELIVERY_ACTIVE;
+            float net = parseFloat(m.group(1));
+            if (net != lastNetPoll && lastNetPoll >= 0f) {
+                delCode |= DC_FLOW_ACTIVE;
             }
+            lastNetPoll = net;
         }
-        return INSTANCE;
+
+        return new int[]{ 0, delCode };
     }
 
-    private final Context appCtx;
-
-    // ✅ CORRECTIF AJOUTÉ (requis par ApiFacadeImpl)
-    public Context getAppContext() { return appCtx; }
-
-    private final DeliveryLogStore store;
-
-    // ✅ Option B: key = transportKey + ":" + node
-    private final Map<String, NodeSession> sessions = new LinkedHashMap<>();
-
-    // ✅ v7: identité registre (node + serial) et pin du média
-    // - expectedSerialByNode: serial attendu (scan / validate) pour un node
-    // - pinnedTransportByRegKey: (node#serial) -> transportKey choisi
-    private final Map<Integer, String> expectedSerialByNode = new LinkedHashMap<>();
-    private final Map<String, String> pinnedTransportByRegKey = new LinkedHashMap<>();
-
-    private RegisterSessionManager(Context appCtx) {
-        this.appCtx = appCtx;
-        this.store = new DeliveryLogStore(appCtx);
-        this.store.purgeOlderThanDaysAsync(7);
+    public int[] opDeliveryStatus(int timeoutMs) throws IOException {
+        return opDeliveryStatus();
     }
 
-    public DeliveryLogStore getStore() { return store; }
-
-    // ✅ v7: clé registre = node#serial (serial = #80)
-    private static String regKey(int nodeDec, String serialId) {
-        int node = nodeDec & 0xFF;
-        String s = (serialId == null) ? "" : serialId.trim();
-        return node + "#" + s;
+    // ── opGetField ────────────────────────────────────────────────────────
+    /**
+     * Retourne la valeur d'un champ en bytes big-endian U32 (comme LcpLink).
+     *
+     * Champs rapides (~300ms): 39, 44, 45, 0, 6
+     * Champs lents (~3s via navigation): 17, 18, 22, 23, 80
+     */
+    public byte[] opGetField(int field) throws IOException {
+        return opGetField(field, 5_000);
     }
 
-    /** Permet au scan/validate d'enregistrer le serial attendu pour un node. */
-    public synchronized void bindExpectedSerial(int nodeDec, String serialId) {
-        int node = nodeDec & 0xFF;
-        if (serialId == null || serialId.trim().isEmpty()) return;
-        expectedSerialByNode.put(node, serialId.trim());
-    }
+    public byte[] opGetField(int field, int timeoutMs) throws IOException {
+        checkOpen();
+        switch (field) {
+            case FIELD_DECIMALS:
+                // Mode 3: # DEC PLACES VOLUME = 1 (validé terrain)
+                return encodeU32(1);
 
-    public synchronized String getExpectedSerial(int nodeDec) {
-        int node = nodeDec & 0xFF;
-        return expectedSerialByNode.get(node);
-    }
-    /** ✅ Rattrapage UI — retourne toutes les sessions connues (node + serial + transportKey) */
-    public synchronized List<int[]> listKnownNodeSerials() {
-        List<int[]> result = new ArrayList<>();
-        for (Map.Entry<Integer, String> e : expectedSerialByNode.entrySet()) {
-            if (e == null || e.getKey() == null || e.getValue() == null) continue;
-            result.add(new int[]{e.getKey()});
-        }
-        return result;
-    }
+            case FIELD_ACTIVE_PRODUCT:
+                return encodeU32(pendingProduct);
 
-    /** ✅ Rattrapage UI — retourne node + serial + transportKey pinné */
-    public synchronized List<String[]> listKnownRegisters() {
-        List<String[]> result = new ArrayList<>();
-        for (Map.Entry<Integer, String> e : expectedSerialByNode.entrySet()) {
-            if (e == null || e.getKey() == null || e.getValue() == null) continue;
-            int node = e.getKey();
-            String serial = e.getValue();
-            String rk = regKey(node, serial);
-            String transport = pinnedTransportByRegKey.get(rk);
-            result.add(new String[]{
-                String.valueOf(node),
-                serial,
-                transport != null ? transport : ""
-            });
-        }
-        return result;
-    }
-    private static String key(String transportKey, int nodeDec) {
-        int node = nodeDec & 0xFF;
-        String k = (transportKey == null || transportKey.trim().isEmpty()) ? "?" : transportKey.trim();
-        return k + ":" + node;
-    }
+            case FIELD_PRESET_NET:
+                return encodeU32((int) pendingPreset);
 
-    // =========================================================
-    // ✅ v7: Résolution média par registre (node + serial)
-    // - Si serial attendu connu: choisir le transport READY dont #80 match
-    // - Sinon: réutiliser une session existante unique pour ce node
-    // =========================================================
-    public synchronized DeliveryController resolveOrCreateForNode(int nodeDec, int fromDec) {
-        int node = nodeDec & 0xFF;
-        int from = fromDec & 0xFF;
-
-        MediaTransportManager mgr = MediaTransportManager.get(appCtx);
-
-        // 0) si un transport est déjà pinné pour node#serial, on le réutilise
-        String expectedSerial = expectedSerialByNode.get(node);
-        if (expectedSerial != null && !expectedSerial.trim().isEmpty()) {
-            String rk = regKey(node, expectedSerial);
-            String pinned = pinnedTransportByRegKey.get(rk);
-            if (pinned != null) {
-                TransportIo io = mgr.getByKey(pinned);
-                if (io != null && io.isOpen()) {
-                    return getOrCreate(pinned, node, from, io);
+            case FIELD_NET_COUNT:
+            case FIELD_GROSS_COUNT: {
+                // E3 06+05 poll — rapide
+                String scr = pollScreen();
+                Matcher m = RE_NET.matcher(scr);
+                if (m.find()) {
+                    float net = parseFloat(m.group(1));
+                    // Convertir en U32 avec 1 décimale: 30.1L → 301
+                    return encodeU32(Math.round(net * 10));
                 }
+                return encodeU32(0);
             }
+
+            case FIELD_SALE_NUMBER:
+                return encodeU32((int) readMode3Field("SALE NUMBER"));
+
+            case FIELD_TICKET_NUMBER:
+                return encodeU32((int) readMode3Field("TICKET NUMBER"));
+
+            case FIELD_GROSS_TOTAL:
+                return encodeU32(Math.round(readMode3Field("TOTAL GROSS VOLUME") * 10));
+
+            case FIELD_NET_TOTAL:
+                return encodeU32(Math.round(readMode3Field("TOTAL NET VOLUME") * 10));
+
+            case FIELD_SERIAL_ID: {
+                String serial = readMode8Serial();
+                return serial.getBytes(StandardCharsets.US_ASCII);
+            }
+
+            default:
+                t("Lc3Link: opGetField(" + field + ") non implémenté → retourne 0");
+                return encodeU32(0);
         }
+    }
 
-        // 1) si on a déjà une session existante unique pour ce node, la réutiliser
-        NodeSession one = null;
-        for (Map.Entry<String, NodeSession> e : sessions.entrySet()) {
-            if (e == null) continue;
-            String k = e.getKey();
-            if (k == null) continue;
-            if (!k.endsWith(":" + node)) continue;
-            NodeSession s = e.getValue();
-            if (s == null) continue;
+    // ── opSetField ────────────────────────────────────────────────────────
+    /**
+     * Stocke les valeurs en mémoire — appliquées au prochain CMD_RUN.
+     */
+    public void opSetField(int field, byte[] value) throws IOException {
+        checkOpen();
+        switch (field) {
+            case FIELD_ACTIVE_PRODUCT:
+                pendingProduct = value.length > 0 ? (value[0] & 0xFF) : 11;
+                t("Lc3Link: ACTIVE_PRODUCT = " + pendingProduct);
+                break;
 
-            if (one == null) one = s;
-            else { one = null; break; } // plusieurs sessions (USB+BT) => pas au hasard
+            case FIELD_PRESET_NET:
+                pendingPreset = beI32(value) & 0xFFFFFFFFL;
+                t("Lc3Link: PRESET_NET = " + pendingPreset);
+                break;
+
+            default:
+                t("Lc3Link: opSetField(" + field + ") non implémenté — ignoré");
         }
-        if (one != null) {
-            TransportIo io = mgr.getByKey(one.transportKey);
-            if (io != null && io.isOpen()) return getOrCreate(one.transportKey, node, from, io);
+    }
+
+    // ── opIssueCommand ────────────────────────────────────────────────────
+    /**
+     * CMD_RUN (0x00)               → navigation Mode 1 + Ctrl+B (START)
+     * CMD_END (0x02)               → Ctrl+S (STOP)
+     * CMD_PRINT_LAST_TICKET (0x06) → Ctrl+P (PRINT) + attendre fin TICKET_PENDING
+     */
+    public void opIssueCommand(int cmd) throws IOException {
+        checkOpen();
+        switch (cmd) {
+            case CMD_RUN:
+                startDelivery();
+                break;
+
+            case CMD_END:
+                t("Lc3Link: CMD_END → Ctrl+S");
+                writeByte(VT_STOP);
+                sleep(500);
+                drainRx(500);
+                break;
+
+            case CMD_PRINT_LAST_TICKET:
+                t("Lc3Link: CMD_PRINT_LAST_TICKET → Ctrl+P");
+                writeByte(VT_PRINT);
+                sleep(1000);
+                // Attendre que TICKET_PENDING retombe (max 15s)
+                long deadline = System.currentTimeMillis() + 15_000;
+                while (System.currentTimeMillis() < deadline) {
+                    int[] ds = opDeliveryStatus();
+                    if ((ds[1] & DC_TICKET_PENDING) == 0) break;
+                    sleep(500);
+                }
+                break;
+
+            default:
+                t("Lc3Link: opIssueCommand(0x" + Integer.toHexString(cmd) + ") non implémenté");
         }
+    }
 
-        // 2) si serial attendu connu: probe tous les transports READY et choisir celui dont #80 match
-        if (expectedSerial != null && !expectedSerial.trim().isEmpty()) {
-            String want = expectedSerial.trim();
-            List<TransportSnapshot> snaps = mgr.listSnapshots();
-            if (snaps != null) {
-                for (TransportSnapshot s : snaps) {
-                    if (s == null || s.key == null) continue;
-                    if (s.status != TransportStatus.READY) continue;
+    // ── Navigation + START ────────────────────────────────────────────────
+    /**
+     * Séquence validée terrain (PCAP awevv5 + tests 2026-05-20):
+     *   Ctrl+L + ENTER + '0'    → Mode 0 → repositionnement
+     *   Ctrl+D + Ctrl+D         → repositionnement
+     *   Ctrl+L + ENTER          → Mode 1 propre
+     *   Ctrl+D                  → ACCESS NUMBER
+     *   accessCode + ENTER      → PRODUCT CODE
+     *   product + ENTER         → PRESET NET
+     *   preset + ENTER          → valide (30L → '30')
+     *   Ctrl+B                  → START
+     *
+     * pendingPreset en U32 × 10^1 (ex: 300 = 30.0L)
+     * Valeur envoyée au registre = pendingPreset / 10 (ex: 300/10 = '30')
+     */
+    private void startDelivery() throws IOException {
+        t("Lc3Link: startDelivery product=" + pendingProduct
+          + " preset=" + pendingPreset);
 
-                    TransportIo io = mgr.getByKey(s.key);
-                    if (io == null || !io.isOpen()) continue;
+        // Retour Mode 1
+        writeByte(VT_M1); sleep(150);
+        writeByte(VT_ENTER); sleep(300);
+        write(new byte[]{'0'}); sleep(500);
+        drainRx(300);
 
-                    String serial = probeSerial(io, node, from);
-                    if (serial != null && serial.equalsIgnoreCase(want)) {
-                        pinnedTransportByRegKey.put(regKey(node, want), s.key);
-                        return getOrCreate(s.key, node, from, io);
+        writeByte(VT_DOWN); sleep(100);
+        writeByte(VT_DOWN); sleep(100);
+        writeByte(VT_M1);   sleep(150);
+        writeByte(VT_ENTER); sleep(500);
+        drainRx(300);
+
+        // ACCESS NUMBER
+        writeByte(VT_DOWN); sleep(400);
+
+        // access + ENTER → PRODUCT CODE
+        write(String.valueOf(accessCode).getBytes()); sleep(100);
+        writeByte(VT_ENTER); sleep(600);
+
+        // product + ENTER → PRESET NET
+        write(String.valueOf(pendingProduct).getBytes()); sleep(100);
+        writeByte(VT_ENTER); sleep(600);
+
+        // preset + ENTER (U32 × 10^1 → diviser par 10 pour obtenir la valeur réelle)
+        // ex: pendingPreset=300 → envoyer '30' → registre affiche 30.0L
+        int presetVal = (int)(pendingPreset / 10);
+        write(String.valueOf(presetVal).getBytes()); sleep(100);
+        writeByte(VT_ENTER); sleep(600);
+
+        // START
+        t("Lc3Link: Ctrl+B → START");
+        writeByte(VT_START); sleep(800);
+        drainRx(500);
+    }
+
+    // ── Lecture Mode 3 ────────────────────────────────────────────────────
+    /**
+     * Navigue en Mode 3 et lit la valeur d'un champ spécifique.
+     * Lent (~3-4s). Utilisé pour SALE_NUMBER, TICKET_NUMBER, totaux.
+     */
+    private float readMode3Field(String fieldName) throws IOException {
+        gotoMode(3);
+        try {
+            // Parcourir les champs en Ctrl+D jusqu'à trouver fieldName
+            for (int i = 0; i < 40; i++) {
+                String scr = readSpontaneous(1000);
+                Matcher m = RE_FIELD.matcher(scr.split("\n")[0].trim());
+                if (m.matches()) {
+                    String name = m.group(1).trim();
+                    if (name.equalsIgnoreCase(fieldName)) {
+                        return parseFloat(m.group(2));
                     }
                 }
+                // Ctrl+D + ENTER pour avancer
+                writeByte(VT_DOWN); sleep(200);
+                writeByte(VT_ENTER);
             }
+        } finally {
+            backToMode1();
         }
-
-        // 3) fallback: pickReady (USB puis n'importe quel READY)
-        try {
-            ArrayList<String> pref = new ArrayList<>();
-            pref.add(MediaTransportManager.KEY_USB);
-            TransportIo io = mgr.pickReady(pref);
-            if (io == null) io = mgr.pickReady(null);
-            if (io != null && io.isOpen()) return getOrCreate(io.getKey(), node, from, io);
-        } catch (Exception ignored) {}
-
-        return null;
+        return 0f;
     }
 
-    private void t(String s) { /* log stub */ }
-
-    // Lecture best-effort du serial (#80) sur un transport donné
-    // Tente LCR-II (LcpLink) d'abord, puis LC3 (Lc3Link)
-    private String probeSerial(TransportIo io, int nodeDec, int fromDec) {
-        // Essai LCR-II
+    /**
+     * Lit le serial ID depuis Mode 8.
+     * "APPLICATION 14-308 REV 3-02-56  04/21/08"
+     */
+    private String readMode8Serial() throws IOException {
+        gotoMode(8);
         try {
-            LcpLink tmp = new LcpLink(io, nodeDec, fromDec, true);
-            byte[] b = tmp.opGetField(80, 500);
-            if (b != null && b.length > 0) {
-                String s = new String(b, StandardCharsets.UTF_8);
-                int nul = s.indexOf('\0');
-                if (nul >= 0) s = s.substring(0, nul);
-                s = s.trim();
-                if (!s.isEmpty()) return s;
-            }
-        } catch (Exception ignored) {}
-
-        // Essai LC3
-        try {
-            if (Lc3Link.probe(io)) {
-                Lc3Link lc3 = new Lc3Link(io);
-                byte[] b = lc3.opGetField(80, 3000);
-                if (b != null && b.length > 0) {
-                    String s = new String(b, StandardCharsets.UTF_8).trim();
-                    if (!s.isEmpty()) return "LC3:" + s;
+            String scr = readSpontaneous(1000);
+            // Chercher la ligne APPLICATION
+            for (String line : scr.split("\n")) {
+                if (line.contains("APPLICATION")) {
+                    return line.trim();
                 }
-                return "LC3";
             }
-        } catch (Exception ignored) {}
-
-        return null;
-    }
-
-    // =========================================================
-    // ✅ Option B: API principale (TransportIo)
-    // =========================================================
-    public synchronized DeliveryController getController(String transportKey, int nodeDec) {
-        NodeSession s = sessions.get(key(transportKey, nodeDec));
-        return (s != null) ? s.dc : null;
-    }
-
-    /** v7: retrouve le transportKey associé à un controller (si présent). */
-    public synchronized String findTransportKeyForController(DeliveryController dc) {
-        if (dc == null) return null;
-        for (NodeSession s : sessions.values()) {
-            if (s == null) continue;
-            if (s.dc == dc) return s.transportKey;
+            return "LC3";
+        } finally {
+            backToMode1();
         }
-        return null;
     }
 
-    public synchronized DeliveryController getOrCreate(String transportKey, int nodeDec, int fromDec, TransportIo io) {
-        int node = nodeDec & 0xFF;
-        int from = fromDec & 0xFF;
-        if (io == null || !io.isOpen()) return null;
+    /**
+     * Navigue vers un mode via Ctrl+N + mode + ENTER (validé terrain COM4).
+     * Key code = '0' par défaut (tous les modes ont key=0 sur ce registre).
+     */
+    private void gotoMode(int modeNum) throws IOException {
+        writeByte(VT_M1);   sleep(300);
+        writeByte(VT_ENTER); sleep(1000);
+        drainRx(300);
 
-        String tk = (transportKey == null || transportKey.trim().isEmpty()) ? io.getKey() : transportKey.trim();
-        // ✅ B1 FSM: activer exclusivement ce transport avant IO (évite USB/BT zombies)
-        try { MediaTransportManager.get(appCtx).activateExclusive(tk, "RSM.getOrCreate"); } catch (Exception ignored) {}
-        String k = key(tk, node);
+        writeByte(VT_MODE); sleep(300);
+        write(String.valueOf(modeNum).getBytes()); sleep(100);
+        writeByte(VT_ENTER); sleep(1200);
 
-        NodeSession existing = sessions.get(k);
-        if (existing != null) {
-            // ✅ Anti-mix: regen si génération transport différente
-            if (existing.generationId == io.getGenerationId()) {
-                return existing.dc;
-            }
-            try { existing.scheduler.shutdown(); } catch (Exception ignored) {}
-            try { existing.dc.shutdown(false); } catch (Exception ignored) {}
-            sessions.remove(k);
+        String scr = readSpontaneous(1000);
+        // Si KEY? affiché → envoyer '0' + ENTER
+        if (scr.toUpperCase().contains("KEY") && scr.contains("?")) {
+            write(new byte[]{'0'}); writeByte(VT_ENTER); sleep(300);
+            readSpontaneous(500);
         }
+    }
 
-        // ── Détection automatique LCR-II vs LC3 ──────────────────
-        LcpLink link;
-        boolean isLc3 = false;
+    private void backToMode1() throws IOException {
+        writeByte(VT_M1); sleep(300);
+        drainRx(300);
+    }
+
+    // ── Poll screen ───────────────────────────────────────────────────────
+    /**
+     * Envoie E3 06 + E3 05 et lit la réponse VT-100.
+     * Utilisé pour NET live et opDeliveryStatus.
+     */
+    private String pollScreen() throws IOException {
+        write(CMD_POLL_A);
+        write(CMD_POLL_B);
+        byte[] raw = readRaw(600);
+        String scr = decodeVt100(raw);
+        if (scr.isEmpty()) {
+            // Fallback E3 07
+            write(CMD_SCREEN);
+            raw = readRaw(800);
+            scr = decodeVt100(raw);
+        }
+        return scr;
+    }
+
+    // ── I/O bas niveau ────────────────────────────────────────────────────
+    private void writeByte(byte b) throws IOException {
+        write(new byte[]{ b });
+    }
+
+    private void write(byte[] data) throws IOException {
         try {
-            isLc3 = Lc3Link.probe(io);
-        } catch (Exception probeEx) {
-            android.util.Log.w("RSM", "probe LC3 exception: " + probeEx.getMessage());
-        }
-        android.util.Log.i("RSM", "probe → " + (isLc3 ? "LC3 (Lc3LinkAdapter)" : "LCR-II (LcpLink)")
-                + "  transport=" + tk + "  node=" + node);
-
-        if (isLc3) {
-            link = new Lc3LinkAdapter(new Lc3Link(io), node, from);
-        } else {
-            link = new LcpLink(io, node, from, true);
-        }
-        DeliveryController dc = new DeliveryController(link);
-        dc.setLogStore(store);
-
-        NodeScheduler scheduler = new NodeScheduler(node);
-        MuxListener mux = new MuxListener();
-        mux.addListener(new LogBusSink(node, scheduler));
-        mux.addListener(scheduler);
-
-        dc.setListener(mux);
-        try { dc.initialize(); } catch (Exception ignored) {}
-
-        // ✅ v7: cache serial (#80) best-effort pour ce node+transport
-        String serialId0 = null;
-        try {
-            byte[] b80 = link.opGetField(80, 3000);
-            if (b80 != null && b80.length > 0) {
-                String ss = new String(b80, StandardCharsets.UTF_8);
-                int nul = ss.indexOf('\0');
-                if (nul >= 0) ss = ss.substring(0, nul);
-                ss = ss.trim();
-                if (!ss.isEmpty()) serialId0 = ss;
+            if (io.write(data, 2000) < 0) {
+                throw new LcpLink.TransportException("Lc3Link: write failed");
             }
-        } catch (Exception ignored) {}
-
-        if (serialId0 != null) {
-            expectedSerialByNode.put(node, serialId0);
-            pinnedTransportByRegKey.put(regKey(node, serialId0), tk);
-        }
-
-        NodeSession s = new NodeSession(dc, mux, scheduler, tk, io.getGenerationId(), serialId0);
-        sessions.put(k, s);
-
-        scheduler.bindController(dc);
-        return dc;
-    }
-
-    public synchronized void attachUiListener(String transportKey, int nodeDec, DeliveryControllerPort.Listener uiListener) {
-        if (uiListener == null) return;
-        NodeSession s = sessions.get(key(transportKey, nodeDec));
-        if (s == null) return;
-        s.mux.addListener(uiListener);
-        s.scheduler.setUiSubscribed(true);
-    }
-
-    public synchronized void detachUiListener(String transportKey, int nodeDec, DeliveryControllerPort.Listener uiListener) {
-        if (uiListener == null) return;
-        NodeSession s = sessions.get(key(transportKey, nodeDec));
-        if (s == null) return;
-        s.mux.removeListener(uiListener);
-        s.scheduler.setUiSubscribed(false);
-    }
-
-    // =========================================================
-    // ✅ LEGACY COMPAT (UI/RegisterTabFragment) — fallback READY
-    // =========================================================
-    @Deprecated
-    public synchronized DeliveryController getOrCreate(int nodeDec, int fromDec, UsbSerialPort port) {
-        TransportIo io = null;
-        try {
-            MediaTransportManager mgr = MediaTransportManager.get(appCtx);
-            if (mgr != null) {
-                io = mgr.getByKey(MediaTransportManager.KEY_USB);
-                if (io == null) io = mgr.pickReady(null);
-            }
-        } catch (Exception ignored) {}
-        if (io == null || !io.isOpen()) return null;
-        return getOrCreate(io.getKey(), nodeDec, fromDec, io);
-    }
-
-    @Deprecated
-    public synchronized void attachUiListener(int nodeDec, DeliveryControllerPort.Listener uiListener) {
-        if (uiListener == null) return;
-        int node = nodeDec & 0xFF;
-        for (Map.Entry<String, NodeSession> e : sessions.entrySet()) {
-            if (e == null) continue;
-            String k = e.getKey();
-            if (k == null) continue;
-            if (!k.endsWith(":" + node)) continue;
-            NodeSession s = e.getValue();
-            if (s == null) continue;
-            s.mux.addListener(uiListener);
-            s.scheduler.setUiSubscribed(true);
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new LcpLink.TransportException("Lc3Link: write error", e);
         }
     }
 
-    @Deprecated
-    public synchronized void detachUiListener(int nodeDec, DeliveryControllerPort.Listener uiListener) {
-        if (uiListener == null) return;
-        int node = nodeDec & 0xFF;
-        for (Map.Entry<String, NodeSession> e : sessions.entrySet()) {
-            if (e == null) continue;
-            String k = e.getKey();
-            if (k == null) continue;
-            if (!k.endsWith(":" + node)) continue;
-            NodeSession s = e.getValue();
-            if (s == null) continue;
-            s.mux.removeListener(uiListener);
-            s.scheduler.setUiSubscribed(false);
-        }
-    }
-
-    // =========================================================
-    // Clear
-    // =========================================================
-    public synchronized void clearAll(boolean closeTransport) {
-        for (NodeSession s : sessions.values()) {
-            try { s.scheduler.shutdown(); } catch (Exception ignored) {}
-            try { s.dc.shutdown(closeTransport); } catch (Exception ignored) {}
-        }
-        sessions.clear();
-    }
-
-    // =========================================================
-    // Internals
-    // =========================================================
-    private static final class NodeSession {
-        final DeliveryController dc;
-        final MuxListener mux;
-        final NodeScheduler scheduler;
-        final String transportKey;
-        final long generationId;
-        final String serialId; // ✅ FIX v7
-
-        NodeSession(DeliveryController dc,
-                    MuxListener mux,
-                    NodeScheduler scheduler,
-                    String transportKey,
-                    long generationId,
-                    String serialId) {
-            this.dc = dc;
-            this.mux = mux;
-            this.scheduler = scheduler;
-            this.transportKey = transportKey;
-            this.generationId = generationId;
-            this.serialId = serialId;
-        }
-    }
-
-    private static final class MuxListener implements DeliveryControllerPort.Listener {
-        private final CopyOnWriteArrayList<DeliveryControllerPort.Listener> listeners =
-                new CopyOnWriteArrayList<>();
-
-        void addListener(DeliveryControllerPort.Listener l) {
-            if (l == null) return;
-            listeners.addIfAbsent(l);
-        }
-
-        void removeListener(DeliveryControllerPort.Listener l) {
-            if (l == null) return;
-            listeners.remove(l);
-        }
-
-        @Override public void onStateChanged(DeliveryState state) {
-            for (DeliveryControllerPort.Listener l : listeners) {
-                try { l.onStateChanged(state); } catch (Exception ignored) {}
-            }
-        }
-
-        @Override public void onProductsUpdated(List<ProductUiItem> products, int activeIndex0) {
-            for (DeliveryControllerPort.Listener l : listeners) {
-                try { l.onProductsUpdated(products, activeIndex0); } catch (Exception ignored) {}
-            }
-        }
-
-        @Override public void onLog(String message) {
-            for (DeliveryControllerPort.Listener l : listeners) {
-                try { l.onLog(message); } catch (Exception ignored) {}
-            }
-        }
-
-        @Override public void onError(String context, Throwable error) {
-            for (DeliveryControllerPort.Listener l : listeners) {
-                try { l.onError(context, error); } catch (Exception ignored) {}
-            }
-        }
-
-        @Override public void onLiveQty(double net, double gross) {
-            for (DeliveryControllerPort.Listener l : listeners) {
-                try { l.onLiveQty(net, gross); } catch (Exception ignored) {}
-            }
-        }
-
-        @Override public void onLiveStatus(String liveText) {
-            for (DeliveryControllerPort.Listener l : listeners) {
-                try { l.onLiveStatus(liveText); } catch (Exception ignored) {}
-            }
-        }
-
-        @Override public void onTicketInfo(String ticketNo, String deliveryUid) {
-            for (DeliveryControllerPort.Listener l : listeners) {
-                try { l.onTicketInfo(ticketNo, deliveryUid); } catch (Exception ignored) {}
-            }
-        }
-    }
-
-    private static final class NodeScheduler implements DeliveryControllerPort.Listener {
-        private final int node;
-        private final ScheduledExecutorService exec;
-        private DeliveryController dc;
-
-        private volatile boolean uiSubscribed = false;
-
-        private volatile long lastLiveMs = 0L;
-        private volatile long lastStatusMs = 0L;
-
-        private volatile long liveBackoffMs = 0L;
-        private volatile long statusBackoffMs = 0L;
-
-        private volatile long lastTickSeqSeen = -1L;
-        private volatile int noChangeCount = 0;
-
-        private static final long LIVE_MS = 350;
-        private static final long STATUS_MS = 2500;
-
-        NodeScheduler(int node) {
-            this.node = node;
-            final int nodeId = node;
-            this.exec = Executors.newSingleThreadScheduledExecutor(r -> {
-                Thread t = new Thread(r, "NodeScheduler-" + nodeId);
-                t.setDaemon(true);
-                return t;
-            });
-        }
-
-        void bindController(DeliveryController dc) {
-            this.dc = dc;
-            exec.scheduleWithFixedDelay(this::tick, 200, 200, TimeUnit.MILLISECONDS);
-        }
-
-        void setUiSubscribed(boolean v) { this.uiSubscribed = v; }
-
-        void noteBusyRc26() {
-            liveBackoffMs = Math.min(2000, Math.max(liveBackoffMs * 2, 400));
-            statusBackoffMs = Math.min(2000, Math.max(statusBackoffMs * 2, 400));
-        }
-
-        void resetBackoff() {
-            liveBackoffMs = 0L;
-            statusBackoffMs = 0L;
-        }
-
-        private void tick() {
-            DeliveryController c = dc;
-            if (c == null) return;
-            if (!uiSubscribed) return;
-            DeliveryState st = c.getState();
-            if (st == DeliveryState.DISCONNECTED) return;
-
-            if (st == DeliveryState.CONNECTED || st == DeliveryState.PRESTART || st == DeliveryState.ENDING) {
-                return;
-            }
-
-            boolean running = (st == DeliveryState.RUNNING_FLOWING) || (st == DeliveryState.RUNNING_PAUSED);
-            if (!running) return;
-
+    private byte[] readRaw(int timeoutMs) throws IOException {
+        byte[] tmp = new byte[4096];
+        byte[] result = new byte[0];
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
             try {
-                ApiResult tr = c.api_tickSnapshot();
-                JSONObject td = (tr != null) ? tr.data : null;
-                long seq = (td != null) ? td.optLong("seq", -1L) : -1L;
-                if (seq >= 0) {
-                    if (lastTickSeqSeen >= 0 && seq == lastTickSeqSeen) {
-                        noChangeCount++;
-                    } else {
-                        noChangeCount = 0;
-                        lastTickSeqSeen = seq;
-                        liveBackoffMs = 0L;
-                        statusBackoffMs = 0L;
-                    }
-                    if (noChangeCount >= 3) {
-                        liveBackoffMs = Math.min(2000, Math.max(liveBackoffMs, 200));
-                        liveBackoffMs = Math.min(2000, liveBackoffMs + 200);
-                    }
-                    if (noChangeCount >= 6) {
-                        statusBackoffMs = Math.min(4000, Math.max(statusBackoffMs, 500));
-                        statusBackoffMs = Math.min(4000, statusBackoffMs + 500);
-                    }
+                int n = io.read(tmp, 50);
+                if (n < 0) throw new LcpLink.TransportException("Lc3Link: transport closed");
+                if (n > 0) {
+                    byte[] next = new byte[result.length + n];
+                    System.arraycopy(result, 0, next, 0, result.length);
+                    System.arraycopy(tmp, 0, next, result.length, n);
+                    result = next;
+                    deadline = Math.max(deadline, System.currentTimeMillis() + 200);
                 }
-            } catch (Exception ignored) {}
-
-            long now = System.currentTimeMillis();
-
-            long liveInterval = LIVE_MS + liveBackoffMs;
-            if (now - lastLiveMs >= liveInterval) {
-                lastLiveMs = now;
-                try {
-                    c.requestLiveSample();
-                    if (liveBackoffMs > 0 && noChangeCount == 0) liveBackoffMs = Math.max(0, liveBackoffMs - 200);
-                } catch (Exception ignored) {}
-            }
-
-            long stInterval = STATUS_MS + statusBackoffMs;
-            if (now - lastStatusMs >= stInterval) {
-                lastStatusMs = now;
-                try {
-                    c.requestStatus();
-                    if (statusBackoffMs > 0 && noChangeCount == 0) statusBackoffMs = Math.max(0, statusBackoffMs - 200);
-                } catch (Exception ignored) {}
+            } catch (IOException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new LcpLink.TransportException("Lc3Link: read error", e);
             }
         }
+        return result;
+    }
 
-        @Override public void onStateChanged(DeliveryState state) {
-            if (state == DeliveryState.CONNECTED) resetBackoff();
+    private String readSpontaneous(int timeoutMs) throws IOException {
+        return decodeVt100(readRaw(timeoutMs));
+    }
+
+    private void drainRx(int timeoutMs) {
+        try { readRaw(timeoutMs); } catch (Exception ignored) {}
+    }
+
+    // ── Décodeur VT-100 ───────────────────────────────────────────────────
+    /**
+     * Décode un buffer VT-100 en texte lisible.
+     * Identique à decode_vt100() Python validé sur ce registre.
+     */
+    static String decodeVt100(byte[] data) {
+        if (data == null || data.length == 0) return "";
+        StringBuilder sb = new StringBuilder();
+        int i = 0;
+        while (i < data.length) {
+            int b = data[i] & 0xFF;
+            if (b == 0x1B && i + 1 < data.length) {
+                int next = data[i + 1] & 0xFF;
+                if (next == 0x5B) {           // ESC [
+                    i += 2;
+                    while (i < data.length && !(data[i] >= 0x40 && data[i] <= 0x7E)) i++;
+                    i++;
+                } else if (next == 0x48) {    // ESC H
+                    sb.append('\n'); i += 2;
+                } else {
+                    i += 2;
+                }
+            } else if (b == 0x0D || b == 0x0A) {
+                sb.append('\n'); i++;
+            } else if (b >= 0x20 && b < 0x7F) {
+                sb.append((char) b); i++;
+            } else {
+                i++;
+            }
+        }
+        // Retourner lignes non-vides
+        StringBuilder out = new StringBuilder();
+        for (String line : sb.toString().split("\n")) {
+            String l = line.trim();
+            if (!l.isEmpty()) {
+                if (out.length() > 0) out.append('\n');
+                out.append(l);
+            }
+        }
+        return out.toString();
+    }
+
+    // ── RegisterProbe ─────────────────────────────────────────────────────
+    // ── Identité registre ────────────────────────────────────────────────
+    /**
+     * Identité complète retournée par probeAndIdentify().
+     */
+    public static final class RegisterIdentity {
+        public final boolean isLc3;
+        public final String  serialId;   // #80 ou Mode 8
+        public final int     nodeId;     // UNIT ID NUMBER (Mode 4) ou toAddr (LCR-II)
+        public final int     truckNo;    // TRUCK NUMBER (Mode 4)
+        public final String  model;      // APPLICATION string (Mode 8) ou ""
+
+        public RegisterIdentity(boolean isLc3, String serialId, int nodeId,
+                                int truckNo, String model) {
+            this.isLc3    = isLc3;
+            this.serialId = serialId;
+            this.nodeId   = nodeId;
+            this.truckNo  = truckNo;
+            this.model    = model;
         }
 
-        @Override public void onProductsUpdated(List<ProductUiItem> products, int activeIndex0) { }
-        @Override public void onLog(String message) { }
-        @Override public void onError(String context, Throwable error) { }
-        @Override public void onLiveQty(double net, double gross) { }
-        @Override public void onLiveStatus(String liveText) { }
-        @Override public void onTicketInfo(String ticketNo, String deliveryUid) { }
-
-        void shutdown() {
-            try { exec.shutdownNow(); } catch (Exception ignored) {}
+        @Override public String toString() {
+            return (isLc3 ? "LC3" : "LCR-II")
+                + " node=" + nodeId
+                + " truck=" + truckNo
+                + " serial=" + serialId
+                + " model=" + model;
         }
     }
 
-    private static final class LogBusSink implements DeliveryControllerPort.Listener {
-        private final int node;
-        private final NodeScheduler scheduler;
-
-        LogBusSink(int node, NodeScheduler scheduler) {
-            this.node = node;
-            this.scheduler = scheduler;
+    /**
+     * Probe et identifie le registre en une seule passe.
+     *
+     * Si LC3 détecté :
+     *   - Lit UNIT ID (Mode 4) → nodeId
+     *   - Lit APPLICATION (Mode 8) → serialId + model
+     *   - Lit TRUCK NUMBER (Mode 4) → truckNo
+     *
+     * Si pas LC3 → RegisterIdentity(isLc3=false, ...)
+     * L'appelant peut ensuite faire opGetField(80) sur LcpLink pour le serial LCR-II.
+     */
+    public static RegisterIdentity probeAndIdentify(TransportIo io) {
+        if (!probe(io)) {
+            return new RegisterIdentity(false, null, 0, 0, "");
         }
 
-        @Override public void onStateChanged(DeliveryState state) {
-            LogBus.ui(node, "STATE=" + (state != null ? state.name() : "null"));
+        // C'est un LC3 — lire l'identité
+        Lc3Link lc3 = new Lc3Link(io);
+        String  serialId = "LC3";
+        String  model    = "";
+        int     nodeId   = 0;
+        int     truckNo  = 0;
+
+        try {
+            // Mode 4: UNIT ID NUMBER + TRUCK NUMBER
+            lc3.gotoMode(4);
+            String scr4 = lc3.readSpontaneous(1000);
+            // Parcourir les champs
+            for (int i = 0; i < 15; i++) {
+                String first = scr4.split("\n")[0].trim();
+                if (first.contains("UNIT ID")) {
+                    Matcher m = Pattern.compile("(\d+)\s*\.?\s*$").matcher(first);
+                    if (m.find()) nodeId = Integer.parseInt(m.group(1).trim());
+                }
+                if (first.contains("TRUCK NUMBER")) {
+                    Matcher m = Pattern.compile("(\d+)\s*\.?\s*$").matcher(first);
+                    if (m.find()) truckNo = Integer.parseInt(m.group(1).trim());
+                }
+                if (nodeId > 0 && truckNo > 0) break;
+                lc3.writeByte(VT_DOWN); sleep(200);
+                lc3.writeByte(VT_ENTER);
+                scr4 = lc3.readSpontaneous(800);
+            }
+            lc3.backToMode1();
+
+            // Mode 8: APPLICATION string → serial
+            lc3.gotoMode(8);
+            String scr8 = lc3.readSpontaneous(1000);
+            for (String line : scr8.split("\n")) {
+                if (line.contains("APPLICATION")) {
+                    model    = line.trim();
+                    serialId = "LC3-" + line.trim()
+                                    .replaceAll("[^A-Z0-9.-]", "")
+                                    .substring(0, Math.min(16, line.trim().length()));
+                    break;
+                }
+            }
+            lc3.backToMode1();
+
+        } catch (Exception e) {
+            android.util.Log.w("Lc3Link", "probeAndIdentify error: " + e.getMessage());
         }
 
-        @Override public void onProductsUpdated(List<ProductUiItem> products, int activeIndex0) { }
+        android.util.Log.i("Lc3Link", "probeAndIdentify → " + serialId
+                + " node=" + nodeId + " truck=" + truckNo);
 
-        @Override public void onLog(String message) {
-            if (message == null) return;
-            String s = message.trim();
-            if (s.startsWith("TX:") || s.startsWith("[TX]")) { LogBus.ioTx(node, s); return; }
-            if (s.startsWith("RX:") || s.startsWith("[RX]")) { LogBus.ioRx(node, s); return; }
-            if (s.startsWith("[API") || s.startsWith("[API]")) { LogBus.api(node, s); return; }
-            LogBus.ui(node, s);
+        return new RegisterIdentity(true, serialId, nodeId, truckNo, model);
+    }
+
+    /**
+     * Détecte si le transport est connecté à un LC3.
+     *
+     * Algorithme:
+     *   1. Envoyer E3 07 (SCREEN)
+     *   2. Si réponse contient "NET VOLUME LITRES" → LC3 confirmé ✅
+     *   3. Si réponse contient "DISPLAY TERMINAL" → LC3 confirmé ✅
+     *   4. Sinon → pas un LC3
+     *
+     * Appelé par RegisterSessionManager.getOrCreate() après échec LCP.
+     */
+    // ── Identité registre ────────────────────────────────────────────────
+    /**
+     * Identité complète retournée par probeAndIdentify().
+     */
+    public static final class RegisterIdentity {
+        public final boolean isLc3;
+        public final String  serialId;   // #80 ou Mode 8
+        public final int     nodeId;     // UNIT ID NUMBER (Mode 4) ou toAddr (LCR-II)
+        public final int     truckNo;    // TRUCK NUMBER (Mode 4)
+        public final String  model;      // APPLICATION string (Mode 8) ou ""
+
+        public RegisterIdentity(boolean isLc3, String serialId, int nodeId,
+                                int truckNo, String model) {
+            this.isLc3    = isLc3;
+            this.serialId = serialId;
+            this.nodeId   = nodeId;
+            this.truckNo  = truckNo;
+            this.model    = model;
         }
 
-        @Override public void onError(String context, Throwable error) {
-            String msg = (error != null && error.getMessage() != null) ? error.getMessage() : "";
-            LogBus.api(node, "[ERR][" + context + "] " + msg);
-            if (msg.contains("rc=0x26") || msg.contains("rc=0X26")) {
-                if (scheduler != null) scheduler.noteBusyRc26();
+        @Override public String toString() {
+            return (isLc3 ? "LC3" : "LCR-II")
+                + " node=" + nodeId
+                + " truck=" + truckNo
+                + " serial=" + serialId
+                + " model=" + model;
+        }
+    }
+
+    /**
+     * Probe et identifie le registre en une seule passe.
+     *
+     * Si LC3 détecté :
+     *   - Lit UNIT ID (Mode 4) → nodeId
+     *   - Lit APPLICATION (Mode 8) → serialId + model
+     *   - Lit TRUCK NUMBER (Mode 4) → truckNo
+     *
+     * Si pas LC3 → RegisterIdentity(isLc3=false, ...)
+     * L'appelant peut ensuite faire opGetField(80) sur LcpLink pour le serial LCR-II.
+     */
+    public static RegisterIdentity probeAndIdentify(TransportIo io) {
+        if (!probe(io)) {
+            return new RegisterIdentity(false, null, 0, 0, "");
+        }
+
+        // C'est un LC3 — lire l'identité
+        Lc3Link lc3 = new Lc3Link(io);
+        String  serialId = "LC3";
+        String  model    = "";
+        int     nodeId   = 0;
+        int     truckNo  = 0;
+
+        try {
+            // Mode 4: UNIT ID NUMBER + TRUCK NUMBER
+            lc3.gotoMode(4);
+            String scr4 = lc3.readSpontaneous(1000);
+            // Parcourir les champs
+            for (int i = 0; i < 15; i++) {
+                String first = scr4.split("\n")[0].trim();
+                if (first.contains("UNIT ID")) {
+                    Matcher m = Pattern.compile("(\d+)\s*\.?\s*$").matcher(first);
+                    if (m.find()) nodeId = Integer.parseInt(m.group(1).trim());
+                }
+                if (first.contains("TRUCK NUMBER")) {
+                    Matcher m = Pattern.compile("(\d+)\s*\.?\s*$").matcher(first);
+                    if (m.find()) truckNo = Integer.parseInt(m.group(1).trim());
+                }
+                if (nodeId > 0 && truckNo > 0) break;
+                lc3.writeByte(VT_DOWN); sleep(200);
+                lc3.writeByte(VT_ENTER);
+                scr4 = lc3.readSpontaneous(800);
+            }
+            lc3.backToMode1();
+
+            // Mode 8: APPLICATION string → serial
+            lc3.gotoMode(8);
+            String scr8 = lc3.readSpontaneous(1000);
+            for (String line : scr8.split("\n")) {
+                if (line.contains("APPLICATION")) {
+                    model    = line.trim();
+                    serialId = "LC3-" + line.trim()
+                                    .replaceAll("[^A-Z0-9.-]", "")
+                                    .substring(0, Math.min(16, line.trim().length()));
+                    break;
+                }
+            }
+            lc3.backToMode1();
+
+        } catch (Exception e) {
+            android.util.Log.w("Lc3Link", "probeAndIdentify error: " + e.getMessage());
+        }
+
+        android.util.Log.i("Lc3Link", "probeAndIdentify → " + serialId
+                + " node=" + nodeId + " truck=" + truckNo);
+
+        return new RegisterIdentity(true, serialId, nodeId, truckNo, model);
+    }
+
+    /**
+     * Détecte si le transport est connecté à un LC3.
+     * Envoie E3 07 (SCREEN) 2 fois — le registre peut être occupé.
+     * Retourne true si la réponse contient du VT-100 LC3.
+     */
+    public static boolean probe(TransportIo io) {
+        byte[] screen = {(byte)0x1B,(byte)0x7C,(byte)0xE3,
+                          (byte)0x07,(byte)0xE4,(byte)0xA9,(byte)0xCA};
+        for (int attempt = 0; attempt < 2; attempt++) {
+            try {
+                io.write(screen, 1000);
+                Thread.sleep(600);
+                byte[] buf = new byte[1024];
+                int n = io.read(buf, 1000);
+                android.util.Log.d("Lc3Link", "probe attempt=" + attempt
+                        + " read=" + n + " bytes");
+                if (n > 0) {
+                    byte[] data = new byte[n];
+                    System.arraycopy(buf, 0, data, 0, n);
+                    String scr = decodeVt100(data);
+                    android.util.Log.d("Lc3Link", "probe scr=[" + scr.replace("\n"," | ") + "]");
+                    if (scr.contains("NET VOLUME LITRES") ||
+                        scr.contains("PUSH START TO RESUME") ||
+                        scr.contains("PRESET STOP") ||
+                        scr.contains("DISPLAY TERMINAL") ||
+                        scr.contains("VT-100") ||
+                        scr.contains("ACCESS NUMBER")) {
+                        android.util.Log.i("Lc3Link", "probe → LC3 ✅");
+                        return true;
+                    }
+                } else {
+                    android.util.Log.d("Lc3Link", "probe attempt=" + attempt + " → silence");
+                }
+                Thread.sleep(300);
+            } catch (Exception e) {
+                android.util.Log.w("Lc3Link", "probe exception: " + e.getMessage());
+                return false;
             }
         }
+        android.util.Log.i("Lc3Link", "probe → pas LC3 ❌");
+        return false;
+    }
 
-        @Override public void onLiveQty(double net, double gross) { }
-        @Override public void onLiveStatus(String liveText) { }
-        @Override public void onTicketInfo(String ticketNo, String deliveryUid) { }
+    // ── Utilitaires ───────────────────────────────────────────────────────
+    private void checkOpen() throws IOException {
+        if (closed || !io.isOpen())
+            throw new LcpLink.TransportException("Lc3Link: transport fermé");
+    }
+
+    private static byte[] encodeU32(int v) {
+        return new byte[]{
+            (byte)(v >> 24), (byte)(v >> 16), (byte)(v >> 8), (byte)v
+        };
+    }
+
+    private static int beI32(byte[] b) {
+        if (b == null || b.length < 4) return 0;
+        return ((b[0] & 0xFF) << 24) | ((b[1] & 0xFF) << 16) |
+               ((b[2] & 0xFF) << 8)  |  (b[3] & 0xFF);
+    }
+
+    private static float parseFloat(String s) {
+        try { return Float.parseFloat(s.trim()); }
+        catch (Exception e) { return 0f; }
+    }
+
+    private static void sleep(long ms) {
+        try { Thread.sleep(ms); } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 }
