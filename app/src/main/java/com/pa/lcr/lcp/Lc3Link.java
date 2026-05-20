@@ -606,13 +606,13 @@ public final class Lc3Link implements RegisterLink {
             String scr4 = lc3.readSpontaneous(1000);
             // Parcourir les champs
             for (int i = 0; i < 15; i++) {
-                String first = scr4.split("\n")[0].trim();
+                String first = scr4.split("\\n")[0].trim();
                 if (first.contains("UNIT ID")) {
-                    Matcher m = Pattern.compile("(\d+)\s*\.?\s*$").matcher(first);
+                    Matcher m = Pattern.compile("(\\d+)\\s*\\.?\\s*$").matcher(first);
                     if (m.find()) nodeId = Integer.parseInt(m.group(1).trim());
                 }
                 if (first.contains("TRUCK NUMBER")) {
-                    Matcher m = Pattern.compile("(\d+)\s*\.?\s*$").matcher(first);
+                    Matcher m = Pattern.compile("(\\d+)\\s*\\.?\\s*$").matcher(first);
                     if (m.find()) truckNo = Integer.parseInt(m.group(1).trim());
                 }
                 if (nodeId > 0 && truckNo > 0) break;
@@ -625,7 +625,7 @@ public final class Lc3Link implements RegisterLink {
             // Mode 8: APPLICATION string → serial
             lc3.gotoMode(8);
             String scr8 = lc3.readSpontaneous(1000);
-            for (String line : scr8.split("\n")) {
+            for (String line : scr8.split("\\n")) {
                 if (line.contains("APPLICATION")) {
                     model    = line.trim();
                     serialId = "LC3-" + line.trim()
@@ -715,13 +715,13 @@ public final class Lc3Link implements RegisterLink {
             String scr4 = lc3.readSpontaneous(1000);
             // Parcourir les champs
             for (int i = 0; i < 15; i++) {
-                String first = scr4.split("\n")[0].trim();
+                String first = scr4.split("\\n")[0].trim();
                 if (first.contains("UNIT ID")) {
-                    Matcher m = Pattern.compile("(\d+)\s*\.?\s*$").matcher(first);
+                    Matcher m = Pattern.compile("(\\d+)\\s*\\.?\\s*$").matcher(first);
                     if (m.find()) nodeId = Integer.parseInt(m.group(1).trim());
                 }
                 if (first.contains("TRUCK NUMBER")) {
-                    Matcher m = Pattern.compile("(\d+)\s*\.?\s*$").matcher(first);
+                    Matcher m = Pattern.compile("(\\d+)\\s*\\.?\\s*$").matcher(first);
                     if (m.find()) truckNo = Integer.parseInt(m.group(1).trim());
                 }
                 if (nodeId > 0 && truckNo > 0) break;
@@ -734,7 +734,7 @@ public final class Lc3Link implements RegisterLink {
             // Mode 8: APPLICATION string → serial
             lc3.gotoMode(8);
             String scr8 = lc3.readSpontaneous(1000);
-            for (String line : scr8.split("\n")) {
+            for (String line : scr8.split("\\n")) {
                 if (line.contains("APPLICATION")) {
                     model    = line.trim();
                     serialId = "LC3-" + line.trim()
