@@ -305,21 +305,30 @@ public final class RegisterSessionManager {
         try { dc.initialize(); } catch (Exception ignored) {}
 
         // ✅ v7: cache serial (#80) best-effort pour ce node+transport
+        // LC3 : serial déjà connu via probeAndIdentify() → pas de second aller-retour Mode 8
+        // LCR-II : lecture normale opGetField(80)
         String serialId0 = null;
-        try {
-            byte[] b80 = link.opGetField(80, 3000);
-            if (b80 != null && b80.length > 0) {
-                String ss = new String(b80, StandardCharsets.UTF_8);
-                int nul = ss.indexOf('\0');
-                if (nul >= 0) ss = ss.substring(0, nul);
-                ss = ss.trim();
-                if (!ss.isEmpty()) serialId0 = ss;
+        if (isLc3) {
+            if (identity.serialId != null && !identity.serialId.isEmpty()) {
+                serialId0 = identity.serialId;
             }
-        } catch (Exception ignored) {}
+        } else {
+            try {
+                byte[] b80 = link.opGetField(80, 3000);
+                if (b80 != null && b80.length > 0) {
+                    String ss = new String(b80, StandardCharsets.UTF_8);
+                    int nul = ss.indexOf('\0');
+                    if (nul >= 0) ss = ss.substring(0, nul);
+                    ss = ss.trim();
+                    if (!ss.isEmpty()) serialId0 = ss;
+                }
+            } catch (Exception ignored) {}
+        }
 
         if (serialId0 != null) {
-            expectedSerialByNode.put(node, serialId0);
-            pinnedTransportByRegKey.put(regKey(node, serialId0), tk);
+            int effectiveNode = isLc3 && identity.nodeId > 0 ? identity.nodeId : node;
+            expectedSerialByNode.put(effectiveNode, serialId0);
+            pinnedTransportByRegKey.put(regKey(effectiveNode, serialId0), tk);
         }
 
         NodeSession s = new NodeSession(dc, mux, scheduler, tk, io.getGenerationId(), serialId0);

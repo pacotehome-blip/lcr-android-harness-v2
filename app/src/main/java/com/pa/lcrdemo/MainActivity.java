@@ -1,4 +1,3 @@
-
 package com.pa.lcrdemo;
 
 import androidx.appcompat.app.AppCompatActivity;
@@ -186,15 +185,21 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
         final int node;
         final int from;
         final String serialId;
+        final boolean isLc3;       // ✅ badge LC3 vs LCR-II
         String qtySuffix; // " | N=.. G=.."
 
         TabSpec(String tabKey, String mediaShort, String transportKey, int node, int from, String serialId) {
+            this(tabKey, mediaShort, transportKey, node, from, serialId, false);
+        }
+
+        TabSpec(String tabKey, String mediaShort, String transportKey, int node, int from, String serialId, boolean isLc3) {
             this.tabKey = tabKey;
             this.mediaShort = mediaShort;
             this.transportKey = transportKey;
             this.node = node;
             this.from = from;
             this.serialId = serialId;
+            this.isLc3 = isLc3;
         }
     }
 
@@ -790,8 +795,13 @@ private void setupTabsTop() {
     }
 
     private String tabLabelOf(String mediaShort, int node, String serialId) {
+        return tabLabelOf(mediaShort, node, serialId, false);
+    }
+
+    private String tabLabelOf(String mediaShort, int node, String serialId, boolean isLc3) {
         String m = (mediaShort == null || mediaShort.trim().isEmpty()) ? "—" : mediaShort.trim();
-        return m + " - " + serialShort(serialId) + " - " + (node & 0xFF);
+        String badge = isLc3 ? "[LC3] " : "[LCR-II] ";
+        return m + " - " + badge + serialShort(serialId) + " - " + (node & 0xFF);
     }
 
     private boolean isTransportReady(String transportKey) {
@@ -845,8 +855,8 @@ private void setupTabsTop() {
         String media = mediaShortFromTransportKey(spec.transportKey);
         String mediaLabel = ready ? media : (media + "(OFF)");
 
-        // ✅ Format: BT(OFF) - 123456 - 250
-        updateRegisterTabLabel(tabKey, tabLabelOf(mediaLabel, spec.node, spec.serialId) + (spec.qtySuffix != null ? spec.qtySuffix : ""));
+        // ✅ Format: BT(OFF) - [LC3] 123456 - 250
+        updateRegisterTabLabel(tabKey, tabLabelOf(mediaLabel, spec.node, spec.serialId, spec.isLc3) + (spec.qtySuffix != null ? spec.qtySuffix : ""));
 
         try {
             Fragment f = getSupportFragmentManager().findFragmentByTag("regtab_" + tabKey);
@@ -900,6 +910,10 @@ private void setupTabsTop() {
      * Règle: clear ciblé A1 si même (node,serial) apparaît sur un autre média.
      */
     private void upsertRegisterTabFromScan(String transportKey, int node, int from, String serialId, boolean focus) {
+        upsertRegisterTabFromScan(transportKey, node, from, serialId, focus, false);
+    }
+
+    private void upsertRegisterTabFromScan(String transportKey, int node, int from, String serialId, boolean focus, boolean isLc3) {
         if (node < 1 || node > 250) return;
         if (from < 0 || from > 255) from = 255;
         String mediaShort = mediaShortFromTransportKey(transportKey);
@@ -921,14 +935,14 @@ private void setupTabsTop() {
         // 3) upsert tab
         TabSpec existing = tabsByKey.get(newTabKey);
         if (existing == null) {
-            TabSpec spec = new TabSpec(newTabKey, mediaShort, transportKey, node, from, serial);
+            TabSpec spec = new TabSpec(newTabKey, mediaShort, transportKey, node, from, serial, isLc3);
             tabsByKey.put(newTabKey, spec);
             addRegisterTabUi(spec);
-            logUi(null, "TAB registre ajouté: " + tabLabelOf(mediaShort, node, serial));
+            logUi(null, "TAB registre ajouté: " + tabLabelOf(mediaShort, node, serial, isLc3));
         } else {
-            TabSpec spec = new TabSpec(newTabKey, mediaShort, transportKey, node, from, serial);
+            TabSpec spec = new TabSpec(newTabKey, mediaShort, transportKey, node, from, serial, isLc3);
             tabsByKey.put(newTabKey, spec);
-            updateRegisterTabLabel(newTabKey, tabLabelOf(mediaShort, node, serial));
+            updateRegisterTabLabel(newTabKey, tabLabelOf(mediaShort, node, serial, isLc3));
         }
 
         if (focus) {
@@ -957,7 +971,7 @@ private void setupTabsTop() {
     private void addRegisterTabUi(TabSpec spec) {
         if (tabRegisters == null || spec == null) return;
         TabLayout.Tab t = tabRegisters.newTab();
-        t.setText(tabLabelOf(spec.mediaShort, spec.node, spec.serialId));
+        t.setText(tabLabelOf(spec.mediaShort, spec.node, spec.serialId, spec.isLc3));
         t.setTag(spec.tabKey);
         tabRegisters.addTab(t, false);
     }
@@ -1000,7 +1014,7 @@ private void setupTabsTop() {
         currentRegNode = spec.node;
 
         if (txtActiveNode != null) {
-            txtActiveNode.setText("Node actif : " + tabLabelOf(spec.mediaShort, spec.node, spec.serialId));
+            txtActiveNode.setText("Node actif : " + tabLabelOf(spec.mediaShort, spec.node, spec.serialId, spec.isLc3));
         }
 
         FragmentManager fm = getSupportFragmentManager();
@@ -1209,22 +1223,45 @@ private void setupTabsTop() {
             final int T28 = 300;
             final int TF = 300;
 
-            for (int node = 1; node <= 250; node++) {
+            // APRÈS — LC3 d'abord, LCR-II en fallback
+            Lc3Link.RegisterIdentity identity = null;
+            try { identity = Lc3Link.probeAndIdentify(ioFinal); } catch (Exception ignored) {}
+
+            if (identity != null && identity.isLc3) {
+                // LC3 détecté — pas de boucle node
+                int    lc3Node  = identity.nodeId > 0 ? identity.nodeId : 2524;
+                String serialId = identity.serialId;
+                String ticketNo = "";
                 try {
-                    LcpLink tmp = new LcpLink(ioFinal, node, 255, true);
-                    int[] ds = tmp.opDeliveryStatus(T28);
-                    int delCode = ds[1];
-                    boolean ticketPending = (delCode & 0x0001) != 0;
-                    boolean flowActive = (delCode & 0x0004) != 0;
-                    boolean deliveryActive = (delCode & 0x0008) != 0;
-
-                    String serialId = decodeAz(tmp.opGetField(80, TF));
-                    String ticketNo = u32beDec(tmp.opGetField(23, TF)); // optionnel
-
-                    if (serialId != null && !serialId.trim().isEmpty()) {
-                        found.put(node, new NodeScanItem(node, serialId, ticketNo, ticketPending, deliveryActive, flowActive, false));
-                    }
+                    Lc3Link lc3tmp = new Lc3Link(ioFinal);
+                    ticketNo = u32beDec(lc3tmp.opGetField(23, 3000));
                 } catch (Exception ignored) {}
+                found.put(lc3Node, new NodeScanItem(
+                    lc3Node, serialId, ticketNo,
+                    false, false, false, false, true  // isLc3=true
+                ));
+                android.util.Log.i("MainActivity", "Scan LC3: node=" + lc3Node
+                        + " serial=" + serialId);
+            } else {
+                // LCR-II — boucle classique
+                for (int node = 1; node <= 250; node++) {
+                    try {
+                        LcpLink tmp = new LcpLink(ioFinal, node, 255, true);
+                        int[] ds = tmp.opDeliveryStatus(T28);
+                        int delCode = ds[1];
+                        boolean ticketPending  = (delCode & 0x0001) != 0;
+                        boolean flowActive     = (delCode & 0x0004) != 0;
+                        boolean deliveryActive = (delCode & 0x0008) != 0;
+                        String serialId = decodeAz(tmp.opGetField(80, TF));
+                        String ticketNo = u32beDec(tmp.opGetField(23, TF));
+                        if (serialId != null && !serialId.trim().isEmpty()) {
+                            found.put(node, new NodeScanItem(
+                                node, serialId, ticketNo,
+                                ticketPending, deliveryActive, flowActive, false
+                            ));
+                        }
+                    } catch (Exception ignored) {}
+                }
             }
 
             final long scanFinishedMs = System.currentTimeMillis();
@@ -1243,7 +1280,9 @@ private void setupTabsTop() {
                             sb.append(mediaShort).append(" — ").append(found.size()).append(" registre(s)\n");
                             for (NodeScanItem it : found.values()) {
                                 if (it == null) continue;
-                                sb.append("Serial=").append(safeSerial(it.serialId))
+                                String badge = it.isLc3 ? "[LC3]" : "[LCR-II]";
+                                sb.append(badge)
+                                  .append("  Serial=").append(safeSerial(it.serialId))
                                   .append("  Node=").append(it.lcrnode)
                                   .append("  TO=").append(it.lcrnode)
                                   .append("  From=255\n");
@@ -1258,12 +1297,12 @@ private void setupTabsTop() {
                             if (it == null) continue;
                             boolean focus = false;
                             if (!focused && it.lcrnode == 250) focus = true;
-                            upsertRegisterTabFromScan(tk, it.lcrnode, 255, it.serialId, focus);
+                            upsertRegisterTabFromScan(tk, it.lcrnode, 255, it.serialId, focus, it.isLc3);
                             if (focus) focused = true;
                         }
                         if (!focused) {
                             NodeScanItem first = found.values().iterator().next();
-                            if (first != null) upsertRegisterTabFromScan(tk, first.lcrnode, 255, first.serialId, true);
+                            if (first != null) upsertRegisterTabFromScan(tk, first.lcrnode, 255, first.serialId, true, first.isLc3);
                         }
                     }
                 } finally {
@@ -1414,9 +1453,15 @@ private void setupTabsTop() {
         final boolean deliveryActive;
         final boolean flowActive;
         final boolean isDefault;
+        final boolean isLc3; // ✅ badge LC3 vs LCR-II
 
         NodeScanItem(int lcrnode, String serialId, String ticketNo,
                      boolean ticketPending, boolean deliveryActive, boolean flowActive, boolean isDefault) {
+            this(lcrnode, serialId, ticketNo, ticketPending, deliveryActive, flowActive, isDefault, false);
+        }
+
+        NodeScanItem(int lcrnode, String serialId, String ticketNo,
+                     boolean ticketPending, boolean deliveryActive, boolean flowActive, boolean isDefault, boolean isLc3) {
             this.lcrnode = lcrnode;
             this.serialId = serialId;
             this.ticketNo = ticketNo;
@@ -1424,12 +1469,13 @@ private void setupTabsTop() {
             this.deliveryActive = deliveryActive;
             this.flowActive = flowActive;
             this.isDefault = isDefault;
+            this.isLc3 = isLc3;
         }
 
         static NodeScanItem default250() { return new NodeScanItem(250, "", "", false, false, false, true); }
 
         NodeScanItem asDefault() {
-            return new NodeScanItem(lcrnode, serialId, ticketNo, ticketPending, deliveryActive, flowActive, true);
+            return new NodeScanItem(lcrnode, serialId, ticketNo, ticketPending, deliveryActive, flowActive, true, isLc3);
         }
 
         @Override public String toString() {
@@ -2591,7 +2637,7 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
 
             if (spec == null) return;
             spec.qtySuffix = formatQtyLabel(net, gross);
-            String base = tabLabelOf(spec.mediaShort, spec.node, spec.serialId);
+            String base = tabLabelOf(spec.mediaShort, spec.node, spec.serialId, spec.isLc3);
             updateRegisterTabLabel(spec.tabKey, base + spec.qtySuffix);
         } catch (Exception ignored) {}
     }
@@ -2631,7 +2677,7 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
 
             if (spec == null) return;
             spec.qtySuffix = null;
-            String base = tabLabelOf(spec.mediaShort, spec.node, spec.serialId);
+            String base = tabLabelOf(spec.mediaShort, spec.node, spec.serialId, spec.isLc3);
             updateRegisterTabLabel(spec.tabKey, base);
         } catch (Exception ignored) {}
     }
