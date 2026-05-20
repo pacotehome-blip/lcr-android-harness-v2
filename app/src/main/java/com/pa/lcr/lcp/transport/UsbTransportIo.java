@@ -39,9 +39,10 @@ public final class UsbTransportIo implements TransportIo {
     public int read(byte[] buffer, int timeoutMs) throws Exception {
         if (closed || port == null) return -1;
         if (buffer == null || buffer.length == 0) return 0;
-
         int to = (timeoutMs < 0) ? 60_000 : timeoutMs;
-        return port.read(buffer, to);
+        int n = port.read(buffer, to);
+        android.util.Log.d("UsbTransportIo", "read to=" + to + " n=" + n);
+        return n;
     }
 
     @Override
