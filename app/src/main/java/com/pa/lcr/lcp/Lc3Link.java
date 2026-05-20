@@ -418,27 +418,37 @@ public class Lc3Link extends LcpLink {
         byte[] screen = {(byte)0x1B,(byte)0x7C,(byte)0xE3,
                           (byte)0x07,(byte)0xE4,(byte)0xA9,(byte)0xCA};
         // Drain résidus avant de commencer
-        drainIo(io, 300);
+        drainIo(io, 400);
 
         for (int attempt = 0; attempt < 3; attempt++) {
             try {
-                io.write(screen, 1000);
-                // Accumule pendant 1200ms (9600 baud → ~120 bytes/s, réponse VT-100 ~200 bytes)
+                int written = io.write(screen, 1000);
+                android.util.Log.d("Lc3Link", "probe attempt=" + attempt + " write=" + written);
+
+                // Attente initiale : laisser le LC3 préparer sa réponse
+                // À 9600 baud : 7 bytes TX = ~7ms, réponse ~91 bytes = ~95ms + délai hardware
+                Thread.sleep(300);
+
+                // Lecture avec spinner (compatible mode async DataRouter où read() retourne 0)
                 byte[] result = new byte[0];
-                long deadline = System.currentTimeMillis() + 1200;
                 byte[] tmp = new byte[1024];
+                long deadline = System.currentTimeMillis() + 1500;
                 while (System.currentTimeMillis() < deadline) {
-                    int n = io.read(tmp, 80);
+                    int n = io.read(tmp, 100);
                     if (n > 0) {
-                        byte[] next = new byte[result.length + n];
-                        System.arraycopy(result, 0, next, 0, result.length);
-                        System.arraycopy(tmp, 0, next, result.length, n);
-                        result = next;
+                        byte[] combined = new byte[result.length + n];
+                        System.arraycopy(result, 0, combined, 0, result.length);
+                        System.arraycopy(tmp, 0, combined, result.length, n);
+                        result = combined;
                         // prolonge si données arrivent encore
-                        deadline = Math.max(deadline, System.currentTimeMillis() + 250);
+                        deadline = Math.max(deadline, System.currentTimeMillis() + 200);
+                    } else {
+                        // read() retourne 0 immédiatement (mode async) → sleep court
+                        Thread.sleep(20);
                     }
                 }
-                android.util.Log.d("Lc3Link", "probe attempt=" + attempt + " n=" + result.length);
+
+                android.util.Log.d("Lc3Link", "probe attempt=" + attempt + " total=" + result.length);
                 if (result.length > 0) {
                     String scr = decodeVt100(result);
                     android.util.Log.d("Lc3Link", "probe scr=" + scr.replace("\n", "|"));
@@ -453,7 +463,7 @@ public class Lc3Link extends LcpLink {
                     }
                 }
                 // Drain avant prochain essai
-                drainIo(io, 200);
+                drainIo(io, 300);
             } catch (Exception e) {
                 android.util.Log.w("Lc3Link", "probe ex: " + e.getMessage());
                 return false;
@@ -468,8 +478,10 @@ public class Lc3Link extends LcpLink {
             byte[] sink = new byte[1024];
             long dl = System.currentTimeMillis() + ms;
             while (System.currentTimeMillis() < dl) {
-                int n = io.read(sink, 30);
-                if (n <= 0) break;
+                int n = io.read(sink, 50);
+                if (n <= 0) {
+                    Thread.sleep(20);
+                }
             }
         } catch (Exception ignored) {}
     }
