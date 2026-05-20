@@ -97,11 +97,11 @@ public final class Lc3Link implements RegisterLink {
     // ── Dernier NET poll (pour DC_FLOW_ACTIVE) ────────────────────────────
     private volatile float  lastNetPoll    = -1f;
 
-    // ── Trace ─────────────────────────────────────────────────────────────
-    public interface TraceSink { void onTrace(String line); }
-    private volatile TraceSink traceSink;
-    public void setTraceSink(TraceSink sink) { this.traceSink = sink; }
-    private void t(String s) { TraceSink ts = traceSink; if (ts != null) ts.onTrace(s); }
+    // ── Trace — utilise LcpLink.TraceSink pour compatibilité RegisterLink ──
+    private volatile LcpLink.TraceSink traceSink;
+    @Override
+    public void setTraceSink(LcpLink.TraceSink sink) { this.traceSink = sink; }
+    private void t(String s) { LcpLink.TraceSink ts = traceSink; if (ts != null) ts.onTrace(s); }
 
     // ── Compat LcpLink (champs hérités) ───────────────────────────────────
     public static final class TransportException extends IOException {
