@@ -24,7 +24,7 @@ import java.util.Locale;
  *
  * ✅ Option B: tout passe par TransportIo (USB/BT/WiFi)
  */
-public final class LcpLink {
+public class LcpLink {
 
     // ===================== ✅ A3: TransportException =====================
     /** Exception typée pour erreurs de transport (I/O read/write/closed). */

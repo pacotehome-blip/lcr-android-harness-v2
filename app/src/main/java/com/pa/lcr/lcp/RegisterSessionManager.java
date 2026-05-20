@@ -195,6 +195,8 @@ public final class RegisterSessionManager {
         return null;
     }
 
+    private void t(String s) { /* log stub */ }
+
     // Lecture best-effort du serial (#80) sur un transport donné
     // Tente LCR-II (LcpLink) d'abord, puis LC3 (Lc3Link)
     private String probeSerial(TransportIo io, int nodeDec, int fromDec) {
@@ -267,13 +269,10 @@ public final class RegisterSessionManager {
         }
 
         // ── Détection automatique LCR-II vs LC3 ──────────────────
-        // Tenter LCR-II d'abord (opDeliveryStatus rapide)
-        // Si échec → tenter LC3 (E3 07 → "NET VOLUME LITRES")
+        // Retirer "final" de LcpLink pour permettre Lc3LinkAdapter extends LcpLink
         LcpLink link;
         if (Lc3Link.probe(io)) {
-            // LC3 détecté — wrapper dans un adaptateur LcpLink-compatible
-            Lc3Link lc3 = new Lc3Link(io);
-            link = new Lc3LinkAdapter(lc3, node, from);
+            link = new Lc3LinkAdapter(new Lc3Link(io), node, from);
         } else {
             link = new LcpLink(io, node, from, true);
         }
@@ -291,7 +290,7 @@ public final class RegisterSessionManager {
         // ✅ v7: cache serial (#80) best-effort pour ce node+transport
         String serialId0 = null;
         try {
-            byte[] b80 = link.opGetField(80, 3000); // LC3 peut être lent (~3s)
+            byte[] b80 = link.opGetField(80, 3000);
             if (b80 != null && b80.length > 0) {
                 String ss = new String(b80, StandardCharsets.UTF_8);
                 int nul = ss.indexOf('\0');
