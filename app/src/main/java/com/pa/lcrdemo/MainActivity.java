@@ -50,6 +50,7 @@ import com.hoho.android.usbserial.driver.UsbSerialProber;
 import com.pa.lcr.lcp.ApiFacade;
 import com.pa.lcr.lcp.ApiServer;
 import com.pa.lcr.lcp.LcpLink;
+import com.pa.lcr.lcp.Lc3Link;
 import com.pa.lcr.lcp.MultiRegisterApiFacadeImpl;
 import com.pa.lcr.lcp.RegisterSessionManager;
 import com.pa.lcr.lcp.log.LogBus;
