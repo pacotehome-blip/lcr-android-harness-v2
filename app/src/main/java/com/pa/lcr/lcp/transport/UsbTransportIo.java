@@ -1,16 +1,17 @@
 package com.pa.lcr.lcp.transport;
 
 import com.hoho.android.usbserial.driver.UsbSerialPort;
-import com.hoho.android.usbserial.util.SerialInputOutputManager;
 
 import java.util.concurrent.LinkedBlockingDeque;
 
 /**
- * UsbTransportIo — mode async via SerialInputOutputManager.
+ * UsbTransportIo — lecture async via thread dédié.
  *
- * port.read() direct retourne 0 immédiatement sur certains devices Android
- * (USB partagé MTP/ADB). On utilise SerialInputOutputManager (callback onNewData)
- * et on bufferise dans une LinkedBlockingDeque pour que read() soit bloquant.
+ * port.read() direct retourne 0 immédiatement sur Android 9 (Samsung SM-T397U)
+ * avec adaptateur PL2303. SerialInputOutputManager échoue sur get_status avec ce chip.
+ *
+ * Solution : thread de lecture dédié qui appelle port.read() en boucle continue
+ * et alimente un LinkedBlockingDeque. read() lit depuis ce buffer avec vrai blocage.
  */
 public final class UsbTransportIo implements TransportIo {
 
@@ -20,41 +21,43 @@ public final class UsbTransportIo implements TransportIo {
     private final long generationId;
     private volatile boolean closed = false;
 
-    // Buffer async : SerialInputOutputManager pousse les bytes ici via onNewData
+    // Buffer async : le thread de lecture pousse les bytes ici
     private final LinkedBlockingDeque<Byte> rxBuffer = new LinkedBlockingDeque<>(65536);
-    private SerialInputOutputManager ioManager;
+    private Thread readerThread;
 
     public UsbTransportIo(String key, UsbSerialPort port, String description, long generationId) {
-        this.key         = key;
-        this.port        = port;
-        this.description = (description != null ? description : "USB");
+        this.key          = key;
+        this.port         = port;
+        this.description  = (description != null ? description : "USB");
         this.generationId = generationId;
-        startIoManager();
+        startReaderThread();
     }
 
-    private void startIoManager() {
+    private void startReaderThread() {
         if (port == null) return;
-        try {
-            ioManager = new SerialInputOutputManager(port, new SerialInputOutputManager.Listener() {
-                @Override
-                public void onNewData(byte[] data) {
-                    if (data == null) return;
-                    android.util.Log.d("UsbTransportIo", "onNewData n=" + data.length);
-                    for (byte b : data) {
-                        rxBuffer.offerLast(b);
+        readerThread = new Thread(() -> {
+            byte[] buf = new byte[256];
+            android.util.Log.i("UsbTransportIo", "reader thread démarré");
+            while (!closed) {
+                try {
+                    int n = port.read(buf, 50);
+                    if (n > 0) {
+                        android.util.Log.d("UsbTransportIo", "reader n=" + n);
+                        for (int i = 0; i < n; i++) {
+                            rxBuffer.offerLast(buf[i]);
+                        }
+                    }
+                } catch (Exception e) {
+                    if (!closed) {
+                        android.util.Log.w("UsbTransportIo", "reader err: " + e.getMessage());
+                        try { Thread.sleep(100); } catch (Exception ignored) {}
                     }
                 }
-                @Override
-                public void onRunError(Exception e) {
-                    android.util.Log.w("UsbTransportIo", "IoManager error: " + e.getMessage());
-                }
-            });
-            ioManager.start();
-            android.util.Log.i("UsbTransportIo", "SerialInputOutputManager démarré");
-        } catch (Exception e) {
-            android.util.Log.w("UsbTransportIo", "startIoManager failed: " + e.getMessage());
-            ioManager = null;
-        }
+            }
+            android.util.Log.i("UsbTransportIo", "reader thread arrêté");
+        }, "UsbTransportIo-Reader");
+        readerThread.setDaemon(true);
+        readerThread.start();
     }
 
     @Override public String  getKey()          { return key; }
@@ -71,11 +74,8 @@ public final class UsbTransportIo implements TransportIo {
     }
 
     /**
-     * Lit jusqu'à buffer.length bytes depuis le buffer async.
-     * Bloque jusqu'à timeoutMs ms en attendant le premier byte,
-     * puis ramasse tous les bytes disponibles sans délai supplémentaire.
-     *
-     * Retourne 0 si timeout écoulé sans aucun byte (jamais -1 sauf fermé).
+     * Lit depuis le buffer alimenté par le thread de lecture.
+     * Bloque jusqu'à timeoutMs ms en attendant le premier byte.
      */
     @Override
     public int read(byte[] buffer, int timeoutMs) throws Exception {
@@ -85,7 +85,7 @@ public final class UsbTransportIo implements TransportIo {
         int to = (timeoutMs < 0) ? 60_000 : timeoutMs;
         long deadline = System.currentTimeMillis() + to;
 
-        // Attend le premier byte (bloquant avec deadline)
+        // Attend le premier byte
         int count = 0;
         while (count == 0 && System.currentTimeMillis() < deadline) {
             long remaining = deadline - System.currentTimeMillis();
@@ -96,7 +96,7 @@ public final class UsbTransportIo implements TransportIo {
             }
         }
 
-        // Ramasse les bytes restants disponibles immédiatement
+        // Ramasse le reste disponible immédiatement
         while (count < buffer.length) {
             Byte b = rxBuffer.pollFirst();
             if (b == null) break;
@@ -110,9 +110,7 @@ public final class UsbTransportIo implements TransportIo {
     public void close() {
         if (closed) return;
         closed = true;
-        try {
-            if (ioManager != null) ioManager.stop();
-        } catch (Exception ignored) {}
+        if (readerThread != null) readerThread.interrupt();
         try { port.close(); } catch (Exception ignored) {}
     }
 }
