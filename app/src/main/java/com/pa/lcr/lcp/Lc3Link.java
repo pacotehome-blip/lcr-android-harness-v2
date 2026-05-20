@@ -417,29 +417,43 @@ public class Lc3Link extends LcpLink {
     public static boolean probe(TransportIo io) {
         byte[] screen = {(byte)0x1B,(byte)0x7C,(byte)0xE3,
                           (byte)0x07,(byte)0xE4,(byte)0xA9,(byte)0xCA};
-        for (int attempt = 0; attempt < 2; attempt++) {
+        // Drain résidus avant de commencer
+        drainIo(io, 300);
+
+        for (int attempt = 0; attempt < 3; attempt++) {
             try {
                 io.write(screen, 1000);
-                Thread.sleep(600);
-                byte[] buf = new byte[1024];
-                int n = io.read(buf, 1000);
-                android.util.Log.d("Lc3Link", "probe attempt=" + attempt + " n=" + n);
-                if (n > 0) {
-                    byte[] data = new byte[n];
-                    System.arraycopy(buf, 0, data, 0, n);
-                    String scr = decodeVt100(data);
+                // Accumule pendant 1200ms (9600 baud → ~120 bytes/s, réponse VT-100 ~200 bytes)
+                byte[] result = new byte[0];
+                long deadline = System.currentTimeMillis() + 1200;
+                byte[] tmp = new byte[1024];
+                while (System.currentTimeMillis() < deadline) {
+                    int n = io.read(tmp, 80);
+                    if (n > 0) {
+                        byte[] next = new byte[result.length + n];
+                        System.arraycopy(result, 0, next, 0, result.length);
+                        System.arraycopy(tmp, 0, next, result.length, n);
+                        result = next;
+                        // prolonge si données arrivent encore
+                        deadline = Math.max(deadline, System.currentTimeMillis() + 250);
+                    }
+                }
+                android.util.Log.d("Lc3Link", "probe attempt=" + attempt + " n=" + result.length);
+                if (result.length > 0) {
+                    String scr = decodeVt100(result);
                     android.util.Log.d("Lc3Link", "probe scr=" + scr.replace("\n", "|"));
-                    if (scr.contains("NET VOLUME LITRES")   ||
-                        scr.contains("PUSH START TO RESUME")||
-                        scr.contains("PRESET STOP")         ||
-                        scr.contains("ACCESS NUMBER")       ||
-                        scr.contains("DISPLAY TERMINAL")    ||
+                    if (scr.contains("NET VOLUME LITRES")    ||
+                        scr.contains("PUSH START TO RESUME") ||
+                        scr.contains("PRESET STOP")          ||
+                        scr.contains("ACCESS NUMBER")        ||
+                        scr.contains("DISPLAY TERMINAL")     ||
                         scr.contains("VT-100")) {
                         android.util.Log.i("Lc3Link", "probe → LC3 ✅");
                         return true;
                     }
                 }
-                Thread.sleep(300);
+                // Drain avant prochain essai
+                drainIo(io, 200);
             } catch (Exception e) {
                 android.util.Log.w("Lc3Link", "probe ex: " + e.getMessage());
                 return false;
@@ -447,6 +461,17 @@ public class Lc3Link extends LcpLink {
         }
         android.util.Log.i("Lc3Link", "probe → pas LC3");
         return false;
+    }
+
+    private static void drainIo(TransportIo io, int ms) {
+        try {
+            byte[] sink = new byte[1024];
+            long dl = System.currentTimeMillis() + ms;
+            while (System.currentTimeMillis() < dl) {
+                int n = io.read(sink, 30);
+                if (n <= 0) break;
+            }
+        } catch (Exception ignored) {}
     }
 
     // ── probeAndIdentify ──────────────────────────────────────────────────

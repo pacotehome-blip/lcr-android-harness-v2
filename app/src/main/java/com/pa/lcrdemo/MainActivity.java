@@ -1225,6 +1225,13 @@ private void setupTabsTop() {
             final int TF = 300;
 
             // APRÈS — LC3 d'abord, LCR-II en fallback
+            // Drain résidus avant probe (évite faux négatif si session LCR-II active)
+            try { Thread.sleep(150); } catch (Exception ignored) {}
+            try {
+                byte[] sink = new byte[512];
+                while (ioFinal.read(sink, 50) > 0) { /* drain */ }
+            } catch (Exception ignored) {}
+
             Lc3Link.RegisterIdentity identity = null;
             try { identity = Lc3Link.probeAndIdentify(ioFinal); } catch (Exception ignored) {}
 
@@ -2443,6 +2450,29 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
 
     scanExec.execute(() -> {
         try {
+            // Probe LC3 d'abord
+            Lc3Link.RegisterIdentity identity = null;
+            try { identity = Lc3Link.probeAndIdentify(io); } catch (Exception ignored) {}
+
+            if (identity != null && identity.isLc3) {
+                int lc3Node = identity.nodeId > 0 ? identity.nodeId : node;
+                String serial = identity.serialId != null ? identity.serialId : "";
+                final String fSerial = serial;
+                final int fNode = lc3Node;
+                ui.post(() -> {
+                    if (out != null) out.setText("#Série : " + (fSerial.isEmpty() ? "—" : fSerial));
+                    if (!fSerial.isEmpty()) {
+                        upsertRegisterTabFromScan(transportKey, fNode, from, fSerial, true, true);
+                        refreshAllTabsMediaStatus();
+                    } else {
+                        toast(mediaShort + ": LC3 détecté mais serial vide");
+                    }
+                });
+                saveManualSlotToPrefs(usb, slot, lc3Node, serial);
+                return;
+            }
+
+            // Fallback LCR-II
             LcpLink tmp = new LcpLink(io, node, from, true);
             byte[] b80 = tmp.opGetField(80, 600);
             String serial = decodeAz(b80);
