@@ -269,9 +269,17 @@ public final class RegisterSessionManager {
         }
 
         // ── Détection automatique LCR-II vs LC3 ──────────────────
-        // Retirer "final" de LcpLink pour permettre Lc3LinkAdapter extends LcpLink
         LcpLink link;
-        if (Lc3Link.probe(io)) {
+        boolean isLc3 = false;
+        try {
+            isLc3 = Lc3Link.probe(io);
+        } catch (Exception probeEx) {
+            android.util.Log.w("RSM", "probe LC3 exception: " + probeEx.getMessage());
+        }
+        android.util.Log.i("RSM", "probe → " + (isLc3 ? "LC3 (Lc3LinkAdapter)" : "LCR-II (LcpLink)")
+                + "  transport=" + tk + "  node=" + node);
+
+        if (isLc3) {
             link = new Lc3LinkAdapter(new Lc3Link(io), node, from);
         } else {
             link = new LcpLink(io, node, from, true);
