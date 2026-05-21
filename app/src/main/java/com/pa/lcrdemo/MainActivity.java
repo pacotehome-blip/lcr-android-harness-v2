@@ -2610,16 +2610,36 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
         } catch (Exception ignored) {}
 
         // 3) si on n'a pas un serial plausible, tenter un probe rapide sur le nouveau transport
+        // ⚠️ probe doit se faire sur un background thread (io.read() bloquant)
         if (serial == null || serial.trim().isEmpty()) {
-            try {
-                TransportIo ioT = (mediaTransportManager != null) ? mediaTransportManager.getByKey(tk) : null;
-                if (ioT != null && ioT.isOpen()) {
-                    ProbeResult pr = probeRegisterReadable(ioT, node, 255, null);
-                    if (pr != null && pr.ok && pr.serial != null && isPlausibleSerial(pr.serial)) {
-                        serial = safeSerial(pr.serial);
+            final int fNodeBg = node;
+            final String tkBg = tk;
+            scanExec.execute(() -> {
+                String serialBg = null;
+                try {
+                    TransportIo ioT = (mediaTransportManager != null) ? mediaTransportManager.getByKey(tkBg) : null;
+                    if (ioT != null && ioT.isOpen()) {
+                        ProbeResult pr = probeRegisterReadable(ioT, fNodeBg, 255, null);
+                        if (pr != null && pr.ok && pr.serial != null && isPlausibleSerial(pr.serial)) {
+                            serialBg = safeSerial(pr.serial);
+                        }
                     }
+                } catch (Exception ignored) {}
+
+                if (serialBg == null || serialBg.trim().isEmpty() || !isPlausibleSerial(serialBg)) {
+                    ui.post(this::refreshAllTabsMediaStatus);
+                    return;
                 }
-            } catch (Exception ignored) {}
+
+                final String fSerial = serialBg;
+                ui.post(() -> {
+                    try {
+                        upsertRegisterTabFromScan(tkBg, fNodeBg, 255, fSerial, true);
+                        refreshAllTabsMediaStatus();
+                    } catch (Exception ignored) {}
+                });
+            });
+            return;
         }
 
         if (serial == null || serial.trim().isEmpty() || !isPlausibleSerial(serial)) {
