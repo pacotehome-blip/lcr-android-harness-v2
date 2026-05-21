@@ -1225,18 +1225,9 @@ private void setupTabsTop() {
             final int TF = 300;
 
             // APRÈS — LC3 d'abord, LCR-II en fallback
-            // Drain résidus avant probe (évite faux négatif si session LCR-II active)
-            try { Thread.sleep(150); } catch (Exception ignored) {}
-            try {
-                byte[] sink = new byte[512];
-                while (ioFinal.read(sink, 50) > 0) { /* drain */ }
-            } catch (Exception ignored) {}
-
             Lc3Link.RegisterIdentity identity = null;
             try { identity = Lc3Link.probeAndIdentify(ioFinal); } catch (Exception ignored) {}
 
-            // ── Auto-detect baud: si probe LC3 échoue sur USB, retenter à 9600 ──
-            // Le LCR-II tourne à 19200, le LC3 à 9600. On essaie 9600 si rien trouvé.
             boolean baudSwitchedTo9600 = false;
             if ((identity == null || !identity.isLc3) && "USB".equalsIgnoreCase(mediaShort)) {
                 try {
@@ -1246,10 +1237,6 @@ private void setupTabsTop() {
                         baudSwitchedTo9600 = true;
                         android.util.Log.i("MainActivity", "Scan: retry probe LC3 @ 9600 baud");
                         try { Thread.sleep(200); } catch (Exception ignored) {}
-                        try {
-                            byte[] sink = new byte[512];
-                            while (ioFinal.read(sink, 50) > 0) { /* drain */ }
-                        } catch (Exception ignored) {}
                         identity = Lc3Link.probeAndIdentify(ioFinal);
                     }
                 } catch (Exception ignored) {}
