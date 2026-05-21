@@ -1226,21 +1226,14 @@ private void setupTabsTop() {
 
             // APRÈS — LC3 d'abord, LCR-II en fallback
             Lc3Link.RegisterIdentity identity = null;
-            try { identity = Lc3Link.probeAndIdentify(ioFinal); } catch (Exception ignored) {}
-
-            boolean baudSwitchedTo9600 = false;
-            if ((identity == null || !identity.isLc3) && "USB".equalsIgnoreCase(mediaShort)) {
-                try {
-                    UsbSerialPort p = usbPort;
-                    if (p != null) {
-                        p.setParameters(9600, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
-                        baudSwitchedTo9600 = true;
-                        android.util.Log.i("MainActivity", "Scan: retry probe LC3 @ 9600 baud");
-                        try { Thread.sleep(200); } catch (Exception ignored) {}
-                        identity = Lc3Link.probeAndIdentify(ioFinal);
-                    }
-                } catch (Exception ignored) {}
+            // ⚠️ probe LC3 désactivé sur USB — port.read() retourne 0 sur ce device
+            // LC3 détectable via BT uniquement pour l'instant
+            if (!"USB".equalsIgnoreCase(mediaShort)) {
+                try { identity = Lc3Link.probeAndIdentify(ioFinal); } catch (Exception ignored) {}
             }
+
+            // Pas de retry baud sur USB non plus
+            boolean baudSwitchedTo9600 = false;
 
             if (identity != null && identity.isLc3) {
                 // LC3 détecté — pas de boucle node
@@ -1277,17 +1270,6 @@ private void setupTabsTop() {
                         }
                     } catch (Exception ignored) {}
                 }
-            }
-
-            // ── Restaure 19200 si LCR-II (ou rien) après le switch à 9600 ──
-            if (baudSwitchedTo9600 && (found.isEmpty() || found.values().iterator().next().isLc3 == false)) {
-                try {
-                    UsbSerialPort p = usbPort;
-                    if (p != null) {
-                        p.setParameters(19200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
-                        android.util.Log.i("MainActivity", "Scan: baud restauré 19200 (LCR-II)");
-                    }
-                } catch (Exception ignored) {}
             }
 
             final long scanFinishedMs = System.currentTimeMillis();
