@@ -269,11 +269,17 @@ public final class RegisterSessionManager {
         }
 
         // ── Détection automatique LCR-II vs LC3 ──────────────────
+        // ⚠️ probeAndIdentify() bloquant — ne jamais appeler sur le thread UI
         Lc3Link.RegisterIdentity identity = null;
-        try {
-            identity = Lc3Link.probeAndIdentify(io);
-        } catch (Exception probeEx) {
-            android.util.Log.w("RSM", "probeAndIdentify exception: " + probeEx.getMessage());
+        boolean isUiThread = android.os.Looper.myLooper() == android.os.Looper.getMainLooper();
+        if (!isUiThread) {
+            try {
+                identity = Lc3Link.probeAndIdentify(io);
+            } catch (Exception probeEx) {
+                android.util.Log.w("RSM", "probeAndIdentify exception: " + probeEx.getMessage());
+            }
+        } else {
+            android.util.Log.w("RSM", "getOrCreate sur UI thread — probe LC3 skippé pour éviter gel");
         }
 
         boolean isLc3 = (identity != null && identity.isLc3);
