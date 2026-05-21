@@ -429,22 +429,22 @@ public class Lc3Link extends LcpLink {
                 // À 9600 baud : 7 bytes TX = ~7ms, réponse ~91 bytes = ~95ms + délai hardware
                 Thread.sleep(300);
 
-                // Lecture avec spinner (compatible mode async DataRouter où read() retourne 0)
+                // Lecture avec spinner — compatible port.read() non-bloquant (USB PL2303)
+                // Utilise timeout=0 (non-bloquant) + sleep(5) comme BtSppTransportIo
                 byte[] result = new byte[0];
                 byte[] tmp = new byte[1024];
                 long deadline = System.currentTimeMillis() + 1500;
                 while (System.currentTimeMillis() < deadline) {
-                    int n = io.read(tmp, 100);
+                    int n = io.read(tmp, 0); // timeout=0 : non-bloquant
                     if (n > 0) {
+                        android.util.Log.d("Lc3Link", "probe got n=" + n);
                         byte[] combined = new byte[result.length + n];
                         System.arraycopy(result, 0, combined, 0, result.length);
                         System.arraycopy(tmp, 0, combined, result.length, n);
                         result = combined;
-                        // prolonge si données arrivent encore
                         deadline = Math.max(deadline, System.currentTimeMillis() + 200);
                     } else {
-                        // read() retourne 0 immédiatement (mode async) → sleep court
-                        Thread.sleep(20);
+                        Thread.sleep(5);
                     }
                 }
 
@@ -478,10 +478,8 @@ public class Lc3Link extends LcpLink {
             byte[] sink = new byte[1024];
             long dl = System.currentTimeMillis() + ms;
             while (System.currentTimeMillis() < dl) {
-                int n = io.read(sink, 50);
-                if (n <= 0) {
-                    Thread.sleep(20);
-                }
+                int n = io.read(sink, 0); // non-bloquant
+                if (n <= 0) Thread.sleep(5);
             }
         } catch (Exception ignored) {}
     }
@@ -514,12 +512,30 @@ public class Lc3Link extends LcpLink {
             lc3.backToMode1();
             lc3.gotoMode(8);
             String scr8 = lc3.readSpontaneous(1000);
+            android.util.Log.d("Lc3Link", "probeAndIdentify Mode8 scr=" + scr8.replace("\n", "|"));
             for (String line : scr8.split("\n")) {
                 if (line.contains("APPLICATION")) {
-                    model    = line.trim();
-                    serialId = "LC3-" + nodeId;
+                    model = line.trim();
+                    serialId = "LC3-" + nodeId; // fallback si SERIAL NUMBER non trouvé
                     break;
                 }
+            }
+            // Scroller pour trouver SERIAL NUMBER (2 champs après APPLICATION)
+            for (int i = 0; i < 4; i++) {
+                lc3.rawWrite(new byte[]{ VT_DOWN }); sleep(300);
+                String scr = lc3.readSpontaneous(800);
+                android.util.Log.d("Lc3Link", "probeAndIdentify Mode8 field" + i + "=" + scr.replace("\n", "|"));
+                for (String line : scr.split("\n")) {
+                    if (line.contains("SERIAL NUMBER")) {
+                        Matcher m = Pattern.compile("(\\d+)\\s*\\.?\\s*$").matcher(line);
+                        if (m.find()) {
+                            serialId = m.group(1).trim();
+                            android.util.Log.i("Lc3Link", "SERIAL NUMBER trouvé: " + serialId);
+                        }
+                        break;
+                    }
+                }
+                if (!serialId.startsWith("LC3-") && !serialId.equals("LC3")) break;
             }
             lc3.backToMode1();
         } catch (Exception e) {
