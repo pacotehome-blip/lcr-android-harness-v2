@@ -513,30 +513,35 @@ public class Lc3Link extends LcpLink {
             lc3.gotoMode(8);
             String scr8 = lc3.readSpontaneous(1000);
             android.util.Log.d("Lc3Link", "probeAndIdentify Mode8 scr=" + scr8.replace("\n", "|"));
-            for (String line : scr8.split("\n")) {
-                if (line.contains("APPLICATION")) {
-                    model = line.trim();
-                    serialId = "LC3-" + nodeId; // fallback si SERIAL NUMBER non trouvé
+
+            // SERIAL NUMBER est avant le champ courant → scroller UP
+            // VT_UP = Ctrl+U = 0x15 (champ précédent)
+            byte VT_UP = 0x15;
+            for (int i = 0; i < 6; i++) {
+                lc3.rawWrite(new byte[]{ VT_UP }); sleep(300);
+                String scr = lc3.readSpontaneous(800);
+                android.util.Log.d("Lc3Link", "probeAndIdentify Mode8 up" + i + "=" + scr.replace("\n", "|"));
+                if (model.isEmpty() && scr.contains("APPLICATION")) {
+                    for (String line : scr.split("\n")) {
+                        if (line.contains("APPLICATION")) { model = line.trim(); break; }
+                    }
+                }
+                if (scr.contains("SERIAL NUMBER")) {
+                    for (String line : scr.split("\n")) {
+                        if (line.contains("SERIAL NUMBER")) {
+                            Matcher m = Pattern.compile("(\\d+)\\s*\\.?\\s*$").matcher(line);
+                            if (m.find()) {
+                                serialId = m.group(1).trim();
+                                android.util.Log.i("Lc3Link", "SERIAL NUMBER trouvé: " + serialId);
+                            }
+                            break;
+                        }
+                    }
                     break;
                 }
             }
-            // Scroller pour trouver SERIAL NUMBER (2 champs après APPLICATION)
-            for (int i = 0; i < 4; i++) {
-                lc3.rawWrite(new byte[]{ VT_DOWN }); sleep(300);
-                String scr = lc3.readSpontaneous(800);
-                android.util.Log.d("Lc3Link", "probeAndIdentify Mode8 field" + i + "=" + scr.replace("\n", "|"));
-                for (String line : scr.split("\n")) {
-                    if (line.contains("SERIAL NUMBER")) {
-                        Matcher m = Pattern.compile("(\\d+)\\s*\\.?\\s*$").matcher(line);
-                        if (m.find()) {
-                            serialId = m.group(1).trim();
-                            android.util.Log.i("Lc3Link", "SERIAL NUMBER trouvé: " + serialId);
-                        }
-                        break;
-                    }
-                }
-                if (!serialId.startsWith("LC3-") && !serialId.equals("LC3")) break;
-            }
+            // Fallback si SERIAL NUMBER non trouvé
+            if (serialId.equals("LC3") && nodeId > 0) serialId = "LC3-" + nodeId;
             lc3.backToMode1();
         } catch (Exception e) {
             android.util.Log.w("Lc3Link", "probeAndIdentify: " + e.getMessage());
