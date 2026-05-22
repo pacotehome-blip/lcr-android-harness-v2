@@ -1635,10 +1635,14 @@ private void scanUsb() {
         try {
             if (mediaTransportManager != null) {
                 mediaTransportManager.onUsbReady(null, usbPort, "USB prêt (MainActivity)");
-                // ✅ CONFIGURE: média activé -> rebind tab sur USB
                 onConfigureMediaActivated(MediaTransportManager.KEY_USB, "USB_READY_RX");
             }
         } catch (Exception ignored) {}
+
+        // ✅ Scan automatique au branchement — délai 800ms pour laisser le port s'initialiser
+        ui.postDelayed(() -> {
+            try { scanRegistersUsbOnly(); } catch (Exception ignored) {}
+        }, 800);
 
         logMedia1("USB Ready");
     }
@@ -2621,39 +2625,7 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
             }
         } catch (Exception ignored) {}
 
-        // 3) si on n'a pas un serial plausible, tenter un probe rapide sur le nouveau transport
-        // ⚠️ probe doit se faire sur un background thread (io.read() bloquant)
-        if (serial == null || serial.trim().isEmpty()) {
-            final int fNodeBg = node;
-            final String tkBg = tk;
-            scanExec.execute(() -> {
-                String serialBg = null;
-                try {
-                    TransportIo ioT = (mediaTransportManager != null) ? mediaTransportManager.getByKey(tkBg) : null;
-                    if (ioT != null && ioT.isOpen()) {
-                        ProbeResult pr = probeRegisterReadable(ioT, fNodeBg, 255, null);
-                        if (pr != null && pr.ok && pr.serial != null && isPlausibleSerial(pr.serial)) {
-                            serialBg = safeSerial(pr.serial);
-                        }
-                    }
-                } catch (Exception ignored) {}
-
-                if (serialBg == null || serialBg.trim().isEmpty() || !isPlausibleSerial(serialBg)) {
-                    ui.post(this::refreshAllTabsMediaStatus);
-                    return;
-                }
-
-                final String fSerial = serialBg;
-                ui.post(() -> {
-                    try {
-                        upsertRegisterTabFromScan(tkBg, fNodeBg, 255, fSerial, true);
-                        refreshAllTabsMediaStatus();
-                    } catch (Exception ignored) {}
-                });
-            });
-            return;
-        }
-
+        // 3) si on n'a pas un serial plausible → rien à rebinder, le scan auto s'en charge
         if (serial == null || serial.trim().isEmpty() || !isPlausibleSerial(serial)) {
             ui.post(this::refreshAllTabsMediaStatus);
             return;
