@@ -809,13 +809,19 @@ private void setupTabsTop() {
         try {
             if (mediaTransportManager == null) return false;
             if (transportKey == null || transportKey.trim().isEmpty()) return false;
-            TransportIo io = mediaTransportManager.getByKey(transportKey.trim());
-            return io != null && io.isOpen();
+            // Vérifie le statut via snapshot (plus fiable que io.isOpen() pour BT)
+            for (TransportSnapshot s : mediaTransportManager.listSnapshots()) {
+                if (s == null || s.key == null) continue;
+                if (s.key.equalsIgnoreCase(transportKey.trim())) {
+                    return s.status == TransportStatus.READY
+                        || s.status == TransportStatus.ACTIVE;
+                }
+            }
+            return false;
         } catch (Exception e) {
             return false;
         }
     }
-
     private void persistTabMediaStatusForApi(TabSpec spec, boolean ready, String media) {
         try {
             if (deliveryStore == null || spec == null) return;
