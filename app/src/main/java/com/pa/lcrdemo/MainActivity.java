@@ -788,7 +788,7 @@ private void setupTabsTop() {
 
     private static String tabKeyOf(String mediaShort, int node, String serialId) {
         String m = (mediaShort == null || mediaShort.trim().isEmpty()) ? "—" : mediaShort.trim();
-        return m + ":" + (node & 0xFF) + ":" + safeSerial(serialId);
+                return m + ":" + node + ":" + safeSerial(serialId);
     }
 
     private static String regKeyOf(int node, String serialId) {
