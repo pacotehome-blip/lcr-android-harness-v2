@@ -2690,8 +2690,7 @@ private void ensureActiveTransport(String transportKey, String reason) {
             if (mediaTransportManager == null) mediaTransportManager = MediaTransportManager.get(this);
             if (mediaTransportManager != null) {
                 mediaTransportManager.activateExclusive(transportKey.trim(), (reason != null ? reason : "UI"));
+                ui.post(this::refreshAllTabsMediaStatus);
             }
         } catch (Exception ignored) {}
     }
-
-}
