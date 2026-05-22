@@ -809,14 +809,12 @@ private void setupTabsTop() {
         try {
             if (mediaTransportManager == null) return false;
             if (transportKey == null || transportKey.trim().isEmpty()) return false;
-            for (TransportSnapshot s : mediaTransportManager.listSnapshots()) {
-                if (s == null || s.key == null) continue;
-                if (s.key.equalsIgnoreCase(transportKey.trim())) {
-                    return s.status == TransportStatus.READY
-                        || s.status == TransportStatus.CONNECTED;
-                }
-            }
-            return false;
+            TransportIo io = mediaTransportManager.getByKey(transportKey.trim());
+            if (io == null || !io.isOpen()) return false;
+            // Si un autre transport est actif exclusif, celui-ci est OFF
+            String activeKey = mediaTransportManager.getActiveKey();
+            if (activeKey != null && !activeKey.equalsIgnoreCase(transportKey.trim())) return false;
+            return true;
         } catch (Exception e) {
             return false;
         }
