@@ -911,9 +911,13 @@ private void setupTabsTop() {
      * Règle: clear ciblé A1 si même (node,serial) apparaît sur un autre média.
      */
     private void upsertRegisterTabFromScan(String transportKey, int node, int from, String serialId, boolean focus) {
-        upsertRegisterTabFromScan(transportKey, node, from, serialId, focus, false);
+        // Préserver isLc3 du tab existant si connu
+        String mediaShort = mediaShortFromTransportKey(transportKey);
+        String tabKey = tabKeyOf(mediaShort, node, safeSerial(serialId));
+        TabSpec existing = tabsByKey.get(tabKey);
+        boolean isLc3 = (existing != null) && existing.isLc3;
+        upsertRegisterTabFromScan(transportKey, node, from, serialId, focus, isLc3);
     }
-
     private void upsertRegisterTabFromScan(String transportKey, int node, int from, String serialId, boolean focus, boolean isLc3) {
         if (node < 1 || (!isLc3 && node > 250)) return;
         if (from < 0 || from > 255) from = 255;
