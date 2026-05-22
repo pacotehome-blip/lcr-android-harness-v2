@@ -2684,7 +2684,7 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
         } catch (Exception ignored) {}
     }
 
-private void ensureActiveTransport(String transportKey, String reason) {
+    private void ensureActiveTransport(String transportKey, String reason) {
         try {
             if (transportKey == null || transportKey.trim().isEmpty()) return;
             if (mediaTransportManager == null) mediaTransportManager = MediaTransportManager.get(this);
@@ -2694,3 +2694,4 @@ private void ensureActiveTransport(String transportKey, String reason) {
             }
         } catch (Exception ignored) {}
     }
+}
