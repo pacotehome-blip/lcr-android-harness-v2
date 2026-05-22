@@ -814,7 +814,7 @@ private void setupTabsTop() {
                 if (s == null || s.key == null) continue;
                 if (s.key.equalsIgnoreCase(transportKey.trim())) {
                     return s.status == TransportStatus.READY
-                        || s.status == TransportStatus.ACTIVE;
+                        || s.status == TransportStatus.CONNECTED;
                 }
             }
             return false;
