@@ -809,19 +809,13 @@ private void setupTabsTop() {
         try {
             if (mediaTransportManager == null) return false;
             if (transportKey == null || transportKey.trim().isEmpty()) return false;
-            // Vérifie le statut via snapshot (plus fiable que io.isOpen() pour BT)
-            for (TransportSnapshot s : mediaTransportManager.listSnapshots()) {
-                if (s == null || s.key == null) continue;
-                if (s.key.equalsIgnoreCase(transportKey.trim())) {
-                    return s.status == TransportStatus.READY
-                        || s.status == TransportStatus.CONNECTED;
-                }
-            }
-            return false;
+            TransportIo io = mediaTransportManager.getByKey(transportKey.trim());
+            return io != null && io.isOpen();
         } catch (Exception e) {
             return false;
         }
     }
+
     private void persistTabMediaStatusForApi(TabSpec spec, boolean ready, String media) {
         try {
             if (deliveryStore == null || spec == null) return;
@@ -1247,8 +1241,8 @@ private void setupTabsTop() {
                     ticketNo = u32beDec(lc3tmp.opGetField(23, 3000));
                 } catch (Exception ignored) {}
                 found.put(lc3Node, new NodeScanItem(
-                    lc3Node, serialId, ticketNo,
-                    false, false, false, false, true
+                    lc3Node, "[LC3] " + serialId, ticketNo,
+                    false, false, false, false
                 ));
                 android.util.Log.i("MainActivity", "Scan LC3: node=" + lc3Node
                         + " serial=" + serialId);
@@ -2253,7 +2247,18 @@ private boolean ensureBtConnectPermission() {
         ui.post(() -> {
             if (txtBtStatus != null) txtBtStatus.setText("BT : DISCONNECTED");
             updateMediaStatusUi();
-            refreshAllTabsMediaStatus();
+            // Forcer tous les tabs BT à (OFF)
+            try {
+                for (TabSpec s : tabsByKey.values()) {
+                    if (s == null) continue;
+                    String ms = mediaShortFromTransportKey(s.transportKey);
+                    if ("BT".equalsIgnoreCase(ms)) {
+                        updateRegisterTabLabel(s.tabKey,
+                            tabLabelOf(ms + "(OFF)", s.node, s.serialId, s.isLc3)
+                            + (s.qtySuffix != null ? s.qtySuffix : ""));
+                    }
+                }
+            } catch (Exception ignored) {}
         });
 
         logMedia1("BT Disconnect: OK");
@@ -2691,14 +2696,14 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
         } catch (Exception ignored) {}
     }
 
-    private void ensureActiveTransport(String transportKey, String reason) {
+private void ensureActiveTransport(String transportKey, String reason) {
         try {
             if (transportKey == null || transportKey.trim().isEmpty()) return;
             if (mediaTransportManager == null) mediaTransportManager = MediaTransportManager.get(this);
             if (mediaTransportManager != null) {
                 mediaTransportManager.activateExclusive(transportKey.trim(), (reason != null ? reason : "UI"));
-                ui.post(this::refreshAllTabsMediaStatus);
             }
         } catch (Exception ignored) {}
     }
+
 }
