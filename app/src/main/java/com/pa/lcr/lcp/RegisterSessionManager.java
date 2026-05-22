@@ -71,20 +71,20 @@ public final class RegisterSessionManager {
 
     // ✅ v7: clé registre = node#serial (serial = #80)
     private static String regKey(int nodeDec, String serialId) {
-        int node = nodeDec & 0xFF;
+        int node = nodeDec; // LC3: node peut être > 255
         String s = (serialId == null) ? "" : serialId.trim();
         return node + "#" + s;
     }
 
     /** Permet au scan/validate d'enregistrer le serial attendu pour un node. */
     public synchronized void bindExpectedSerial(int nodeDec, String serialId) {
-        int node = nodeDec & 0xFF;
+        int node = nodeDec; // LC3: node peut être > 255
         if (serialId == null || serialId.trim().isEmpty()) return;
         expectedSerialByNode.put(node, serialId.trim());
     }
 
     public synchronized String getExpectedSerial(int nodeDec) {
-        int node = nodeDec & 0xFF;
+        int node = nodeDec; // LC3: node peut être > 255
         return expectedSerialByNode.get(node);
     }
     /** ✅ Rattrapage UI — retourne toutes les sessions connues (node + serial + transportKey) */
@@ -115,7 +115,7 @@ public final class RegisterSessionManager {
         return result;
     }
     private static String key(String transportKey, int nodeDec) {
-        int node = nodeDec & 0xFF;
+        int node = nodeDec; // LC3: node peut être > 255
         String k = (transportKey == null || transportKey.trim().isEmpty()) ? "?" : transportKey.trim();
         return k + ":" + node;
     }
@@ -126,7 +126,7 @@ public final class RegisterSessionManager {
     // - Sinon: réutiliser une session existante unique pour ce node
     // =========================================================
     public synchronized DeliveryController resolveOrCreateForNode(int nodeDec, int fromDec) {
-        int node = nodeDec & 0xFF;
+        int node = nodeDec; // LC3: node peut être > 255
         int from = fromDec & 0xFF;
 
         MediaTransportManager mgr = MediaTransportManager.get(appCtx);
@@ -248,7 +248,7 @@ public final class RegisterSessionManager {
     }
 
     public synchronized DeliveryController getOrCreate(String transportKey, int nodeDec, int fromDec, TransportIo io) {
-        int node = nodeDec & 0xFF;
+        int node = nodeDec; // LC3: node peut être > 255
         int from = fromDec & 0xFF;
         if (io == null || !io.isOpen()) return null;
 
@@ -380,7 +380,7 @@ public final class RegisterSessionManager {
     @Deprecated
     public synchronized void attachUiListener(int nodeDec, DeliveryControllerPort.Listener uiListener) {
         if (uiListener == null) return;
-        int node = nodeDec & 0xFF;
+        int node = nodeDec; // LC3: node peut être > 255
         for (Map.Entry<String, NodeSession> e : sessions.entrySet()) {
             if (e == null) continue;
             String k = e.getKey();
@@ -396,7 +396,7 @@ public final class RegisterSessionManager {
     @Deprecated
     public synchronized void detachUiListener(int nodeDec, DeliveryControllerPort.Listener uiListener) {
         if (uiListener == null) return;
-        int node = nodeDec & 0xFF;
+        int node = nodeDec; // LC3: node peut être > 255
         for (Map.Entry<String, NodeSession> e : sessions.entrySet()) {
             if (e == null) continue;
             String k = e.getKey();
