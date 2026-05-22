@@ -186,15 +186,21 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
         final int node;
         final int from;
         final String serialId;
+        final boolean isLc3;
         String qtySuffix; // " | N=.. G=.."
 
         TabSpec(String tabKey, String mediaShort, String transportKey, int node, int from, String serialId) {
+            this(tabKey, mediaShort, transportKey, node, from, serialId, false);
+        }
+
+        TabSpec(String tabKey, String mediaShort, String transportKey, int node, int from, String serialId, boolean isLc3) {
             this.tabKey = tabKey;
             this.mediaShort = mediaShort;
             this.transportKey = transportKey;
             this.node = node;
             this.from = from;
             this.serialId = serialId;
+            this.isLc3 = isLc3;
         }
     }
 
@@ -790,8 +796,13 @@ private void setupTabsTop() {
     }
 
     private String tabLabelOf(String mediaShort, int node, String serialId) {
+        return tabLabelOf(mediaShort, node, serialId, false);
+    }
+
+    private String tabLabelOf(String mediaShort, int node, String serialId, boolean isLc3) {
         String m = (mediaShort == null || mediaShort.trim().isEmpty()) ? "—" : mediaShort.trim();
-        return m + " - " + serialShort(serialId) + " - " + (node & 0xFF);
+        String badge = isLc3 ? "[LC3] " : "[LCR-II] ";
+        return m + " - " + badge + serialShort(serialId) + " - " + node;
     }
 
     private boolean isTransportReady(String transportKey) {
@@ -1437,9 +1448,15 @@ private void setupTabsTop() {
         final boolean deliveryActive;
         final boolean flowActive;
         final boolean isDefault;
+        final boolean isLc3;
 
         NodeScanItem(int lcrnode, String serialId, String ticketNo,
                      boolean ticketPending, boolean deliveryActive, boolean flowActive, boolean isDefault) {
+            this(lcrnode, serialId, ticketNo, ticketPending, deliveryActive, flowActive, isDefault, false);
+        }
+
+        NodeScanItem(int lcrnode, String serialId, String ticketNo,
+                     boolean ticketPending, boolean deliveryActive, boolean flowActive, boolean isDefault, boolean isLc3) {
             this.lcrnode = lcrnode;
             this.serialId = serialId;
             this.ticketNo = ticketNo;
@@ -1447,12 +1464,13 @@ private void setupTabsTop() {
             this.deliveryActive = deliveryActive;
             this.flowActive = flowActive;
             this.isDefault = isDefault;
+            this.isLc3 = isLc3;
         }
 
         static NodeScanItem default250() { return new NodeScanItem(250, "", "", false, false, false, true); }
 
         NodeScanItem asDefault() {
-            return new NodeScanItem(lcrnode, serialId, ticketNo, ticketPending, deliveryActive, flowActive, true);
+            return new NodeScanItem(lcrnode, serialId, ticketNo, ticketPending, deliveryActive, flowActive, true, isLc3);
         }
 
         @Override public String toString() {
