@@ -1241,8 +1241,8 @@ private void setupTabsTop() {
                     ticketNo = u32beDec(lc3tmp.opGetField(23, 3000));
                 } catch (Exception ignored) {}
                 found.put(lc3Node, new NodeScanItem(
-                    lc3Node, "[LC3] " + serialId, ticketNo,
-                    false, false, false, false
+                    lc3Node, serialId, ticketNo,
+                    false, false, false, false, true
                 ));
                 android.util.Log.i("MainActivity", "Scan LC3: node=" + lc3Node
                         + " serial=" + serialId);
