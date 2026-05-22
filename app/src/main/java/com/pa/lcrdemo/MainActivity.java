@@ -856,8 +856,8 @@ private void setupTabsTop() {
         String media = mediaShortFromTransportKey(spec.transportKey);
         String mediaLabel = ready ? media : (media + "(OFF)");
 
-        // ✅ Format: BT(OFF) - 123456 - 250
-        updateRegisterTabLabel(tabKey, tabLabelOf(mediaLabel, spec.node, spec.serialId) + (spec.qtySuffix != null ? spec.qtySuffix : ""));
+        // ✅ Format: BT(OFF) - [LC3] 123456 - 250
+        updateRegisterTabLabel(tabKey, tabLabelOf(mediaLabel, spec.node, spec.serialId, spec.isLc3) + (spec.qtySuffix != null ? spec.qtySuffix : ""));
 
         try {
             Fragment f = getSupportFragmentManager().findFragmentByTag("regtab_" + tabKey);
@@ -911,7 +911,11 @@ private void setupTabsTop() {
      * Règle: clear ciblé A1 si même (node,serial) apparaît sur un autre média.
      */
     private void upsertRegisterTabFromScan(String transportKey, int node, int from, String serialId, boolean focus) {
-        if (node < 1 || node > 250) return;
+        upsertRegisterTabFromScan(transportKey, node, from, serialId, focus, false);
+    }
+
+    private void upsertRegisterTabFromScan(String transportKey, int node, int from, String serialId, boolean focus, boolean isLc3) {
+        if (node < 1 || (!isLc3 && node > 250)) return;
         if (from < 0 || from > 255) from = 255;
         String mediaShort = mediaShortFromTransportKey(transportKey);
         String serial = safeSerial(serialId);
@@ -920,26 +924,29 @@ private void setupTabsTop() {
         // 1) retirer les tabs legacy (serial vide) dès qu'on trouve au moins un registre
         removeAllUnknownSerialTabsBestEffort();
 
-        // 2) clear ciblé si migration (même node+serial, média différent)
-        String regKey = regKeyOf(node, serial);
+        // 2) clear ciblé si migration (même node+serial+type, média différent)
+        String regKey = regKeyOf(node, serial) + (isLc3 ? ":lc3" : ":lcr");
         String newTabKey = tabKeyOf(mediaShort, node, serial);
         String oldTabKey = regKeyToTabKey.get(regKey);
         if (oldTabKey != null && !oldTabKey.equals(newTabKey)) {
-            removeTabAndFragment(oldTabKey, "migrated to " + newTabKey);
+            TabSpec oldSpec = tabsByKey.get(oldTabKey);
+            if (oldSpec != null && oldSpec.isLc3 == isLc3) {
+                removeTabAndFragment(oldTabKey, "migrated to " + newTabKey);
+            }
         }
         regKeyToTabKey.put(regKey, newTabKey);
 
         // 3) upsert tab
         TabSpec existing = tabsByKey.get(newTabKey);
         if (existing == null) {
-            TabSpec spec = new TabSpec(newTabKey, mediaShort, transportKey, node, from, serial);
+            TabSpec spec = new TabSpec(newTabKey, mediaShort, transportKey, node, from, serial, isLc3);
             tabsByKey.put(newTabKey, spec);
             addRegisterTabUi(spec);
-            logUi(null, "TAB registre ajouté: " + tabLabelOf(mediaShort, node, serial));
+            logUi(null, "TAB registre ajouté: " + tabLabelOf(mediaShort, node, serial, isLc3));
         } else {
-            TabSpec spec = new TabSpec(newTabKey, mediaShort, transportKey, node, from, serial);
+            TabSpec spec = new TabSpec(newTabKey, mediaShort, transportKey, node, from, serial, isLc3);
             tabsByKey.put(newTabKey, spec);
-            updateRegisterTabLabel(newTabKey, tabLabelOf(mediaShort, node, serial));
+            updateRegisterTabLabel(newTabKey, tabLabelOf(mediaShort, node, serial, isLc3));
         }
 
         if (focus) {
@@ -968,7 +975,7 @@ private void setupTabsTop() {
     private void addRegisterTabUi(TabSpec spec) {
         if (tabRegisters == null || spec == null) return;
         TabLayout.Tab t = tabRegisters.newTab();
-        t.setText(tabLabelOf(spec.mediaShort, spec.node, spec.serialId));
+        t.setText(tabLabelOf(spec.mediaShort, spec.node, spec.serialId, spec.isLc3));
         t.setTag(spec.tabKey);
         tabRegisters.addTab(t, false);
     }
@@ -1011,7 +1018,7 @@ private void setupTabsTop() {
         currentRegNode = spec.node;
 
         if (txtActiveNode != null) {
-            txtActiveNode.setText("Node actif : " + tabLabelOf(spec.mediaShort, spec.node, spec.serialId));
+            txtActiveNode.setText("Node actif : " + tabLabelOf(spec.mediaShort, spec.node, spec.serialId, spec.isLc3));
         }
 
         FragmentManager fm = getSupportFragmentManager();
@@ -1220,12 +1227,10 @@ private void setupTabsTop() {
             final int T28 = 300;
             final int TF = 300;
 
-            // APRÈS — LC3 d'abord, LCR-II en fallback (BT seulement)
+            // APRÈS — LC3 d'abord, LCR-II en fallback
             Lc3Link.RegisterIdentity identity = null;
-            if (!"USB".equalsIgnoreCase(mediaShort)) {
-                try { identity = Lc3Link.probeAndIdentify(ioFinal); } catch (Exception ignored) {}
-            }
-            
+            try { identity = Lc3Link.probeAndIdentify(ioFinal); } catch (Exception ignored) {}
+
             if (identity != null && identity.isLc3) {
                 // LC3 détecté — pas de boucle node
                 int    lc3Node  = identity.nodeId > 0 ? identity.nodeId : 2524;
@@ -1294,12 +1299,12 @@ private void setupTabsTop() {
                             if (it == null) continue;
                             boolean focus = false;
                             if (!focused && it.lcrnode == 250) focus = true;
-                            upsertRegisterTabFromScan(tk, it.lcrnode, 255, it.serialId, focus);
+                            upsertRegisterTabFromScan(tk, it.lcrnode, 255, it.serialId, focus, it.isLc3);
                             if (focus) focused = true;
                         }
                         if (!focused) {
                             NodeScanItem first = found.values().iterator().next();
-                            if (first != null) upsertRegisterTabFromScan(tk, first.lcrnode, 255, first.serialId, true);
+                            if (first != null) upsertRegisterTabFromScan(tk, first.lcrnode, 255, first.serialId, true, first.isLc3);
                         }
                     }
                 } finally {
@@ -2634,7 +2639,7 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
 
             if (spec == null) return;
             spec.qtySuffix = formatQtyLabel(net, gross);
-            String base = tabLabelOf(spec.mediaShort, spec.node, spec.serialId);
+            String base = tabLabelOf(spec.mediaShort, spec.node, spec.serialId, spec.isLc3);
             updateRegisterTabLabel(spec.tabKey, base + spec.qtySuffix);
         } catch (Exception ignored) {}
     }
@@ -2674,7 +2679,7 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
 
             if (spec == null) return;
             spec.qtySuffix = null;
-            String base = tabLabelOf(spec.mediaShort, spec.node, spec.serialId);
+            String base = tabLabelOf(spec.mediaShort, spec.node, spec.serialId, spec.isLc3);
             updateRegisterTabLabel(spec.tabKey, base);
         } catch (Exception ignored) {}
     }
