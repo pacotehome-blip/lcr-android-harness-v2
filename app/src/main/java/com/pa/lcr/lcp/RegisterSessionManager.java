@@ -71,20 +71,20 @@ public final class RegisterSessionManager {
 
     // ✅ v7: clé registre = node#serial (serial = #80)
     private static String regKey(int nodeDec, String serialId) {
-        int node = nodeDec; // LC3: node peut être > 255
+        int node = nodeDec & 0xFF;
         String s = (serialId == null) ? "" : serialId.trim();
         return node + "#" + s;
     }
 
     /** Permet au scan/validate d'enregistrer le serial attendu pour un node. */
     public synchronized void bindExpectedSerial(int nodeDec, String serialId) {
-        int node = nodeDec; // LC3: node peut être > 255
+        int node = nodeDec & 0xFF;
         if (serialId == null || serialId.trim().isEmpty()) return;
         expectedSerialByNode.put(node, serialId.trim());
     }
 
     public synchronized String getExpectedSerial(int nodeDec) {
-        int node = nodeDec; // LC3: node peut être > 255
+        int node = nodeDec & 0xFF;
         return expectedSerialByNode.get(node);
     }
     /** ✅ Rattrapage UI — retourne toutes les sessions connues (node + serial + transportKey) */
@@ -115,7 +115,7 @@ public final class RegisterSessionManager {
         return result;
     }
     private static String key(String transportKey, int nodeDec) {
-        int node = nodeDec; // LC3: node peut être > 255
+        int node = nodeDec & 0xFF;
         String k = (transportKey == null || transportKey.trim().isEmpty()) ? "?" : transportKey.trim();
         return k + ":" + node;
     }
@@ -126,7 +126,7 @@ public final class RegisterSessionManager {
     // - Sinon: réutiliser une session existante unique pour ce node
     // =========================================================
     public synchronized DeliveryController resolveOrCreateForNode(int nodeDec, int fromDec) {
-        int node = nodeDec; // LC3: node peut être > 255
+        int node = nodeDec & 0xFF;
         int from = fromDec & 0xFF;
 
         MediaTransportManager mgr = MediaTransportManager.get(appCtx);
@@ -213,21 +213,18 @@ public final class RegisterSessionManager {
             }
         } catch (Exception ignored) {}
 
-        // Essai LC3 — seulement sur BT (USB: port.read() retourne 0 sur ce device)
-        boolean isUsb = io != null && "USB".equalsIgnoreCase(io.getKey());
-        if (!isUsb) {
-            try {
-                if (Lc3Link.probe(io)) {
-                    Lc3Link lc3 = new Lc3Link(io);
-                    byte[] b = lc3.opGetField(80, 3000);
-                    if (b != null && b.length > 0) {
-                        String s = new String(b, StandardCharsets.UTF_8).trim();
-                        if (!s.isEmpty()) return "LC3-" + s;
-                    }
-                    return "LC3";
+        // Essai LC3
+        try {
+            if (Lc3Link.probe(io)) {
+                Lc3Link lc3 = new Lc3Link(io);
+                byte[] b = lc3.opGetField(80, 3000);
+                if (b != null && b.length > 0) {
+                    String s = new String(b, StandardCharsets.UTF_8).trim();
+                    if (!s.isEmpty()) return "LC3:" + s;
                 }
-            } catch (Exception ignored) {}
-        }
+                return "LC3";
+            }
+        } catch (Exception ignored) {}
 
         return null;
     }
@@ -251,7 +248,7 @@ public final class RegisterSessionManager {
     }
 
     public synchronized DeliveryController getOrCreate(String transportKey, int nodeDec, int fromDec, TransportIo io) {
-        int node = nodeDec; // LC3: node peut être > 255
+        int node = nodeDec & 0xFF;
         int from = fromDec & 0xFF;
         if (io == null || !io.isOpen()) return null;
 
@@ -272,17 +269,11 @@ public final class RegisterSessionManager {
         }
 
         // ── Détection automatique LCR-II vs LC3 ──────────────────
-        // ⚠️ probeAndIdentify() bloquant — ne jamais appeler sur le thread UI
         Lc3Link.RegisterIdentity identity = null;
-        boolean isUiThread = android.os.Looper.myLooper() == android.os.Looper.getMainLooper();
-        if (!isUiThread) {
-            try {
-                identity = Lc3Link.probeAndIdentify(io);
-            } catch (Exception probeEx) {
-                android.util.Log.w("RSM", "probeAndIdentify exception: " + probeEx.getMessage());
-            }
-        } else {
-            android.util.Log.w("RSM", "getOrCreate sur UI thread — probe LC3 skippé pour éviter gel");
+        try {
+            identity = Lc3Link.probeAndIdentify(io);
+        } catch (Exception probeEx) {
+            android.util.Log.w("RSM", "probeAndIdentify exception: " + probeEx.getMessage());
         }
 
         boolean isLc3 = (identity != null && identity.isLc3);
@@ -314,30 +305,21 @@ public final class RegisterSessionManager {
         try { dc.initialize(); } catch (Exception ignored) {}
 
         // ✅ v7: cache serial (#80) best-effort pour ce node+transport
-        // LC3 : serial déjà connu via probeAndIdentify() → pas de second aller-retour Mode 8
-        // LCR-II : lecture normale opGetField(80)
         String serialId0 = null;
-        if (isLc3) {
-            if (identity.serialId != null && !identity.serialId.isEmpty()) {
-                serialId0 = identity.serialId;
+        try {
+            byte[] b80 = link.opGetField(80, 3000);
+            if (b80 != null && b80.length > 0) {
+                String ss = new String(b80, StandardCharsets.UTF_8);
+                int nul = ss.indexOf('\0');
+                if (nul >= 0) ss = ss.substring(0, nul);
+                ss = ss.trim();
+                if (!ss.isEmpty()) serialId0 = ss;
             }
-        } else {
-            try {
-                byte[] b80 = link.opGetField(80, 3000);
-                if (b80 != null && b80.length > 0) {
-                    String ss = new String(b80, StandardCharsets.UTF_8);
-                    int nul = ss.indexOf('\0');
-                    if (nul >= 0) ss = ss.substring(0, nul);
-                    ss = ss.trim();
-                    if (!ss.isEmpty()) serialId0 = ss;
-                }
-            } catch (Exception ignored) {}
-        }
+        } catch (Exception ignored) {}
 
         if (serialId0 != null) {
-            int effectiveNode = isLc3 && identity.nodeId > 0 ? identity.nodeId : node;
-            expectedSerialByNode.put(effectiveNode, serialId0);
-            pinnedTransportByRegKey.put(regKey(effectiveNode, serialId0), tk);
+            expectedSerialByNode.put(node, serialId0);
+            pinnedTransportByRegKey.put(regKey(node, serialId0), tk);
         }
 
         NodeSession s = new NodeSession(dc, mux, scheduler, tk, io.getGenerationId(), serialId0);
@@ -383,7 +365,7 @@ public final class RegisterSessionManager {
     @Deprecated
     public synchronized void attachUiListener(int nodeDec, DeliveryControllerPort.Listener uiListener) {
         if (uiListener == null) return;
-        int node = nodeDec; // LC3: node peut être > 255
+        int node = nodeDec & 0xFF;
         for (Map.Entry<String, NodeSession> e : sessions.entrySet()) {
             if (e == null) continue;
             String k = e.getKey();
@@ -399,7 +381,7 @@ public final class RegisterSessionManager {
     @Deprecated
     public synchronized void detachUiListener(int nodeDec, DeliveryControllerPort.Listener uiListener) {
         if (uiListener == null) return;
-        int node = nodeDec; // LC3: node peut être > 255
+        int node = nodeDec & 0xFF;
         for (Map.Entry<String, NodeSession> e : sessions.entrySet()) {
             if (e == null) continue;
             String k = e.getKey();

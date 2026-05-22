@@ -50,7 +50,6 @@ import com.hoho.android.usbserial.driver.UsbSerialProber;
 import com.pa.lcr.lcp.ApiFacade;
 import com.pa.lcr.lcp.ApiServer;
 import com.pa.lcr.lcp.LcpLink;
-import com.pa.lcr.lcp.Lc3Link;
 import com.pa.lcr.lcp.MultiRegisterApiFacadeImpl;
 import com.pa.lcr.lcp.RegisterSessionManager;
 import com.pa.lcr.lcp.log.LogBus;
@@ -186,21 +185,15 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
         final int node;
         final int from;
         final String serialId;
-        final boolean isLc3;       // ✅ badge LC3 vs LCR-II
         String qtySuffix; // " | N=.. G=.."
 
         TabSpec(String tabKey, String mediaShort, String transportKey, int node, int from, String serialId) {
-            this(tabKey, mediaShort, transportKey, node, from, serialId, false);
-        }
-
-        TabSpec(String tabKey, String mediaShort, String transportKey, int node, int from, String serialId, boolean isLc3) {
             this.tabKey = tabKey;
             this.mediaShort = mediaShort;
             this.transportKey = transportKey;
             this.node = node;
             this.from = from;
             this.serialId = serialId;
-            this.isLc3 = isLc3;
         }
     }
 
@@ -337,7 +330,7 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
                     String serial = intent.getStringExtra("serial");
                     String transportKey = intent.getStringExtra("transport");
 
-                    if (node < 1) return;
+                    if (node < 1 || node > 250) return;
 
                     serial = (serial != null) ? serial.trim() : "";
                     if (!isPlausibleSerial(serial)) {
@@ -788,21 +781,16 @@ private void setupTabsTop() {
 
     private static String tabKeyOf(String mediaShort, int node, String serialId) {
         String m = (mediaShort == null || mediaShort.trim().isEmpty()) ? "—" : mediaShort.trim();
-        return m + ":" + node + ":" + safeSerial(serialId);
+        return m + ":" + (node & 0xFF) + ":" + safeSerial(serialId);
     }
 
     private static String regKeyOf(int node, String serialId) {
-        return node + "#" + safeSerial(serialId);
+        return (node & 0xFF) + "#" + safeSerial(serialId);
     }
 
     private String tabLabelOf(String mediaShort, int node, String serialId) {
-        return tabLabelOf(mediaShort, node, serialId, false);
-    }
-
-    private String tabLabelOf(String mediaShort, int node, String serialId, boolean isLc3) {
         String m = (mediaShort == null || mediaShort.trim().isEmpty()) ? "—" : mediaShort.trim();
-        String badge = isLc3 ? "[LC3] " : "[LCR-II] ";
-        return m + " - " + badge + serialShort(serialId) + " - " + (node & 0xFF);
+        return m + " - " + serialShort(serialId) + " - " + (node & 0xFF);
     }
 
     private boolean isTransportReady(String transportKey) {
@@ -856,8 +844,8 @@ private void setupTabsTop() {
         String media = mediaShortFromTransportKey(spec.transportKey);
         String mediaLabel = ready ? media : (media + "(OFF)");
 
-        // ✅ Format: BT(OFF) - [LC3] 123456 - 250
-        updateRegisterTabLabel(tabKey, tabLabelOf(mediaLabel, spec.node, spec.serialId, spec.isLc3) + (spec.qtySuffix != null ? spec.qtySuffix : ""));
+        // ✅ Format: BT(OFF) - 123456 - 250
+        updateRegisterTabLabel(tabKey, tabLabelOf(mediaLabel, spec.node, spec.serialId) + (spec.qtySuffix != null ? spec.qtySuffix : ""));
 
         try {
             Fragment f = getSupportFragmentManager().findFragmentByTag("regtab_" + tabKey);
@@ -911,12 +899,7 @@ private void setupTabsTop() {
      * Règle: clear ciblé A1 si même (node,serial) apparaît sur un autre média.
      */
     private void upsertRegisterTabFromScan(String transportKey, int node, int from, String serialId, boolean focus) {
-        upsertRegisterTabFromScan(transportKey, node, from, serialId, focus, false);
-    }
-
-    private void upsertRegisterTabFromScan(String transportKey, int node, int from, String serialId, boolean focus, boolean isLc3) {
-        // LC3: node peut être > 250 (ex: UNIT ID = 2524)
-        if (node < 1 || (!isLc3 && node > 250)) return;
+        if (node < 1 || node > 250) return;
         if (from < 0 || from > 255) from = 255;
         String mediaShort = mediaShortFromTransportKey(transportKey);
         String serial = safeSerial(serialId);
@@ -925,31 +908,26 @@ private void setupTabsTop() {
         // 1) retirer les tabs legacy (serial vide) dès qu'on trouve au moins un registre
         removeAllUnknownSerialTabsBestEffort();
 
-        // 2) clear ciblé si migration (même node+serial+type, média différent)
-        // ⚠️ Ne pas migrer si type différent (LC3 BT ≠ LCR-II USB — registres distincts)
-        String regKey = regKeyOf(node, serial) + (isLc3 ? ":lc3" : ":lcr");
+        // 2) clear ciblé si migration (même node+serial, média différent)
+        String regKey = regKeyOf(node, serial);
         String newTabKey = tabKeyOf(mediaShort, node, serial);
         String oldTabKey = regKeyToTabKey.get(regKey);
         if (oldTabKey != null && !oldTabKey.equals(newTabKey)) {
-            // Vérifier que l'ancien tab est bien du même type avant de le retirer
-            TabSpec oldSpec = tabsByKey.get(oldTabKey);
-            if (oldSpec != null && oldSpec.isLc3 == isLc3) {
-                removeTabAndFragment(oldTabKey, "migrated to " + newTabKey);
-            }
+            removeTabAndFragment(oldTabKey, "migrated to " + newTabKey);
         }
         regKeyToTabKey.put(regKey, newTabKey);
 
         // 3) upsert tab
         TabSpec existing = tabsByKey.get(newTabKey);
         if (existing == null) {
-            TabSpec spec = new TabSpec(newTabKey, mediaShort, transportKey, node, from, serial, isLc3);
+            TabSpec spec = new TabSpec(newTabKey, mediaShort, transportKey, node, from, serial);
             tabsByKey.put(newTabKey, spec);
             addRegisterTabUi(spec);
-            logUi(null, "TAB registre ajouté: " + tabLabelOf(mediaShort, node, serial, isLc3));
+            logUi(null, "TAB registre ajouté: " + tabLabelOf(mediaShort, node, serial));
         } else {
-            TabSpec spec = new TabSpec(newTabKey, mediaShort, transportKey, node, from, serial, isLc3);
+            TabSpec spec = new TabSpec(newTabKey, mediaShort, transportKey, node, from, serial);
             tabsByKey.put(newTabKey, spec);
-            updateRegisterTabLabel(newTabKey, tabLabelOf(mediaShort, node, serial, isLc3));
+            updateRegisterTabLabel(newTabKey, tabLabelOf(mediaShort, node, serial));
         }
 
         if (focus) {
@@ -978,7 +956,7 @@ private void setupTabsTop() {
     private void addRegisterTabUi(TabSpec spec) {
         if (tabRegisters == null || spec == null) return;
         TabLayout.Tab t = tabRegisters.newTab();
-        t.setText(tabLabelOf(spec.mediaShort, spec.node, spec.serialId, spec.isLc3));
+        t.setText(tabLabelOf(spec.mediaShort, spec.node, spec.serialId));
         t.setTag(spec.tabKey);
         tabRegisters.addTab(t, false);
     }
@@ -1021,7 +999,7 @@ private void setupTabsTop() {
         currentRegNode = spec.node;
 
         if (txtActiveNode != null) {
-            txtActiveNode.setText("Node actif : " + tabLabelOf(spec.mediaShort, spec.node, spec.serialId, spec.isLc3));
+            txtActiveNode.setText("Node actif : " + tabLabelOf(spec.mediaShort, spec.node, spec.serialId));
         }
 
         FragmentManager fm = getSupportFragmentManager();
@@ -1232,14 +1210,7 @@ private void setupTabsTop() {
 
             // APRÈS — LC3 d'abord, LCR-II en fallback
             Lc3Link.RegisterIdentity identity = null;
-            // ⚠️ probe LC3 désactivé sur USB — port.read() retourne 0 sur ce device
-            // LC3 détectable via BT uniquement pour l'instant
-            if (!"USB".equalsIgnoreCase(mediaShort)) {
-                try { identity = Lc3Link.probeAndIdentify(ioFinal); } catch (Exception ignored) {}
-            }
-
-            // Pas de retry baud sur USB non plus
-            boolean baudSwitchedTo9600 = false;
+            try { identity = Lc3Link.probeAndIdentify(ioFinal); } catch (Exception ignored) {}
 
             if (identity != null && identity.isLc3) {
                 // LC3 détecté — pas de boucle node
@@ -1251,8 +1222,8 @@ private void setupTabsTop() {
                     ticketNo = u32beDec(lc3tmp.opGetField(23, 3000));
                 } catch (Exception ignored) {}
                 found.put(lc3Node, new NodeScanItem(
-                    lc3Node, serialId, ticketNo,
-                    false, false, false, false, true  // isLc3=true
+                    lc3Node, "[LC3] " + serialId, ticketNo,
+                    false, false, false, false
                 ));
                 android.util.Log.i("MainActivity", "Scan LC3: node=" + lc3Node
                         + " serial=" + serialId);
@@ -1294,9 +1265,7 @@ private void setupTabsTop() {
                             sb.append(mediaShort).append(" — ").append(found.size()).append(" registre(s)\n");
                             for (NodeScanItem it : found.values()) {
                                 if (it == null) continue;
-                                String badge = it.isLc3 ? "[LC3]" : "[LCR-II]";
-                                sb.append(badge)
-                                  .append("  Serial=").append(safeSerial(it.serialId))
+                                sb.append("Serial=").append(safeSerial(it.serialId))
                                   .append("  Node=").append(it.lcrnode)
                                   .append("  TO=").append(it.lcrnode)
                                   .append("  From=255\n");
@@ -1311,12 +1280,12 @@ private void setupTabsTop() {
                             if (it == null) continue;
                             boolean focus = false;
                             if (!focused && it.lcrnode == 250) focus = true;
-                            upsertRegisterTabFromScan(tk, it.lcrnode, 255, it.serialId, focus, it.isLc3);
+                            upsertRegisterTabFromScan(tk, it.lcrnode, 255, it.serialId, focus);
                             if (focus) focused = true;
                         }
                         if (!focused) {
                             NodeScanItem first = found.values().iterator().next();
-                            if (first != null) upsertRegisterTabFromScan(tk, first.lcrnode, 255, first.serialId, true, first.isLc3);
+                            if (first != null) upsertRegisterTabFromScan(tk, first.lcrnode, 255, first.serialId, true);
                         }
                     }
                 } finally {
@@ -1467,15 +1436,9 @@ private void setupTabsTop() {
         final boolean deliveryActive;
         final boolean flowActive;
         final boolean isDefault;
-        final boolean isLc3; // ✅ badge LC3 vs LCR-II
 
         NodeScanItem(int lcrnode, String serialId, String ticketNo,
                      boolean ticketPending, boolean deliveryActive, boolean flowActive, boolean isDefault) {
-            this(lcrnode, serialId, ticketNo, ticketPending, deliveryActive, flowActive, isDefault, false);
-        }
-
-        NodeScanItem(int lcrnode, String serialId, String ticketNo,
-                     boolean ticketPending, boolean deliveryActive, boolean flowActive, boolean isDefault, boolean isLc3) {
             this.lcrnode = lcrnode;
             this.serialId = serialId;
             this.ticketNo = ticketNo;
@@ -1483,13 +1446,12 @@ private void setupTabsTop() {
             this.deliveryActive = deliveryActive;
             this.flowActive = flowActive;
             this.isDefault = isDefault;
-            this.isLc3 = isLc3;
         }
 
         static NodeScanItem default250() { return new NodeScanItem(250, "", "", false, false, false, true); }
 
         NodeScanItem asDefault() {
-            return new NodeScanItem(lcrnode, serialId, ticketNo, ticketPending, deliveryActive, flowActive, true, isLc3);
+            return new NodeScanItem(lcrnode, serialId, ticketNo, ticketPending, deliveryActive, flowActive, true);
         }
 
         @Override public String toString() {
@@ -1640,14 +1602,10 @@ private void scanUsb() {
         try {
             if (mediaTransportManager != null) {
                 mediaTransportManager.onUsbReady(null, usbPort, "USB prêt (MainActivity)");
+                // ✅ CONFIGURE: média activé -> rebind tab sur USB
                 onConfigureMediaActivated(MediaTransportManager.KEY_USB, "USB_READY_RX");
             }
         } catch (Exception ignored) {}
-
-        // ✅ Scan automatique au branchement — délai 800ms pour laisser le port s'initialiser
-        ui.postDelayed(() -> {
-            try { scanRegistersUsbOnly(); } catch (Exception ignored) {}
-        }, 800);
 
         logMedia1("USB Ready");
     }
@@ -2239,23 +2197,6 @@ private boolean ensureBtConnectPermission() {
     private synchronized void btDisconnect() {
         logMedia1("BT Disconnect: " + (lastBtMac != null ? lastBtMac : "-"));
 
-        // Retirer les tabs BT associés à ce MAC à la déconnexion
-        try {
-            String btMac = lastBtMac;
-            if (btMac != null && !btMac.isEmpty()) {
-                String btKey = MediaTransportManager.btKey(btMac);
-                ArrayList<String> toRemove = new ArrayList<>();
-                for (Map.Entry<String, TabSpec> e : tabsByKey.entrySet()) {
-                    if (e == null) continue;
-                    TabSpec s = e.getValue();
-                    if (s == null) continue;
-                    if (s.transportKey != null && s.transportKey.equalsIgnoreCase(btKey))
-                        toRemove.add(e.getKey());
-                }
-                for (String k : toRemove) removeTabAndFragment(k, "BT disconnected");
-            }
-        } catch (Exception ignored) {}
-
         // ✅ Option A: publish BT disconnected
         try {
             if (mediaTransportManager != null) {
@@ -2477,29 +2418,6 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
 
     scanExec.execute(() -> {
         try {
-            // Probe LC3 d'abord
-            Lc3Link.RegisterIdentity identity = null;
-            try { identity = Lc3Link.probeAndIdentify(io); } catch (Exception ignored) {}
-
-            if (identity != null && identity.isLc3) {
-                int lc3Node = identity.nodeId > 0 ? identity.nodeId : node;
-                String serial = identity.serialId != null ? identity.serialId : "";
-                final String fSerial = serial;
-                final int fNode = lc3Node;
-                ui.post(() -> {
-                    if (out != null) out.setText("#Série : " + (fSerial.isEmpty() ? "—" : fSerial));
-                    if (!fSerial.isEmpty()) {
-                        upsertRegisterTabFromScan(transportKey, fNode, from, fSerial, true, true);
-                        refreshAllTabsMediaStatus();
-                    } else {
-                        toast(mediaShort + ": LC3 détecté mais serial vide");
-                    }
-                });
-                saveManualSlotToPrefs(usb, slot, lc3Node, serial);
-                return;
-            }
-
-            // Fallback LCR-II
             LcpLink tmp = new LcpLink(io, node, from, true);
             byte[] b80 = tmp.opGetField(80, 600);
             String serial = decodeAz(b80);
@@ -2602,20 +2520,8 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
         beginMediaSwitchGuard(reason);
         final String tk = transportKey.trim();
 
-        // 1) activer exclusif seulement si aucun tab BT actif
-        // — évite de déconnecter le LC3 BT quand USB se branche
-        boolean hasBtTabs = false;
-        try {
-            for (TabSpec s : tabsByKey.values()) {
-                if (s == null) continue;
-                String ms = mediaShortFromTransportKey(s.transportKey);
-                if ("BT".equalsIgnoreCase(ms)) { hasBtTabs = true; break; }
-            }
-        } catch (Exception ignored) {}
-
-        if (!hasBtTabs) {
-            ensureActiveTransport(tk, "CONFIGURE_MEDIA_SWITCH");
-        }
+        // 1) activer exclusif immédiatement
+        ensureActiveTransport(tk, "CONFIGURE_MEDIA_SWITCH");
 
         // 2) déterminer node/serial "courants" pour créer/activer le bon tab
         int node = (currentRegNode > 0 ? currentRegNode : 250);
@@ -2630,7 +2536,19 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
             }
         } catch (Exception ignored) {}
 
-        // 3) si on n'a pas un serial plausible → rien à rebinder, le scan auto s'en charge
+        // 3) si on n'a pas un serial plausible, tenter un probe rapide sur le nouveau transport
+        if (serial == null || serial.trim().isEmpty()) {
+            try {
+                TransportIo ioT = (mediaTransportManager != null) ? mediaTransportManager.getByKey(tk) : null;
+                if (ioT != null && ioT.isOpen()) {
+                    ProbeResult pr = probeRegisterReadable(ioT, node, 255, null);
+                    if (pr != null && pr.ok && pr.serial != null && isPlausibleSerial(pr.serial)) {
+                        serial = safeSerial(pr.serial);
+                    }
+                }
+            } catch (Exception ignored) {}
+        }
+
         if (serial == null || serial.trim().isEmpty() || !isPlausibleSerial(serial)) {
             ui.post(this::refreshAllTabsMediaStatus);
             return;
@@ -2695,7 +2613,7 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
 
             if (spec == null) return;
             spec.qtySuffix = formatQtyLabel(net, gross);
-            String base = tabLabelOf(spec.mediaShort, spec.node, spec.serialId, spec.isLc3);
+            String base = tabLabelOf(spec.mediaShort, spec.node, spec.serialId);
             updateRegisterTabLabel(spec.tabKey, base + spec.qtySuffix);
         } catch (Exception ignored) {}
     }
@@ -2735,7 +2653,7 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
 
             if (spec == null) return;
             spec.qtySuffix = null;
-            String base = tabLabelOf(spec.mediaShort, spec.node, spec.serialId, spec.isLc3);
+            String base = tabLabelOf(spec.mediaShort, spec.node, spec.serialId);
             updateRegisterTabLabel(spec.tabKey, base);
         } catch (Exception ignored) {}
     }
