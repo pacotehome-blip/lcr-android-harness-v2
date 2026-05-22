@@ -2256,15 +2256,20 @@ private boolean ensureBtConnectPermission() {
             try { mediaProfileStore.setActiveStatus("DISCONNECTED", null); } catch (Exception ignored) {}
         }
 
+        final String disconnectedMac = lastBtMac;
         lastBtMac = null;
 
         ui.post(() -> {
             if (txtBtStatus != null) txtBtStatus.setText("BT : DISCONNECTED");
             updateMediaStatusUi();
-            // Forcer tous les tabs BT à (OFF)
+            // Forcer à (OFF) seulement les tabs du BT déconnecté
             try {
+                String disconnectedKey = disconnectedMac != null
+                    ? MediaTransportManager.btKey(disconnectedMac) : null;
                 for (TabSpec s : tabsByKey.values()) {
                     if (s == null) continue;
+                    if (disconnectedKey != null
+                            && !disconnectedKey.equalsIgnoreCase(s.transportKey)) continue;
                     String ms = mediaShortFromTransportKey(s.transportKey);
                     if ("BT".equalsIgnoreCase(ms)) {
                         updateRegisterTabLabel(s.tabKey,
@@ -2272,6 +2277,7 @@ private boolean ensureBtConnectPermission() {
                             + (s.qtySuffix != null ? s.qtySuffix : ""));
                     }
                 }
+
             } catch (Exception ignored) {}
         });
 
