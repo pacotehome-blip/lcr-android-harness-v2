@@ -337,7 +337,7 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
                     String serial = intent.getStringExtra("serial");
                     String transportKey = intent.getStringExtra("transport");
 
-                    if (node < 1 || node > 250) return;
+                    if (node < 1) return;
 
                     serial = (serial != null) ? serial.trim() : "";
                     if (!isPlausibleSerial(serial)) {
@@ -915,7 +915,8 @@ private void setupTabsTop() {
     }
 
     private void upsertRegisterTabFromScan(String transportKey, int node, int from, String serialId, boolean focus, boolean isLc3) {
-        if (node < 1 || node > 250) return;
+        // LC3: node peut être > 250 (ex: UNIT ID = 2524)
+        if (node < 1 || (!isLc3 && node > 250)) return;
         if (from < 0 || from > 255) from = 255;
         String mediaShort = mediaShortFromTransportKey(transportKey);
         String serial = safeSerial(serialId);
@@ -2229,6 +2230,23 @@ private boolean ensureBtConnectPermission() {
     private synchronized void btDisconnect() {
         logMedia1("BT Disconnect: " + (lastBtMac != null ? lastBtMac : "-"));
 
+        // Retirer les tabs BT associés à ce MAC à la déconnexion
+        try {
+            String btMac = lastBtMac;
+            if (btMac != null && !btMac.isEmpty()) {
+                String btKey = MediaTransportManager.btKey(btMac);
+                ArrayList<String> toRemove = new ArrayList<>();
+                for (Map.Entry<String, TabSpec> e : tabsByKey.entrySet()) {
+                    if (e == null) continue;
+                    TabSpec s = e.getValue();
+                    if (s == null) continue;
+                    if (s.transportKey != null && s.transportKey.equalsIgnoreCase(btKey))
+                        toRemove.add(e.getKey());
+                }
+                for (String k : toRemove) removeTabAndFragment(k, "BT disconnected");
+            }
+        } catch (Exception ignored) {}
+
         // ✅ Option A: publish BT disconnected
         try {
             if (mediaTransportManager != null) {
@@ -2575,8 +2593,20 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
         beginMediaSwitchGuard(reason);
         final String tk = transportKey.trim();
 
-        // 1) activer exclusif immédiatement
-        ensureActiveTransport(tk, "CONFIGURE_MEDIA_SWITCH");
+        // 1) activer exclusif seulement si aucun tab BT actif
+        // — évite de déconnecter le LC3 BT quand USB se branche
+        boolean hasBtTabs = false;
+        try {
+            for (TabSpec s : tabsByKey.values()) {
+                if (s == null) continue;
+                String ms = mediaShortFromTransportKey(s.transportKey);
+                if ("BT".equalsIgnoreCase(ms)) { hasBtTabs = true; break; }
+            }
+        } catch (Exception ignored) {}
+
+        if (!hasBtTabs) {
+            ensureActiveTransport(tk, "CONFIGURE_MEDIA_SWITCH");
+        }
 
         // 2) déterminer node/serial "courants" pour créer/activer le bon tab
         int node = (currentRegNode > 0 ? currentRegNode : 250);
