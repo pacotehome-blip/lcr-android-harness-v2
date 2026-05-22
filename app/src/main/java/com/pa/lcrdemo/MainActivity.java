@@ -1220,10 +1220,12 @@ private void setupTabsTop() {
             final int T28 = 300;
             final int TF = 300;
 
-            // APRÈS — LC3 d'abord, LCR-II en fallback
+            // APRÈS — LC3 d'abord, LCR-II en fallback (BT seulement)
             Lc3Link.RegisterIdentity identity = null;
-            try { identity = Lc3Link.probeAndIdentify(ioFinal); } catch (Exception ignored) {}
-
+            if (!"USB".equalsIgnoreCase(mediaShort)) {
+                try { identity = Lc3Link.probeAndIdentify(ioFinal); } catch (Exception ignored) {}
+            }
+            
             if (identity != null && identity.isLc3) {
                 // LC3 détecté — pas de boucle node
                 int    lc3Node  = identity.nodeId > 0 ? identity.nodeId : 2524;
