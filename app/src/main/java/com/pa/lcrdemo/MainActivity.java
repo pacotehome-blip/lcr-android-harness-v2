@@ -2247,6 +2247,7 @@ private boolean ensureBtConnectPermission() {
         ui.post(() -> {
             if (txtBtStatus != null) txtBtStatus.setText("BT : DISCONNECTED");
             updateMediaStatusUi();
+            refreshAllTabsMediaStatus();
         });
 
         logMedia1("BT Disconnect: OK");
