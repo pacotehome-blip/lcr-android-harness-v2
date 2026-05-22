@@ -213,18 +213,21 @@ public final class RegisterSessionManager {
             }
         } catch (Exception ignored) {}
 
-        // Essai LC3
-        try {
-            if (Lc3Link.probe(io)) {
-                Lc3Link lc3 = new Lc3Link(io);
-                byte[] b = lc3.opGetField(80, 3000);
-                if (b != null && b.length > 0) {
-                    String s = new String(b, StandardCharsets.UTF_8).trim();
-                    if (!s.isEmpty()) return "LC3-" + s;
+        // Essai LC3 — seulement sur BT (USB: port.read() retourne 0 sur ce device)
+        boolean isUsb = io != null && "USB".equalsIgnoreCase(io.getKey());
+        if (!isUsb) {
+            try {
+                if (Lc3Link.probe(io)) {
+                    Lc3Link lc3 = new Lc3Link(io);
+                    byte[] b = lc3.opGetField(80, 3000);
+                    if (b != null && b.length > 0) {
+                        String s = new String(b, StandardCharsets.UTF_8).trim();
+                        if (!s.isEmpty()) return "LC3-" + s;
+                    }
+                    return "LC3";
                 }
-                return "LC3";
-            }
-        } catch (Exception ignored) {}
+            } catch (Exception ignored) {}
+        }
 
         return null;
     }

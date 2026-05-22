@@ -788,11 +788,11 @@ private void setupTabsTop() {
 
     private static String tabKeyOf(String mediaShort, int node, String serialId) {
         String m = (mediaShort == null || mediaShort.trim().isEmpty()) ? "—" : mediaShort.trim();
-        return m + ":" + (node & 0xFF) + ":" + safeSerial(serialId);
+        return m + ":" + node + ":" + safeSerial(serialId);
     }
 
     private static String regKeyOf(int node, String serialId) {
-        return (node & 0xFF) + "#" + safeSerial(serialId);
+        return node + "#" + safeSerial(serialId);
     }
 
     private String tabLabelOf(String mediaShort, int node, String serialId) {
@@ -925,12 +925,17 @@ private void setupTabsTop() {
         // 1) retirer les tabs legacy (serial vide) dès qu'on trouve au moins un registre
         removeAllUnknownSerialTabsBestEffort();
 
-        // 2) clear ciblé si migration (même node+serial, média différent)
-        String regKey = regKeyOf(node, serial);
+        // 2) clear ciblé si migration (même node+serial+type, média différent)
+        // ⚠️ Ne pas migrer si type différent (LC3 BT ≠ LCR-II USB — registres distincts)
+        String regKey = regKeyOf(node, serial) + (isLc3 ? ":lc3" : ":lcr");
         String newTabKey = tabKeyOf(mediaShort, node, serial);
         String oldTabKey = regKeyToTabKey.get(regKey);
         if (oldTabKey != null && !oldTabKey.equals(newTabKey)) {
-            removeTabAndFragment(oldTabKey, "migrated to " + newTabKey);
+            // Vérifier que l'ancien tab est bien du même type avant de le retirer
+            TabSpec oldSpec = tabsByKey.get(oldTabKey);
+            if (oldSpec != null && oldSpec.isLc3 == isLc3) {
+                removeTabAndFragment(oldTabKey, "migrated to " + newTabKey);
+            }
         }
         regKeyToTabKey.put(regKey, newTabKey);
 
