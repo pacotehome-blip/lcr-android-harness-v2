@@ -2172,17 +2172,15 @@ private boolean ensureBtConnectPermission() {
                 btSocket = s;
                 btIn = s.getInputStream();
                 btOut = s.getOutputStream();
-
                 // ✅ Option A: publish BT connected
                 try {
                     lastBtMac = (dev != null ? dev.getAddress() : null);
                     if (mediaTransportManager != null) {
                         mediaTransportManager.onBtConnected(dev, btSocket, btIn, btOut, "BT SPP CONNECTED");
+                    }
                     // ✅ CONFIGURE: média activé -> rebind tab sur BT
-                   try { onConfigureMediaActivated(MediaTransportManager.btKey(lastBtMac), "BT_READY"); } catch (Exception ignored) {}
-
+                    try { onConfigureMediaActivated(MediaTransportManager.btKey(lastBtMac), "BT_READY"); } catch (Exception ignored) {}
                 } catch (Exception ignored) {}
-
                 ui.postDelayed(this::refreshAllTabsMediaStatus, 200);
 
                 } catch (Exception ignored) {}
