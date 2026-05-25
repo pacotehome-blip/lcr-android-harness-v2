@@ -809,18 +809,9 @@ private void setupTabsTop() {
         try {
             if (mediaTransportManager == null) return false;
             if (transportKey == null || transportKey.trim().isEmpty()) return false;
-            // Vérifie que le transport est physiquement connecté et ouvert
-            for (TransportSnapshot s : mediaTransportManager.listSnapshots()) {
-                if (s == null || s.key == null) continue;
-                if (!s.key.equalsIgnoreCase(transportKey.trim())) continue;
-                // DISCONNECTED ou ERROR → toujours OFF
-                if (s.status == TransportStatus.DISCONNECTED
-                        || s.status == TransportStatus.ERROR) return false;
-                // Transport ouvert → vérifie io.isOpen()
-                TransportIo io = mediaTransportManager.getByKey(transportKey.trim());
-                return io != null && io.isOpen();
-            }
-            return false;
+            // getByKey retourne null si DISCONNECTED ou ERROR
+            TransportIo io = mediaTransportManager.getByKey(transportKey.trim());
+            return io != null && io.isOpen();
         } catch (Exception e) {
             return false;
         }
