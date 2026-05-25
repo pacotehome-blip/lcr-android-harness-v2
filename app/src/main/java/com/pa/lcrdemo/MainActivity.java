@@ -1029,7 +1029,15 @@ private void setupTabsTop() {
         FragmentManager fm = getSupportFragmentManager();
         String tag = "regtab_" + tabKey;
         Fragment existing = fm.findFragmentByTag(tag);
-        Fragment f = (existing != null) ? existing : RegisterTabFragment.newInstance(spec.node, spec.from, spec.serialId, spec.transportKey);
+        // Recréer si serial manquant dans le fragment existant
+        boolean needsRebuild = false;
+        if (existing instanceof RegisterTabFragment) {
+            String existingSerial = ((RegisterTabFragment) existing).getSerialFromArgs();
+            needsRebuild = (existingSerial == null || existingSerial.trim().isEmpty())
+                && (spec.serialId != null && !spec.serialId.trim().isEmpty());
+        }
+        Fragment f = (existing != null && !needsRebuild) ? existing
+                : RegisterTabFragment.newInstance(spec.node, spec.from, spec.serialId, spec.transportKey);
         FragmentTransaction tx = fm.beginTransaction();
         tx.replace(R.id.registerContainer, f, tag);
         tx.setReorderingAllowed(true);

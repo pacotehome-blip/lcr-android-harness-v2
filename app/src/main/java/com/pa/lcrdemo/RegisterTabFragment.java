@@ -841,4 +841,5 @@ public class RegisterTabFragment extends Fragment {
             }
         } catch (Exception ignored) {}
     }
+    public String getSerialFromArgs() { return serialFromArgs; }
 }
