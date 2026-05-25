@@ -165,11 +165,20 @@ public class Lc3Link extends LcpLink {
                 return encodeU32(pendingProduct);
             case FIELD_PRESET_NET:
                 return encodeU32((int) pendingPreset);
-            case FIELD_NET_COUNT:
-            case FIELD_GROSS_COUNT: {
+            case FIELD_NET_COUNT: {
                 String scr = pollScreen();
                 Matcher m = RE_NET.matcher(scr);
                 if (m.find()) return encodeU32(Math.round(parseFloat(m.group(1)) * 10));
+                return encodeU32(0);
+            }
+            case FIELD_GROSS_COUNT: {
+                String scr = pollScreen();
+                // Mode GROSS
+                Matcher mg = Pattern.compile("GROSS VOLUME LITRES\\s+([\\d.]+)").matcher(scr);
+                if (mg.find()) return encodeU32(Math.round(parseFloat(mg.group(1)) * 10));
+                // Mode NET → GROSS = NET (même valeur, compensation déjà faite par le registre)
+                Matcher mn = RE_NET.matcher(scr);
+                if (mn.find()) return encodeU32(Math.round(parseFloat(mn.group(1)) * 10));
                 return encodeU32(0);
             }
             case FIELD_SALE_NUMBER:
