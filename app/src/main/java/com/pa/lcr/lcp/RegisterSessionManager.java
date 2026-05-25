@@ -278,7 +278,22 @@ public final class RegisterSessionManager {
                 android.util.Log.w("RSM", "probeAndIdentify exception: " + probeEx.getMessage());
             }
         } else {
-            android.util.Log.w("RSM", "getOrCreate sur UI thread — probe LC3 skippé pour éviter gel");
+            // Sur UI thread — vérifier si le transport est BT (LC3 probable)
+            // Si oui, forcer isLc3=true si le key contient "BT:" et qu'on a un serial LC3 connu
+            String tkLower = tk.toLowerCase(java.util.Locale.ROOT);
+            if (tkLower.startsWith("bt:")) {
+                // Chercher si ce node/transport a déjà été identifié comme LC3
+                String regk = regKey(node, null);
+                for (String pinnedKey : pinnedTransportByRegKey.values()) {
+                    if (pinnedKey != null && pinnedKey.equalsIgnoreCase(tk)) {
+                        // Ce transport était déjà pinné pour un registre LC3
+                        android.util.Log.i("RSM", "UI thread: transport BT pinné → assumé LC3");
+                        identity = new Lc3Link.RegisterIdentity(true, "", node, 0, "");
+                        break;
+                    }
+                }
+            }
+            android.util.Log.w("RSM", "getOrCreate sur UI thread — probe LC3 " + (identity != null ? "assumé LC3" : "skippé"));
         }
         
         boolean isLc3 = (identity != null && identity.isLc3);
