@@ -60,6 +60,8 @@ public final class RegisterSessionManager {
     // - pinnedTransportByRegKey: (node#serial) -> transportKey choisi
     private final Map<Integer, String> expectedSerialByNode = new LinkedHashMap<>();
     private final Map<String, String> pinnedTransportByRegKey = new LinkedHashMap<>();
+    private final java.util.Set<String> knownLc3TransportKeys =
+        java.util.Collections.synchronizedSet(new java.util.HashSet<>());
 
     private RegisterSessionManager(Context appCtx) {
         this.appCtx = appCtx;
@@ -281,17 +283,9 @@ public final class RegisterSessionManager {
             // Sur UI thread — vérifier si le transport est BT (LC3 probable)
             // Si oui, forcer isLc3=true si le key contient "BT:" et qu'on a un serial LC3 connu
             String tkLower = tk.toLowerCase(java.util.Locale.ROOT);
-            if (tkLower.startsWith("bt:")) {
-                // Chercher si ce node/transport a déjà été identifié comme LC3
-                String regk = regKey(node, null);
-                for (String pinnedKey : pinnedTransportByRegKey.values()) {
-                    if (pinnedKey != null && pinnedKey.equalsIgnoreCase(tk)) {
-                        // Ce transport était déjà pinné pour un registre LC3
-                        android.util.Log.i("RSM", "UI thread: transport BT pinné → assumé LC3");
-                        identity = new Lc3Link.RegisterIdentity(true, "", node, 0, "");
-                        break;
-                    }
-                }
+            if (tkLower.startsWith("bt:") && knownLc3TransportKeys.contains(tk)) {
+                android.util.Log.i("RSM", "UI thread: transport BT LC3 connu → assumé LC3");
+                identity = new Lc3Link.RegisterIdentity(true, "", node, 0, "");
             }
             android.util.Log.w("RSM", "getOrCreate sur UI thread — probe LC3 " + (identity != null ? "assumé LC3" : "skippé"));
         }
@@ -302,6 +296,7 @@ public final class RegisterSessionManager {
 
         LcpLink link;
         if (isLc3) {
+            knownLc3TransportKeys.add(tk);
             int lc3Node = (identity.nodeId > 0) ? identity.nodeId : node;
             link = new Lc3Link(io);  // Lc3Link extends LcpLink directement
             if (identity.serialId != null && !identity.serialId.isEmpty()) {
