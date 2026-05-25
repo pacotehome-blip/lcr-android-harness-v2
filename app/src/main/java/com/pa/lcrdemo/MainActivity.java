@@ -2172,6 +2172,7 @@ private boolean ensureBtConnectPermission() {
                 btSocket = s;
                 btIn = s.getInputStream();
                 btOut = s.getOutputStream();
+
                 // ✅ Option A: publish BT connected
                 try {
                     lastBtMac = (dev != null ? dev.getAddress() : null);
@@ -2182,19 +2183,14 @@ private boolean ensureBtConnectPermission() {
                     try { onConfigureMediaActivated(MediaTransportManager.btKey(lastBtMac), "BT_READY"); } catch (Exception ignored) {}
                 } catch (Exception ignored) {}
                 ui.postDelayed(this::refreshAllTabsMediaStatus, 200);
-
-                } catch (Exception ignored) {}
-
                 if (mediaProfileStore != null) {
                     mediaProfileStore.setActiveBt(dev.getName(), dev.getAddress(), SPP_UUID.toString());
                     mediaProfileStore.setActiveStatus("CONNECTED", null);
                 }
-
                 ui.post(() -> {
                     if (txtBtStatus != null) txtBtStatus.setText("BT : CONNECTED — " + dev.getName());
                     updateMediaStatusUi();
                 });
-
                 logMedia1("BT Connect: OK " + dev.getAddress());
 
             } catch (Exception e) {
