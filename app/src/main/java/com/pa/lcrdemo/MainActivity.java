@@ -1259,6 +1259,14 @@ private void setupTabsTop() {
                 ));
                 android.util.Log.i("MainActivity", "Scan LC3: node=" + lc3Node
                         + " serial=" + serialId);
+                // Créer la session LC3 maintenant (background thread) pour pré-populer knownLc3TransportKeys
+                try {
+                    RegisterSessionManager sm = RegisterSessionManager.get(getApplicationContext());
+                    DeliveryController dc = sm.getOrCreate(tk, lc3Node, 255, ioFinal);
+                    android.util.Log.i("MainActivity", "LC3 getOrCreate → " + (dc != null ? "OK" : "null") + " io.isOpen=" + ioFinal.isOpen());
+                } catch (Exception e) {
+                    android.util.Log.w("MainActivity", "LC3 getOrCreate ERR: " + e.getMessage());
+                }
             } else {
                 // LCR-II — boucle classique
                 for (int node = 1; node <= 250; node++) {
