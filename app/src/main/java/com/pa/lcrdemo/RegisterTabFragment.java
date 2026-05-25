@@ -586,6 +586,7 @@ public class RegisterTabFragment extends Fragment {
             if (!tabMediaReady) {
                 if (txtLive != null) txtLive.setText("LIVE: " + tabMediaShort + "(OFF) — reconnect requis");
                 controller = null;
+                pendingReconnect = true;
                 updateButtons(null);
                 return;
             }
