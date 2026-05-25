@@ -49,6 +49,10 @@ public class Lc3Link extends LcpLink {
     private static final int FIELD_NET_COUNT      = 45;
     private static final int FIELD_SERIAL_ID      = 80;
 
+    // ── Cache pollScreen ──────────────────────────────────────────────────
+    private String lastPollScreen = "";
+    private long   lastPollMs     = 0L;
+
     // ── Commandes ─────────────────────────────────────────────────────────
     private static final int CMD_RUN               = 0x00;
     private static final int CMD_END               = 0x02;
@@ -166,17 +170,16 @@ public class Lc3Link extends LcpLink {
             case FIELD_PRESET_NET:
                 return encodeU32((int) pendingPreset);
             case FIELD_NET_COUNT: {
-                String scr = pollScreen();
+                String scr = cachedPollScreen();
                 Matcher m = RE_NET.matcher(scr);
                 if (m.find()) return encodeU32(Math.round(parseFloat(m.group(1)) * 10));
                 return encodeU32(0);
             }
             case FIELD_GROSS_COUNT: {
-                String scr = pollScreen();
-                // Mode GROSS
+                String scr = cachedPollScreen();
                 Matcher mg = Pattern.compile("GROSS VOLUME LITRES\\s+([\\d.]+)").matcher(scr);
                 if (mg.find()) return encodeU32(Math.round(parseFloat(mg.group(1)) * 10));
-                // Mode NET → GROSS = NET (même valeur, compensation déjà faite par le registre)
+                // Mode NET → GROSS = NET
                 Matcher mn = RE_NET.matcher(scr);
                 if (mn.find()) return encodeU32(Math.round(parseFloat(mn.group(1)) * 10));
                 return encodeU32(0);
@@ -335,6 +338,16 @@ public class Lc3Link extends LcpLink {
         drainRx(300);
     }
 
+    // ── cachedPollScreen ──────────────────────────────────────────────────
+    private String cachedPollScreen() throws IOException {
+        if (System.currentTimeMillis() - lastPollMs < 500 && !lastPollScreen.isEmpty()) {
+            return lastPollScreen;
+        }
+        lastPollScreen = pollScreen();
+        lastPollMs = System.currentTimeMillis();
+        return lastPollScreen;
+    }
+
     // ── pollScreen ────────────────────────────────────────────────────────
     private String pollScreen() throws IOException {
         rawWrite(CMD_POLL_A);
@@ -426,53 +439,29 @@ public class Lc3Link extends LcpLink {
     public static boolean probe(TransportIo io) {
         byte[] screen = {(byte)0x1B,(byte)0x7C,(byte)0xE3,
                           (byte)0x07,(byte)0xE4,(byte)0xA9,(byte)0xCA};
-        // Drain résidus avant de commencer
-        drainIo(io, 400);
-
-        for (int attempt = 0; attempt < 3; attempt++) {
+        for (int attempt = 0; attempt < 2; attempt++) {
             try {
-                int written = io.write(screen, 1000);
-                android.util.Log.d("Lc3Link", "probe attempt=" + attempt + " write=" + written);
-
-                // Attente initiale : laisser le LC3 préparer sa réponse
-                // À 9600 baud : 7 bytes TX = ~7ms, réponse ~91 bytes = ~95ms + délai hardware
-                Thread.sleep(300);
-
-                // Lecture avec spinner — compatible port.read() non-bloquant (USB PL2303)
-                // Utilise timeout=0 (non-bloquant) + sleep(5) comme BtSppTransportIo
-                byte[] result = new byte[0];
-                byte[] tmp = new byte[1024];
-                long deadline = System.currentTimeMillis() + 1500;
-                while (System.currentTimeMillis() < deadline) {
-                    int n = io.read(tmp, 0); // timeout=0 : non-bloquant
-                    if (n > 0) {
-                        android.util.Log.d("Lc3Link", "probe got n=" + n);
-                        byte[] combined = new byte[result.length + n];
-                        System.arraycopy(result, 0, combined, 0, result.length);
-                        System.arraycopy(tmp, 0, combined, result.length, n);
-                        result = combined;
-                        deadline = Math.max(deadline, System.currentTimeMillis() + 200);
-                    } else {
-                        Thread.sleep(5);
-                    }
-                }
-
-                android.util.Log.d("Lc3Link", "probe attempt=" + attempt + " total=" + result.length);
-                if (result.length > 0) {
-                    String scr = decodeVt100(result);
+                io.write(screen, 1000);
+                Thread.sleep(600);
+                byte[] buf = new byte[1024];
+                int n = io.read(buf, 1000);
+                android.util.Log.d("Lc3Link", "probe attempt=" + attempt + " n=" + n);
+                if (n > 0) {
+                    byte[] data = new byte[n];
+                    System.arraycopy(buf, 0, data, 0, n);
+                    String scr = decodeVt100(data);
                     android.util.Log.d("Lc3Link", "probe scr=" + scr.replace("\n", "|"));
-                    if (scr.contains("NET VOLUME LITRES")    ||
-                        scr.contains("PUSH START TO RESUME") ||
-                        scr.contains("PRESET STOP")          ||
-                        scr.contains("ACCESS NUMBER")        ||
-                        scr.contains("DISPLAY TERMINAL")     ||
+                    if (scr.contains("NET VOLUME LITRES")   ||
+                        scr.contains("PUSH START TO RESUME")||
+                        scr.contains("PRESET STOP")         ||
+                        scr.contains("ACCESS NUMBER")       ||
+                        scr.contains("DISPLAY TERMINAL")    ||
                         scr.contains("VT-100")) {
                         android.util.Log.i("Lc3Link", "probe → LC3 ✅");
                         return true;
                     }
                 }
-                // Drain avant prochain essai
-                drainIo(io, 300);
+                Thread.sleep(300);
             } catch (Exception e) {
                 android.util.Log.w("Lc3Link", "probe ex: " + e.getMessage());
                 return false;
@@ -480,17 +469,6 @@ public class Lc3Link extends LcpLink {
         }
         android.util.Log.i("Lc3Link", "probe → pas LC3");
         return false;
-    }
-
-    private static void drainIo(TransportIo io, int ms) {
-        try {
-            byte[] sink = new byte[1024];
-            long dl = System.currentTimeMillis() + ms;
-            while (System.currentTimeMillis() < dl) {
-                int n = io.read(sink, 0); // non-bloquant
-                if (n <= 0) Thread.sleep(5);
-            }
-        } catch (Exception ignored) {}
     }
 
     // ── probeAndIdentify ──────────────────────────────────────────────────
@@ -521,36 +499,13 @@ public class Lc3Link extends LcpLink {
             lc3.backToMode1();
             lc3.gotoMode(8);
             String scr8 = lc3.readSpontaneous(1000);
-            android.util.Log.d("Lc3Link", "probeAndIdentify Mode8 scr=" + scr8.replace("\n", "|"));
-
-            // SERIAL NUMBER est avant le champ courant → scroller UP
-            // VT_UP = Ctrl+U = 0x15 (champ précédent)
-            byte VT_UP = 0x15;
-            for (int i = 0; i < 6; i++) {
-                lc3.rawWrite(new byte[]{ VT_UP }); sleep(300);
-                String scr = lc3.readSpontaneous(800);
-                android.util.Log.d("Lc3Link", "probeAndIdentify Mode8 up" + i + "=" + scr.replace("\n", "|"));
-                if (model.isEmpty() && scr.contains("APPLICATION")) {
-                    for (String line : scr.split("\n")) {
-                        if (line.contains("APPLICATION")) { model = line.trim(); break; }
-                    }
-                }
-                if (scr.contains("SERIAL NUMBER")) {
-                    for (String line : scr.split("\n")) {
-                        if (line.contains("SERIAL NUMBER")) {
-                            Matcher m = Pattern.compile("(\\d+)\\s*\\.?\\s*$").matcher(line);
-                            if (m.find()) {
-                                serialId = m.group(1).trim();
-                                android.util.Log.i("Lc3Link", "SERIAL NUMBER trouvé: " + serialId);
-                            }
-                            break;
-                        }
-                    }
+            for (String line : scr8.split("\n")) {
+                if (line.contains("APPLICATION")) {
+                    model    = line.trim();
+                    serialId = "LC3:" + nodeId;
                     break;
                 }
             }
-            // Fallback si SERIAL NUMBER non trouvé
-            if (serialId.equals("LC3") && nodeId > 0) serialId = "LC3-" + nodeId;
             lc3.backToMode1();
         } catch (Exception e) {
             android.util.Log.w("Lc3Link", "probeAndIdentify: " + e.getMessage());
