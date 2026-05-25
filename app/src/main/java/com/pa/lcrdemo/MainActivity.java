@@ -2179,8 +2179,11 @@ private boolean ensureBtConnectPermission() {
                     if (mediaTransportManager != null) {
                         mediaTransportManager.onBtConnected(dev, btSocket, btIn, btOut, "BT SPP CONNECTED");
                     // ✅ CONFIGURE: média activé -> rebind tab sur BT
-                    try { onConfigureMediaActivated(MediaTransportManager.btKey(lastBtMac), "BT_READY"); } catch (Exception ignored) {}
-                    ui.postDelayed(this::refreshAllTabsMediaStatus, 200);
+                   try { onConfigureMediaActivated(MediaTransportManager.btKey(lastBtMac), "BT_READY"); } catch (Exception ignored) {}
+
+                } catch (Exception ignored) {}
+
+                ui.postDelayed(this::refreshAllTabsMediaStatus, 200);
 
                 } catch (Exception ignored) {}
 
