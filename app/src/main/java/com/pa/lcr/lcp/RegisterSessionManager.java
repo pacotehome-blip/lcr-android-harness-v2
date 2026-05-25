@@ -660,4 +660,10 @@ public final class RegisterSessionManager {
         @Override public void onLiveStatus(String liveText) { }
         @Override public void onTicketInfo(String ticketNo, String deliveryUid) { }
     }
+    public synchronized void markAsLc3Transport(String transportKey) {
+    if (transportKey != null && !transportKey.trim().isEmpty()) {
+        knownLc3TransportKeys.add(transportKey.trim());
+        android.util.Log.i("RSM", "markAsLc3Transport: " + transportKey);
+    }
+}
 }
