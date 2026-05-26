@@ -344,9 +344,16 @@ public class Lc3Link extends LcpLink {
     private String readMode8Serial() throws IOException {
         gotoMode(8);
         try {
-            String scr = readSpontaneous(1000);
-            for (String line : scr.split("\n")) {
-                if (line.contains("APPLICATION")) return line.trim();
+            byte VT_UP = 0x15;
+            for (int i = 0; i < 6; i++) {
+                rawWrite(new byte[]{ VT_UP }); sleep(300);
+                String scr = readSpontaneous(800);
+                for (String line : scr.split("\n")) {
+                    if (line.contains("SERIAL NUMBER")) {
+                        Matcher m = Pattern.compile("(\\d+)\\s*\\.?\\s*$").matcher(line);
+                        if (m.find()) return m.group(1).trim();
+                    }
+                }
             }
             return "LC3";
         } finally {
