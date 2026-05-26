@@ -6,7 +6,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-
+private String cachedSerial = null;
 /**
  * Lc3Link — LC3 LectroCount³ compatible DeliveryController.
  *
@@ -74,8 +74,13 @@ public class Lc3Link extends LcpLink {
 
     // ── Constructeur ──────────────────────────────────────────────────────
     public Lc3Link(TransportIo io) {
+        this(io, null);
+    }
+
+    public Lc3Link(TransportIo io, String knownSerial) {
         super(null, 0, 0, false);
         this.lc3io = io;
+        this.cachedSerial = knownSerial;
     }
     // ── Identité registre ─────────────────────────────────────────────────
     public static final class RegisterIdentity {
@@ -197,8 +202,9 @@ public class Lc3Link extends LcpLink {
             case FIELD_NET_TOTAL:
                 return encodeU32(Math.round(readMode3FieldValue("TOTAL NET VOLUME") * 10));
             case FIELD_SERIAL_ID: {
-                String s = readMode8Serial();
-                return s.getBytes(StandardCharsets.US_ASCII);
+                if (cachedSerial != null) return cachedSerial.getBytes(StandardCharsets.US_ASCII);
+                cachedSerial = readMode8Serial();
+                return cachedSerial.getBytes(StandardCharsets.US_ASCII);
             }
             default:
                 android.util.Log.d("Lc3Link", "opGetField(" + field + ") non impl → 0");
