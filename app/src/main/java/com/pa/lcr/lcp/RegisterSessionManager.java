@@ -285,7 +285,9 @@ public final class RegisterSessionManager {
             String tkLower = tk.toLowerCase(java.util.Locale.ROOT);
             if (tkLower.startsWith("bt:") && knownLc3TransportKeys.contains(tk)) {
                 android.util.Log.i("RSM", "UI thread: transport BT LC3 connu → assumé LC3");
-                identity = new Lc3Link.RegisterIdentity(true, "", node, 0, "");
+                String knownSerial = expectedSerialByNode.get(node);
+                identity = new Lc3Link.RegisterIdentity(true, 
+                    knownSerial != null ? knownSerial : "", node, 0, "");
             }
             android.util.Log.w("RSM", "getOrCreate sur UI thread — probe LC3 " + (identity != null ? "assumé LC3" : "skippé"));
         }
