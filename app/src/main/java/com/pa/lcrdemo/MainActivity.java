@@ -1040,8 +1040,8 @@ private void setupTabsTop() {
         boolean needsRebuild = false;
         if (existing instanceof RegisterTabFragment) {
             String existingSerial = ((RegisterTabFragment) existing).getSerialFromArgs();
-            needsRebuild = (existingSerial == null || existingSerial.trim().isEmpty())
-                && (spec.serialId != null && !spec.serialId.trim().isEmpty());
+            needsRebuild = (spec.serialId != null && !spec.serialId.trim().isEmpty())
+                && !spec.serialId.trim().equals(existingSerial != null ? existingSerial.trim() : "");
         }
         Fragment f = (existing != null && !needsRebuild) ? existing
                 : RegisterTabFragment.newInstance(spec.node, spec.from, spec.serialId, spec.transportKey);
