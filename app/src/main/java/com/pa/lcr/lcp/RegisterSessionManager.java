@@ -292,12 +292,15 @@ public final class RegisterSessionManager {
 
                 // Chercher serial dans expectedSerialByNode ou pinnedTransportByRegKey
                 // Chercher serial dans la map LC3 d'abord, puis expectedSerialByNode
+
                 String knownSerial = knownLc3TransportKeys.get(tk);
                 if (knownSerial == null || knownSerial.isEmpty()) {
                     knownSerial = expectedSerialByNode.get(node);
                 }
+                android.util.Log.i("RSM", "UI thread LC3 knownSerial=" + knownSerial + " node=" + node + " tk=" + tk);
                 identity = new Lc3Link.RegisterIdentity(true,
                     knownSerial != null ? knownSerial : "", node, 0, "");
+
             }
             android.util.Log.w("RSM", "getOrCreate sur UI thread — probe LC3 " + (identity != null ? "assumé LC3" : "skippé"));
         }
