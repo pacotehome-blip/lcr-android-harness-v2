@@ -714,12 +714,25 @@ public class RegisterTabFragment extends Fragment {
                 try {
                     DeliveryController c = controller;
                     if (c == null) return;
-                    ApiResult r = c.api_registerValidate(null, node, null, null, null, false);
-                    JSONObject j = r.toJson().optJSONObject("data");
-                    if (j == null) return;
-                    String serial = j.optString("serial_id", "");
+
+                    // Si serial déjà connu depuis args, l'utiliser directement sans naviguer Mode 8
+                    String serial = (serialFromArgs != null && !serialFromArgs.trim().isEmpty())
+                        ? serialFromArgs.trim() : "";
+                    int tp = -1;
+                    if (serial.isEmpty()) {
+                        ApiResult r = c.api_registerValidate(null, node, null, null, null, false);
+                        JSONObject j = r.toJson().optJSONObject("data");
+                        if (j == null) return;
+                        serial = j.optString("serial_id", "");
+                        tp = j.optInt("ticketPending", -1);
+                    } else {
+                        ApiResult r = c.api_registerValidate(null, node, null, null, null, false);
+                        JSONObject j = r != null ? r.toJson().optJSONObject("data") : null;
+                        if (j != null) tp = j.optInt("ticketPending", -1);
+                    }
+
                     try { RegisterSessionManager.get(requireContext()).bindExpectedSerial(node, serial); } catch (Exception ignored) {}
-                    int tp = j.optInt("ticketPending", -1);
+                    // int tp = j.optInt("ticketPending", -1);
                     ticketPendingFlag = (tp == 1 ? 1 : (tp == 0 ? 0 : -1));
                     ui.post(() -> {
                         if (!isAdded() || getView() == null) return;
