@@ -75,8 +75,10 @@ public class Lc3Link extends LcpLink {
     private volatile long  pendingPreset  = 0;
     private volatile int   accessCode     = 1;
     private volatile float lastNetPoll    = -1f;
-    private volatile int cachedTicketNo = -1;
-
+    private volatile int  cachedTicketNo   = -1;
+    private volatile long cachedTicketMs   = 0L;
+    private static final long TICKET_TTL_MS = 30_000L; // re-lire toutes les 30s
+    
     // ── Ratio GROSS/NET (calculé depuis Mode 13) ──────────────────────────
     private float   grossNetRatio       = 1.0082144f; // calculé depuis Mode 13
     private boolean grossNetRatioLoaded = true;        // pré-chargé — évite navigation Mode 13
@@ -204,8 +206,16 @@ public class Lc3Link extends LcpLink {
             case FIELD_SALE_NUMBER:
                 return encodeU32((int) readMode3FieldValue("SALE NUMBER"));
             case FIELD_TICKET_NUMBER: {
-                if (cachedTicketNo >= 0) return encodeU32(cachedTicketNo);
-                cachedTicketNo = (int) readMode3FieldValue("TICKET NUMBER");
+                long now = System.currentTimeMillis();
+                if (cachedTicketNo >= 0 && (now - cachedTicketMs) < TICKET_TTL_MS) {
+                    return encodeU32(cachedTicketNo);
+                }
+                int fresh = (int) readMode3FieldValue("TICKET NUMBER");
+                if (fresh != cachedTicketNo) {
+                    android.util.Log.i("Lc3Link", "TICKET NUMBER: " + cachedTicketNo + " → " + fresh);
+                }
+                cachedTicketNo = fresh;
+                cachedTicketMs = now;
                 return encodeU32(cachedTicketNo);
             }
             case FIELD_GROSS_TOTAL:
