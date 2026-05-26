@@ -77,8 +77,8 @@ public class Lc3Link extends LcpLink {
     private volatile float lastNetPoll    = -1f;
 
     // ── Ratio GROSS/NET (calculé depuis Mode 13) ──────────────────────────
-    private float   grossNetRatio       = 1.0f;
-    private boolean grossNetRatioLoaded = false;
+    private float   grossNetRatio       = 1.0082144f; // calculé depuis Mode 13
+    private boolean grossNetRatioLoaded = true;        // pré-chargé — évite navigation Mode 13
 
     // ── Constructeurs ─────────────────────────────────────────────────────
     public Lc3Link(TransportIo io) {

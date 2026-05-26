@@ -331,23 +331,29 @@ public final class RegisterSessionManager {
         dc.setListener(mux);
         try { dc.initialize(); } catch (Exception ignored) {}
 
-        // ✅ v7: cache serial (#80) best-effort pour ce node+transport
+        // ✅ v7: serial déjà connu via identity ou knownLc3TransportKeys — pas de opGetField(80) ici
         String serialId0 = null;
-        try {
-            byte[] b80 = link.opGetField(80, 3000);
-            if (b80 != null && b80.length > 0) {
-                String ss = new String(b80, StandardCharsets.UTF_8);
-                int nul = ss.indexOf('\0');
-                if (nul >= 0) ss = ss.substring(0, nul);
-                ss = ss.trim();
-                if (!ss.isEmpty()) serialId0 = ss;
-            }
-        } catch (Exception ignored) {}
-
+        if (isLc3) {
+            // Pour LC3 — serial déjà dans cachedSerial du Lc3Link via constructeur
+            serialId0 = (identity != null && !identity.serialId.isEmpty()) ? identity.serialId : null;
+        } else {
+            // Pour LCR-II — lecture rapide opGetField(80)
+            try {
+                byte[] b80 = link.opGetField(80, 3000);
+                if (b80 != null && b80.length > 0) {
+                    String ss = new String(b80, StandardCharsets.UTF_8);
+                    int nul = ss.indexOf('\0');
+                    if (nul >= 0) ss = ss.substring(0, nul);
+                    ss = ss.trim();
+                    if (!ss.isEmpty()) serialId0 = ss;
+                }
+            } catch (Exception ignored) {}
+        }
         if (serialId0 != null) {
             expectedSerialByNode.put(node, serialId0);
             pinnedTransportByRegKey.put(regKey(node, serialId0), tk);
         }
+
 
         NodeSession s = new NodeSession(dc, mux, scheduler, tk, io.getGenerationId(), serialId0);
         sessions.put(k, s);
