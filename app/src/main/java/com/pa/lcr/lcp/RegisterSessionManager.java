@@ -285,8 +285,20 @@ public final class RegisterSessionManager {
             String tkLower = tk.toLowerCase(java.util.Locale.ROOT);
             if (tkLower.startsWith("bt:") && knownLc3TransportKeys.contains(tk)) {
                 android.util.Log.i("RSM", "UI thread: transport BT LC3 connu → assumé LC3");
+
+                // Chercher serial dans expectedSerialByNode ou pinnedTransportByRegKey
                 String knownSerial = expectedSerialByNode.get(node);
-                identity = new Lc3Link.RegisterIdentity(true, 
+                if (knownSerial == null || knownSerial.isEmpty()) {
+                    // Chercher via transport key dans les sessions existantes
+                    for (java.util.Map.Entry<String, NodeSession> e : sessions.entrySet()) {
+                        if (e.getValue() != null && e.getKey().contains(":" + node)) {
+                            // session trouvée pour ce node — pas de serial disponible ici
+                            break;
+                        }
+                    }
+                }
+                identity = new Lc3Link.RegisterIdentity(true,
+
                     knownSerial != null ? knownSerial : "", node, 0, "");
             }
             android.util.Log.w("RSM", "getOrCreate sur UI thread — probe LC3 " + (identity != null ? "assumé LC3" : "skippé"));
