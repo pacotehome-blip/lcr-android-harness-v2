@@ -6,7 +6,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-private String cachedSerial = null;
+
 /**
  * Lc3Link — LC3 LectroCount³ compatible DeliveryController.
  *
@@ -27,6 +27,7 @@ public class Lc3Link extends LcpLink {
     private static final byte VT_M1    = 0x0C;
     private static final byte VT_ENTER = 0x0D;
     private static final byte VT_DOWN  = 0x04;
+    private static final byte VT_UP    = 0x15;
     private static final byte VT_MODE  = 0x0E;
     private static final byte VT_START = 0x02;
     private static final byte VT_STOP  = 0x13;
@@ -53,6 +54,9 @@ public class Lc3Link extends LcpLink {
     private String lastPollScreen = "";
     private long   lastPollMs     = 0L;
 
+    // ── Cache serial ──────────────────────────────────────────────────────
+    private String cachedSerial = null;
+
     // ── Commandes ─────────────────────────────────────────────────────────
     private static final int CMD_RUN               = 0x00;
     private static final int CMD_END               = 0x02;
@@ -67,12 +71,16 @@ public class Lc3Link extends LcpLink {
     private volatile boolean lc3closed = false;
 
     // ── État interne ──────────────────────────────────────────────────────
-    private volatile int  pendingProduct = 11;
-    private volatile long pendingPreset  = 0;
-    private volatile int  accessCode     = 1;
-    private volatile float lastNetPoll   = -1f;
+    private volatile int   pendingProduct = 11;
+    private volatile long  pendingPreset  = 0;
+    private volatile int   accessCode     = 1;
+    private volatile float lastNetPoll    = -1f;
 
-    // ── Constructeur ──────────────────────────────────────────────────────
+    // ── Ratio GROSS/NET (calculé depuis Mode 13) ──────────────────────────
+    private float   grossNetRatio       = 1.0f;
+    private boolean grossNetRatioLoaded = false;
+
+    // ── Constructeurs ─────────────────────────────────────────────────────
     public Lc3Link(TransportIo io) {
         this(io, null);
     }
@@ -80,8 +88,9 @@ public class Lc3Link extends LcpLink {
     public Lc3Link(TransportIo io, String knownSerial) {
         super(null, 0, 0, false);
         this.lc3io = io;
-        this.cachedSerial = knownSerial;
+        this.cachedSerial = (knownSerial != null && !knownSerial.isEmpty()) ? knownSerial : null;
     }
+
     // ── Identité registre ─────────────────────────────────────────────────
     public static final class RegisterIdentity {
         public final boolean isLc3;
@@ -121,9 +130,7 @@ public class Lc3Link extends LcpLink {
     @Override public long getTransportGenerationId() { return lc3io != null ? lc3io.getGenerationId() : 0L; }
 
     @Override
-    public void setTraceSink(TraceSink sink) {
-        // NO-OP — trace via android.util.Log
-    }
+    public void setTraceSink(TraceSink sink) { /* NO-OP */ }
 
     // ── opGetMachineStatus ────────────────────────────────────────────────
     @Override
@@ -264,7 +271,6 @@ public class Lc3Link extends LcpLink {
     private void startDelivery() throws IOException {
         android.util.Log.i("Lc3Link", "startDelivery product="
                 + pendingProduct + " preset=" + pendingPreset);
-        // Retour Mode 1
         rawWrite(new byte[]{ VT_M1 });   sleep(150);
         rawWrite(new byte[]{ VT_ENTER }); sleep(300);
         rawWrite(new byte[]{ '0' });      sleep(500);
@@ -274,28 +280,20 @@ public class Lc3Link extends LcpLink {
         rawWrite(new byte[]{ VT_M1 });   sleep(150);
         rawWrite(new byte[]{ VT_ENTER }); sleep(500);
         drainRx(300);
-        // ACCESS NUMBER
         rawWrite(new byte[]{ VT_DOWN });  sleep(400);
-        // access + ENTER
         rawWrite(String.valueOf(accessCode).getBytes()); sleep(100);
         rawWrite(new byte[]{ VT_ENTER }); sleep(600);
-        // product + ENTER
         rawWrite(String.valueOf(pendingProduct).getBytes()); sleep(100);
         rawWrite(new byte[]{ VT_ENTER }); sleep(600);
-        // preset / 10 + ENTER  (pendingPreset=300 → envoie '30' → registre=30.0L)
         int presetVal = (int)(pendingPreset / 10);
         rawWrite(String.valueOf(presetVal).getBytes()); sleep(100);
         rawWrite(new byte[]{ VT_ENTER }); sleep(600);
-        // START
         rawWrite(new byte[]{ VT_START }); sleep(800);
         drainRx(300);
         android.util.Log.i("Lc3Link", "startDelivery → START envoyé");
     }
 
-    // ── Ratio GROSS/NET (calculé depuis Mode 13) ──────────────────────────
-    private float   grossNetRatio       = 1.0f;
-    private boolean grossNetRatioLoaded = false;
-
+    // ── Ratio GROSS/NET ───────────────────────────────────────────────────
     private void ensureGrossNetRatio() {
         if (grossNetRatioLoaded) return;
         try {
@@ -331,18 +329,16 @@ public class Lc3Link extends LcpLink {
         gotoMode(3);
         try {
             for (int i = 0; i < 40; i++) {
-                String scr = readSpontaneous(800);
+                String scr   = readSpontaneous(800);
                 String first = firstLine(scr);
                 if (first.toUpperCase().contains(fieldName.toUpperCase())) {
                     Matcher m = Pattern.compile("([\\d.]+)\\s*\\.?\\s*$").matcher(first);
                     if (m.find()) return parseFloat(m.group(1));
                 }
-                rawWrite(new byte[]{ VT_DOWN });  sleep(200);
+                rawWrite(new byte[]{ VT_DOWN }); sleep(200);
                 rawWrite(new byte[]{ VT_ENTER });
             }
-        } finally {
-            backToMode1();
-        }
+        } finally { backToMode1(); }
         return 0f;
     }
 
@@ -350,7 +346,6 @@ public class Lc3Link extends LcpLink {
     private String readMode8Serial() throws IOException {
         gotoMode(8);
         try {
-            byte VT_UP = 0x15;
             for (int i = 0; i < 6; i++) {
                 rawWrite(new byte[]{ VT_UP }); sleep(300);
                 String scr = readSpontaneous(800);
@@ -502,11 +497,11 @@ public class Lc3Link extends LcpLink {
                     System.arraycopy(buf, 0, data, 0, n);
                     String scr = decodeVt100(data);
                     android.util.Log.d("Lc3Link", "probe scr=" + scr.replace("\n", "|"));
-                    if (scr.contains("NET VOLUME LITRES")   ||
-                        scr.contains("PUSH START TO RESUME")||
-                        scr.contains("PRESET STOP")         ||
-                        scr.contains("ACCESS NUMBER")       ||
-                        scr.contains("DISPLAY TERMINAL")    ||
+                    if (scr.contains("NET VOLUME LITRES")    ||
+                        scr.contains("PUSH START TO RESUME") ||
+                        scr.contains("PRESET STOP")          ||
+                        scr.contains("ACCESS NUMBER")        ||
+                        scr.contains("DISPLAY TERMINAL")     ||
                         scr.contains("VT-100")) {
                         android.util.Log.i("Lc3Link", "probe → LC3 ✅");
                         return true;
@@ -531,62 +526,36 @@ public class Lc3Link extends LcpLink {
         int    nodeId   = 0;
         int    truckNo  = 0;
         try {
-            lc3.gotoMode(4);
-            for (int i = 0; i < 15; i++) {
-                String scr   = lc3.readSpontaneous(800);
-                String first = firstLine(scr);
-                if (first.contains("UNIT ID")) {
-                    Matcher m = Pattern.compile("(\\d+)\\s*\\.?\\s*$").matcher(first);
-                    if (m.find()) nodeId = Integer.parseInt(m.group(1).trim());
-                }
-                if (first.contains("TRUCK NUMBER")) {
-                    Matcher m = Pattern.compile("(\\d+)\\s*\\.?\\s*$").matcher(first);
-                    if (m.find()) truckNo = Integer.parseInt(m.group(1).trim());
-                }
-                if (nodeId > 0 && truckNo > 0) break;
-                lc3.rawWrite(new byte[]{ VT_DOWN });  sleep(200);
-                lc3.rawWrite(new byte[]{ VT_ENTER });
-            }
-            lc3.backToMode1();
             lc3.gotoMode(8);
             String scr8 = lc3.readSpontaneous(1000);
             android.util.Log.d("Lc3Link", "probeAndIdentify Mode8 scr=" + scr8.replace("\n", "|"));
 
-            // Scroller UP pour trouver SERIAL NUMBER et APPLICATION
-            byte VT_UP = 0x15;
-
+            // Scroller UP pour trouver SERIAL NUMBER, UNIT ID, TRUCK NUMBER
             for (int i = 0; i < 6; i++) {
                 lc3.rawWrite(new byte[]{ VT_UP }); sleep(300);
                 String scr = lc3.readSpontaneous(800);
                 android.util.Log.d("Lc3Link", "probeAndIdentify Mode8 up" + i + "=" + scr.replace("\n", "|"));
-                if (model.isEmpty() && scr.contains("APPLICATION")) {
-                    for (String line : scr.split("\n")) {
-                        if (line.contains("APPLICATION")) { model = line.trim(); break; }
+                for (String line : scr.split("\n")) {
+                    if (model.isEmpty() && line.contains("APPLICATION")) {
+                        model = line.trim();
                     }
-                }
-                if (nodeId == 0 && scr.contains("UNIT ID")) {
-                    for (String line : scr.split("\n")) {
-                        if (line.contains("UNIT ID")) {
-                            Matcher mu = Pattern.compile("(\\d+)\\s*\\.?\\s*$").matcher(line);
-                            if (mu.find()) nodeId = Integer.parseInt(mu.group(1).trim());
-                            break;
+                    if (nodeId == 0 && line.contains("UNIT ID")) {
+                        Matcher m = Pattern.compile("(\\d+)\\s*\\.?\\s*$").matcher(line);
+                        if (m.find()) nodeId = Integer.parseInt(m.group(1).trim());
+                    }
+                    if (truckNo == 0 && line.contains("TRUCK NUMBER")) {
+                        Matcher m = Pattern.compile("(\\d+)\\s*\\.?\\s*$").matcher(line);
+                        if (m.find()) truckNo = Integer.parseInt(m.group(1).trim());
+                    }
+                    if (line.contains("SERIAL NUMBER")) {
+                        Matcher m = Pattern.compile("(\\d+)\\s*\\.?\\s*$").matcher(line);
+                        if (m.find()) {
+                            serialId = m.group(1).trim();
+                            android.util.Log.i("Lc3Link", "SERIAL NUMBER trouvé: " + serialId);
                         }
                     }
                 }
-                if (scr.contains("SERIAL NUMBER")) {
-
-                    for (String line : scr.split("\n")) {
-                        if (line.contains("SERIAL NUMBER")) {
-                            Matcher m = Pattern.compile("(\\d+)\\s*\\.?\\s*$").matcher(line);
-                            if (m.find()) {
-                                serialId = m.group(1).trim();
-                                android.util.Log.i("Lc3Link", "SERIAL NUMBER trouvé: " + serialId);
-                            }
-                            break;
-                        }
-                    }
-                    break;
-                }
+                if (!serialId.equals("LC3") && nodeId > 0) break;
             }
             // Fallback si SERIAL NUMBER non trouvé
             if (serialId.equals("LC3") && nodeId > 0) serialId = "LC3-" + nodeId;
