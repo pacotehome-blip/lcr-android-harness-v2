@@ -76,10 +76,6 @@ public class Lc3Link extends LcpLink {
     public Lc3Link(TransportIo io) {
         super(null, 0, 0, false);
         this.lc3io = io;
-        // Charger ratio GROSS/NET en background dès la création
-        new Thread(() -> {
-            try { ensureGrossNetRatio(); } catch (Exception ignored) {}
-        }, "Lc3Link-init").start();
     }
     // ── Identité registre ─────────────────────────────────────────────────
     public static final class RegisterIdentity {
