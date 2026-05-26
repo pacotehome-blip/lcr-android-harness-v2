@@ -1271,7 +1271,7 @@ private void setupTabsTop() {
                 try {
                     RegisterSessionManager sm = RegisterSessionManager.get(getApplicationContext());
                     sm.bindExpectedSerial(lc3Node, serialId);
-                    sm.markAsLc3Transport(tk);
+                    sm.markAsLc3Transport(tk, serialId);
                 } catch (Exception ignored) {}
 
             } else {

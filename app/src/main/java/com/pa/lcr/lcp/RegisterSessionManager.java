@@ -60,9 +60,9 @@ public final class RegisterSessionManager {
     // - pinnedTransportByRegKey: (node#serial) -> transportKey choisi
     private final Map<Integer, String> expectedSerialByNode = new LinkedHashMap<>();
     private final Map<String, String> pinnedTransportByRegKey = new LinkedHashMap<>();
-    private final java.util.Set<String> knownLc3TransportKeys =
-        java.util.Collections.synchronizedSet(new java.util.HashSet<>());
-
+    // transportKey → serialId connu
+    private final java.util.concurrent.ConcurrentHashMap<String, String> knownLc3TransportKeys =
+        new java.util.concurrent.ConcurrentHashMap<>();
     private RegisterSessionManager(Context appCtx) {
         this.appCtx = appCtx;
         this.store = new DeliveryLogStore(appCtx);
@@ -287,22 +287,16 @@ public final class RegisterSessionManager {
             // Sur UI thread — vérifier si le transport est BT (LC3 probable)
             // Si oui, forcer isLc3=true si le key contient "BT:" et qu'on a un serial LC3 connu
             String tkLower = tk.toLowerCase(java.util.Locale.ROOT);
-            if (tkLower.startsWith("bt:") && knownLc3TransportKeys.contains(tk)) {
+            if (tkLower.startsWith("bt:") && knownLc3TransportKeys.containsKey(tk)) {
                 android.util.Log.i("RSM", "UI thread: transport BT LC3 connu → assumé LC3");
 
                 // Chercher serial dans expectedSerialByNode ou pinnedTransportByRegKey
-                String knownSerial = expectedSerialByNode.get(node);
+                // Chercher serial dans la map LC3 d'abord, puis expectedSerialByNode
+                String knownSerial = knownLc3TransportKeys.get(tk);
                 if (knownSerial == null || knownSerial.isEmpty()) {
-                    // Chercher via transport key dans les sessions existantes
-                    for (java.util.Map.Entry<String, NodeSession> e : sessions.entrySet()) {
-                        if (e.getValue() != null && e.getKey().contains(":" + node)) {
-                            // session trouvée pour ce node — pas de serial disponible ici
-                            break;
-                        }
-                    }
+                    knownSerial = expectedSerialByNode.get(node);
                 }
                 identity = new Lc3Link.RegisterIdentity(true,
-
                     knownSerial != null ? knownSerial : "", node, 0, "");
             }
             android.util.Log.w("RSM", "getOrCreate sur UI thread — probe LC3 " + (identity != null ? "assumé LC3" : "skippé"));
@@ -314,7 +308,7 @@ public final class RegisterSessionManager {
 
         LcpLink link;
         if (isLc3) {
-            knownLc3TransportKeys.add(tk);
+            knownLc3TransportKeys.put(tk, identity.serialId != null ? identity.serialId : "");
             int lc3Node = (identity.nodeId > 0) ? identity.nodeId : node;
             link = new Lc3Link(io, identity.serialId.isEmpty() ? null : identity.serialId);
             if (identity.serialId != null && !identity.serialId.isEmpty()) {
@@ -679,9 +673,16 @@ public final class RegisterSessionManager {
         @Override public void onTicketInfo(String ticketNo, String deliveryUid) { }
     }
     public synchronized void markAsLc3Transport(String transportKey) {
-    if (transportKey != null && !transportKey.trim().isEmpty()) {
-        knownLc3TransportKeys.add(transportKey.trim());
-        android.util.Log.i("RSM", "markAsLc3Transport: " + transportKey);
+        markAsLc3Transport(transportKey, null);
     }
-}
+
+    public synchronized void markAsLc3Transport(String transportKey, String serialId) {
+        if (transportKey != null && !transportKey.trim().isEmpty()) {
+            String existing = knownLc3TransportKeys.get(transportKey.trim());
+            String serial = (serialId != null && !serialId.isEmpty()) ? serialId :
+                            (existing != null ? existing : "");
+            knownLc3TransportKeys.put(transportKey.trim(), serial);
+            android.util.Log.i("RSM", "markAsLc3Transport: " + transportKey + " serial=" + serial);
+        }
+    }
 }
