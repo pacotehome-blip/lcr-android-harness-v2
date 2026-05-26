@@ -396,13 +396,13 @@ public class Lc3Link extends LcpLink {
 
     // ── pollScreen ────────────────────────────────────────────────────────
     private String pollScreen() throws IOException {
-        rawWrite(CMD_POLL_A);
-        rawWrite(CMD_POLL_B);
-        byte[] raw = readRaw(600);
+        rawWrite(CMD_SCREEN);
+        byte[] raw = readRaw(800);
         String scr = decodeVt100(raw);
         if (scr.isEmpty()) {
-            rawWrite(CMD_SCREEN);
-            scr = decodeVt100(readRaw(800));
+            rawWrite(CMD_POLL_A);
+            rawWrite(CMD_POLL_B);
+            scr = decodeVt100(readRaw(600));
         }
         return scr;
     }
