@@ -256,7 +256,11 @@ public final class RegisterSessionManager {
 
         String tk = (transportKey == null || transportKey.trim().isEmpty()) ? io.getKey() : transportKey.trim();
         // ✅ B1 FSM: activer exclusivement ce transport avant IO (évite USB/BT zombies)
-        try { MediaTransportManager.get(appCtx).activateExclusive(tk, "RSM.getOrCreate"); } catch (Exception ignored) {}
+        // try { MediaTransportManager.get(appCtx).activateExclusive(tk, "RSM.getOrCreate"); } catch (Exception ignored) {}
+
+        // Multi-registre: pas d'activateExclusive ici — le tab actif gère l'activation
+        android.util.Log.d("RSM", "getOrCreate transport=" + tk + " node=" + node);
+
         String k = key(tk, node);
 
         NodeSession existing = sessions.get(k);
