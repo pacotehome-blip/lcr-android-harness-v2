@@ -164,7 +164,8 @@ public class Lc3Link extends LcpLink {
         checkOpen();
         switch (field) {
             case FIELD_DECIMALS:
-                return encodeU32(1);  // 1 décimale fixe (validé Mode 3)
+                // DC lit dec[0] comme idx → decimalsDigits(1)=1 → divise par 10
+                return new byte[]{ 1, 0, 0, 0 };
             case FIELD_ACTIVE_PRODUCT:
                 return encodeU32(pendingProduct);
             case FIELD_PRESET_NET:
