@@ -734,12 +734,15 @@ public class RegisterTabFragment extends Fragment {
                     try { RegisterSessionManager.get(requireContext()).bindExpectedSerial(node, serial); } catch (Exception ignored) {}
                     // int tp = j.optInt("ticketPending", -1);
                     ticketPendingFlag = (tp == 1 ? 1 : (tp == 0 ? 0 : -1));
+
+                    final String fSerial = serial;
                     ui.post(() -> {
                         if (!isAdded() || getView() == null) return;
                         if (txtSerialId != null) {
-                            txtSerialId.setText("#Série : " + ((serial == null || serial.isEmpty()) ? "—" : serial));
-                            if (serial != null && !serial.trim().isEmpty()) headerValidatedOnce = true;
+                            txtSerialId.setText("#Série : " + ((fSerial == null || fSerial.isEmpty()) ? "—" : fSerial));
+                            if (fSerial != null && !fSerial.trim().isEmpty()) headerValidatedOnce = true;
                         }
+
                         if (txtTicketPending != null) {
                             txtTicketPending.setText("Ticket pending : " +
                                     (ticketPendingFlag == 1 ? "OUI" : (ticketPendingFlag == 0 ? "NON" : "—")));
