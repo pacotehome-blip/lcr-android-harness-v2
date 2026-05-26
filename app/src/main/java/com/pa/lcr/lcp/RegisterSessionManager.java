@@ -73,20 +73,20 @@ public final class RegisterSessionManager {
 
     // ✅ v7: clé registre = node#serial (serial = #80)
     private static String regKey(int nodeDec, String serialId) {
-        int node = nodeDec & 0xFF;
+        int node = nodeDec;
         String s = (serialId == null) ? "" : serialId.trim();
         return node + "#" + s;
     }
 
     /** Permet au scan/validate d'enregistrer le serial attendu pour un node. */
     public synchronized void bindExpectedSerial(int nodeDec, String serialId) {
-        int node = nodeDec & 0xFF;
+        int node = nodeDec;
         if (serialId == null || serialId.trim().isEmpty()) return;
         expectedSerialByNode.put(node, serialId.trim());
     }
 
     public synchronized String getExpectedSerial(int nodeDec) {
-        int node = nodeDec & 0xFF;
+        int node = nodeDec;
         return expectedSerialByNode.get(node);
     }
     /** ✅ Rattrapage UI — retourne toutes les sessions connues (node + serial + transportKey) */
@@ -117,7 +117,7 @@ public final class RegisterSessionManager {
         return result;
     }
     private static String key(String transportKey, int nodeDec) {
-        int node = nodeDec & 0xFF;
+        int node = nodeDec;
         String k = (transportKey == null || transportKey.trim().isEmpty()) ? "?" : transportKey.trim();
         return k + ":" + node;
     }
@@ -128,7 +128,7 @@ public final class RegisterSessionManager {
     // - Sinon: réutiliser une session existante unique pour ce node
     // =========================================================
     public synchronized DeliveryController resolveOrCreateForNode(int nodeDec, int fromDec) {
-        int node = nodeDec & 0xFF;
+        int node = nodeDec;
         int from = fromDec & 0xFF;
 
         MediaTransportManager mgr = MediaTransportManager.get(appCtx);
@@ -250,7 +250,7 @@ public final class RegisterSessionManager {
     }
 
     public synchronized DeliveryController getOrCreate(String transportKey, int nodeDec, int fromDec, TransportIo io) {
-        int node = nodeDec & 0xFF;
+        int node = nodeDec;
         int from = fromDec & 0xFF;
         if (io == null || !io.isOpen()) return null;
 
@@ -300,7 +300,7 @@ public final class RegisterSessionManager {
         if (isLc3) {
             knownLc3TransportKeys.add(tk);
             int lc3Node = (identity.nodeId > 0) ? identity.nodeId : node;
-            link = new Lc3Link(io);  // Lc3Link extends LcpLink directement
+            link = new Lc3Link(io, identity.serialId.isEmpty() ? null : identity.serialId);
             if (identity.serialId != null && !identity.serialId.isEmpty()) {
                 expectedSerialByNode.put(lc3Node, identity.serialId);
                 pinnedTransportByRegKey.put(regKey(lc3Node, identity.serialId), tk);
@@ -382,7 +382,7 @@ public final class RegisterSessionManager {
     @Deprecated
     public synchronized void attachUiListener(int nodeDec, DeliveryControllerPort.Listener uiListener) {
         if (uiListener == null) return;
-        int node = nodeDec & 0xFF;
+        int node = nodeDec;
         for (Map.Entry<String, NodeSession> e : sessions.entrySet()) {
             if (e == null) continue;
             String k = e.getKey();
@@ -398,7 +398,7 @@ public final class RegisterSessionManager {
     @Deprecated
     public synchronized void detachUiListener(int nodeDec, DeliveryControllerPort.Listener uiListener) {
         if (uiListener == null) return;
-        int node = nodeDec & 0xFF;
+        int node = nodeDec;
         for (Map.Entry<String, NodeSession> e : sessions.entrySet()) {
             if (e == null) continue;
             String k = e.getKey();
