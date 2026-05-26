@@ -179,9 +179,13 @@ public class Lc3Link extends LcpLink {
                 String scr = cachedPollScreen();
                 Matcher mg = Pattern.compile("GROSS VOLUME LITRES\\s+([\\d.]+)").matcher(scr);
                 if (mg.find()) return encodeU32(Math.round(parseFloat(mg.group(1)) * 10));
-                // Mode NET → GROSS = NET
+                // Mode NET → calculer GROSS via ratio Mode 13
                 Matcher mn = RE_NET.matcher(scr);
-                if (mn.find()) return encodeU32(Math.round(parseFloat(mn.group(1)) * 10));
+                if (mn.find()) {
+                    ensureGrossNetRatio();
+                    float gross = parseFloat(mn.group(1)) * grossNetRatio;
+                    return encodeU32(Math.round(gross * 10));
+                }
                 return encodeU32(0);
             }
             case FIELD_SALE_NUMBER:
@@ -282,6 +286,40 @@ public class Lc3Link extends LcpLink {
         android.util.Log.i("Lc3Link", "startDelivery → START envoyé");
     }
 
+    // ── Ratio GROSS/NET (calculé depuis Mode 13) ──────────────────────────
+    private float   grossNetRatio       = 1.0f;
+    private boolean grossNetRatioLoaded = false;
+
+    private void ensureGrossNetRatio() {
+        if (grossNetRatioLoaded) return;
+        try {
+            float net   = readModeFieldValue(13, "TOTAL NET VOLUME");
+            float gross = readModeFieldValue(13, "TOTAL GROSS VOLUME");
+            if (net > 0 && gross > 0) {
+                grossNetRatio = gross / net;
+                android.util.Log.i("Lc3Link", "grossNetRatio=" + grossNetRatio);
+            }
+            grossNetRatioLoaded = true;
+        } catch (Exception ignored) {}
+    }
+
+    private float readModeFieldValue(int mode, String fieldName) throws IOException {
+        gotoMode(mode);
+        try {
+            for (int i = 0; i < 40; i++) {
+                String scr   = readSpontaneous(800);
+                String first = firstLine(scr);
+                if (first.toUpperCase().contains(fieldName.toUpperCase())) {
+                    Matcher m = Pattern.compile("([\\d.]+)\\s*\\.?\\s*$").matcher(first);
+                    if (m.find()) return parseFloat(m.group(1));
+                }
+                rawWrite(new byte[]{ VT_DOWN }); sleep(200);
+                rawWrite(new byte[]{ VT_ENTER });
+            }
+        } finally { backToMode1(); }
+        return 0f;
+    }
+
     // ── Lecture Mode 3 ────────────────────────────────────────────────────
     private float readMode3FieldValue(String fieldName) throws IOException {
         gotoMode(3);
@@ -349,18 +387,7 @@ public class Lc3Link extends LcpLink {
     }
 
     // ── pollScreen ────────────────────────────────────────────────────────
-    //private String pollScreen() throws IOException {
-    //    rawWrite(CMD_POLL_A);
-    //    rawWrite(CMD_POLL_B);
-    //    byte[] raw = readRaw(600);
-    //    String scr = decodeVt100(raw);
-    //    if (scr.isEmpty()) {
-    //        rawWrite(CMD_SCREEN);
-    //        scr = decodeVt100(readRaw(800));
-    //    }
-    //    return scr;
-    //}
-        private String pollScreen() throws IOException {
+    private String pollScreen() throws IOException {
         rawWrite(CMD_SCREEN);
         byte[] raw = readRaw(800);
         String scr = decodeVt100(raw);
@@ -510,13 +537,35 @@ public class Lc3Link extends LcpLink {
             lc3.backToMode1();
             lc3.gotoMode(8);
             String scr8 = lc3.readSpontaneous(1000);
-            for (String line : scr8.split("\n")) {
-                if (line.contains("APPLICATION")) {
-                    model    = line.trim();
-                    serialId = "LC3:" + nodeId;
+            android.util.Log.d("Lc3Link", "probeAndIdentify Mode8 scr=" + scr8.replace("\n", "|"));
+
+            // Scroller UP pour trouver SERIAL NUMBER et APPLICATION
+            byte VT_UP = 0x15;
+            for (int i = 0; i < 6; i++) {
+                lc3.rawWrite(new byte[]{ VT_UP }); sleep(300);
+                String scr = lc3.readSpontaneous(800);
+                android.util.Log.d("Lc3Link", "probeAndIdentify Mode8 up" + i + "=" + scr.replace("\n", "|"));
+                if (model.isEmpty() && scr.contains("APPLICATION")) {
+                    for (String line : scr.split("\n")) {
+                        if (line.contains("APPLICATION")) { model = line.trim(); break; }
+                    }
+                }
+                if (scr.contains("SERIAL NUMBER")) {
+                    for (String line : scr.split("\n")) {
+                        if (line.contains("SERIAL NUMBER")) {
+                            Matcher m = Pattern.compile("(\\d+)\\s*\\.?\\s*$").matcher(line);
+                            if (m.find()) {
+                                serialId = m.group(1).trim();
+                                android.util.Log.i("Lc3Link", "SERIAL NUMBER trouvé: " + serialId);
+                            }
+                            break;
+                        }
+                    }
                     break;
                 }
             }
+            // Fallback si SERIAL NUMBER non trouvé
+            if (serialId.equals("LC3") && nodeId > 0) serialId = "LC3-" + nodeId;
             lc3.backToMode1();
         } catch (Exception e) {
             android.util.Log.w("Lc3Link", "probeAndIdentify: " + e.getMessage());
