@@ -1260,10 +1260,13 @@ private void setupTabsTop() {
                 android.util.Log.i("MainActivity", "Scan LC3: node=" + lc3Node
                         + " serial=" + serialId);
                 // Pré-populer knownLc3TransportKeys sans créer de session complète
+
                 try {
                     RegisterSessionManager sm = RegisterSessionManager.get(getApplicationContext());
+                    sm.bindExpectedSerial(lc3Node, serialId);
                     sm.markAsLc3Transport(tk);
                 } catch (Exception ignored) {}
+
             } else {
                 // LCR-II — boucle classique
                 for (int node = 1; node <= 250; node++) {
