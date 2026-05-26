@@ -142,7 +142,7 @@ public class Lc3Link extends LcpLink {
     // ── opDeliveryStatus ──────────────────────────────────────────────────
     @Override
     public int[] opDeliveryStatus() throws IOException {
-        String scr = pollScreen();
+        String scr = cachedPollScreen();
         int delCode = 0;
         if (scr.contains("PUSH START TO RESUME") ||
             scr.contains("PRESET STOP") ||
