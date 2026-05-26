@@ -548,6 +548,7 @@ public class Lc3Link extends LcpLink {
 
             // Scroller UP pour trouver SERIAL NUMBER et APPLICATION
             byte VT_UP = 0x15;
+
             for (int i = 0; i < 6; i++) {
                 lc3.rawWrite(new byte[]{ VT_UP }); sleep(300);
                 String scr = lc3.readSpontaneous(800);
@@ -557,7 +558,17 @@ public class Lc3Link extends LcpLink {
                         if (line.contains("APPLICATION")) { model = line.trim(); break; }
                     }
                 }
+                if (nodeId == 0 && scr.contains("UNIT ID")) {
+                    for (String line : scr.split("\n")) {
+                        if (line.contains("UNIT ID")) {
+                            Matcher mu = Pattern.compile("(\\d+)\\s*\\.?\\s*$").matcher(line);
+                            if (mu.find()) nodeId = Integer.parseInt(mu.group(1).trim());
+                            break;
+                        }
+                    }
+                }
                 if (scr.contains("SERIAL NUMBER")) {
+
                     for (String line : scr.split("\n")) {
                         if (line.contains("SERIAL NUMBER")) {
                             Matcher m = Pattern.compile("(\\d+)\\s*\\.?\\s*$").matcher(line);
