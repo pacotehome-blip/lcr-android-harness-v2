@@ -74,10 +74,13 @@ public class Lc3Link extends LcpLink {
 
     // ── Constructeur ──────────────────────────────────────────────────────
     public Lc3Link(TransportIo io) {
-        super(null, 0, 0, false);   // LcpLink parent sans transport
+        super(null, 0, 0, false);
         this.lc3io = io;
+        // Charger ratio GROSS/NET en background dès la création
+        new Thread(() -> {
+            try { ensureGrossNetRatio(); } catch (Exception ignored) {}
+        }, "Lc3Link-init").start();
     }
-
     // ── Identité registre ─────────────────────────────────────────────────
     public static final class RegisterIdentity {
         public final boolean isLc3;
@@ -389,13 +392,13 @@ public class Lc3Link extends LcpLink {
 
     // ── pollScreen ────────────────────────────────────────────────────────
     private String pollScreen() throws IOException {
-        rawWrite(CMD_SCREEN);
-        byte[] raw = readRaw(800);
+        rawWrite(CMD_POLL_A);
+        rawWrite(CMD_POLL_B);
+        byte[] raw = readRaw(600);
         String scr = decodeVt100(raw);
         if (scr.isEmpty()) {
-            rawWrite(CMD_POLL_A);
-            rawWrite(CMD_POLL_B);
-            scr = decodeVt100(readRaw(600));
+            rawWrite(CMD_SCREEN);
+            scr = decodeVt100(readRaw(800));
         }
         return scr;
     }
