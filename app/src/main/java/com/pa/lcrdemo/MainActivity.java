@@ -940,6 +940,13 @@ private void setupTabsTop() {
             }
         }
         regKeyToTabKey.put(regKey, newTabKey);
+          // Pré-populer le serial pour LC3 avant création du fragment
+        if (isLc3 && !serial.isEmpty()) {
+            try {
+                RegisterSessionManager sm = RegisterSessionManager.get(getApplicationContext());
+                sm.bindExpectedSerial(node, serial);
+            } catch (Exception ignored) {}
+        }      
 
         // 3) upsert tab
         TabSpec existing = tabsByKey.get(newTabKey);
