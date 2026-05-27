@@ -52,8 +52,7 @@ public class RegisterTabFragment extends Fragment {
     private TextView txtLcrNode, txtFrom, txtSerialId, txtTicketNo, txtTicketPending;
     private TextView txtDeliveryUid;
     private TextView txtLive, txtQtyNet, txtQtyGross;
-    private Spinner spnProduct;
-    private android.widget.EditText edtProductCode;
+    private android.widget.AutoCompleteTextView spnProduct;
     private EditText edtPreset;
     private Button btnConnect, btnA, btnB, btnC, btnContinue, btnFinish;
     private Button btnReprintTicket;
@@ -368,7 +367,14 @@ public class RegisterTabFragment extends Fragment {
         txtTicketNo = v.findViewById(R.id.txtTicketNo);
         txtTicketPending = v.findViewById(R.id.txtTicketPending);
         spnProduct = v.findViewById(R.id.spnProduct);
-        edtProductCode = v.findViewById(R.id.edtProductCode);
+        if (spnProduct != null) {
+            // Liste suggestions 1-16
+            String[] items = new String[16];
+            for (int i = 0; i < 16; i++) items[i] = String.valueOf(i + 1);
+            android.widget.ArrayAdapter<String> ad = new android.widget.ArrayAdapter<>(
+                requireContext(), android.R.layout.simple_dropdown_item_1line, items);
+            spnProduct.setAdapter(ad);
+        }
         edtPreset = v.findViewById(R.id.edtPreset);
         btnConnect = v.findViewById(R.id.btnConnectTab);
         btnA = v.findViewById(R.id.btnA);
@@ -405,11 +411,7 @@ public class RegisterTabFragment extends Fragment {
         if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
         if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
         if (edtPreset != null) edtPreset.setText("50");
-        List<String> items = new ArrayList<>();
-        for (int i = 1; i <= 16; i++) items.add("Produit " + i);
-        ArrayAdapter<String> ad = new ArrayAdapter<>(requireContext(), android.R.layout.simple_spinner_item, items);
-        ad.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        if (spnProduct != null) { spnProduct.setAdapter(ad); spnProduct.setSelection(0); }
+        if (spnProduct != null) spnProduct.setText("1", false);
         if (cbShowLog != null) cbShowLog.setChecked(false);
         if (logPanel != null) logPanel.setVisibility(View.GONE);
         logViewSinceMs = 0L;
@@ -860,15 +862,13 @@ public class RegisterTabFragment extends Fragment {
         } catch (Exception ignored) {}
     }
     private int getPendingProduct() {
-        // EditText prioritaire si non vide — permet codes produits LC3 (11, 22, 21, 10...)
-        if (edtProductCode != null) {
-            String txt = edtProductCode.getText().toString().trim();
+        if (spnProduct != null) {
+            String txt = spnProduct.getText().toString().trim();
             if (!txt.isEmpty()) {
                 try { return Integer.parseInt(txt); } catch (Exception ignored) {}
             }
         }
-        // Fallback spinner 1-16
-        return (spnProduct != null ? (spnProduct.getSelectedItemPosition() + 1) : 1);
+        return 1;
     }
 
     public String getSerialFromArgs() { return serialFromArgs; }

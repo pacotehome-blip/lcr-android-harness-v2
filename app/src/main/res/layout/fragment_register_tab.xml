@@ -129,20 +129,15 @@
                             android:textStyle="bold"
                             android:textSize="12sp" />
 
-                        <Spinner
+                        <AutoCompleteTextView
                             android:id="@+id/spnProduct"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:layout_marginTop="2dp" />
-
-                        <EditText
-                            android:id="@+id/edtProductCode"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
                             android:layout_marginTop="2dp"
-                            android:hint="Code produit (ex: 11)"
                             android:inputType="number"
-                            android:textSize="12sp" />
+                            android:hint="Produit (1-16 ou code)"
+                            android:textSize="12sp"
+                            android:completionThreshold="1" />
                     </LinearLayout>
 
                     <!-- Preset -->
