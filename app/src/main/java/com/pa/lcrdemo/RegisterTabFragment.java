@@ -613,7 +613,6 @@ public class RegisterTabFragment extends Fragment {
         controller = null;
         starting = false;
         ticketPendingFlag = -1;
-        try { if (tabTransportKey != null) MediaTransportManager.get(requireContext()).activateExclusive(tabTransportKey, "TAB_RECONNECT"); } catch (Exception ignored) {}
         connectThisRegister(userInitiated);
     }
 
