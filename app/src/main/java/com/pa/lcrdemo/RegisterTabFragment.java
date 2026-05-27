@@ -435,11 +435,9 @@ public class RegisterTabFragment extends Fragment {
                 return;
             }
             ui.postDelayed(() -> {
-                try {
-                    if (tabTransportKey != null) {
-                        MediaTransportManager.get(requireContext()).activateExclusive(tabTransportKey, "LIVE_AFTER_B");
-                    }
-                } catch (Exception ignored) {}
+
+                  try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
+
                 try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
             }, 200);
         } catch (Exception ignored) {}
