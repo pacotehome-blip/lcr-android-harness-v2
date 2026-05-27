@@ -1214,9 +1214,27 @@ private void setupTabsTop() {
     }
 
     private void scanRegistersBtOnly() {
+        if (mediaTransportManager == null) return;
+        // Scanner tous les transports BT connectés
+        try {
+            for (TransportSnapshot s : mediaTransportManager.listSnapshots()) {
+                if (s == null || s.key == null) continue;
+                if (!s.key.toUpperCase().startsWith("BT:")) continue;
+                if (s.status == TransportStatus.DISCONNECTED || s.status == TransportStatus.ERROR) continue;
+                TransportIo io = mediaTransportManager.getByKey(s.key);
+                if (io == null || !io.isOpen()) continue;
+                final TransportIo ioFinal = io;
+                final String keyFinal = s.key;
+                scanExec.execute(() -> scanRegistersWithIo(ioFinal, keyFinal, txtBtRegsFound));
+            }
+        } catch (Exception e) {
+            logUi(null, "Scan BT registres: erreur: " + e.getMessage());
+        }
+    }
+
+    private void scanRegistersBtOnlyLegacy() {
         if (lastBtMac == null || lastBtMac.trim().isEmpty()) {
-            logUi(null, "Scan BT registres: aucun BT connecté. Faire Refresh + Connect.");
-            toast("Scan BT registres: BT non connecté");
+            logUi(null, "Scan BT registres: aucun BT connecté.");
             return;
         }
         TransportIo io = null;
@@ -1224,6 +1242,7 @@ private void setupTabsTop() {
             String key = MediaTransportManager.btKey(lastBtMac);
             if (mediaTransportManager != null) {
                 io = mediaTransportManager.getByKey(key);
+
             }
         } catch (Exception ignored) {}
         if (io == null || !io.isOpen()) {
