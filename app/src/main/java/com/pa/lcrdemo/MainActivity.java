@@ -2741,6 +2741,21 @@ private void ensureActiveTransport(String transportKey, String reason) {
             if (transportKey == null || transportKey.trim().isEmpty()) return;
             if (mediaTransportManager == null) mediaTransportManager = MediaTransportManager.get(this);
             if (mediaTransportManager != null) {
+                // TAB_SWITCH entre deux BT différents — pas d'activateExclusive
+                // chaque registre BT garde son transport actif
+                if ("TAB_SWITCH".equals(reason)) {
+                    String tk = transportKey.trim();
+                    boolean isBt = tk.toUpperCase().startsWith("BT:");
+                    if (isBt) {
+                        // Vérifier si l'autre transport actif est aussi BT
+                        String activeKey = mediaTransportManager.getActiveKey();
+                        boolean otherIsBt = activeKey != null && activeKey.toUpperCase().startsWith("BT:");
+                        if (otherIsBt && !activeKey.equalsIgnoreCase(tk)) {
+                            // Deux BT différents — pas d'exclusion
+                            return;
+                        }
+                    }
+                }
                 mediaTransportManager.activateExclusive(transportKey.trim(), (reason != null ? reason : "UI"));
             }
         } catch (Exception ignored) {}
