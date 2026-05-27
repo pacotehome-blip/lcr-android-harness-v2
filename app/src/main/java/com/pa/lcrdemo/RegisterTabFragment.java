@@ -53,6 +53,7 @@ public class RegisterTabFragment extends Fragment {
     private TextView txtDeliveryUid;
     private TextView txtLive, txtQtyNet, txtQtyGross;
     private Spinner spnProduct;
+    private android.widget.EditText edtProductCode;
     private EditText edtPreset;
     private Button btnConnect, btnA, btnB, btnC, btnContinue, btnFinish;
     private Button btnReprintTicket;
@@ -367,6 +368,7 @@ public class RegisterTabFragment extends Fragment {
         txtTicketNo = v.findViewById(R.id.txtTicketNo);
         txtTicketPending = v.findViewById(R.id.txtTicketPending);
         spnProduct = v.findViewById(R.id.spnProduct);
+        edtProductCode = v.findViewById(R.id.edtProductCode);
         edtPreset = v.findViewById(R.id.edtPreset);
         btnConnect = v.findViewById(R.id.btnConnectTab);
         btnA = v.findViewById(R.id.btnA);
@@ -523,7 +525,7 @@ public class RegisterTabFragment extends Fragment {
                 startingSinceMs = System.currentTimeMillis();
                 updateButtons(controller.getState());
                 if (txtLive != null) txtLive.setText("LIVE: RUNNING_FLOWING (flow off - waiting progression)");
-                int prod = (spnProduct != null ? (spnProduct.getSelectedItemPosition() + 1) : 1);
+                int prod = getPendingProduct();
                 double preset = parseDouble(edtPreset != null ? edtPreset.getText().toString() : "0", 0.0);
                 controller.startDelivery(prod, preset);
             });
@@ -857,5 +859,17 @@ public class RegisterTabFragment extends Fragment {
             }
         } catch (Exception ignored) {}
     }
+    private int getPendingProduct() {
+        // EditText prioritaire si non vide — permet codes produits LC3 (11, 22, 21, 10...)
+        if (edtProductCode != null) {
+            String txt = edtProductCode.getText().toString().trim();
+            if (!txt.isEmpty()) {
+                try { return Integer.parseInt(txt); } catch (Exception ignored) {}
+            }
+        }
+        // Fallback spinner 1-16
+        return (spnProduct != null ? (spnProduct.getSelectedItemPosition() + 1) : 1);
+    }
+
     public String getSerialFromArgs() { return serialFromArgs; }
 }

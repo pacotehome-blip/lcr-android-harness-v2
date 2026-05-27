@@ -41,6 +41,8 @@ public class Lc3Link extends LcpLink {
     // ── Champs ────────────────────────────────────────────────────────────
     private static final int FIELD_ACTIVE_PRODUCT = 0;
     private static final int FIELD_PRESET_NET     = 6;
+    private static final int FIELD_PRESET_GROSS   = 7;
+    private static final int FIELD_PRESET_PRICE   = 8;
     private static final int FIELD_GROSS_TOTAL    = 17;
     private static final int FIELD_NET_TOTAL      = 18;
     private static final int FIELD_SALE_NUMBER    = 22;
@@ -48,16 +50,10 @@ public class Lc3Link extends LcpLink {
     private static final int FIELD_DECIMALS       = 39;
     private static final int FIELD_GROSS_COUNT    = 44;
     private static final int FIELD_NET_COUNT      = 45;
+    private static final int FIELD_TEMPERATURE    = 46;
     private static final int FIELD_SERIAL_ID      = 80;
 
-    // ── Cache pollScreen ──────────────────────────────────────────────────
-    private String lastPollScreen = "";
-    private long   lastPollMs     = 0L;
-
-    // ── Cache serial ──────────────────────────────────────────────────────
-    private String cachedSerial = null;
-
-    // ── Commandes ─────────────────────────────────────────────────────────
+    // ── Commandes DC ──────────────────────────────────────────────────────
     private static final int CMD_RUN               = 0x00;
     private static final int CMD_END               = 0x02;
     private static final int CMD_PRINT_LAST_TICKET = 0x06;
@@ -70,18 +66,32 @@ public class Lc3Link extends LcpLink {
     private final TransportIo lc3io;
     private volatile boolean lc3closed = false;
 
+    // ── Cache pollScreen ──────────────────────────────────────────────────
+    private String lastPollScreen = "";
+    private long   lastPollMs     = 0L;
+
+    // ── Cache serial ──────────────────────────────────────────────────────
+    private String cachedSerial = null;
+
+    // ── Cache ticket ──────────────────────────────────────────────────────
+    private volatile int  cachedTicketNo  = -1;
+    private volatile long cachedTicketMs  = 0L;
+    private static final long TICKET_TTL_MS = 30_000L;
+
+    // ── Cache température ─────────────────────────────────────────────────
+    private volatile float cachedTemperature = Float.NaN;
+
     // ── État interne ──────────────────────────────────────────────────────
-    private volatile int   pendingProduct = 11;
-    private volatile long  pendingPreset  = 0;
-    private volatile int   accessCode     = 1;
-    private volatile float lastNetPoll    = -1f;
-    private volatile int  cachedTicketNo   = -1;
-    private volatile long cachedTicketMs   = 0L;
-    private static final long TICKET_TTL_MS = 30_000L; // re-lire toutes les 30s
-    
-    // ── Ratio GROSS/NET (calculé depuis Mode 13) ──────────────────────────
-    private float   grossNetRatio       = 1.0082144f; // calculé depuis Mode 13
-    private boolean grossNetRatioLoaded = true;        // pré-chargé — évite navigation Mode 13
+    private volatile int   pendingProduct      = 11;
+    private volatile long  pendingPreset       = 0;  // PRESET NET
+    private volatile long  pendingPresetGross  = 0;  // PRESET GROSS
+    private volatile long  pendingPresetPrice  = 0;  // PRESET PRICE
+    private volatile int   accessCode          = 1;
+    private volatile float lastNetPoll         = -1f;
+
+    // ── Ratio GROSS/NET ───────────────────────────────────────────────────
+    private float   grossNetRatio       = 1.0082144f; // pré-chargé depuis Mode 13
+    private boolean grossNetRatioLoaded = true;
 
     // ── Constructeurs ─────────────────────────────────────────────────────
     public Lc3Link(TransportIo io) {
@@ -118,7 +128,7 @@ public class Lc3Link extends LcpLink {
         }
     }
 
-    // ── Lifecycle (override LcpLink) ──────────────────────────────────────
+    // ── Lifecycle ─────────────────────────────────────────────────────────
     @Override public boolean isClosed() {
         return lc3closed || lc3io == null || !lc3io.isOpen();
     }
@@ -131,9 +141,7 @@ public class Lc3Link extends LcpLink {
     @Override public void forceSyncNext(String r)    { /* NO-OP */ }
     @Override public String getTransportKey()        { return lc3io != null ? lc3io.getKey() : null; }
     @Override public long getTransportGenerationId() { return lc3io != null ? lc3io.getGenerationId() : 0L; }
-
-    @Override
-    public void setTraceSink(TraceSink sink) { /* NO-OP */ }
+    @Override public void setTraceSink(TraceSink sink) { /* NO-OP */ }
 
     // ── opGetMachineStatus ────────────────────────────────────────────────
     @Override
@@ -184,6 +192,10 @@ public class Lc3Link extends LcpLink {
                 return encodeU32(pendingProduct);
             case FIELD_PRESET_NET:
                 return encodeU32((int) pendingPreset);
+            case FIELD_PRESET_GROSS:
+                return encodeU32((int) pendingPresetGross);
+            case FIELD_PRESET_PRICE:
+                return encodeU32((int) pendingPresetPrice);
             case FIELD_NET_COUNT: {
                 String scr = cachedPollScreen();
                 Matcher m = RE_NET.matcher(scr);
@@ -194,7 +206,7 @@ public class Lc3Link extends LcpLink {
                 String scr = cachedPollScreen();
                 Matcher mg = Pattern.compile("GROSS VOLUME LITRES\\s+([\\d.]+)").matcher(scr);
                 if (mg.find()) return encodeU32(Math.round(parseFloat(mg.group(1)) * 10));
-                // Mode NET → calculer GROSS via ratio Mode 13
+                // Mode NET → calculer GROSS via ratio
                 Matcher mn = RE_NET.matcher(scr);
                 if (mn.find()) {
                     ensureGrossNetRatio();
@@ -222,6 +234,15 @@ public class Lc3Link extends LcpLink {
                 return encodeU32(Math.round(readMode3FieldValue("TOTAL GROSS VOLUME") * 10));
             case FIELD_NET_TOTAL:
                 return encodeU32(Math.round(readMode3FieldValue("TOTAL NET VOLUME") * 10));
+            case FIELD_TEMPERATURE: {
+                String scr = cachedPollScreen();
+                Matcher m = Pattern.compile("TAB54 TEMP[^\\d]*([\\d.]+)").matcher(scr);
+                if (m.find()) {
+                    cachedTemperature = parseFloat(m.group(1));
+                    return encodeU32(Math.round(cachedTemperature * 10));
+                }
+                return encodeU32(0);
+            }
             case FIELD_SERIAL_ID: {
                 if (cachedSerial != null) return cachedSerial.getBytes(StandardCharsets.US_ASCII);
                 cachedSerial = readMode8Serial();
@@ -245,6 +266,14 @@ public class Lc3Link extends LcpLink {
             case FIELD_PRESET_NET:
                 pendingPreset = beI32(value) & 0xFFFFFFFFL;
                 android.util.Log.d("Lc3Link", "PRESET_NET=" + pendingPreset);
+                break;
+            case FIELD_PRESET_GROSS:
+                pendingPresetGross = beI32(value) & 0xFFFFFFFFL;
+                android.util.Log.d("Lc3Link", "PRESET_GROSS=" + pendingPresetGross);
+                break;
+            case FIELD_PRESET_PRICE:
+                pendingPresetPrice = beI32(value) & 0xFFFFFFFFL;
+                android.util.Log.d("Lc3Link", "PRESET_PRICE=" + pendingPresetPrice);
                 break;
             default:
                 android.util.Log.d("Lc3Link", "opSetField(" + field + ") ignoré");
@@ -285,28 +314,56 @@ public class Lc3Link extends LcpLink {
 
     // ── startDelivery ─────────────────────────────────────────────────────
     private void startDelivery() throws IOException {
-        android.util.Log.i("Lc3Link", "startDelivery product="
-                + pendingProduct + " preset=" + pendingPreset);
-        rawWrite(new byte[]{ VT_M1 });   sleep(150);
-        rawWrite(new byte[]{ VT_ENTER }); sleep(300);
-        rawWrite(new byte[]{ '0' });      sleep(500);
-        drainRx(300);
-        rawWrite(new byte[]{ VT_DOWN });  sleep(100);
-        rawWrite(new byte[]{ VT_DOWN });  sleep(100);
-        rawWrite(new byte[]{ VT_M1 });   sleep(150);
-        rawWrite(new byte[]{ VT_ENTER }); sleep(500);
-        drainRx(300);
-        rawWrite(new byte[]{ VT_DOWN });  sleep(400);
+        android.util.Log.i("Lc3Link", "startDelivery product=" + pendingProduct
+                + " presetNet=" + pendingPreset
+                + " presetGross=" + pendingPresetGross
+                + " presetPrice=" + pendingPresetPrice);
+
+        // 1) Retour Mode 1
+        backToMode1();
+
+        // 2) Valider qu'on est en Mode 1 (NET VOLUME LITRES ou ACCESS NUMBER)
+        String scr = readSpontaneous(800);
+        if (!scr.contains("NET VOLUME LITRES") && !scr.contains("ACCESS NUMBER")) {
+            android.util.Log.w("Lc3Link", "startDelivery: écran inattendu: " + scr.replace("\n", "|"));
+            backToMode1();
+            scr = readSpontaneous(800);
+        }
+        android.util.Log.i("Lc3Link", "startDelivery écran=" + scr.replace("\n", "|"));
+
+        // 3) [1] ACCESS NUMBER
+        rawWrite(new byte[]{ VT_DOWN }); sleep(400);
         rawWrite(String.valueOf(accessCode).getBytes()); sleep(100);
         rawWrite(new byte[]{ VT_ENTER }); sleep(600);
+
+        // 4) [2] PRODUCT CODE
         rawWrite(String.valueOf(pendingProduct).getBytes()); sleep(100);
         rawWrite(new byte[]{ VT_ENTER }); sleep(600);
-        int presetVal = (int)(pendingPreset / 10);
-        rawWrite(String.valueOf(presetVal).getBytes()); sleep(100);
+
+        // 5) [3] PRESET NET
+        int presetNet = (int)(pendingPreset / 10);
+        rawWrite(String.valueOf(presetNet).getBytes()); sleep(100);
         rawWrite(new byte[]{ VT_ENTER }); sleep(600);
+
+        // 6) [4] PRESET GROSS
+        int presetGross = (int)(pendingPresetGross / 10);
+        rawWrite(String.valueOf(presetGross).getBytes()); sleep(100);
+        rawWrite(new byte[]{ VT_ENTER }); sleep(600);
+
+        // 7) [5] PRESET PRICE (2 décimales)
+        int presetPrice = (int)(pendingPresetPrice / 100);
+        rawWrite(String.valueOf(presetPrice).getBytes()); sleep(100);
+        rawWrite(new byte[]{ VT_ENTER }); sleep(600);
+
+        // 8) START
         rawWrite(new byte[]{ VT_START }); sleep(800);
         drainRx(300);
         android.util.Log.i("Lc3Link", "startDelivery → START envoyé");
+    }
+
+    // ── Méthode publique température (pour FieldService) ──────────────────
+    public float getTemperature() {
+        return Float.isNaN(cachedTemperature) ? 0f : cachedTemperature;
     }
 
     // ── Ratio GROSS/NET ───────────────────────────────────────────────────
@@ -378,9 +435,9 @@ public class Lc3Link extends LcpLink {
         }
     }
 
-    // ── Navigation modes ─────────────────────────────────────────────────
+    // ── Navigation modes ──────────────────────────────────────────────────
     private void gotoMode(int modeNum) throws IOException {
-        rawWrite(new byte[]{ VT_M1 });   sleep(300);
+        rawWrite(new byte[]{ VT_M1 });    sleep(300);
         rawWrite(new byte[]{ VT_ENTER }); sleep(1000);
         drainRx(300);
         rawWrite(new byte[]{ VT_MODE });  sleep(300);
@@ -412,13 +469,13 @@ public class Lc3Link extends LcpLink {
 
     // ── pollScreen ────────────────────────────────────────────────────────
     private String pollScreen() throws IOException {
-        rawWrite(CMD_SCREEN);
-        byte[] raw = readRaw(800);
+        rawWrite(CMD_POLL_A);
+        rawWrite(CMD_POLL_B);
+        byte[] raw = readRaw(600);
         String scr = decodeVt100(raw);
         if (scr.isEmpty()) {
-            rawWrite(CMD_POLL_A);
-            rawWrite(CMD_POLL_B);
-            scr = decodeVt100(readRaw(600));
+            rawWrite(CMD_SCREEN);
+            scr = decodeVt100(readRaw(800));
         }
         return scr;
     }
@@ -546,7 +603,6 @@ public class Lc3Link extends LcpLink {
             String scr8 = lc3.readSpontaneous(1000);
             android.util.Log.d("Lc3Link", "probeAndIdentify Mode8 scr=" + scr8.replace("\n", "|"));
 
-            // Scroller UP pour trouver SERIAL NUMBER, UNIT ID, TRUCK NUMBER
             for (int i = 0; i < 6; i++) {
                 lc3.rawWrite(new byte[]{ VT_UP }); sleep(300);
                 String scr = lc3.readSpontaneous(800);
@@ -573,7 +629,6 @@ public class Lc3Link extends LcpLink {
                 }
                 if (!serialId.equals("LC3") && nodeId > 0) break;
             }
-            // Fallback si SERIAL NUMBER non trouvé
             if (serialId.equals("LC3") && nodeId > 0) serialId = "LC3-" + nodeId;
             lc3.backToMode1();
         } catch (Exception e) {

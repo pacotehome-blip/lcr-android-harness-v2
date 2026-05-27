@@ -1,4 +1,3 @@
-
 <androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/regRootScroll"
@@ -135,6 +134,15 @@
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
                             android:layout_marginTop="2dp" />
+
+                        <EditText
+                            android:id="@+id/edtProductCode"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:hint="Code produit (ex: 11)"
+                            android:inputType="number"
+                            android:textSize="12sp" />
                     </LinearLayout>
 
                     <!-- Preset -->
