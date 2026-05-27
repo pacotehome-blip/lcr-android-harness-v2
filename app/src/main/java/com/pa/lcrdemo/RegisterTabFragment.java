@@ -46,6 +46,11 @@ public class RegisterTabFragment extends Fragment {
         return f;
     }
 
+    public void onTabActivated() {
+            ui.postDelayed(() -> {
+            try { runStatusBLikeButton("TAB_ACTIVATED"); } catch (Exception ignored) {}
+            }, 300);
+    }
     private int node = 250;
     private int from = 255;
 

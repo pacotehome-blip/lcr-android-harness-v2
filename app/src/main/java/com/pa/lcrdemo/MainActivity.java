@@ -1050,6 +1050,14 @@ private void setupTabsTop() {
         tx.setReorderingAllowed(true);
         tx.commitAllowingStateLoss();
         ui.postDelayed(() -> refreshOneTabMediaStatus(tabKey), 50);
+        ui.postDelayed(() -> {
+            try {
+             Fragment ff = getSupportFragmentManager().findFragmentByTag("regtab_" + tabKey);
+             if (ff instanceof RegisterTabFragment) {
+                ((RegisterTabFragment) ff).onTabActivated();
+             }
+            } catch (Exception ignored) {}
+        }, 100);        
     }
 
     /**
