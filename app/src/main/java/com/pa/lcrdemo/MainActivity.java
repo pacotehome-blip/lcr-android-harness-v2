@@ -1265,7 +1265,7 @@ private void setupTabsTop() {
         try { if ("USB".equalsIgnoreCase(mediaShort) && btnScanUsbRegs != null) btnScanUsbRegs.setEnabled(false); } catch (Exception ignored) {}
         try { if ("BT".equalsIgnoreCase(mediaShort) && btnScanBtRegs != null) btnScanBtRegs.setEnabled(false); } catch (Exception ignored) {}
 
-        if (target != null) target.setText("Scan en cours... (" + mediaShort + ")");
+       if (target != null) ui.post(() -> target.setText("Scan en cours... (" + mediaShort + ")"));
 
         final TransportIo ioFinal = io;
         scanExec.execute(() -> {
@@ -1333,7 +1333,7 @@ private void setupTabsTop() {
 
                     if (target != null) {
                         if (found.isEmpty()) {
-                            target.setText("(aucun registre trouvé)\n" + mediaShort);
+                         ui.post(() -> target.setText("(aucun registre trouvé)\n" + mediaShort));
                         } else {
                             StringBuilder sb = new StringBuilder();
                             sb.append(mediaShort).append(" — ").append(found.size()).append(" registre(s)\n");
@@ -1344,7 +1344,10 @@ private void setupTabsTop() {
                                   .append("  TO=").append(it.lcrnode)
                                   .append("  From=255\n");
                             }
-                            target.setText(sb.toString().trim());
+
+                           final String result = sb.toString().trim();
+                           ui.post(() -> target.setText(result));
+
                         }
                     }
 
