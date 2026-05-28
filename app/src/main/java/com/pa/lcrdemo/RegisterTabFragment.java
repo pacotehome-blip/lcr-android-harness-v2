@@ -622,9 +622,18 @@ public class RegisterTabFragment extends Fragment {
         connectThisRegister(false);
     }
 
+
     private void connectThisRegister(boolean userInitiated) {
+        // Si controller existe et transport prêt — pas besoin de recréer
+        if (controller != null && tabMediaReady) {
+            syncUiFromController();
+            validateHeaderAsync();
+            ui.postDelayed(() -> runStatusBLikeButton("TAB_REACTIVATED"), 250);
+            return;
+        }
         RegisterSessionManager sm = RegisterSessionManager.get(requireContext());
         DeliveryController dc = null;
+
         if (tabTransportKey != null && !tabTransportKey.trim().isEmpty()) {
             final String tkPinned = tabTransportKey.trim();
             try { MediaTransportManager.get(requireContext()).activateExclusive(tkPinned, "TAB_CONNECT"); } catch (Exception ignored) {}
