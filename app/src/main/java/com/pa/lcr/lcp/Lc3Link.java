@@ -402,13 +402,13 @@ public class Lc3Link extends LcpLink {
         gotoMode(3);
         try {
             for (int i = 0; i < 40; i++) {
-                String scr   = readSpontaneous(800);
+                String scr   = readSpontaneous(150);
                 String first = firstLine(scr);
                 if (first.toUpperCase().contains(fieldName.toUpperCase())) {
                     Matcher m = Pattern.compile("([\\d.]+)\\s*\\.?\\s*$").matcher(first);
                     if (m.find()) return parseFloat(m.group(1));
                 }
-                rawWrite(new byte[]{ VT_DOWN }); sleep(200);
+                rawWrite(new byte[]{ VT_DOWN }); sleep(70);
                 rawWrite(new byte[]{ VT_ENTER });
             }
         } finally { backToMode1(); }
@@ -420,8 +420,8 @@ public class Lc3Link extends LcpLink {
         gotoMode(8);
         try {
             for (int i = 0; i < 6; i++) {
-                rawWrite(new byte[]{ VT_UP }); sleep(300);
-                String scr = readSpontaneous(800);
+                rawWrite(new byte[]{ VT_UP }); sleep(70);
+                String scr = readSpontaneous(150);
                 for (String line : scr.split("\n")) {
                     if (line.contains("SERIAL NUMBER")) {
                         Matcher m = Pattern.compile("(\\d+)\\s*\\.?\\s*$").matcher(line);
@@ -436,25 +436,28 @@ public class Lc3Link extends LcpLink {
     }
 
     // ── Navigation modes ──────────────────────────────────────────────────
+    // Timings validés BT SPP aggressive benchmark:
+    // goto=536ms (EXTREME), probe=1837ms, ticket=2777ms
+    // Marge +20ms ajoutée pour variabilité BT
     private void gotoMode(int modeNum) throws IOException {
-        rawWrite(new byte[]{ VT_M1 });    sleep(300);
-        rawWrite(new byte[]{ VT_ENTER }); sleep(1000);
-        drainRx(300);
-        rawWrite(new byte[]{ VT_MODE });  sleep(300);
-        rawWrite(String.valueOf(modeNum).getBytes()); sleep(100);
-        rawWrite(new byte[]{ VT_ENTER }); sleep(1200);
-        String scr = readSpontaneous(1000);
+        rawWrite(new byte[]{ VT_M1 });    sleep(30);
+        rawWrite(new byte[]{ VT_ENTER }); sleep(70);
+        drainRx(30);
+        rawWrite(new byte[]{ VT_MODE });  sleep(30);
+        rawWrite(String.valueOf(modeNum).getBytes()); sleep(30);
+        rawWrite(new byte[]{ VT_ENTER }); sleep(120);
+        String scr = readSpontaneous(200);
         if (scr.toUpperCase().contains("KEY") && scr.contains("?")) {
             rawWrite(new byte[]{ '0' });
             rawWrite(new byte[]{ VT_ENTER });
-            sleep(300);
-            readSpontaneous(500);
+            sleep(100);
+            readSpontaneous(150);
         }
     }
 
     private void backToMode1() throws IOException {
-        rawWrite(new byte[]{ VT_M1 }); sleep(300);
-        drainRx(300);
+        rawWrite(new byte[]{ VT_M1 }); sleep(30);
+        drainRx(30);
     }
 
     // ── cachedPollScreen ──────────────────────────────────────────────────
@@ -468,14 +471,15 @@ public class Lc3Link extends LcpLink {
     }
 
     // ── pollScreen ────────────────────────────────────────────────────────
+    // CMD_SCREEN fiable BT (226ms avec silence=50ms)
     private String pollScreen() throws IOException {
-        rawWrite(CMD_POLL_A);
-        rawWrite(CMD_POLL_B);
-        byte[] raw = readRaw(600);
+        rawWrite(CMD_SCREEN);
+        byte[] raw = readRaw(300);
         String scr = decodeVt100(raw);
         if (scr.isEmpty()) {
-            rawWrite(CMD_SCREEN);
-            scr = decodeVt100(readRaw(800));
+            rawWrite(CMD_POLL_A);
+            rawWrite(CMD_POLL_B);
+            scr = decodeVt100(readRaw(300));
         }
         return scr;
     }
@@ -604,8 +608,8 @@ public class Lc3Link extends LcpLink {
             android.util.Log.d("Lc3Link", "probeAndIdentify Mode8 scr=" + scr8.replace("\n", "|"));
 
             for (int i = 0; i < 6; i++) {
-                lc3.rawWrite(new byte[]{ VT_UP }); sleep(300);
-                String scr = lc3.readSpontaneous(800);
+                lc3.rawWrite(new byte[]{ VT_UP }); sleep(70);
+                String scr = lc3.readSpontaneous(150);
                 android.util.Log.d("Lc3Link", "probeAndIdentify Mode8 up" + i + "=" + scr.replace("\n", "|"));
                 for (String line : scr.split("\n")) {
                     if (model.isEmpty() && line.contains("APPLICATION")) {
