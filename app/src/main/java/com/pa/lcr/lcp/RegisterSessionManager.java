@@ -67,6 +67,14 @@ public final class RegisterSessionManager {
         this.appCtx = appCtx;
         this.store = new DeliveryLogStore(appCtx);
         this.store.purgeOlderThanDaysAsync(7);
+        // Charger les transports LC3 connus depuis SharedPreferences
+        try {
+            android.content.SharedPreferences prefs =
+                appCtx.getSharedPreferences("lc3_known_transports", 0);
+            for (String key : prefs.getAll().keySet()) {
+                knownLc3TransportKeys.put(key, prefs.getString(key, ""));
+            }
+        } catch (Exception ignored) {}
     }
 
     public DeliveryLogStore getStore() { return store; }
@@ -710,6 +718,13 @@ public final class RegisterSessionManager {
                             (existing != null ? existing : "");
             knownLc3TransportKeys.put(transportKey.trim(), serial);
             android.util.Log.i("RSM", "markAsLc3Transport: " + transportKey + " serial=" + serial);
+             // Persister dans SharedPreferences
+            try {
+                appCtx.getSharedPreferences("lc3_known_transports", 0)
+                    .edit().putString(transportKey.trim(), serial).apply();
+            } catch (Exception ignored) {}           
         }
     }
+    
+    
 }
