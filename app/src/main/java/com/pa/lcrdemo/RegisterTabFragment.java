@@ -592,9 +592,9 @@ public class RegisterTabFragment extends Fragment {
             if (!isAdded() || getView() == null) return;
             if (!tabMediaReady) {
                 if (txtLive != null) txtLive.setText("LIVE: " + tabMediaShort + "(OFF) — reconnect requis");
-                controller = null;
+                // Ne pas nullifier controller si transport suspendu — garder pour reconnexion rapide
                 pendingReconnect = true;
-                updateButtons(null);
+                updateButtons(controller != null ? controller.getState() : null);
                 return;
             }
             if (pendingReconnect) { pendingReconnect = false; reconnectThisRegister(false); }
