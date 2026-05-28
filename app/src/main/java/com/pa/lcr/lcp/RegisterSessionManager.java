@@ -272,7 +272,7 @@ public final class RegisterSessionManager {
             }
             // Vérifier si le link est encore utilisable avant de détruire
             try {
-                if (!existing.dc.isLinkClosed()) {
+                if (existing.dc.getState() != null) {
                     // Mettre à jour generationId sans recréer — remplacer par nouvelle NodeSession légère
                     NodeSession updated = new NodeSession(existing.dc, existing.mux,
                         existing.scheduler, existing.transportKey,
