@@ -667,11 +667,21 @@ public class RegisterTabFragment extends Fragment {
             }
             return;
         }
+
         controller = dc;
         try {
             String tk = sm.findTransportKeyForController(controller);
-            if (tk != null && !tk.trim().isEmpty()) tabTransportKey = tk.trim();
+            // Ne mettre à jour tabTransportKey que si cohérent avec transportFromArgs
+            if (tk != null && !tk.trim().isEmpty()) {
+                if (transportFromArgs == null || transportFromArgs.trim().isEmpty()) {
+                    tabTransportKey = tk.trim();
+                } else if (tk.trim().equalsIgnoreCase(transportFromArgs.trim())) {
+                    tabTransportKey = tk.trim();
+                }
+                // Sinon garder tabTransportKey original — ne pas écraser avec mauvais transport
+            }
         } catch (Exception ignored) {}
+
         try {
             if (tabTransportKey != null) MediaTransportManager.get(requireContext()).activateExclusive(tabTransportKey, "TAB_CONNECT_FINAL");
         } catch (Exception ignored) {}
