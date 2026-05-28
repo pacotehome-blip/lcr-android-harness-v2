@@ -264,11 +264,23 @@ public final class RegisterSessionManager {
         String k = key(tk, node);
 
         NodeSession existing = sessions.get(k);
+
         if (existing != null) {
             // ✅ Anti-mix: regen si génération transport différente
             if (existing.generationId == io.getGenerationId()) {
                 return existing.dc;
             }
+            // Vérifier si le link est encore utilisable avant de détruire
+            try {
+                if (!existing.dc.isLinkClosed()) {
+                    // Mettre à jour generationId sans recréer — remplacer par nouvelle NodeSession légère
+                    NodeSession updated = new NodeSession(existing.dc, existing.mux,
+                        existing.scheduler, existing.transportKey,
+                        io.getGenerationId(), existing.serialId);
+                    sessions.put(k, updated);
+                    return existing.dc;
+                }
+            } catch (Exception ignored) {}
             try { existing.scheduler.shutdown(); } catch (Exception ignored) {}
             try { existing.dc.shutdown(false); } catch (Exception ignored) {}
             sessions.remove(k);
