@@ -215,9 +215,15 @@ public final class RegisterSessionManager {
             }
         } catch (Exception ignored) {}
 
-        // Essai LC3
-        try {
+        // Essai LC3 — seulement si transport non connu comme LCR-II
+        String ioKey = io != null ? io.getKey().trim() : "";
+        boolean isKnownLc3 = knownLc3TransportKeys.containsKey(ioKey);
+        boolean isUsb = "USB".equalsIgnoreCase(ioKey);
+        boolean skipLc3Probe = isUsb || (!isKnownLc3 && knownLc3TransportKeys.size() > 0
+                && ioKey.toUpperCase().startsWith("BT:"));
+        if (!skipLc3Probe) try {
             if (Lc3Link.probe(io)) {
+
                 Lc3Link lc3 = new Lc3Link(io);
                 byte[] b = lc3.opGetField(80, 3000);
                 if (b != null && b.length > 0) {
