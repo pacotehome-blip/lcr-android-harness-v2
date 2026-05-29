@@ -160,7 +160,9 @@ public class FieldServiceActivity extends Activity {
         if (serviceReady) return; // Guard — charger une seule fois
         serviceReady = true;
         if (webView != null) {
-            webView.loadUrl(FIELD_SERVICE_URL);
+         String url = getIntent().getStringExtra("url");
+        if (url == null || url.trim().isEmpty()) url = FIELD_SERVICE_URL;
+        webView.loadUrl(url);
         }
     }
 }

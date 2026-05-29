@@ -677,10 +677,24 @@ ensureRegisterTab(250, 255, true);
         }
 
         // ✅ Field Service Mobile
+
         Button btnFieldService = findViewById(R.id.btnFieldService);
+        EditText editFsUrl = findViewById(R.id.editFieldServiceUrl);
+        // Charger l'URL sauvegardée
+        SharedPreferences p = getSharedPreferences("filgo_prefs", MODE_PRIVATE);
+        String savedUrl = p.getString("fs_url", "");
+        if (editFsUrl != null && !savedUrl.isEmpty()) editFsUrl.setText(savedUrl);
         if (btnFieldService != null) {
-            btnFieldService.setOnClickListener(v ->
-                startActivity(new Intent(MainActivity.this, FieldServiceActivity.class)));
+            btnFieldService.setOnClickListener(v -> {
+                String url = (editFsUrl != null && !editFsUrl.getText().toString().trim().isEmpty())
+                    ? editFsUrl.getText().toString().trim()
+                    : "https://votre-org.crm.dynamics.com/main.aspx";
+                p.edit().putString("fs_url", url).apply();
+                Intent intent = new Intent(MainActivity.this, FieldServiceActivity.class);
+                intent.putExtra("url", url);
+                startActivity(intent);
+            });
+
             btnFieldService.setOnLongClickListener(v -> {
                 SharedPreferences p = getSharedPreferences("filgo_prefs", MODE_PRIVATE);
                 boolean current = p.getBoolean("auto_launch_fs", false);

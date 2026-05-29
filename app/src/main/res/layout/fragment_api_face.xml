@@ -122,13 +122,30 @@
                     android:textSize="13sp"
                     android:layout_marginTop="4dp" />
 
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="URL Field Service"
+                    android:textSize="12sp"
+                    android:layout_marginTop="10dp"
+                    android:textColor="#888780" />
+
+                <EditText
+                    android:id="@+id/editFieldServiceUrl"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:hint="https://votre-org.crm.dynamics.com/main.aspx"
+                    android:inputType="textUri"
+                    android:textSize="13sp"
+                    android:singleLine="true" />
+
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnFieldService"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="10dp"
                     android:text="Ouvrir Field Service" />
-
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
