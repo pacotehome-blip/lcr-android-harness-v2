@@ -397,6 +397,15 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
         initUiDefaults();
         setupTabsTop();
 
+        // ✅ Démarrage automatique Field Service
+        if (getSharedPreferences("filgo_prefs", MODE_PRIVATE)
+                .getBoolean("auto_launch_fs", false)) {
+            startActivity(new Intent(this, FieldServiceActivity.class));
+        }
+
+        // CONFIGURE: media + bluetooth
+
+
         // CONFIGURE: media + bluetooth
         mediaProfileStore = new com.pa.lcr.lcp.storage.MediaProfileStore(this);
         btAdapter = BluetoothAdapter.getDefaultAdapter();
@@ -661,9 +670,24 @@ ensureRegisterTab(250, 255, true);
         // API-Face
         if (btnApiStart != null) btnApiStart.setOnClickListener(v -> startApiServer());
         if (btnApiStop != null) btnApiStop.setOnClickListener(v -> stopApiServer("Stop button"));
+
         if (btnDbBackup != null) {
             btnDbBackup.setOnClickListener(v -> doBackupDb());
             btnDbBackup.setOnLongClickListener(v -> { requestBackupDir(); return true; });
+        }
+
+        // ✅ Field Service Mobile
+        Button btnFieldService = findViewById(R.id.btnFieldService);
+        if (btnFieldService != null) {
+            btnFieldService.setOnClickListener(v ->
+                startActivity(new Intent(MainActivity.this, FieldServiceActivity.class)));
+            btnFieldService.setOnLongClickListener(v -> {
+                SharedPreferences p = getSharedPreferences("filgo_prefs", MODE_PRIVATE);
+                boolean current = p.getBoolean("auto_launch_fs", false);
+                p.edit().putBoolean("auto_launch_fs", !current).apply();
+                toast("Auto-launch Field Service: " + (!current ? "ON" : "OFF"));
+                return true;
+            });
         }
 
         // BT

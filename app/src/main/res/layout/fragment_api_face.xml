@@ -92,13 +92,7 @@
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- ===================== CARD: DATABASE (OPTIONNEL) ===================== -->
-        <!--
-             Recommandé: déplacer le bouton Backup DB ici pour que la page API-Face
-             soit autosuffisante et plus cohérente visuellement.
-             NOTE: si tu gardes btnDbBackup dans activity_main.xml, tu peux laisser cette card commentée.
-        -->
-        <!--
+        <!-- ===================== CARD: FIELD SERVICE MOBILE ===================== -->
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -117,20 +111,26 @@
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="Base de données"
+                    android:text="Field Service Mobile"
                     android:textStyle="bold"
-                    android:textSize="14sp" />
+                    android:textSize="18sp" />
 
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnDbBackup"
-                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:text="Backup DB (Downloads)" />
+                    android:text="Ouvre Field Service dans la WebView avec le bridge LCR injecté (window.LCR)."
+                    android:textSize="13sp"
+                    android:layout_marginTop="4dp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnFieldService"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="Ouvrir Field Service" />
+
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
-        -->
 
         <!-- Spacer bas -->
         <View
