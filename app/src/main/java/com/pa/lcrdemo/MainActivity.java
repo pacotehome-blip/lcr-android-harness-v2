@@ -681,7 +681,7 @@ ensureRegisterTab(250, 255, true);
         Button btnFieldService = findViewById(R.id.btnFieldService);
         EditText editFsUrl = findViewById(R.id.editFieldServiceUrl);
         // Charger l'URL sauvegardée
-        SharedPreferences p = getSharedPreferences("filgo_prefs", MODE_PRIVATE);
+        SharedPreferences fsPrefs = getSharedPreferences("filgo_prefs", MODE_PRIVATE);
         String savedUrl = p.getString("fs_url", "");
         if (editFsUrl != null && !savedUrl.isEmpty()) editFsUrl.setText(savedUrl);
         if (btnFieldService != null) {
