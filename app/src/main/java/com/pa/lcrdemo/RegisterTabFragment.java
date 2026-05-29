@@ -349,8 +349,8 @@ public class RegisterTabFragment extends Fragment {
         try { ui.removeCallbacksAndMessages(null); } catch (Exception ignored) {}
         try { bg.shutdownNow(); } catch (Exception ignored) {}
         controller = null;
+        attemptedAutoAttachOnce = false;  // ← ajouter cette ligne
     }
-
     @Nullable
     @Override
     public View onCreateView(@NonNull LayoutInflater inflater,
