@@ -682,14 +682,14 @@ ensureRegisterTab(250, 255, true);
         EditText editFsUrl = findViewById(R.id.editFieldServiceUrl);
         // Charger l'URL sauvegardée
         SharedPreferences fsPrefs = getSharedPreferences("filgo_prefs", MODE_PRIVATE);
-        String savedUrl = p.getString("fs_url", "");
+        String savedUrl = fsPrefs.getString("fs_url", "");
         if (editFsUrl != null && !savedUrl.isEmpty()) editFsUrl.setText(savedUrl);
         if (btnFieldService != null) {
             btnFieldService.setOnClickListener(v -> {
                 String url = (editFsUrl != null && !editFsUrl.getText().toString().trim().isEmpty())
                     ? editFsUrl.getText().toString().trim()
                     : "https://votre-org.crm.dynamics.com/main.aspx";
-                p.edit().putString("fs_url", url).apply();
+                fsPrefs.edit().putString("fs_url", url).apply();
                 Intent intent = new Intent(MainActivity.this, FieldServiceActivity.class);
                 intent.putExtra("url", url);
                 startActivity(intent);
