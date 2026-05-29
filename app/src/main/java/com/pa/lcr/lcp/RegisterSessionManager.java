@@ -377,18 +377,25 @@ public final class RegisterSessionManager {
                     if (!ss.isEmpty()) serialId0 = ss;
                 }
             } catch (Exception ignored) {}
+
+        }
+        // ✅ LCR-II sans serial — registre pas prêt, abandonner sans créer de session
+        if (!isLc3 && (serialId0 == null || serialId0.isEmpty())) {
+            android.util.Log.w("RSM", "getOrCreate LCR-II sans serial — abandon transport=" + tk + " node=" + node);
+            try { dc.shutdown(false); } catch (Exception ignored) {}
+            return null;
         }
         if (serialId0 != null) {
             expectedSerialByNode.put(node, serialId0);
             pinnedTransportByRegKey.put(regKey(node, serialId0), tk);
         }
 
-
         NodeSession s = new NodeSession(dc, mux, scheduler, tk, io.getGenerationId(), serialId0);
         sessions.put(k, s);
 
         scheduler.bindController(dc);
         return dc;
+
     }
 
     public synchronized void attachUiListener(String transportKey, int nodeDec, DeliveryControllerPort.Listener uiListener) {
