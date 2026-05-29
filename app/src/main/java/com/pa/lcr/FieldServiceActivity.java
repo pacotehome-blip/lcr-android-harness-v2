@@ -1,4 +1,4 @@
-package com.pa.lcrdemo;
+package com.pa.lcr;
 
 import android.app.Activity;
 import android.content.BroadcastReceiver;

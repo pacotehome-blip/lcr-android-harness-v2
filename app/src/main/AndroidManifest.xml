@@ -36,13 +36,24 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
+    <!-- ✅ Foreground service HTTP -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <!-- ✅ Démarrage automatique au boot -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- ✅ Exclure des optimisations batterie (garder service actif) -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <application
         android:allowBackup="true"
         android:supportsRtl="true"
         android:label="Filgo Registre"
         android:icon="@mipmap/logoenergie1"
         android:roundIcon="@mipmap/logoiconeernergie"
-        android:theme="@style/Theme.LcrFilgoEnergie">
+        android:theme="@style/Theme.LcrFilgoEnergie"
+        android:networkSecurityConfig="@xml/network_security_config">
 
         <activity
             android:name="com.pa.lcrdemo.MainActivity"
@@ -52,6 +63,32 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- ✅ FieldService container WebView -->
+        <activity
+            android:name="com.pa.lcrdemo.FieldServiceActivity"
+            android:label="Field Service"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+
+        <!-- ✅ Foreground service — maintient le serveur HTTP :8765 actif -->
+        <service
+            android:name="com.pa.lcrdemo.LcrHttpService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:stopWithTask="false" />
+
+        <!-- ✅ Boot receiver — démarre LcrHttpService au boot et après mise à jour APK -->
+        <receiver
+            android:name="com.pa.lcrdemo.LcrBootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <receiver
             android:name="com.pa.lcrdemo.UsbReceiver"

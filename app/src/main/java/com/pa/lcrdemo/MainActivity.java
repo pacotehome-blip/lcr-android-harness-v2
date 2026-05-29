@@ -1280,7 +1280,7 @@ private void setupTabsTop() {
 
             if (identity != null && identity.isLc3) {
                 // LC3 détecté — pas de boucle node
-                int    lc3Node  = identity.nodeId > 0 ? identity.nodeId : 2524;
+                int    lc3Node  = identity.nodeId > 0 ? identity.nodeId : 250;
                 String serialId = identity.serialId;
                 String ticketNo = "";
                 try {
