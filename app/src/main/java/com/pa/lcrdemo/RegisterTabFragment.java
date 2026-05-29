@@ -893,4 +893,9 @@ public class RegisterTabFragment extends Fragment {
     }
 
     public String getSerialFromArgs() { return serialFromArgs; }
+
+    public int getNodeFromArgs() {
+        Bundle a = getArguments();
+        return a != null ? a.getInt(ARG_NODE, 250) : 250;
+    }
 }
