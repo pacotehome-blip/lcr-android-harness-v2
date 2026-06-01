@@ -23,6 +23,12 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
+import java.io.InputStream;
+import java.security.KeyStore;
+import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLServerSocketFactory;
+
 public final class ApiServer {
 
     public interface ApiLogSink { void onApiLine(String line); }
@@ -54,14 +60,34 @@ public final class ApiServer {
 
     public synchronized boolean isRunning() { return running; }
 
-    public synchronized void start() throws Exception {
-        if (running) return;
-        InetAddress loopback = InetAddress.getByName("127.0.0.1");
-        serverSocket = new ServerSocket(port, 50, loopback);
-        workers = Executors.newFixedThreadPool(8);
-        acceptor = Executors.newSingleThreadExecutor();
-        running = true;
-        t("[API " + ts() + "] START http://127.0.0.1:" + port);
+public synchronized void start() throws Exception {
+    if (running) return;
+    InetAddress loopback = InetAddress.getByName("127.0.0.1");
+
+    // ── HTTPS avec certificat auto-signé ──────────────────────────
+    KeyStore ks = KeyStore.getInstance("BKS");
+    InputStream ksPstream = appCtx.getResources().openRawResource(
+        appCtx.getResources().getIdentifier("lcr_keystore", "raw", appCtx.getPackageName())
+    );
+    ks.load(ksPstream, "lcr2024secure".toCharArray());
+    ksPstream.close();
+
+    KeyManagerFactory kmf = KeyManagerFactory.getInstance(
+        KeyManagerFactory.getDefaultAlgorithm()
+    );
+    kmf.init(ks, "lcr2024secure".toCharArray());
+
+    SSLContext sslCtx = SSLContext.getInstance("TLS");
+    sslCtx.init(kmf.getKeyManagers(), null, null);
+
+    SSLServerSocketFactory ssf = sslCtx.getServerSocketFactory();
+    serverSocket = ssf.createServerSocket(port, 50, loopback);
+    // ─────────────────────────────────────────────────────────────
+
+    workers = Executors.newFixedThreadPool(8);
+    acceptor = Executors.newSingleThreadExecutor();
+    running = true;
+    t("[API " + ts() + "] START https://127.0.0.1:" + port);
 
         acceptor.execute(() -> {
             while (running) {

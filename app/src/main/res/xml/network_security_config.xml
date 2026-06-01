@@ -2,10 +2,11 @@
 <!--
   res/xml/network_security_config.xml
   
-  Autorise le trafic HTTP (non-HTTPS) uniquement vers 127.0.0.1 et localhost.
-  Tout autre trafic HTTP vers l'extérieur reste bloqué — sécurité préservée.
+  - HTTP autorisé uniquement vers 127.0.0.1 et localhost
+  - HTTPS avec certificat auto-signé vers votre serveur externe
+  - Tout autre trafic HTTP vers l'extérieur reste bloqué
   
-  Référencer dans AndroidManifest.xml sur la balise <application> :
+  Référencer dans AndroidManifest.xml :
     android:networkSecurityConfig="@xml/network_security_config"
 -->
 <network-security-config>
@@ -16,7 +17,16 @@
         <domain includeSubdomains="false">localhost</domain>
     </domain-config>
 
-    <!-- Tout le reste : HTTPS obligatoire (comportement Android par défaut) -->
+    <!-- HTTPS avec certificat auto-signé vers votre serveur -->
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">votre-domaine.com</domain>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="@raw/mon_certificat" />
+        </trust-anchors>
+    </domain-config>
+
+    <!-- Tout le reste : HTTPS obligatoire + CAs système uniquement -->
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />
