@@ -62,31 +62,51 @@ public final class ApiServer {
 
 public synchronized void start() throws Exception {
     if (running) return;
+    android.util.Log.e("LCRDEMO", "=== ApiServer.start() BEGIN port=" + port + " ===");
     InetAddress loopback = InetAddress.getByName("127.0.0.1");
 
     // ── HTTPS avec certificat auto-signé ──────────────────────────
-    KeyStore ks = KeyStore.getInstance("BKS");
+    android.util.Log.e("LCRDEMO", "Step 1: opening BKS resource");
     InputStream ksPstream = appCtx.getResources().openRawResource(
         appCtx.getResources().getIdentifier("lcr_keystore", "raw", appCtx.getPackageName())
     );
+    android.util.Log.e("LCRDEMO", "Step 2: InputStream ok, bytes=" + ksPstream.available());
+
+    // FIX: fournir explicitement le provider "BC" (BouncyCastle)
+    // Sans "BC", Android 9+ ne trouve pas le type BKS → KeyStoreException silencieuse
+    KeyStore ks;
+    try {
+        ks = KeyStore.getInstance("BKS", "BC");
+        android.util.Log.e("LCRDEMO", "Step 3: KeyStore BKS/BC ok");
+    } catch (Exception e) {
+        android.util.Log.e("LCRDEMO", "Step 3 FAIL BKS/BC, essai BKS seul: " + e.getMessage());
+        ks = KeyStore.getInstance("BKS");
+        android.util.Log.e("LCRDEMO", "Step 3b: KeyStore BKS (sans provider) ok");
+    }
+
     ks.load(ksPstream, "lcr2024secure".toCharArray());
     ksPstream.close();
+    android.util.Log.e("LCRDEMO", "Step 4: KeyStore chargé, nb entrées=" + ks.size());
 
     KeyManagerFactory kmf = KeyManagerFactory.getInstance(
         KeyManagerFactory.getDefaultAlgorithm()
     );
     kmf.init(ks, "lcr2024secure".toCharArray());
+    android.util.Log.e("LCRDEMO", "Step 5: KeyManagerFactory ok, algo=" + KeyManagerFactory.getDefaultAlgorithm());
 
     SSLContext sslCtx = SSLContext.getInstance("TLS");
     sslCtx.init(kmf.getKeyManagers(), null, null);
+    android.util.Log.e("LCRDEMO", "Step 6: SSLContext TLS ok");
 
     SSLServerSocketFactory ssf = sslCtx.getServerSocketFactory();
     serverSocket = ssf.createServerSocket(port, 50, loopback);
+    android.util.Log.e("LCRDEMO", "Step 7: SSLServerSocket créé sur 127.0.0.1:" + port);
     // ─────────────────────────────────────────────────────────────
 
     workers = Executors.newFixedThreadPool(8);
     acceptor = Executors.newSingleThreadExecutor();
     running = true;
+    android.util.Log.e("LCRDEMO", "=== ApiServer.start() SUCCESS ===");
     t("[API " + ts() + "] START https://127.0.0.1:" + port);
 
         acceptor.execute(() -> {
