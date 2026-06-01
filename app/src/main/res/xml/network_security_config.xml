@@ -1,32 +1,29 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   res/xml/network_security_config.xml
-
   - HTTPS vers 127.0.0.1 : certificat auto-signé embarqué dans l'APK
+  - Ajout de "user" pour accepter le cert installé manuellement (dev) et via SOTI (prod)
   - HTTP autorisé uniquement vers localhost (usage interne)
   - Tout autre trafic HTTP vers l'extérieur reste bloqué
 -->
 <network-security-config>
-
-    <!-- HTTPS local 127.0.0.1 — confiance au certificat LCR embarqué -->
+    <!-- HTTPS local 127.0.0.1 — confiance au certificat LCR embarqué + store système + store utilisateur (SOTI/dev) -->
     <domain-config cleartextTrafficPermitted="false">
         <domain includeSubdomains="false">127.0.0.1</domain>
         <trust-anchors>
             <certificates src="system" />
+            <certificates src="user" />
             <certificates src="@raw/lcr_local" />
         </trust-anchors>
     </domain-config>
-
     <!-- HTTP autorisé UNIQUEMENT vers localhost -->
     <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="false">localhost</domain>
     </domain-config>
-
     <!-- Tout le reste : HTTPS obligatoire + CAs système uniquement -->
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>
     </base-config>
-
 </network-security-config>
