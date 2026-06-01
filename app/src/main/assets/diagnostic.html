@@ -1174,7 +1174,7 @@ function updateCmds() {
   var r = buildCmdParams();
   var ps, curl;
   // $BASE = host only, CMDS[cur].p starts with /v1/
-  var baseUrl = 'http://127.0.0.1:' + port();
+  var baseUrl = 'https://127.0.0.1:' + port();
   if (r.method === 'POST') {
     var bodyOneLine = r.body ? r.body.replace(/\s+/g,' ').trim() : '{}';
     ps   = '$BASE = "' + baseUrl + '"\n\n'

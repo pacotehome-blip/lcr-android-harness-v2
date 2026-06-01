@@ -576,7 +576,7 @@ tabRegisters = findViewById(R.id.tabRegisters);
         btnBtConnect1 = findViewById(R.id.btnBtConnect1);
         btnBtConnect2 = findViewById(R.id.btnBtConnect2);
         if (txtApiUrl != null) {
-            txtApiUrl.setText("http://127.0.0.1:" + API_PORT);
+            txtApiUrl.setText("https://127.0.0.1:" + API_PORT);
         }
     }
 

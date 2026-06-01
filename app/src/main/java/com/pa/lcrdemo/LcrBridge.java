@@ -1,11 +1,14 @@
 package com.pa.lcrdemo;
 
-import android.webkit.JavascriptInterface;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManagerFactory;
+import java.security.KeyStore;
 
 /**
  * LcrBridge — Bridge Android WebView → API LCR locale (127.0.0.1:8765)
@@ -22,7 +25,7 @@ import java.io.InputStreamReader;
  */
 public class LcrBridge {
 
-    private static final String BASE = "http://127.0.0.1:8765";
+    private static final String BASE = "https://127.0.0.1:8765";
     private static final int TIMEOUT_MS = 10_000;
     private static final int TIMEOUT_LONG_MS = 35_000; // pour tick/wait
 
@@ -219,7 +222,7 @@ public class LcrBridge {
     private String get(String path, int timeoutMs) {
         try {
             URL url = new URL(BASE + path);
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            HttpsURLConnection conn = (HttpsURLConnection) url.openConnection();
             conn.setRequestMethod("GET");
             conn.setConnectTimeout(timeoutMs);
             conn.setReadTimeout(timeoutMs);
@@ -238,7 +241,7 @@ public class LcrBridge {
     private String post(String path, String jsonBody) {
         try {
             URL url = new URL(BASE + path);
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            HttpsURLConnection conn = (HttpsURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
             conn.setConnectTimeout(TIMEOUT_MS);
             conn.setReadTimeout(TIMEOUT_MS);

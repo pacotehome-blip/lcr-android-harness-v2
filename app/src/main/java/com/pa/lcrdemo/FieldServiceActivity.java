@@ -119,7 +119,7 @@ public class FieldServiceActivity extends Activity {
     private void checkIfAlreadyReady() {
         new Thread(() -> {
             try {
-                java.net.URL url = new java.net.URL("http://127.0.0.1:8765/v1/ping");
+                java.net.URL url = new java.net.URL("https://127.0.0.1:8765/v1/ping");
                 java.net.HttpURLConnection conn =
                     (java.net.HttpURLConnection) url.openConnection();
                 conn.setConnectTimeout(2000);
