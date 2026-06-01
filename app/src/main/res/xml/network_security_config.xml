@@ -1,16 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   res/xml/network_security_config.xml
-  
-  - HTTP autorisé uniquement vers 127.0.0.1 et localhost
-  - HTTPS local : certificat installé dans le store système de la tablette
+
+  - HTTPS vers 127.0.0.1 : certificat auto-signé embarqué dans l'APK
+  - HTTP autorisé uniquement vers localhost (usage interne)
   - Tout autre trafic HTTP vers l'extérieur reste bloqué
 -->
 <network-security-config>
 
-    <!-- HTTP autorisé UNIQUEMENT vers le local -->
-    <domain-config cleartextTrafficPermitted="true">
+    <!-- HTTPS local 127.0.0.1 — confiance au certificat LCR embarqué -->
+    <domain-config cleartextTrafficPermitted="false">
         <domain includeSubdomains="false">127.0.0.1</domain>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="@raw/lcr_local" />
+        </trust-anchors>
+    </domain-config>
+
+    <!-- HTTP autorisé UNIQUEMENT vers localhost -->
+    <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="false">localhost</domain>
     </domain-config>
 
