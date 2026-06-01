@@ -1784,6 +1784,8 @@ private void scanUsb() {
             apiServer.start();
             refreshApiStatus();
             toast("API démarrée (127.0.0.1:" + API_PORT + ")");
+            // ✅ TEST SSL — auto-ping après démarrage
+            testSslPing();
         } catch (Exception e) {
             logApi(null, "[API] START FAIL: " + safeMsg(e));
             refreshApiStatus();
@@ -1802,6 +1804,36 @@ private void scanUsb() {
             apiServer = null;
             refreshApiStatus();
         }
+    }
+
+    // ✅ TEST SSL — appel HttpsURLConnection interne vers notre propre serveur
+    private void testSslPing() {
+        new Thread(() -> {
+            String result;
+            try {
+                java.net.URL url = new java.net.URL("https://127.0.0.1:" + API_PORT + "/v1/ping");
+                javax.net.ssl.HttpsURLConnection conn = (javax.net.ssl.HttpsURLConnection) url.openConnection();
+                conn.setConnectTimeout(3000);
+                conn.setReadTimeout(3000);
+                conn.setRequestMethod("GET");
+                int code = conn.getResponseCode();
+                java.io.InputStream is = conn.getInputStream();
+                byte[] buf = new byte[1024];
+                int n = is.read(buf);
+                String body = new String(buf, 0, n, java.nio.charset.StandardCharsets.UTF_8);
+                conn.disconnect();
+                result = "✅ SSL OK — HTTP " + code + " — " + body.substring(0, Math.min(80, body.length()));
+            } catch (javax.net.ssl.SSLHandshakeException e) {
+                result = "❌ SSL HANDSHAKE FAIL — certificat rejeté: " + e.getMessage();
+            } catch (javax.net.ssl.SSLException e) {
+                result = "❌ SSL ERROR: " + e.getMessage();
+            } catch (Exception e) {
+                result = "❌ ERREUR: " + e.getClass().getSimpleName() + " — " + e.getMessage();
+            }
+            final String finalResult = result;
+            android.util.Log.e("LCRDEMO_SSL", finalResult);
+            runOnUiThread(() -> toast(finalResult));
+        }).start();
     }
 
     private void refreshApiStatus() {
