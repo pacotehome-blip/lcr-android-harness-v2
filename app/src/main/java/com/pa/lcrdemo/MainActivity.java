@@ -1811,8 +1811,26 @@ private void scanUsb() {
         new Thread(() -> {
             String result;
             try {
+                // Utiliser le même SSLSocketFactory que LcrBridge (lcr_local.crt depuis res/raw)
+                java.security.cert.CertificateFactory cf = java.security.cert.CertificateFactory.getInstance("X.509");
+                java.io.InputStream caInput = getResources().openRawResource(R.raw.lcr_local);
+                java.security.cert.Certificate ca = cf.generateCertificate(caInput);
+                caInput.close();
+
+                java.security.KeyStore ks = java.security.KeyStore.getInstance(java.security.KeyStore.getDefaultType());
+                ks.load(null, null);
+                ks.setCertificateEntry("lcr_local", ca);
+
+                javax.net.ssl.TrustManagerFactory tmf = javax.net.ssl.TrustManagerFactory.getInstance(
+                    javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm());
+                tmf.init(ks);
+
+                javax.net.ssl.SSLContext sslCtx = javax.net.ssl.SSLContext.getInstance("TLS");
+                sslCtx.init(null, tmf.getTrustManagers(), null);
+
                 java.net.URL url = new java.net.URL("https://127.0.0.1:" + API_PORT + "/v1/ping");
                 javax.net.ssl.HttpsURLConnection conn = (javax.net.ssl.HttpsURLConnection) url.openConnection();
+                conn.setSSLSocketFactory(sslCtx.getSocketFactory());
                 conn.setConnectTimeout(3000);
                 conn.setReadTimeout(3000);
                 conn.setRequestMethod("GET");
@@ -1824,7 +1842,7 @@ private void scanUsb() {
                 conn.disconnect();
                 result = "✅ SSL OK — HTTP " + code + " — " + body.substring(0, Math.min(80, body.length()));
             } catch (javax.net.ssl.SSLHandshakeException e) {
-                result = "❌ SSL HANDSHAKE FAIL — certificat rejeté: " + e.getMessage();
+                result = "❌ SSL HANDSHAKE FAIL: " + e.getMessage();
             } catch (javax.net.ssl.SSLException e) {
                 result = "❌ SSL ERROR: " + e.getMessage();
             } catch (Exception e) {

@@ -1,15 +1,19 @@
 package com.pa.lcrdemo;
 
+import android.content.Context;
 import android.webkit.JavascriptInterface;
+import java.io.InputStream;
 import java.io.OutputStream;
-import java.net.HttpURLConnection;
 import java.net.URL;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import java.security.KeyStore;
+import java.security.cert.Certificate;
+import java.security.cert.CertificateFactory;
 import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManagerFactory;
-import java.security.KeyStore;
 
 /**
  * LcrBridge — Bridge Android WebView → API LCR locale (127.0.0.1:8765)
@@ -29,6 +33,54 @@ public class LcrBridge {
     private static final String BASE = "https://127.0.0.1:8765";
     private static final int TIMEOUT_MS = 10_000;
     private static final int TIMEOUT_LONG_MS = 35_000; // pour tick/wait
+
+    // ── SSLSocketFactory personnalisé ─────────────────────────────────────
+    // Charge lcr_local.crt depuis res/raw et crée un TrustManager dédié.
+    // Nécessaire car Android 7+ ignore les certificats user/raw dans
+    // HttpsURLConnection même avec network_security_config.xml.
+    private final Context appCtx;
+    private volatile SSLSocketFactory sslSocketFactory = null;
+
+    public LcrBridge(Context ctx) {
+        this.appCtx = ctx;
+    }
+
+    private SSLSocketFactory getSslSocketFactory() {
+        if (sslSocketFactory != null) return sslSocketFactory;
+        try {
+            CertificateFactory cf = CertificateFactory.getInstance("X.509");
+            InputStream caInput = appCtx.getResources().openRawResource(R.raw.lcr_local);
+            Certificate ca = cf.generateCertificate(caInput);
+            caInput.close();
+
+            KeyStore ks = KeyStore.getInstance(KeyStore.getDefaultType());
+            ks.load(null, null);
+            ks.setCertificateEntry("lcr_local", ca);
+
+            TrustManagerFactory tmf = TrustManagerFactory.getInstance(
+                TrustManagerFactory.getDefaultAlgorithm());
+            tmf.init(ks);
+
+            SSLContext sslCtx = SSLContext.getInstance("TLS");
+            sslCtx.init(null, tmf.getTrustManagers(), null);
+
+            sslSocketFactory = sslCtx.getSocketFactory();
+            android.util.Log.d("LCRDEMO_SSL", "SSLSocketFactory créé avec lcr_local.crt");
+        } catch (Exception e) {
+            android.util.Log.e("LCRDEMO_SSL", "SSLSocketFactory FAIL: " + e.getMessage(), e);
+        }
+        return sslSocketFactory;
+    }
+
+    private HttpsURLConnection openHttps(String urlStr, int timeoutMs) throws Exception {
+        URL url = new URL(urlStr);
+        HttpsURLConnection conn = (HttpsURLConnection) url.openConnection();
+        SSLSocketFactory ssf = getSslSocketFactory();
+        if (ssf != null) conn.setSSLSocketFactory(ssf);
+        conn.setConnectTimeout(timeoutMs);
+        conn.setReadTimeout(timeoutMs);
+        return conn;
+    }
 
     // ── GET ───────────────────────────────────────────────────────────────
 
@@ -222,11 +274,8 @@ public class LcrBridge {
 
     private String get(String path, int timeoutMs) {
         try {
-            URL url = new URL(BASE + path);
-            HttpsURLConnection conn = (HttpsURLConnection) url.openConnection();
+            HttpsURLConnection conn = openHttps(BASE + path, timeoutMs);
             conn.setRequestMethod("GET");
-            conn.setConnectTimeout(timeoutMs);
-            conn.setReadTimeout(timeoutMs);
             conn.setRequestProperty("Accept", "application/json");
             int code = conn.getResponseCode();
             String body = readStream(code < 400
@@ -241,11 +290,8 @@ public class LcrBridge {
 
     private String post(String path, String jsonBody) {
         try {
-            URL url = new URL(BASE + path);
-            HttpsURLConnection conn = (HttpsURLConnection) url.openConnection();
+            HttpsURLConnection conn = openHttps(BASE + path, TIMEOUT_MS);
             conn.setRequestMethod("POST");
-            conn.setConnectTimeout(TIMEOUT_MS);
-            conn.setReadTimeout(TIMEOUT_MS);
             conn.setRequestProperty("Content-Type", "application/json");
             conn.setRequestProperty("Accept", "application/json");
             if (jsonBody != null && !jsonBody.isEmpty()) {

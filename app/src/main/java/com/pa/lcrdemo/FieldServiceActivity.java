@@ -89,7 +89,7 @@ public class FieldServiceActivity extends Activity {
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
 
         // Injecter le bridge LCR — accessible via window.LCR dans Field Service
-        webView.addJavascriptInterface(new LcrBridge(), "LCR");
+        webView.addJavascriptInterface(new LcrBridge(this), "LCR");
 
         webView.setWebViewClient(new WebViewClient() {
             @Override
@@ -119,9 +119,24 @@ public class FieldServiceActivity extends Activity {
     private void checkIfAlreadyReady() {
         new Thread(() -> {
             try {
+                // Charger lcr_local.crt pour valider le certificat auto-signé
+                java.security.cert.CertificateFactory cf = java.security.cert.CertificateFactory.getInstance("X.509");
+                java.io.InputStream caInput = getResources().openRawResource(R.raw.lcr_local);
+                java.security.cert.Certificate ca = cf.generateCertificate(caInput);
+                caInput.close();
+                java.security.KeyStore ks = java.security.KeyStore.getInstance(java.security.KeyStore.getDefaultType());
+                ks.load(null, null);
+                ks.setCertificateEntry("lcr_local", ca);
+                javax.net.ssl.TrustManagerFactory tmf = javax.net.ssl.TrustManagerFactory.getInstance(
+                    javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm());
+                tmf.init(ks);
+                javax.net.ssl.SSLContext sslCtx = javax.net.ssl.SSLContext.getInstance("TLS");
+                sslCtx.init(null, tmf.getTrustManagers(), null);
+
                 java.net.URL url = new java.net.URL("https://127.0.0.1:8765/v1/ping");
-                java.net.HttpURLConnection conn =
-                    (java.net.HttpURLConnection) url.openConnection();
+                javax.net.ssl.HttpsURLConnection conn =
+                    (javax.net.ssl.HttpsURLConnection) url.openConnection();
+                conn.setSSLSocketFactory(sslCtx.getSocketFactory());
                 conn.setConnectTimeout(2000);
                 conn.setReadTimeout(2000);
                 int code = conn.getResponseCode();
@@ -132,7 +147,7 @@ public class FieldServiceActivity extends Activity {
                 }
             } catch (Exception e) {
                 // APK pas encore prêt — on attend le broadcast READY
-                Log.d(TAG, "APK pas encore prêt, on attend le broadcast");
+                Log.d(TAG, "APK pas encore prêt, on attend le broadcast: " + e.getMessage());
             }
         }).start();
     }
