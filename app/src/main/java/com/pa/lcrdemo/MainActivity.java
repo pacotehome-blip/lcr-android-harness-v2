@@ -539,35 +539,32 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
             return;
         }
 
-        if ("livraison".equals(host)) {
-            String woNum      = data.getQueryParameter("wonum");
-            String btMac      = data.getQueryParameter("btmac");
-            String serialId   = data.getQueryParameter("serialid");
-            String produit    = data.getQueryParameter("produit");
-            String presetStr  = data.getQueryParameter("preset");
-            String lcrnodeStr = data.getQueryParameter("lcrnode");
+    if ("livraison".equals(host)) {
+        String woNum      = data.getQueryParameter("wonum");
+        String btMac      = data.getQueryParameter("btmac");
+        String serialId   = data.getQueryParameter("serialid");
+        String produit    = data.getQueryParameter("produit");
+        String presetStr  = data.getQueryParameter("preset");
+        String lcrnodeStr = data.getQueryParameter("lcrnode");
 
-            Integer lcrnode = null;
-            try { if (lcrnodeStr != null) lcrnode = Integer.parseInt(lcrnodeStr); }
-            catch (Exception ignored) {}
+        Integer lcrnode = null;
+        try { if (lcrnodeStr != null) lcrnode = Integer.parseInt(lcrnodeStr); }
+        catch (Exception ignored) {}
 
-            android.util.Log.i("LCRDEMO_DEEPLINK",
-                "Livraison — WO=" + wonum + " BT=" + btmac +
-                " serial=" + serialid + " node=" + lcrnode +
-                " produit=" + produit + " preset=" + presetStr);
+        android.util.Log.i("LCRDEMO_DEEPLINK",
+            "Livraison — WO=" + woNum + " BT=" + btMac +
+            " serial=" + serialId + " node=" + lcrnode +
+            " produit=" + produit + " preset=" + presetStr);
 
-            toast("📦 Livraison reçue — " + wonum);
-            android.util.Log.i("LCRDEMO_DEEPLINK", "Retour vers Field Service dans 2s...");
+        toast("📦 Livraison reçue — " + woNum);
+        android.util.Log.i("LCRDEMO_DEEPLINK", "Retour vers Field Service dans 2s...");
 
-                final String fWoNum = wonum;
-                new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
-                retournerFieldService(fWoNum, "en_cours", null);
-            }, 2000);
-            return;
-        }
-        android.util.Log.w("LCRDEMO_DEEPLINK", "Host inconnu: " + host);
+        final String fWoNum = woNum;
+        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+            retournerFieldService(fWoNum, "en_cours", null);
+        }, 2000);
+        return;
     }
-
     /**
      * Retourner à Field Service Mobile après la livraison.
      * Construit l'URL ms-dynamicsxrm:// avec le statut et les données
