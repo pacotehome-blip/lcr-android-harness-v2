@@ -556,16 +556,70 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
                 " serial=" + serialId + " node=" + lcrnode +
                 " produit=" + produit + " preset=" + presetStr);
 
-            toast("📦 Livraison reçue — " + woNum);
-            android.util.Log.i("LCRDEMO_DEEPLINK", "Retour vers Field Service dans 2s...");
-
-            final String fWoNum = woNum;
-            new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
-                retournerFieldService(fWoNum, "en_cours", null);
-            }, 2000);
+            toast("📦 Livraison — " + woNum);
+            int finalNode = (lcrnode != null ? lcrnode : 250);
+            connectBtByMacAndOpenTab(btMac, finalNode, serialId, woNum);
             return;
         }
     }
+
+    private void connectBtByMacAndOpenTab(String btMac, int node, String serialId, String woNum) {
+        if (btMac == null || btMac.trim().isEmpty()) {
+            toast("Deep Link: BT MAC manquant");
+            return;
+        }
+        final String mac = btMac.toUpperCase().trim();
+
+        btExec.execute(() -> {
+            try {
+            BluetoothDevice dev = btAdapter.getRemoteDevice(mac);
+            if (dev == null) {
+                ui.post(() -> toast("BT: device introuvable — " + mac));
+                return;
+            }
+
+            btDisconnect();
+            try { if (btAdapter != null) btAdapter.cancelDiscovery(); } catch (Exception ignored) {}
+
+            BluetoothSocket s;
+            try {
+                s = dev.createInsecureRfcommSocketToServiceRecord(SPP_UUID);
+            } catch (Exception e) {
+                s = dev.createRfcommSocketToServiceRecord(SPP_UUID);
+            }
+                s.connect();
+
+                btSocket = s;
+                btIn  = s.getInputStream();
+                btOut = s.getOutputStream();
+                lastBtMac = mac;
+
+                if (mediaTransportManager != null) {
+                    mediaTransportManager.onBtConnected(dev, btSocket, btIn, btOut, "DEEPLINK");
+                }
+
+                String transportKey = MediaTransportManager.btKey(mac);
+
+                ui.post(() -> {
+                    try {
+                        onConfigureMediaActivated(transportKey, "DEEPLINK");
+                        upsertRegisterTabFromScan(transportKey, node, 255, serialId, true);
+                        refreshAllTabsMediaStatus();
+                        showPage(0);
+                        if (txtBtStatus != null)
+                            txtBtStatus.setText("BT : CONNECTED — " + mac + " (FS)");
+                        toast("✅ BT connecté — " + woNum);
+                    } catch (Exception e) {
+                        toast("BT tab ERR: " + e.getMessage());
+                    }
+                });
+
+            } catch (Exception e) {
+                android.util.Log.e("LCRDEMO_DEEPLINK", "BT connect ERR: " + e.getMessage());
+                ui.post(() -> toast("BT ERR: " + e.getMessage()));
+            }
+        });
+    }    
     /**
      * Retourner à Field Service Mobile après la livraison.
      * Construit l'URL ms-dynamicsxrm:// avec le statut et les données
