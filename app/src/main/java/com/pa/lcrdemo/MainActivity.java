@@ -540,26 +540,26 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
         }
 
         if ("livraison".equals(host)) {
-            String woNum      = data.getQueryParameter("woNum");
-            String btMac      = data.getQueryParameter("btMac");
-            String serialId   = data.getQueryParameter("serialId");
+            String woNum      = data.getQueryParameter("wonum");
+            String btMac      = data.getQueryParameter("btmac");
+            String serialId   = data.getQueryParameter("serialid");
             String produit    = data.getQueryParameter("produit");
             String presetStr  = data.getQueryParameter("preset");
-            String lcrnodeStr = data.getQueryParameter("lcrNode");
+            String lcrnodeStr = data.getQueryParameter("lcrnode");
 
             Integer lcrnode = null;
             try { if (lcrnodeStr != null) lcrnode = Integer.parseInt(lcrnodeStr); }
             catch (Exception ignored) {}
 
             android.util.Log.i("LCRDEMO_DEEPLINK",
-                "Livraison — WO=" + woNum + " BT=" + btMac +
-                " serial=" + serialId + " node=" + lcrnode +
+                "Livraison — WO=" + wonum + " BT=" + btmac +
+                " serial=" + serialid + " node=" + lcrnode +
                 " produit=" + produit + " preset=" + presetStr);
 
-            toast("📦 Livraison reçue — " + woNum);
+            toast("📦 Livraison reçue — " + wonum);
             android.util.Log.i("LCRDEMO_DEEPLINK", "Retour vers Field Service dans 2s...");
 
-                final String fWoNum = woNum;
+                final String fWoNum = wonum;
                 new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
                 retournerFieldService(fWoNum, "en_cours", null);
             }, 2000);
