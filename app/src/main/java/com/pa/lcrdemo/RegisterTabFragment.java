@@ -425,6 +425,15 @@ public class RegisterTabFragment extends Fragment {
         updateButtons(null);
     }
 
+    public void prefillFromDeepLink(String woNum, String produit, String preset) {
+        if (edtPreset != null && preset != null && !preset.isEmpty())
+            edtPreset.setText(preset);
+        if (spnProduct != null && produit != null && !produit.isEmpty())
+            spnProduct.setText(produit, false);
+        if (txtDeliveryUid != null && woNum != null && !woNum.isEmpty())
+            txtDeliveryUid.setText("Delivery UID : " + woNum);
+    }
+    
     private void runStatusBLikeButton(String reason) {
         try {
             if (controller == null) return;

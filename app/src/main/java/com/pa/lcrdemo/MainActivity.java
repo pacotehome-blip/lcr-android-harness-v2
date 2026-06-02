@@ -602,6 +602,23 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
                     try {
                         onConfigureMediaActivated(transportKey, "DEEPLINK");
                         upsertRegisterTabFromScan(transportKey, node, 255, serialId, true);
+                        final String fProduit = produit;
+                        final String fPreset = presetStr;
+                        final String fWoNum = woNum;
+                        final String fTransportKey = transportKey;
+                        ui.postDelayed(() -> {
+                            try {
+                                String mediaShort = mediaShortFromTransportKey(fTransportKey);
+                                String tabKey     = tabKeyOf(mediaShort, node, serialId);
+                                Fragment f        = getSupportFragmentManager()
+                                                        .findFragmentByTag("regtab_" + tabKey);
+                                if (f instanceof RegisterTabFragment) {
+                                    ((RegisterTabFragment) f).prefillFromDeepLink(
+                                        fWoNum, fProduit, fPreset
+                                    );
+                                }
+                            } catch (Exception ignored) {}
+                        }, 800);
                         refreshAllTabsMediaStatus();
                         showPage(0);
                         if (txtBtStatus != null)
