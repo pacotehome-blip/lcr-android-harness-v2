@@ -626,29 +626,46 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
                     } catch (Exception ignored) {}
                 });
 
-                // 3) Appeler oneshot/start via facade
-                try {
-                    int product = 1;
-                    try { product = Integer.parseInt(produit); } catch (Exception ignored) {}
-                    double preset = 0.0;
-                    try { preset = Double.parseDouble(presetStr); } catch (Exception ignored) {}
-    
-                    MultiRegisterApiFacadeImpl facade = new MultiRegisterApiFacadeImpl(this);
-                    com.pa.lcr.lcp.ApiResult r = facade.api_deliveryOneShotStart(
-                        node, 255, woNum, product, preset, null, "bt", mac
-                    );
-                    android.util.Log.i("LCRDEMO_DEEPLINK",
-                        "oneshot/start: code=" + r.code + " msg=" + r.msg);
-                    ui.post(() -> toast("📦 Livraison démarrée — " + woNum));
-                } catch (Exception e) {
-                    android.util.Log.e("LCRDEMO_DEEPLINK",
-                        "oneshot/start ERR: " + e.getMessage());
-                }
-    
-            } catch (Exception e) {
-                android.util.Log.e("LCRDEMO_DEEPLINK", "BT connect ERR: " + e.getMessage());
-                ui.post(() -> toast("BT ERR: " + e.getMessage()));
+    // 3) Attendre que le média soit READY puis appeler oneshot/start
+    int product = 1;
+    try { product = Integer.parseInt(produit); } catch (Exception ignored) {}
+    double preset = 0.0;
+    try { preset = Double.parseDouble(presetStr); } catch (Exception ignored) {}
+
+    final int    fProduct = product;
+    final double fPreset  = preset;
+
+    // Attendre max 5 secondes que le transport soit READY
+    boolean ready = false;
+    for (int i = 0; i < 10; i++) {
+        try { Thread.sleep(500); } catch (Exception ignored) {}
+        try {
+            if (mediaTransportManager != null) {
+                TransportIo io = mediaTransportManager.getByKey(transportKey);
+                if (io != null && io.isOpen()) { ready = true; break; }
             }
+        } catch (Exception ignored) {}
+    }
+
+    if (ready) {
+        try {
+            MultiRegisterApiFacadeImpl facade =
+                new MultiRegisterApiFacadeImpl(this);
+            com.pa.lcr.lcp.ApiResult r = facade.api_deliveryOneShotStart(
+                node, 255, woNum, fProduct, fPreset, null, "bt", mac
+            );
+            android.util.Log.i("LCRDEMO_DEEPLINK",
+                "oneshot/start: code=" + r.code + " msg=" + r.msg);
+            ui.post(() -> toast("📦 Livraison démarrée — " + woNum));
+        } catch (Exception e) {
+            android.util.Log.e("LCRDEMO_DEEPLINK",
+                "oneshot/start ERR: " + e.getMessage());
+        }
+    } else {
+        android.util.Log.w("LCRDEMO_DEEPLINK",
+            "oneshot/start: média non prêt après 5s");
+        ui.post(() -> toast("BT non prêt — réessayez"));
+    }
         });
     }
     /**
