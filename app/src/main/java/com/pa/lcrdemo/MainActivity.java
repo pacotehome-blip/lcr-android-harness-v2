@@ -511,6 +511,85 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
         super.onDestroy();
     }
 
+    // ✅ Deep Link lcrdemo:// — appelé quand Field Service Mobile lance l'APK
+    // Exemples:
+    //   lcrdemo://livraison?idWorkOrder=123&serialId=16466294&lcrnode=250
+    //   lcrdemo://ping
+    @Override
+    protected void onNewIntent(android.content.Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleDeepLink(intent);
+    }
+
+    private void handleDeepLink(android.content.Intent intent) {
+        if (intent == null) return;
+        android.net.Uri data = intent.getData();
+        if (data == null) return;
+        if (!"lcrdemo".equals(data.getScheme())) return;
+
+        String host = data.getHost(); // "livraison", "ping", etc.
+        android.util.Log.i("LCRDEMO_DEEPLINK", "Deep link reçu: " + data.toString());
+
+        if ("ping".equals(host)) {
+            // Test simple — retourner immédiatement à Field Service avec OK
+            android.util.Log.i("LCRDEMO_DEEPLINK", "Ping reçu — réponse OK");
+            toast("✅ LCR Deep Link OK — ping reçu");
+            retournerFieldService("ping", "ok", null);
+            return;
+        }
+
+        if ("livraison".equals(host)) {
+            String idWorkOrder = data.getQueryParameter("idWorkOrder");
+            String serialId    = data.getQueryParameter("serialId");
+            String lcrnodeStr  = data.getQueryParameter("lcrnode");
+            Integer lcrnode    = null;
+            try { if (lcrnodeStr != null) lcrnode = Integer.parseInt(lcrnodeStr); }
+            catch (Exception ignored) {}
+
+            android.util.Log.i("LCRDEMO_DEEPLINK",
+                "Livraison — WO=" + idWorkOrder + " serial=" + serialId + " node=" + lcrnode);
+
+            // TODO: déclencher la livraison LCR ici
+            // Pour l'instant: toast de confirmation et retour à Field Service
+            toast("📦 Livraison reçue — WO=" + idWorkOrder);
+
+            // Retour à Field Service avec le résultat
+            // retournerFieldService(idWorkOrder, "en_cours", null);
+            return;
+        }
+
+        android.util.Log.w("LCRDEMO_DEEPLINK", "Host inconnu: " + host);
+    }
+
+    /**
+     * Retourner à Field Service Mobile après la livraison.
+     * @param idWorkOrder  ID de l'ordre de travail
+     * @param status       "ok", "en_cours", "termine", "erreur"
+     * @param extra        données supplémentaires (optionnel)
+     */
+    private void retournerFieldService(String idWorkOrder, String status, String extra) {
+        try {
+            // URL de retour vers Field Service Mobile
+            // Field Service intercepte cette URL via le PCF
+            String urlRetour = "ms-dynamicsxrm://";
+            android.content.Intent retour = new android.content.Intent(
+                android.content.Intent.ACTION_VIEW,
+                android.net.Uri.parse(urlRetour)
+            );
+            retour.setFlags(
+                android.content.Intent.FLAG_ACTIVITY_NEW_TASK |
+                android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
+            );
+            // Ne pas lancer si Field Service n'est pas installé
+            if (retour.resolveActivity(getPackageManager()) != null) {
+                startActivity(retour);
+            }
+        } catch (Exception e) {
+            android.util.Log.e("LCRDEMO_DEEPLINK", "Retour FS failed: " + e.getMessage());
+        }
+    }
+
     private void bindUi() {
         tabLayout = findViewById(R.id.tabLayout);
         pageMain = findViewById(R.id.pageMain);
