@@ -84,20 +84,7 @@ import java.util.concurrent.Executors;
  *
  * API-Face => Start/Stop + Backup DB
  */
- public void onDeliveryEnded(String woNum, String ticketNo,
-                             double net, double gross) {
-    try {
-        String extra = new org.json.JSONObject()
-            .put("ticketNo", ticketNo)
-            .put("netL",     net)
-            .put("grossL",   gross)
-            .toString();
-        retournerFieldService(woNum, "termine", extra);
-    } catch (Exception e) {
-        android.util.Log.e("LCRDEMO_DEEPLINK",
-            "onDeliveryEnded ERR: " + e.getMessage());
-    }
-}
+
 public class MainActivity extends AppCompatActivity {
 
     public static final String ACTION_USB_PERMISSION = "com.pa.lcrdemo.USB_PERMISSION";
