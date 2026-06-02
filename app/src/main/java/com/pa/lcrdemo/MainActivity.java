@@ -422,6 +422,9 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
         logUi(null, "UI prête — Scan USB requis");
         // ✅ Démarrage automatique API HTTP au lancement
         startApiServer();
+        
+        // ✅ Deep Link au lancement (APK fermé)
+        handleDeepLink(getIntent());
     }
 
     @Override
