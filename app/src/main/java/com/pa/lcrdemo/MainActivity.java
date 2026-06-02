@@ -208,15 +208,27 @@ public class MainActivity extends AppCompatActivity {
 private void pollJobUntilDone(String jobId, int node, String woNum) {
     btExec.execute(() -> {
         try {
+            // ✅ MVP Étape 1 — job/continue pour démarrer le flux (sortir de ARMED)
+            try {
+                MultiRegisterApiFacadeImpl facadeCont = new MultiRegisterApiFacadeImpl(this);
+                com.pa.lcr.lcp.ApiResult rc = facadeCont.api_deliveryContinue(jobId, node);
+                android.util.Log.i("LCRDEMO_DEEPLINK",
+                    "job/continue: code=" + (rc != null ? rc.code : "null")
+                    + " msg=" + (rc != null ? rc.msg : "null"));
+            } catch (Exception e) {
+                android.util.Log.e("LCRDEMO_DEEPLINK", "job/continue ERR: " + e.getMessage());
+            }
+
+            boolean hasSeenFlowing = false;
+            boolean terminateSent  = false;
+
             // Poller max 10 minutes (600 fois x 1 seconde)
             for (int i = 0; i < 600; i++) {
                 try { Thread.sleep(1000); } catch (Exception ignored) {}
 
                 try {
-                    MultiRegisterApiFacadeImpl facade =
-                        new MultiRegisterApiFacadeImpl(this);
-                    com.pa.lcr.lcp.ApiResult r =
-                        facade.api_deliveryJobGet(jobId);
+                    MultiRegisterApiFacadeImpl facade = new MultiRegisterApiFacadeImpl(this);
+                    com.pa.lcr.lcp.ApiResult r = facade.api_deliveryJobGet(jobId);
 
                     if (r == null) continue;
 
@@ -224,23 +236,44 @@ private void pollJobUntilDone(String jobId, int node, String woNum) {
                     if (r.data != null)
                         state = r.data.optString("state", null);
 
-                    android.util.Log.i("LCRDEMO_DEEPLINK",
-                        "pollJob: state=" + state);
+                    android.util.Log.i("LCRDEMO_DEEPLINK", "pollJob: state=" + state);
 
-                    if ("DONE".equals(state) || "TERMINATED".equals(state)) {
-                        // Récupérer les données de fin
-                        String extraJson = (r.data != null)
-                            ? r.data.toString() : "{}";
-                        android.util.Log.i("LCRDEMO_DEEPLINK",
-                            "Livraison terminée — " + extraJson);
-                        onDeliveryEnded(woNum, extraJson);
-                        break;
+                    // ✅ Marquer qu on a vu la livraison active
+                    if ("RUNNING_FLOWING".equals(state) || "RUNNING_PAUSED".equals(state)) {
+                        hasSeenFlowing = true;
                     }
+
+                    // ✅ DONE ou TERMINATED — fin propre, retour FS immédiat
+                    if ("DONE".equals(state) || "TERMINATED".equals(state)) {
+                        String extraJson = (r.data != null) ? r.data.toString() : "{}";
+                        android.util.Log.i("LCRDEMO_DEEPLINK", "Livraison DONE — " + extraJson);
+                        onDeliveryEnded(woNum, extraJson);
+                        return;
+                    }
+
+                    // ✅ MVP: RUNNING_PAUSED apres FLOWING = flow coupe cote registre
+                    // → appeler job/terminate pour obtenir DONE proprement
+                    if ("RUNNING_PAUSED".equals(state) && hasSeenFlowing && !terminateSent) {
+                        android.util.Log.i("LCRDEMO_DEEPLINK",
+                            "RUNNING_PAUSED détecté — envoi job/terminate");
+                        try {
+                            MultiRegisterApiFacadeImpl facadeTerm = new MultiRegisterApiFacadeImpl(this);
+                            com.pa.lcr.lcp.ApiResult rt = facadeTerm.api_deliveryTerminate(jobId, node);
+                            android.util.Log.i("LCRDEMO_DEEPLINK",
+                                "job/terminate: code=" + (rt != null ? rt.code : "null")
+                                + " msg=" + (rt != null ? rt.msg : "null"));
+                            terminateSent = true;
+                        } catch (Exception e) {
+                            android.util.Log.e("LCRDEMO_DEEPLINK",
+                                "job/terminate ERR: " + e.getMessage());
+                        }
+                    }
+
                 } catch (Exception ignored) {}
             }
+            android.util.Log.w("LCRDEMO_DEEPLINK", "pollJob: timeout 10min sans DONE");
         } catch (Exception e) {
-            android.util.Log.e("LCRDEMO_DEEPLINK",
-                "pollJob ERR: " + e.getMessage());
+            android.util.Log.e("LCRDEMO_DEEPLINK", "pollJob ERR: " + e.getMessage());
         }
     });
 }
