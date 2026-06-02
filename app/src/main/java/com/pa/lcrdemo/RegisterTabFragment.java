@@ -432,14 +432,15 @@ public class RegisterTabFragment extends Fragment {
     }
 
     public void prefillFromDeepLink(String woNum, String produit, String preset) {
-            if (edtPreset != null && preset != null && !preset.isEmpty())
-                edtPreset.setText(preset);
-            if (spnProduct != null && produit != null && !produit.isEmpty())
-                spnProduct.setText(produit, false);
-            if (txtDeliveryUid != null && woNum != null && !woNum.isEmpty())
-                txtDeliveryUid.setText("Delivery UID : " + woNum);
-        }
-        private void notifyDeliveryEndedToMainActivity() {
+        if (edtPreset != null && preset != null && !preset.isEmpty())
+            edtPreset.setText(preset);
+        if (spnProduct != null && produit != null && !produit.isEmpty())
+            spnProduct.setText(produit, false);
+        if (txtDeliveryUid != null && woNum != null && !woNum.isEmpty())
+            txtDeliveryUid.setText("Delivery UID : " + woNum);
+    }
+
+    private void notifyDeliveryEndedToMainActivity() {
         try {
             if (!(getActivity() instanceof MainActivity)) return;
             MainActivity main = (MainActivity) getActivity();
@@ -466,7 +467,6 @@ public class RegisterTabFragment extends Fragment {
                                 .replace("Delivery UID : ", "").trim();
             } catch (Exception ignored) {}
 
-            // Récupérer aussi le payload complet via tickSnapshot
             org.json.JSONObject extra = new org.json.JSONObject();
             try {
                 if (controller != null) {
@@ -487,44 +487,7 @@ public class RegisterTabFragment extends Fragment {
 
         } catch (Exception ignored) {}
     }
-    private void notifyDeliveryEndedToMainActivity() {
-        try {
-            if (!(getActivity() instanceof MainActivity)) return;
-            MainActivity main = (MainActivity) getActivity();
 
-            // Récupérer ticketNo, net, gross
-            String ticketNo  = "";
-            double net       = 0.0;
-            double gross     = 0.0;
-            String woNum     = "";
-
-            try {
-                if (txtTicketNo != null)
-                    ticketNo = txtTicketNo.getText().toString()
-                                   .replace("Ticket Number : ", "").trim();
-                if (txtQtyNet != null)
-                    net = Double.parseDouble(
-                        txtQtyNet.getText().toString()
-                                 .replace("NET: ", "").trim());
-                if (txtQtyGross != null)
-                    gross = Double.parseDouble(
-                        txtQtyGross.getText().toString()
-                                   .replace("GROSS: ", "").trim());
-                if (txtDeliveryUid != null)
-                    woNum = txtDeliveryUid.getText().toString()
-                                .replace("Delivery UID : ", "").trim();
-            } catch (Exception ignored) {}
-
-            final String fTicket = ticketNo;
-            final double fNet    = net;
-            final double fGross  = gross;
-            final String fWoNum  = woNum;
-
-            main.onDeliveryEnded(fWoNum, fTicket, fNet, fGross);
-
-        } catch (Exception ignored) {}
-    }
-    
     private void runStatusBLikeButton(String reason) {
         try {
             if (controller == null) return;
