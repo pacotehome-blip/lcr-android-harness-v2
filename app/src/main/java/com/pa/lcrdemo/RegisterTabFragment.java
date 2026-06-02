@@ -198,10 +198,16 @@ public class RegisterTabFragment extends Fragment {
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
                 if (starting && state == DeliveryState.RUNNING_FLOWING) starting = false;
-                if (starting && (System.currentTimeMillis() - startingSinceMs) > 12000L) starting = false;
+                if (starting && (System.currentTimeMillis() - startingSinceMs) > 12000L)
+                    starting = false;
                 refreshDelCodeFromTickSnapshotThrottled();
                 updateButtons(state);
                 scheduleLogRefresh();
+
+                // ✅ Retour Field Service quand livraison terminée
+                if (state == DeliveryState.ENDED) {
+                    notifyDeliveryEndedToMainActivity();
+                }
             });
         }
 
@@ -432,6 +438,43 @@ public class RegisterTabFragment extends Fragment {
             spnProduct.setText(produit, false);
         if (txtDeliveryUid != null && woNum != null && !woNum.isEmpty())
             txtDeliveryUid.setText("Delivery UID : " + woNum);
+    }
+    private void notifyDeliveryEndedToMainActivity() {
+        try {
+            if (!(getActivity() instanceof MainActivity)) return;
+            MainActivity main = (MainActivity) getActivity();
+
+            // Récupérer ticketNo, net, gross
+            String ticketNo  = "";
+            double net       = 0.0;
+            double gross     = 0.0;
+            String woNum     = "";
+
+            try {
+                if (txtTicketNo != null)
+                    ticketNo = txtTicketNo.getText().toString()
+                                   .replace("Ticket Number : ", "").trim();
+                if (txtQtyNet != null)
+                    net = Double.parseDouble(
+                        txtQtyNet.getText().toString()
+                                 .replace("NET: ", "").trim());
+                if (txtQtyGross != null)
+                    gross = Double.parseDouble(
+                        txtQtyGross.getText().toString()
+                                   .replace("GROSS: ", "").trim());
+                if (txtDeliveryUid != null)
+                    woNum = txtDeliveryUid.getText().toString()
+                                .replace("Delivery UID : ", "").trim();
+            } catch (Exception ignored) {}
+
+            final String fTicket = ticketNo;
+            final double fNet    = net;
+            final double fGross  = gross;
+            final String fWoNum  = woNum;
+
+            main.onDeliveryEnded(fWoNum, fTicket, fNet, fGross);
+
+        } catch (Exception ignored) {}
     }
     
     private void runStatusBLikeButton(String reason) {

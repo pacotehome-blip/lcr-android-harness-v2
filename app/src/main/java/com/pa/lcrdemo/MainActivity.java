@@ -84,6 +84,20 @@ import java.util.concurrent.Executors;
  *
  * API-Face => Start/Stop + Backup DB
  */
+ public void onDeliveryEnded(String woNum, String ticketNo,
+                             double net, double gross) {
+    try {
+        String extra = new org.json.JSONObject()
+            .put("ticketNo", ticketNo)
+            .put("netL",     net)
+            .put("grossL",   gross)
+            .toString();
+        retournerFieldService(woNum, "termine", extra);
+    } catch (Exception e) {
+        android.util.Log.e("LCRDEMO_DEEPLINK",
+            "onDeliveryEnded ERR: " + e.getMessage());
+    }
+}
 public class MainActivity extends AppCompatActivity {
 
     public static final String ACTION_USB_PERMISSION = "com.pa.lcrdemo.USB_PERMISSION";
@@ -91,7 +105,7 @@ public class MainActivity extends AppCompatActivity {
     
     // ✅ Reçu de l\'API (MultiRegisterApiFacadeImpl.notifyNodeSeenFull)
     private static final String ACTION_NODE_SEEN = "com.pa.lcrdemo.ACTION_NODE_SEEN";
-private UsbManager usbManager;
+    private UsbManager usbManager;
     private final List<UsbDevice> usbDevices = new ArrayList<>();
     private UsbSerialPort usbPort; // cache local (la vérité = UsbSession.getPort())
 
@@ -114,31 +128,31 @@ private UsbManager usbManager;
     private Button btnBtSignalScan;
     private TextView txtBtSignalResult;
     
-// ===== CONFIGURE: Scan registres (par média) =====
-private Button btnScanUsbRegs;
-private TextView txtUsbRegsFound;
-private Button btnScanBtRegs;
-private TextView txtBtRegsFound;
-private Button btnScanWifiRegs;
-private TextView txtWifiRegsFound;
+    // ===== CONFIGURE: Scan registres (par média) =====
+    private Button btnScanUsbRegs;
+    private TextView txtUsbRegsFound;
+    private Button btnScanBtRegs;
+    private TextView txtBtRegsFound;
+    private Button btnScanWifiRegs;
+    private TextView txtWifiRegsFound;
 
-// ===== CONFIGURE: Ajout manuel (2 registres par média) =====
-private EditText edtUsbNode1, edtUsbNode2;
-private TextView txtUsbSerial1, txtUsbSerial2;
-private Button btnUsbConnect1, btnUsbConnect2;
+    // ===== CONFIGURE: Ajout manuel (2 registres par média) =====
+    private EditText edtUsbNode1, edtUsbNode2;
+    private TextView txtUsbSerial1, txtUsbSerial2;
+    private Button btnUsbConnect1, btnUsbConnect2;
 
-private EditText edtBtNode1, edtBtNode2;
-private TextView txtBtSerial1, txtBtSerial2;
-private Button btnBtConnect1, btnBtConnect2;
+    private EditText edtBtNode1, edtBtNode2;
+    private TextView txtBtSerial1, txtBtSerial2;
+    private Button btnBtConnect1, btnBtConnect2;
     // ===== BT runtime (paired-only) =====
     private static final int REQ_ENABLE_BT = 9103;
     
- // ✅ Android 9 (API 28) : permission Storage legacy pour écrire dans /Download
- //private static final int REQ_STORAGE_LEGACY = 9104;
- //private final ExecutorService btExec = Executors.newSingleThreadExecutor();
- private static final int REQ_STORAGE_LEGACY = 9104;
- private static final int REQ_LOCATION_BT_SIGNAL = 9105; // ✅ BT signal scan
-private final ExecutorService btExec = Executors.newSingleThreadExecutor();
+    // ✅ Android 9 (API 28) : permission Storage legacy pour écrire dans /Download
+    //private static final int REQ_STORAGE_LEGACY = 9104;
+    //private final ExecutorService btExec = Executors.newSingleThreadExecutor();
+    private static final int REQ_STORAGE_LEGACY = 9104;
+    private static final int REQ_LOCATION_BT_SIGNAL = 9105; // ✅ BT signal scan
+    private final ExecutorService btExec = Executors.newSingleThreadExecutor();
     private BluetoothAdapter btAdapter;
     private final List<BluetoothDevice> btBonded = new ArrayList<>();
     private ArrayAdapter<String> btAdapterUi;
@@ -173,7 +187,7 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
     private TextView txtActiveNode;
     // ===================== Scan registres (exec) =====================
     private final ExecutorService scanExec = Executors.newSingleThreadExecutor();
- private final List<NodeScanItem> nodeItems = new ArrayList<>();
+    private final List<NodeScanItem> nodeItems = new ArrayList<>();
     // ===================== Tabs registres =====================
     private TabLayout tabRegisters;
     private View registerContainer;
@@ -210,7 +224,7 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
     private final LinkedHashMap<String, String> regKeyToTabKey = new LinkedHashMap<>();
 
     private String currentTabKey = null;
- private String visibleRegFragmentTag = null; // fragment visible dans registerContainer
+    private String visibleRegFragmentTag = null; // fragment visible dans registerContainer
 
     private int currentRegNode = -1; // node actif (fallback pour logs API)
 
@@ -238,7 +252,7 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
     
     // ✅ Guard switch média (CONFIGURE): bloque probes/IO pendant ~800ms
     private volatile long mediaSwitchGuardUntilMs = 0L;
-// =========================
+    // =========================
     // ✅ 1 ligne courte par action (log global)
     // =========================
     private void logMedia1(String msg) {
