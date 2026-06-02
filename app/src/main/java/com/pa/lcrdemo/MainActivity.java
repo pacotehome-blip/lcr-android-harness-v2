@@ -558,7 +558,7 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
 
             toast("📦 Livraison — " + woNum);
             int finalNode = (lcrnode != null ? lcrnode : 250);
-            connectBtByMacAndOpenTab(btMac, finalNode, serialId, woNum);
+            connectBtByMacAndOpenTab(btMac, finalNode, serialId, woNum, produit, presetStr);
             return;
         }
     }
