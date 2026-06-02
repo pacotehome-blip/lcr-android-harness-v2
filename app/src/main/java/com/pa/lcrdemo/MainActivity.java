@@ -251,6 +251,14 @@ private void pollJobUntilDone(String jobId, int node, String woNum) {
                         return;
                     }
 
+                    // ✅ MVP: CONNECTED après terminate = livraison terminée, retour FS
+                    if ("CONNECTED".equals(state) && terminateSent) {
+                        String extraJson = (r.data != null) ? r.data.toString() : "{}";
+                        android.util.Log.i("LCRDEMO_DEEPLINK", "Livraison terminée (CONNECTED post-terminate) — " + extraJson);
+                        onDeliveryEnded(woNum, extraJson);
+                        return;
+                    }
+
                     // ✅ MVP: RUNNING_PAUSED apres FLOWING = flow coupe cote registre
                     // → appeler job/terminate pour obtenir DONE proprement
                     if ("RUNNING_PAUSED".equals(state) && hasSeenFlowing && !terminateSent) {
