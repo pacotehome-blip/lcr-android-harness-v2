@@ -540,30 +540,31 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
         }
 
         if ("livraison".equals(host)) {
-            String idWorkOrder = data.getQueryParameter("idWorkOrder");
-            String serialId    = data.getQueryParameter("serialId");
-            String lcrnodeStr  = data.getQueryParameter("lcrnode");
-            Integer lcrnode    = null;
+            String woNum      = data.getQueryParameter("woNum");
+            String btMac      = data.getQueryParameter("btMac");
+            String serialId   = data.getQueryParameter("serialId");
+            String produit    = data.getQueryParameter("produit");
+            String presetStr  = data.getQueryParameter("preset");
+            String lcrnodeStr = data.getQueryParameter("lcrNode");
+
+            Integer lcrnode = null;
             try { if (lcrnodeStr != null) lcrnode = Integer.parseInt(lcrnodeStr); }
             catch (Exception ignored) {}
 
             android.util.Log.i("LCRDEMO_DEEPLINK",
-                "Livraison — WO=" + idWorkOrder + " serial=" + serialId + " node=" + lcrnode);
+                "Livraison — WO=" + woNum + " BT=" + btMac +
+                " serial=" + serialId + " node=" + lcrnode +
+                " produit=" + produit + " preset=" + presetStr);
 
-            // TODO: déclencher la livraison LCR ici
-            // Pour l'instant: toast de confirmation + retour à Field Service
-            toast("📦 Livraison reçue — WO=" + idWorkOrder);
+            toast("📦 Livraison reçue — " + woNum);
             android.util.Log.i("LCRDEMO_DEEPLINK", "Retour vers Field Service dans 2s...");
 
-            // Retour automatique à Field Service après 2 secondes
-            // (en production: appeler après completion de la livraison)
-            final String woId = idWorkOrder;
-            new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
-                retournerFieldService(woId, "en_cours", null);
+                final String fWoNum = woNum;
+                new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+                retournerFieldService(fWoNum, "en_cours", null);
             }, 2000);
             return;
         }
-
         android.util.Log.w("LCRDEMO_DEEPLINK", "Host inconnu: " + host);
     }
 
