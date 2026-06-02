@@ -580,118 +580,123 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-private void connectBtByMacAndOpenTab(String btMac, int node, String serialId,
-                                       String woNum, String produit, String presetStr) {
-    if (btMac == null || btMac.trim().isEmpty()) {
-        toast("Deep Link: BT MAC manquant");
-        return;
-    }
-    final String mac = btMac.toUpperCase().trim();
-
-    btExec.execute(() -> {
-        try {
-            // 1) Connecter BT
-            BluetoothDevice dev = btAdapter.getRemoteDevice(mac);
-            btDisconnect();
-            try { if (btAdapter != null) btAdapter.cancelDiscovery(); }
-            catch (Exception ignored) {}
-
-            BluetoothSocket s;
-            try {
-                s = dev.createInsecureRfcommSocketToServiceRecord(SPP_UUID);
-            } catch (Exception e) {
-                s = dev.createRfcommSocketToServiceRecord(SPP_UUID);
-            }
-            s.connect();
-
-            btSocket = s;
-            btIn     = s.getInputStream();
-            btOut    = s.getOutputStream();
-            lastBtMac = mac;
-
-            if (mediaTransportManager != null) {
-                mediaTransportManager.onBtConnected(
-                    dev, btSocket, btIn, btOut, "DEEPLINK");
-            }
-
-            String transportKey = MediaTransportManager.btKey(mac);
-
-            // 2) Ouvrir tab UI
-            final String fProduit      = produit;
-            final String fPreset       = presetStr;
-            final String fWoNum        = woNum;
-            final String fTransportKey = transportKey;
-
-            ui.post(() -> {
-                try {
-                    onConfigureMediaActivated(fTransportKey, "DEEPLINK");
-                    upsertRegisterTabFromScan(fTransportKey, node, 255, serialId, true);
-                    ui.postDelayed(() -> {
-                        try {
-                            String   mediaShort = mediaShortFromTransportKey(fTransportKey);
-                            String   tabKey     = tabKeyOf(mediaShort, node, serialId);
-                            Fragment f          = getSupportFragmentManager()
-                                                      .findFragmentByTag("regtab_" + tabKey);
-                            if (f instanceof RegisterTabFragment) {
-                                ((RegisterTabFragment) f).prefillFromDeepLink(
-                                    fWoNum, fProduit, fPreset);
-                            }
-                        } catch (Exception ignored) {}
-                    }, 800);
-                    refreshAllTabsMediaStatus();
-                    showPage(0);
-                    if (txtBtStatus != null)
-                        txtBtStatus.setText("BT : CONNECTED — " + mac + " (FS)");
-                } catch (Exception ignored) {}
-            });
-
-            // 3) Attendre que le média soit READY puis appeler oneshot/start
-            int    product = 1;
-            double preset  = 0.0;
-            try { product = Integer.parseInt(produit);      } catch (Exception ignored) {}
-            try { preset  = Double.parseDouble(presetStr);  } catch (Exception ignored) {}
-
-            final int    fProduct = product;
-            final double fPresetD = preset;
-
-            boolean ready = false;
-            for (int i = 0; i < 10; i++) {
-                try { Thread.sleep(500); } catch (Exception ignored) {}
-                try {
-                    if (mediaTransportManager != null) {
-                        TransportIo io = mediaTransportManager.getByKey(transportKey);
-                        if (io != null && io.isOpen()) { ready = true; break; }
-                    }
-                } catch (Exception ignored) {}
-            }
-
-            if (ready) {
-                try {
-                    MultiRegisterApiFacadeImpl facade =
-                        new MultiRegisterApiFacadeImpl(this);
-                    com.pa.lcr.lcp.ApiResult r = facade.api_deliveryOneShotStart(
-                        node, 255, woNum, fProduct, fPresetD, null, "bt", mac);
-                    android.util.Log.i("LCRDEMO_DEEPLINK",
-                        "oneshot/start: code=" + r.code + " msg=" + r.msg);
-                    ui.post(() -> toast("📦 Livraison démarrée — " + woNum));
-                } catch (Exception e) {
-                    android.util.Log.e("LCRDEMO_DEEPLINK",
-                        "oneshot/start ERR: " + e.getMessage());
-                }
-            } else {
-                android.util.Log.w("LCRDEMO_DEEPLINK",
-                    "oneshot/start: média non prêt après 5s");
-                ui.post(() -> toast("BT non prêt — réessayez"));
-            }
-
-        } catch (Exception e) {
-            android.util.Log.e("LCRDEMO_DEEPLINK",
-                "BT connect ERR: " + e.getMessage());
-            ui.post(() -> toast("BT ERR: " + e.getMessage()));
+    private void connectBtByMacAndOpenTab(String btMac, int node, String serialId,
+                                           String woNum, String produit, String presetStr) {
+        if (btMac == null || btMac.trim().isEmpty()) {
+            toast("Deep Link: BT MAC manquant");
+            return;
         }
-    });
-}
+        final String mac = btMac.toUpperCase().trim();
 
+        btExec.execute(() -> {
+            try {
+                // 1) Connecter BT
+                BluetoothDevice dev = btAdapter.getRemoteDevice(mac);
+                btDisconnect();
+                try { if (btAdapter != null) btAdapter.cancelDiscovery(); }
+                catch (Exception ignored) {}
+
+                BluetoothSocket s;
+                try {
+                    s = dev.createInsecureRfcommSocketToServiceRecord(SPP_UUID);
+                } catch (Exception e) {
+                    s = dev.createRfcommSocketToServiceRecord(SPP_UUID);
+                }
+                s.connect();
+
+                btSocket = s;
+                btIn     = s.getInputStream();
+                btOut    = s.getOutputStream();
+                lastBtMac = mac;
+
+                if (mediaTransportManager != null) {
+                    mediaTransportManager.onBtConnected(
+                        dev, btSocket, btIn, btOut, "DEEPLINK");
+                }
+
+                String transportKey = MediaTransportManager.btKey(mac);
+
+                // 2) Ouvrir tab UI
+                final String fProduit      = produit;
+                final String fPreset       = presetStr;
+                final String fWoNum        = woNum;
+                final String fTransportKey = transportKey;
+
+                ui.post(() -> {
+                    try {
+                        onConfigureMediaActivated(fTransportKey, "DEEPLINK");
+                        upsertRegisterTabFromScan(fTransportKey, node, 255, serialId, true);
+                        ui.postDelayed(() -> {
+                            try {
+                                String   mediaShort = mediaShortFromTransportKey(fTransportKey);
+                                String   tabKey     = tabKeyOf(mediaShort, node, serialId);
+                                Fragment f          = getSupportFragmentManager()
+                                                          .findFragmentByTag("regtab_" + tabKey);
+                                if (f instanceof RegisterTabFragment) {
+                                    ((RegisterTabFragment) f).prefillFromDeepLink(
+                                        fWoNum, fProduit, fPreset);
+                                }
+                            } catch (Exception ignored) {}
+                        }, 800);
+                        refreshAllTabsMediaStatus();
+                        showPage(0);
+                        if (txtBtStatus != null)
+                            txtBtStatus.setText("BT : CONNECTED — " + mac + " (FS)");
+                    } catch (Exception ignored) {}
+                });
+
+                // 3) Attendre que le média soit READY puis appeler oneshot/start
+                int    product = 1;
+                double preset  = 0.0;
+                try { product = Integer.parseInt(produit);      } catch (Exception ignored) {}
+                try { preset  = Double.parseDouble(presetStr);  } catch (Exception ignored) {}
+
+                final int    fProduct = product;
+                final double fPresetD = preset;
+
+                boolean ready = false;
+                for (int i = 0; i < 10; i++) {
+                    try { Thread.sleep(500); } catch (Exception ignored) {}
+                    try {
+                        if (mediaTransportManager != null) {
+                            TransportIo io = mediaTransportManager.getByKey(transportKey);
+                            if (io != null && io.isOpen()) { ready = true; break; }
+                        }
+                    } catch (Exception ignored) {}
+                }
+
+                if (ready) {
+                    try {
+                        MultiRegisterApiFacadeImpl facade =
+                            new MultiRegisterApiFacadeImpl(this);
+                        com.pa.lcr.lcp.ApiResult r = facade.api_deliveryOneShotStart(
+                            node, 255, woNum, fProduct, fPresetD, null, "bt", mac);
+                        android.util.Log.i("LCRDEMO_DEEPLINK",
+                            "oneshot/start: code=" + r.code + " msg=" + r.msg);
+                        ui.post(() -> toast("📦 Livraison démarrée — " + woNum));
+                    } catch (Exception e) {
+                        android.util.Log.e("LCRDEMO_DEEPLINK",
+                            "oneshot/start ERR: " + e.getMessage());
+                    }
+                } else {
+                    android.util.Log.w("LCRDEMO_DEEPLINK",
+                        "oneshot/start: média non prêt après 5s");
+                    ui.post(() -> toast("BT non prêt — réessayez"));
+                }
+    
+            } catch (Exception e) {
+                android.util.Log.e("LCRDEMO_DEEPLINK",
+                    "BT connect ERR: " + e.getMessage());
+                ui.post(() -> toast("BT ERR: " + e.getMessage()));
+            }
+        });
+    }
+
+    public void onDeliveryEnded(String woNum, String extraJson) {
+        android.util.Log.i("LCRDEMO_DEEPLINK",
+            "Livraison terminée — WO=" + woNum + " extra=" + extraJson);
+        retournerFieldService(woNum, "termine", extraJson);
+    }
     /**
      * Retourner à Field Service Mobile après la livraison.
      * Construit l'URL ms-dynamicsxrm:// avec le statut et les données
