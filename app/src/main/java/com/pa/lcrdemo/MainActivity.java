@@ -205,6 +205,47 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+private void pollJobUntilDone(String jobId, int node, String woNum) {
+    btExec.execute(() -> {
+        try {
+            // Poller max 10 minutes (600 fois x 1 seconde)
+            for (int i = 0; i < 600; i++) {
+                try { Thread.sleep(1000); } catch (Exception ignored) {}
+
+                try {
+                    MultiRegisterApiFacadeImpl facade =
+                        new MultiRegisterApiFacadeImpl(this);
+                    com.pa.lcr.lcp.ApiResult r =
+                        facade.api_deliveryJobGet(jobId, node);
+
+                    if (r == null) continue;
+
+                    String state = null;
+                    if (r.data != null)
+                        state = r.data.optString("state", null);
+
+                    android.util.Log.i("LCRDEMO_DEEPLINK",
+                        "pollJob: state=" + state);
+
+                    if ("DONE".equals(state) || "TERMINATED".equals(state)) {
+                        // Récupérer les données de fin
+                        String extraJson = (r.data != null)
+                            ? r.data.toString() : "{}";
+                        android.util.Log.i("LCRDEMO_DEEPLINK",
+                            "Livraison terminée — " + extraJson);
+                        onDeliveryEnded(woNum, extraJson);
+                        break;
+                    }
+                } catch (Exception ignored) {}
+            }
+        } catch (Exception e) {
+            android.util.Log.e("LCRDEMO_DEEPLINK",
+                "pollJob ERR: " + e.getMessage());
+        }
+    });
+}
+
+
     // tabKey -> spec
     private final LinkedHashMap<String, TabSpec> tabsByKey = new LinkedHashMap<>();
     // regKey(node#serial) -> tabKey courant (clear ciblé si migre de média)
