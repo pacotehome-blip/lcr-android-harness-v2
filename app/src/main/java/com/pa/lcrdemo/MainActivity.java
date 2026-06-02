@@ -551,11 +551,16 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
                 "Livraison — WO=" + idWorkOrder + " serial=" + serialId + " node=" + lcrnode);
 
             // TODO: déclencher la livraison LCR ici
-            // Pour l'instant: toast de confirmation et retour à Field Service
+            // Pour l'instant: toast de confirmation + retour à Field Service
             toast("📦 Livraison reçue — WO=" + idWorkOrder);
+            android.util.Log.i("LCRDEMO_DEEPLINK", "Retour vers Field Service dans 2s...");
 
-            // Retour à Field Service avec le résultat
-            // retournerFieldService(idWorkOrder, "en_cours", null);
+            // Retour automatique à Field Service après 2 secondes
+            // (en production: appeler après completion de la livraison)
+            final String woId = idWorkOrder;
+            new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+                retournerFieldService(woId, "en_cours", null);
+            }, 2000);
             return;
         }
 
@@ -564,29 +569,56 @@ private final ExecutorService btExec = Executors.newSingleThreadExecutor();
 
     /**
      * Retourner à Field Service Mobile après la livraison.
-     * @param idWorkOrder  ID de l'ordre de travail
+     * Construit l'URL ms-dynamicsxrm:// avec le statut et les données
+     * que le PCF interceptera pour mettre à jour le SQLite Dataverse local.
+     *
+     * @param idWorkOrder  GUID de l'ordre de travail (ex: {A4251FF8-...})
      * @param status       "ok", "en_cours", "termine", "erreur"
-     * @param extra        données supplémentaires (optionnel)
+     * @param extra        données supplémentaires JSON (optionnel, ex: ticketNo, litres)
      */
     private void retournerFieldService(String idWorkOrder, String status, String extra) {
         try {
-            // URL de retour vers Field Service Mobile
-            // Field Service intercepte cette URL via le PCF
-            String urlRetour = "ms-dynamicsxrm://";
+            // Construire l'URL de retour avec les paramètres de résultat
+            // Le PCF dans Field Service intercepte ces paramètres
+            // et met à jour le SQLite Dataverse local via context.webAPI.updateRecord()
+            android.net.Uri.Builder builder = new android.net.Uri.Builder()
+                .scheme("ms-dynamicsxrm")
+                .authority("default")
+                .appendQueryParameter("action", "lcr_retour")
+                .appendQueryParameter("idWorkOrder", idWorkOrder != null ? idWorkOrder : "")
+                .appendQueryParameter("status", status != null ? status : "ok")
+                .appendQueryParameter("ts", String.valueOf(System.currentTimeMillis()));
+
+            if (extra != null && !extra.isEmpty()) {
+                builder.appendQueryParameter("data", extra);
+            }
+
+            String urlRetour = builder.build().toString();
+            android.util.Log.i("LCRDEMO_DEEPLINK", "Retour FS: " + urlRetour);
+
             android.content.Intent retour = new android.content.Intent(
                 android.content.Intent.ACTION_VIEW,
                 android.net.Uri.parse(urlRetour)
             );
-            retour.setFlags(
+            retour.addFlags(
                 android.content.Intent.FLAG_ACTIVITY_NEW_TASK |
                 android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
             );
-            // Ne pas lancer si Field Service n'est pas installé
+
+            // Vérifier que Field Service Mobile est installé
             if (retour.resolveActivity(getPackageManager()) != null) {
+                android.util.Log.i("LCRDEMO_DEEPLINK", "Retour FS — lancement OK");
                 startActivity(retour);
+                // Supprimer l'animation de transition pour une bascule invisible
+                overridePendingTransition(0, 0);
+            } else {
+                android.util.Log.w("LCRDEMO_DEEPLINK", "Retour FS — app non trouvée, fallback finish()");
+                // Si Field Service n'est pas trouvé, simplement mettre l'APK en arrière-plan
+                moveTaskToBack(true);
             }
         } catch (Exception e) {
             android.util.Log.e("LCRDEMO_DEEPLINK", "Retour FS failed: " + e.getMessage());
+            moveTaskToBack(true);
         }
     }
 
