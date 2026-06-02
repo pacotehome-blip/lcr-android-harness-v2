@@ -216,7 +216,7 @@ private void pollJobUntilDone(String jobId, int node, String woNum) {
                     MultiRegisterApiFacadeImpl facade =
                         new MultiRegisterApiFacadeImpl(this);
                     com.pa.lcr.lcp.ApiResult r =
-                        facade.api_deliveryJobGet(jobId, node);
+                        facade.api_deliveryJobGet(jobId);
 
                     if (r == null) continue;
 
@@ -701,7 +701,19 @@ private void pollJobUntilDone(String jobId, int node, String woNum) {
                             node, 255, woNum, fProduct, fPresetD, null, "bt", mac);
                         android.util.Log.i("LCRDEMO_DEEPLINK",
                             "oneshot/start: code=" + r.code + " msg=" + r.msg);
-                        ui.post(() -> toast("📦 Livraison démarrée — " + woNum));
+                        // ✅ Récupérer le jobId et démarrer le poll vers DONE
+                        String jobId = (r != null && r.data != null)
+                            ? r.data.optString("jobId", null) : null;
+                        if (jobId != null && !jobId.isEmpty()) {
+                            android.util.Log.i("LCRDEMO_DEEPLINK",
+                                "Poll démarré — jobId=" + jobId);
+                            pollJobUntilDone(jobId, node, woNum);
+                            ui.post(() -> toast("📦 Livraison démarrée — " + woNum));
+                        } else {
+                            android.util.Log.w("LCRDEMO_DEEPLINK",
+                                "oneshot/start: jobId absent dans la réponse");
+                            ui.post(() -> toast("📦 Livraison démarrée (sans jobId) — " + woNum));
+                        }
                     } catch (Exception e) {
                         android.util.Log.e("LCRDEMO_DEEPLINK",
                             "oneshot/start ERR: " + e.getMessage());
