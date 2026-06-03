@@ -806,8 +806,28 @@ private void pollJobUntilDone(String jobId, int node, String woNum) {
                 }
             } catch (Exception ignored) {}
 
-            // ✅ Option 1 — Ouvrir filgo_lcr_form.html directement avec résultats
-            // (fonctionne même sans Field Service Mobile installé)
+            // ✅ Option 1 — ms-dynamicsxrm:// en premier (deep link natif FS Mobile)
+            String urlFs = "ms-dynamicsxrm://default"
+                + "?action=lcr_retour"
+                + "&wonum="  + android.net.Uri.encode(woNum  != null ? woNum  : "")
+                + "&status=" + android.net.Uri.encode(status != null ? status : "ok")
+                + "&net="    + android.net.Uri.encode(net)
+                + "&gross="  + android.net.Uri.encode(gross)
+                + "&ticket=" + android.net.Uri.encode(ticket)
+                + "&ts="     + System.currentTimeMillis();
+
+            android.util.Log.i("LCRDEMO_DEEPLINK", "Retour FS deeplink: " + urlFs);
+
+            android.content.Intent retourFs = new android.content.Intent(
+                android.content.Intent.ACTION_VIEW,
+                android.net.Uri.parse(urlFs)
+            );
+            retourFs.addFlags(
+                android.content.Intent.FLAG_ACTIVITY_NEW_TASK |
+                android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
+            );
+
+            // ✅ Option 2 — fallback form HTML (navigateur) si FS Mobile non trouvé
             String urlForm = "https://dev-filgo-sonic.crm3.dynamics.com/WebResources/filgo_lcr_form"
                 + "?action=lcr_retour"
                 + "&wonum="  + android.net.Uri.encode(woNum  != null ? woNum  : "")
@@ -817,7 +837,7 @@ private void pollJobUntilDone(String jobId, int node, String woNum) {
                 + "&status=" + android.net.Uri.encode(status != null ? status : "ok")
                 + "&ts="     + System.currentTimeMillis();
 
-            android.util.Log.i("LCRDEMO_DEEPLINK", "Retour form: " + urlForm);
+            android.util.Log.i("LCRDEMO_DEEPLINK", "Retour form fallback: " + urlForm);
 
             android.content.Intent retourForm = new android.content.Intent(
                 android.content.Intent.ACTION_VIEW,
@@ -828,22 +848,15 @@ private void pollJobUntilDone(String jobId, int node, String woNum) {
                 android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
             );
 
-            // ✅ Option 2 — ms-dynamicsxrm:// (deep link complet, pour quand FS Mobile
-            // exposera les paramètres au formulaire)
-            String urlFs = "ms-dynamicsxrm://default"
-                + "?action=lcr_retour"
-                + "&idWorkOrder=" + android.net.Uri.encode(woNum  != null ? woNum  : "")
-                + "&status="      + android.net.Uri.encode(status != null ? status : "ok")
-                + "&net="         + android.net.Uri.encode(net)
-                + "&gross="       + android.net.Uri.encode(gross)
-                + "&ticket="      + android.net.Uri.encode(ticket)
-                + "&ts="          + System.currentTimeMillis();
-
-            android.util.Log.i("LCRDEMO_DEEPLINK", "Retour FS deeplink: " + urlFs);
-
-            // ✅ MVP: ouvrir le form HTML directement — résultats garantis affichés
-            startActivity(retourForm);
-            overridePendingTransition(0, 0);
+            // ✅ Priorité: ms-dynamicsxrm:// si FS Mobile installé, sinon form HTML
+            if (retourFs.resolveActivity(getPackageManager()) != null) {
+                android.util.Log.i("LCRDEMO_DEEPLINK", "Retour FS Mobile — deep link natif");
+                startActivity(retourFs);
+                overridePendingTransition(0, 0);
+            } else {
+                android.util.Log.w("LCRDEMO_DEEPLINK", "FS Mobile non trouvé — fallback form HTML");
+                startActivity(retourForm);
+            }
 
         } catch (Exception e) {
             android.util.Log.e("LCRDEMO_DEEPLINK", "Retour FS failed: " + e.getMessage());
