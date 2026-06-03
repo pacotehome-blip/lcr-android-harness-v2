@@ -592,6 +592,27 @@ public synchronized void start() throws Exception {
             });
         }
 
+        // ✅ Delivery last-result — dernier résultat livraison (Stratégie B DeepLinkHandler)
+        // Utilisé par filgo_lcr_ping.js onLoadForm via fetch 127.0.0.1:8765
+        if ("GET".equals(req.method) && "/v1/delivery/last-result".equals(req.path)) {
+            String lastJson = com.pa.lcrdemo.DeepLinkHandler.lastResultJson;
+            if (lastJson == null || lastJson.isEmpty()) {
+                return ApiResult.fail("last-result: 0 - Aucun résultat disponible", "NO_RESULT");
+            }
+            try {
+                JSONObject payload = new JSONObject(lastJson);
+                // Vérifier que le résultat est récent (< 10 minutes)
+                long ts  = payload.optLong("ts", 0);
+                long age = System.currentTimeMillis() - ts;
+                if (age > 10 * 60 * 1000L) {
+                    return ApiResult.fail("last-result: 0 - Résultat expiré (" + (age/1000) + "s)", "RESULT_EXPIRED");
+                }
+                return ApiResult.ok("last-result: 1 - OK", payload);
+            } catch (Exception e) {
+                return ApiResult.fail("last-result: 0 - Parse error", "PARSE_ERROR");
+            }
+        }
+
         // Delivery job get
         if ("GET".equals(req.method) && req.path != null && req.path.startsWith("/v1/delivery/job/")) {
             String jobId = req.path.substring("/v1/delivery/job/".length());
