@@ -166,6 +166,29 @@ public class MainActivity extends AppCompatActivity {
     private static final int API_PORT = 8765;
     private ApiServer apiServer;
     private DeliveryLogStore deliveryStore;
+    private DeepLinkHandler deepLinkHandler; // ✅ Gestion deep link Field Service
+
+    // ✅ Getters publics pour DeepLinkHandler
+    public BluetoothAdapter getBtAdapter() { return btAdapter; }
+    public MediaTransportManager getMediaTransportManager() { return mediaTransportManager; }
+    public Handler getUiHandler() { return ui; }
+    public DeliveryLogStore getDeliveryStore() { return deliveryStore; }
+    public void updateBtStatusText(String text) {
+        if (txtBtStatus != null) txtBtStatus.setText(text);
+    }
+    public void onBtConnectedFromDeepLink(BluetoothSocket socket,
+                                           java.io.InputStream in,
+                                           java.io.OutputStream out,
+                                           String mac) {
+        btSocket  = socket;
+        btIn      = in;
+        btOut     = out;
+        lastBtMac = mac;
+        if (mediaTransportManager != null) {
+            android.bluetooth.BluetoothDevice dev = btAdapter.getRemoteDevice(mac);
+            mediaTransportManager.onBtConnected(dev, socket, in, out, "DEEPLINK");
+        }
+    }
 
     // ===================== MAIN UI (USB + Scan) =====================
     private Spinner spnUsbDevices;
@@ -205,86 +228,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-private void pollJobUntilDone(String jobId, int node, String woNum, String woIdGuid) {
-    btExec.execute(() -> {
-        try {
-            // ✅ MVP Étape 1 — job/continue pour démarrer le flux (sortir de ARMED)
-            try {
-                MultiRegisterApiFacadeImpl facadeCont = new MultiRegisterApiFacadeImpl(this);
-                com.pa.lcr.lcp.ApiResult rc = facadeCont.api_deliveryContinue(jobId, node);
-                android.util.Log.i("LCRDEMO_DEEPLINK",
-                    "job/continue: code=" + (rc != null ? rc.code : "null")
-                    + " msg=" + (rc != null ? rc.msg : "null"));
-            } catch (Exception e) {
-                android.util.Log.e("LCRDEMO_DEEPLINK", "job/continue ERR: " + e.getMessage());
-            }
-
-            boolean hasSeenFlowing = false;
-            boolean terminateSent  = false;
-
-            // Poller max 10 minutes (600 fois x 1 seconde)
-            for (int i = 0; i < 600; i++) {
-                try { Thread.sleep(1000); } catch (Exception ignored) {}
-
-                try {
-                    MultiRegisterApiFacadeImpl facade = new MultiRegisterApiFacadeImpl(this);
-                    com.pa.lcr.lcp.ApiResult r = facade.api_deliveryJobGet(jobId);
-
-                    if (r == null) continue;
-
-                    String state = null;
-                    if (r.data != null)
-                        state = r.data.optString("state", null);
-
-                    android.util.Log.i("LCRDEMO_DEEPLINK", "pollJob: state=" + state);
-
-                    // ✅ Marquer qu on a vu la livraison active
-                    if ("RUNNING_FLOWING".equals(state) || "RUNNING_PAUSED".equals(state)) {
-                        hasSeenFlowing = true;
-                    }
-
-                    // ✅ DONE ou TERMINATED — fin propre, retour FS immédiat
-                    if ("DONE".equals(state) || "TERMINATED".equals(state)) {
-                        String extraJson = (r.data != null) ? r.data.toString() : "{}";
-                        android.util.Log.i("LCRDEMO_DEEPLINK", "Livraison DONE — " + extraJson);
-                        onDeliveryEnded(woNum, woIdGuid, extraJson);
-                        return;
-                    }
-
-                    // ✅ MVP: CONNECTED après terminate = livraison terminée, retour FS
-                    if ("CONNECTED".equals(state) && terminateSent) {
-                        String extraJson = (r.data != null) ? r.data.toString() : "{}";
-                        android.util.Log.i("LCRDEMO_DEEPLINK", "Livraison terminée (CONNECTED post-terminate) — " + extraJson);
-                        onDeliveryEnded(woNum, woIdGuid, extraJson);
-                        return;
-                    }
-
-                    // ✅ MVP: RUNNING_PAUSED apres FLOWING = flow coupe cote registre
-                    // → appeler job/terminate pour obtenir DONE proprement
-                    if ("RUNNING_PAUSED".equals(state) && hasSeenFlowing && !terminateSent) {
-                        android.util.Log.i("LCRDEMO_DEEPLINK",
-                            "RUNNING_PAUSED détecté — envoi job/terminate");
-                        try {
-                            MultiRegisterApiFacadeImpl facadeTerm = new MultiRegisterApiFacadeImpl(this);
-                            com.pa.lcr.lcp.ApiResult rt = facadeTerm.api_deliveryTerminate(jobId, node);
-                            android.util.Log.i("LCRDEMO_DEEPLINK",
-                                "job/terminate: code=" + (rt != null ? rt.code : "null")
-                                + " msg=" + (rt != null ? rt.msg : "null"));
-                            terminateSent = true;
-                        } catch (Exception e) {
-                            android.util.Log.e("LCRDEMO_DEEPLINK",
-                                "job/terminate ERR: " + e.getMessage());
-                        }
-                    }
-
-                } catch (Exception ignored) {}
-            }
-            android.util.Log.w("LCRDEMO_DEEPLINK", "pollJob: timeout 10min sans DONE");
-        } catch (Exception e) {
-            android.util.Log.e("LCRDEMO_DEEPLINK", "pollJob ERR: " + e.getMessage());
-        }
-    });
-}
 
 
     // tabKey -> spec
@@ -500,6 +443,7 @@ private void pollJobUntilDone(String jobId, int node, String woNum, String woIdG
  // ✅ Android 9: demander la permission storage (une seule fois) pour /Download
  ensureLegacyStoragePermissionForDownloads(true);
         deliveryStore.purgeOlderThanDaysAsync(7);
+        deepLinkHandler = new DeepLinkHandler(this, deliveryStore, btExec);
 
         refreshApiStatus();
         logUi(null, "UI prête — Scan USB requis");
@@ -507,7 +451,7 @@ private void pollJobUntilDone(String jobId, int node, String woNum, String woIdG
         startApiServer();
         
         // ✅ Deep Link au lancement (APK fermé)
-        handleDeepLink(getIntent());
+        deepLinkHandler.handleDeepLink(getIntent());
     }
 
     @Override
@@ -605,190 +549,18 @@ private void pollJobUntilDone(String jobId, int node, String woNum, String woIdG
     protected void onNewIntent(android.content.Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        handleDeepLink(intent);
+        if (deepLinkHandler != null) deepLinkHandler.handleDeepLink(intent);
     }
 
-    private void handleDeepLink(android.content.Intent intent) {
-        if (intent == null) return;
-        android.net.Uri data = intent.getData();
-        if (data == null) return;
-        if (!"lcrdemo".equals(data.getScheme())) return;
 
-        String host = data.getHost(); // "livraison", "ping", etc.
-        android.util.Log.i("LCRDEMO_DEEPLINK", "Deep link reçu: " + data.toString());
 
-        if ("ping".equals(host)) {
-            // Test simple — retourner immédiatement à Field Service avec OK
-            android.util.Log.i("LCRDEMO_DEEPLINK", "Ping reçu — réponse OK");
-            toast("✅ LCR Deep Link OK — ping reçu");
-            retournerFieldService("ping", "", "ok", null);
-            return;
-        }
-
-        if ("livraison".equals(host)) {
-            String woNum      = data.getQueryParameter("wonum");
-            String woIdGuid   = data.getQueryParameter("woid") != null ? data.getQueryParameter("woid") : "";
-            String btMac      = data.getQueryParameter("btmac");
-            String serialId   = data.getQueryParameter("serialid");
-            String produit    = data.getQueryParameter("produit");
-            String presetStr  = data.getQueryParameter("preset");
-            String lcrnodeStr = data.getQueryParameter("lcrnode");
-
-            Integer lcrnode = null;
-            try { if (lcrnodeStr != null) lcrnode = Integer.parseInt(lcrnodeStr); }
-            catch (Exception ignored) {}
-
-            android.util.Log.i("LCRDEMO_DEEPLINK",
-                "Livraison — WO=" + woNum + " BT=" + btMac +
-                " serial=" + serialId + " node=" + lcrnode +
-                " produit=" + produit + " preset=" + presetStr);
-
-            toast("📦 Livraison — " + woNum);
-            int finalNode = (lcrnode != null ? lcrnode : 250);
-            connectBtByMacAndOpenTab(btMac, finalNode, serialId, woNum, woIdGuid, produit, presetStr);
-            return;
-        }
-    }
-
-    private void connectBtByMacAndOpenTab(String btMac, int node, String serialId,
-                                           String woNum, String woIdGuid, String produit, String presetStr) {
-        if (btMac == null || btMac.trim().isEmpty()) {
-            toast("Deep Link: BT MAC manquant");
-            return;
-        }
-        final String mac = btMac.toUpperCase().trim();
-
-        btExec.execute(() -> {
-            try {
-                // 1) Connecter BT
-                BluetoothDevice dev = btAdapter.getRemoteDevice(mac);
-                btDisconnect();
-                try { if (btAdapter != null) btAdapter.cancelDiscovery(); }
-                catch (Exception ignored) {}
-
-                BluetoothSocket s;
-                try {
-                    s = dev.createInsecureRfcommSocketToServiceRecord(SPP_UUID);
-                } catch (Exception e) {
-                    s = dev.createRfcommSocketToServiceRecord(SPP_UUID);
-                }
-                s.connect();
-
-                btSocket = s;
-                btIn     = s.getInputStream();
-                btOut    = s.getOutputStream();
-                lastBtMac = mac;
-
-                if (mediaTransportManager != null) {
-                    mediaTransportManager.onBtConnected(
-                        dev, btSocket, btIn, btOut, "DEEPLINK");
-                }
-
-                String transportKey = MediaTransportManager.btKey(mac);
-
-                // 2) Ouvrir tab UI
-                final String fProduit      = produit;
-                final String fPreset       = presetStr;
-                final String fWoNum        = woNum;
-                final String fTransportKey = transportKey;
-
-                ui.post(() -> {
-                    try {
-                        onConfigureMediaActivated(fTransportKey, "DEEPLINK");
-                        upsertRegisterTabFromScan(fTransportKey, node, 255, serialId, true);
-                        ui.postDelayed(() -> {
-                            try {
-                                String   mediaShort = mediaShortFromTransportKey(fTransportKey);
-                                String   tabKey     = tabKeyOf(mediaShort, node, serialId);
-                                Fragment f          = getSupportFragmentManager()
-                                                          .findFragmentByTag("regtab_" + tabKey);
-                                if (f instanceof RegisterTabFragment) {
-                                    ((RegisterTabFragment) f).prefillFromDeepLink(
-                                        fWoNum, fProduit, fPreset);
-                                }
-                            } catch (Exception ignored) {}
-                        }, 800);
-                        refreshAllTabsMediaStatus();
-                        showPage(0);
-                        if (txtBtStatus != null)
-                            txtBtStatus.setText("BT : CONNECTED — " + mac + " (FS)");
-                    } catch (Exception ignored) {}
-                });
-
-                // 3) Attendre que le média soit READY puis appeler oneshot/start
-                int    product = 1;
-                double preset  = 0.0;
-                try { product = Integer.parseInt(produit);      } catch (Exception ignored) {}
-                try { preset  = Double.parseDouble(presetStr);  } catch (Exception ignored) {}
-
-                final int    fProduct = product;
-                final double fPresetD = preset;
-
-                boolean ready = false;
-                for (int i = 0; i < 10; i++) {
-                    try { Thread.sleep(500); } catch (Exception ignored) {}
-                    try {
-                        if (mediaTransportManager != null) {
-                            TransportIo io = mediaTransportManager.getByKey(transportKey);
-                            if (io != null && io.isOpen()) { ready = true; break; }
-                        }
-                    } catch (Exception ignored) {}
-                }
-
-                if (ready) {
-                    try {
-                        MultiRegisterApiFacadeImpl facade =
-                            new MultiRegisterApiFacadeImpl(this);
-                        com.pa.lcr.lcp.ApiResult r = facade.api_deliveryOneShotStart(
-                            node, 255, woNum, fProduct, fPresetD, null, "bt", mac);
-                        android.util.Log.i("LCRDEMO_DEEPLINK",
-                            "oneshot/start: code=" + r.code + " msg=" + r.msg);
-                        // ✅ Récupérer le jobId et démarrer le poll vers DONE
-                        String jobId = (r != null && r.data != null)
-                            ? r.data.optString("jobId", null) : null;
-                        if (jobId != null && !jobId.isEmpty()) {
-                            android.util.Log.i("LCRDEMO_DEEPLINK",
-                                "Poll démarré — jobId=" + jobId);
-                            pollJobUntilDone(jobId, node, woNum, woIdGuid);
-                            ui.post(() -> toast("📦 Livraison démarrée — " + woNum));
-                        } else {
-                            android.util.Log.w("LCRDEMO_DEEPLINK",
-                                "oneshot/start: jobId absent dans la réponse");
-                            ui.post(() -> toast("📦 Livraison démarrée (sans jobId) — " + woNum));
-                        }
-                    } catch (Exception e) {
-                        android.util.Log.e("LCRDEMO_DEEPLINK",
-                            "oneshot/start ERR: " + e.getMessage());
-                    }
-                } else {
-                    android.util.Log.w("LCRDEMO_DEEPLINK",
-                        "oneshot/start: média non prêt après 5s");
-                    ui.post(() -> toast("BT non prêt — réessayez"));
-                }
-    
-            } catch (Exception e) {
-                android.util.Log.e("LCRDEMO_DEEPLINK",
-                    "BT connect ERR: " + e.getMessage());
-                ui.post(() -> toast("BT ERR: " + e.getMessage()));
-            }
-        });
-    }
-
-    // ✅ Overload pour compatibilité RegisterTabFragment
+    // ✅ Délégation à DeepLinkHandler
     public void onDeliveryEnded(String woNum, String extraJson) {
-        onDeliveryEnded(woNum, "", extraJson);
+        if (deepLinkHandler != null) deepLinkHandler.onDeliveryEnded(woNum, extraJson);
     }
 
     public void onDeliveryEnded(String woNum, String woIdGuid, String extraJson) {
-        android.util.Log.i("LCRDEMO_DEEPLINK",
-            "Livraison terminée — WO=" + woNum + " extra=" + extraJson);
-        // Récupérer le woIdGuid depuis le JSON extra si disponible
-        String woGuidFromExtra = "";
-        try {
-            org.json.JSONObject ej = new org.json.JSONObject(extraJson != null ? extraJson : "{}");
-            woGuidFromExtra = ej.optString("wo_guid", "");
-        } catch (Exception ignored) {}
-        retournerFieldService(woNum, woIdGuid, "termine", extraJson);
+        if (deepLinkHandler != null) deepLinkHandler.onDeliveryEnded(woNum, woIdGuid, extraJson);
     }
     /**
      * Retourner à Field Service Mobile après la livraison.
@@ -799,119 +571,6 @@ private void pollJobUntilDone(String jobId, int node, String woNum, String woIdG
      * @param status       "ok", "en_cours", "termine", "erreur"
      * @param extra        données supplémentaires JSON (optionnel, ex: ticketNo, litres)
      */
-    private void retournerFieldService(String woNum, String woIdGuid, String status, String extraJson) {
-        try {
-            // ✅ Extraire net, gross, ticket du JSON résultat
-            String net    = "";
-            String gross  = "";
-            String ticket = "";
-            try {
-                org.json.JSONObject d = new org.json.JSONObject(extraJson != null ? extraJson : "{}");
-                org.json.JSONObject result = d.optJSONObject("result");
-                if (result != null) {
-                    net    = String.valueOf(result.optDouble("fs_net_l",   0));
-                    gross  = String.valueOf(result.optDouble("fs_gross_l", 0));
-                    ticket = result.optString("ticket_no", "");
-                } else {
-                    net   = String.valueOf(d.optDouble("net",   0));
-                    gross = String.valueOf(d.optDouble("gross", 0));
-                }
-            } catch (Exception ignored) {}
-
-            // ✅ Option 1 — ms-dynamicsxrm:// en premier (deep link natif FS Mobile)
-            String urlFs = "ms-dynamicsxrm://default"
-                + "?action=lcr_retour"
-                + "&wonum="  + android.net.Uri.encode(woNum  != null ? woNum  : "")
-                + "&status=" + android.net.Uri.encode(status != null ? status : "ok")
-                + "&net="    + android.net.Uri.encode(net)
-                + "&gross="  + android.net.Uri.encode(gross)
-                + "&ticket=" + android.net.Uri.encode(ticket)
-                + "&ts="     + System.currentTimeMillis();
-
-            android.util.Log.i("LCRDEMO_DEEPLINK", "Retour FS deeplink: " + urlFs);
-
-            android.content.Intent retourFs = new android.content.Intent(
-                android.content.Intent.ACTION_VIEW,
-                android.net.Uri.parse(urlFs)
-            );
-            retourFs.addFlags(
-                android.content.Intent.FLAG_ACTIVITY_NEW_TASK |
-                android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
-            );
-
-            // ✅ Option 2 — fallback form HTML (navigateur) si FS Mobile non trouvé
-            // Extraire le woId (GUID) depuis extraJson si disponible
-            String woId = "";
-            try {
-                org.json.JSONObject dj = new org.json.JSONObject(extraJson != null ? extraJson : "{}");
-                // Le GUID est dans delivery_uid ou numero_livraison
-                String uid = dj.optString("delivery_uid", "");
-                if (uid.isEmpty() && dj.has("result")) {
-                    uid = dj.optJSONObject("result") != null
-                        ? dj.optJSONObject("result").optString("delivery_uid", "") : "";
-                }
-            } catch (Exception ignored) {}
-
-            // Extraire le GUID du WO depuis extraJson (delivery_uid ou numero_livraison)
-            String woGuid = "";
-            try {
-                org.json.JSONObject dj2 = new org.json.JSONObject(extraJson != null ? extraJson : "{}");
-                // Le GUID n'est pas dans le payload LCR — on utilise ce qu'on a
-                woGuid = dj2.optString("wo_guid", woIdGuid != null ? woIdGuid : "");
-            } catch (Exception ignored) {}
-
-            String urlForm = "https://dev-filgo-sonic.crm3.dynamics.com/WebResources/filgo_lcr_form"
-                + "?action=lcr_retour"
-                + "&wonum="  + android.net.Uri.encode(woNum  != null ? woNum  : "")
-                + "&woid="   + android.net.Uri.encode(woGuid)
-                + "&net="    + android.net.Uri.encode(net)
-                + "&gross="  + android.net.Uri.encode(gross)
-                + "&ticket=" + android.net.Uri.encode(ticket)
-                + "&status=" + android.net.Uri.encode(status != null ? status : "ok")
-                + "&ts="     + System.currentTimeMillis();
-
-            android.util.Log.i("LCRDEMO_DEEPLINK", "Retour form fallback: " + urlForm);
-
-            android.content.Intent retourForm = new android.content.Intent(
-                android.content.Intent.ACTION_VIEW,
-                android.net.Uri.parse(urlForm)
-            );
-            retourForm.addFlags(
-                android.content.Intent.FLAG_ACTIVITY_NEW_TASK |
-                android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
-            );
-
-            // ✅ Option 3 — ms-apps-fs:// scheme natif Field Service Mobile
-            String urlFsNatif = "ms-apps-fs://91a8643f-21db-ee11-904c-002248b1ce29"
-                + "?pagetype=entityrecord"
-                + "&etn=msdyn_workorder"
-                + "&id="     + android.net.Uri.encode("{" + (woNum != null ? woNum : "") + "}")
-                + "&wonum="  + android.net.Uri.encode(woNum  != null ? woNum  : "")
-                + "&net="    + android.net.Uri.encode(net)
-                + "&gross="  + android.net.Uri.encode(gross)
-                + "&ticket=" + android.net.Uri.encode(ticket)
-                + "&status=" + android.net.Uri.encode(status != null ? status : "ok");
-
-            android.util.Log.i("LCRDEMO_DEEPLINK", "Retour ms-apps-fs: " + urlFsNatif);
-
-            android.content.Intent retourFsNatif = new android.content.Intent(
-                android.content.Intent.ACTION_VIEW,
-                android.net.Uri.parse(urlFsNatif)
-            );
-            retourFsNatif.addFlags(
-                android.content.Intent.FLAG_ACTIVITY_NEW_TASK |
-                android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
-            );
-
-            // ✅ MVP: form HTML direct — GUID disponible, résultat garanti affiché
-            android.util.Log.i("LCRDEMO_DEEPLINK", "Retour form HTML avec GUID");
-            startActivity(retourForm);
-
-        } catch (Exception e) {
-            android.util.Log.e("LCRDEMO_DEEPLINK", "Retour FS failed: " + e.getMessage());
-            moveTaskToBack(true);
-        }
-    }
 
     private void bindUi() {
         tabLayout = findViewById(R.id.tabLayout);
@@ -1188,7 +847,7 @@ private void setupTabsTop() {
         });
     }
 
-    private void showPage(int index) {
+    public void showPage(int index) {
         if (pageMain != null) pageMain.setVisibility(index == 0 ? View.VISIBLE : View.GONE);
         if (pageApiFace != null) pageApiFace.setVisibility(index == 1 ? View.VISIBLE : View.GONE);
         if (pageConfigure != null) pageConfigure.setVisibility(index == 2 ? View.VISIBLE : View.GONE);
@@ -1204,7 +863,7 @@ private void setupTabsTop() {
 // Register tabs helpers (multi-media)
 // =========================
 
-    private static String mediaShortFromTransportKey(String transportKey) {
+    public static String mediaShortFromTransportKey(String transportKey) {
         if (transportKey == null) return "—";
         String k = transportKey.trim().toUpperCase(java.util.Locale.ROOT);
         if (k.startsWith("BT:")) return "BT";
@@ -1226,7 +885,7 @@ private void setupTabsTop() {
         return s.substring(Math.max(0, s.length() - 6));
     }
 
-    private static String tabKeyOf(String mediaShort, int node, String serialId) {
+    public static String tabKeyOf(String mediaShort, int node, String serialId) {
         String m = (mediaShort == null || mediaShort.trim().isEmpty()) ? "—" : mediaShort.trim();
                 return m + ":" + node + ":" + safeSerial(serialId);
     }
@@ -1310,7 +969,7 @@ private void setupTabsTop() {
         persistTabMediaStatusForApi(spec, ready, media);
     }
 
-    private void refreshAllTabsMediaStatus() {
+    public void refreshAllTabsMediaStatus() {
         try {
             ArrayList<String> keys = new ArrayList<>(tabsByKey.keySet());
             for (String k : keys) refreshOneTabMediaStatus(k);
@@ -1351,7 +1010,7 @@ private void setupTabsTop() {
      * Upsert issu d'un scan (serial connu).
      * Règle: clear ciblé A1 si même (node,serial) apparaît sur un autre média.
      */
-    private void upsertRegisterTabFromScan(String transportKey, int node, int from, String serialId, boolean focus) {
+    public void upsertRegisterTabFromScan(String transportKey, int node, int from, String serialId, boolean focus) {
         // Préserver isLc3 du tab existant si connu
         String mediaShort = mediaShortFromTransportKey(transportKey);
         String tabKey = tabKeyOf(mediaShort, node, safeSerial(serialId));
@@ -2519,7 +2178,7 @@ private void scanUsb() {
         try { return Integer.parseInt(s.trim()); } catch (Exception e) { return def; }
     }
 
-    private void toast(String s) {
+    public void toast(String s) {
         ui.post(() -> Toast.makeText(this, s, Toast.LENGTH_SHORT).show());
     }
 
@@ -2770,7 +2429,7 @@ private boolean ensureBtConnectPermission() {
         });
     }
 
-    private synchronized void btDisconnect() {
+    public synchronized void btDisconnect() {
         logMedia1("BT Disconnect: " + (lastBtMac != null ? lastBtMac : "-"));
 
         // ✅ Option A: publish BT disconnected
@@ -3109,7 +2768,7 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
      * Appelé quand un média devient READY via CONFIGURE (USB Open/Ping / BT Connect).
      * But: forcer le transport actif + rebind sur un tab du même registre.
      */
-    private void onConfigureMediaActivated(String transportKey, String reason) {
+    public void onConfigureMediaActivated(String transportKey, String reason) {
         if (transportKey == null || transportKey.trim().isEmpty()) return;
         beginMediaSwitchGuard(reason);
         final String tk = transportKey.trim();
