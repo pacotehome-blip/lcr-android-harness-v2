@@ -774,6 +774,11 @@ private void pollJobUntilDone(String jobId, int node, String woNum, String woIdG
         });
     }
 
+    // ✅ Overload pour compatibilité RegisterTabFragment
+    public void onDeliveryEnded(String woNum, String extraJson) {
+        onDeliveryEnded(woNum, "", extraJson);
+    }
+
     public void onDeliveryEnded(String woNum, String woIdGuid, String extraJson) {
         android.util.Log.i("LCRDEMO_DEEPLINK",
             "Livraison terminée — WO=" + woNum + " extra=" + extraJson);
