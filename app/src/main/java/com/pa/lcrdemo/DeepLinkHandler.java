@@ -386,7 +386,7 @@ public class DeepLinkHandler {
                             return;
                         }
 
-                        // ✅ CONNECTED après terminate = fin
+                        // ✅ CONNECTED après terminate = fin propre
                         if ("CONNECTED".equals(state) && terminateSent) {
                             String extraJson = (r.data != null) ? r.data.toString() : "{}";
                             android.util.Log.i(TAG,
@@ -394,6 +394,24 @@ public class DeepLinkHandler {
                             logDeliveryEnd(serialId, woNum, jobId, "DONE", extraJson, null);
                             onDeliveryEnded(woNum, woIdGuid, extraJson);
                             return;
+                        }
+
+                        // ✅ CONNECTED après FLOWING sans PAUSED = fin directe
+                        // (cas 2e livraison successive — le registre termine sans pause)
+                        if ("CONNECTED".equals(state) && hasSeenFlowing && !terminateSent) {
+                            android.util.Log.i(TAG, "CONNECTED après FLOWING — terminate direct");
+                            try {
+                                MultiRegisterApiFacadeImpl facadeTerm2 =
+                                    new MultiRegisterApiFacadeImpl(activity);
+                                com.pa.lcr.lcp.ApiResult rt2 =
+                                    facadeTerm2.api_deliveryTerminate(jobId, node);
+                                android.util.Log.i(TAG,
+                                    "job/terminate (direct): code=" + (rt2 != null ? rt2.code : "null")
+                                    + " msg=" + (rt2 != null ? rt2.msg : "null"));
+                                terminateSent = true;
+                            } catch (Exception e) {
+                                android.util.Log.e(TAG, "job/terminate direct ERR: " + e.getMessage());
+                            }
                         }
 
                         // ✅ RUNNING_PAUSED → terminate
