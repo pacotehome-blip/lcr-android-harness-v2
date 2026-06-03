@@ -30,9 +30,9 @@ public class FieldServiceActivity extends Activity {
 
     private static final String TAG = "FieldServiceActivity";
 
-    // ⚠️ Remplacez par votre URL Field Service réelle
+    // ✅ URL Field Service Mobile DEV-FILGO-SONIC
     private static final String FIELD_SERVICE_URL =
-        "https://votre-org.crm.dynamics.com/main.aspx";
+        "https://dev-filgo-sonic.crm3.dynamics.com/main.aspx?appid=91a8643f-21db-ee11-904c-002248b1ce29";
 
     private WebView webView;
     private BroadcastReceiver readyReceiver;

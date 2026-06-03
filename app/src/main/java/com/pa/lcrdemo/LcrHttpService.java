@@ -156,8 +156,8 @@ public class LcrHttpService extends Service {
     }
 
     private Notification buildNotification(String text) {
-        // Intent pour ouvrir l'APK si on tape sur la notification
-        Intent openIntent = new Intent(this, FieldServiceActivity.class);
+        // Intent pour ouvrir MainActivity si on tape sur la notification
+        Intent openIntent = new Intent(this, MainActivity.class);
         openIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         PendingIntent pendingOpen = PendingIntent.getActivity(
             this, 0, openIntent,
