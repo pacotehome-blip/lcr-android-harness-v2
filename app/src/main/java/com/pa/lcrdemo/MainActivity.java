@@ -170,6 +170,7 @@ public class MainActivity extends AppCompatActivity {
 
     // ✅ Getters publics pour DeepLinkHandler
     public BluetoothAdapter getBtAdapter() { return btAdapter; }
+    public String getLastBtMac() { return lastBtMac; }
     public MediaTransportManager getMediaTransportManager() { return mediaTransportManager; }
     public Handler getUiHandler() { return ui; }
     public DeliveryLogStore getDeliveryStore() { return deliveryStore; }

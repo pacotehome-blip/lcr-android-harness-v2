@@ -119,30 +119,91 @@ public class DeepLinkHandler {
 
         btExec.execute(() -> {
             try {
-                // 1) Connexion BT
-                android.bluetooth.BluetoothAdapter btAdapter = activity.getBtAdapter();
-                BluetoothDevice dev = btAdapter.getRemoteDevice(mac);
-                activity.btDisconnect();
-                try { if (btAdapter != null) btAdapter.cancelDiscovery(); }
-                catch (Exception ignored) {}
-
-                BluetoothSocket s;
-                try {
-                    s = dev.createInsecureRfcommSocketToServiceRecord(SPP_UUID);
-                } catch (Exception e) {
-                    s = dev.createRfcommSocketToServiceRecord(SPP_UUID);
-                }
-                s.connect();
-
-                InputStream  btIn  = s.getInputStream();
-                OutputStream btOut = s.getOutputStream();
-                activity.onBtConnectedFromDeepLink(s, btIn, btOut, mac);
-
-                android.util.Log.i(TAG, "BT connecté: " + mac);
-                logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
-                    "BT_CONNECT", "BT connecté: " + mac, null);
-
+                // =========================================================
+                // 1) Vérifier si BT déjà connecté au bon MAC — réutiliser
+                // =========================================================
                 String transportKey = MediaTransportManager.btKey(mac);
+                MediaTransportManager mtm = activity.getMediaTransportManager();
+                boolean btDejaConnecte = false;
+
+                if (mtm != null) {
+                    TransportIo existing = mtm.getByKey(transportKey);
+                    if (existing != null && existing.isOpen()) {
+                        btDejaConnecte = true;
+                        android.util.Log.i(TAG, "BT déjà connecté: " + mac + " — réutilisation");
+                        logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
+                            "BT_REUSE", "BT déjà connecté: " + mac, null);
+                    }
+                }
+
+                if (!btDejaConnecte) {
+                    // ✅ Nouveau BT — déconnecter proprement si différent
+                    android.bluetooth.BluetoothAdapter btAdapter = activity.getBtAdapter();
+
+                    // Déconnecter seulement si le MAC actif est différent
+                    String lastMac = activity.getLastBtMac();
+                    if (lastMac != null && !lastMac.equalsIgnoreCase(mac)) {
+                        android.util.Log.i(TAG, "BT différent — déconnexion: " + lastMac);
+                        activity.btDisconnect();
+                        try { Thread.sleep(500); } catch (Exception ignored) {}
+                    }
+
+                    try { if (btAdapter != null) btAdapter.cancelDiscovery(); }
+                    catch (Exception ignored) {}
+
+                    BluetoothDevice dev = btAdapter.getRemoteDevice(mac);
+                    BluetoothSocket s;
+                    try {
+                        s = dev.createInsecureRfcommSocketToServiceRecord(SPP_UUID);
+                    } catch (Exception e) {
+                        s = dev.createRfcommSocketToServiceRecord(SPP_UUID);
+                    }
+                    s.connect();
+
+                    InputStream  btIn  = s.getInputStream();
+                    OutputStream btOut = s.getOutputStream();
+                    activity.onBtConnectedFromDeepLink(s, btIn, btOut, mac);
+
+                    android.util.Log.i(TAG, "BT connecté: " + mac);
+                    logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
+                        "BT_CONNECT", "BT connecté: " + mac, null);
+                }
+
+                // =========================================================
+                // 2) Valider le registre — bon serial, bon node
+                // =========================================================
+                try {
+                    MultiRegisterApiFacadeImpl facadeVal =
+                        new MultiRegisterApiFacadeImpl(activity);
+                    com.pa.lcr.lcp.ApiResult rv = facadeVal.api_registerValidate(
+                        woNum, node, null, serialId, null, null, "bt", mac);
+                    android.util.Log.i(TAG, "register/validate: code=" + rv.code + " msg=" + rv.msg);
+
+                    if (rv.code != 1) {
+                        // ✅ Mauvais registre ou pas prêt — tenter auto-connect
+                        android.util.Log.w(TAG, "Registre invalide — tentative auto-connect");
+                        MultiRegisterApiFacadeImpl facadeAuto =
+                            new MultiRegisterApiFacadeImpl(activity);
+                        com.pa.lcr.lcp.ApiResult ra =
+                            facadeAuto.api_registerConnectAuto(serialId, node);
+                        android.util.Log.i(TAG, "register/connect-auto: code=" + ra.code + " msg=" + ra.msg);
+
+                        if (ra.code != 1) {
+                            logError(serialId, woNum, "REGISTER_INVALID",
+                                "Registre invalide: " + rv.msg);
+                            activity.runOnUiThread(() ->
+                                activity.toast("⚠️ Registre invalide — " + rv.msg));
+                            retournerFieldService(woNum, woIdGuid, "erreur_registre",
+                                buildErrorJson("REGISTER_INVALID", rv.msg));
+                            return;
+                        }
+                    }
+                    logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
+                        "REGISTER_OK", "Registre validé node=" + node, null);
+                } catch (Exception e) {
+                    android.util.Log.w(TAG, "register/validate ERR (ignoré): " + e.getMessage());
+                    // Non bloquant — continuer quand même
+                }
 
                 // 2) Ouvrir tab UI
                 final String fProduit      = produit;
