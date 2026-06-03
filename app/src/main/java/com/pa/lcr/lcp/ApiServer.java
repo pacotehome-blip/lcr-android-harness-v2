@@ -943,6 +943,9 @@ public synchronized void start() throws Exception {
         String hdr = "HTTP/1.1 " + status + " OK\r\n" +
                 "Content-Type: application/json; charset=utf-8\r\n" +
                 "Content-Length: " + body.length + "\r\n" +
+                "Access-Control-Allow-Origin: *\r\n" +
+                "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n" +
+                "Access-Control-Allow-Headers: Content-Type, Accept, OData-MaxVersion, OData-Version\r\n" +
                 "Connection: close\r\n\r\n";
         out.write(hdr.getBytes(StandardCharsets.UTF_8));
         out.write(body);
