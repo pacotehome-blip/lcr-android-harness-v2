@@ -388,7 +388,17 @@ public class DeepLinkHandler {
     }
 
     // =========================================================
-    // Retour Field Service
+    // Dernier résultat — accessible via GET /v1/delivery/last-result
+    // =========================================================
+
+    // Variable statique — partagée entre DeepLinkHandler et ApiServer
+    public static volatile String lastResultJson = null;
+    public static volatile String lastResultWoNum = null;
+    public static volatile String lastResultWoGuid = null;
+    public static volatile long   lastResultTs = 0;
+
+    // =========================================================
+    // Retour Field Service — Stratégie A + B
     // =========================================================
 
     private void retournerFieldService(String woNum, String woIdGuid,
@@ -414,47 +424,41 @@ public class DeepLinkHandler {
             String woGuid = (woIdGuid != null && !woIdGuid.isEmpty()) ? woIdGuid : "";
             woGuid = woGuid.replace("{", "").replace("}", "");
 
-            // ✅ ms-dynamicsxrm:// — pour log seulement
-            String urlFs = "ms-dynamicsxrm://default"
-                + "?action=lcr_retour"
-                + "&wonum="  + Uri.encode(woNum  != null ? woNum  : "")
-                + "&status=" + Uri.encode(status != null ? status : "ok")
-                + "&net="    + Uri.encode(net)
-                + "&gross="  + Uri.encode(gross)
-                + "&ticket=" + Uri.encode(ticket)
-                + "&ts="     + System.currentTimeMillis();
-            android.util.Log.i(TAG, "Retour FS deeplink: " + urlFs);
+            // ✅ Stratégie B — sauvegarder le résultat pour GET /v1/delivery/last-result
+            try {
+                JSONObject lastResult = new JSONObject();
+                lastResult.put("wonum",   woNum   != null ? woNum   : "");
+                lastResult.put("woid",    woGuid);
+                lastResult.put("net",     net);
+                lastResult.put("gross",   gross);
+                lastResult.put("ticket",  ticket);
+                lastResult.put("status",  status  != null ? status  : "ok");
+                lastResult.put("ts",      System.currentTimeMillis());
+                if (extraJson != null) {
+                    try {
+                        lastResult.put("payload", new JSONObject(extraJson));
+                    } catch (Exception ignored) {}
+                }
+                lastResultJson   = lastResult.toString();
+                lastResultWoNum  = woNum;
+                lastResultWoGuid = woGuid;
+                lastResultTs     = System.currentTimeMillis();
+                android.util.Log.i(TAG, "last-result sauvegardé: wonum=" + woNum
+                    + " net=" + net + " gross=" + gross + " ticket=" + ticket);
+            } catch (Exception ignored) {}
 
-            // ✅ ms-apps-fs:// — pour log seulement
-            String urlFsNatif = "ms-apps-fs://91a8643f-21db-ee11-904c-002248b1ce29"
-                + "?pagetype=entityrecord"
-                + "&etn=msdyn_workorder"
-                + "&id="     + Uri.encode("{" + (woNum != null ? woNum : "") + "}")
-                + "&wonum="  + Uri.encode(woNum  != null ? woNum  : "")
-                + "&net="    + Uri.encode(net)
-                + "&gross="  + Uri.encode(gross)
-                + "&ticket=" + Uri.encode(ticket)
-                + "&status=" + Uri.encode(status != null ? status : "ok");
-            android.util.Log.i(TAG, "Retour ms-apps-fs: " + urlFsNatif);
-
-            // ✅ Form HTML — retour actif avec GUID
-            String urlForm = FS_FORM_URL
-                + "?action=lcr_retour"
-                + "&wonum="  + Uri.encode(woNum  != null ? woNum  : "")
-                + "&woid="   + Uri.encode(woGuid)
-                + "&net="    + Uri.encode(net)
-                + "&gross="  + Uri.encode(gross)
-                + "&ticket=" + Uri.encode(ticket)
-                + "&status=" + Uri.encode(status != null ? status : "ok")
-                + "&ts="     + System.currentTimeMillis();
-            android.util.Log.i(TAG, "Retour form HTML avec GUID");
-
-            Intent retourForm = new Intent(Intent.ACTION_VIEW, Uri.parse(urlForm));
-            retourForm.addFlags(
-                Intent.FLAG_ACTIVITY_NEW_TASK |
-                Intent.FLAG_ACTIVITY_CLEAR_TOP
-            );
-            activity.startActivity(retourForm);
+            // ✅ Stratégie A — finish() pour revenir à Field Service (même stack)
+            // Field Service était en dessous dans le même task stack
+            // Sa session OAuth reste vivante — onLoadForm se déclenche
+            android.util.Log.i(TAG, "Retour FS — finish() stratégie A");
+            activity.runOnUiThread(() -> {
+                try {
+                    activity.finish();
+                } catch (Exception e) {
+                    android.util.Log.e(TAG, "finish() failed: " + e.getMessage());
+                    activity.moveTaskToBack(true);
+                }
+            });
 
         } catch (Exception e) {
             android.util.Log.e(TAG, "Retour FS failed: " + e.getMessage());

@@ -59,6 +59,7 @@
             android:name="com.pa.lcrdemo.MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
+            android:taskAffinity="com.microsoft.crm.crmphone.fieldServices"
             android:resizeableActivity="true">
             <!-- Launcher normal -->
             <intent-filter>
@@ -66,10 +67,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
             <!-- ✅ Deep Link lcrdemo:// — appelé depuis Field Service Mobile PCF -->
-            <!-- Exemples:
-                 lcrdemo://livraison?idWorkOrder=123&serialId=16466294&lcrnode=250
-                 lcrdemo://ping
-            -->
             <intent-filter android:label="LCR Deep Link">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
