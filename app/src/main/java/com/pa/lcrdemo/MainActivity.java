@@ -787,46 +787,64 @@ private void pollJobUntilDone(String jobId, int node, String woNum) {
      * @param status       "ok", "en_cours", "termine", "erreur"
      * @param extra        données supplémentaires JSON (optionnel, ex: ticketNo, litres)
      */
-    private void retournerFieldService(String idWorkOrder, String status, String extra) {
+    private void retournerFieldService(String woNum, String status, String extraJson) {
         try {
-            // Construire l'URL de retour avec les paramètres de résultat
-            // Le PCF dans Field Service intercepte ces paramètres
-            // et met à jour le SQLite Dataverse local via context.webAPI.updateRecord()
-            android.net.Uri.Builder builder = new android.net.Uri.Builder()
-                .scheme("ms-dynamicsxrm")
-                .authority("default")
-                .appendQueryParameter("action", "lcr_retour")
-                .appendQueryParameter("idWorkOrder", idWorkOrder != null ? idWorkOrder : "")
-                .appendQueryParameter("status", status != null ? status : "ok")
-                .appendQueryParameter("ts", String.valueOf(System.currentTimeMillis()));
+            // ✅ Extraire net, gross, ticket du JSON résultat
+            String net    = "";
+            String gross  = "";
+            String ticket = "";
+            try {
+                org.json.JSONObject d = new org.json.JSONObject(extraJson != null ? extraJson : "{}");
+                org.json.JSONObject result = d.optJSONObject("result");
+                if (result != null) {
+                    net    = String.valueOf(result.optDouble("fs_net_l",   0));
+                    gross  = String.valueOf(result.optDouble("fs_gross_l", 0));
+                    ticket = result.optString("ticket_no", "");
+                } else {
+                    net   = String.valueOf(d.optDouble("net",   0));
+                    gross = String.valueOf(d.optDouble("gross", 0));
+                }
+            } catch (Exception ignored) {}
 
-            if (extra != null && !extra.isEmpty()) {
-                builder.appendQueryParameter("data", extra);
-            }
+            // ✅ Option 1 — Ouvrir filgo_lcr_form.html directement avec résultats
+            // (fonctionne même sans Field Service Mobile installé)
+            String urlForm = "https://dev-filgo-sonic.crm3.dynamics.com/WebResources/filgo_lcr_form"
+                + "?action=lcr_retour"
+                + "&wonum="  + android.net.Uri.encode(woNum  != null ? woNum  : "")
+                + "&net="    + android.net.Uri.encode(net)
+                + "&gross="  + android.net.Uri.encode(gross)
+                + "&ticket=" + android.net.Uri.encode(ticket)
+                + "&status=" + android.net.Uri.encode(status != null ? status : "ok")
+                + "&ts="     + System.currentTimeMillis();
 
-            String urlRetour = builder.build().toString();
-            android.util.Log.i("LCRDEMO_DEEPLINK", "Retour FS: " + urlRetour);
+            android.util.Log.i("LCRDEMO_DEEPLINK", "Retour form: " + urlForm);
 
-            android.content.Intent retour = new android.content.Intent(
+            android.content.Intent retourForm = new android.content.Intent(
                 android.content.Intent.ACTION_VIEW,
-                android.net.Uri.parse(urlRetour)
+                android.net.Uri.parse(urlForm)
             );
-            retour.addFlags(
+            retourForm.addFlags(
                 android.content.Intent.FLAG_ACTIVITY_NEW_TASK |
                 android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
             );
 
-            // Vérifier que Field Service Mobile est installé
-            if (retour.resolveActivity(getPackageManager()) != null) {
-                android.util.Log.i("LCRDEMO_DEEPLINK", "Retour FS — lancement OK");
-                startActivity(retour);
-                // Supprimer l'animation de transition pour une bascule invisible
-                overridePendingTransition(0, 0);
-            } else {
-                android.util.Log.w("LCRDEMO_DEEPLINK", "Retour FS — app non trouvée, fallback finish()");
-                // Si Field Service n'est pas trouvé, simplement mettre l'APK en arrière-plan
-                moveTaskToBack(true);
-            }
+            // ✅ Option 2 — ms-dynamicsxrm:// (deep link complet, pour quand FS Mobile
+            // exposera les paramètres au formulaire)
+            String urlFs = "ms-dynamicsxrm://default"
+                + "?action=lcr_retour"
+                + "&idWorkOrder=" + android.net.Uri.encode(woNum  != null ? woNum  : "")
+                + "&status="      + android.net.Uri.encode(status != null ? status : "ok")
+                + "&net="         + android.net.Uri.encode(net)
+                + "&gross="       + android.net.Uri.encode(gross)
+                + "&ticket="      + android.net.Uri.encode(ticket)
+                + "&ts="          + System.currentTimeMillis();
+
+            android.util.Log.i("LCRDEMO_DEEPLINK", "Retour FS deeplink: " + urlFs);
+
+            // ✅ MVP: ouvrir le form HTML directement — résultats garantis affichés
+            startActivity(retourForm);
+            overridePendingTransition(0, 0);
+
         } catch (Exception e) {
             android.util.Log.e("LCRDEMO_DEEPLINK", "Retour FS failed: " + e.getMessage());
             moveTaskToBack(true);
