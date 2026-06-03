@@ -247,9 +247,9 @@ public class DeepLinkHandler {
                 for (int i = 0; i < 10; i++) {
                     try { Thread.sleep(500); } catch (Exception ignored) {}
                     try {
-                        MediaTransportManager mtm = activity.getMediaTransportManager();
-                        if (mtm != null) {
-                            TransportIo io = mtm.getByKey(transportKey);
+                        MediaTransportManager mtm2 = activity.getMediaTransportManager();
+                        if (mtm2 != null) {
+                            TransportIo io = mtm2.getByKey(transportKey);
                             if (io != null && io.isOpen()) { ready = true; break; }
                         }
                     } catch (Exception ignored) {}
