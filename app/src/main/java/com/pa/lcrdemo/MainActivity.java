@@ -447,8 +447,13 @@ public class MainActivity extends AppCompatActivity {
 
         refreshApiStatus();
         logUi(null, "UI prête — Scan USB requis");
-        // ✅ Démarrage automatique API HTTP au lancement
-        startApiServer();
+        // ✅ Démarrage API via LcrHttpService (foreground service permanent)
+        android.content.Intent svcIntent = new android.content.Intent(this, LcrHttpService.class);
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            startForegroundService(svcIntent);
+        } else {
+            startService(svcIntent);
+        }
         
         // ✅ Deep Link au lancement (APK fermé)
         deepLinkHandler.handleDeepLink(getIntent());

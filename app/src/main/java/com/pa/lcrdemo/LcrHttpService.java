@@ -50,6 +50,10 @@ public class LcrHttpService extends Service {
 
     // ── Lifecycle ──────────────────────────────────────────────────────────
 
+    // ✅ ApiServer géré directement dans le foreground service
+    private com.pa.lcr.lcp.ApiServer apiServer;
+    private static final int API_PORT = 8765;
+
     @Override
     public void onCreate() {
         super.onCreate();
@@ -61,6 +65,7 @@ public class LcrHttpService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && ACTION_STOP.equals(intent.getAction())) {
             Log.i(TAG, "ACTION_STOP reçu — arrêt du service");
+            stopApiServer();
             stopForeground(true);
             stopSelf();
             return START_NOT_STICKY;
@@ -68,30 +73,70 @@ public class LcrHttpService extends Service {
 
         Log.i(TAG, "Service démarré — foreground");
 
-        // Démarrer en foreground immédiatement avec notification persistante
-        startForeground(NOTIF_ID, buildNotification("APK Filgo actif — :8765"));
+        // Démarrer en foreground immédiatement
+        startForeground(NOTIF_ID, buildNotification("APK Filgo — démarrage..."));
 
-        // L'APK Filgo gère lui-même son serveur HTTP.
-        // Ce service garantit que le processus Android reste vivant.
-        // Broadcaster "prêt" après un court délai pour laisser l'APK démarrer.
+        // ✅ Démarrer le serveur API dans le foreground service
         new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+            startApiServer();
             broadcastReady();
-            updateNotification("APK Filgo — serveur HTTP prêt");
-        }, 1500);
+        }, 1000);
 
-        // START_STICKY : Android relance ce service si tué (mémoire basse etc.)
+        // START_STICKY : Android relance ce service si tué
         return START_STICKY;
     }
 
     @Override
     public IBinder onBind(Intent intent) {
-        return null; // Service non lié
+        return null;
     }
 
     @Override
     public void onDestroy() {
         super.onDestroy();
+        stopApiServer();
         Log.w(TAG, "Service détruit — Android va le relancer (START_STICKY)");
+    }
+
+    // =========================================================
+    // API Server — géré dans le foreground service
+    // =========================================================
+
+    private void startApiServer() {
+        if (apiServer != null && apiServer.isRunning()) {
+            Log.i(TAG, "ApiServer déjà running");
+            updateNotification("APK Filgo — serveur HTTP actif :8765");
+            return;
+        }
+        try {
+            com.pa.lcr.lcp.ApiFacade facade =
+                new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(this);
+            apiServer = new com.pa.lcr.lcp.ApiServer(
+                facade, line -> Log.d(TAG, line), API_PORT, this);
+            apiServer.start();
+            updateNotification("APK Filgo — serveur HTTP actif :8765");
+            Log.i(TAG, "ApiServer démarré sur port " + API_PORT);
+        } catch (Exception e) {
+            Log.e(TAG, "ApiServer start FAIL: " + e.getMessage());
+            updateNotification("APK Filgo — erreur démarrage serveur");
+        }
+    }
+
+    private void stopApiServer() {
+        try {
+            if (apiServer != null && apiServer.isRunning()) {
+                apiServer.stop();
+                Log.i(TAG, "ApiServer arrêté");
+            }
+        } catch (Exception ignored) {
+        } finally {
+            apiServer = null;
+        }
+    }
+
+    // ✅ Accès statique pour MainActivity (évite double démarrage)
+    public static boolean isApiRunning() {
+        return false; // MainActivity vérifie via broadcast
     }
 
     // ── Notification ───────────────────────────────────────────────────────
