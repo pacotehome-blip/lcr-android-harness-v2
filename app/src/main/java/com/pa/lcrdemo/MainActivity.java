@@ -903,19 +903,9 @@ private void pollJobUntilDone(String jobId, int node, String woNum, String woIdG
                 android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
             );
 
-            // ✅ Priorité: ms-apps-fs:// → ms-dynamicsxrm:// → form HTML
-            if (retourFsNatif.resolveActivity(getPackageManager()) != null) {
-                android.util.Log.i("LCRDEMO_DEEPLINK", "Retour FS natif — ms-apps-fs://");
-                startActivity(retourFsNatif);
-                overridePendingTransition(0, 0);
-            } else if (retourFs.resolveActivity(getPackageManager()) != null) {
-                android.util.Log.i("LCRDEMO_DEEPLINK", "Retour FS Mobile — ms-dynamicsxrm://");
-                startActivity(retourFs);
-                overridePendingTransition(0, 0);
-            } else {
-                android.util.Log.w("LCRDEMO_DEEPLINK", "Fallback form HTML");
-                startActivity(retourForm);
-            }
+            // ✅ MVP: form HTML direct — GUID disponible, résultat garanti affiché
+            android.util.Log.i("LCRDEMO_DEEPLINK", "Retour form HTML avec GUID");
+            startActivity(retourForm);
 
         } catch (Exception e) {
             android.util.Log.e("LCRDEMO_DEEPLINK", "Retour FS failed: " + e.getMessage());
