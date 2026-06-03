@@ -205,7 +205,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-private void pollJobUntilDone(String jobId, int node, String woNum) {
+private void pollJobUntilDone(String jobId, int node, String woNum, String woIdGuid) {
     btExec.execute(() -> {
         try {
             // ✅ MVP Étape 1 — job/continue pour démarrer le flux (sortir de ARMED)
@@ -247,7 +247,7 @@ private void pollJobUntilDone(String jobId, int node, String woNum) {
                     if ("DONE".equals(state) || "TERMINATED".equals(state)) {
                         String extraJson = (r.data != null) ? r.data.toString() : "{}";
                         android.util.Log.i("LCRDEMO_DEEPLINK", "Livraison DONE — " + extraJson);
-                        onDeliveryEnded(woNum, extraJson);
+                        onDeliveryEnded(woNum, woIdGuid, extraJson);
                         return;
                     }
 
@@ -255,7 +255,7 @@ private void pollJobUntilDone(String jobId, int node, String woNum) {
                     if ("CONNECTED".equals(state) && terminateSent) {
                         String extraJson = (r.data != null) ? r.data.toString() : "{}";
                         android.util.Log.i("LCRDEMO_DEEPLINK", "Livraison terminée (CONNECTED post-terminate) — " + extraJson);
-                        onDeliveryEnded(woNum, extraJson);
+                        onDeliveryEnded(woNum, woIdGuid, extraJson);
                         return;
                     }
 
@@ -621,12 +621,13 @@ private void pollJobUntilDone(String jobId, int node, String woNum) {
             // Test simple — retourner immédiatement à Field Service avec OK
             android.util.Log.i("LCRDEMO_DEEPLINK", "Ping reçu — réponse OK");
             toast("✅ LCR Deep Link OK — ping reçu");
-            retournerFieldService("ping", "ok", null);
+            retournerFieldService("ping", "", "ok", null);
             return;
         }
 
         if ("livraison".equals(host)) {
             String woNum      = data.getQueryParameter("wonum");
+            String woIdGuid   = data.getQueryParameter("woid") != null ? data.getQueryParameter("woid") : "";
             String btMac      = data.getQueryParameter("btmac");
             String serialId   = data.getQueryParameter("serialid");
             String produit    = data.getQueryParameter("produit");
@@ -644,13 +645,13 @@ private void pollJobUntilDone(String jobId, int node, String woNum) {
 
             toast("📦 Livraison — " + woNum);
             int finalNode = (lcrnode != null ? lcrnode : 250);
-            connectBtByMacAndOpenTab(btMac, finalNode, serialId, woNum, produit, presetStr);
+            connectBtByMacAndOpenTab(btMac, finalNode, serialId, woNum, woIdGuid, produit, presetStr);
             return;
         }
     }
 
     private void connectBtByMacAndOpenTab(String btMac, int node, String serialId,
-                                           String woNum, String produit, String presetStr) {
+                                           String woNum, String woIdGuid, String produit, String presetStr) {
         if (btMac == null || btMac.trim().isEmpty()) {
             toast("Deep Link: BT MAC manquant");
             return;
@@ -748,7 +749,7 @@ private void pollJobUntilDone(String jobId, int node, String woNum) {
                         if (jobId != null && !jobId.isEmpty()) {
                             android.util.Log.i("LCRDEMO_DEEPLINK",
                                 "Poll démarré — jobId=" + jobId);
-                            pollJobUntilDone(jobId, node, woNum);
+                            pollJobUntilDone(jobId, node, woNum, woIdGuid);
                             ui.post(() -> toast("📦 Livraison démarrée — " + woNum));
                         } else {
                             android.util.Log.w("LCRDEMO_DEEPLINK",
@@ -773,10 +774,16 @@ private void pollJobUntilDone(String jobId, int node, String woNum) {
         });
     }
 
-    public void onDeliveryEnded(String woNum, String extraJson) {
+    public void onDeliveryEnded(String woNum, String woIdGuid, String extraJson) {
         android.util.Log.i("LCRDEMO_DEEPLINK",
             "Livraison terminée — WO=" + woNum + " extra=" + extraJson);
-        retournerFieldService(woNum, "termine", extraJson);
+        // Récupérer le woIdGuid depuis le JSON extra si disponible
+        String woGuidFromExtra = "";
+        try {
+            org.json.JSONObject ej = new org.json.JSONObject(extraJson != null ? extraJson : "{}");
+            woGuidFromExtra = ej.optString("wo_guid", "");
+        } catch (Exception ignored) {}
+        retournerFieldService(woNum, woIdGuid, "termine", extraJson);
     }
     /**
      * Retourner à Field Service Mobile après la livraison.
@@ -787,7 +794,7 @@ private void pollJobUntilDone(String jobId, int node, String woNum) {
      * @param status       "ok", "en_cours", "termine", "erreur"
      * @param extra        données supplémentaires JSON (optionnel, ex: ticketNo, litres)
      */
-    private void retournerFieldService(String woNum, String status, String extraJson) {
+    private void retournerFieldService(String woNum, String woIdGuid, String status, String extraJson) {
         try {
             // ✅ Extraire net, gross, ticket du JSON résultat
             String net    = "";
@@ -828,9 +835,30 @@ private void pollJobUntilDone(String jobId, int node, String woNum) {
             );
 
             // ✅ Option 2 — fallback form HTML (navigateur) si FS Mobile non trouvé
+            // Extraire le woId (GUID) depuis extraJson si disponible
+            String woId = "";
+            try {
+                org.json.JSONObject dj = new org.json.JSONObject(extraJson != null ? extraJson : "{}");
+                // Le GUID est dans delivery_uid ou numero_livraison
+                String uid = dj.optString("delivery_uid", "");
+                if (uid.isEmpty() && dj.has("result")) {
+                    uid = dj.optJSONObject("result") != null
+                        ? dj.optJSONObject("result").optString("delivery_uid", "") : "";
+                }
+            } catch (Exception ignored) {}
+
+            // Extraire le GUID du WO depuis extraJson (delivery_uid ou numero_livraison)
+            String woGuid = "";
+            try {
+                org.json.JSONObject dj2 = new org.json.JSONObject(extraJson != null ? extraJson : "{}");
+                // Le GUID n'est pas dans le payload LCR — on utilise ce qu'on a
+                woGuid = dj2.optString("wo_guid", woIdGuid != null ? woIdGuid : "");
+            } catch (Exception ignored) {}
+
             String urlForm = "https://dev-filgo-sonic.crm3.dynamics.com/WebResources/filgo_lcr_form"
                 + "?action=lcr_retour"
                 + "&wonum="  + android.net.Uri.encode(woNum  != null ? woNum  : "")
+                + "&woid="   + android.net.Uri.encode(woGuid)
                 + "&net="    + android.net.Uri.encode(net)
                 + "&gross="  + android.net.Uri.encode(gross)
                 + "&ticket=" + android.net.Uri.encode(ticket)
@@ -848,13 +876,39 @@ private void pollJobUntilDone(String jobId, int node, String woNum) {
                 android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
             );
 
-            // ✅ Priorité: ms-dynamicsxrm:// si FS Mobile installé, sinon form HTML
-            if (retourFs.resolveActivity(getPackageManager()) != null) {
-                android.util.Log.i("LCRDEMO_DEEPLINK", "Retour FS Mobile — deep link natif");
+            // ✅ Option 3 — ms-apps-fs:// scheme natif Field Service Mobile
+            String urlFsNatif = "ms-apps-fs://91a8643f-21db-ee11-904c-002248b1ce29"
+                + "?pagetype=entityrecord"
+                + "&etn=msdyn_workorder"
+                + "&id="     + android.net.Uri.encode("{" + (woNum != null ? woNum : "") + "}")
+                + "&wonum="  + android.net.Uri.encode(woNum  != null ? woNum  : "")
+                + "&net="    + android.net.Uri.encode(net)
+                + "&gross="  + android.net.Uri.encode(gross)
+                + "&ticket=" + android.net.Uri.encode(ticket)
+                + "&status=" + android.net.Uri.encode(status != null ? status : "ok");
+
+            android.util.Log.i("LCRDEMO_DEEPLINK", "Retour ms-apps-fs: " + urlFsNatif);
+
+            android.content.Intent retourFsNatif = new android.content.Intent(
+                android.content.Intent.ACTION_VIEW,
+                android.net.Uri.parse(urlFsNatif)
+            );
+            retourFsNatif.addFlags(
+                android.content.Intent.FLAG_ACTIVITY_NEW_TASK |
+                android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
+            );
+
+            // ✅ Priorité: ms-apps-fs:// → ms-dynamicsxrm:// → form HTML
+            if (retourFsNatif.resolveActivity(getPackageManager()) != null) {
+                android.util.Log.i("LCRDEMO_DEEPLINK", "Retour FS natif — ms-apps-fs://");
+                startActivity(retourFsNatif);
+                overridePendingTransition(0, 0);
+            } else if (retourFs.resolveActivity(getPackageManager()) != null) {
+                android.util.Log.i("LCRDEMO_DEEPLINK", "Retour FS Mobile — ms-dynamicsxrm://");
                 startActivity(retourFs);
                 overridePendingTransition(0, 0);
             } else {
-                android.util.Log.w("LCRDEMO_DEEPLINK", "FS Mobile non trouvé — fallback form HTML");
+                android.util.Log.w("LCRDEMO_DEEPLINK", "Fallback form HTML");
                 startActivity(retourForm);
             }
 
