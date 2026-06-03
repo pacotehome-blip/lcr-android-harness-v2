@@ -526,11 +526,48 @@ public class DeepLinkHandler {
                     + " net=" + net + " gross=" + gross + " ticket=" + ticket);
             } catch (Exception ignored) {}
 
-            // ✅ Stratégie A — finish() pour revenir à Field Service (même stack)
-            // Field Service était en dessous dans le même task stack
-            // Sa session OAuth reste vivante — onLoadForm se déclenche
-            android.util.Log.i(TAG, "Retour FS — finish() stratégie A");
+            // ✅ Stratégie B — écrire dans localStorage du WebView Field Service
+            // avant finish() pour que onLoadForm puisse lire les données
+            final String fNet    = net;
+            final String fGross  = gross;
+            final String fTicket = ticket;
+            final String fWoGuid = woGuid;
+            final String fWoNum2 = woNum;
+            final String fStatus = status;
+
             activity.runOnUiThread(() -> {
+                try {
+                    // ✅ Construire le JSON résultat
+                    JSONObject lsData = new JSONObject();
+                    try {
+                        lsData.put("wonum",  fWoNum2 != null ? fWoNum2 : "");
+                        lsData.put("woid",   fWoGuid);
+                        lsData.put("net",    fNet);
+                        lsData.put("gross",  fGross);
+                        lsData.put("ticket", fTicket);
+                        lsData.put("status", fStatus != null ? fStatus : "ok");
+                        lsData.put("ts",     System.currentTimeMillis());
+                    } catch (Exception ignored) {}
+
+                    // ✅ Injecter dans localStorage via le WebView de MainActivity
+                    // Le même domaine crm3.dynamics.com est partagé avec Field Service
+                    String js = "try { localStorage.setItem('lcr_last_result', '"
+                        + lsData.toString().replace("'", "\'") + "'); } catch(e) {}";
+
+                    android.webkit.WebView wv = activity.getFieldServiceWebView();
+                    if (wv != null) {
+                        wv.evaluateJavascript(js, null);
+                        android.util.Log.i(TAG, "localStorage écrit: " + lsData.toString());
+                    } else {
+                        android.util.Log.w(TAG, "WebView non disponible — localStorage ignoré");
+                    }
+
+                } catch (Exception e) {
+                    android.util.Log.e(TAG, "localStorage ERR: " + e.getMessage());
+                }
+
+                // ✅ Stratégie A — finish() pour revenir à Field Service
+                android.util.Log.i(TAG, "Retour FS — finish() stratégie A");
                 try {
                     activity.finish();
                 } catch (Exception e) {

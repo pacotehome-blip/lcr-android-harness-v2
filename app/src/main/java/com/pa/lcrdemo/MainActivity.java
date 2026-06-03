@@ -170,6 +170,40 @@ public class MainActivity extends AppCompatActivity {
 
     // ✅ Getters publics pour DeepLinkHandler
     public BluetoothAdapter getBtAdapter() { return btAdapter; }
+
+    // ✅ WebView Field Service — pour écrire dans localStorage avant finish()
+    public android.webkit.WebView getFieldServiceWebView() {
+        try {
+            // Chercher le WebView actif dans les fragments visibles
+            androidx.fragment.app.FragmentManager fm = getSupportFragmentManager();
+            for (androidx.fragment.app.Fragment f : fm.getFragments()) {
+                if (f != null && f.getView() != null) {
+                    android.webkit.WebView wv = f.getView().findViewWithTag("lcr_webview");
+                    if (wv != null) return wv;
+                    // Chercher récursivement
+                    wv = findWebView(f.getView());
+                    if (wv != null) return wv;
+                }
+            }
+            // Fallback — chercher dans la vue principale
+            return findWebView(getWindow().getDecorView());
+        } catch (Exception e) {
+            android.util.Log.w("MainActivity", "getFieldServiceWebView ERR: " + e.getMessage());
+            return null;
+        }
+    }
+
+    private android.webkit.WebView findWebView(android.view.View root) {
+        if (root instanceof android.webkit.WebView) return (android.webkit.WebView) root;
+        if (root instanceof android.view.ViewGroup) {
+            android.view.ViewGroup vg = (android.view.ViewGroup) root;
+            for (int i = 0; i < vg.getChildCount(); i++) {
+                android.webkit.WebView found = findWebView(vg.getChildAt(i));
+                if (found != null) return found;
+            }
+        }
+        return null;
+    }
     public String getLastBtMac() { return lastBtMac; }
     public MediaTransportManager getMediaTransportManager() { return mediaTransportManager; }
     public Handler getUiHandler() { return ui; }
