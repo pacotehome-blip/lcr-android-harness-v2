@@ -328,6 +328,8 @@ public class DeepLinkHandler {
                                    String woIdGuid, String serialId) {
         btExec.execute(() -> {
             try {
+                final boolean[] deliveryDone = {false}; // ✅ Flag anti-double
+
                 // ✅ job/continue — sortir de ARMED
                 try {
                     MultiRegisterApiFacadeImpl facadeCont =
@@ -379,6 +381,8 @@ public class DeepLinkHandler {
 
                         // ✅ DONE ou TERMINATED
                         if ("DONE".equals(state) || "TERMINATED".equals(state)) {
+                            if (deliveryDone[0]) return;
+                            deliveryDone[0] = true;
                             String extraJson = (r.data != null) ? r.data.toString() : "{}";
                             android.util.Log.i(TAG, "Livraison DONE — " + extraJson);
                             logDeliveryEnd(serialId, woNum, jobId, "DONE", extraJson, null);
@@ -388,6 +392,8 @@ public class DeepLinkHandler {
 
                         // ✅ CONNECTED après terminate = fin propre
                         if ("CONNECTED".equals(state) && terminateSent) {
+                            if (deliveryDone[0]) return;
+                            deliveryDone[0] = true;
                             String extraJson = (r.data != null) ? r.data.toString() : "{}";
                             android.util.Log.i(TAG,
                                 "Livraison terminée (CONNECTED post-terminate) — " + extraJson);
