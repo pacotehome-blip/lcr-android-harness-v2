@@ -3,6 +3,7 @@
   "authorization_user_agent": "DEFAULT",
   "redirect_uri": "msauth://com.pa.lcrdemo/r4rwO/ygkzV/EW8z3JM6D3ehRk8=",
   "broker_redirect_uri_registered": false,
+  "account_mode": "SINGLE",
   "authorities": [
     {
       "type": "AAD",
