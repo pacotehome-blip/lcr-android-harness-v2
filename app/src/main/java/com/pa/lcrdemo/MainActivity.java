@@ -57,6 +57,7 @@ import com.pa.lcr.lcp.log.LogBus;
 import com.pa.lcr.lcp.storage.DeliveryDb;
 import com.pa.lcr.lcp.storage.DeliveryLogStore;
 import com.pa.lcrdemo.dataverse.DeliverySyncScheduler;
+import com.pa.lcrdemo.auth.MsalTokenProvider;
 
 // ✅ Option A: runtime transport manager
 import com.pa.lcr.lcp.transport.MediaTransportManager;
@@ -483,6 +484,31 @@ public class MainActivity extends AppCompatActivity {
 
         // ✅ WorkManager — vide la queue offline Dataverse quand réseau disponible
         DeliverySyncScheduler.schedulePeriodic(this);
+
+        // ✅ MSAL — init + login au premier démarrage de l'APK
+        // Après ce premier login le token est en cache → silent pour toutes les livraisons
+        MsalTokenProvider msal = new MsalTokenProvider(this);
+        msal.init(new MsalTokenProvider.InitCallback() {
+            @Override
+            public void onReady() {
+                msal.acquireToken(MainActivity.this, new MsalTokenProvider.TokenCallback() {
+                    @Override
+                    public void onSuccess(String token) {
+                        android.util.Log.i("MSAL", "Token OK — Dataverse prêt");
+                        // Déclencher sync immédiat si items en attente
+                        DeliverySyncScheduler.triggerNow(MainActivity.this);
+                    }
+                    @Override
+                    public void onError(Exception e) {
+                        android.util.Log.w("MSAL", "Token ERR: " + e.getMessage());
+                    }
+                });
+            }
+            @Override
+            public void onError(Exception e) {
+                android.util.Log.e("MSAL", "Init ERR: " + e.getMessage());
+            }
+        });
 
         refreshApiStatus();
         logUi(null, "UI prête — Scan USB requis");
