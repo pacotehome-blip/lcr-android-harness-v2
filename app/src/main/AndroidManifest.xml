@@ -93,7 +93,7 @@
                 <data
                     android:scheme="msauth"
                     android:host="com.pa.lcrdemo"
-                    android:path="/oQHvgt8wJsarpKneW3rVFA5hL1k=" />
+                    android:path="/5ut2u98D3lhweiDQ6Y3bDp7tREw=" />
             </intent-filter>
         </activity>
 

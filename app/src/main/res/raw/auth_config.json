@@ -1,7 +1,7 @@
 {
   "client_id": "ec9ea9bc-e972-4407-962b-b17ccd050380",
   "authorization_user_agent": "DEFAULT",
-  "redirect_uri": "msauth://com.pa.lcrdemo/oQHvgt8wJsarpKneW3rVFA5hL1k=",
+  "redirect_uri": "msauth://com.pa.lcrdemo/5ut2u98D3lhweiDQ6Y3bDp7tREw=",
   "broker_redirect_uri_registered": true,
   "authorities": [
     {
