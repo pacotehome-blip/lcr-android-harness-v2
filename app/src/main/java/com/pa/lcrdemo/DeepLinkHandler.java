@@ -568,13 +568,30 @@ public class DeepLinkHandler {
                     android.util.Log.e(TAG, "localStorage ERR: " + e.getMessage());
                 }
 
-                // ✅ Stratégie A — finish() pour revenir à Field Service
-                android.util.Log.i(TAG, "Retour FS — finish() stratégie A");
+                // ✅ Ouvrir filgo_lcr_form avec les données
+                // WebResource locale — fonctionne 100% offline
+                // Xrm.WebApi.updateRecord() écrit dans SQLite local FS
+                String urlRetour = "https://dev-filgo-sonic.crm3.dynamics.com/WebResources/filgo_lcr_form"
+                    + "?action=lcr_retour"
+                    + "&wonum="  + android.net.Uri.encode(fWoNum2  != null ? fWoNum2  : "")
+                    + "&woid="   + android.net.Uri.encode(fWoGuid  != null ? fWoGuid  : "")
+                    + "&net="    + android.net.Uri.encode(fNet     != null ? fNet     : "")
+                    + "&gross="  + android.net.Uri.encode(fGross   != null ? fGross   : "")
+                    + "&ticket=" + android.net.Uri.encode(fTicket  != null ? fTicket  : "")
+                    + "&status=" + android.net.Uri.encode(fStatus  != null ? fStatus  : "ok")
+                    + "&ts="     + System.currentTimeMillis();
+
+                android.util.Log.i(TAG, "Retour form — " + urlRetour);
+
                 try {
-                    activity.finish();
+                    android.content.Intent retour = new android.content.Intent(
+                        android.content.Intent.ACTION_VIEW,
+                        android.net.Uri.parse(urlRetour));
+                    retour.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                    activity.startActivity(retour);
                 } catch (Exception e) {
-                    android.util.Log.e(TAG, "finish() failed: " + e.getMessage());
-                    activity.moveTaskToBack(true);
+                    android.util.Log.e(TAG, "startActivity retour FAIL: " + e.getMessage());
+                    activity.finish();
                 }
             });
 
