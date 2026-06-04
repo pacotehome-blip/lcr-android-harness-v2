@@ -1,666 +1,287 @@
 package com.pa.lcrdemo;
 
-import android.bluetooth.BluetoothDevice;
-import android.bluetooth.BluetoothSocket;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.app.Service;
 import android.content.Intent;
-import android.net.Uri;
+import android.os.Build;
+import android.os.IBinder;
+import android.util.Log;
 
-import androidx.fragment.app.Fragment;
-
-import com.pa.lcr.lcp.MultiRegisterApiFacadeImpl;
-import com.pa.lcr.lcp.storage.DeliveryLogStore;
-import com.pa.lcr.lcp.transport.MediaTransportManager;
-import com.pa.lcr.lcp.transport.TransportIo;
-
-import org.json.JSONObject;
-
-import java.io.InputStream;
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
-import java.util.UUID;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicReference;
 
-/**
- * DeepLinkHandler — gestion complète du flux deep link Field Service ↔ APK.
- *
- * Responsabilités :
- *  - handleDeepLink()          : parse et route le deep link entrant
- *  - connectBtByMacAndOpenTab(): connexion BT + oneshot/start
- *  - pollJobUntilDone()        : poll état livraison → DONE
- *  - onDeliveryEnded()         : fin de livraison → retournerFieldService
- *  - retournerFieldService()   : construit l'URL retour et lance Field Service
- *
- * Logging dans DeliveryLogStore :
- *  - upsertSummaryAsync → openAttemptAsync → addEventAsync → closeAttemptAsync
- */
-public class DeepLinkHandler {
+public class LcrHttpService extends Service {
 
-    private static final String TAG = "LCRDEMO_DEEPLINK";
-    private static final UUID SPP_UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
+    private static final String TAG = "LcrHttpService";
+    public static final int HTTP_PORT = 8765;
+    public static final String ACTION_STOP = "com.pa.lcrdemo.STOP_HTTP";
+    public static final String BROADCAST_READY = "com.pa.lcrdemo.HTTP_READY";
 
-    // URL retour Field Service
-    private static final String FS_FORM_URL =
-        "https://dev-filgo-sonic.crm3.dynamics.com/WebResources/filgo_lcr_form";
+    private static final String CHANNEL_ID = "lcr_http_channel";
+    private static final int NOTIF_ID = 42;
 
-    private final MainActivity activity;
-    private final DeliveryLogStore deliveryStore;
-    private final ExecutorService btExec;
+    // Shared result storage: set by MainActivity after delivery ends
+    private static final AtomicReference<String> sLastResult = new AtomicReference<>(null);
+    private static volatile long sResultTimestamp = 0;
+    private static final long RESULT_TTL_MS = 60_000;
 
-    public DeepLinkHandler(MainActivity activity,
-                           DeliveryLogStore deliveryStore,
-                           ExecutorService btExec) {
-        this.activity      = activity;
-        this.deliveryStore = deliveryStore;
-        this.btExec        = btExec;
+    private ServerSocket mServerSocket;
+    private ExecutorService mExecutor;
+    private volatile boolean mRunning = false;
+
+    // Called by MainActivity to publish the delivery result JSON
+    public static void publishResult(String json) {
+        sLastResult.set(json);
+        sResultTimestamp = System.currentTimeMillis();
+        Log.i(TAG, "Result published: " + json);
     }
 
-    // =========================================================
-    // Point d'entrée principal
-    // =========================================================
+    // ── Lifecycle ────────────────────────────────────────────────────────────
 
-    public void handleDeepLink(Intent intent) {
-        if (intent == null) return;
-        Uri data = intent.getData();
-        if (data == null) return;
-        if (!"lcrdemo".equals(data.getScheme())) return;
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        createNotificationChannel();
+    }
 
-        String host = data.getHost();
-        android.util.Log.i(TAG, "Deep link reçu: " + data.toString());
-
-        if ("ping".equals(host)) {
-            android.util.Log.i(TAG, "Ping reçu — réponse OK");
-            activity.toast("✅ LCR Deep Link OK — ping reçu");
-            retournerFieldService("ping", "", "ok", null);
-            return;
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null && ACTION_STOP.equals(intent.getAction())) {
+            stopSelf();
+            return START_NOT_STICKY;
         }
 
-        if ("livraison".equals(host)) {
-            String woNum      = data.getQueryParameter("wonum");
-            String woIdGuid   = data.getQueryParameter("woid") != null
-                                ? data.getQueryParameter("woid") : "";
-            String btMac      = data.getQueryParameter("btmac");
-            String serialId   = data.getQueryParameter("serialid");
-            String produit    = data.getQueryParameter("produit");
-            String presetStr  = data.getQueryParameter("preset");
-            String lcrnodeStr = data.getQueryParameter("lcrnode");
+        startForeground(NOTIF_ID, buildNotification("HTTP service starting…"));
 
-            Integer lcrnode = null;
-            try { if (lcrnodeStr != null) lcrnode = Integer.parseInt(lcrnodeStr); }
-            catch (Exception ignored) {}
+        mRunning = true;
+        mExecutor = Executors.newCachedThreadPool();
+        mExecutor.execute(this::serverLoop);
 
-            android.util.Log.i(TAG,
-                "Livraison — WO=" + woNum + " BT=" + btMac +
-                " serial=" + serialId + " node=" + lcrnode +
-                " produit=" + produit + " preset=" + presetStr);
-
-            // ✅ Log événement départ dans DeliveryLogStore
-            final String fWoNum    = woNum;
-            final String fSerialId = serialId != null ? serialId : "";
-            logDeliveryStart(fSerialId, fWoNum, btMac, lcrnode, produit, presetStr);
-
-            activity.toast("📦 Livraison — " + woNum);
-            int finalNode = (lcrnode != null ? lcrnode : 250);
-            connectBtByMacAndOpenTab(btMac, finalNode, serialId, woNum, woIdGuid, produit, presetStr);
-        }
+        return START_STICKY;
     }
 
-    // =========================================================
-    // Connexion BT + oneshot/start
-    // =========================================================
-
-    private void connectBtByMacAndOpenTab(String btMac, int node, String serialId,
-                                           String woNum, String woIdGuid,
-                                           String produit, String presetStr) {
-        if (btMac == null || btMac.trim().isEmpty()) {
-            activity.toast("Deep Link: BT MAC manquant");
-            logError(serialId, woNum, "BT_CONNECT", "BT MAC manquant");
-            return;
-        }
-        final String mac = btMac.toUpperCase().trim();
-
-        btExec.execute(() -> {
-            try {
-                // =========================================================
-                // 1) Vérifier si BT déjà connecté au bon MAC — réutiliser
-                // =========================================================
-                String transportKey = MediaTransportManager.btKey(mac);
-                MediaTransportManager mtm = activity.getMediaTransportManager();
-                boolean btDejaConnecte = false;
-
-                if (mtm != null) {
-                    TransportIo existing = mtm.getByKey(transportKey);
-                    if (existing != null && existing.isOpen()) {
-                        btDejaConnecte = true;
-                        android.util.Log.i(TAG, "BT déjà connecté: " + mac + " — réutilisation");
-                        logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
-                            "BT_REUSE", "BT déjà connecté: " + mac, null);
-                    }
-                }
-
-                if (!btDejaConnecte) {
-                    // ✅ Nouveau BT — déconnecter proprement si différent
-                    android.bluetooth.BluetoothAdapter btAdapter = activity.getBtAdapter();
-
-                    // Déconnecter seulement si le MAC actif est différent
-                    String lastMac = activity.getLastBtMac();
-                    if (lastMac != null && !lastMac.equalsIgnoreCase(mac)) {
-                        android.util.Log.i(TAG, "BT différent — déconnexion: " + lastMac);
-                        activity.btDisconnect();
-                        try { Thread.sleep(500); } catch (Exception ignored) {}
-                    }
-
-                    try { if (btAdapter != null) btAdapter.cancelDiscovery(); }
-                    catch (Exception ignored) {}
-
-                    BluetoothDevice dev = btAdapter.getRemoteDevice(mac);
-                    BluetoothSocket s;
-                    try {
-                        s = dev.createInsecureRfcommSocketToServiceRecord(SPP_UUID);
-                    } catch (Exception e) {
-                        s = dev.createRfcommSocketToServiceRecord(SPP_UUID);
-                    }
-                    s.connect();
-
-                    InputStream  btIn  = s.getInputStream();
-                    OutputStream btOut = s.getOutputStream();
-                    activity.onBtConnectedFromDeepLink(s, btIn, btOut, mac);
-
-                    android.util.Log.i(TAG, "BT connecté: " + mac);
-                    logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
-                        "BT_CONNECT", "BT connecté: " + mac, null);
-                }
-
-                // =========================================================
-                // 2) Valider le registre — bon serial, bon node
-                // =========================================================
-                try {
-                    MultiRegisterApiFacadeImpl facadeVal =
-                        new MultiRegisterApiFacadeImpl(activity);
-                    com.pa.lcr.lcp.ApiResult rv = facadeVal.api_registerValidate(
-                        woNum, node, null, serialId, null, null, "bt", mac);
-                    android.util.Log.i(TAG, "register/validate: code=" + rv.code + " msg=" + rv.msg);
-
-                    if (rv.code != 1) {
-                        // ✅ Mauvais registre ou pas prêt — tenter auto-connect
-                        android.util.Log.w(TAG, "Registre invalide — tentative auto-connect");
-                        MultiRegisterApiFacadeImpl facadeAuto =
-                            new MultiRegisterApiFacadeImpl(activity);
-                        com.pa.lcr.lcp.ApiResult ra =
-                            facadeAuto.api_registerConnectAuto(serialId, node);
-                        android.util.Log.i(TAG, "register/connect-auto: code=" + ra.code + " msg=" + ra.msg);
-
-                        if (ra.code != 1) {
-                            logError(serialId, woNum, "REGISTER_INVALID",
-                                "Registre invalide: " + rv.msg);
-                            activity.runOnUiThread(() ->
-                                activity.toast("⚠️ Registre invalide — " + rv.msg));
-                            retournerFieldService(woNum, woIdGuid, "erreur_registre",
-                                buildErrorJson("REGISTER_INVALID", rv.msg));
-                            return;
-                        }
-                    }
-                    logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
-                        "REGISTER_OK", "Registre validé node=" + node, null);
-                } catch (Exception e) {
-                    android.util.Log.w(TAG, "register/validate ERR (ignoré): " + e.getMessage());
-                    // Non bloquant — continuer quand même
-                }
-
-                // 2) Ouvrir tab UI
-                final String fProduit      = produit;
-                final String fPreset       = presetStr;
-                final String fWoNum        = woNum;
-                final String fSerialId     = serialId != null ? serialId : "";
-                final String fTransportKey = transportKey;
-
-                activity.runOnUiThread(() -> {
-                    try {
-                        activity.onConfigureMediaActivated(fTransportKey, "DEEPLINK");
-                        activity.upsertRegisterTabFromScan(fTransportKey, node, 255, fSerialId, true);
-                        activity.getUiHandler().postDelayed(() -> {
-                            try {
-                                String   mediaShort = activity.mediaShortFromTransportKey(fTransportKey);
-                                String   tabKey     = activity.tabKeyOf(mediaShort, node, fSerialId);
-                                Fragment f          = activity.getSupportFragmentManager()
-                                                              .findFragmentByTag("regtab_" + tabKey);
-                                if (f instanceof RegisterTabFragment) {
-                                    ((RegisterTabFragment) f).prefillFromDeepLink(
-                                        fWoNum, fProduit, fPreset);
-                                }
-                            } catch (Exception ignored) {}
-                        }, 800);
-                        activity.refreshAllTabsMediaStatus();
-                        activity.showPage(0);
-                        activity.updateBtStatusText("BT : CONNECTED — " + mac + " (FS)");
-                    } catch (Exception ignored) {}
-                });
-
-                // 3) Attendre que le média soit READY
-                int    product = 1;
-                double preset  = 0.0;
-                try { product = Integer.parseInt(produit);     } catch (Exception ignored) {}
-                try { preset  = Double.parseDouble(presetStr); } catch (Exception ignored) {}
-
-                final int    fProduct = product;
-                final double fPresetD = preset;
-
-                boolean ready = false;
-                for (int i = 0; i < 10; i++) {
-                    try { Thread.sleep(500); } catch (Exception ignored) {}
-                    try {
-                        MediaTransportManager mtm2 = activity.getMediaTransportManager();
-                        if (mtm2 != null) {
-                            TransportIo io = mtm2.getByKey(transportKey);
-                            if (io != null && io.isOpen()) { ready = true; break; }
-                        }
-                    } catch (Exception ignored) {}
-                }
-
-                if (ready) {
-                    try {
-                        MultiRegisterApiFacadeImpl facade =
-                            new MultiRegisterApiFacadeImpl(activity);
-                        com.pa.lcr.lcp.ApiResult r = facade.api_deliveryOneShotStart(
-                            node, 255, woNum, fProduct, fPresetD, null, "bt", mac);
-
-                        android.util.Log.i(TAG,
-                            "oneshot/start: code=" + r.code + " msg=" + r.msg);
-
-                        if (r.code == 1) {
-                            // ✅ Succès — récupérer jobId et démarrer le poll
-                            String jobId = (r.data != null)
-                                ? r.data.optString("jobId", null) : null;
-
-                            logEvent(fSerialId, woNum, DeliveryLogStore.LEVEL_INFO,
-                                "ONESHOT_START", "ARMED jobId=" + jobId, null);
-
-                            if (jobId != null && !jobId.isEmpty()) {
-                                android.util.Log.i(TAG, "Poll démarré — jobId=" + jobId);
-                                activity.runOnUiThread(() ->
-                                    activity.toast("📦 Livraison démarrée — " + woNum));
-                                pollJobUntilDone(jobId, node, woNum, woIdGuid, fSerialId);
-                            } else {
-                                android.util.Log.w(TAG, "oneshot/start: jobId absent");
-                                activity.runOnUiThread(() ->
-                                    activity.toast("📦 Livraison démarrée (sans jobId) — " + woNum));
-                            }
-                        } else {
-                            // ✅ Erreur oneshot — livraison précédente en cours ?
-                            android.util.Log.w(TAG, "oneshot/start code=0: " + r.msg);
-                            logEvent(fSerialId, woNum, DeliveryLogStore.LEVEL_WARN,
-                                "ONESHOT_ERROR", r.msg,
-                                r.data != null ? r.data.toString() : null);
-
-                            // Retourner vers FS avec status=erreur
-                            retournerFieldService(woNum, woIdGuid, "erreur_oneshot",
-                                buildErrorJson("ONESHOT_FAILED", r.msg));
-                        }
-
-                    } catch (Exception e) {
-                        android.util.Log.e(TAG, "oneshot/start ERR: " + e.getMessage());
-                        logError(fSerialId, woNum, "ONESHOT_EXCEPTION", e.getMessage());
-                        retournerFieldService(woNum, woIdGuid, "erreur",
-                            buildErrorJson("ONESHOT_EXCEPTION", e.getMessage()));
-                    }
-                } else {
-                    android.util.Log.w(TAG, "Média non prêt après 5s");
-                    activity.runOnUiThread(() -> activity.toast("BT non prêt — réessayez"));
-                    logError(fSerialId, woNum, "MEDIA_NOT_READY", "Média non prêt après 5s");
-                    retournerFieldService(woNum, woIdGuid, "erreur_media",
-                        buildErrorJson("MEDIA_NOT_READY", "Média non prêt après 5s"));
-                }
-
-            } catch (Exception e) {
-                android.util.Log.e(TAG, "BT connect ERR: " + e.getMessage());
-                activity.runOnUiThread(() -> activity.toast("BT ERR: " + e.getMessage()));
-                logError(serialId != null ? serialId : "", woNum,
-                    "BT_CONNECT_ERROR", e.getMessage());
-                retournerFieldService(woNum, woIdGuid, "erreur_bt",
-                    buildErrorJson("BT_CONNECT_ERROR", e.getMessage()));
-            }
-        });
-    }
-
-    // =========================================================
-    // Poll état livraison
-    // =========================================================
-
-    private void pollJobUntilDone(String jobId, int node, String woNum,
-                                   String woIdGuid, String serialId) {
-        btExec.execute(() -> {
-            try {
-                // ✅ job/continue — sortir de ARMED
-                try {
-                    MultiRegisterApiFacadeImpl facadeCont =
-                        new MultiRegisterApiFacadeImpl(activity);
-                    com.pa.lcr.lcp.ApiResult rc =
-                        facadeCont.api_deliveryContinue(jobId, node);
-                    android.util.Log.i(TAG,
-                        "job/continue: code=" + (rc != null ? rc.code : "null")
-                        + " msg=" + (rc != null ? rc.msg : "null"));
-                    logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
-                        "JOB_CONTINUE",
-                        "code=" + (rc != null ? rc.code : "null") +
-                        " msg=" + (rc != null ? rc.msg : "null"), null);
-                } catch (Exception e) {
-                    android.util.Log.e(TAG, "job/continue ERR: " + e.getMessage());
-                    logError(serialId, woNum, "JOB_CONTINUE_ERROR", e.getMessage());
-                }
-
-                boolean hasSeenFlowing = false;
-                boolean terminateSent  = false;
-                String  lastState      = "";
-
-                // Poll max 10 minutes
-                for (int i = 0; i < 600; i++) {
-                    try { Thread.sleep(1000); } catch (Exception ignored) {}
-
-                    try {
-                        MultiRegisterApiFacadeImpl facade =
-                            new MultiRegisterApiFacadeImpl(activity);
-                        com.pa.lcr.lcp.ApiResult r = facade.api_deliveryJobGet(jobId);
-                        if (r == null) continue;
-
-                        String state = null;
-                        if (r.data != null)
-                            state = r.data.optString("state", null);
-
-                        android.util.Log.i(TAG, "pollJob: state=" + state);
-
-                        // Logger seulement les changements d'état
-                        if (state != null && !state.equals(lastState)) {
-                            logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
-                                "STATE_CHANGE", "state=" + state, null);
-                            lastState = state;
-                        }
-
-                        if ("RUNNING_FLOWING".equals(state) || "RUNNING_PAUSED".equals(state)) {
-                            hasSeenFlowing = true;
-                        }
-
-                        // ✅ DONE ou TERMINATED
-                        if ("DONE".equals(state) || "TERMINATED".equals(state)) {
-                            String extraJson = (r.data != null) ? r.data.toString() : "{}";
-                            android.util.Log.i(TAG, "Livraison DONE — " + extraJson);
-                            logDeliveryEnd(serialId, woNum, jobId, "DONE", extraJson, null);
-                            onDeliveryEnded(woNum, woIdGuid, extraJson);
-                            return;
-                        }
-
-                        // ✅ CONNECTED après terminate = fin propre
-                        if ("CONNECTED".equals(state) && terminateSent) {
-                            String extraJson = (r.data != null) ? r.data.toString() : "{}";
-                            android.util.Log.i(TAG,
-                                "Livraison terminée (CONNECTED post-terminate) — " + extraJson);
-                            logDeliveryEnd(serialId, woNum, jobId, "DONE", extraJson, null);
-                            onDeliveryEnded(woNum, woIdGuid, extraJson);
-                            return;
-                        }
-
-                        // ✅ CONNECTED après FLOWING sans PAUSED = fin directe
-                        // (cas 2e livraison successive — le registre termine sans pause)
-                        if ("CONNECTED".equals(state) && hasSeenFlowing && !terminateSent) {
-                            android.util.Log.i(TAG, "CONNECTED après FLOWING — terminate direct");
-                            try {
-                                MultiRegisterApiFacadeImpl facadeTerm2 =
-                                    new MultiRegisterApiFacadeImpl(activity);
-                                com.pa.lcr.lcp.ApiResult rt2 =
-                                    facadeTerm2.api_deliveryTerminate(jobId, node);
-                                android.util.Log.i(TAG,
-                                    "job/terminate (direct): code=" + (rt2 != null ? rt2.code : "null")
-                                    + " msg=" + (rt2 != null ? rt2.msg : "null"));
-                                terminateSent = true;
-                            } catch (Exception e) {
-                                android.util.Log.e(TAG, "job/terminate direct ERR: " + e.getMessage());
-                            }
-                        }
-
-                        // ✅ RUNNING_PAUSED → terminate
-                        if ("RUNNING_PAUSED".equals(state) && hasSeenFlowing && !terminateSent) {
-                            android.util.Log.i(TAG, "RUNNING_PAUSED — envoi job/terminate");
-                            logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
-                                "JOB_TERMINATE", "RUNNING_PAUSED détecté", null);
-                            try {
-                                MultiRegisterApiFacadeImpl facadeTerm =
-                                    new MultiRegisterApiFacadeImpl(activity);
-                                com.pa.lcr.lcp.ApiResult rt =
-                                    facadeTerm.api_deliveryTerminate(jobId, node);
-                                android.util.Log.i(TAG,
-                                    "job/terminate: code=" + (rt != null ? rt.code : "null")
-                                    + " msg=" + (rt != null ? rt.msg : "null"));
-                                terminateSent = true;
-                            } catch (Exception e) {
-                                android.util.Log.e(TAG, "job/terminate ERR: " + e.getMessage());
-                                logError(serialId, woNum, "JOB_TERMINATE_ERROR", e.getMessage());
-                            }
-                        }
-
-                    } catch (Exception ignored) {}
-                }
-
-                // Timeout
-                android.util.Log.w(TAG, "pollJob: timeout 10min sans DONE");
-                logError(serialId, woNum, "POLL_TIMEOUT", "Timeout 10 minutes sans DONE");
-                retournerFieldService(woNum, woIdGuid, "erreur_timeout",
-                    buildErrorJson("POLL_TIMEOUT", "Timeout 10 minutes"));
-
-            } catch (Exception e) {
-                android.util.Log.e(TAG, "pollJob ERR: " + e.getMessage());
-                logError(serialId, woNum, "POLL_EXCEPTION", e.getMessage());
-                retournerFieldService(woNum, woIdGuid, "erreur",
-                    buildErrorJson("POLL_EXCEPTION", e.getMessage()));
-            }
-        });
-    }
-
-    // =========================================================
-    // Fin de livraison
-    // =========================================================
-
-    public void onDeliveryEnded(String woNum, String extraJson) {
-        onDeliveryEnded(woNum, "", extraJson);
-    }
-
-    public void onDeliveryEnded(String woNum, String woIdGuid, String extraJson) {
-        android.util.Log.i(TAG,
-            "Livraison terminée — WO=" + woNum + " extra=" + extraJson);
-        retournerFieldService(woNum, woIdGuid, "termine", extraJson);
-    }
-
-    // =========================================================
-    // Dernier résultat — accessible via GET /v1/delivery/last-result
-    // =========================================================
-
-    // Variable statique — partagée entre DeepLinkHandler et ApiServer
-    public static volatile String lastResultJson = null;
-    public static volatile String lastResultWoNum = null;
-    public static volatile String lastResultWoGuid = null;
-    public static volatile long   lastResultTs = 0;
-
-    // =========================================================
-    // Retour Field Service — Stratégie A + B
-    // =========================================================
-
-    private void retournerFieldService(String woNum, String woIdGuid,
-                                        String status, String extraJson) {
+    @Override
+    public void onDestroy() {
+        mRunning = false;
         try {
-            String net    = "";
-            String gross  = "";
-            String ticket = "";
-            try {
-                JSONObject d = new JSONObject(extraJson != null ? extraJson : "{}");
-                JSONObject result = d.optJSONObject("result");
-                if (result != null) {
-                    net    = String.valueOf(result.optDouble("fs_net_l",   0));
-                    gross  = String.valueOf(result.optDouble("fs_gross_l", 0));
-                    ticket = result.optString("ticket_no", "");
-                } else {
-                    net   = String.valueOf(d.optDouble("net",   0));
-                    gross = String.valueOf(d.optDouble("gross", 0));
-                }
-            } catch (Exception ignored) {}
+            if (mServerSocket != null) mServerSocket.close();
+        } catch (IOException ignored) {}
+        if (mExecutor != null) mExecutor.shutdownNow();
+        super.onDestroy();
+    }
 
-            // GUID du WO
-            String woGuid = (woIdGuid != null && !woIdGuid.isEmpty()) ? woIdGuid : "";
-            woGuid = woGuid.replace("{", "").replace("}", "");
+    @Override
+    public IBinder onBind(Intent intent) { return null; }
 
-            // ✅ Stratégie B — sauvegarder le résultat pour GET /v1/delivery/last-result
-            try {
-                JSONObject lastResult = new JSONObject();
-                lastResult.put("wonum",   woNum   != null ? woNum   : "");
-                lastResult.put("woid",    woGuid);
-                lastResult.put("net",     net);
-                lastResult.put("gross",   gross);
-                lastResult.put("ticket",  ticket);
-                lastResult.put("status",  status  != null ? status  : "ok");
-                lastResult.put("ts",      System.currentTimeMillis());
-                if (extraJson != null) {
-                    try {
-                        lastResult.put("payload", new JSONObject(extraJson));
-                    } catch (Exception ignored) {}
-                }
-                lastResultJson   = lastResult.toString();
-                lastResultWoNum  = woNum;
-                lastResultWoGuid = woGuid;
-                lastResultTs     = System.currentTimeMillis();
-                // ✅ Écrire aussi dans LcrHttpService pour le serveur HTTP 8766
-                com.pa.lcrdemo.LcrHttpService.lastResultJson = lastResult.toString();
-                android.util.Log.i(TAG, "last-result sauvegardé: wonum=" + woNum
-                    + " net=" + net + " gross=" + gross + " ticket=" + ticket);
-            } catch (Exception ignored) {}
+    // ── Server loop ──────────────────────────────────────────────────────────
 
-            // ✅ Stratégie B — écrire dans localStorage du WebView Field Service
-            // avant finish() pour que onLoadForm puisse lire les données
-            final String fNet    = net;
-            final String fGross  = gross;
-            final String fTicket = ticket;
-            final String fWoGuid = woGuid;
-            final String fWoNum2 = woNum;
-            final String fStatus = status;
+    private void serverLoop() {
+        try {
+            mServerSocket = new ServerSocket(HTTP_PORT);
+            Log.i(TAG, "Listening on port " + HTTP_PORT);
+            updateNotification("Listening on port " + HTTP_PORT);
+            broadcastReady();
 
-            activity.runOnUiThread(() -> {
+            while (mRunning) {
                 try {
-                    // ✅ Construire le JSON résultat
-                    JSONObject lsData = new JSONObject();
-                    try {
-                        lsData.put("wonum",  fWoNum2 != null ? fWoNum2 : "");
-                        lsData.put("woid",   fWoGuid);
-                        lsData.put("net",    fNet);
-                        lsData.put("gross",  fGross);
-                        lsData.put("ticket", fTicket);
-                        lsData.put("status", fStatus != null ? fStatus : "ok");
-                        lsData.put("ts",     System.currentTimeMillis());
-                    } catch (Exception ignored) {}
+                    Socket client = mServerSocket.accept();
+                    mExecutor.execute(() -> handleClient(client));
+                } catch (IOException e) {
+                    if (mRunning) Log.w(TAG, "Accept error", e);
+                }
+            }
+        } catch (IOException e) {
+            Log.e(TAG, "Server error", e);
+        }
+    }
 
-                    // ✅ Injecter dans localStorage via le WebView de MainActivity
-                    // Le même domaine crm3.dynamics.com est partagé avec Field Service
-                    String js = "try { localStorage.setItem('lcr_last_result', '"
-                        + lsData.toString().replace("'", "\'") + "'); } catch(e) {}";
+    // ── Request handler ──────────────────────────────────────────────────────
 
-                    android.webkit.WebView wv = activity.getFieldServiceWebView();
-                    if (wv != null) {
-                        wv.evaluateJavascript(js, null);
-                        android.util.Log.i(TAG, "localStorage écrit: " + lsData.toString());
+    private void handleClient(Socket socket) {
+        try (socket;
+             BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+             OutputStream out = socket.getOutputStream()) {
+
+            // Read request line
+            String requestLine = in.readLine();
+            if (requestLine == null) return;
+            Log.d(TAG, "Request: " + requestLine);
+
+            // Drain headers
+            while (true) {
+                String h = in.readLine();
+                if (h == null || h.isEmpty()) break;
+            }
+
+            // Parse method + path
+            String[] parts = requestLine.split(" ");
+            String method = parts.length > 0 ? parts[0] : "";
+            String path   = parts.length > 1 ? parts[1] : "/";
+
+            // Strip query string
+            int q = path.indexOf('?');
+            String cleanPath = q >= 0 ? path.substring(0, q) : path;
+
+            // OPTIONS preflight
+            if ("OPTIONS".equalsIgnoreCase(method)) {
+                writeOptions(out);
+                return;
+            }
+
+            String body;
+
+            if ("/v1/delivery/result".equals(cleanPath)) {
+                String last = sLastResult.get();
+                if (last == null) {
+                    body = buildJson("code", "0", "msg", "No result yet");
+                } else {
+                    long age = System.currentTimeMillis() - sResultTimestamp;
+                    if (age > RESULT_TTL_MS) {
+                        sLastResult.set(null);
+                        body = buildJson("code", "0", "msg", "Result expired");
                     } else {
-                        android.util.Log.w(TAG, "WebView non disponible — localStorage ignoré");
+                        // last is already a JSON object string — embed it as the data value
+                        body = "{\"code\":1,\"msg\":\"OK\",\"data\":" + last + "}";
                     }
-
-                } catch (Exception e) {
-                    android.util.Log.e(TAG, "localStorage ERR: " + e.getMessage());
                 }
+            } else if ("/v1/ping".equals(cleanPath)) {
+                body = "{\"code\":1,\"msg\":\"PING OK\",\"port\":" + HTTP_PORT + "}";
+            } else {
+                write404(out);
+                return;
+            }
 
-                // ✅ Stratégie A — finish() pour revenir à Field Service
-                android.util.Log.i(TAG, "Retour FS — finish() stratégie A");
-                try {
-                    activity.finish();
-                } catch (Exception e) {
-                    android.util.Log.e(TAG, "finish() failed: " + e.getMessage());
-                    activity.moveTaskToBack(true);
-                }
-            });
+            writeOk(out, body);
 
         } catch (Exception e) {
-            android.util.Log.e(TAG, "Retour FS failed: " + e.getMessage());
-            activity.moveTaskToBack(true);
+            Log.e(TAG, "Client error", e);
         }
     }
 
-    // =========================================================
-    // Logging helpers
-    // =========================================================
+    // ── JSON builder helper ──────────────────────────────────────────────────
 
-    private void logDeliveryStart(String serialId, String woNum, String btMac,
-                                   Integer node, String produit, String preset) {
-        if (deliveryStore == null || serialId == null || serialId.isEmpty()) return;
-        try {
-            JSONObject d = new JSONObject();
-            d.put("woNum",   woNum != null ? woNum : "");
-            d.put("btMac",   btMac != null ? btMac : "");
-            d.put("node",    node  != null ? node  : 0);
-            d.put("produit", produit != null ? produit : "");
-            d.put("preset",  preset  != null ? preset  : "");
-            d.put("source",  "DEEPLINK_FS");
-            d.put("ts",      System.currentTimeMillis());
-
-            deliveryStore.upsertSummaryAsync(
-                serialId, woNum != null ? woNum : "DEEPLINK",
-                null, "DEEPLINK_START", DeliveryLogStore.SOURCE_API,
-                null, null, null);
-
-            deliveryStore.openAttemptAsync(
-                serialId, woNum != null ? woNum : "DEEPLINK",
-                DeliveryLogStore.SOURCE_API, null, attemptId -> {
-                    deliveryStore.addEventAsync(attemptId,
-                        DeliveryLogStore.LEVEL_INFO,
-                        "DEEPLINK_START",
-                        "WO=" + woNum + " BT=" + btMac + " node=" + node,
-                        d.toString());
-                });
-        } catch (Exception ignored) {}
-    }
-
-    private void logDeliveryEnd(String serialId, String woNum, String jobId,
-                                 String outcome, String resultJson, String errorJson) {
-        if (deliveryStore == null || serialId == null || serialId.isEmpty()) return;
-        deliveryStore.upsertSummaryAsync(
-            serialId, woNum != null ? woNum : "DEEPLINK",
-            null, outcome, DeliveryLogStore.SOURCE_API,
-            jobId, resultJson, errorJson);
-    }
-
-    private void logEvent(String serialId, String woNum, String level,
-                           String type, String message, String dataJson) {
-        if (deliveryStore == null || serialId == null || serialId.isEmpty()) return;
-        try {
-            deliveryStore.openAttemptAsync(
-                serialId, woNum != null ? woNum : "DEEPLINK",
-                DeliveryLogStore.SOURCE_API, null, attemptId ->
-                    deliveryStore.addEventAsync(
-                        attemptId, level, type, message, dataJson));
-        } catch (Exception ignored) {}
-    }
-
-    private void logError(String serialId, String woNum, String code, String message) {
-        if (deliveryStore == null) return;
-        try {
-            String errorJson = new JSONObject()
-                .put("code", code)
-                .put("message", message != null ? message : "")
-                .put("ts", System.currentTimeMillis())
-                .toString();
-            logDeliveryEnd(serialId, woNum, null, "ERROR", null, errorJson);
-            logEvent(serialId, woNum, DeliveryLogStore.LEVEL_ERROR, code, message, errorJson);
-        } catch (Exception ignored) {}
-    }
-
-    private static String buildErrorJson(String code, String message) {
-        try {
-            return new JSONObject()
-                .put("error_code", code)
-                .put("error_message", message != null ? message : "")
-                .put("ts", System.currentTimeMillis())
-                .toString();
-        } catch (Exception e) {
-            return "{\"error_code\":\"" + code + "\"}";
+    /** Build a flat JSON object from key/value string pairs. Values are quoted. */
+    private String buildJson(String... kvPairs) {
+        StringBuilder sb = new StringBuilder("{");
+        for (int i = 0; i < kvPairs.length; i += 2) {
+            if (i > 0) sb.append(',');
+            sb.append('"').append(kvPairs[i]).append("\":\"").append(kvPairs[i + 1]).append('"');
         }
+        sb.append('}');
+        return sb.toString();
+    }
+
+    // ── HTTP response writers ────────────────────────────────────────────────
+
+    private void writeOk(OutputStream out, String body) throws IOException {
+        byte[] bodyBytes = body.getBytes("UTF-8");
+        StringBuilder sb = new StringBuilder();
+        sb.append("HTTP/1.1 200 OK\r\n");
+        sb.append("Content-Type: application/json; charset=UTF-8\r\n");
+        sb.append("Access-Control-Allow-Origin: *\r\n");
+        sb.append("Access-Control-Allow-Methods: GET, OPTIONS\r\n");
+        sb.append("Access-Control-Allow-Headers: Content-Type, Accept\r\n");
+        sb.append("Content-Length: ").append(bodyBytes.length).append("\r\n");
+        sb.append("Connection: close\r\n");
+        sb.append("\r\n");
+        writeRaw(out, sb.toString());
+        out.write(bodyBytes);
+        out.flush();
+    }
+
+    private void write404(OutputStream out) throws IOException {
+        String body = "{\"code\":0,\"msg\":\"Not found\"}";
+        byte[] bodyBytes = body.getBytes("UTF-8");
+        StringBuilder sb = new StringBuilder();
+        sb.append("HTTP/1.1 404 Not Found\r\n");
+        sb.append("Content-Type: application/json; charset=UTF-8\r\n");
+        sb.append("Access-Control-Allow-Origin: *\r\n");
+        sb.append("Content-Length: ").append(bodyBytes.length).append("\r\n");
+        sb.append("Connection: close\r\n");
+        sb.append("\r\n");
+        writeRaw(out, sb.toString());
+        out.write(bodyBytes);
+        out.flush();
+    }
+
+    private void writeOptions(OutputStream out) throws IOException {
+        StringBuilder sb = new StringBuilder();
+        sb.append("HTTP/1.1 204 No Content\r\n");
+        sb.append("Access-Control-Allow-Origin: *\r\n");
+        sb.append("Access-Control-Allow-Methods: GET, OPTIONS\r\n");
+        sb.append("Access-Control-Allow-Headers: Content-Type, Accept\r\n");
+        sb.append("Content-Length: 0\r\n");
+        sb.append("Connection: close\r\n");
+        sb.append("\r\n");
+        writeRaw(out, sb.toString());
+        out.flush();
+    }
+
+    private void writeRaw(OutputStream out, String text) throws IOException {
+        out.write(text.getBytes("UTF-8"));
+    }
+
+    // ── Notification helpers ─────────────────────────────────────────────────
+
+    private void createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel channel = new NotificationChannel(
+                CHANNEL_ID, "LCR HTTP Service", NotificationManager.IMPORTANCE_LOW);
+            NotificationManager mgr = getSystemService(NotificationManager.class);
+            if (mgr != null) mgr.createNotificationChannel(channel);
+        }
+    }
+
+    private Notification buildNotification(String text) {
+        Intent openIntent = new Intent(this, MainActivity.class);
+        openIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        PendingIntent pendingOpen = PendingIntent.getActivity(
+            this, 0, openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+        Intent stopIntent = new Intent(this, LcrHttpService.class);
+        stopIntent.setAction(ACTION_STOP);
+        PendingIntent pendingStop = PendingIntent.getService(
+            this, 0, stopIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+        Notification.Builder builder;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            builder = new Notification.Builder(this, CHANNEL_ID);
+        } else {
+            builder = new Notification.Builder(this);
+            builder.setPriority(Notification.PRIORITY_LOW);
+        }
+        return builder
+            .setContentTitle("Filgo LCR")
+            .setContentText(text)
+            .setSmallIcon(android.R.drawable.ic_menu_manage)
+            .setContentIntent(pendingOpen)
+            .setOngoing(true)
+            .setShowWhen(false)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Arrêter", pendingStop)
+            .build();
+    }
+
+    private void updateNotification(String text) {
+        NotificationManager mgr = getSystemService(NotificationManager.class);
+        if (mgr != null) mgr.notify(NOTIF_ID, buildNotification(text));
+    }
+
+    private void broadcastReady() {
+        Intent intent = new Intent(BROADCAST_READY);
+        intent.setPackage(getPackageName());
+        sendBroadcast(intent);
+        Log.i(TAG, "Broadcast READY envoyé");
     }
 }
