@@ -24,8 +24,15 @@ public class LcrHttpService extends Service {
 
     private static final String TAG = "LcrHttpService";
     public static final int HTTP_PORT = 8765;
-    public static final String ACTION_STOP = "com.pa.lcrdemo.STOP_HTTP";
+    public static final String ACTION_START = "com.pa.lcrdemo.START_HTTP";
+    public static final String ACTION_STOP  = "com.pa.lcrdemo.STOP_HTTP";
     public static final String BROADCAST_READY = "com.pa.lcrdemo.HTTP_READY";
+
+    // Compatibilité avec DeepLinkHandler — utiliser publishResult() de préférence
+    public static volatile String lastResultJson   = null;
+    public static volatile String lastResultWoNum  = null;
+    public static volatile String lastResultWoGuid = null;
+    public static volatile long   lastResultTs     = 0;
 
     private static final String CHANNEL_ID = "lcr_http_channel";
     private static final int NOTIF_ID = 42;
@@ -39,6 +46,8 @@ public class LcrHttpService extends Service {
     private volatile boolean mRunning = false;
 
     public static void publishResult(String json) {
+        lastResultJson = json;
+        lastResultTs   = System.currentTimeMillis();
         sLastResult.set(json);
         sResultTimestamp = System.currentTimeMillis();
         Log.i(TAG, "Result published: " + json);
