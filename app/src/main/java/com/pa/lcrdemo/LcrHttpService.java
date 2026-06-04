@@ -102,10 +102,21 @@ public class LcrHttpService extends Service {
     // API Server — géré dans le foreground service
     // =========================================================
 
+    // =========================================================
+    // ✅ Serveur HTTP simple port 8766 — sans SSL, pour Field Service WebView
+    // =========================================================
+    private java.net.ServerSocket httpServerSocket;
+    private java.util.concurrent.ExecutorService httpExecutor;
+    private volatile boolean httpRunning = false;
+    private static final int HTTP_PORT = 8766;
+
+    // ✅ Dernier résultat de livraison — écrit par DeepLinkHandler
+    public static volatile String lastResultJson = null;
+
     private void startApiServer() {
         if (apiServer != null && apiServer.isRunning()) {
             Log.i(TAG, "ApiServer déjà running");
-            updateNotification("APK Filgo — serveur HTTP actif :8765");
+            updateNotification("APK Filgo — HTTPS:8765 HTTP:8766 actifs");
             return;
         }
         try {
@@ -114,11 +125,110 @@ public class LcrHttpService extends Service {
             apiServer = new com.pa.lcr.lcp.ApiServer(
                 facade, line -> Log.d(TAG, line), API_PORT, this);
             apiServer.start();
-            updateNotification("APK Filgo — serveur HTTP actif :8765");
-            Log.i(TAG, "ApiServer démarré sur port " + API_PORT);
+            Log.i(TAG, "ApiServer HTTPS démarré sur port " + API_PORT);
         } catch (Exception e) {
-            Log.e(TAG, "ApiServer start FAIL: " + e.getMessage());
-            updateNotification("APK Filgo — erreur démarrage serveur");
+            Log.e(TAG, "ApiServer HTTPS start FAIL: " + e.getMessage());
+        }
+
+        // ✅ Démarrer aussi le serveur HTTP simple sur 8766
+        startHttpServer();
+        updateNotification("APK Filgo — HTTPS:8765 HTTP:8766 actifs");
+    }
+
+    private void startHttpServer() {
+        if (httpRunning) return;
+        httpRunning = true;
+        httpExecutor = java.util.concurrent.Executors.newFixedThreadPool(4);
+        httpExecutor.execute(() -> {
+            try {
+                httpServerSocket = new java.net.ServerSocket(HTTP_PORT,
+                    50, java.net.InetAddress.getByName("127.0.0.1"));
+                Log.i(TAG, "Serveur HTTP démarré sur port " + HTTP_PORT);
+                while (httpRunning) {
+                    try {
+                        java.net.Socket client = httpServerSocket.accept();
+                        httpExecutor.execute(() -> handleHttpClient(client));
+                    } catch (Exception e) {
+                        if (httpRunning) Log.e(TAG, "HTTP accept ERR: " + e.getMessage());
+                    }
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "HTTP server start FAIL: " + e.getMessage());
+            }
+        });
+    }
+
+    private void handleHttpClient(java.net.Socket socket) {
+        try {
+            java.io.BufferedReader in = new java.io.BufferedReader(
+                new java.io.InputStreamReader(socket.getInputStream()));
+            java.io.OutputStream out = socket.getOutputStream();
+
+            String line = in.readLine();
+            if (line == null) { socket.close(); return; }
+            Log.d(TAG, "HTTP REQ: " + line);
+
+            boolean isOptions = line.startsWith("OPTIONS");
+            boolean isGet     = line.startsWith("GET /v1/delivery/last-result")
+                             || line.startsWith("GET /v1/ping");
+
+            String body = "";
+            if (line.startsWith("GET /v1/delivery/last-result")) {
+                String last = lastResultJson;
+                if (last == null) {
+                    body = "{"code":0,"msg":"No result yet"}";
+                } else {
+                    // Vérifier fraîcheur
+                    try {
+                        org.json.JSONObject j = new org.json.JSONObject(last);
+                        long ts  = j.optLong("ts", 0);
+                        long age = System.currentTimeMillis() - ts;
+                        if (age > 10 * 60 * 1000L) {
+                            body = "{"code":0,"msg":"Result expired"}";
+                        } else {
+                            body = "{"code":1,"msg":"OK","data":" + last + "}";
+                        }
+                    } catch (Exception e) {
+                        body = "{"code":0,"msg":"Parse error"}";
+                    }
+                }
+            } else if (line.startsWith("GET /v1/ping")) {
+                body = "{"code":1,"msg":"PING OK","port":" + HTTP_PORT + "}";
+            } else if (!isOptions) {
+                String resp = "HTTP/1.1 404 Not Found
+Connection: close
+
+";
+                out.write(resp.getBytes("UTF-8"));
+                out.flush();
+                socket.close();
+                return;
+            }
+
+            String response = "HTTP/1.1 200 OK
+"
+                + "Content-Type: application/json; charset=UTF-8
+"
+                + "Access-Control-Allow-Origin: *
+"
+                + "Access-Control-Allow-Methods: GET, OPTIONS
+"
+                + "Access-Control-Allow-Headers: Content-Type, Accept
+"
+                + "Content-Length: " + body.getBytes("UTF-8").length + "
+"
+                + "Connection: close
+
+"
+                + body;
+
+            out.write(response.getBytes("UTF-8"));
+            out.flush();
+            socket.close();
+
+        } catch (Exception e) {
+            Log.e(TAG, "HTTP handle ERR: " + e.getMessage());
+            try { socket.close(); } catch (Exception ignored) {}
         }
     }
 
@@ -126,17 +236,24 @@ public class LcrHttpService extends Service {
         try {
             if (apiServer != null && apiServer.isRunning()) {
                 apiServer.stop();
-                Log.i(TAG, "ApiServer arrêté");
+                Log.i(TAG, "ApiServer HTTPS arrêté");
             }
         } catch (Exception ignored) {
         } finally {
             apiServer = null;
         }
+
+        // Arrêter aussi le serveur HTTP
+        httpRunning = false;
+        try {
+            if (httpServerSocket != null) httpServerSocket.close();
+            if (httpExecutor != null) httpExecutor.shutdownNow();
+            Log.i(TAG, "Serveur HTTP arrêté");
+        } catch (Exception ignored) {}
     }
 
-    // ✅ Accès statique pour MainActivity (évite double démarrage)
     public static boolean isApiRunning() {
-        return false; // MainActivity vérifie via broadcast
+        return false;
     }
 
     // ── Notification ───────────────────────────────────────────────────────

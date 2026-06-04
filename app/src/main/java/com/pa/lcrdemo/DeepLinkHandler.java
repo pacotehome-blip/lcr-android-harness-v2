@@ -522,6 +522,8 @@ public class DeepLinkHandler {
                 lastResultWoNum  = woNum;
                 lastResultWoGuid = woGuid;
                 lastResultTs     = System.currentTimeMillis();
+                // ✅ Écrire aussi dans LcrHttpService pour le serveur HTTP 8766
+                com.pa.lcrdemo.LcrHttpService.lastResultJson = lastResult.toString();
                 android.util.Log.i(TAG, "last-result sauvegardé: wonum=" + woNum
                     + " net=" + net + " gross=" + gross + " ticket=" + ticket);
             } catch (Exception ignored) {}
