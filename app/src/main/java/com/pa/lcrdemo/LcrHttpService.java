@@ -10,220 +10,228 @@ import android.os.Build;
 import android.os.IBinder;
 import android.util.Log;
 
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
-import java.net.ServerSocket;
-import java.net.Socket;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicReference;
-
 public class LcrHttpService extends Service {
 
-    private static final String TAG = "LcrHttpService";
-    public static final int HTTP_PORT = 8765;
-    public static final String ACTION_START = "com.pa.lcrdemo.START_HTTP";
-    public static final String ACTION_STOP  = "com.pa.lcrdemo.STOP_HTTP";
-    public static final String BROADCAST_READY = "com.pa.lcrdemo.HTTP_READY";
+    private static final String TAG        = "LcrHttpService";
+    public  static final String CHANNEL_ID = "lcr_http_channel";
+    public  static final int    NOTIF_ID   = 1001;
 
-    // Compatibilité avec DeepLinkHandler — utiliser publishResult() de préférence
-    public static volatile String lastResultJson   = null;
-    public static volatile String lastResultWoNum  = null;
-    public static volatile String lastResultWoGuid = null;
-    public static volatile long   lastResultTs     = 0;
+    public static final String ACTION_START  = "com.pa.lcr.START_HTTP";
+    public static final String ACTION_STOP   = "com.pa.lcr.STOP_HTTP";
+    public static final String ACTION_STATUS = "com.pa.lcr.HTTP_STATUS";
+    public static final String BROADCAST_READY = "com.pa.lcr.HTTP_READY";
 
-    private static final String CHANNEL_ID = "lcr_http_channel";
-    private static final int NOTIF_ID = 42;
+    // Serveur HTTPS 8765
+    private com.pa.lcr.lcp.ApiServer apiServer;
+    private static final int API_PORT = 8765;
 
-    private static final AtomicReference<String> sLastResult = new AtomicReference<>(null);
-    private static volatile long sResultTimestamp = 0;
-    private static final long RESULT_TTL_MS = 60_000;
+    // Serveur HTTP 8766 — sans SSL pour Field Service WebView
+    private java.net.ServerSocket httpServerSocket;
+    private java.util.concurrent.ExecutorService httpExecutor;
+    private volatile boolean httpRunning = false;
+    private static final int HTTP_PORT = 8766;
 
-    private ServerSocket mServerSocket;
-    private ExecutorService mExecutor;
-    private volatile boolean mRunning = false;
-
-    public static void publishResult(String json) {
-        lastResultJson = json;
-        lastResultTs   = System.currentTimeMillis();
-        sLastResult.set(json);
-        sResultTimestamp = System.currentTimeMillis();
-        Log.i(TAG, "Result published: " + json);
-    }
-
-    // ── Lifecycle ─────────────────────────────────────────────────────────────
+    // Dernier résultat livraison — écrit par DeepLinkHandler
+    public static volatile String lastResultJson = null;
 
     @Override
     public void onCreate() {
         super.onCreate();
+        Log.i(TAG, "Service créé");
         createNotificationChannel();
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && ACTION_STOP.equals(intent.getAction())) {
+            Log.i(TAG, "ACTION_STOP reçu — arrêt du service");
+            stopApiServer();
+            stopForeground(true);
             stopSelf();
             return START_NOT_STICKY;
         }
-        startForeground(NOTIF_ID, buildNotification("HTTP service starting\u2026"));
-        mRunning = true;
-        mExecutor = Executors.newCachedThreadPool();
-        mExecutor.execute(this::serverLoop);
-        return START_STICKY;
-    }
 
-    @Override
-    public void onDestroy() {
-        mRunning = false;
-        try {
-            if (mServerSocket != null) mServerSocket.close();
-        } catch (IOException ignored) {}
-        if (mExecutor != null) mExecutor.shutdownNow();
-        super.onDestroy();
+        Log.i(TAG, "Service démarré — foreground");
+        startForeground(NOTIF_ID, buildNotification("APK Filgo — démarrage..."));
+
+        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+            startApiServer();
+            broadcastReady();
+        }, 1000);
+
+        return START_STICKY;
     }
 
     @Override
     public IBinder onBind(Intent intent) { return null; }
 
-    // ── Server loop ───────────────────────────────────────────────────────────
-
-    private void serverLoop() {
-        try {
-            mServerSocket = new ServerSocket(HTTP_PORT);
-            Log.i(TAG, "Listening on port " + HTTP_PORT);
-            updateNotification("Listening on port " + HTTP_PORT);
-            broadcastReady();
-            while (mRunning) {
-                try {
-                    final Socket client = mServerSocket.accept();
-                    mExecutor.execute(new Runnable() {
-                        @Override public void run() { handleClient(client); }
-                    });
-                } catch (IOException e) {
-                    if (mRunning) Log.w(TAG, "Accept error", e);
-                }
-            }
-        } catch (IOException e) {
-            Log.e(TAG, "Server error", e);
-        }
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+        stopApiServer();
+        Log.w(TAG, "Service détruit — Android va le relancer (START_STICKY)");
     }
 
-    // ── Request handler ───────────────────────────────────────────────────────
+    // =========================================================
+    // HTTPS 8765
+    // =========================================================
 
-    private void handleClient(Socket socket) {
+    private void startApiServer() {
+        if (apiServer != null && apiServer.isRunning()) {
+            Log.i(TAG, "ApiServer HTTPS déjà running");
+        } else {
+            try {
+                com.pa.lcr.lcp.ApiFacade facade =
+                    new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(this);
+                apiServer = new com.pa.lcr.lcp.ApiServer(
+                    facade, line -> Log.d(TAG, line), API_PORT, this);
+                apiServer.start();
+                Log.i(TAG, "ApiServer HTTPS démarré port " + API_PORT);
+            } catch (Exception e) {
+                Log.e(TAG, "ApiServer HTTPS FAIL: " + e.getMessage());
+            }
+        }
+
+        startHttpServer();
+        updateNotification("APK Filgo — HTTPS:" + API_PORT + " HTTP:" + HTTP_PORT);
+    }
+
+    private void stopApiServer() {
         try {
-            BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-            OutputStream out = socket.getOutputStream();
-
-            // Read request line
-            String requestLine = in.readLine();
-            if (requestLine == null) { socket.close(); return; }
-            Log.d(TAG, "Request: " + requestLine);
-
-            // Drain headers
-            while (true) {
-                String h = in.readLine();
-                if (h == null || h.isEmpty()) break;
+            if (apiServer != null && apiServer.isRunning()) {
+                apiServer.stop();
+                Log.i(TAG, "ApiServer HTTPS arrêté");
             }
+        } catch (Exception ignored) {
+        } finally {
+            apiServer = null;
+        }
+        stopHttpServer();
+    }
 
-            String[] parts = requestLine.split(" ");
-            String method = parts.length > 0 ? parts[0] : "";
-            String path   = parts.length > 1 ? parts[1] : "/";
-            int q = path.indexOf('?');
-            String cleanPath = q >= 0 ? path.substring(0, q) : path;
+    public static boolean isApiRunning() { return false; }
 
-            if ("OPTIONS".equalsIgnoreCase(method)) {
-                writeOptions(out);
-                socket.close();
-                return;
-            }
+    // =========================================================
+    // HTTP 8766 — sans SSL
+    // =========================================================
 
-            String body;
-
-            if ("/v1/delivery/result".equals(cleanPath)) {
-                String last = sLastResult.get();
-                if (last == null) {
-                    body = "{\"code\":0,\"msg\":\"No result yet\"}";
-                } else {
-                    long age = System.currentTimeMillis() - sResultTimestamp;
-                    if (age > RESULT_TTL_MS) {
-                        sLastResult.set(null);
-                        body = "{\"code\":0,\"msg\":\"Result expired\"}";
-                    } else {
-                        body = "{\"code\":1,\"msg\":\"OK\",\"data\":" + last + "}";
+    private void startHttpServer() {
+        if (httpRunning) return;
+        httpRunning = true;
+        httpExecutor = java.util.concurrent.Executors.newFixedThreadPool(4);
+        httpExecutor.execute(() -> {
+            try {
+                httpServerSocket = new java.net.ServerSocket(
+                    HTTP_PORT, 50, java.net.InetAddress.getByName("127.0.0.1"));
+                Log.i(TAG, "Serveur HTTP démarré port " + HTTP_PORT);
+                while (httpRunning) {
+                    try {
+                        java.net.Socket client = httpServerSocket.accept();
+                        httpExecutor.execute(() -> handleHttpClient(client));
+                    } catch (Exception e) {
+                        if (httpRunning) Log.e(TAG, "HTTP accept ERR: " + e.getMessage());
                     }
                 }
-            } else if ("/v1/ping".equals(cleanPath)) {
-                body = "{\"code\":1,\"msg\":\"PING OK\",\"port\":" + HTTP_PORT + "}";
-            } else {
-                write404(out);
+            } catch (Exception e) {
+                Log.e(TAG, "HTTP server FAIL: " + e.getMessage());
+            }
+        });
+    }
+
+    private void stopHttpServer() {
+        httpRunning = false;
+        try { if (httpServerSocket != null) httpServerSocket.close(); } catch (Exception ignored) {}
+        try { if (httpExecutor != null) httpExecutor.shutdownNow(); } catch (Exception ignored) {}
+    }
+
+    private void handleHttpClient(java.net.Socket socket) {
+        try {
+            java.io.BufferedReader br = new java.io.BufferedReader(
+                new java.io.InputStreamReader(socket.getInputStream()));
+            java.io.OutputStream out = socket.getOutputStream();
+
+            String line = br.readLine();
+            if (line == null) { socket.close(); return; }
+            Log.d(TAG, "HTTP REQ: " + line);
+
+            boolean isOptions    = line.startsWith("OPTIONS");
+            boolean isLastResult = line.startsWith("GET /v1/delivery/last-result");
+            boolean isPing       = line.startsWith("GET /v1/ping");
+
+            String body = "";
+            if (isLastResult) {
+                String last = lastResultJson;
+                if (last == null) {
+                    body = buildJson(0, "No result yet", null);
+                } else {
+                    try {
+                        org.json.JSONObject j = new org.json.JSONObject(last);
+                        long age = System.currentTimeMillis() - j.optLong("ts", 0);
+                        if (age > 10L * 60L * 1000L) {
+                            body = buildJson(0, "Result expired", null);
+                        } else {
+                            body = buildJson(1, "OK", last);
+                        }
+                    } catch (Exception ex) {
+                        body = buildJson(0, "Parse error", null);
+                    }
+                }
+            } else if (isPing) {
+                body = buildJson(1, "PING OK port " + HTTP_PORT, null);
+            } else if (!isOptions) {
+                writeRaw(out, "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
                 socket.close();
                 return;
             }
 
-            writeOk(out, body);
+            byte[] bodyBytes = body.getBytes("UTF-8");
+            String header = "HTTP/1.1 200 OK\r\n"
+                + "Content-Type: application/json; charset=UTF-8\r\n"
+                + "Access-Control-Allow-Origin: *\r\n"
+                + "Access-Control-Allow-Methods: GET, OPTIONS\r\n"
+                + "Access-Control-Allow-Headers: Content-Type, Accept\r\n"
+                + "Content-Length: " + bodyBytes.length + "\r\n"
+                + "Connection: close\r\n\r\n";
+
+            writeRaw(out, header);
+            out.write(bodyBytes);
+            out.flush();
             socket.close();
 
         } catch (Exception e) {
-            Log.e(TAG, "Client error", e);
-            try { socket.close(); } catch (IOException ignored) {}
+            Log.e(TAG, "HTTP handle ERR: " + e.getMessage());
+            try { socket.close(); } catch (Exception ignored) {}
         }
     }
 
-    // ── HTTP response writers ─────────────────────────────────────────────────
-
-    private void writeOk(OutputStream out, String body) throws IOException {
-        byte[] bodyBytes = body.getBytes("UTF-8");
+    private static String buildJson(int code, String msg, String data) {
         StringBuilder sb = new StringBuilder();
-        sb.append("HTTP/1.1 200 OK\r\n");
-        sb.append("Content-Type: application/json; charset=UTF-8\r\n");
-        sb.append("Access-Control-Allow-Origin: *\r\n");
-        sb.append("Access-Control-Allow-Methods: GET, OPTIONS\r\n");
-        sb.append("Access-Control-Allow-Headers: Content-Type, Accept\r\n");
-        sb.append("Content-Length: ").append(bodyBytes.length).append("\r\n");
-        sb.append("Connection: close\r\n");
-        sb.append("\r\n");
-        out.write(sb.toString().getBytes("UTF-8"));
-        out.write(bodyBytes);
-        out.flush();
+        sb.append("{\"code\":").append(code);
+        sb.append(",\"msg\":\"").append(msg.replace("\"", "\\\"")).append("\"");
+        if (data != null) {
+            sb.append(",\"data\":").append(data);
+        }
+        sb.append("}");
+        return sb.toString();
     }
 
-    private void write404(OutputStream out) throws IOException {
-        String body = "{\"code\":0,\"msg\":\"Not found\"}";
-        byte[] bodyBytes = body.getBytes("UTF-8");
-        StringBuilder sb = new StringBuilder();
-        sb.append("HTTP/1.1 404 Not Found\r\n");
-        sb.append("Content-Type: application/json; charset=UTF-8\r\n");
-        sb.append("Access-Control-Allow-Origin: *\r\n");
-        sb.append("Content-Length: ").append(bodyBytes.length).append("\r\n");
-        sb.append("Connection: close\r\n");
-        sb.append("\r\n");
-        out.write(sb.toString().getBytes("UTF-8"));
-        out.write(bodyBytes);
-        out.flush();
+    private static void writeRaw(java.io.OutputStream out, String s) throws Exception {
+        out.write(s.getBytes("UTF-8"));
     }
 
-    private void writeOptions(OutputStream out) throws IOException {
-        StringBuilder sb = new StringBuilder();
-        sb.append("HTTP/1.1 204 No Content\r\n");
-        sb.append("Access-Control-Allow-Origin: *\r\n");
-        sb.append("Access-Control-Allow-Methods: GET, OPTIONS\r\n");
-        sb.append("Access-Control-Allow-Headers: Content-Type, Accept\r\n");
-        sb.append("Content-Length: 0\r\n");
-        sb.append("Connection: close\r\n");
-        sb.append("\r\n");
-        out.write(sb.toString().getBytes("UTF-8"));
-        out.flush();
-    }
-
-    // ── Notification helpers ──────────────────────────────────────────────────
+    // =========================================================
+    // Notification
+    // =========================================================
 
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(
-                CHANNEL_ID, "LCR HTTP Service", NotificationManager.IMPORTANCE_LOW);
+                CHANNEL_ID,
+                "APK Filgo — Serveur HTTP",
+                NotificationManager.IMPORTANCE_LOW
+            );
+            channel.setDescription("Maintient le serveur HTTP LCR actif en arrière-plan");
+            channel.setShowBadge(false);
             NotificationManager mgr = getSystemService(NotificationManager.class);
             if (mgr != null) mgr.createNotificationChannel(channel);
         }
@@ -256,7 +264,7 @@ public class LcrHttpService extends Service {
             .setContentIntent(pendingOpen)
             .setOngoing(true)
             .setShowWhen(false)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Arr\u00eater", pendingStop)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Arrêter", pendingStop)
             .build();
     }
 
@@ -269,6 +277,6 @@ public class LcrHttpService extends Service {
         Intent intent = new Intent(BROADCAST_READY);
         intent.setPackage(getPackageName());
         sendBroadcast(intent);
-        Log.i(TAG, "Broadcast READY envoy\u00e9");
+        Log.i(TAG, "Broadcast READY envoyé");
     }
 }
