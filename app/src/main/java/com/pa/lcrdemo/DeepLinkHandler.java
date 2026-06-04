@@ -30,7 +30,6 @@ public class LcrHttpService extends Service {
     private static final String CHANNEL_ID = "lcr_http_channel";
     private static final int NOTIF_ID = 42;
 
-    // Shared result storage: set by MainActivity after delivery ends
     private static final AtomicReference<String> sLastResult = new AtomicReference<>(null);
     private static volatile long sResultTimestamp = 0;
     private static final long RESULT_TTL_MS = 60_000;
@@ -39,14 +38,13 @@ public class LcrHttpService extends Service {
     private ExecutorService mExecutor;
     private volatile boolean mRunning = false;
 
-    // Called by MainActivity to publish the delivery result JSON
     public static void publishResult(String json) {
         sLastResult.set(json);
         sResultTimestamp = System.currentTimeMillis();
         Log.i(TAG, "Result published: " + json);
     }
 
-    // ── Lifecycle ────────────────────────────────────────────────────────────
+    // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     @Override
     public void onCreate() {
@@ -60,13 +58,10 @@ public class LcrHttpService extends Service {
             stopSelf();
             return START_NOT_STICKY;
         }
-
-        startForeground(NOTIF_ID, buildNotification("HTTP service starting…"));
-
+        startForeground(NOTIF_ID, buildNotification("HTTP service starting\u2026"));
         mRunning = true;
         mExecutor = Executors.newCachedThreadPool();
         mExecutor.execute(this::serverLoop);
-
         return START_STICKY;
     }
 
@@ -83,7 +78,7 @@ public class LcrHttpService extends Service {
     @Override
     public IBinder onBind(Intent intent) { return null; }
 
-    // ── Server loop ──────────────────────────────────────────────────────────
+    // ── Server loop ───────────────────────────────────────────────────────────
 
     private void serverLoop() {
         try {
@@ -91,11 +86,12 @@ public class LcrHttpService extends Service {
             Log.i(TAG, "Listening on port " + HTTP_PORT);
             updateNotification("Listening on port " + HTTP_PORT);
             broadcastReady();
-
             while (mRunning) {
                 try {
-                    Socket client = mServerSocket.accept();
-                    mExecutor.execute(() -> handleClient(client));
+                    final Socket client = mServerSocket.accept();
+                    mExecutor.execute(new Runnable() {
+                        @Override public void run() { handleClient(client); }
+                    });
                 } catch (IOException e) {
                     if (mRunning) Log.w(TAG, "Accept error", e);
                 }
@@ -105,16 +101,16 @@ public class LcrHttpService extends Service {
         }
     }
 
-    // ── Request handler ──────────────────────────────────────────────────────
+    // ── Request handler ───────────────────────────────────────────────────────
 
     private void handleClient(Socket socket) {
-        try (socket;
-             BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-             OutputStream out = socket.getOutputStream()) {
+        try {
+            BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+            OutputStream out = socket.getOutputStream();
 
             // Read request line
             String requestLine = in.readLine();
-            if (requestLine == null) return;
+            if (requestLine == null) { socket.close(); return; }
             Log.d(TAG, "Request: " + requestLine);
 
             // Drain headers
@@ -123,18 +119,15 @@ public class LcrHttpService extends Service {
                 if (h == null || h.isEmpty()) break;
             }
 
-            // Parse method + path
             String[] parts = requestLine.split(" ");
             String method = parts.length > 0 ? parts[0] : "";
             String path   = parts.length > 1 ? parts[1] : "/";
-
-            // Strip query string
             int q = path.indexOf('?');
             String cleanPath = q >= 0 ? path.substring(0, q) : path;
 
-            // OPTIONS preflight
             if ("OPTIONS".equalsIgnoreCase(method)) {
                 writeOptions(out);
+                socket.close();
                 return;
             }
 
@@ -143,14 +136,13 @@ public class LcrHttpService extends Service {
             if ("/v1/delivery/result".equals(cleanPath)) {
                 String last = sLastResult.get();
                 if (last == null) {
-                    body = buildJson("code", "0", "msg", "No result yet");
+                    body = "{\"code\":0,\"msg\":\"No result yet\"}";
                 } else {
                     long age = System.currentTimeMillis() - sResultTimestamp;
                     if (age > RESULT_TTL_MS) {
                         sLastResult.set(null);
-                        body = buildJson("code", "0", "msg", "Result expired");
+                        body = "{\"code\":0,\"msg\":\"Result expired\"}";
                     } else {
-                        // last is already a JSON object string — embed it as the data value
                         body = "{\"code\":1,\"msg\":\"OK\",\"data\":" + last + "}";
                     }
                 }
@@ -158,30 +150,20 @@ public class LcrHttpService extends Service {
                 body = "{\"code\":1,\"msg\":\"PING OK\",\"port\":" + HTTP_PORT + "}";
             } else {
                 write404(out);
+                socket.close();
                 return;
             }
 
             writeOk(out, body);
+            socket.close();
 
         } catch (Exception e) {
             Log.e(TAG, "Client error", e);
+            try { socket.close(); } catch (IOException ignored) {}
         }
     }
 
-    // ── JSON builder helper ──────────────────────────────────────────────────
-
-    /** Build a flat JSON object from key/value string pairs. Values are quoted. */
-    private String buildJson(String... kvPairs) {
-        StringBuilder sb = new StringBuilder("{");
-        for (int i = 0; i < kvPairs.length; i += 2) {
-            if (i > 0) sb.append(',');
-            sb.append('"').append(kvPairs[i]).append("\":\"").append(kvPairs[i + 1]).append('"');
-        }
-        sb.append('}');
-        return sb.toString();
-    }
-
-    // ── HTTP response writers ────────────────────────────────────────────────
+    // ── HTTP response writers ─────────────────────────────────────────────────
 
     private void writeOk(OutputStream out, String body) throws IOException {
         byte[] bodyBytes = body.getBytes("UTF-8");
@@ -194,7 +176,7 @@ public class LcrHttpService extends Service {
         sb.append("Content-Length: ").append(bodyBytes.length).append("\r\n");
         sb.append("Connection: close\r\n");
         sb.append("\r\n");
-        writeRaw(out, sb.toString());
+        out.write(sb.toString().getBytes("UTF-8"));
         out.write(bodyBytes);
         out.flush();
     }
@@ -209,7 +191,7 @@ public class LcrHttpService extends Service {
         sb.append("Content-Length: ").append(bodyBytes.length).append("\r\n");
         sb.append("Connection: close\r\n");
         sb.append("\r\n");
-        writeRaw(out, sb.toString());
+        out.write(sb.toString().getBytes("UTF-8"));
         out.write(bodyBytes);
         out.flush();
     }
@@ -223,15 +205,11 @@ public class LcrHttpService extends Service {
         sb.append("Content-Length: 0\r\n");
         sb.append("Connection: close\r\n");
         sb.append("\r\n");
-        writeRaw(out, sb.toString());
+        out.write(sb.toString().getBytes("UTF-8"));
         out.flush();
     }
 
-    private void writeRaw(OutputStream out, String text) throws IOException {
-        out.write(text.getBytes("UTF-8"));
-    }
-
-    // ── Notification helpers ─────────────────────────────────────────────────
+    // ── Notification helpers ──────────────────────────────────────────────────
 
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -269,7 +247,7 @@ public class LcrHttpService extends Service {
             .setContentIntent(pendingOpen)
             .setOngoing(true)
             .setShowWhen(false)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Arrêter", pendingStop)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Arr\u00eater", pendingStop)
             .build();
     }
 
@@ -282,6 +260,6 @@ public class LcrHttpService extends Service {
         Intent intent = new Intent(BROADCAST_READY);
         intent.setPackage(getPackageName());
         sendBroadcast(intent);
-        Log.i(TAG, "Broadcast READY envoyé");
+        Log.i(TAG, "Broadcast READY envoy\u00e9");
     }
 }
