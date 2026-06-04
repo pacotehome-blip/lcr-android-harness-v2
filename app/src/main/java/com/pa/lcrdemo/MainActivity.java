@@ -56,6 +56,7 @@ import com.pa.lcr.lcp.RegisterSessionManager;
 import com.pa.lcr.lcp.log.LogBus;
 import com.pa.lcr.lcp.storage.DeliveryDb;
 import com.pa.lcr.lcp.storage.DeliveryLogStore;
+import com.pa.lcrdemo.dataverse.DeliverySyncScheduler;
 
 // ✅ Option A: runtime transport manager
 import com.pa.lcr.lcp.transport.MediaTransportManager;
@@ -479,6 +480,9 @@ public class MainActivity extends AppCompatActivity {
  ensureLegacyStoragePermissionForDownloads(true);
         deliveryStore.purgeOlderThanDaysAsync(7);
         deepLinkHandler = new DeepLinkHandler(this, deliveryStore, btExec);
+
+        // ✅ WorkManager — vide la queue offline Dataverse quand réseau disponible
+        DeliverySyncScheduler.schedulePeriodic(this);
 
         refreshApiStatus();
         logUi(null, "UI prête — Scan USB requis");

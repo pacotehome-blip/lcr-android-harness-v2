@@ -1,0 +1,21 @@
+{
+  "client_id": "ec9ea9bc-e972-4407-962b-b17ccd050380",
+  "authorization_user_agent": "DEFAULT",
+  "redirect_uri": "msauth://com.pa.lcrdemo/oQHvgt8wJsarpKneW3rVFA5hL1k=",
+  "broker_redirect_uri_registered": true,
+  "authorities": [
+    {
+      "type": "AAD",
+      "audience": {
+        "type": "AzureADMyOrg",
+        "tenant_id": "e04bf9f9-0e1b-4a84-a911-a1b2836046a2"
+      },
+      "default": true
+    }
+  ],
+  "logging": {
+    "pii_enabled": false,
+    "log_level": "INFO",
+    "logcat_enabled": true
+  }
+}

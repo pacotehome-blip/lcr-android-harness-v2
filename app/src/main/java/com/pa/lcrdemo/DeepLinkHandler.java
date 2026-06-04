@@ -11,6 +11,9 @@ import com.pa.lcr.lcp.MultiRegisterApiFacadeImpl;
 import com.pa.lcr.lcp.storage.DeliveryLogStore;
 import com.pa.lcr.lcp.transport.MediaTransportManager;
 import com.pa.lcr.lcp.transport.TransportIo;
+import com.pa.lcrdemo.auth.MsalTokenProvider;
+import com.pa.lcrdemo.dataverse.WorkOrderUpdater;
+import com.pa.lcrdemo.dataverse.DeliveryResultQueueDb;
 
 import org.json.JSONObject;
 
@@ -697,74 +700,89 @@ public class DeepLinkHandler {
             return;
         }
 
-        btExec.execute(() -> {
-            try {
-                // ✅ Récupérer les cookies du WebView Field Service
-                // CookieManager partagé entre tous les WebViews du processus
-                String cookies = "";
-                try {
-                    android.webkit.CookieManager cm = android.webkit.CookieManager.getInstance();
-                    cookies = cm.getCookie("https://dev-filgo-sonic.crm3.dynamics.com");
-                    if (cookies == null) cookies = "";
-                } catch (Exception e) {
-                    android.util.Log.w(TAG, "CookieManager ERR: " + e.getMessage());
+        // ✅ Extraire delivery_uid depuis lastResultJson
+        String deliveryUid = "";
+        try {
+            if (lastResultJson != null) {
+                JSONObject j = new JSONObject(lastResultJson);
+                JSONObject payload = j.optJSONObject("payload");
+                if (payload != null) {
+                    JSONObject result = payload.optJSONObject("result");
+                    if (result != null) deliveryUid = result.optString("delivery_uid", "");
                 }
+            }
+        } catch (Exception ignored) {}
 
-                if (cookies.isEmpty()) {
-                    android.util.Log.w(TAG, "patchDataverse: cookies vides — PATCH annulé");
-                    return;
-                }
+        final String fDeliveryUid = deliveryUid;
 
-                // ✅ Construire le JSON résumé
-                JSONObject resume = new JSONObject();
-                resume.put("source",  "LCR");
-                resume.put("wonum",   woNum   != null ? woNum   : "");
-                resume.put("net_l",   net     != null ? Double.parseDouble(net)   : 0);
-                resume.put("gross_l", gross   != null ? Double.parseDouble(gross) : 0);
-                resume.put("ticket",  ticket  != null ? ticket  : "");
-                resume.put("status",  status  != null ? status  : "DONE");
-                resume.put("ts",      new java.util.Date().toString());
+        // ✅ Sauvegarder dans la queue offline — même si pas de réseau
+        try {
+            DeliveryResultQueueDb queueDb = new DeliveryResultQueueDb(activity);
+            JSONObject queuePayload = new JSONObject();
+            queuePayload.put("deliveryUid", fDeliveryUid.isEmpty() ? woNum + "-" + System.currentTimeMillis() : fDeliveryUid);
+            queuePayload.put("workOrderId", woGuid.replace("{", "").replace("}", ""));
+            queuePayload.put("woNum",       woNum   != null ? woNum   : "");
+            queuePayload.put("netTotal",    net     != null ? Double.parseDouble(net)   : 0);
+            queuePayload.put("grossTotal",  gross   != null ? Double.parseDouble(gross) : 0);
+            queuePayload.put("ticketNo",    ticket  != null ? ticket  : "");
+            queuePayload.put("status",      status  != null ? status  : "DONE");
+            queueDb.upsertPending(
+                fDeliveryUid.isEmpty() ? woNum + "-" + System.currentTimeMillis() : fDeliveryUid,
+                queuePayload.toString()
+            );
+            android.util.Log.i(TAG, "patchDataverse: ajouté à la queue offline");
+            // ✅ Déclencher WorkManager immédiatement si réseau disponible
+            com.pa.lcrdemo.dataverse.DeliverySyncScheduler.triggerNow(activity);
+        } catch (Exception e) {
+            android.util.Log.e(TAG, "Queue ERR: " + e.getMessage());
+        }
 
-                JSONObject body = new JSONObject();
-                body.put("msdyn_workordersummary", resume.toString());
-
-                // ✅ PATCH vers Dataverse
-                String url = "https://dev-filgo-sonic.crm3.dynamics.com/api/data/v9.2/msdyn_workorders("
-                    + woGuid.replace("{", "").replace("}", "") + ")";
-
-                java.net.URL apiUrl = new java.net.URL(url);
-                javax.net.ssl.HttpsURLConnection conn =
-                    (javax.net.ssl.HttpsURLConnection) apiUrl.openConnection();
-                conn.setRequestMethod("PATCH");
-                conn.setDoOutput(true);
-                conn.setConnectTimeout(10000);
-                conn.setReadTimeout(10000);
-                conn.setRequestProperty("Content-Type",    "application/json");
-                conn.setRequestProperty("Accept",          "application/json");
-                conn.setRequestProperty("OData-MaxVersion","4.0");
-                conn.setRequestProperty("OData-Version",   "4.0");
-                conn.setRequestProperty("Cookie",          cookies);
-
-                byte[] bodyBytes = body.toString().getBytes("UTF-8");
-                conn.setRequestProperty("Content-Length", String.valueOf(bodyBytes.length));
-
-                java.io.OutputStream os = conn.getOutputStream();
-                os.write(bodyBytes);
-                os.flush();
-                os.close();
-
-                int code = conn.getResponseCode();
-                conn.disconnect();
-
-                if (code == 204 || code == 200) {
-                    android.util.Log.i(TAG, "patchDataverse: OK " + code
-                        + " wonum=" + woNum + " net=" + net + " gross=" + gross);
-                } else {
-                    android.util.Log.w(TAG, "patchDataverse: HTTP " + code);
-                }
-
-            } catch (Exception e) {
-                android.util.Log.e(TAG, "patchDataverse ERR: " + e.getMessage());
+        // ✅ Tenter MSAL + PATCH immédiat si réseau disponible
+        MsalTokenProvider tokenProvider = new MsalTokenProvider(activity);
+        tokenProvider.init(new MsalTokenProvider.InitCallback() {
+            @Override
+            public void onReady() {
+                tokenProvider.acquireToken(activity, new MsalTokenProvider.TokenCallback() {
+                    @Override
+                    public void onSuccess(String accessToken) {
+                        btExec.execute(() -> {
+                            try {
+                                WorkOrderUpdater.patchSummary(
+                                    accessToken,
+                                    woGuid,
+                                    net, gross, ticket,
+                                    woNum, fDeliveryUid
+                                );
+                                android.util.Log.i(TAG, "patchDataverse MSAL: OK — wonum=" + woNum);
+                                // Marquer comme envoyé dans la queue
+                                try {
+                                    DeliveryResultQueueDb qdb = new DeliveryResultQueueDb(activity);
+                                    java.util.List<DeliveryResultQueueDb.QueueItem> items =
+                                        qdb.listPending(5);
+                                    for (DeliveryResultQueueDb.QueueItem item : items) {
+                                        if (item.deliveryUid.equals(fDeliveryUid)) {
+                                            qdb.markSent(item.id);
+                                            break;
+                                        }
+                                    }
+                                } catch (Exception ignored) {}
+                            } catch (Exception e) {
+                                android.util.Log.w(TAG, "patchDataverse MSAL PATCH ERR: " + e.getMessage());
+                                // Reste dans la queue pour retry WorkManager
+                            }
+                        });
+                    }
+                    @Override
+                    public void onError(Exception e) {
+                        android.util.Log.w(TAG, "patchDataverse MSAL token ERR: " + e.getMessage()
+                            + " — restera dans la queue pour retry");
+                    }
+                });
+            }
+            @Override
+            public void onError(Exception e) {
+                android.util.Log.w(TAG, "patchDataverse MSAL init ERR: " + e.getMessage()
+                    + " — restera dans la queue pour retry");
             }
         });
     }

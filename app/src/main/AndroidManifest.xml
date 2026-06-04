@@ -12,7 +12,7 @@
     <!-- API loopback -->
     <uses-permission android:name="android.permission.INTERNET" />
 
-    <!-- ✅ Storage legacy (Android 9 / API 28 uniquement) : nécessaire pour écrire dans /Download -->
+    <!-- ✅ Storage legacy (Android 9 / API 28 uniquement) -->
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
@@ -32,7 +32,7 @@
         android:name="android.permission.BLUETOOTH_SCAN"
         android:required="false" />
 
-    <!-- ✅ Localisation requise pour startDiscovery() scan RSSI (Android 6-11) -->
+    <!-- ✅ Localisation requise pour startDiscovery() -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
@@ -43,7 +43,7 @@
     <!-- ✅ Démarrage automatique au boot -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
-    <!-- ✅ Exclure des optimisations batterie (garder service actif) -->
+    <!-- ✅ Exclure des optimisations batterie -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <application
@@ -66,7 +66,7 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- ✅ Deep Link lcrdemo:// — appelé depuis Field Service Mobile PCF -->
+            <!-- ✅ Deep Link lcrdemo:// — appelé depuis Field Service Mobile -->
             <intent-filter android:label="LCR Deep Link">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -82,7 +82,22 @@
             android:exported="true"
             android:configChanges="orientation|screenSize|keyboardHidden" />
 
-        <!-- ✅ Foreground service — maintient le serveur HTTP :8765 actif -->
+        <!-- ✅ MSAL — BrowserTabActivity pour le flow OAuth interactif -->
+        <activity
+            android:name="com.microsoft.identity.client.BrowserTabActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="msauth"
+                    android:host="com.pa.lcrdemo"
+                    android:path="/oQHvgt8wJsarpKneW3rVFA5hL1k=" />
+            </intent-filter>
+        </activity>
+
+        <!-- ✅ Foreground service — maintient le serveur HTTP :8765/:8766 actif -->
         <service
             android:name="com.pa.lcrdemo.LcrHttpService"
             android:enabled="true"
@@ -90,7 +105,7 @@
             android:foregroundServiceType="dataSync"
             android:stopWithTask="false" />
 
-        <!-- ✅ Boot receiver — démarre LcrHttpService au boot et après mise à jour APK -->
+        <!-- ✅ Boot receiver — démarre LcrHttpService au boot -->
         <receiver
             android:name="com.pa.lcrdemo.LcrBootReceiver"
             android:enabled="true"
