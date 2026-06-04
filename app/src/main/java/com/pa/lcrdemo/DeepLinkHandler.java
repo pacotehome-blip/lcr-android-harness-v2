@@ -526,6 +526,16 @@ public class DeepLinkHandler {
                 com.pa.lcrdemo.LcrHttpService.lastResultJson = lastResult.toString();
                 android.util.Log.i(TAG, "last-result sauvegardé: wonum=" + woNum
                     + " net=" + net + " gross=" + gross + " ticket=" + ticket);
+
+                // ✅ PATCH Dataverse directement via cookies WebView
+                final String fNetP    = net;
+                final String fGrossP  = gross;
+                final String fTicketP = ticket;
+                final String fGuidP   = woGuid;
+                final String fWoNumP  = woNum;
+                final String fStatusP = status;
+                patchDataverse(fGuidP, fWoNumP, fNetP, fGrossP, fTicketP, fStatusP);
+
             } catch (Exception ignored) {}
 
             // ✅ Stratégie B — écrire dans localStorage du WebView Field Service
@@ -667,6 +677,90 @@ public class DeepLinkHandler {
             logDeliveryEnd(serialId, woNum, null, "ERROR", null, errorJson);
             logEvent(serialId, woNum, DeliveryLogStore.LEVEL_ERROR, code, message, errorJson);
         } catch (Exception ignored) {}
+    }
+
+    // =========================================================
+    // ✅ PATCH Dataverse via cookies WebView Field Service
+    // =========================================================
+
+    private void patchDataverse(String woGuid, String woNum,
+                                 String net, String gross, String ticket,
+                                 String status) {
+        if (woGuid == null || woGuid.isEmpty()) {
+            android.util.Log.w(TAG, "patchDataverse: GUID vide — ignoré");
+            return;
+        }
+
+        btExec.execute(() -> {
+            try {
+                // ✅ Récupérer les cookies du WebView Field Service
+                // CookieManager partagé entre tous les WebViews du processus
+                String cookies = "";
+                try {
+                    android.webkit.CookieManager cm = android.webkit.CookieManager.getInstance();
+                    cookies = cm.getCookie("https://dev-filgo-sonic.crm3.dynamics.com");
+                    if (cookies == null) cookies = "";
+                } catch (Exception e) {
+                    android.util.Log.w(TAG, "CookieManager ERR: " + e.getMessage());
+                }
+
+                if (cookies.isEmpty()) {
+                    android.util.Log.w(TAG, "patchDataverse: cookies vides — PATCH annulé");
+                    return;
+                }
+
+                // ✅ Construire le JSON résumé
+                JSONObject resume = new JSONObject();
+                resume.put("source",  "LCR");
+                resume.put("wonum",   woNum   != null ? woNum   : "");
+                resume.put("net_l",   net     != null ? Double.parseDouble(net)   : 0);
+                resume.put("gross_l", gross   != null ? Double.parseDouble(gross) : 0);
+                resume.put("ticket",  ticket  != null ? ticket  : "");
+                resume.put("status",  status  != null ? status  : "DONE");
+                resume.put("ts",      new java.util.Date().toString());
+
+                JSONObject body = new JSONObject();
+                body.put("msdyn_workordersummary", resume.toString());
+
+                // ✅ PATCH vers Dataverse
+                String url = "https://dev-filgo-sonic.crm3.dynamics.com/api/data/v9.2/msdyn_workorders("
+                    + woGuid.replace("{", "").replace("}", "") + ")";
+
+                java.net.URL apiUrl = new java.net.URL(url);
+                javax.net.ssl.HttpsURLConnection conn =
+                    (javax.net.ssl.HttpsURLConnection) apiUrl.openConnection();
+                conn.setRequestMethod("PATCH");
+                conn.setDoOutput(true);
+                conn.setConnectTimeout(10000);
+                conn.setReadTimeout(10000);
+                conn.setRequestProperty("Content-Type",    "application/json");
+                conn.setRequestProperty("Accept",          "application/json");
+                conn.setRequestProperty("OData-MaxVersion","4.0");
+                conn.setRequestProperty("OData-Version",   "4.0");
+                conn.setRequestProperty("Cookie",          cookies);
+
+                byte[] bodyBytes = body.toString().getBytes("UTF-8");
+                conn.setRequestProperty("Content-Length", String.valueOf(bodyBytes.length));
+
+                java.io.OutputStream os = conn.getOutputStream();
+                os.write(bodyBytes);
+                os.flush();
+                os.close();
+
+                int code = conn.getResponseCode();
+                conn.disconnect();
+
+                if (code == 204 || code == 200) {
+                    android.util.Log.i(TAG, "patchDataverse: OK " + code
+                        + " wonum=" + woNum + " net=" + net + " gross=" + gross);
+                } else {
+                    android.util.Log.w(TAG, "patchDataverse: HTTP " + code);
+                }
+
+            } catch (Exception e) {
+                android.util.Log.e(TAG, "patchDataverse ERR: " + e.getMessage());
+            }
+        });
     }
 
     private static String buildErrorJson(String code, String message) {
