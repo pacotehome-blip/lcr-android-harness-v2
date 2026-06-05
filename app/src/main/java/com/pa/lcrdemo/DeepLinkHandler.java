@@ -280,7 +280,7 @@ public class DeepLinkHandler {
                                 android.util.Log.i(TAG, "Poll démarré — jobId=" + jobId);
                                 activity.runOnUiThread(() ->
                                     activity.toast("📦 Livraison démarrée — " + woNum));
-                                pollJobUntilDone(jobId, node, woNum, woIdGuid, fSerialId);
+                                pollJobUntilDone(jobId, node, woNum, woIdGuid, fSerialId, mac);
                             } else {
                                 android.util.Log.w(TAG, "oneshot/start: jobId absent");
                                 activity.runOnUiThread(() ->
@@ -328,7 +328,7 @@ public class DeepLinkHandler {
     // =========================================================
 
     private void pollJobUntilDone(String jobId, int node, String woNum,
-                                   String woIdGuid, String serialId) {
+                                   String woIdGuid, String serialId, String btMac) {
         btExec.execute(() -> {
             try {
                 final boolean[] deliveryDone = {false}; // ✅ Flag anti-double
