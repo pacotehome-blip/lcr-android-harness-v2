@@ -1,4 +1,3 @@
-
 package com.pa.lcr.lcp;
 
 import com.pa.lcr.lcp.transport.TransportIo;
@@ -51,13 +50,35 @@ public class LcpLink {
     private static final byte MSG_CHECK_REQUEST = 0x7D;
 
     // Cadence du CHECK_REQUEST
-    private static final int QP_MS = 200;
+    // ── Profils de performance par type de registre ─────────────────────────
+    // LCR-II mesuré : triplet DS+Gross+Net = 70ms, 1 lecture = 23ms @ 19200 baud
+    private static final int QP_MS_LCRII       = 100;
+    private static final int RX_SLICE_MS_LCRII = 100;
+    // Valeurs conservatives (LC3 ou inconnu)
+    private static final int QP_MS_DEFAULT       = 200;
+    private static final int RX_SLICE_MS_DEFAULT = 250;
+
+    // Valeurs actives — ajustées après détection du type de registre
+    private int QP_MS       = QP_MS_DEFAULT;
+    private int RX_SLICE_MS = RX_SLICE_MS_DEFAULT;
 
     // Timeout "queued long" pour opérations modifiantes (SET_FIELD / ISSUE_COMMAND)
     private static final int OP_QUEUEABLE_TIMEOUT_MS = 30_000;
 
-    // Slice de lecture pour permettre l'interleaving TX 0x7D / RX
-    private static final int RX_SLICE_MS = 250;
+    /**
+     * Applique le profil de performance selon le type de registre détecté.
+     * A appeler dans RegisterSessionManager après probeAndIdentify().
+     * LCR-II : QP_MS=100, RX_SLICE_MS=100 (mesuré par lcr_bench.py)
+     * LC3/défaut : valeurs conservatives
+     */
+    public void applyRegisterProfile(boolean isLcrii) {
+        QP_MS       = isLcrii ? QP_MS_LCRII       : QP_MS_DEFAULT;
+        RX_SLICE_MS = isLcrii ? RX_SLICE_MS_LCRII : RX_SLICE_MS_DEFAULT;
+        android.util.Log.i("LcpLink", "Profile applied: "
+            + (isLcrii ? "LCR-II" : "DEFAULT")
+            + " QP_MS=" + QP_MS
+            + " RX_SLICE_MS=" + RX_SLICE_MS);
+    }
 
     // ===================== TRANSPORT =====================
     private final TransportIo io;

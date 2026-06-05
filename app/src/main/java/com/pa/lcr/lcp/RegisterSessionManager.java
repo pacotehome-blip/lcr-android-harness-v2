@@ -348,8 +348,15 @@ public final class RegisterSessionManager {
             }
         } else {
             link = new LcpLink(io, node, from, true);
+            // ✅ LCR-II détecté — appliquer le profil de performance optimisé
+            // QP_MS=100, RX_SLICE_MS=100 (mesuré par lcr_bench.py @ 19200 baud)
+            link.applyRegisterProfile(true);
         }
         DeliveryController dc = new DeliveryController(link);
+        if (!isLc3) {
+            // ✅ LCR-II — appliquer profil performance au DeliveryController aussi
+            dc.applyRegisterProfile(true);
+        }
         dc.setLogStore(store);
 
         NodeScheduler scheduler = new NodeScheduler(node);

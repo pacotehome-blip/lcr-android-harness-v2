@@ -1,4 +1,3 @@
-
 package com.pa.lcr.lcp;
 
 import com.pa.lcr.lcp.storage.DeliveryLogStore;
@@ -281,9 +280,16 @@ private void reproEvent(String level, String type, String message, JSONObject da
     // Ticket loop
     private static final long TICKET_DEVICE_LOOP_MS = 30_000;
 
-    // LIVE backoff
-    private static final long LIVE_BASE_MS = 200;
-    private static final long LIVE_MAX_MS = 2000;
+    // LIVE backoff — valeurs par défaut conservatives
+    private static final long LIVE_BASE_MS_DEFAULT = 200;
+    private static final long LIVE_MAX_MS_DEFAULT   = 2000;
+    // Valeurs optimisées LCR-II (mesurées par lcr_bench.py @ 19200 baud)
+    // triplet DS+Gross+Net = 70ms → base 105ms avec marge
+    private static final long LIVE_BASE_MS_LCRII = 105;
+    private static final long LIVE_MAX_MS_LCRII  = 800;
+    // Valeurs actives — ajustées par applyRegisterProfile()
+    private volatile long LIVE_BASE_MS = LIVE_BASE_MS_DEFAULT;
+    private volatile long LIVE_MAX_MS  = LIVE_MAX_MS_DEFAULT;
     private static final long LIVE_LOG_THROTTLE_MS = 1000;
 
     // CONTINUER: fenêtre de grâce 30s
@@ -291,8 +297,15 @@ private void reproEvent(String level, String type, String message, JSONObject da
     private static final long CONTINUE_DEBOUNCE_MS = 1500;
 
     // API JobGet throttling
-    private static final long API_JOB_MIN_POLL_MS = 900;
-    private static final long API_JOB_BACKOFF_ON_FAIL_MS = 1200;
+    // Poll API — valeurs par défaut conservatives
+    private static final long API_JOB_MIN_POLL_MS_DEFAULT        = 900;
+    private static final long API_JOB_BACKOFF_ON_FAIL_MS_DEFAULT = 1200;
+    // Valeurs optimisées LCR-II
+    private static final long API_JOB_MIN_POLL_MS_LCRII        = 105;
+    private static final long API_JOB_BACKOFF_ON_FAIL_MS_LCRII = 200;
+    // Valeurs actives
+    private volatile long API_JOB_MIN_POLL_MS        = API_JOB_MIN_POLL_MS_DEFAULT;
+    private volatile long API_JOB_BACKOFF_ON_FAIL_MS = API_JOB_BACKOFF_ON_FAIL_MS_DEFAULT;
 
     private final LcpLink link;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
@@ -1305,6 +1318,35 @@ try {
         });
     }
 
+    /**
+     * Applique le profil de performance selon le type de registre détecté.
+     * Appelé par RegisterSessionManager après probeAndIdentify().
+     *
+     * LCR-II (19200 baud) mesuré par lcr_bench.py :
+     *   - 1 lecture = 23ms
+     *   - triplet DS+Gross+Net = 70ms
+     *   → LIVE_BASE_MS=105  LIVE_MAX_MS=800
+     *   → API_JOB_MIN_POLL_MS=105  API_JOB_BACKOFF_ON_FAIL_MS=200
+     *
+     * Par défaut (LC3 ou inconnu) : valeurs conservatives inchangées.
+     * En cas d'erreurs → liveBackoffStep() monte progressivement jusqu'à LIVE_MAX_MS.
+     * Quand ça se stabilise → liveResetBackoff() revient à LIVE_BASE_MS du profil.
+     */
+    public void applyRegisterProfile(boolean isLcrii) {
+        LIVE_BASE_MS              = isLcrii ? LIVE_BASE_MS_LCRII              : LIVE_BASE_MS_DEFAULT;
+        LIVE_MAX_MS               = isLcrii ? LIVE_MAX_MS_LCRII               : LIVE_MAX_MS_DEFAULT;
+        API_JOB_MIN_POLL_MS       = isLcrii ? API_JOB_MIN_POLL_MS_LCRII       : API_JOB_MIN_POLL_MS_DEFAULT;
+        API_JOB_BACKOFF_ON_FAIL_MS = isLcrii ? API_JOB_BACKOFF_ON_FAIL_MS_LCRII : API_JOB_BACKOFF_ON_FAIL_MS_DEFAULT;
+        // Réinitialiser le backoff avec la nouvelle base
+        liveBackoffMs     = LIVE_BASE_MS;
+        liveNextAllowedMs = 0L;
+        android.util.Log.i("DeliveryController", "Profile applied: "
+            + (isLcrii ? "LCR-II" : "DEFAULT")
+            + " LIVE_BASE=" + LIVE_BASE_MS + "ms"
+            + " LIVE_MAX=" + LIVE_MAX_MS + "ms"
+            + " POLL=" + API_JOB_MIN_POLL_MS + "ms");
+    }
+
     private void liveResetBackoff() {
         liveBackoffMs = LIVE_BASE_MS;
         liveNextAllowedMs = 0L;
@@ -1312,6 +1354,8 @@ try {
 
     private void liveBackoffStep(String reason) {
         long now = System.currentTimeMillis();
+        // Double le backoff jusqu'au max — si on revient à la normale,
+        // liveResetBackoff() remet LIVE_BASE_MS (valeur du profil actif)
         liveBackoffMs = Math.min(LIVE_MAX_MS, Math.max(LIVE_BASE_MS, liveBackoffMs * 2));
         liveNextAllowedMs = now + liveBackoffMs;
         if (now - liveLastSkipLogMs >= LIVE_LOG_THROTTLE_MS) {
