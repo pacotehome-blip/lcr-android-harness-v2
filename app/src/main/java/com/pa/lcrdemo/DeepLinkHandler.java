@@ -170,6 +170,25 @@ public class DeepLinkHandler {
                     android.util.Log.i(TAG, "BT connecté: " + mac);
                     logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
                         "BT_CONNECT", "BT connecté: " + mac, null);
+
+                    // ✅ Nouveau BT — attendre que probeAndIdentify crée le controller
+                    // probeAndIdentify() tourne en background dans onBtConnectedFromDeepLink
+                    // On attend max 5s par tranches de 200ms
+                    android.util.Log.i(TAG, "Attente controller BT après connexion...");
+                    com.pa.lcr.lcp.RegisterSessionManager rsm =
+                        com.pa.lcr.lcp.RegisterSessionManager.get(activity);
+                    String btKey2 = com.pa.lcr.lcp.transport.MediaTransportManager.btKey(mac);
+                    long waitDeadline = System.currentTimeMillis() + 5000;
+                    while (System.currentTimeMillis() < waitDeadline) {
+                        com.pa.lcr.lcp.DeliveryController dcCheck =
+                            rsm.getController(btKey2, node);
+                        if (dcCheck != null) {
+                            android.util.Log.i(TAG, "Controller BT prêt après "
+                                + (5000 - (waitDeadline - System.currentTimeMillis())) + "ms");
+                            break;
+                        }
+                        try { Thread.sleep(200); } catch (Exception ignored) {}
+                    }
                 }
 
                 // =========================================================
@@ -280,7 +299,7 @@ public class DeepLinkHandler {
                                 android.util.Log.i(TAG, "Poll démarré — jobId=" + jobId);
                                 activity.runOnUiThread(() ->
                                     activity.toast("📦 Livraison démarrée — " + woNum));
-                                pollJobUntilDone(jobId, node, woNum, woIdGuid, fSerialId, mac);
+                                pollJobUntilDone(jobId, node, woNum, woIdGuid, fSerialId);
                             } else {
                                 android.util.Log.w(TAG, "oneshot/start: jobId absent");
                                 activity.runOnUiThread(() ->
@@ -328,7 +347,7 @@ public class DeepLinkHandler {
     // =========================================================
 
     private void pollJobUntilDone(String jobId, int node, String woNum,
-                                   String woIdGuid, String serialId, String btMac) {
+                                   String woIdGuid, String serialId) {
         btExec.execute(() -> {
             try {
                 final boolean[] deliveryDone = {false}; // ✅ Flag anti-double
@@ -408,21 +427,7 @@ public class DeepLinkHandler {
                         // ✅ CONNECTED après FLOWING sans PAUSED = fin directe
                         // (cas 2e livraison successive — le registre termine sans pause)
                         if ("CONNECTED".equals(state) && hasSeenFlowing && !terminateSent) {
-                            android.util.Log.i(TAG, "CONNECTED après FLOWING — lecture fraîche avant terminate");
-                            // ✅ Lire le dernier tick frais du registre BT avant terminate
-                            try {
-                                String btKey = com.pa.lcr.lcp.transport.MediaTransportManager.btKey(btMac);
-                                com.pa.lcr.lcp.DeliveryController dc =
-                                    com.pa.lcr.lcp.RegisterSessionManager.get(activity)
-                                        .getController(btKey, node);
-                                if (dc != null) {
-                                    dc.requestLiveSample();
-                                    Thread.sleep(1200); // laisser le tick arriver
-                                    android.util.Log.i(TAG, "Lecture fraîche BT OK avant terminate direct");
-                                }
-                            } catch (Exception eLive) {
-                                android.util.Log.w(TAG, "Lecture fraîche ERR: " + eLive.getMessage());
-                            }
+                            android.util.Log.i(TAG, "CONNECTED après FLOWING — terminate direct");
                             try {
                                 MultiRegisterApiFacadeImpl facadeTerm2 =
                                     new MultiRegisterApiFacadeImpl(activity);
@@ -439,23 +444,9 @@ public class DeepLinkHandler {
 
                         // ✅ RUNNING_PAUSED → terminate
                         if ("RUNNING_PAUSED".equals(state) && hasSeenFlowing && !terminateSent) {
-                            android.util.Log.i(TAG, "RUNNING_PAUSED — lecture fraîche avant terminate");
+                            android.util.Log.i(TAG, "RUNNING_PAUSED — envoi job/terminate");
                             logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
                                 "JOB_TERMINATE", "RUNNING_PAUSED détecté", null);
-                            // ✅ Lire le dernier tick frais du registre BT avant terminate
-                            try {
-                                String btKey = com.pa.lcr.lcp.transport.MediaTransportManager.btKey(btMac);
-                                com.pa.lcr.lcp.DeliveryController dc =
-                                    com.pa.lcr.lcp.RegisterSessionManager.get(activity)
-                                        .getController(btKey, node);
-                                if (dc != null) {
-                                    dc.requestLiveSample();
-                                    Thread.sleep(1200); // laisser le tick arriver
-                                    android.util.Log.i(TAG, "Lecture fraîche BT OK avant terminate PAUSED");
-                                }
-                            } catch (Exception eLive) {
-                                android.util.Log.w(TAG, "Lecture fraîche ERR: " + eLive.getMessage());
-                            }
                             try {
                                 MultiRegisterApiFacadeImpl facadeTerm =
                                     new MultiRegisterApiFacadeImpl(activity);
@@ -615,13 +606,30 @@ public class DeepLinkHandler {
                     android.util.Log.e(TAG, "localStorage ERR: " + e.getMessage());
                 }
 
-                // ✅ MSAL écrit directement dans Dataverse — finish() suffit
-                android.util.Log.i(TAG, "Retour FS — finish()");
+                // ✅ Ouvrir filgo_lcr_form avec les données
+                // WebResource locale — fonctionne 100% offline
+                // Xrm.WebApi.updateRecord() écrit dans SQLite local FS
+                String urlRetour = "https://dev-filgo-sonic.crm3.dynamics.com/WebResources/filgo_lcr_form"
+                    + "?action=lcr_retour"
+                    + "&wonum="  + android.net.Uri.encode(fWoNum2  != null ? fWoNum2  : "")
+                    + "&woid="   + android.net.Uri.encode(fWoGuid  != null ? fWoGuid  : "")
+                    + "&net="    + android.net.Uri.encode(fNet     != null ? fNet     : "")
+                    + "&gross="  + android.net.Uri.encode(fGross   != null ? fGross   : "")
+                    + "&ticket=" + android.net.Uri.encode(fTicket  != null ? fTicket  : "")
+                    + "&status=" + android.net.Uri.encode(fStatus  != null ? fStatus  : "ok")
+                    + "&ts="     + System.currentTimeMillis();
+
+                android.util.Log.i(TAG, "Retour form — " + urlRetour);
+
                 try {
-                    activity.finish();
+                    android.content.Intent retour = new android.content.Intent(
+                        android.content.Intent.ACTION_VIEW,
+                        android.net.Uri.parse(urlRetour));
+                    retour.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                    activity.startActivity(retour);
                 } catch (Exception e) {
-                    android.util.Log.e(TAG, "finish() ERR: " + e.getMessage());
-                    activity.moveTaskToBack(true);
+                    android.util.Log.e(TAG, "startActivity retour FAIL: " + e.getMessage());
+                    activity.finish();
                 }
             });
 
