@@ -556,20 +556,26 @@ public class RegisterTabFragment extends Fragment {
         }
         if (btnConnect != null) btnConnect.setOnClickListener(v -> reconnectThisRegister(true));
         if (btnA != null) btnA.setOnClickListener(v -> {
-            if (controller == null) return;
-            controller.alignOrRecover();
-            ui.postDelayed(() -> {
+            final DeliveryController c = controller;
+            if (c == null) return;
+            bg.execute(() -> {
                 try {
                     if (tabTransportKey != null) {
-                        MediaTransportManager.get(requireContext()).activateExclusive(tabTransportKey, "TAB_A");
+                        MediaTransportManager.get(requireContext())
+                            .activateExclusive(tabTransportKey, "TAB_A");
                     }
                 } catch (Exception ignored) {}
-                try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
-                try { validateHeaderAsync(); } catch (Exception ignored) {}
-                try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
-                refreshDelCodeFromTickSnapshotThrottled();
-                updateButtons(controller != null ? controller.getState() : null);
-            }, 900);
+                try { c.alignOrRecover(); } catch (Exception e) {
+                    LogBus.api(node, "[A] ERR: " + safeMsg(e));
+                }
+                ui.post(() -> {
+                    if (!isAdded() || getView() == null) return;
+                    try { validateHeaderAsync(); } catch (Exception ignored) {}
+                    try { refreshDelCodeFromTickSnapshotThrottled(); } catch (Exception ignored) {}
+                    try { updateButtons(c.getState()); } catch (Exception ignored) {}
+                    try { scheduleLogRefresh(); } catch (Exception ignored) {}
+                });
+            });
         });
         if (btnB != null) btnB.setOnClickListener(v -> {
             if (controller == null) { reconnectThisRegister(true); return; }
@@ -577,54 +583,89 @@ public class RegisterTabFragment extends Fragment {
         });
         if (btnC != null) {
             btnC.setOnClickListener(v -> {
-                if (controller == null) return;
-                refreshDelCodeFromTickSnapshotThrottled();
-                int dc = lastDelCode;
-                boolean tp = (dc & 0x0001) != 0;
-                boolean flow = (dc & 0x0004) != 0;
-                boolean act = (dc & 0x0008) != 0;
-                if (tp || flow || act) {
-                    if (txtLive != null) txtLive.setText("LIVE: registre non prêt — faire Status (B) / Resolve (A)");
-                    LogBus.ui(node, ts("C bloqué: delCode=0x" + Integer.toHexString(dc)));
-                    updateButtons(controller.getState());
-                    return;
-                }
+                final DeliveryController c = controller;
+                if (c == null) return;
+                final int    prod   = getPendingProduct();
+                final double preset = parseDouble(
+                    edtPreset != null ? edtPreset.getText().toString() : "0", 0.0);
                 starting = true;
                 startingSinceMs = System.currentTimeMillis();
-                updateButtons(controller.getState());
-                if (txtLive != null) txtLive.setText("LIVE: RUNNING_FLOWING (flow off - waiting progression)");
-                int prod = getPendingProduct();
-                double preset = parseDouble(edtPreset != null ? edtPreset.getText().toString() : "0", 0.0);
-                controller.startDelivery(prod, preset);
+                updateButtons(c.getState());
+                bg.execute(() -> {
+                    try {
+                        if (tabTransportKey != null) {
+                            MediaTransportManager.get(requireContext())
+                                .activateExclusive(tabTransportKey, "TAB_C");
+                        }
+                    } catch (Exception ignored) {}
+                    DeliveryController.UiActionResult r = c.requestStartFromUi(prod, preset);
+                    if (!r.ok) {
+                        ui.post(() -> {
+                            starting = false;
+                            if (!isAdded() || getView() == null) return;
+                            if (txtLive != null) txtLive.setText("LIVE: " + r.userMessage);
+                            updateButtons(c.getState());
+                            try { Toast.makeText(requireContext(),
+                                r.userMessage, Toast.LENGTH_SHORT).show();
+                            } catch (Exception ignored) {}
+                        });
+                        return;
+                    }
+                    ui.post(() -> {
+                        if (!isAdded() || getView() == null) return;
+                        if (txtLive != null)
+                            txtLive.setText("LIVE: START demandé — attente confirmation registre");
+                        try { refreshDelCodeFromTickSnapshotThrottled(); } catch (Exception ignored) {}
+                        try { updateButtons(c.getState()); } catch (Exception ignored) {}
+                        try { scheduleLogRefresh(); } catch (Exception ignored) {}
+                    });
+                });
             });
         }
         if (btnContinue != null) btnContinue.setOnClickListener(v -> {
-            if (controller == null) return;
-            if (controller.getState() != DeliveryState.RUNNING_PAUSED) {
-                try { controller.requestLiveSample(); } catch (Exception ignored) {}
-                try { Toast.makeText(requireContext(), "Attendre confirmation FLOW OFF", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
-                LogBus.ui(node, ts("Continue ignoré: FLOW OFF pas encore confirmé"));
-                return;
-            }
-            controller.resumeIfPaused();
+            final DeliveryController c = controller;
+            if (c == null) return;
+            bg.execute(() -> {
+                DeliveryController.UiActionResult r = c.requestContinueFromUi();
+                if (!r.ok) {
+                    ui.post(() -> {
+                        if (!isAdded() || getView() == null) return;
+                        if (txtLive != null) txtLive.setText("LIVE: " + r.userMessage);
+                        updateButtons(c.getState());
+                        try { Toast.makeText(requireContext(),
+                            r.userMessage, Toast.LENGTH_SHORT).show();
+                        } catch (Exception ignored) {}
+                    });
+                    return;
+                }
+                ui.post(() -> {
+                    if (!isAdded() || getView() == null) return;
+                    try { updateButtons(c.getState()); } catch (Exception ignored) {}
+                    try { scheduleLogRefresh(); } catch (Exception ignored) {}
+                });
+            });
         });
         if (btnFinish != null) btnFinish.setOnClickListener(v -> {
-            if (controller == null) return;
-            boolean stableOff2 = false;
-            try { stableOff2 = controller.isFlowOffStable(); } catch (Exception ignored) {}
-            if (!stableOff2) {
-                try { controller.requestLiveSample(); } catch (Exception ignored) {}
-                try { Toast.makeText(requireContext(), "FLOW OFF en confirmation...", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
-                return;
-            }
-            controller.endDelivery();
-            ui.postDelayed(() -> {
-                try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
-                try { validateHeaderAsync(); } catch (Exception ignored) {}
-                try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
-                refreshDelCodeFromTickSnapshotThrottled();
-                updateButtons(controller != null ? controller.getState() : null);
-            }, 1500);
+            final DeliveryController c = controller;
+            if (c == null) return;
+            bg.execute(() -> {
+                try { c.endDelivery(); } catch (Exception e) {
+                    ui.post(() -> {
+                        if (!isAdded() || getView() == null) return;
+                        if (txtLive != null)
+                            txtLive.setText("LIVE: erreur END — " + safeMsg(e));
+                        updateButtons(c.getState());
+                    });
+                    return;
+                }
+                ui.post(() -> {
+                    if (!isAdded() || getView() == null) return;
+                    try { validateHeaderAsync(); } catch (Exception ignored) {}
+                    try { refreshDelCodeFromTickSnapshotThrottled(); } catch (Exception ignored) {}
+                    try { updateButtons(c.getState()); } catch (Exception ignored) {}
+                    try { scheduleLogRefresh(); } catch (Exception ignored) {}
+                });
+            });
         });
 
         // ✅ REPRINT: câblage du bouton Reprint (last ticket)
@@ -846,6 +887,16 @@ public class RegisterTabFragment extends Fragment {
         } catch (java.util.concurrent.RejectedExecutionException ignored) {}
     }
 
+    private DeliveryController.UiGateSnapshot gate() {
+        try {
+            DeliveryController c = controller;
+            if (c == null) return DeliveryController.UiGateSnapshot.disconnected();
+            return c.getUiGateSnapshot();
+        } catch (Exception e) {
+            return DeliveryController.UiGateSnapshot.disconnected();
+        }
+    }
+
     private void updateButtons(DeliveryState state) {
         if (btnConnect == null || btnA == null || btnB == null || btnC == null
                 || btnContinue == null || btnFinish == null) return;
@@ -861,36 +912,29 @@ public class RegisterTabFragment extends Fragment {
             return;
         }
 
+        // ✅ Source de vérité unique — le controller décide, pas le fragment
+        DeliveryController.UiGateSnapshot g = gate();
         DeliveryState st = (state != null) ? state : controller.getState();
-        boolean connected = (st == DeliveryState.CONNECTED);
-        boolean paused    = (st == DeliveryState.RUNNING_PAUSED);
-        boolean flowing   = (st == DeliveryState.RUNNING_FLOWING);
-        boolean ending    = (st == DeliveryState.ENDING);
 
         btnConnect.setEnabled(true);
-        btnB.setEnabled(true);
-        btnA.setEnabled(connected || paused || flowing);
+        btnB.setEnabled(g.canStatus);
+        btnA.setEnabled(g.canAlign);
+        btnC.setEnabled(g.canStart && !starting);
+        btnContinue.setEnabled(g.canContinue && !starting);
+        btnFinish.setEnabled(g.canEnd && !starting);
 
-        int dc = lastDelCode;
-        boolean tp   = (dc & 0x0001) != 0;
-        boolean flow = (dc & 0x0004) != 0;
-        boolean act  = (dc & 0x0008) != 0;
-        btnC.setEnabled(connected && !tp && !flow && !act);
-
-        if (starting) {
-            btnContinue.setEnabled(false);
-            btnFinish.setEnabled(false);
-        } else {
-            String lt = lastLiveText;
-            boolean flowOffPhase = (lt != null && lt.contains("Flow OFF"));
-            boolean enable = paused || flowOffPhase;
-            btnContinue.setEnabled(enable);
-            btnFinish.setEnabled(enable);
+        if (btnReprintTicket != null) {
+            btnReprintTicket.setEnabled(g.canReprint);
         }
 
-        // ✅ REPRINT: actif sur CONNECTED, RUNNING_PAUSED, ENDING
-        if (btnReprintTicket != null) {
-            btnReprintTicket.setEnabled(connected || paused || ending);
+        // Relâcher le flag "starting" si le controller confirme un état stable
+        if (starting) {
+            if (st == DeliveryState.RUNNING_FLOWING
+                    || st == DeliveryState.RUNNING_PAUSED
+                    || st == DeliveryState.ENDING
+                    || (System.currentTimeMillis() - startingSinceMs) > 12000L) {
+                starting = false;
+            }
         }
     }
 

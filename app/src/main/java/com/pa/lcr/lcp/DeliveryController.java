@@ -3133,4 +3133,115 @@ private String resolveActiveMedia() {
          currentDeliveryAttemptId = null;
      }
  }
+
+    // =========================================================
+    // UiGateSnapshot — snapshot canonique des droits UI
+    // Le controller décide, pas le fragment.
+    // =========================================================
+    public static final class UiGateSnapshot {
+        public final boolean canAlign;
+        public final boolean canStatus;
+        public final boolean canStart;
+        public final boolean canContinue;
+        public final boolean canEnd;
+        public final boolean canReprint;
+
+        public UiGateSnapshot(boolean canAlign, boolean canStatus, boolean canStart,
+                              boolean canContinue, boolean canEnd, boolean canReprint) {
+            this.canAlign    = canAlign;
+            this.canStatus   = canStatus;
+            this.canStart    = canStart;
+            this.canContinue = canContinue;
+            this.canEnd      = canEnd;
+            this.canReprint  = canReprint;
+        }
+
+        public static UiGateSnapshot disconnected() {
+            return new UiGateSnapshot(false, false, false, false, false, false);
+        }
+    }
+
+    public UiGateSnapshot getUiGateSnapshot() {
+        DeliveryState st = state;
+        if (st == null || st == DeliveryState.DISCONNECTED) {
+            return UiGateSnapshot.disconnected();
+        }
+        boolean connected = (st == DeliveryState.CONNECTED);
+        boolean flowing   = (st == DeliveryState.RUNNING_FLOWING);
+        boolean paused    = (st == DeliveryState.RUNNING_PAUSED);
+        boolean ending    = (st == DeliveryState.ENDING);
+
+        int dc = 0;
+        try { LastTick lt = lastTick; if (lt != null) dc = lt.delCode; } catch (Exception ignored) {}
+
+        boolean ticketPending  = (dc & DC_TICKET_PENDING)  != 0;
+        boolean flowActive     = (dc & DC_FLOW_ACTIVE)      != 0;
+        boolean deliveryActive = (dc & DC_DELIVERY_ACTIVE)  != 0;
+
+        boolean flowOffStable = false;
+        try { flowOffStable = isFlowOffStable(); } catch (Exception ignored) {}
+
+        boolean canAlign    = connected || flowing || paused;
+        boolean canStatus   = connected || flowing || paused || ending;
+        boolean canStart    = connected && !ticketPending && !flowActive && !deliveryActive;
+        boolean canContinue = paused || (flowing && flowOffStable);
+        boolean canEnd      = paused || (flowing && flowOffStable);
+        boolean canReprint  = connected || paused || ending;
+
+        return new UiGateSnapshot(canAlign, canStatus, canStart, canContinue, canEnd, canReprint);
+    }
+
+    // =========================================================
+    // UiActionResult — résultat typé pour les actions UI
+    // =========================================================
+    public static final class UiActionResult {
+        public final boolean ok;
+        public final String  userMessage;
+        private UiActionResult(boolean ok, String msg) { this.ok = ok; this.userMessage = msg; }
+        public static UiActionResult ok(String msg)   { return new UiActionResult(true,  msg); }
+        public static UiActionResult fail(String msg) { return new UiActionResult(false, msg); }
+    }
+
+    /** Point d'entrée bouton C — appelé depuis bg.execute() dans le fragment. */
+    public UiActionResult requestStartFromUi(int product1to16, double presetNet) {
+        if (link == null || link.isClosed())
+            return UiActionResult.fail("Registre non connecté");
+        DeliveryState st = state;
+        if (st == DeliveryState.PRESTART || st == DeliveryState.ENDING)
+            return UiActionResult.fail("Opération en cours — attendre");
+        if (st == DeliveryState.RUNNING_FLOWING || st == DeliveryState.RUNNING_PAUSED)
+            return UiActionResult.fail("Livraison déjà active — faire A pour récupérer");
+        int dc = 0;
+        try { LastTick lt = lastTick; if (lt != null) dc = lt.delCode; } catch (Exception ignored) {}
+        boolean notReady = ((dc & DC_TICKET_PENDING) != 0)
+                        || ((dc & DC_FLOW_ACTIVE)     != 0)
+                        || ((dc & DC_DELIVERY_ACTIVE)  != 0);
+        if (notReady)
+            return UiActionResult.fail(
+                "Registre non prêt (dc=0x" + Integer.toHexString(dc) + ") — faire B puis A");
+        try {
+            startDelivery(product1to16, presetNet);
+            return UiActionResult.ok("Livraison démarrée");
+        } catch (Exception e) {
+            return UiActionResult.fail("Erreur start: " + safeMsg(e));
+        }
+    }
+
+    /** Point d'entrée bouton Continuer — appelé depuis bg.execute() dans le fragment. */
+    public UiActionResult requestContinueFromUi() {
+        DeliveryState st = state;
+        boolean flowOffStable = false;
+        try { flowOffStable = isFlowOffStable(); } catch (Exception ignored) {}
+        if (st == DeliveryState.RUNNING_PAUSED
+                || (st == DeliveryState.RUNNING_FLOWING && flowOffStable)) {
+            try {
+                resumeIfPaused();
+                return UiActionResult.ok("Continue envoyé");
+            } catch (Exception e) {
+                return UiActionResult.fail("Erreur continue: " + safeMsg(e));
+            }
+        }
+        return UiActionResult.fail(
+            "État non valide pour Continuer (" + (st != null ? st.name() : "null") + ")");
+    }
 }
