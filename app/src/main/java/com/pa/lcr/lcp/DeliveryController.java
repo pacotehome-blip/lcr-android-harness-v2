@@ -341,6 +341,9 @@ private void reproEvent(String level, String type, String message, JSONObject da
     private final AtomicBoolean liveInFlight = new AtomicBoolean(false);
     private final ThreadLocal<Boolean> inLiveSample = new ThreadLocal<>();
 
+    // ✅ FIX: guard bouton A — évite les exécutions multiples en parallèle/séquence rapide
+    private final AtomicBoolean alignInFlight = new AtomicBoolean(false);
+
     // Ticket pending: anti-réimpression
     private final java.util.concurrent.atomic.AtomicBoolean ticketPrintInFlight =
             new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -911,6 +914,11 @@ FullStatus fs = readFullStatus("status/full");
     public void alignOrRecover() {
         io.execute(() -> {
             if (isStopped()) return;
+            // ✅ FIX multi-clic: si un align est déjà en cours, ignorer silencieusement.
+            if (!alignInFlight.compareAndSet(false, true)) {
+                emitLog("[A] alignOrRecover ignoré — déjà en cours");
+                return;
+            }
             try {
                 emitLog("[A] Align / recover requested");
 
@@ -926,6 +934,8 @@ try {
                 doAlignOrRecoverFull();
             } catch (Exception e) {
                 handleIoFailure("alignOrRecover", e);
+            } finally {
+                alignInFlight.set(false);
             }
         });
     }
@@ -1240,8 +1250,10 @@ try {
                     d = Math.abs(g - lastGrossRaw) + Math.abs(n - lastNetRaw);
                 }
 
-                double netL = n / scale;
-                double grossL = g / scale;
+                // ✅ FIX: cast unsigned comme dans la 1re zone (& 0xFFFFFFFFL)
+                // sans ça, si bit 31 set → valeur négative → division erronée
+                double netL   = (n & 0xFFFFFFFFL) / scale;
+                double grossL = (g & 0xFFFFFFFFL) / scale;
 
                 if (listener != null) listener.onLiveQty(netL, grossL);
 
@@ -1631,9 +1643,16 @@ softResync("retry/" + step);
     // =========================
     private void ensureDigits() throws Exception {
         if (cachedDigits >= 0) return;
-        byte[] dec = lcpGetField(FIELD_DECIMALS);
-        int idx = (dec.length >= 1) ? (dec[0] & 0xFF) : 0;
-        cachedDigits = decimalsDigits(idx);
+        try {
+            byte[] dec = lcpGetField(FIELD_DECIMALS);
+            int idx = (dec.length >= 1) ? (dec[0] & 0xFF) : 0;
+            cachedDigits = decimalsDigits(idx);
+        } catch (Exception e) {
+            // Fallback: 2 décimales (hundredths) — valeur LCR-II la plus courante.
+            // Ne pas relancer: cachedDigits reste -1 si on relance → scale = 0.1 → x10 bug.
+            cachedDigits = 2;
+            throw e; // signaler l'erreur LCP mais avec cachedDigits maintenant safe
+        }
     }
 
     private void writePresetNet_WithCacheOrFallback(double preset) throws Exception {
