@@ -72,7 +72,7 @@ public class RegisterTabFragment extends Fragment {
     private long logViewSinceMs = 0L;
     private int ticketPendingFlag = -1;
     private volatile String lastLiveText = null;
-    private volatile int lastDigits = 3;
+    private volatile int lastDigits = 2;  // ✅ FIX: LCR-II défaut = hundredths (2 décimales)
     private volatile int lastDelCode = 0;
     private volatile long lastDelCodePollMs = 0L;
     private static final long DELCODE_POLL_MIN_MS = 800L;
@@ -244,6 +244,8 @@ public class RegisterTabFragment extends Fragment {
                 if (!isAdded() || getView() == null) return;
                 lastLiveText = liveText;
                 if (txtLive != null) txtLive.setText(liveText);
+                // ✅ FIX décimales: mettre à jour lastDigits dès que le controller a cachedDigits
+                try { if (controller != null) { int d = controller.getDisplayDigits(); if (d >= 0) lastDigits = d; } } catch (Exception ignored) {}
                 ensureSerialVisibleThrottled();
                 refreshDelCodeFromTickSnapshotThrottled();
                 updateButtons(controller != null ? controller.getState() : null);
@@ -418,7 +420,7 @@ public class RegisterTabFragment extends Fragment {
         if (txtTicketPending != null) txtTicketPending.setText("Ticket pending : —");
         if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : —");
         ticketPendingFlag = -1;
-        lastDigits = 3;
+        lastDigits = 2;  // ✅ FIX: LCR-II défaut = hundredths (2 décimales)
         if (txtLive != null) txtLive.setText("LIVE: (en attente)");
         if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
         if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
@@ -566,9 +568,14 @@ public class RegisterTabFragment extends Fragment {
                             .activateExclusive(tabTransportKey, "TAB_A");
                     }
                 } catch (Exception ignored) {}
-                try { c.alignOrRecover(); } catch (Exception e) {
+
+                // ✅ FIX ticket pending: alignOrRecoverSync() est bloquant —
+                // retourne seulement quand le ticket est cleared et l'état FSM stable.
+                // validateHeaderAsync() lit donc ticketPending à jour (0 = NON).
+                try { c.alignOrRecoverSync(); } catch (Exception e) {
                     LogBus.api(node, "[A] ERR: " + safeMsg(e));
                 }
+
                 ui.post(() -> {
                     if (!isAdded() || getView() == null) return;
                     try { validateHeaderAsync(); } catch (Exception ignored) {}

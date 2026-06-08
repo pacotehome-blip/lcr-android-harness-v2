@@ -940,6 +940,31 @@ try {
         });
     }
 
+    /**
+     * Version bloquante de alignOrRecover — à appeler depuis un thread bg (jamais UI thread).
+     * Garantit que le ticket pending est cleared ET que l'état FSM est stable
+     * avant de retourner. Le fragment peut ainsi lire ticketPending à jour.
+     */
+    public void alignOrRecoverSync() {
+        if (isStopped()) return;
+        if (!alignInFlight.compareAndSet(false, true)) {
+            // Déjà en cours — attendre qu'il finisse (max 8s)
+            long deadline = System.currentTimeMillis() + 8000L;
+            while (alignInFlight.get() && System.currentTimeMillis() < deadline) {
+                try { Thread.sleep(100); } catch (InterruptedException ignored) { break; }
+            }
+            return;
+        }
+        try {
+            emitLog("[A-sync] Align / recover (sync)");
+            doAlignOrRecoverFull();
+        } catch (Exception e) {
+            handleIoFailure("alignOrRecoverSync", e);
+        } finally {
+            alignInFlight.set(false);
+        }
+    }
+
     @Override
     public void startDelivery(int product1to16, double presetNet) {
         io.execute(() -> {
