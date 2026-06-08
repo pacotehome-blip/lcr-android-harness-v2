@@ -3203,6 +3203,9 @@ private String resolveActiveMedia() {
     }
 
     /** Point d'entrée bouton C — appelé depuis bg.execute() dans le fragment. */
+    /** Point d'entrée UI bouton C.
+     *  UN SEUL MAÎTRE : api_deliveryStartC() — lit delStatus, crée ApiJob, envoie CMD_RUN.
+     *  Appelé depuis bg.execute() dans RegisterTabFragment. */
     public UiActionResult requestStartFromUi(int product1to16, double presetNet) {
         if (link == null || link.isClosed())
             return UiActionResult.fail("Registre non connecté");
@@ -3211,35 +3214,24 @@ private String resolveActiveMedia() {
             return UiActionResult.fail("Opération en cours — attendre");
         if (st == DeliveryState.RUNNING_FLOWING || st == DeliveryState.RUNNING_PAUSED)
             return UiActionResult.fail("Livraison déjà active — faire A pour récupérer");
-        int dc = 0;
-        try { LastTick lt = lastTick; if (lt != null) dc = lt.delCode; } catch (Exception ignored) {}
-        boolean notReady = ((dc & DC_TICKET_PENDING) != 0)
-                        || ((dc & DC_FLOW_ACTIVE)     != 0)
-                        || ((dc & DC_DELIVERY_ACTIVE)  != 0);
-        if (notReady)
-            return UiActionResult.fail(
-                "Registre non prêt (dc=0x" + Integer.toHexString(dc) + ") — faire B puis A");
-        try {
-            startDelivery(product1to16, presetNet);
-            return UiActionResult.ok("Livraison démarrée");
-        } catch (Exception e) {
-            return UiActionResult.fail("Erreur start: " + safeMsg(e));
-        }
+        // Déléguer à api_deliveryStartC — seul maître.
+        ApiResult r = api_deliveryStartC(product1to16, presetNet);
+        if (r != null && r.code == 1) return UiActionResult.ok("Livraison démarrée");
+        return UiActionResult.fail(r != null && r.msg != null ? r.msg : "Erreur start");
     }
 
     /** Point d'entrée bouton Continuer — appelé depuis bg.execute() dans le fragment. */
+    /** Point d'entrée UI bouton Continuer.
+     *  Délègue à resumeIfPaused() — maître unique du CMD_RUN de continuation.
+     *  Appelé depuis bg.execute() dans RegisterTabFragment. */
     public UiActionResult requestContinueFromUi() {
         DeliveryState st = state;
-        boolean flowOffStable = false;
-        try { flowOffStable = isFlowOffStable(); } catch (Exception ignored) {}
+        boolean stable = false;
+        try { stable = isFlowOffStable(); } catch (Exception ignored) {}
         if (st == DeliveryState.RUNNING_PAUSED
-                || (st == DeliveryState.RUNNING_FLOWING && flowOffStable)) {
-            try {
-                resumeIfPaused();
-                return UiActionResult.ok("Continue envoyé");
-            } catch (Exception e) {
-                return UiActionResult.fail("Erreur continue: " + safeMsg(e));
-            }
+                || (st == DeliveryState.RUNNING_FLOWING && stable)) {
+            resumeIfPaused();
+            return UiActionResult.ok("Continue envoyé");
         }
         return UiActionResult.fail(
             "État non valide pour Continuer (" + (st != null ? st.name() : "null") + ")");
