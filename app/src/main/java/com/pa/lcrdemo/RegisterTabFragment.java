@@ -197,7 +197,8 @@ public class RegisterTabFragment extends Fragment {
         public void onStateChanged(DeliveryState state) {
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
-                if (starting && state == DeliveryState.RUNNING_FLOWING) starting = false;
+                if (starting && (state == DeliveryState.RUNNING_FLOWING
+                        || state == DeliveryState.RUNNING_PAUSED)) starting = false;
                 if (starting && (System.currentTimeMillis() - startingSinceMs) > 12000L)
                     starting = false;
                 refreshDelCodeFromTickSnapshotThrottled();
