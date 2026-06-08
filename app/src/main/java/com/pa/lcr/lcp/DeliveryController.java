@@ -1459,9 +1459,12 @@ try {
     }
 
     private FullStatus readFullStatus(String ctx) throws Exception {
+        // ✅ FIX: un seul appel LCP au lieu de deux (lcpMachineStatus + lcpDeliveryStatus).
+        // Deux appels séquentiels sur BT LCR-II causaient des désynchronisations de buffer
+        // → "length=6; index=6" → soft-skip counters en boucle → gross/net jamais lus.
         LcpLink.MachineStatus ms = lcpMachineStatus();
-        int[] ds = lcpDeliveryStatus();
-        return new FullStatus(ms, ds[0], ds[1]);
+        // Réutiliser delStatus/delCode de MachineStatus — même données que GET_DELIVERY_STATUS.
+        return new FullStatus(ms, ms.delStatus, ms.delCode);
     }
 
     private FullStatus safeReadFullStatusNoThrow() {
