@@ -1457,9 +1457,10 @@ try {
     }
 
     private FullStatus readFullStatus(String ctx) throws Exception {
+        // ✅ FIX: un seul appel LCP (GET_MACHINE_STATUS contient déjà delStatus+delCode).
+        // Deux appels séquentiels causaient rc=0xDA sur GET_FIELD #44/#45 → soft-skip counters en boucle.
         LcpLink.MachineStatus ms = lcpMachineStatus();
-        int[] ds = lcpDeliveryStatus();
-        return new FullStatus(ms, ds[0], ds[1]);
+        return new FullStatus(ms, ms.delStatus, ms.delCode);
     }
 
     private FullStatus safeReadFullStatusNoThrow() {
