@@ -20,7 +20,8 @@ public class DeliveryDb extends SQLiteOpenHelper {
     // v3: add media_profile/media_event
     // v4: add structured error columns to delivery_event (event_level/event_code/event_where/detail_short)
     // v5: add truck_profile + truck_drift tables
-    public static final int DB_VERSION = 5;
+    // v6: add active_delivery table (livraison courante persistée)
+    public static final int DB_VERSION = 6;
 
     private static final String TAG = "DeliveryDb";
 
@@ -48,8 +49,8 @@ public class DeliveryDb extends SQLiteOpenHelper {
     public void onCreate(SQLiteDatabase db) {
         createDeliveryTables(db);
         createMediaTables(db);
-        // ✅ v5: truck profile + drift tables
         createTruckTables(db);
+        createActiveDeliveryTable(db);
     }
 
     @Override
@@ -79,6 +80,10 @@ public class DeliveryDb extends SQLiteOpenHelper {
         // v5 tables
         if (oldVersion < 5) {
             createTruckTables(db);
+        }
+        // v6: active_delivery
+        if (oldVersion < 6) {
+            createActiveDeliveryTable(db);
         }
     }
 
@@ -234,6 +239,27 @@ public class DeliveryDb extends SQLiteOpenHelper {
         );
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_drift_truck ON truck_drift(truck_id, ts_ms);");
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_drift_ack ON truck_drift(acknowledged);");
+    }
+
+    // =========================================================
+    // Active delivery table (v6)
+    // Une seule ligne (id=1) — livraison courante en cours.
+    // Effacée à onDeliveryEnded. Permet de reprendre le poll
+    // si l'APK est relancé pendant une livraison active.
+    // =========================================================
+    private static void createActiveDeliveryTable(SQLiteDatabase db) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS active_delivery (" +
+            "id INTEGER PRIMARY KEY CHECK (id = 1)," +
+            "wo_num TEXT," +
+            "wo_id_guid TEXT," +
+            "job_id TEXT," +
+            "mac TEXT," +
+            "node INTEGER," +
+            "serial_id TEXT," +
+            "ts_started_ms INTEGER" +
+            ");"
+        );
     }
 
     // =========================================================
