@@ -578,6 +578,7 @@ public class RegisterTabFragment extends Fragment {
 
                 ui.post(() -> {
                     if (!isAdded() || getView() == null) return;
+                    lastHeaderValidateMs = 0L; // forcer refresh après align
                     try { validateHeaderAsync(); } catch (Exception ignored) {}
                     try { refreshDelCodeFromTickSnapshotThrottled(); } catch (Exception ignored) {}
                     try { updateButtons(c.getState()); } catch (Exception ignored) {}
@@ -846,20 +847,36 @@ public class RegisterTabFragment extends Fragment {
 
     private void validateHeaderAsync() {
         try { if (bg.isShutdown() || bg.isTerminated()) return; } catch (Exception ignored) {}
+        // ✅ Throttle: pas plus d'une validation LCP toutes les 5s
+        long now0 = System.currentTimeMillis();
+        if (now0 - lastHeaderValidateMs < HEADER_VALIDATE_MIN_MS) return;
+        lastHeaderValidateMs = now0;
         try {
             bg.execute(() -> {
                 try {
                     DeliveryController c = controller;
                     if (c == null) return;
 
-                    // ✅ FIX: pendant une livraison active, ne pas faire d'appels LCP
-                    // (api_registerValidate = 5+ transactions LCP → sature le bus → soft-skip counters).
-                    // Utiliser le tickSnapshot (cache) pour ticketPending uniquement.
-                    DeliveryState st = c.getState();
-                    boolean deliveryActive = (st == DeliveryState.RUNNING_FLOWING
-                            || st == DeliveryState.RUNNING_PAUSED
-                            || st == DeliveryState.PRESTART
-                            || st == DeliveryState.ENDING);
+                    // ✅ FIX: utiliser delCode du tickSnapshot pour détecter livraison active.
+                    // Le FSM oscille trop (CONNECTED↔RUNNING_FLOWING) — pas fiable.
+                    // DC_DELIVERY_ACTIVE (0x0008) est la source de vérité du registre.
+                    boolean deliveryActive = false;
+                    try {
+                        ApiResult snap = c.api_tickSnapshot();
+                        if (snap != null && snap.data != null) {
+                            int dc = snap.data.optInt("delCode", 0);
+                            deliveryActive = (dc & 0x0008) != 0;
+                        }
+                    } catch (Exception ignored) {}
+
+                    // Aussi bloquer si FSM dit livraison active (double garde)
+                    if (!deliveryActive) {
+                        DeliveryState st = c.getState();
+                        deliveryActive = (st == DeliveryState.RUNNING_FLOWING
+                                || st == DeliveryState.RUNNING_PAUSED
+                                || st == DeliveryState.PRESTART
+                                || st == DeliveryState.ENDING);
+                    }
 
                     String serial = (serialFromArgs != null && !serialFromArgs.trim().isEmpty())
                             ? serialFromArgs.trim() : "";
@@ -874,7 +891,7 @@ public class RegisterTabFragment extends Fragment {
                             tp = j.optInt("ticketPending", -1);
                         }
                     } else {
-                        // Pendant livraison: cache uniquement
+                        // Pendant livraison: cache uniquement — zéro appel LCP
                         ApiResult snap = c.api_tickSnapshot();
                         JSONObject j = (snap != null && snap.data != null) ? snap.data : null;
                         if (j != null) {
@@ -893,7 +910,6 @@ public class RegisterTabFragment extends Fragment {
                             txtSerialId.setText("#Série : " + ((fSerial == null || fSerial.isEmpty()) ? "—" : fSerial));
                             if (fSerial != null && !fSerial.trim().isEmpty()) headerValidatedOnce = true;
                         }
-
                         if (txtTicketPending != null) {
                             txtTicketPending.setText("Ticket pending : " +
                                     (ticketPendingFlag == 1 ? "OUI" : (ticketPendingFlag == 0 ? "NON" : "—")));
