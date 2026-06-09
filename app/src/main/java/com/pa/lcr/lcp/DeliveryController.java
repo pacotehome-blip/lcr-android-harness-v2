@@ -1206,19 +1206,23 @@ try {
                     return;
                 }
 
-                boolean ticket = (delCode & DC_TICKET_PENDING) != 0;
-                boolean flowBit = (delCode & DC_FLOW_ACTIVE) != 0;
-                boolean active = (delCode & DC_DELIVERY_ACTIVE) != 0;
+                boolean ticket  = (delCode & DC_TICKET_PENDING)  != 0;
+                boolean flowBit = (delCode & DC_FLOW_ACTIVE)      != 0;
+                boolean active  = (delCode & DC_DELIVERY_ACTIVE)  != 0;
 
-                if (!active) {
+                // ✅ RÈGLE D'ÉTAT SIMPLE — delCode est la vérité registre.
+                // ticketPending ne peut jamais écraser une livraison réelle.
+                if (active && flowBit) {
+                    setState(DeliveryState.RUNNING_FLOWING);
+                } else if (active) {
+                    setState(DeliveryState.RUNNING_PAUSED);
+                } else {
                     liveResetBackoff();
                     setState(DeliveryState.CONNECTED);
-
                     if (listener != null) {
                         listener.onLiveStatus(ticket ? "LIVE: CONNECTED - Ticket pending" : "LIVE: CONNECTED - Ready");
                         listener.onFlowStability(false, false, 0L);
                     }
-
                     lastGrossRaw = -1;
                     lastNetRaw = -1;
                     flowOffStable = false;
@@ -1226,47 +1230,51 @@ try {
                     flowOffStartMs = 0L;
                     lastCountsChangeMs = 0L;
                     continueGraceUntilMs = 0L;
-
-                    // ✅ TickBus: publish state/del changes even if quantities unknown
                     try {
                         LastTick prev = lastTick;
-                        double net = (prev != null) ? prev.net : 0.0;
+                        double net   = (prev != null) ? prev.net   : 0.0;
                         double gross = (prev != null) ? prev.gross : 0.0;
                         publishTickIfChanged(net, gross, -1, -1, delStatus, delCode, state);
                     } catch (Exception ignored) {}
-
                     return;
                 }
 
+                // ✅ Livraison active — lire les compteurs
                 try { ensureDigits(); }
                 catch (Exception e) { liveSoftSkip("ensureDigits", e); return; }
 
                 double scale = Math.pow(10, cachedDigits);
 
                 int g, n;
+                boolean countersOk;
                 try {
                     g = beI32(lcpGetField(FIELD_GROSS_COUNT));
                     n = beI32(lcpGetField(FIELD_NET_COUNT));
+                    countersOk = true;
+                    liveResetBackoff();
                 } catch (Exception ex) {
+                    // Fallback sur dernières valeurs connues — on publie quand même
                     g = (lastGrossRaw >= 0) ? lastGrossRaw : 0;
-                    n = (lastNetRaw >= 0) ? lastNetRaw : 0;
+                    n = (lastNetRaw   >= 0) ? lastNetRaw   : 0;
+                    countersOk = false;
                     liveBackoffStep("[LIVE] soft-skip counters");
                 }
 
-                liveResetBackoff();
+                // ✅ unsigned cast — les compteurs LCR sont U32
+                double netL   = (n & 0xFFFFFFFFL) / scale;
+                double grossL = (g & 0xFFFFFFFFL) / scale;
+
+                // ✅ Toujours publier onLiveQty tant que la livraison est active
+                if (listener != null) listener.onLiveQty(netL, grossL);
+                publishTickIfChanged(netL, grossL, -1, -1, delStatus, delCode, state);
+
+                if (!countersOk) return; // backoff déjà appliqué
+
                 long t = System.currentTimeMillis();
                 int d = 0;
                 if (lastGrossRaw >= 0 && lastNetRaw >= 0) {
                     d = Math.abs(g - lastGrossRaw) + Math.abs(n - lastNetRaw);
                 }
-
-                double netL = n / scale;
-                double grossL = g / scale;
-
-                if (listener != null) listener.onLiveQty(netL, grossL);
-
-                // ✅ TickBus: publish on change (B+ includes delStatus/delCode + state; dev/prn best-effort via last known)
-                publishTickIfChanged(netL, grossL, -1, -1, delStatus, delCode, state);
 
                 if (d > 0) {
                     continueGraceUntilMs = 0L;
@@ -1276,12 +1284,10 @@ try {
                     flowOffStartMs = 0L;
                     lastGrossRaw = g;
                     lastNetRaw = n;
-
                     if (listener != null) {
                         listener.onFlowStability(flowBit, false, 0L);
                         listener.onLiveStatus("LIVE: RUNNING_FLOWING (FLOW ON)");
                     }
-                    setState(DeliveryState.RUNNING_FLOWING);
                     return;
                 }
 
@@ -1289,15 +1295,10 @@ try {
                 long age = t - lastCountsChangeMs;
 
                 if (!sawFlowOnOnce) {
-                    flowOffStable = false;
-                    flowOffStartMs = 0L;
-
                     if (listener != null) {
                         listener.onFlowStability(flowBit, false, 0L);
                         listener.onLiveStatus("LIVE: RUNNING_FLOWING (Flow OFF - waiting progression)");
                     }
-
-                    setState(DeliveryState.RUNNING_FLOWING);
                     lastGrossRaw = g;
                     lastNetRaw = n;
                     return;
@@ -1312,7 +1313,6 @@ try {
                         listener.onFlowStability(flowBit, false, age);
                         listener.onLiveStatus("LIVE: RUNNING_FLOWING (Flow OFF - waiting progression)");
                     }
-                    setState(DeliveryState.RUNNING_FLOWING);
                     lastGrossRaw = g;
                     lastNetRaw = n;
                     return;
@@ -1324,9 +1324,6 @@ try {
                             ? "LIVE: RUNNING_PAUSED (FLOW OFF confirmed)"
                             : "LIVE: RUNNING_FLOWING (FLOW OFF - confirming...)");
                 }
-
-                if (flowOffStable) setState(DeliveryState.RUNNING_PAUSED);
-                else setState(DeliveryState.RUNNING_FLOWING);
 
                 lastGrossRaw = g;
                 lastNetRaw = n;

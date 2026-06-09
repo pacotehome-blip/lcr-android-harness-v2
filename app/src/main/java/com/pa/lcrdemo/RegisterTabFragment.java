@@ -505,12 +505,10 @@ public class RegisterTabFragment extends Fragment {
                 LogBus.api(node, "Status(B) ERR: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
                 return;
             }
+            // ✅ Un seul requestLiveSample après délai
             ui.postDelayed(() -> {
-
-                  try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
-
                 try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
-            }, 200);
+            }, 300);
         } catch (Exception ignored) {}
     }
 
