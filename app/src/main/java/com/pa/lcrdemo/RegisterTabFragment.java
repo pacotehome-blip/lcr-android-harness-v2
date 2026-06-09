@@ -845,7 +845,8 @@ public class RegisterTabFragment extends Fragment {
     }
 
     private void validateHeaderAsync() {
-        try { if (bg.isShutdown() || bg.isTerminated()) return; } catch (Exception ignored) {}\n        try {
+        try { if (bg.isShutdown() || bg.isTerminated()) return; } catch (Exception ignored) {}
+        try {
             bg.execute(() -> {
                 try {
                     DeliveryController c = controller;
