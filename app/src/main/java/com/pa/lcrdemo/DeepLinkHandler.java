@@ -374,6 +374,47 @@ public class DeepLinkHandler {
                             || "RUNNING_PAUSED".equals(currentState)) {
                         android.util.Log.i(TAG, "job/continue ignoré — déjà en " + currentState);
                         hasSeenFlowing = true;
+                    } else if ("CONNECTED".equals(currentState)) {
+                        // Vérifier si ticket pending — si oui, faire status B et laisser l'opérateur
+                        boolean tp = false;
+                        try {
+                            MultiRegisterApiFacadeImpl facadeCheck2 =
+                                new MultiRegisterApiFacadeImpl(activity);
+                            com.pa.lcr.lcp.ApiResult stateCheck2 =
+                                facadeCheck2.api_deliveryJobGet(jobId);
+                            if (stateCheck2 != null && stateCheck2.data != null)
+                                tp = stateCheck2.data.optInt("ticketPending", 0) == 1;
+                        } catch (Exception ignored) {}
+
+                        if (tp) {
+                            android.util.Log.i(TAG, "Reprise: ticket pending — status B + attente opérateur");
+                            try {
+                                String tKey = MediaTransportManager.btKey(mac);
+                                com.pa.lcr.lcp.DeliveryController dc =
+                                    com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                                        .getController(tKey, node);
+                                if (dc != null) {
+                                    dc.requestStatus();
+                                    Thread.sleep(200);
+                                    dc.requestLiveSample();
+                                }
+                            } catch (Exception ignored) {}
+                            // Sortir du poll — l'opérateur gère via bouton A
+                            return;
+                        } else {
+                            // CONNECTED sans ticket pending — envoyer continue normalement
+                            MultiRegisterApiFacadeImpl facadeCont =
+                                new MultiRegisterApiFacadeImpl(activity);
+                            com.pa.lcr.lcp.ApiResult rc =
+                                facadeCont.api_deliveryContinue(jobId, node);
+                            android.util.Log.i(TAG,
+                                "job/continue: code=" + (rc != null ? rc.code : "null")
+                                + " msg=" + (rc != null ? rc.msg : "null"));
+                            logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
+                                "JOB_CONTINUE",
+                                "code=" + (rc != null ? rc.code : "null") +
+                                " msg=" + (rc != null ? rc.msg : "null"), null);
+                        }
                     } else {
                         MultiRegisterApiFacadeImpl facadeCont =
                             new MultiRegisterApiFacadeImpl(activity);
