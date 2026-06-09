@@ -393,6 +393,20 @@ public class DeepLinkHandler {
                             return;
                         }
 
+                        // ✅ PRINT_TIMEOUT: imprimante offline — écrire quand même dans Dataverse.
+                        // Le ticket pending sera résolu par l'opérateur via bouton A (Resolve).
+                        // La livraison est terminée, les volumes sont connus.
+                        if ("ERROR".equals(state) && r.data != null
+                                && "PRINT_TIMEOUT".equals(r.data.optString("err", ""))) {
+                            if (deliveryDone[0]) return;
+                            deliveryDone[0] = true;
+                            String extraJson = r.data.toString();
+                            android.util.Log.w(TAG, "Livraison PRINT_TIMEOUT — Dataverse quand même — " + extraJson);
+                            logDeliveryEnd(serialId, woNum, jobId, "DONE_PRINT_TIMEOUT", extraJson, null);
+                            onDeliveryEnded(woNum, woIdGuid, extraJson);
+                            return;
+                        }
+
                         // ✅ CONNECTED après terminate = fin propre
                         if ("CONNECTED".equals(state) && terminateSent) {
                             if (deliveryDone[0]) return;
