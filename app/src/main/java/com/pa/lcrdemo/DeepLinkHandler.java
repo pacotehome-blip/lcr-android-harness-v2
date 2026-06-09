@@ -280,7 +280,7 @@ public class DeepLinkHandler {
                                 android.util.Log.i(TAG, "Poll démarré — jobId=" + jobId);
                                 activity.runOnUiThread(() ->
                                     activity.toast("📦 Livraison démarrée — " + woNum));
-                                pollJobUntilDone(jobId, node, woNum, woIdGuid, fSerialId);
+                                pollJobUntilDone(jobId, node, woNum, woIdGuid, fSerialId, mac);
                             } else {
                                 android.util.Log.w(TAG, "oneshot/start: jobId absent");
                                 activity.runOnUiThread(() ->
@@ -328,7 +328,7 @@ public class DeepLinkHandler {
     // =========================================================
 
     private void pollJobUntilDone(String jobId, int node, String woNum,
-                                   String woIdGuid, String serialId) {
+                                   String woIdGuid, String serialId, String mac) {
         btExec.execute(() -> {
             try {
                 final boolean[] deliveryDone = {false}; // ✅ Flag anti-double
@@ -412,6 +412,13 @@ public class DeepLinkHandler {
                             try {
                                 MultiRegisterApiFacadeImpl facadeTerm2 =
                                     new MultiRegisterApiFacadeImpl(activity);
+                                try {
+                                    String tKey = MediaTransportManager.btKey(mac);
+                                    com.pa.lcr.lcp.DeliveryController dc =
+                                        com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                                            .getController(tKey, node);
+                                    if (dc != null) { dc.requestLiveSample(); Thread.sleep(300); }
+                                } catch (Exception ignored) {}
                                 com.pa.lcr.lcp.ApiResult rt2 =
                                     facadeTerm2.api_deliveryTerminate(jobId, node);
                                 android.util.Log.i(TAG,
@@ -431,6 +438,13 @@ public class DeepLinkHandler {
                             try {
                                 MultiRegisterApiFacadeImpl facadeTerm =
                                     new MultiRegisterApiFacadeImpl(activity);
+                                try {
+                                    String tKey = MediaTransportManager.btKey(mac);
+                                    com.pa.lcr.lcp.DeliveryController dc =
+                                        com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                                            .getController(tKey, node);
+                                    if (dc != null) { dc.requestLiveSample(); Thread.sleep(300); }
+                                } catch (Exception ignored) {}
                                 com.pa.lcr.lcp.ApiResult rt =
                                     facadeTerm.api_deliveryTerminate(jobId, node);
                                 android.util.Log.i(TAG,
