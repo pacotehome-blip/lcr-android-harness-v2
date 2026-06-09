@@ -176,18 +176,13 @@ public class LcpLink {
     public MachineStatus opGetMachineStatus() throws IOException {
         Response r = sendRecv(buildPayload(MSG_GET_MACHINE_STATUS, null), 8000);
         ensureOk(r, "GET_MACHINE_STATUS");
-        // ✅ FIX: LCR-II peut retourner 6 bytes (sans prnStatus) ou 7 bytes (avec prnStatus).
-        // Vérifier la longueur avant d'accéder à chaque index pour éviter AIOOB.
-        if (r.payload.length < 6)
-            throw new IOException("GET_MACHINE_STATUS payload trop court: " + r.payload.length);
-        int rc      = r.payload[0] & 0xFF;
-        int dev     = r.payload[1] & 0xFF;
-        // payload[2] = prnStatus si length>=7, sinon c'est delStatus high byte
-        int prn     = (r.payload.length >= 7) ? (r.payload[2] & 0xFF) : 0;
-        int dsOff   = (r.payload.length >= 7) ? 3 : 2;
-        int ds      = u16be(r.payload[dsOff], r.payload[dsOff + 1]);
-        int dc      = u16be(r.payload[dsOff + 2], r.payload[dsOff + 3]);
-        return new MachineStatus(rc, dev, prn, ds, dc);
+        return new MachineStatus(
+                r.payload[0] & 0xFF,
+                r.payload[1] & 0xFF,
+                r.payload[2] & 0xFF,
+                u16be(r.payload[3], r.payload[4]),
+                u16be(r.payload[5], r.payload[6])
+        );
     }
 
     /** Timeout 30s pour commande queueable */
@@ -226,9 +221,6 @@ public class LcpLink {
     public int[] opDeliveryStatus() throws IOException {
         Response r = sendRecv(buildPayload(MSG_GET_DELIVERY_STATUS, null), 6000);
         ensureOk(r, "GET_DELIVERY_STATUS");
-        // ✅ FIX: vérifier la longueur avant d'accéder aux bytes
-        if (r.payload.length < 6)
-            throw new IOException("GET_DELIVERY_STATUS payload trop court: " + r.payload.length);
         return new int[]{
                 u16be(r.payload[2], r.payload[3]),
                 u16be(r.payload[4], r.payload[5])
@@ -239,9 +231,6 @@ public class LcpLink {
     public int[] opDeliveryStatus(int timeoutMs) throws IOException {
         Response r = sendRecv(buildPayload(MSG_GET_DELIVERY_STATUS, null), timeoutMs);
         ensureOk(r, "GET_DELIVERY_STATUS");
-        // ✅ FIX: vérifier la longueur avant d'accéder aux bytes
-        if (r.payload.length < 6)
-            throw new IOException("GET_DELIVERY_STATUS payload trop court: " + r.payload.length);
         return new int[]{
                 u16be(r.payload[2], r.payload[3]),
                 u16be(r.payload[4], r.payload[5])
@@ -300,6 +289,14 @@ public class LcpLink {
             }
 
             t("RX: " + hexDump(f.raw));
+
+            // ✅ FIX: rejeter les trames d'un autre nœud (buffer BT contaminé par 2e tab)
+            // from doit correspondre à toAddr (le registre qu'on adresse)
+            if (f.from != toAddr) {
+                t("RX: ignoré — from=0x" + hex2(f.from) + " attendu=0x" + hex2(toAddr));
+                continue; // lire la prochaine trame
+            }
+
             int rc = (f.payload.length > 0) ? (f.payload[0] & 0xFF) : 0xFF;
 
             // 3) Busy/queued handling
