@@ -99,20 +99,35 @@ public class DeepLinkHandler {
             final String fSerialId = serialId != null ? serialId : "";
             logDeliveryStart(fSerialId, fWoNum, btMac, lcrnode, produit, presetStr);
 
-            // ✅ Vérifier si une livraison est déjà en cours pour ce WO
+            // ✅ Vérifier si une livraison est déjà en cours
             try {
                 ActiveDeliveryStore ads = new ActiveDeliveryStore(activity);
-                ActiveDeliveryStore.ActiveDelivery active = ads.getIfSameWo(woNum);
+                ActiveDeliveryStore.ActiveDelivery active = ads.load();
                 if (active != null && active.jobId != null && !active.jobId.isEmpty()) {
-                    android.util.Log.i(TAG, "Livraison en cours détectée — reprise poll jobId="
-                        + active.jobId + " woNum=" + woNum);
-                    activity.toast("↩️ Reprise livraison — " + woNum);
-                    int resumeNode = active.node > 0 ? active.node : (lcrnode != null ? lcrnode : 250);
-                    String resumeMac = (active.mac != null && !active.mac.isEmpty())
-                        ? active.mac : btMac;
-                    pollJobUntilDone(active.jobId, resumeNode, woNum, woIdGuid,
-                        fSerialId, resumeMac);
-                    return;
+                    if (woNum != null && woNum.equals(active.woNum)) {
+                        // Même WO — reprendre le poll
+                        android.util.Log.i(TAG, "Livraison en cours détectée — reprise poll jobId="
+                            + active.jobId + " woNum=" + woNum);
+                        activity.toast("↩️ Reprise livraison — " + woNum);
+                        int resumeNode = active.node > 0 ? active.node : (lcrnode != null ? lcrnode : 250);
+                        String resumeMac = (active.mac != null && !active.mac.isEmpty())
+                            ? active.mac : btMac;
+                        pollJobUntilDone(active.jobId, resumeNode, woNum, woIdGuid,
+                            fSerialId, resumeMac);
+                        return;
+                    } else {
+                        // WO différent — bloquer et alerter l'opérateur
+                        android.util.Log.w(TAG, "Livraison en cours: " + active.woNum
+                            + " — impossible de démarrer " + woNum);
+                        final String activeWo = active.woNum;
+                        activity.runOnUiThread(() ->
+                            activity.toast("⚠️ Livraison " + activeWo
+                                + " en cours — terminez-la avant de passer à " + woNum));
+                        retournerFieldService(woNum, woIdGuid, "erreur_livraison_en_cours",
+                            buildErrorJson("DELIVERY_IN_PROGRESS",
+                                "Livraison " + activeWo + " en cours sur ce registre"));
+                        return;
+                    }
                 }
             } catch (Exception ignored) {}
 
@@ -337,26 +352,45 @@ public class DeepLinkHandler {
             try {
                 final boolean[] deliveryDone = {false};
 
+                boolean hasSeenFlowing = false;
+                boolean terminateSent  = false;
+                String  lastState      = "";
+
                 try {
-                    MultiRegisterApiFacadeImpl facadeCont =
-                        new MultiRegisterApiFacadeImpl(activity);
-                    com.pa.lcr.lcp.ApiResult rc =
-                        facadeCont.api_deliveryContinue(jobId, node);
-                    android.util.Log.i(TAG,
-                        "job/continue: code=" + (rc != null ? rc.code : "null")
-                        + " msg=" + (rc != null ? rc.msg : "null"));
-                    logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
-                        "JOB_CONTINUE",
-                        "code=" + (rc != null ? rc.code : "null") +
-                        " msg=" + (rc != null ? rc.msg : "null"), null);
+                    // ✅ Vérifier l'état avant d'envoyer continue
+                    // Si déjà RUNNING_FLOWING ou RUNNING_PAUSED, ne pas renvoyer continue
+                    // (évite de redémarrer une livraison en pause lors d'une reprise)
+                    String currentState = "";
+                    try {
+                        MultiRegisterApiFacadeImpl facadeCheck =
+                            new MultiRegisterApiFacadeImpl(activity);
+                        com.pa.lcr.lcp.ApiResult stateCheck =
+                            facadeCheck.api_deliveryJobGet(jobId);
+                        if (stateCheck != null && stateCheck.data != null)
+                            currentState = stateCheck.data.optString("state", "");
+                    } catch (Exception ignored) {}
+
+                    if ("RUNNING_FLOWING".equals(currentState)
+                            || "RUNNING_PAUSED".equals(currentState)) {
+                        android.util.Log.i(TAG, "job/continue ignoré — déjà en " + currentState);
+                        hasSeenFlowing = true;
+                    } else {
+                        MultiRegisterApiFacadeImpl facadeCont =
+                            new MultiRegisterApiFacadeImpl(activity);
+                        com.pa.lcr.lcp.ApiResult rc =
+                            facadeCont.api_deliveryContinue(jobId, node);
+                        android.util.Log.i(TAG,
+                            "job/continue: code=" + (rc != null ? rc.code : "null")
+                            + " msg=" + (rc != null ? rc.msg : "null"));
+                        logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
+                            "JOB_CONTINUE",
+                            "code=" + (rc != null ? rc.code : "null") +
+                            " msg=" + (rc != null ? rc.msg : "null"), null);
+                    }
                 } catch (Exception e) {
                     android.util.Log.e(TAG, "job/continue ERR: " + e.getMessage());
                     logError(serialId, woNum, "JOB_CONTINUE_ERROR", e.getMessage());
                 }
-
-                boolean hasSeenFlowing = false;
-                boolean terminateSent  = false;
-                String  lastState      = "";
 
                 for (int i = 0; i < 600; i++) {
                     try { Thread.sleep(1000); } catch (Exception ignored) {}
