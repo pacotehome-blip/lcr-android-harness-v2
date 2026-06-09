@@ -1,7 +1,7 @@
 package com.pa.lcr.lcp;
 
 import com.pa.lcr.lcp.storage.DeliveryLogStore;
-     
+
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -340,6 +340,9 @@ private void reproEvent(String level, String type, String message, JSONObject da
     // Pas de chevauchement LIVE
     private final AtomicBoolean liveInFlight = new AtomicBoolean(false);
     private final ThreadLocal<Boolean> inLiveSample = new ThreadLocal<>();
+
+    // Guard bouton A — évite multi-clic et collision LCP
+    private final AtomicBoolean alignInFlight = new AtomicBoolean(false);
 
     // Ticket pending: anti-réimpression
     private final java.util.concurrent.atomic.AtomicBoolean ticketPrintInFlight =
@@ -911,6 +914,10 @@ FullStatus fs = readFullStatus("status/full");
     public void alignOrRecover() {
         io.execute(() -> {
             if (isStopped()) return;
+            if (!alignInFlight.compareAndSet(false, true)) {
+                emitLog("[A] alignOrRecover ignoré — déjà en cours");
+                return;
+            }
             try {
                 emitLog("[A] Align / recover requested");
 
@@ -926,8 +933,36 @@ try {
                 doAlignOrRecoverFull();
             } catch (Exception e) {
                 handleIoFailure("alignOrRecover", e);
+            } finally {
+                alignInFlight.set(false);
             }
         });
+    }
+
+    /**
+     * Version bloquante de alignOrRecover — appeler depuis un thread bg, jamais UI thread.
+     * Retourne seulement quand le ticket est cleared et l'état FSM stable.
+     * Utilisé par le bouton A du fragment pour garantir que validateHeaderAsync()
+     * lit ticketPending à jour (0) après l'appel.
+     */
+    public void alignOrRecoverSync() {
+        if (isStopped()) return;
+        if (!alignInFlight.compareAndSet(false, true)) {
+            // Déjà en cours — attendre qu'il finisse (max 8s)
+            long deadline = System.currentTimeMillis() + 8000L;
+            while (alignInFlight.get() && System.currentTimeMillis() < deadline) {
+                try { Thread.sleep(100); } catch (InterruptedException ignored) { break; }
+            }
+            return;
+        }
+        try {
+            emitLog("[A-sync] Align / recover (sync)");
+            doAlignOrRecoverFull();
+        } catch (Exception e) {
+            handleIoFailure("alignOrRecoverSync", e);
+        } finally {
+            alignInFlight.set(false);
+        }
     }
 
     @Override
@@ -1240,8 +1275,8 @@ try {
                     d = Math.abs(g - lastGrossRaw) + Math.abs(n - lastNetRaw);
                 }
 
-                double netL   = (n & 0xFFFFFFFFL) / scale;
-                double grossL = (g & 0xFFFFFFFFL) / scale;
+                double netL = n / scale;
+                double grossL = g / scale;
 
                 if (listener != null) listener.onLiveQty(netL, grossL);
 
