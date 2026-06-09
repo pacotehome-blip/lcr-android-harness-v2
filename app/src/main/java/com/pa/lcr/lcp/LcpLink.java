@@ -176,13 +176,17 @@ public class LcpLink {
     public MachineStatus opGetMachineStatus() throws IOException {
         Response r = sendRecv(buildPayload(MSG_GET_MACHINE_STATUS, null), 8000);
         ensureOk(r, "GET_MACHINE_STATUS");
-        return new MachineStatus(
-                r.payload[0] & 0xFF,
-                r.payload[1] & 0xFF,
-                r.payload[2] & 0xFF,
-                u16be(r.payload[3], r.payload[4]),
-                u16be(r.payload[5], r.payload[6])
-        );
+        // ✅ FIX: LCR-II retourne 6 bytes (sans prnStatus) ou 7 bytes (avec prnStatus).
+        // r.payload[6] sur un payload de 6 bytes = ArrayIndexOutOfBounds → "length=6; index=6"
+        if (r.payload.length < 6)
+            throw new IOException("GET_MACHINE_STATUS payload trop court: " + r.payload.length);
+        int rc  = r.payload[0] & 0xFF;
+        int dev = r.payload[1] & 0xFF;
+        int prn = (r.payload.length >= 7) ? (r.payload[2] & 0xFF) : 0;
+        int off = (r.payload.length >= 7) ? 3 : 2;
+        int ds  = u16be(r.payload[off],     r.payload[off + 1]);
+        int dc  = u16be(r.payload[off + 2], r.payload[off + 3]);
+        return new MachineStatus(rc, dev, prn, ds, dc);
     }
 
     /** Timeout 30s pour commande queueable */
