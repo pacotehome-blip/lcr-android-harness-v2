@@ -353,6 +353,9 @@ private void reproEvent(String level, String type, String message, JSONObject da
     private volatile long liveBackoffMs = LIVE_BASE_MS;
     private volatile long liveNextAllowedMs = 0L;
     private volatile long liveLastSkipLogMs = 0L;
+    // ✅ Sticky: un trou de polling ne fait pas retomber à CONNECTED immédiatement
+    private static final long DELIVERY_ACTIVE_STICKY_MS = 3000L;
+    private volatile long lastDeliveryActiveSeen = 0L;
 
     // Grâce 30s après Continuer
     private volatile long continueGraceUntilMs = 0L;
@@ -1202,6 +1205,11 @@ try {
                     delStatus = ds[0];
                     delCode = ds[1];
                 } catch (Exception e) {
+                    // ✅ Sticky: timeout ne signifie pas livraison finie
+                    if (System.currentTimeMillis() - lastDeliveryActiveSeen < DELIVERY_ACTIVE_STICKY_MS) {
+                        liveBackoffStep("GET_DELIVERY_STATUS");
+                        return; // garder l'état actuel
+                    }
                     liveSoftSkip("GET_DELIVERY_STATUS", e);
                     return;
                 }
@@ -1210,6 +1218,9 @@ try {
                 boolean flowBit = (delCode & DC_FLOW_ACTIVE)      != 0;
                 boolean active  = (delCode & DC_DELIVERY_ACTIVE)  != 0;
 
+                // Mettre à jour le timestamp sticky
+                if (active) lastDeliveryActiveSeen = System.currentTimeMillis();
+
                 // ✅ RÈGLE D'ÉTAT SIMPLE — delCode est la vérité registre.
                 // ticketPending ne peut jamais écraser une livraison réelle.
                 if (active && flowBit) {
@@ -1217,7 +1228,12 @@ try {
                 } else if (active) {
                     setState(DeliveryState.RUNNING_PAUSED);
                 } else {
+                    // ✅ Sticky: ne pas tomber à CONNECTED si livraison confirmée récemment
+                    if (System.currentTimeMillis() - lastDeliveryActiveSeen < DELIVERY_ACTIVE_STICKY_MS) {
+                        return; // garder l'état actuel, attendre confirmation
+                    }
                     liveResetBackoff();
+                    lastDeliveryActiveSeen = 0L; // livraison confirmée terminée
                     setState(DeliveryState.CONNECTED);
                     if (listener != null) {
                         listener.onLiveStatus(ticket ? "LIVE: CONNECTED - Ticket pending" : "LIVE: CONNECTED - Ready");
