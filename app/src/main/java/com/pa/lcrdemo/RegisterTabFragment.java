@@ -128,20 +128,9 @@ public class RegisterTabFragment extends Fragment {
             long now = System.currentTimeMillis();
             if (now - lastDelCodePollMs < DELCODE_POLL_MIN_MS) return;
             lastDelCodePollMs = now;
-            // ✅ FIX: api_tickSnapshot est un appel LCP — exécuter sur bg, pas UI thread
-            bg.execute(() -> {
-                try {
-                    ApiResult r = c.api_tickSnapshot();
-                    JSONObject d = (r != null) ? r.data : null;
-                    if (d != null) {
-                        int dc = d.optInt("delCode", lastDelCode);
-                        ui.post(() -> {
-                            lastDelCode = dc;
-                            updateButtons(c.getState());
-                        });
-                    }
-                } catch (Exception ignored) {}
-            });
+            ApiResult r = c.api_tickSnapshot();
+            JSONObject d = (r != null) ? r.data : null;
+            if (d != null) lastDelCode = d.optInt("delCode", lastDelCode);
         } catch (Exception ignored) {}
     }
 
@@ -516,10 +505,12 @@ public class RegisterTabFragment extends Fragment {
                 LogBus.api(node, "Status(B) ERR: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
                 return;
             }
-            // ✅ FIX: un seul requestLiveSample après délai (pas deux de suite → collision LCP)
             ui.postDelayed(() -> {
+
+                  try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
+
                 try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
-            }, 300);
+            }, 200);
         } catch (Exception ignored) {}
     }
 
@@ -854,31 +845,44 @@ public class RegisterTabFragment extends Fragment {
     }
 
     private void validateHeaderAsync() {
-        try { if (bg.isShutdown() || bg.isTerminated()) return; } catch (Exception ignored) {}
-        try {
+        try { if (bg.isShutdown() || bg.isTerminated()) return; } catch (Exception ignored) {}\n        try {
             bg.execute(() -> {
                 try {
                     DeliveryController c = controller;
                     if (c == null) return;
 
-                    // Si serial déjà connu depuis args, l'utiliser directement sans naviguer Mode 8
+                    // ✅ FIX: pendant une livraison active, ne pas faire d'appels LCP
+                    // (api_registerValidate = 5+ transactions LCP → sature le bus → soft-skip counters).
+                    // Utiliser le tickSnapshot (cache) pour ticketPending uniquement.
+                    DeliveryState st = c.getState();
+                    boolean deliveryActive = (st == DeliveryState.RUNNING_FLOWING
+                            || st == DeliveryState.RUNNING_PAUSED
+                            || st == DeliveryState.PRESTART
+                            || st == DeliveryState.ENDING);
+
                     String serial = (serialFromArgs != null && !serialFromArgs.trim().isEmpty())
-                        ? serialFromArgs.trim() : "";
+                            ? serialFromArgs.trim() : "";
                     int tp = -1;
-                    if (serial.isEmpty()) {
-                        ApiResult r = c.api_registerValidate(null, node, null, null, null, false);
-                        JSONObject j = r.toJson().optJSONObject("data");
-                        if (j == null) return;
-                        serial = j.optString("serial_id", "");
-                        tp = j.optInt("ticketPending", -1);
-                    } else {
+
+                    if (!deliveryActive) {
+                        // Hors livraison: lecture LCP normale
                         ApiResult r = c.api_registerValidate(null, node, null, null, null, false);
                         JSONObject j = r != null ? r.toJson().optJSONObject("data") : null;
-                        if (j != null) tp = j.optInt("ticketPending", -1);
+                        if (j != null) {
+                            if (serial.isEmpty()) serial = j.optString("serial_id", "");
+                            tp = j.optInt("ticketPending", -1);
+                        }
+                    } else {
+                        // Pendant livraison: cache uniquement
+                        ApiResult snap = c.api_tickSnapshot();
+                        JSONObject j = (snap != null && snap.data != null) ? snap.data : null;
+                        if (j != null) {
+                            int dc = j.optInt("delCode", 0);
+                            tp = ((dc & 0x0001) != 0) ? 1 : 0;
+                        }
                     }
 
                     try { RegisterSessionManager.get(requireContext()).bindExpectedSerial(node, serial); } catch (Exception ignored) {}
-                    // int tp = j.optInt("ticketPending", -1);
                     ticketPendingFlag = (tp == 1 ? 1 : (tp == 0 ? 0 : -1));
 
                     final String fSerial = serial;

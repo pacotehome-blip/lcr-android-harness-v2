@@ -859,7 +859,7 @@ try {
         io.execute(() -> {
             if (isStopped()) return;
             try {
-                
+
 // ✅ REPRO: intent Status (B)
 try {
     JSONObject d0 = new JSONObject();
@@ -869,40 +869,25 @@ try {
     reproEvent(DeliveryLogStore.LEVEL_INFO, "UI_STATUS_B", "Status requested", d0);
 } catch (Exception ignored) {}
 
+// ✅ FIX: UN SEUL appel LCP (GET_MACHINE_STATUS).
+// Les lectures GET_FIELD #44/#45/#23 sont supprimées d'ici —
+// elles saturaient le bus et causaient rc=0xDA sur le live poll.
+// Le gross/net vient exclusivement du live poll (requestLiveSample).
 FullStatus fs = readFullStatus("status/full");
 
-
-                // keep last known dev/prn for B+ tick bus
                 lastDevStatusKnown = fs.devStatus;
                 lastPrnStatusKnown = fs.prnStatus;
 
                 emitLog(String.format("[STATUS] dev=0x%02X prn=0x%02X ds=0x%04X dc=0x%04X",
                         fs.devStatus, fs.prnStatus, fs.delStatus, fs.delCode));
 
-                ensureDigits();
-                double scale = Math.pow(10, cachedDigits);
-
-                int gRaw = beI32(lcpGetField(FIELD_GROSS_COUNT));
-                int nRaw = beI32(lcpGetField(FIELD_NET_COUNT));
-
-                double net = (nRaw & 0xFFFFFFFFL) / scale;
-                double gross = (gRaw & 0xFFFFFFFFL) / scale;
-
-                if (listener != null) listener.onLiveQty(net, gross);
-
-                // ✅ TickBus: push on change (B+ includes dev/prn/ds/dc/state)
-                publishTickIfChanged(net, gross, fs.devStatus, fs.prnStatus, fs.delStatus, fs.delCode, state);
-
-                // ✅ Ticket info (UI): ticket_no (#23). delivery_uid est inconnu ici => null
+                // TickBus: push state/ds/dc change (net/gross inchangés — viennent du live poll)
                 try {
- String tno = readTicketNo23();
- String uid = null;
- String n = lastNumeroLivraison;
- if (n != null && !n.trim().isEmpty() && tno != null && !tno.trim().isEmpty()) {
- uid = n.trim() + "-" + tno.trim();
- }
- if (listener != null) listener.onTicketInfo(tno, uid);
- } catch (Exception ignored) {}
+                    LastTick prev = lastTick;
+                    double net   = (prev != null) ? prev.net   : 0.0;
+                    double gross = (prev != null) ? prev.gross : 0.0;
+                    publishTickIfChanged(net, gross, fs.devStatus, fs.prnStatus, fs.delStatus, fs.delCode, state);
+                } catch (Exception ignored) {}
 
             } catch (Exception e) {
                 handleIoFailure("status", e);
