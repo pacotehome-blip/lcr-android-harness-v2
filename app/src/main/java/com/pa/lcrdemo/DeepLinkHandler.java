@@ -26,37 +26,27 @@ import java.util.concurrent.ExecutorService;
  * DeepLinkHandler — gestion complète du flux deep link Field Service ↔ APK.
  *
  * Responsabilités :
- *  - handleDeepLink()           : parse et route le deep link entrant
- *  - connectBtByMacAndOpenTab() : connexion BT + oneshot/start
- *  - pollJobUntilDone()         : poll état livraison → DONE
- *  - onDeliveryEnded()          : fin de livraison → retournerFieldService
- *  - retournerFieldService()    : retour vers Field Service via ms-dynamicsxrm://
+ *  - handleDeepLink()          : parse et route le deep link entrant
+ *  - connectBtByMacAndOpenTab(): connexion BT + oneshot/start
+ *  - pollJobUntilDone()        : poll état livraison → DONE
+ *  - onDeliveryEnded()         : fin de livraison → retournerFieldService
+ *  - retournerFieldService()   : construit l'URL retour et lance Field Service
  *
- * ✅ FIX #1 : facade est une instance unique partagée — jobToNode/jobToFrom/jobToTransport
- *            sont désormais correctement maintenus entre oneshot/start, continue, terminate
- *            et jobGet. L'ancien code créait une nouvelle MultiRegisterApiFacadeImpl à
- *            chaque appel, vidant les maps et causant "Controller introuvable".
- *
- * ✅ FIX #2 : patchDataverse() utilise acquireTokenSilentFromWorker() au lieu de
- *            acquireToken() (interactif). acquireToken() peut lancer une UI login depuis
- *            un thread background (btExec), causant crash ou ANR.
- *
- * ✅ FIX #3 : retournerFieldService() retourne vers Field Service via ms-dynamicsxrm://
- *            au lieu d'une URL HTTPS qui ouvre un navigateur externe. La WebView et
- *            localStorage sont retirés — le flow passe uniquement par last-result + Dataverse.
+ * Logging dans DeliveryLogStore :
+ *  - upsertSummaryAsync → openAttemptAsync → addEventAsync → closeAttemptAsync
  */
 public class DeepLinkHandler {
 
-    private static final String TAG      = "LCRDEMO_DEEPLINK";
-    private static final UUID   SPP_UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
+    private static final String TAG = "LCRDEMO_DEEPLINK";
+    private static final UUID SPP_UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
 
-    private final MainActivity            activity;
-    private final DeliveryLogStore        deliveryStore;
-    private final ExecutorService         btExec;
+    // URL retour Field Service
+    private static final String FS_FORM_URL =
+        "https://dev-filgo-sonic.crm3.dynamics.com/WebResources/filgo_lcr_form";
 
-    // ✅ FIX #1 — instance unique, partagée pour toute la durée de vie du handler.
-    // jobToNode / jobToFrom / jobToTransport persistent correctement entre les appels.
-    private final MultiRegisterApiFacadeImpl facade;
+    private final MainActivity activity;
+    private final DeliveryLogStore deliveryStore;
+    private final ExecutorService btExec;
 
     public DeepLinkHandler(MainActivity activity,
                            DeliveryLogStore deliveryStore,
@@ -64,7 +54,6 @@ public class DeepLinkHandler {
         this.activity      = activity;
         this.deliveryStore = deliveryStore;
         this.btExec        = btExec;
-        this.facade        = new MultiRegisterApiFacadeImpl(activity);
     }
 
     // =========================================================
@@ -106,6 +95,7 @@ public class DeepLinkHandler {
                 " serial=" + serialId + " node=" + lcrnode +
                 " produit=" + produit + " preset=" + presetStr);
 
+            // ✅ Log événement départ dans DeliveryLogStore
             final String fWoNum    = woNum;
             final String fSerialId = serialId != null ? serialId : "";
             logDeliveryStart(fSerialId, fWoNum, btMac, lcrnode, produit, presetStr);
@@ -132,9 +122,9 @@ public class DeepLinkHandler {
 
         btExec.execute(() -> {
             try {
-                // =============================================================
+                // =========================================================
                 // 1) Vérifier si BT déjà connecté au bon MAC — réutiliser
-                // =============================================================
+                // =========================================================
                 String transportKey = MediaTransportManager.btKey(mac);
                 MediaTransportManager mtm = activity.getMediaTransportManager();
                 boolean btDejaConnecte = false;
@@ -150,9 +140,10 @@ public class DeepLinkHandler {
                 }
 
                 if (!btDejaConnecte) {
-                    // Déconnecter proprement si MAC différent
+                    // ✅ Nouveau BT — déconnecter proprement si différent
                     android.bluetooth.BluetoothAdapter btAdapter = activity.getBtAdapter();
 
+                    // Déconnecter seulement si le MAC actif est différent
                     String lastMac = activity.getLastBtMac();
                     if (lastMac != null && !lastMac.equalsIgnoreCase(mac)) {
                         android.util.Log.i(TAG, "BT différent — déconnexion: " + lastMac);
@@ -179,38 +170,25 @@ public class DeepLinkHandler {
                     android.util.Log.i(TAG, "BT connecté: " + mac);
                     logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
                         "BT_CONNECT", "BT connecté: " + mac, null);
-
-                    // ✅ Attendre que probeAndIdentify() crée le controller (max 5s)
-                    android.util.Log.i(TAG, "Attente controller BT après connexion...");
-                    com.pa.lcr.lcp.RegisterSessionManager rsm =
-                        com.pa.lcr.lcp.RegisterSessionManager.get(activity);
-                    String btKey2 = com.pa.lcr.lcp.transport.MediaTransportManager.btKey(mac);
-                    long waitDeadline = System.currentTimeMillis() + 5000;
-                    while (System.currentTimeMillis() < waitDeadline) {
-                        com.pa.lcr.lcp.DeliveryController dcCheck =
-                            rsm.getController(btKey2, node);
-                        if (dcCheck != null) {
-                            android.util.Log.i(TAG, "Controller BT prêt après "
-                                + (5000 - (waitDeadline - System.currentTimeMillis())) + "ms");
-                            break;
-                        }
-                        try { Thread.sleep(200); } catch (Exception ignored) {}
-                    }
                 }
 
-                // =============================================================
+                // =========================================================
                 // 2) Valider le registre — bon serial, bon node
-                // =============================================================
+                // =========================================================
                 try {
-                    // ✅ FIX #1 — utilise this.facade (instance partagée)
-                    com.pa.lcr.lcp.ApiResult rv = facade.api_registerValidate(
+                    MultiRegisterApiFacadeImpl facadeVal =
+                        new MultiRegisterApiFacadeImpl(activity);
+                    com.pa.lcr.lcp.ApiResult rv = facadeVal.api_registerValidate(
                         woNum, node, null, serialId, null, null, "bt", mac);
                     android.util.Log.i(TAG, "register/validate: code=" + rv.code + " msg=" + rv.msg);
 
                     if (rv.code != 1) {
+                        // ✅ Mauvais registre ou pas prêt — tenter auto-connect
                         android.util.Log.w(TAG, "Registre invalide — tentative auto-connect");
+                        MultiRegisterApiFacadeImpl facadeAuto =
+                            new MultiRegisterApiFacadeImpl(activity);
                         com.pa.lcr.lcp.ApiResult ra =
-                            facade.api_registerConnectAuto(serialId, node);
+                            facadeAuto.api_registerConnectAuto(serialId, node);
                         android.util.Log.i(TAG, "register/connect-auto: code=" + ra.code + " msg=" + ra.msg);
 
                         if (ra.code != 1) {
@@ -226,13 +204,11 @@ public class DeepLinkHandler {
                     logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
                         "REGISTER_OK", "Registre validé node=" + node, null);
                 } catch (Exception e) {
-                    // Non bloquant — continuer quand même
                     android.util.Log.w(TAG, "register/validate ERR (ignoré): " + e.getMessage());
+                    // Non bloquant — continuer quand même
                 }
 
-                // =============================================================
-                // 3) Ouvrir tab UI
-                // =============================================================
+                // 2) Ouvrir tab UI
                 final String fProduit      = produit;
                 final String fPreset       = presetStr;
                 final String fWoNum        = woNum;
@@ -261,9 +237,7 @@ public class DeepLinkHandler {
                     } catch (Exception ignored) {}
                 });
 
-                // =============================================================
-                // 4) Attendre que le média soit READY (max 5s)
-                // =============================================================
+                // 3) Attendre que le média soit READY
                 int    product = 1;
                 double preset  = 0.0;
                 try { product = Integer.parseInt(produit);     } catch (Exception ignored) {}
@@ -284,59 +258,58 @@ public class DeepLinkHandler {
                     } catch (Exception ignored) {}
                 }
 
-                if (!ready) {
+                if (ready) {
+                    try {
+                        MultiRegisterApiFacadeImpl facade =
+                            new MultiRegisterApiFacadeImpl(activity);
+                        com.pa.lcr.lcp.ApiResult r = facade.api_deliveryOneShotStart(
+                            node, 255, woNum, fProduct, fPresetD, null, "bt", mac);
+
+                        android.util.Log.i(TAG,
+                            "oneshot/start: code=" + r.code + " msg=" + r.msg);
+
+                        if (r.code == 1) {
+                            // ✅ Succès — récupérer jobId et démarrer le poll
+                            String jobId = (r.data != null)
+                                ? r.data.optString("jobId", null) : null;
+
+                            logEvent(fSerialId, woNum, DeliveryLogStore.LEVEL_INFO,
+                                "ONESHOT_START", "ARMED jobId=" + jobId, null);
+
+                            if (jobId != null && !jobId.isEmpty()) {
+                                android.util.Log.i(TAG, "Poll démarré — jobId=" + jobId);
+                                activity.runOnUiThread(() ->
+                                    activity.toast("📦 Livraison démarrée — " + woNum));
+                                pollJobUntilDone(jobId, node, woNum, woIdGuid, fSerialId);
+                            } else {
+                                android.util.Log.w(TAG, "oneshot/start: jobId absent");
+                                activity.runOnUiThread(() ->
+                                    activity.toast("📦 Livraison démarrée (sans jobId) — " + woNum));
+                            }
+                        } else {
+                            // ✅ Erreur oneshot — livraison précédente en cours ?
+                            android.util.Log.w(TAG, "oneshot/start code=0: " + r.msg);
+                            logEvent(fSerialId, woNum, DeliveryLogStore.LEVEL_WARN,
+                                "ONESHOT_ERROR", r.msg,
+                                r.data != null ? r.data.toString() : null);
+
+                            // Retourner vers FS avec status=erreur
+                            retournerFieldService(woNum, woIdGuid, "erreur_oneshot",
+                                buildErrorJson("ONESHOT_FAILED", r.msg));
+                        }
+
+                    } catch (Exception e) {
+                        android.util.Log.e(TAG, "oneshot/start ERR: " + e.getMessage());
+                        logError(fSerialId, woNum, "ONESHOT_EXCEPTION", e.getMessage());
+                        retournerFieldService(woNum, woIdGuid, "erreur",
+                            buildErrorJson("ONESHOT_EXCEPTION", e.getMessage()));
+                    }
+                } else {
                     android.util.Log.w(TAG, "Média non prêt après 5s");
                     activity.runOnUiThread(() -> activity.toast("BT non prêt — réessayez"));
                     logError(fSerialId, woNum, "MEDIA_NOT_READY", "Média non prêt après 5s");
                     retournerFieldService(woNum, woIdGuid, "erreur_media",
                         buildErrorJson("MEDIA_NOT_READY", "Média non prêt après 5s"));
-                    return;
-                }
-
-                // =============================================================
-                // 5) Lancer la livraison oneshot
-                // =============================================================
-                try {
-                    // ✅ FIX #1 — utilise this.facade (instance partagée)
-                    // jobToNode/jobToFrom/jobToTransport seront correctement mémorisés
-                    // et retrouvés par continue/terminate/jobGet ci-dessous.
-                    com.pa.lcr.lcp.ApiResult r = facade.api_deliveryOneShotStart(
-                        node, 255, woNum, fProduct, fPresetD, null, "bt", mac);
-
-                    android.util.Log.i(TAG,
-                        "oneshot/start: code=" + r.code + " msg=" + r.msg);
-
-                    if (r.code == 1) {
-                        String jobId = (r.data != null)
-                            ? r.data.optString("jobId", null) : null;
-
-                        logEvent(fSerialId, woNum, DeliveryLogStore.LEVEL_INFO,
-                            "ONESHOT_START", "ARMED jobId=" + jobId, null);
-
-                        if (jobId != null && !jobId.isEmpty()) {
-                            android.util.Log.i(TAG, "Poll démarré — jobId=" + jobId);
-                            activity.runOnUiThread(() ->
-                                activity.toast("📦 Livraison démarrée — " + woNum));
-                            pollJobUntilDone(jobId, node, woNum, woIdGuid, fSerialId);
-                        } else {
-                            android.util.Log.w(TAG, "oneshot/start: jobId absent");
-                            activity.runOnUiThread(() ->
-                                activity.toast("📦 Livraison démarrée (sans jobId) — " + woNum));
-                        }
-                    } else {
-                        android.util.Log.w(TAG, "oneshot/start code=0: " + r.msg);
-                        logEvent(fSerialId, woNum, DeliveryLogStore.LEVEL_WARN,
-                            "ONESHOT_ERROR", r.msg,
-                            r.data != null ? r.data.toString() : null);
-                        retournerFieldService(woNum, woIdGuid, "erreur_oneshot",
-                            buildErrorJson("ONESHOT_FAILED", r.msg));
-                    }
-
-                } catch (Exception e) {
-                    android.util.Log.e(TAG, "oneshot/start ERR: " + e.getMessage());
-                    logError(fSerialId, woNum, "ONESHOT_EXCEPTION", e.getMessage());
-                    retournerFieldService(woNum, woIdGuid, "erreur",
-                        buildErrorJson("ONESHOT_EXCEPTION", e.getMessage()));
                 }
 
             } catch (Exception e) {
@@ -358,12 +331,14 @@ public class DeepLinkHandler {
                                    String woIdGuid, String serialId) {
         btExec.execute(() -> {
             try {
-                final boolean[] deliveryDone = {false};
+                final boolean[] deliveryDone = {false}; // ✅ Flag anti-double
 
-                // ✅ FIX #1 — utilise this.facade (instance partagée)
-                // continue sortira de l'état ARMED
+                // ✅ job/continue — sortir de ARMED
                 try {
-                    com.pa.lcr.lcp.ApiResult rc = facade.api_deliveryContinue(jobId, node);
+                    MultiRegisterApiFacadeImpl facadeCont =
+                        new MultiRegisterApiFacadeImpl(activity);
+                    com.pa.lcr.lcp.ApiResult rc =
+                        facadeCont.api_deliveryContinue(jobId, node);
                     android.util.Log.i(TAG,
                         "job/continue: code=" + (rc != null ? rc.code : "null")
                         + " msg=" + (rc != null ? rc.msg : "null"));
@@ -380,12 +355,13 @@ public class DeepLinkHandler {
                 boolean terminateSent  = false;
                 String  lastState      = "";
 
-                // Poll max 10 minutes (600 × 1s)
+                // Poll max 10 minutes
                 for (int i = 0; i < 600; i++) {
                     try { Thread.sleep(1000); } catch (Exception ignored) {}
 
                     try {
-                        // ✅ FIX #1 — utilise this.facade (instance partagée)
+                        MultiRegisterApiFacadeImpl facade =
+                            new MultiRegisterApiFacadeImpl(activity);
                         com.pa.lcr.lcp.ApiResult r = facade.api_deliveryJobGet(jobId);
                         if (r == null) continue;
 
@@ -395,6 +371,7 @@ public class DeepLinkHandler {
 
                         android.util.Log.i(TAG, "pollJob: state=" + state);
 
+                        // Logger seulement les changements d'état
                         if (state != null && !state.equals(lastState)) {
                             logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
                                 "STATE_CHANGE", "state=" + state, null);
@@ -405,7 +382,7 @@ public class DeepLinkHandler {
                             hasSeenFlowing = true;
                         }
 
-                        // DONE ou TERMINATED
+                        // ✅ DONE ou TERMINATED
                         if ("DONE".equals(state) || "TERMINATED".equals(state)) {
                             if (deliveryDone[0]) return;
                             deliveryDone[0] = true;
@@ -416,7 +393,7 @@ public class DeepLinkHandler {
                             return;
                         }
 
-                        // CONNECTED après terminate = fin propre
+                        // ✅ CONNECTED après terminate = fin propre
                         if ("CONNECTED".equals(state) && terminateSent) {
                             if (deliveryDone[0]) return;
                             deliveryDone[0] = true;
@@ -428,13 +405,15 @@ public class DeepLinkHandler {
                             return;
                         }
 
-                        // CONNECTED après FLOWING sans PAUSED = fin directe
+                        // ✅ CONNECTED après FLOWING sans PAUSED = fin directe
+                        // (cas 2e livraison successive — le registre termine sans pause)
                         if ("CONNECTED".equals(state) && hasSeenFlowing && !terminateSent) {
                             android.util.Log.i(TAG, "CONNECTED après FLOWING — terminate direct");
                             try {
-                                // ✅ FIX #1 — utilise this.facade
+                                MultiRegisterApiFacadeImpl facadeTerm2 =
+                                    new MultiRegisterApiFacadeImpl(activity);
                                 com.pa.lcr.lcp.ApiResult rt2 =
-                                    facade.api_deliveryTerminate(jobId, node);
+                                    facadeTerm2.api_deliveryTerminate(jobId, node);
                                 android.util.Log.i(TAG,
                                     "job/terminate (direct): code=" + (rt2 != null ? rt2.code : "null")
                                     + " msg=" + (rt2 != null ? rt2.msg : "null"));
@@ -444,15 +423,16 @@ public class DeepLinkHandler {
                             }
                         }
 
-                        // RUNNING_PAUSED → terminate
+                        // ✅ RUNNING_PAUSED → terminate
                         if ("RUNNING_PAUSED".equals(state) && hasSeenFlowing && !terminateSent) {
                             android.util.Log.i(TAG, "RUNNING_PAUSED — envoi job/terminate");
                             logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
                                 "JOB_TERMINATE", "RUNNING_PAUSED détecté", null);
                             try {
-                                // ✅ FIX #1 — utilise this.facade
+                                MultiRegisterApiFacadeImpl facadeTerm =
+                                    new MultiRegisterApiFacadeImpl(activity);
                                 com.pa.lcr.lcp.ApiResult rt =
-                                    facade.api_deliveryTerminate(jobId, node);
+                                    facadeTerm.api_deliveryTerminate(jobId, node);
                                 android.util.Log.i(TAG,
                                     "job/terminate: code=" + (rt != null ? rt.code : "null")
                                     + " msg=" + (rt != null ? rt.msg : "null"));
@@ -466,7 +446,7 @@ public class DeepLinkHandler {
                     } catch (Exception ignored) {}
                 }
 
-                // Timeout 10 min
+                // Timeout
                 android.util.Log.w(TAG, "pollJob: timeout 10min sans DONE");
                 logError(serialId, woNum, "POLL_TIMEOUT", "Timeout 10 minutes sans DONE");
                 retournerFieldService(woNum, woIdGuid, "erreur_timeout",
@@ -499,13 +479,14 @@ public class DeepLinkHandler {
     // Dernier résultat — accessible via GET /v1/delivery/last-result
     // =========================================================
 
-    public static volatile String lastResultJson  = null;
-    public static volatile String lastResultWoNum  = null;
+    // Variable statique — partagée entre DeepLinkHandler et ApiServer
+    public static volatile String lastResultJson = null;
+    public static volatile String lastResultWoNum = null;
     public static volatile String lastResultWoGuid = null;
-    public static volatile long   lastResultTs     = 0;
+    public static volatile long   lastResultTs = 0;
 
     // =========================================================
-    // Retour Field Service
+    // Retour Field Service — Stratégie A + B
     // =========================================================
 
     private void retournerFieldService(String woNum, String woIdGuid,
@@ -527,82 +508,92 @@ public class DeepLinkHandler {
                 }
             } catch (Exception ignored) {}
 
+            // GUID du WO
             String woGuid = (woIdGuid != null && !woIdGuid.isEmpty()) ? woIdGuid : "";
             woGuid = woGuid.replace("{", "").replace("}", "");
 
-            // Sauvegarder le résultat pour GET /v1/delivery/last-result
+            // ✅ Stratégie B — sauvegarder le résultat pour GET /v1/delivery/last-result
             try {
                 JSONObject lastResult = new JSONObject();
-                lastResult.put("wonum",  woNum   != null ? woNum   : "");
-                lastResult.put("woid",   woGuid);
-                lastResult.put("net",    net);
-                lastResult.put("gross",  gross);
-                lastResult.put("ticket", ticket);
-                lastResult.put("status", status  != null ? status  : "ok");
-                lastResult.put("ts",     System.currentTimeMillis());
+                lastResult.put("wonum",   woNum   != null ? woNum   : "");
+                lastResult.put("woid",    woGuid);
+                lastResult.put("net",     net);
+                lastResult.put("gross",   gross);
+                lastResult.put("ticket",  ticket);
+                lastResult.put("status",  status  != null ? status  : "ok");
+                lastResult.put("ts",      System.currentTimeMillis());
                 if (extraJson != null) {
-                    try { lastResult.put("payload", new JSONObject(extraJson)); }
-                    catch (Exception ignored) {}
+                    try {
+                        lastResult.put("payload", new JSONObject(extraJson));
+                    } catch (Exception ignored) {}
                 }
                 lastResultJson   = lastResult.toString();
                 lastResultWoNum  = woNum;
                 lastResultWoGuid = woGuid;
                 lastResultTs     = System.currentTimeMillis();
-                // Écrire aussi dans LcrHttpService pour le serveur HTTP 8766
+                // ✅ Écrire aussi dans LcrHttpService pour le serveur HTTP 8766
                 com.pa.lcrdemo.LcrHttpService.lastResultJson = lastResult.toString();
                 android.util.Log.i(TAG, "last-result sauvegardé: wonum=" + woNum
                     + " net=" + net + " gross=" + gross + " ticket=" + ticket);
 
-                // Patch Dataverse (queue offline + tentative MSAL immédiate)
-                final String fNet    = net;
-                final String fGross  = gross;
-                final String fTicket = ticket;
-                patchDataverse(woGuid, woNum, fNet, fGross, fTicket, status);
+                // ✅ PATCH Dataverse directement via cookies WebView
+                final String fNetP    = net;
+                final String fGrossP  = gross;
+                final String fTicketP = ticket;
+                final String fGuidP   = woGuid;
+                final String fWoNumP  = woNum;
+                final String fStatusP = status;
+                patchDataverse(fGuidP, fWoNumP, fNetP, fGrossP, fTicketP, fStatusP);
 
             } catch (Exception ignored) {}
 
-            // ✅ FIX #3 — Retour Field Service via ms-dynamicsxrm://
-            // Remplace l'ouverture d'une URL HTTPS dans un navigateur externe.
-            // filgo_lcr_form reçoit les données via les query params et/ou
-            // GET /v1/delivery/last-result (port 8766, CORS libre).
-            final String fNet2    = net;
-            final String fGross2  = gross;
-            final String fTicket2 = ticket;
-            final String fWoGuid  = woGuid;
-            final String fWoNum2  = woNum;
-            final String fStatus  = status;
+            // ✅ Stratégie B — écrire dans localStorage du WebView Field Service
+            // avant finish() pour que onLoadForm puisse lire les données
+            final String fNet    = net;
+            final String fGross  = gross;
+            final String fTicket = ticket;
+            final String fWoGuid = woGuid;
+            final String fWoNum2 = woNum;
+            final String fStatus = status;
 
             activity.runOnUiThread(() -> {
                 try {
-                    // Construire l'URL de retour ms-dynamicsxrm://
-                    // filgo_lcr_form intercepte action=lcr_retour et lit les params
-                    String urlRetour = "ms-dynamicsxrm://main.aspx"
-                        + "?pagetype=webresource"
-                        + "&webresourcename=filgo_lcr_form"
-                        + "&action=lcr_retour"
-                        + "&wonum="  + android.net.Uri.encode(fWoNum2  != null ? fWoNum2  : "")
-                        + "&woid="   + android.net.Uri.encode(fWoGuid  != null ? fWoGuid  : "")
-                        + "&net="    + android.net.Uri.encode(fNet2    != null ? fNet2    : "")
-                        + "&gross="  + android.net.Uri.encode(fGross2  != null ? fGross2  : "")
-                        + "&ticket=" + android.net.Uri.encode(fTicket2 != null ? fTicket2 : "")
-                        + "&status=" + android.net.Uri.encode(fStatus  != null ? fStatus  : "ok")
-                        + "&ts="     + System.currentTimeMillis();
-
-                    android.util.Log.i(TAG, "Retour Field Service — " + urlRetour);
-
+                    // ✅ Construire le JSON résultat
+                    JSONObject lsData = new JSONObject();
                     try {
-                        Intent retour = new Intent(Intent.ACTION_VIEW, Uri.parse(urlRetour));
-                        retour.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                        activity.startActivity(retour);
-                    } catch (Exception e) {
-                        // ms-dynamicsxrm non disponible (ex: FS Mobile pas installé)
-                        // → rester dans l'APK, les données sont dans last-result
-                        android.util.Log.w(TAG,
-                            "ms-dynamicsxrm non disponible — retour ignoré: " + e.getMessage());
-                        activity.moveTaskToBack(true);
+                        lsData.put("wonum",  fWoNum2 != null ? fWoNum2 : "");
+                        lsData.put("woid",   fWoGuid);
+                        lsData.put("net",    fNet);
+                        lsData.put("gross",  fGross);
+                        lsData.put("ticket", fTicket);
+                        lsData.put("status", fStatus != null ? fStatus : "ok");
+                        lsData.put("ts",     System.currentTimeMillis());
+                    } catch (Exception ignored) {}
+
+                    // ✅ Injecter dans localStorage via le WebView de MainActivity
+                    // Le même domaine crm3.dynamics.com est partagé avec Field Service
+                    String js = "try { localStorage.setItem('lcr_last_result', '"
+                        + lsData.toString().replace("'", "\'") + "'); } catch(e) {}";
+
+                    android.webkit.WebView wv = activity.getFieldServiceWebView();
+                    if (wv != null) {
+                        wv.evaluateJavascript(js, null);
+                        android.util.Log.i(TAG, "localStorage écrit: " + lsData.toString());
+                    } else {
+                        android.util.Log.w(TAG, "WebView non disponible — localStorage ignoré");
                     }
+
                 } catch (Exception e) {
-                    android.util.Log.e(TAG, "retournerFieldService ERR: " + e.getMessage());
+                    android.util.Log.e(TAG, "localStorage ERR: " + e.getMessage());
+                }
+
+                // ✅ MSAL écrit directement dans Dataverse — plus besoin du dialog
+                // Retour Field Service via finish() — taskAffinity ramène FS au premier plan
+                android.util.Log.i(TAG, "Retour FS — finish()");
+                try {
+                    activity.finish();
+                } catch (Exception e) {
+                    android.util.Log.e(TAG, "finish() ERR: " + e.getMessage());
                     activity.moveTaskToBack(true);
                 }
             });
@@ -614,113 +605,6 @@ public class DeepLinkHandler {
     }
 
     // =========================================================
-    // Patch Dataverse — queue offline + MSAL silent
-    // =========================================================
-
-    private void patchDataverse(String woGuid, String woNum,
-                                 String net, String gross, String ticket,
-                                 String status) {
-        if (woGuid == null || woGuid.isEmpty()) {
-            android.util.Log.w(TAG, "patchDataverse: GUID vide — ignoré");
-            return;
-        }
-
-        // Extraire delivery_uid depuis lastResultJson
-        String deliveryUid = "";
-        try {
-            if (lastResultJson != null) {
-                JSONObject j = new JSONObject(lastResultJson);
-                JSONObject payload = j.optJSONObject("payload");
-                if (payload != null) {
-                    JSONObject result = payload.optJSONObject("result");
-                    if (result != null) deliveryUid = result.optString("delivery_uid", "");
-                }
-            }
-        } catch (Exception ignored) {}
-
-        final String fDeliveryUid = deliveryUid.isEmpty()
-            ? woNum + "-" + System.currentTimeMillis()
-            : deliveryUid;
-
-        // Sauvegarder dans la queue offline d'abord (même sans réseau)
-        try {
-            DeliveryResultQueueDb queueDb = new DeliveryResultQueueDb(activity);
-            JSONObject queuePayload = new JSONObject();
-            queuePayload.put("deliveryUid", fDeliveryUid);
-            queuePayload.put("workOrderId", woGuid);
-            queuePayload.put("woNum",       woNum   != null ? woNum   : "");
-            queuePayload.put("netTotal",    net     != null ? Double.parseDouble(net)   : 0);
-            queuePayload.put("grossTotal",  gross   != null ? Double.parseDouble(gross) : 0);
-            queuePayload.put("ticketNo",    ticket  != null ? ticket  : "");
-            queuePayload.put("status",      status  != null ? status  : "DONE");
-            queueDb.upsertPending(fDeliveryUid, queuePayload.toString());
-            android.util.Log.i(TAG, "patchDataverse: ajouté à la queue offline");
-
-            // Déclencher WorkManager immédiatement si réseau disponible
-            com.pa.lcrdemo.dataverse.DeliverySyncScheduler.triggerNow(activity);
-        } catch (Exception e) {
-            android.util.Log.e(TAG, "Queue ERR: " + e.getMessage());
-        }
-
-        // ✅ FIX #2 — MSAL silent (acquireTokenSilentFromWorker) depuis btExec
-        // L'ancien code appelait acquireToken() (interactif) depuis un thread background,
-        // ce qui pouvait lancer une UI login depuis btExec → crash/ANR.
-        MsalTokenProvider tokenProvider = new MsalTokenProvider(activity);
-        tokenProvider.init(new MsalTokenProvider.InitCallback() {
-            @Override
-            public void onReady() {
-                // acquireTokenSilentFromWorker = pas d'Activity, purement silent
-                tokenProvider.acquireTokenSilentFromWorker(new MsalTokenProvider.TokenCallback() {
-                    @Override
-                    public void onSuccess(String accessToken) {
-                        btExec.execute(() -> {
-                            try {
-                                WorkOrderUpdater.patchSummary(
-                                    accessToken,
-                                    woGuid,
-                                    net, gross, ticket,
-                                    woNum, fDeliveryUid
-                                );
-                                android.util.Log.i(TAG,
-                                    "patchDataverse MSAL: OK — wonum=" + woNum);
-                                // Marquer comme envoyé dans la queue
-                                try {
-                                    DeliveryResultQueueDb qdb = new DeliveryResultQueueDb(activity);
-                                    java.util.List<DeliveryResultQueueDb.QueueItem> items =
-                                        qdb.listPending(5);
-                                    for (DeliveryResultQueueDb.QueueItem item : items) {
-                                        if (fDeliveryUid.equals(item.deliveryUid)) {
-                                            qdb.markSent(item.id);
-                                            break;
-                                        }
-                                    }
-                                } catch (Exception ignored) {}
-                            } catch (Exception e) {
-                                android.util.Log.w(TAG,
-                                    "patchDataverse PATCH ERR: " + e.getMessage()
-                                    + " — restera dans la queue pour retry WorkManager");
-                            }
-                        });
-                    }
-                    @Override
-                    public void onError(Exception e) {
-                        // Token non disponible — la queue WorkManager retentera plus tard
-                        android.util.Log.w(TAG,
-                            "patchDataverse token silent ERR: " + e.getMessage()
-                            + " — restera dans la queue pour retry");
-                    }
-                });
-            }
-            @Override
-            public void onError(Exception e) {
-                android.util.Log.w(TAG,
-                    "patchDataverse MSAL init ERR: " + e.getMessage()
-                    + " — restera dans la queue pour retry");
-            }
-        });
-    }
-
-    // =========================================================
     // Logging helpers
     // =========================================================
 
@@ -729,9 +613,9 @@ public class DeepLinkHandler {
         if (deliveryStore == null || serialId == null || serialId.isEmpty()) return;
         try {
             JSONObject d = new JSONObject();
-            d.put("woNum",   woNum   != null ? woNum   : "");
-            d.put("btMac",   btMac   != null ? btMac   : "");
-            d.put("node",    node    != null ? node    : 0);
+            d.put("woNum",   woNum != null ? woNum : "");
+            d.put("btMac",   btMac != null ? btMac : "");
+            d.put("node",    node  != null ? node  : 0);
             d.put("produit", produit != null ? produit : "");
             d.put("preset",  preset  != null ? preset  : "");
             d.put("source",  "DEEPLINK_FS");
@@ -779,21 +663,120 @@ public class DeepLinkHandler {
         if (deliveryStore == null) return;
         try {
             String errorJson = new JSONObject()
-                .put("code",    code)
+                .put("code", code)
                 .put("message", message != null ? message : "")
-                .put("ts",      System.currentTimeMillis())
+                .put("ts", System.currentTimeMillis())
                 .toString();
             logDeliveryEnd(serialId, woNum, null, "ERROR", null, errorJson);
             logEvent(serialId, woNum, DeliveryLogStore.LEVEL_ERROR, code, message, errorJson);
         } catch (Exception ignored) {}
     }
 
+    // =========================================================
+    // ✅ PATCH Dataverse via cookies WebView Field Service
+    // =========================================================
+
+    private void patchDataverse(String woGuid, String woNum,
+                                 String net, String gross, String ticket,
+                                 String status) {
+        if (woGuid == null || woGuid.isEmpty()) {
+            android.util.Log.w(TAG, "patchDataverse: GUID vide — ignoré");
+            return;
+        }
+
+        // ✅ Extraire delivery_uid depuis lastResultJson
+        String deliveryUid = "";
+        try {
+            if (lastResultJson != null) {
+                JSONObject j = new JSONObject(lastResultJson);
+                JSONObject payload = j.optJSONObject("payload");
+                if (payload != null) {
+                    JSONObject result = payload.optJSONObject("result");
+                    if (result != null) deliveryUid = result.optString("delivery_uid", "");
+                }
+            }
+        } catch (Exception ignored) {}
+
+        final String fDeliveryUid = deliveryUid;
+
+        // ✅ Sauvegarder dans la queue offline — même si pas de réseau
+        try {
+            DeliveryResultQueueDb queueDb = new DeliveryResultQueueDb(activity);
+            JSONObject queuePayload = new JSONObject();
+            queuePayload.put("deliveryUid", fDeliveryUid.isEmpty() ? woNum + "-" + System.currentTimeMillis() : fDeliveryUid);
+            queuePayload.put("workOrderId", woGuid.replace("{", "").replace("}", ""));
+            queuePayload.put("woNum",       woNum   != null ? woNum   : "");
+            queuePayload.put("netTotal",    net     != null ? Double.parseDouble(net)   : 0);
+            queuePayload.put("grossTotal",  gross   != null ? Double.parseDouble(gross) : 0);
+            queuePayload.put("ticketNo",    ticket  != null ? ticket  : "");
+            queuePayload.put("status",      status  != null ? status  : "DONE");
+            queueDb.upsertPending(
+                fDeliveryUid.isEmpty() ? woNum + "-" + System.currentTimeMillis() : fDeliveryUid,
+                queuePayload.toString()
+            );
+            android.util.Log.i(TAG, "patchDataverse: ajouté à la queue offline");
+            // ✅ Déclencher WorkManager immédiatement si réseau disponible
+            com.pa.lcrdemo.dataverse.DeliverySyncScheduler.triggerNow(activity);
+        } catch (Exception e) {
+            android.util.Log.e(TAG, "Queue ERR: " + e.getMessage());
+        }
+
+        // ✅ Tenter MSAL + PATCH immédiat si réseau disponible
+        MsalTokenProvider tokenProvider = new MsalTokenProvider(activity);
+        tokenProvider.init(new MsalTokenProvider.InitCallback() {
+            @Override
+            public void onReady() {
+                tokenProvider.acquireToken(activity, new MsalTokenProvider.TokenCallback() {
+                    @Override
+                    public void onSuccess(String accessToken) {
+                        btExec.execute(() -> {
+                            try {
+                                WorkOrderUpdater.patchSummary(
+                                    accessToken,
+                                    woGuid,
+                                    net, gross, ticket,
+                                    woNum, fDeliveryUid
+                                );
+                                android.util.Log.i(TAG, "patchDataverse MSAL: OK — wonum=" + woNum);
+                                // Marquer comme envoyé dans la queue
+                                try {
+                                    DeliveryResultQueueDb qdb = new DeliveryResultQueueDb(activity);
+                                    java.util.List<DeliveryResultQueueDb.QueueItem> items =
+                                        qdb.listPending(5);
+                                    for (DeliveryResultQueueDb.QueueItem item : items) {
+                                        if (item.deliveryUid.equals(fDeliveryUid)) {
+                                            qdb.markSent(item.id);
+                                            break;
+                                        }
+                                    }
+                                } catch (Exception ignored) {}
+                            } catch (Exception e) {
+                                android.util.Log.w(TAG, "patchDataverse MSAL PATCH ERR: " + e.getMessage());
+                                // Reste dans la queue pour retry WorkManager
+                            }
+                        });
+                    }
+                    @Override
+                    public void onError(Exception e) {
+                        android.util.Log.w(TAG, "patchDataverse MSAL token ERR: " + e.getMessage()
+                            + " — restera dans la queue pour retry");
+                    }
+                });
+            }
+            @Override
+            public void onError(Exception e) {
+                android.util.Log.w(TAG, "patchDataverse MSAL init ERR: " + e.getMessage()
+                    + " — restera dans la queue pour retry");
+            }
+        });
+    }
+
     private static String buildErrorJson(String code, String message) {
         try {
             return new JSONObject()
-                .put("error_code",    code)
+                .put("error_code", code)
                 .put("error_message", message != null ? message : "")
-                .put("ts",            System.currentTimeMillis())
+                .put("ts", System.currentTimeMillis())
                 .toString();
         } catch (Exception e) {
             return "{\"error_code\":\"" + code + "\"}";

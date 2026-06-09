@@ -20,8 +20,7 @@ public class DeliveryDb extends SQLiteOpenHelper {
     // v3: add media_profile/media_event
     // v4: add structured error columns to delivery_event (event_level/event_code/event_where/detail_short)
     // v5: add truck_profile + truck_drift tables
-    // v6: add bt_signal table
-    public static final int DB_VERSION = 6;
+    public static final int DB_VERSION = 5;
 
     private static final String TAG = "DeliveryDb";
 
@@ -51,8 +50,6 @@ public class DeliveryDb extends SQLiteOpenHelper {
         createMediaTables(db);
         // ✅ v5: truck profile + drift tables
         createTruckTables(db);
-        // ✅ v6: bt_signal
-        createBtSignalTable(db);
     }
 
     @Override
@@ -82,10 +79,6 @@ public class DeliveryDb extends SQLiteOpenHelper {
         // v5 tables
         if (oldVersion < 5) {
             createTruckTables(db);
-        }
-        // v6 table
-        if (oldVersion < 6) {
-            createBtSignalTable(db);
         }
     }
 
@@ -241,31 +234,6 @@ public class DeliveryDb extends SQLiteOpenHelper {
         );
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_drift_truck ON truck_drift(truck_id, ts_ms);");
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_drift_ack ON truck_drift(acknowledged);");
-    }
-
-    // =========================================================
-    // BtSignal table (v6)
-    // =========================================================
-    private static void createBtSignalTable(SQLiteDatabase db) {
-        db.execSQL(
-            "CREATE TABLE IF NOT EXISTS bt_signal (" +
-            "id INTEGER PRIMARY KEY AUTOINCREMENT," +
-            "mac TEXT NOT NULL," +
-            "transport_key TEXT," +
-            "rssi INTEGER," +
-            "rssi_quality TEXT," +
-            "io_score TEXT," +
-            "io_errors INTEGER," +
-            "io_timeouts INTEGER," +
-            "io_latency_avg_ms INTEGER," +
-            "io_samples INTEGER," +
-            "source TEXT NOT NULL," +
-            "delivery_active INTEGER NOT NULL DEFAULT 0," +
-            "ts_ms INTEGER NOT NULL" +
-            ");"
-        );
-        db.execSQL("CREATE INDEX IF NOT EXISTS idx_bt_signal_mac_ts ON bt_signal(mac, ts_ms);");
-        db.execSQL("CREATE INDEX IF NOT EXISTS idx_bt_signal_source ON bt_signal(source);");
     }
 
     // =========================================================

@@ -1,3 +1,4 @@
+
 package com.pa.lcr.lcp;
 
 import com.pa.lcr.lcp.transport.TransportIo;
@@ -50,35 +51,13 @@ public class LcpLink {
     private static final byte MSG_CHECK_REQUEST = 0x7D;
 
     // Cadence du CHECK_REQUEST
-    // ── Profils de performance par type de registre ─────────────────────────
-    // LCR-II mesuré : triplet DS+Gross+Net = 70ms, 1 lecture = 23ms @ 19200 baud
-    private static final int QP_MS_LCRII       = 100;
-    private static final int RX_SLICE_MS_LCRII = 100;
-    // Valeurs conservatives (LC3 ou inconnu)
-    private static final int QP_MS_DEFAULT       = 200;
-    private static final int RX_SLICE_MS_DEFAULT = 250;
-
-    // Valeurs actives — ajustées après détection du type de registre
-    private int QP_MS       = QP_MS_DEFAULT;
-    private int RX_SLICE_MS = RX_SLICE_MS_DEFAULT;
+    private static final int QP_MS = 200;
 
     // Timeout "queued long" pour opérations modifiantes (SET_FIELD / ISSUE_COMMAND)
     private static final int OP_QUEUEABLE_TIMEOUT_MS = 30_000;
 
-    /**
-     * Applique le profil de performance selon le type de registre détecté.
-     * A appeler dans RegisterSessionManager après probeAndIdentify().
-     * LCR-II : QP_MS=100, RX_SLICE_MS=100 (mesuré par lcr_bench.py)
-     * LC3/défaut : valeurs conservatives
-     */
-    public void applyRegisterProfile(boolean isLcrii) {
-        QP_MS       = isLcrii ? QP_MS_LCRII       : QP_MS_DEFAULT;
-        RX_SLICE_MS = isLcrii ? RX_SLICE_MS_LCRII : RX_SLICE_MS_DEFAULT;
-        android.util.Log.i("LcpLink", "Profile applied: "
-            + (isLcrii ? "LCR-II" : "DEFAULT")
-            + " QP_MS=" + QP_MS
-            + " RX_SLICE_MS=" + RX_SLICE_MS);
-    }
+    // Slice de lecture pour permettre l'interleaving TX 0x7D / RX
+    private static final int RX_SLICE_MS = 250;
 
     // ===================== TRANSPORT =====================
     private final TransportIo io;
@@ -176,17 +155,13 @@ public class LcpLink {
     public MachineStatus opGetMachineStatus() throws IOException {
         Response r = sendRecv(buildPayload(MSG_GET_MACHINE_STATUS, null), 8000);
         ensureOk(r, "GET_MACHINE_STATUS");
-        // ✅ FIX: LCR-II retourne 6 bytes (sans prnStatus) ou 7 bytes (avec prnStatus).
-        // r.payload[6] sur un payload de 6 bytes = ArrayIndexOutOfBounds → "length=6; index=6"
-        if (r.payload.length < 6)
-            throw new IOException("GET_MACHINE_STATUS payload trop court: " + r.payload.length);
-        int rc  = r.payload[0] & 0xFF;
-        int dev = r.payload[1] & 0xFF;
-        int prn = (r.payload.length >= 7) ? (r.payload[2] & 0xFF) : 0;
-        int off = (r.payload.length >= 7) ? 3 : 2;
-        int ds  = u16be(r.payload[off],     r.payload[off + 1]);
-        int dc  = u16be(r.payload[off + 2], r.payload[off + 3]);
-        return new MachineStatus(rc, dev, prn, ds, dc);
+        return new MachineStatus(
+                r.payload[0] & 0xFF,
+                r.payload[1] & 0xFF,
+                r.payload[2] & 0xFF,
+                u16be(r.payload[3], r.payload[4]),
+                u16be(r.payload[5], r.payload[6])
+        );
     }
 
     /** Timeout 30s pour commande queueable */
@@ -293,14 +268,6 @@ public class LcpLink {
             }
 
             t("RX: " + hexDump(f.raw));
-
-            // ✅ FIX: rejeter les trames d'un autre nœud (buffer BT contaminé par 2e tab)
-            // from doit correspondre à toAddr (le registre qu'on adresse)
-            if (f.from != toAddr) {
-                t("RX: ignoré — from=0x" + hex2(f.from) + " attendu=0x" + hex2(toAddr));
-                continue; // lire la prochaine trame
-            }
-
             int rc = (f.payload.length > 0) ? (f.payload[0] & 0xFF) : 0xFF;
 
             // 3) Busy/queued handling

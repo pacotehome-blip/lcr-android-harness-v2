@@ -72,7 +72,7 @@ public class RegisterTabFragment extends Fragment {
     private long logViewSinceMs = 0L;
     private int ticketPendingFlag = -1;
     private volatile String lastLiveText = null;
-    private volatile int lastDigits = 2;  // ✅ FIX: LCR-II défaut = hundredths (2 décimales)
+    private volatile int lastDigits = 3;
     private volatile int lastDelCode = 0;
     private volatile long lastDelCodePollMs = 0L;
     private static final long DELCODE_POLL_MIN_MS = 800L;
@@ -197,8 +197,7 @@ public class RegisterTabFragment extends Fragment {
         public void onStateChanged(DeliveryState state) {
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
-                if (starting && (state == DeliveryState.RUNNING_FLOWING
-                        || state == DeliveryState.RUNNING_PAUSED)) starting = false;
+                if (starting && state == DeliveryState.RUNNING_FLOWING) starting = false;
                 if (starting && (System.currentTimeMillis() - startingSinceMs) > 12000L)
                     starting = false;
                 refreshDelCodeFromTickSnapshotThrottled();
@@ -244,8 +243,6 @@ public class RegisterTabFragment extends Fragment {
                 if (!isAdded() || getView() == null) return;
                 lastLiveText = liveText;
                 if (txtLive != null) txtLive.setText(liveText);
-                // ✅ FIX décimales: mettre à jour lastDigits dès que le controller a cachedDigits
-                try { if (controller != null) { int d = controller.getDisplayDigits(); if (d >= 0) lastDigits = d; } } catch (Exception ignored) {}
                 ensureSerialVisibleThrottled();
                 refreshDelCodeFromTickSnapshotThrottled();
                 updateButtons(controller != null ? controller.getState() : null);
@@ -420,7 +417,7 @@ public class RegisterTabFragment extends Fragment {
         if (txtTicketPending != null) txtTicketPending.setText("Ticket pending : —");
         if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : —");
         ticketPendingFlag = -1;
-        lastDigits = 2;  // ✅ FIX: LCR-II défaut = hundredths (2 décimales)
+        lastDigits = 3;
         if (txtLive != null) txtLive.setText("LIVE: (en attente)");
         if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
         if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
@@ -505,10 +502,12 @@ public class RegisterTabFragment extends Fragment {
                 LogBus.api(node, "Status(B) ERR: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
                 return;
             }
-            // ✅ Un seul requestLiveSample après délai
             ui.postDelayed(() -> {
+
+                  try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
+
                 try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
-            }, 300);
+            }, 200);
         } catch (Exception ignored) {}
     }
 
@@ -557,32 +556,20 @@ public class RegisterTabFragment extends Fragment {
         }
         if (btnConnect != null) btnConnect.setOnClickListener(v -> reconnectThisRegister(true));
         if (btnA != null) btnA.setOnClickListener(v -> {
-            final DeliveryController c = controller;
-            if (c == null) return;
-            bg.execute(() -> {
+            if (controller == null) return;
+            controller.alignOrRecover();
+            ui.postDelayed(() -> {
                 try {
                     if (tabTransportKey != null) {
-                        MediaTransportManager.get(requireContext())
-                            .activateExclusive(tabTransportKey, "TAB_A");
+                        MediaTransportManager.get(requireContext()).activateExclusive(tabTransportKey, "TAB_A");
                     }
                 } catch (Exception ignored) {}
-
-                // ✅ FIX ticket pending: alignOrRecoverSync() est bloquant —
-                // retourne seulement quand le ticket est cleared et l'état FSM stable.
-                // validateHeaderAsync() lit donc ticketPending à jour (0 = NON).
-                try { c.alignOrRecoverSync(); } catch (Exception e) {
-                    LogBus.api(node, "[A] ERR: " + safeMsg(e));
-                }
-
-                ui.post(() -> {
-                    if (!isAdded() || getView() == null) return;
-                    lastHeaderValidateMs = 0L; // forcer refresh après align
-                    try { validateHeaderAsync(); } catch (Exception ignored) {}
-                    try { refreshDelCodeFromTickSnapshotThrottled(); } catch (Exception ignored) {}
-                    try { updateButtons(c.getState()); } catch (Exception ignored) {}
-                    try { scheduleLogRefresh(); } catch (Exception ignored) {}
-                });
-            });
+                try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
+                try { validateHeaderAsync(); } catch (Exception ignored) {}
+                try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
+                refreshDelCodeFromTickSnapshotThrottled();
+                updateButtons(controller != null ? controller.getState() : null);
+            }, 900);
         });
         if (btnB != null) btnB.setOnClickListener(v -> {
             if (controller == null) { reconnectThisRegister(true); return; }
@@ -590,89 +577,54 @@ public class RegisterTabFragment extends Fragment {
         });
         if (btnC != null) {
             btnC.setOnClickListener(v -> {
-                final DeliveryController c = controller;
-                if (c == null) return;
-                final int    prod   = getPendingProduct();
-                final double preset = parseDouble(
-                    edtPreset != null ? edtPreset.getText().toString() : "0", 0.0);
+                if (controller == null) return;
+                refreshDelCodeFromTickSnapshotThrottled();
+                int dc = lastDelCode;
+                boolean tp = (dc & 0x0001) != 0;
+                boolean flow = (dc & 0x0004) != 0;
+                boolean act = (dc & 0x0008) != 0;
+                if (tp || flow || act) {
+                    if (txtLive != null) txtLive.setText("LIVE: registre non prêt — faire Status (B) / Resolve (A)");
+                    LogBus.ui(node, ts("C bloqué: delCode=0x" + Integer.toHexString(dc)));
+                    updateButtons(controller.getState());
+                    return;
+                }
                 starting = true;
                 startingSinceMs = System.currentTimeMillis();
-                updateButtons(c.getState());
-                bg.execute(() -> {
-                    try {
-                        if (tabTransportKey != null) {
-                            MediaTransportManager.get(requireContext())
-                                .activateExclusive(tabTransportKey, "TAB_C");
-                        }
-                    } catch (Exception ignored) {}
-                    DeliveryController.UiActionResult r = c.requestStartFromUi(prod, preset);
-                    if (!r.ok) {
-                        ui.post(() -> {
-                            starting = false;
-                            if (!isAdded() || getView() == null) return;
-                            if (txtLive != null) txtLive.setText("LIVE: " + r.userMessage);
-                            updateButtons(c.getState());
-                            try { Toast.makeText(requireContext(),
-                                r.userMessage, Toast.LENGTH_SHORT).show();
-                            } catch (Exception ignored) {}
-                        });
-                        return;
-                    }
-                    ui.post(() -> {
-                        if (!isAdded() || getView() == null) return;
-                        if (txtLive != null)
-                            txtLive.setText("LIVE: START demandé — attente confirmation registre");
-                        try { refreshDelCodeFromTickSnapshotThrottled(); } catch (Exception ignored) {}
-                        try { updateButtons(c.getState()); } catch (Exception ignored) {}
-                        try { scheduleLogRefresh(); } catch (Exception ignored) {}
-                    });
-                });
+                updateButtons(controller.getState());
+                if (txtLive != null) txtLive.setText("LIVE: RUNNING_FLOWING (flow off - waiting progression)");
+                int prod = getPendingProduct();
+                double preset = parseDouble(edtPreset != null ? edtPreset.getText().toString() : "0", 0.0);
+                controller.startDelivery(prod, preset);
             });
         }
         if (btnContinue != null) btnContinue.setOnClickListener(v -> {
-            final DeliveryController c = controller;
-            if (c == null) return;
-            bg.execute(() -> {
-                DeliveryController.UiActionResult r = c.requestContinueFromUi();
-                if (!r.ok) {
-                    ui.post(() -> {
-                        if (!isAdded() || getView() == null) return;
-                        if (txtLive != null) txtLive.setText("LIVE: " + r.userMessage);
-                        updateButtons(c.getState());
-                        try { Toast.makeText(requireContext(),
-                            r.userMessage, Toast.LENGTH_SHORT).show();
-                        } catch (Exception ignored) {}
-                    });
-                    return;
-                }
-                ui.post(() -> {
-                    if (!isAdded() || getView() == null) return;
-                    try { updateButtons(c.getState()); } catch (Exception ignored) {}
-                    try { scheduleLogRefresh(); } catch (Exception ignored) {}
-                });
-            });
+            if (controller == null) return;
+            if (controller.getState() != DeliveryState.RUNNING_PAUSED) {
+                try { controller.requestLiveSample(); } catch (Exception ignored) {}
+                try { Toast.makeText(requireContext(), "Attendre confirmation FLOW OFF", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
+                LogBus.ui(node, ts("Continue ignoré: FLOW OFF pas encore confirmé"));
+                return;
+            }
+            controller.resumeIfPaused();
         });
         if (btnFinish != null) btnFinish.setOnClickListener(v -> {
-            final DeliveryController c = controller;
-            if (c == null) return;
-            bg.execute(() -> {
-                try { c.endDelivery(); } catch (Exception e) {
-                    ui.post(() -> {
-                        if (!isAdded() || getView() == null) return;
-                        if (txtLive != null)
-                            txtLive.setText("LIVE: erreur END — " + safeMsg(e));
-                        updateButtons(c.getState());
-                    });
-                    return;
-                }
-                ui.post(() -> {
-                    if (!isAdded() || getView() == null) return;
-                    try { validateHeaderAsync(); } catch (Exception ignored) {}
-                    try { refreshDelCodeFromTickSnapshotThrottled(); } catch (Exception ignored) {}
-                    try { updateButtons(c.getState()); } catch (Exception ignored) {}
-                    try { scheduleLogRefresh(); } catch (Exception ignored) {}
-                });
-            });
+            if (controller == null) return;
+            boolean stableOff2 = false;
+            try { stableOff2 = controller.isFlowOffStable(); } catch (Exception ignored) {}
+            if (!stableOff2) {
+                try { controller.requestLiveSample(); } catch (Exception ignored) {}
+                try { Toast.makeText(requireContext(), "FLOW OFF en confirmation...", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
+                return;
+            }
+            controller.endDelivery();
+            ui.postDelayed(() -> {
+                try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
+                try { validateHeaderAsync(); } catch (Exception ignored) {}
+                try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
+                refreshDelCodeFromTickSnapshotThrottled();
+                updateButtons(controller != null ? controller.getState() : null);
+            }, 1500);
         });
 
         // ✅ REPRINT: câblage du bouton Reprint (last ticket)
@@ -845,60 +797,30 @@ public class RegisterTabFragment extends Fragment {
 
     private void validateHeaderAsync() {
         try { if (bg.isShutdown() || bg.isTerminated()) return; } catch (Exception ignored) {}
-        // ✅ Throttle: pas plus d'une validation LCP toutes les 5s
-        long now0 = System.currentTimeMillis();
-        if (now0 - lastHeaderValidateMs < HEADER_VALIDATE_MIN_MS) return;
-        lastHeaderValidateMs = now0;
         try {
             bg.execute(() -> {
                 try {
                     DeliveryController c = controller;
                     if (c == null) return;
 
-                    // ✅ FIX: utiliser delCode du tickSnapshot pour détecter livraison active.
-                    // Le FSM oscille trop (CONNECTED↔RUNNING_FLOWING) — pas fiable.
-                    // DC_DELIVERY_ACTIVE (0x0008) est la source de vérité du registre.
-                    boolean deliveryActive = false;
-                    try {
-                        ApiResult snap = c.api_tickSnapshot();
-                        if (snap != null && snap.data != null) {
-                            int dc = snap.data.optInt("delCode", 0);
-                            deliveryActive = (dc & 0x0008) != 0;
-                        }
-                    } catch (Exception ignored) {}
-
-                    // Aussi bloquer si FSM dit livraison active (double garde)
-                    if (!deliveryActive) {
-                        DeliveryState st = c.getState();
-                        deliveryActive = (st == DeliveryState.RUNNING_FLOWING
-                                || st == DeliveryState.RUNNING_PAUSED
-                                || st == DeliveryState.PRESTART
-                                || st == DeliveryState.ENDING);
-                    }
-
+                    // Si serial déjà connu depuis args, l'utiliser directement sans naviguer Mode 8
                     String serial = (serialFromArgs != null && !serialFromArgs.trim().isEmpty())
-                            ? serialFromArgs.trim() : "";
+                        ? serialFromArgs.trim() : "";
                     int tp = -1;
-
-                    if (!deliveryActive) {
-                        // Hors livraison: lecture LCP normale
+                    if (serial.isEmpty()) {
+                        ApiResult r = c.api_registerValidate(null, node, null, null, null, false);
+                        JSONObject j = r.toJson().optJSONObject("data");
+                        if (j == null) return;
+                        serial = j.optString("serial_id", "");
+                        tp = j.optInt("ticketPending", -1);
+                    } else {
                         ApiResult r = c.api_registerValidate(null, node, null, null, null, false);
                         JSONObject j = r != null ? r.toJson().optJSONObject("data") : null;
-                        if (j != null) {
-                            if (serial.isEmpty()) serial = j.optString("serial_id", "");
-                            tp = j.optInt("ticketPending", -1);
-                        }
-                    } else {
-                        // Pendant livraison: cache uniquement — zéro appel LCP
-                        ApiResult snap = c.api_tickSnapshot();
-                        JSONObject j = (snap != null && snap.data != null) ? snap.data : null;
-                        if (j != null) {
-                            int dc = j.optInt("delCode", 0);
-                            tp = ((dc & 0x0001) != 0) ? 1 : 0;
-                        }
+                        if (j != null) tp = j.optInt("ticketPending", -1);
                     }
 
                     try { RegisterSessionManager.get(requireContext()).bindExpectedSerial(node, serial); } catch (Exception ignored) {}
+                    // int tp = j.optInt("ticketPending", -1);
                     ticketPendingFlag = (tp == 1 ? 1 : (tp == 0 ? 0 : -1));
 
                     final String fSerial = serial;
@@ -908,6 +830,7 @@ public class RegisterTabFragment extends Fragment {
                             txtSerialId.setText("#Série : " + ((fSerial == null || fSerial.isEmpty()) ? "—" : fSerial));
                             if (fSerial != null && !fSerial.trim().isEmpty()) headerValidatedOnce = true;
                         }
+
                         if (txtTicketPending != null) {
                             txtTicketPending.setText("Ticket pending : " +
                                     (ticketPendingFlag == 1 ? "OUI" : (ticketPendingFlag == 0 ? "NON" : "—")));
@@ -921,16 +844,6 @@ public class RegisterTabFragment extends Fragment {
                 }
             });
         } catch (java.util.concurrent.RejectedExecutionException ignored) {}
-    }
-
-    private DeliveryController.UiGateSnapshot gate() {
-        try {
-            DeliveryController c = controller;
-            if (c == null) return DeliveryController.UiGateSnapshot.disconnected();
-            return c.getUiGateSnapshot();
-        } catch (Exception e) {
-            return DeliveryController.UiGateSnapshot.disconnected();
-        }
     }
 
     private void updateButtons(DeliveryState state) {
@@ -948,29 +861,36 @@ public class RegisterTabFragment extends Fragment {
             return;
         }
 
-        // ✅ Source de vérité unique — le controller décide, pas le fragment
-        DeliveryController.UiGateSnapshot g = gate();
         DeliveryState st = (state != null) ? state : controller.getState();
+        boolean connected = (st == DeliveryState.CONNECTED);
+        boolean paused    = (st == DeliveryState.RUNNING_PAUSED);
+        boolean flowing   = (st == DeliveryState.RUNNING_FLOWING);
+        boolean ending    = (st == DeliveryState.ENDING);
 
         btnConnect.setEnabled(true);
-        btnB.setEnabled(g.canStatus);
-        btnA.setEnabled(g.canAlign);
-        btnC.setEnabled(g.canStart && !starting);
-        btnContinue.setEnabled(g.canContinue && !starting);
-        btnFinish.setEnabled(g.canEnd && !starting);
+        btnB.setEnabled(true);
+        btnA.setEnabled(connected || paused || flowing);
 
-        if (btnReprintTicket != null) {
-            btnReprintTicket.setEnabled(g.canReprint);
+        int dc = lastDelCode;
+        boolean tp   = (dc & 0x0001) != 0;
+        boolean flow = (dc & 0x0004) != 0;
+        boolean act  = (dc & 0x0008) != 0;
+        btnC.setEnabled(connected && !tp && !flow && !act);
+
+        if (starting) {
+            btnContinue.setEnabled(false);
+            btnFinish.setEnabled(false);
+        } else {
+            String lt = lastLiveText;
+            boolean flowOffPhase = (lt != null && lt.contains("Flow OFF"));
+            boolean enable = paused || flowOffPhase;
+            btnContinue.setEnabled(enable);
+            btnFinish.setEnabled(enable);
         }
 
-        // Relâcher le flag "starting" si le controller confirme un état stable
-        if (starting) {
-            if (st == DeliveryState.RUNNING_FLOWING
-                    || st == DeliveryState.RUNNING_PAUSED
-                    || st == DeliveryState.ENDING
-                    || (System.currentTimeMillis() - startingSinceMs) > 12000L) {
-                starting = false;
-            }
+        // ✅ REPRINT: actif sur CONNECTED, RUNNING_PAUSED, ENDING
+        if (btnReprintTicket != null) {
+            btnReprintTicket.setEnabled(connected || paused || ending);
         }
     }
 

@@ -1,3 +1,4 @@
+
 package com.pa.lcr.lcp;
 
 import com.pa.lcr.lcp.storage.DeliveryLogStore;
@@ -280,16 +281,9 @@ private void reproEvent(String level, String type, String message, JSONObject da
     // Ticket loop
     private static final long TICKET_DEVICE_LOOP_MS = 30_000;
 
-    // LIVE backoff — valeurs par défaut conservatives
-    private static final long LIVE_BASE_MS_DEFAULT = 200;
-    private static final long LIVE_MAX_MS_DEFAULT   = 2000;
-    // Valeurs optimisées LCR-II (mesurées par lcr_bench.py @ 19200 baud)
-    // triplet DS+Gross+Net = 70ms → base 105ms avec marge
-    private static final long LIVE_BASE_MS_LCRII = 105;
-    private static final long LIVE_MAX_MS_LCRII  = 800;
-    // Valeurs actives — ajustées par applyRegisterProfile()
-    private volatile long LIVE_BASE_MS = LIVE_BASE_MS_DEFAULT;
-    private volatile long LIVE_MAX_MS  = LIVE_MAX_MS_DEFAULT;
+    // LIVE backoff
+    private static final long LIVE_BASE_MS = 200;
+    private static final long LIVE_MAX_MS = 2000;
     private static final long LIVE_LOG_THROTTLE_MS = 1000;
 
     // CONTINUER: fenêtre de grâce 30s
@@ -297,15 +291,8 @@ private void reproEvent(String level, String type, String message, JSONObject da
     private static final long CONTINUE_DEBOUNCE_MS = 1500;
 
     // API JobGet throttling
-    // Poll API — valeurs par défaut conservatives
-    private static final long API_JOB_MIN_POLL_MS_DEFAULT        = 900;
-    private static final long API_JOB_BACKOFF_ON_FAIL_MS_DEFAULT = 1200;
-    // Valeurs optimisées LCR-II
-    private static final long API_JOB_MIN_POLL_MS_LCRII        = 105;
-    private static final long API_JOB_BACKOFF_ON_FAIL_MS_LCRII = 200;
-    // Valeurs actives
-    private volatile long API_JOB_MIN_POLL_MS        = API_JOB_MIN_POLL_MS_DEFAULT;
-    private volatile long API_JOB_BACKOFF_ON_FAIL_MS = API_JOB_BACKOFF_ON_FAIL_MS_DEFAULT;
+    private static final long API_JOB_MIN_POLL_MS = 900;
+    private static final long API_JOB_BACKOFF_ON_FAIL_MS = 1200;
 
     private final LcpLink link;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
@@ -341,9 +328,6 @@ private void reproEvent(String level, String type, String message, JSONObject da
     private final AtomicBoolean liveInFlight = new AtomicBoolean(false);
     private final ThreadLocal<Boolean> inLiveSample = new ThreadLocal<>();
 
-    // Guard bouton A — évite multi-clic et collision LCP
-    private final AtomicBoolean alignInFlight = new AtomicBoolean(false);
-
     // Ticket pending: anti-réimpression
     private final java.util.concurrent.atomic.AtomicBoolean ticketPrintInFlight =
             new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -353,9 +337,6 @@ private void reproEvent(String level, String type, String message, JSONObject da
     private volatile long liveBackoffMs = LIVE_BASE_MS;
     private volatile long liveNextAllowedMs = 0L;
     private volatile long liveLastSkipLogMs = 0L;
-    // ✅ Sticky: un trou de polling ne fait pas retomber à CONNECTED immédiatement
-    private static final long DELIVERY_ACTIVE_STICKY_MS = 3000L;
-    private volatile long lastDeliveryActiveSeen = 0L;
 
     // Grâce 30s après Continuer
     private volatile long continueGraceUntilMs = 0L;
@@ -862,7 +843,7 @@ try {
         io.execute(() -> {
             if (isStopped()) return;
             try {
-
+                
 // ✅ REPRO: intent Status (B)
 try {
     JSONObject d0 = new JSONObject();
@@ -872,25 +853,40 @@ try {
     reproEvent(DeliveryLogStore.LEVEL_INFO, "UI_STATUS_B", "Status requested", d0);
 } catch (Exception ignored) {}
 
-// ✅ FIX: UN SEUL appel LCP (GET_MACHINE_STATUS).
-// Les lectures GET_FIELD #44/#45/#23 sont supprimées d'ici —
-// elles saturaient le bus et causaient rc=0xDA sur le live poll.
-// Le gross/net vient exclusivement du live poll (requestLiveSample).
 FullStatus fs = readFullStatus("status/full");
 
+
+                // keep last known dev/prn for B+ tick bus
                 lastDevStatusKnown = fs.devStatus;
                 lastPrnStatusKnown = fs.prnStatus;
 
                 emitLog(String.format("[STATUS] dev=0x%02X prn=0x%02X ds=0x%04X dc=0x%04X",
                         fs.devStatus, fs.prnStatus, fs.delStatus, fs.delCode));
 
-                // TickBus: push state/ds/dc change (net/gross inchangés — viennent du live poll)
+                ensureDigits();
+                double scale = Math.pow(10, cachedDigits);
+
+                int gRaw = beI32(lcpGetField(FIELD_GROSS_COUNT));
+                int nRaw = beI32(lcpGetField(FIELD_NET_COUNT));
+
+                double net = (nRaw & 0xFFFFFFFFL) / scale;
+                double gross = (gRaw & 0xFFFFFFFFL) / scale;
+
+                if (listener != null) listener.onLiveQty(net, gross);
+
+                // ✅ TickBus: push on change (B+ includes dev/prn/ds/dc/state)
+                publishTickIfChanged(net, gross, fs.devStatus, fs.prnStatus, fs.delStatus, fs.delCode, state);
+
+                // ✅ Ticket info (UI): ticket_no (#23). delivery_uid est inconnu ici => null
                 try {
-                    LastTick prev = lastTick;
-                    double net   = (prev != null) ? prev.net   : 0.0;
-                    double gross = (prev != null) ? prev.gross : 0.0;
-                    publishTickIfChanged(net, gross, fs.devStatus, fs.prnStatus, fs.delStatus, fs.delCode, state);
-                } catch (Exception ignored) {}
+ String tno = readTicketNo23();
+ String uid = null;
+ String n = lastNumeroLivraison;
+ if (n != null && !n.trim().isEmpty() && tno != null && !tno.trim().isEmpty()) {
+ uid = n.trim() + "-" + tno.trim();
+ }
+ if (listener != null) listener.onTicketInfo(tno, uid);
+ } catch (Exception ignored) {}
 
             } catch (Exception e) {
                 handleIoFailure("status", e);
@@ -902,10 +898,6 @@ FullStatus fs = readFullStatus("status/full");
     public void alignOrRecover() {
         io.execute(() -> {
             if (isStopped()) return;
-            if (!alignInFlight.compareAndSet(false, true)) {
-                emitLog("[A] alignOrRecover ignoré — déjà en cours");
-                return;
-            }
             try {
                 emitLog("[A] Align / recover requested");
 
@@ -921,36 +913,8 @@ try {
                 doAlignOrRecoverFull();
             } catch (Exception e) {
                 handleIoFailure("alignOrRecover", e);
-            } finally {
-                alignInFlight.set(false);
             }
         });
-    }
-
-    /**
-     * Version bloquante de alignOrRecover — appeler depuis un thread bg, jamais UI thread.
-     * Retourne seulement quand le ticket est cleared et l'état FSM stable.
-     * Utilisé par le bouton A du fragment pour garantir que validateHeaderAsync()
-     * lit ticketPending à jour (0) après l'appel.
-     */
-    public void alignOrRecoverSync() {
-        if (isStopped()) return;
-        if (!alignInFlight.compareAndSet(false, true)) {
-            // Déjà en cours — attendre qu'il finisse (max 8s)
-            long deadline = System.currentTimeMillis() + 8000L;
-            while (alignInFlight.get() && System.currentTimeMillis() < deadline) {
-                try { Thread.sleep(100); } catch (InterruptedException ignored) { break; }
-            }
-            return;
-        }
-        try {
-            emitLog("[A-sync] Align / recover (sync)");
-            doAlignOrRecoverFull();
-        } catch (Exception e) {
-            handleIoFailure("alignOrRecoverSync", e);
-        } finally {
-            alignInFlight.set(false);
-        }
     }
 
     @Override
@@ -1205,40 +1169,23 @@ try {
                     delStatus = ds[0];
                     delCode = ds[1];
                 } catch (Exception e) {
-                    // ✅ Sticky: timeout ne signifie pas livraison finie
-                    if (System.currentTimeMillis() - lastDeliveryActiveSeen < DELIVERY_ACTIVE_STICKY_MS) {
-                        liveBackoffStep("GET_DELIVERY_STATUS");
-                        return; // garder l'état actuel
-                    }
                     liveSoftSkip("GET_DELIVERY_STATUS", e);
                     return;
                 }
 
-                boolean ticket  = (delCode & DC_TICKET_PENDING)  != 0;
-                boolean flowBit = (delCode & DC_FLOW_ACTIVE)      != 0;
-                boolean active  = (delCode & DC_DELIVERY_ACTIVE)  != 0;
+                boolean ticket = (delCode & DC_TICKET_PENDING) != 0;
+                boolean flowBit = (delCode & DC_FLOW_ACTIVE) != 0;
+                boolean active = (delCode & DC_DELIVERY_ACTIVE) != 0;
 
-                // Mettre à jour le timestamp sticky
-                if (active) lastDeliveryActiveSeen = System.currentTimeMillis();
-
-                // ✅ RÈGLE D'ÉTAT SIMPLE — delCode est la vérité registre.
-                // ticketPending ne peut jamais écraser une livraison réelle.
-                if (active && flowBit) {
-                    setState(DeliveryState.RUNNING_FLOWING);
-                } else if (active) {
-                    setState(DeliveryState.RUNNING_PAUSED);
-                } else {
-                    // ✅ Sticky: ne pas tomber à CONNECTED si livraison confirmée récemment
-                    if (System.currentTimeMillis() - lastDeliveryActiveSeen < DELIVERY_ACTIVE_STICKY_MS) {
-                        return; // garder l'état actuel, attendre confirmation
-                    }
+                if (!active) {
                     liveResetBackoff();
-                    lastDeliveryActiveSeen = 0L; // livraison confirmée terminée
                     setState(DeliveryState.CONNECTED);
+
                     if (listener != null) {
                         listener.onLiveStatus(ticket ? "LIVE: CONNECTED - Ticket pending" : "LIVE: CONNECTED - Ready");
                         listener.onFlowStability(false, false, 0L);
                     }
+
                     lastGrossRaw = -1;
                     lastNetRaw = -1;
                     flowOffStable = false;
@@ -1246,51 +1193,47 @@ try {
                     flowOffStartMs = 0L;
                     lastCountsChangeMs = 0L;
                     continueGraceUntilMs = 0L;
+
+                    // ✅ TickBus: publish state/del changes even if quantities unknown
                     try {
                         LastTick prev = lastTick;
-                        double net   = (prev != null) ? prev.net   : 0.0;
+                        double net = (prev != null) ? prev.net : 0.0;
                         double gross = (prev != null) ? prev.gross : 0.0;
                         publishTickIfChanged(net, gross, -1, -1, delStatus, delCode, state);
                     } catch (Exception ignored) {}
+
                     return;
                 }
 
-                // ✅ Livraison active — lire les compteurs
                 try { ensureDigits(); }
                 catch (Exception e) { liveSoftSkip("ensureDigits", e); return; }
 
                 double scale = Math.pow(10, cachedDigits);
 
                 int g, n;
-                boolean countersOk;
                 try {
                     g = beI32(lcpGetField(FIELD_GROSS_COUNT));
                     n = beI32(lcpGetField(FIELD_NET_COUNT));
-                    countersOk = true;
-                    liveResetBackoff();
                 } catch (Exception ex) {
-                    // Fallback sur dernières valeurs connues — on publie quand même
                     g = (lastGrossRaw >= 0) ? lastGrossRaw : 0;
-                    n = (lastNetRaw   >= 0) ? lastNetRaw   : 0;
-                    countersOk = false;
+                    n = (lastNetRaw >= 0) ? lastNetRaw : 0;
                     liveBackoffStep("[LIVE] soft-skip counters");
                 }
 
-                // ✅ unsigned cast — les compteurs LCR sont U32
-                double netL   = (n & 0xFFFFFFFFL) / scale;
-                double grossL = (g & 0xFFFFFFFFL) / scale;
-
-                // ✅ Toujours publier onLiveQty tant que la livraison est active
-                if (listener != null) listener.onLiveQty(netL, grossL);
-                publishTickIfChanged(netL, grossL, -1, -1, delStatus, delCode, state);
-
-                if (!countersOk) return; // backoff déjà appliqué
-
+                liveResetBackoff();
                 long t = System.currentTimeMillis();
                 int d = 0;
                 if (lastGrossRaw >= 0 && lastNetRaw >= 0) {
                     d = Math.abs(g - lastGrossRaw) + Math.abs(n - lastNetRaw);
                 }
+
+                double netL = n / scale;
+                double grossL = g / scale;
+
+                if (listener != null) listener.onLiveQty(netL, grossL);
+
+                // ✅ TickBus: publish on change (B+ includes delStatus/delCode + state; dev/prn best-effort via last known)
+                publishTickIfChanged(netL, grossL, -1, -1, delStatus, delCode, state);
 
                 if (d > 0) {
                     continueGraceUntilMs = 0L;
@@ -1300,10 +1243,12 @@ try {
                     flowOffStartMs = 0L;
                     lastGrossRaw = g;
                     lastNetRaw = n;
+
                     if (listener != null) {
                         listener.onFlowStability(flowBit, false, 0L);
                         listener.onLiveStatus("LIVE: RUNNING_FLOWING (FLOW ON)");
                     }
+                    setState(DeliveryState.RUNNING_FLOWING);
                     return;
                 }
 
@@ -1311,10 +1256,15 @@ try {
                 long age = t - lastCountsChangeMs;
 
                 if (!sawFlowOnOnce) {
+                    flowOffStable = false;
+                    flowOffStartMs = 0L;
+
                     if (listener != null) {
                         listener.onFlowStability(flowBit, false, 0L);
                         listener.onLiveStatus("LIVE: RUNNING_FLOWING (Flow OFF - waiting progression)");
                     }
+
+                    setState(DeliveryState.RUNNING_FLOWING);
                     lastGrossRaw = g;
                     lastNetRaw = n;
                     return;
@@ -1329,6 +1279,7 @@ try {
                         listener.onFlowStability(flowBit, false, age);
                         listener.onLiveStatus("LIVE: RUNNING_FLOWING (Flow OFF - waiting progression)");
                     }
+                    setState(DeliveryState.RUNNING_FLOWING);
                     lastGrossRaw = g;
                     lastNetRaw = n;
                     return;
@@ -1341,6 +1292,9 @@ try {
                             : "LIVE: RUNNING_FLOWING (FLOW OFF - confirming...)");
                 }
 
+                if (flowOffStable) setState(DeliveryState.RUNNING_PAUSED);
+                else setState(DeliveryState.RUNNING_FLOWING);
+
                 lastGrossRaw = g;
                 lastNetRaw = n;
 
@@ -1351,35 +1305,6 @@ try {
         });
     }
 
-    /**
-     * Applique le profil de performance selon le type de registre détecté.
-     * Appelé par RegisterSessionManager après probeAndIdentify().
-     *
-     * LCR-II (19200 baud) mesuré par lcr_bench.py :
-     *   - 1 lecture = 23ms
-     *   - triplet DS+Gross+Net = 70ms
-     *   → LIVE_BASE_MS=105  LIVE_MAX_MS=800
-     *   → API_JOB_MIN_POLL_MS=105  API_JOB_BACKOFF_ON_FAIL_MS=200
-     *
-     * Par défaut (LC3 ou inconnu) : valeurs conservatives inchangées.
-     * En cas d'erreurs → liveBackoffStep() monte progressivement jusqu'à LIVE_MAX_MS.
-     * Quand ça se stabilise → liveResetBackoff() revient à LIVE_BASE_MS du profil.
-     */
-    public void applyRegisterProfile(boolean isLcrii) {
-        LIVE_BASE_MS              = isLcrii ? LIVE_BASE_MS_LCRII              : LIVE_BASE_MS_DEFAULT;
-        LIVE_MAX_MS               = isLcrii ? LIVE_MAX_MS_LCRII               : LIVE_MAX_MS_DEFAULT;
-        API_JOB_MIN_POLL_MS       = isLcrii ? API_JOB_MIN_POLL_MS_LCRII       : API_JOB_MIN_POLL_MS_DEFAULT;
-        API_JOB_BACKOFF_ON_FAIL_MS = isLcrii ? API_JOB_BACKOFF_ON_FAIL_MS_LCRII : API_JOB_BACKOFF_ON_FAIL_MS_DEFAULT;
-        // Réinitialiser le backoff avec la nouvelle base
-        liveBackoffMs     = LIVE_BASE_MS;
-        liveNextAllowedMs = 0L;
-        android.util.Log.i("DeliveryController", "Profile applied: "
-            + (isLcrii ? "LCR-II" : "DEFAULT")
-            + " LIVE_BASE=" + LIVE_BASE_MS + "ms"
-            + " LIVE_MAX=" + LIVE_MAX_MS + "ms"
-            + " POLL=" + API_JOB_MIN_POLL_MS + "ms");
-    }
-
     private void liveResetBackoff() {
         liveBackoffMs = LIVE_BASE_MS;
         liveNextAllowedMs = 0L;
@@ -1387,8 +1312,6 @@ try {
 
     private void liveBackoffStep(String reason) {
         long now = System.currentTimeMillis();
-        // Double le backoff jusqu'au max — si on revient à la normale,
-        // liveResetBackoff() remet LIVE_BASE_MS (valeur du profil actif)
         liveBackoffMs = Math.min(LIVE_MAX_MS, Math.max(LIVE_BASE_MS, liveBackoffMs * 2));
         liveNextAllowedMs = now + liveBackoffMs;
         if (now - liveLastSkipLogMs >= LIVE_LOG_THROTTLE_MS) {
@@ -1455,10 +1378,9 @@ try {
     }
 
     private FullStatus readFullStatus(String ctx) throws Exception {
-        // ✅ FIX: un seul appel LCP (GET_MACHINE_STATUS contient déjà delStatus+delCode).
-        // Deux appels séquentiels causaient rc=0xDA sur GET_FIELD #44/#45 → soft-skip counters en boucle.
         LcpLink.MachineStatus ms = lcpMachineStatus();
-        return new FullStatus(ms, ms.delStatus, ms.delCode);
+        int[] ds = lcpDeliveryStatus();
+        return new FullStatus(ms, ds[0], ds[1]);
     }
 
     private FullStatus safeReadFullStatusNoThrow() {
@@ -3167,107 +3089,4 @@ private String resolveActiveMedia() {
          currentDeliveryAttemptId = null;
      }
  }
-
-    // =========================================================
-    // UiGateSnapshot — snapshot canonique des droits UI
-    // Le controller décide, pas le fragment.
-    // =========================================================
-    public static final class UiGateSnapshot {
-        public final boolean canAlign;
-        public final boolean canStatus;
-        public final boolean canStart;
-        public final boolean canContinue;
-        public final boolean canEnd;
-        public final boolean canReprint;
-
-        public UiGateSnapshot(boolean canAlign, boolean canStatus, boolean canStart,
-                              boolean canContinue, boolean canEnd, boolean canReprint) {
-            this.canAlign    = canAlign;
-            this.canStatus   = canStatus;
-            this.canStart    = canStart;
-            this.canContinue = canContinue;
-            this.canEnd      = canEnd;
-            this.canReprint  = canReprint;
-        }
-
-        public static UiGateSnapshot disconnected() {
-            return new UiGateSnapshot(false, false, false, false, false, false);
-        }
-    }
-
-    public UiGateSnapshot getUiGateSnapshot() {
-        DeliveryState st = state;
-        if (st == null || st == DeliveryState.DISCONNECTED) {
-            return UiGateSnapshot.disconnected();
-        }
-        boolean connected = (st == DeliveryState.CONNECTED);
-        boolean flowing   = (st == DeliveryState.RUNNING_FLOWING);
-        boolean paused    = (st == DeliveryState.RUNNING_PAUSED);
-        boolean ending    = (st == DeliveryState.ENDING);
-
-        int dc = 0;
-        try { LastTick lt = lastTick; if (lt != null) dc = lt.delCode; } catch (Exception ignored) {}
-
-        boolean ticketPending  = (dc & DC_TICKET_PENDING)  != 0;
-        boolean flowActive     = (dc & DC_FLOW_ACTIVE)      != 0;
-        boolean deliveryActive = (dc & DC_DELIVERY_ACTIVE)  != 0;
-
-        boolean flowOffStable = false;
-        try { flowOffStable = isFlowOffStable(); } catch (Exception ignored) {}
-
-        boolean canAlign    = connected || flowing || paused;
-        boolean canStatus   = connected || flowing || paused || ending;
-        boolean canStart    = connected && !ticketPending && !flowActive && !deliveryActive;
-        boolean canContinue = paused || (flowing && flowOffStable);
-        boolean canEnd      = paused || (flowing && flowOffStable);
-        boolean canReprint  = connected || paused || ending;
-
-        return new UiGateSnapshot(canAlign, canStatus, canStart, canContinue, canEnd, canReprint);
-    }
-
-    // =========================================================
-    // UiActionResult — résultat typé pour les actions UI
-    // =========================================================
-    public static final class UiActionResult {
-        public final boolean ok;
-        public final String  userMessage;
-        private UiActionResult(boolean ok, String msg) { this.ok = ok; this.userMessage = msg; }
-        public static UiActionResult ok(String msg)   { return new UiActionResult(true,  msg); }
-        public static UiActionResult fail(String msg) { return new UiActionResult(false, msg); }
-    }
-
-    /** Point d'entrée bouton C — appelé depuis bg.execute() dans le fragment. */
-    /** Point d'entrée UI bouton C.
-     *  UN SEUL MAÎTRE : api_deliveryStartC() — lit delStatus, crée ApiJob, envoie CMD_RUN.
-     *  Appelé depuis bg.execute() dans RegisterTabFragment. */
-    public UiActionResult requestStartFromUi(int product1to16, double presetNet) {
-        if (link == null || link.isClosed())
-            return UiActionResult.fail("Registre non connecté");
-        DeliveryState st = state;
-        if (st == DeliveryState.PRESTART || st == DeliveryState.ENDING)
-            return UiActionResult.fail("Opération en cours — attendre");
-        if (st == DeliveryState.RUNNING_FLOWING || st == DeliveryState.RUNNING_PAUSED)
-            return UiActionResult.fail("Livraison déjà active — faire A pour récupérer");
-        // Déléguer à api_deliveryStartC — seul maître.
-        ApiResult r = api_deliveryStartC(product1to16, presetNet);
-        if (r != null && r.code == 1) return UiActionResult.ok("Livraison démarrée");
-        return UiActionResult.fail(r != null && r.msg != null ? r.msg : "Erreur start");
-    }
-
-    /** Point d'entrée bouton Continuer — appelé depuis bg.execute() dans le fragment. */
-    /** Point d'entrée UI bouton Continuer.
-     *  Délègue à resumeIfPaused() — maître unique du CMD_RUN de continuation.
-     *  Appelé depuis bg.execute() dans RegisterTabFragment. */
-    public UiActionResult requestContinueFromUi() {
-        DeliveryState st = state;
-        boolean stable = false;
-        try { stable = isFlowOffStable(); } catch (Exception ignored) {}
-        if (st == DeliveryState.RUNNING_PAUSED
-                || (st == DeliveryState.RUNNING_FLOWING && stable)) {
-            resumeIfPaused();
-            return UiActionResult.ok("Continue envoyé");
-        }
-        return UiActionResult.fail(
-            "État non valide pour Continuer (" + (st != null ? st.name() : "null") + ")");
-    }
 }
