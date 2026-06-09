@@ -128,9 +128,20 @@ public class RegisterTabFragment extends Fragment {
             long now = System.currentTimeMillis();
             if (now - lastDelCodePollMs < DELCODE_POLL_MIN_MS) return;
             lastDelCodePollMs = now;
-            ApiResult r = c.api_tickSnapshot();
-            JSONObject d = (r != null) ? r.data : null;
-            if (d != null) lastDelCode = d.optInt("delCode", lastDelCode);
+            // ✅ FIX: api_tickSnapshot est un appel LCP — exécuter sur bg, pas UI thread
+            bg.execute(() -> {
+                try {
+                    ApiResult r = c.api_tickSnapshot();
+                    JSONObject d = (r != null) ? r.data : null;
+                    if (d != null) {
+                        int dc = d.optInt("delCode", lastDelCode);
+                        ui.post(() -> {
+                            lastDelCode = dc;
+                            updateButtons(c.getState());
+                        });
+                    }
+                } catch (Exception ignored) {}
+            });
         } catch (Exception ignored) {}
     }
 
@@ -505,12 +516,10 @@ public class RegisterTabFragment extends Fragment {
                 LogBus.api(node, "Status(B) ERR: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
                 return;
             }
+            // ✅ FIX: un seul requestLiveSample après délai (pas deux de suite → collision LCP)
             ui.postDelayed(() -> {
-
-                  try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
-
                 try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
-            }, 200);
+            }, 300);
         } catch (Exception ignored) {}
     }
 
