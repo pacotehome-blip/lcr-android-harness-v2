@@ -405,12 +405,21 @@ public class DeepLinkHandler {
         });
     }
 
+    // ✅ Guard anti-double poll — un seul poll par jobId
+    private static final java.util.Set<String> activePolls =
+        java.util.Collections.synchronizedSet(new java.util.HashSet<>());
+
     // =========================================================
     // Poll état livraison
     // =========================================================
 
     private void pollJobUntilDone(String jobId, int node, String woNum,
                                    String woIdGuid, String serialId, String mac) {
+        // ✅ Anti-double poll — si ce jobId est déjà en cours de poll, ignorer
+        if (!activePolls.add(jobId)) {
+            android.util.Log.w(TAG, "pollJobUntilDone: déjà actif pour jobId=" + jobId + " — ignoré");
+            return;
+        }
         // ✅ Persister la livraison courante
         try {
             new ActiveDeliveryStore(activity).save(woNum, woIdGuid, jobId, mac, node, serialId);
@@ -515,6 +524,12 @@ public class DeepLinkHandler {
                             state = r.data.optString("state", null);
 
                         android.util.Log.i(TAG, "pollJob: state=" + state);
+
+                        // ✅ state=null = job disparu du controller — sortir immédiatement
+                        if (state == null || state.isEmpty()) {
+                            android.util.Log.w(TAG, "pollJob: state=null — job disparu, arrêt poll");
+                            return;
+                        }
 
                         if (state != null && !state.equals(lastState)) {
                             logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
@@ -625,6 +640,9 @@ public class DeepLinkHandler {
                 logError(serialId, woNum, "POLL_EXCEPTION", e.getMessage());
                 retournerFieldService(woNum, woIdGuid, "erreur",
                     buildErrorJson("POLL_EXCEPTION", e.getMessage()));
+            } finally {
+                // ✅ Toujours retirer du set — libère le guard pour ce jobId
+                activePolls.remove(jobId);
             }
         });
     }
