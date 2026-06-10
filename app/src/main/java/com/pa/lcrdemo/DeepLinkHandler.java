@@ -819,32 +819,10 @@ public class DeepLinkHandler {
                             }
                         }
 
-                        // ✅ RUNNING_PAUSED → terminate
-                        if ("RUNNING_PAUSED".equals(state) && hasSeenFlowing && !terminateSent) {
-                            android.util.Log.i(TAG, "RUNNING_PAUSED — envoi job/terminate");
-                            logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
-                                "JOB_TERMINATE", "RUNNING_PAUSED détecté", null);
-                            try {
-                                MultiRegisterApiFacadeImpl facadeTerm =
-                                    new MultiRegisterApiFacadeImpl(activity);
-                                try {
-                                    String tKey = MediaTransportManager.btKey(mac);
-                                    com.pa.lcr.lcp.DeliveryController dc =
-                                        com.pa.lcr.lcp.RegisterSessionManager.get(activity)
-                                            .getController(tKey, node);
-                                    if (dc != null) { dc.requestLiveSample(); Thread.sleep(300); }
-                                } catch (Exception ignored) {}
-                                com.pa.lcr.lcp.ApiResult rt =
-                                    facadeTerm.api_deliveryTerminate(jobId, node);
-                                android.util.Log.i(TAG,
-                                    "job/terminate: code=" + (rt != null ? rt.code : "null")
-                                    + " msg=" + (rt != null ? rt.msg : "null"));
-                                terminateSent = true;
-                            } catch (Exception e) {
-                                android.util.Log.e(TAG, "job/terminate ERR: " + e.getMessage());
-                                logError(serialId, woNum, "JOB_TERMINATE_ERROR", e.getMessage());
-                            }
-                        }
+                        // ✅ RUNNING_PAUSED — NE PAS terminer automatiquement.
+                        // L'opérateur doit cliquer "Terminer" dans le tab.
+                        // Le terminate automatique causait une impression non voulue
+                        // quand la venne était coupée manuellement avant le preset.
 
                     } catch (Exception ignored) {}
                 }
