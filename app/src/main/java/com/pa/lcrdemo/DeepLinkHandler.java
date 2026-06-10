@@ -263,6 +263,12 @@ public class DeepLinkHandler {
         });
 
         // ✅ Attendre que le média soit READY (max 10s) avant oneshot/start
+        // ✅ Bloquer si un poll est déjà actif — évite double job
+        if (!activePolls.isEmpty()) {
+            android.util.Log.w(TAG, "lancerLivraison: poll déjà actif — ignoré");
+            activity.runOnUiThread(() -> activity.toast("↩️ Livraison déjà en cours"));
+            return;
+        }
         boolean ready = false;
         for (int i = 0; i < 20; i++) {
             try { Thread.sleep(500); } catch (Exception ignored) {}
@@ -558,6 +564,12 @@ public class DeepLinkHandler {
                 }
 
                 if (ready) {
+                    // ✅ Bloquer si un poll est déjà actif
+                    if (!activePolls.isEmpty()) {
+                        android.util.Log.w(TAG, "connectBt: poll déjà actif — ignoré");
+                        activity.runOnUiThread(() -> activity.toast("↩️ Livraison déjà en cours"));
+                        return;
+                    }
                     try {
                         MultiRegisterApiFacadeImpl facade =
                             new MultiRegisterApiFacadeImpl(activity);
@@ -694,6 +706,7 @@ public class DeepLinkHandler {
                                     dc.requestLiveSample();
                                 }
                             } catch (Exception ignored) {}
+                            android.util.Log.i(TAG, "pollJob: ticket pending — sortie poll, opérateur gère via bouton A");
                             // Sortir du poll — l'opérateur gère via bouton A
                             return;
                         } else {
