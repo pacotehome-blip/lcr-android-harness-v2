@@ -251,14 +251,21 @@ public class DeepLinkHandler {
 
         // ✅ Attendre que le média soit READY (max 10s) avant oneshot/start
         boolean ready = false;
-        MediaTransportManager mtmWait = activity.getMediaTransportManager();
         for (int i = 0; i < 20; i++) {
             try { Thread.sleep(500); } catch (Exception ignored) {}
             try {
-                if (mtmWait != null) {
-                    TransportIo io = mtmWait.getByKey(transportKey);
-                    if (io != null && io.isOpen()) { ready = true; break; }
+                java.util.List<com.pa.lcr.lcp.transport.TransportSnapshot> snaps =
+                    activity.getMediaTransportManager().listSnapshots();
+                if (snaps != null) {
+                    for (com.pa.lcr.lcp.transport.TransportSnapshot s : snaps) {
+                        if (s != null && transportKey.equals(s.key)
+                                && s.status == com.pa.lcr.lcp.transport.TransportStatus.READY) {
+                            ready = true;
+                            break;
+                        }
+                    }
                 }
+                if (ready) break;
             } catch (Exception ignored) {}
         }
 
