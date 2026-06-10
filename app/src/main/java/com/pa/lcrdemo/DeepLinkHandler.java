@@ -249,6 +249,28 @@ public class DeepLinkHandler {
             } catch (Exception ignored) {}
         });
 
+        // ✅ Attendre que le média soit READY (max 10s) avant oneshot/start
+        boolean ready = false;
+        MediaTransportManager mtmWait = activity.getMediaTransportManager();
+        for (int i = 0; i < 20; i++) {
+            try { Thread.sleep(500); } catch (Exception ignored) {}
+            try {
+                if (mtmWait != null) {
+                    TransportIo io = mtmWait.getByKey(transportKey);
+                    if (io != null && io.isOpen()) { ready = true; break; }
+                }
+            } catch (Exception ignored) {}
+        }
+
+        if (!ready) {
+            android.util.Log.w(TAG, "lancerLivraison: média non prêt après 10s");
+            activity.runOnUiThread(() -> activity.toast("BT non prêt — réessayez"));
+            logError(fSerialId, woNum, "MEDIA_NOT_READY", "Média non prêt après 10s");
+            retournerFieldService(woNum, woIdGuid, "erreur_media",
+                buildErrorJson("MEDIA_NOT_READY", "Média non prêt après 10s"));
+            return;
+        }
+
         // Démarrer oneshot/start
         int product = 1;
         double preset = 0.0;
