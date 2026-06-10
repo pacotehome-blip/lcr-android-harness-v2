@@ -292,27 +292,6 @@ public class DeepLinkHandler {
             return;
         }
 
-        // ✅ Attendre que le controller LCP soit CONNECTED (probeAndIdentify terminé)
-        // TransportStatus.READY ne garantit pas que le controller est prêt
-        for (int i = 0; i < 10; i++) {
-            try {
-                com.pa.lcr.lcp.DeliveryController dc =
-                    com.pa.lcr.lcp.RegisterSessionManager.get(activity)
-                        .getController(transportKey, node);
-                if (dc != null) {
-                    com.pa.lcr.lcp.ApiResult snap = dc.api_tickSnapshot();
-                    if (snap != null && snap.data != null) {
-                        String st = snap.data.optString("state", "");
-                        if (!st.isEmpty() && !"STOPPED".equals(st)) {
-                            android.util.Log.i(TAG, "Controller prêt: state=" + st);
-                            break;
-                        }
-                    }
-                }
-            } catch (Exception ignored) {}
-            try { Thread.sleep(300); } catch (Exception ignored) {}
-        }
-
         // Démarrer oneshot/start
         int product = 1;
         double preset = 0.0;
@@ -323,12 +302,27 @@ public class DeepLinkHandler {
         final double fPresetD = preset;
         final String fMac = mac != null ? mac : "";
 
+        // ✅ Déduire le type de transport depuis transportKey
+        // transportKey = "BT:XX:XX:XX" ou "USB" ou autre
+        // Ne pas se fier à fMac — il peut être vide même si BT est actif
+        String mediaType;
+        String btMacForFacade;
+        if (transportKey.toUpperCase().startsWith("BT:")) {
+            mediaType = "bt";
+            btMacForFacade = transportKey.substring(3); // extraire le MAC du transportKey
+        } else if (!fMac.isEmpty()) {
+            mediaType = "bt";
+            btMacForFacade = fMac;
+        } else {
+            mediaType = "usb";
+            btMacForFacade = null;
+        }
+
         try {
             MultiRegisterApiFacadeImpl facade = new MultiRegisterApiFacadeImpl(activity);
             com.pa.lcr.lcp.ApiResult r = facade.api_deliveryOneShotStart(
                 node, 255, woNum, fProduct, fPresetD, null,
-                fMac.isEmpty() ? "usb" : "bt",
-                fMac.isEmpty() ? null : fMac);
+                mediaType, btMacForFacade);
 
             android.util.Log.i(TAG, "oneshot/start: code=" + r.code + " msg=" + r.msg);
 
