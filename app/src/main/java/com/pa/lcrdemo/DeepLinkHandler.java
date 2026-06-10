@@ -119,16 +119,61 @@ public class DeepLinkHandler {
                 ActiveDeliveryStore.ActiveDelivery active = ads.load();
                 if (active != null && active.jobId != null && !active.jobId.isEmpty()) {
                     if (woNum != null && woNum.equals(active.woNum)) {
-                        // Même WO — reprendre le poll
-                        android.util.Log.i(TAG, "Livraison en cours détectée — reprise poll jobId="
-                            + active.jobId + " woNum=" + woNum);
-                        activity.toast("↩️ Reprise livraison — " + woNum);
-                        int resumeNode = active.node > 0 ? active.node : (lcrnode != null ? lcrnode : 250);
-                        String resumeMac = (active.mac != null && !active.mac.isEmpty())
-                            ? active.mac : btMac;
-                        pollJobUntilDone(active.jobId, resumeNode, woNum, woIdGuid,
-                            fSerialId, resumeMac);
-                        return;
+                        // Même WO — vérifier l'état du registre
+                        int delCode = 0;
+                        try {
+                            com.pa.lcr.lcp.RegisterSessionManager rsm =
+                                com.pa.lcr.lcp.RegisterSessionManager.get(activity);
+                            int resumeNode = active.node > 0 ? active.node : (lcrnode != null ? lcrnode : 250);
+                            String tKey = active.mac != null && !active.mac.isEmpty()
+                                ? com.pa.lcr.lcp.transport.MediaTransportManager.btKey(active.mac)
+                                : null;
+                            com.pa.lcr.lcp.DeliveryController dc = tKey != null
+                                ? rsm.getController(tKey, resumeNode) : null;
+                            if (dc != null) {
+                                com.pa.lcr.lcp.ApiResult snap = dc.api_tickSnapshot();
+                                if (snap != null && snap.data != null)
+                                    delCode = snap.data.optInt("delCode", 0);
+                            }
+                        } catch (Exception ignored) {}
+
+                        boolean deliveryActive = (delCode & 0x0008) != 0;
+                        boolean flowActive     = (delCode & 0x0004) != 0;
+                        boolean ticketPending  = (delCode & 0x0001) != 0;
+
+                        if (deliveryActive) {
+                            // Registre en livraison active (FLOWING ou PAUSED) — reprendre le poll
+                            android.util.Log.i(TAG, "Reprise poll — même WO jobId=" + active.jobId
+                                + " delCode=0x" + Integer.toHexString(delCode));
+                            activity.toast("↩️ Reprise livraison — " + woNum);
+                            int resumeNode = active.node > 0 ? active.node : (lcrnode != null ? lcrnode : 250);
+                            String resumeMac = (active.mac != null && !active.mac.isEmpty())
+                                ? active.mac : btMac;
+                            pollJobUntilDone(active.jobId, resumeNode, woNum, woIdGuid,
+                                fSerialId, resumeMac);
+                            return;
+                        } else if (ticketPending) {
+                            // Livraison terminée mais ticket pending — faire bouton A (Resolve)
+                            android.util.Log.i(TAG, "Ticket pending détecté — align avant nouveau oneshot");
+                            activity.toast("🖨️ Résolution ticket en cours...");
+                            try {
+                                int resumeNode = active.node > 0 ? active.node : (lcrnode != null ? lcrnode : 250);
+                                String tKey = active.mac != null && !active.mac.isEmpty()
+                                    ? com.pa.lcr.lcp.transport.MediaTransportManager.btKey(active.mac)
+                                    : null;
+                                com.pa.lcr.lcp.DeliveryController dc = tKey != null
+                                    ? com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                                        .getController(tKey, resumeNode) : null;
+                                if (dc != null) {
+                                    dc.alignOrRecover();
+                                    Thread.sleep(5000); // attendre que l'align se termine
+                                }
+                            } catch (Exception ignored) {}
+                            // Continuer vers nouvelle livraison après align
+                        }
+                        // else: registre IDLE — démarrer normalement
+                        ads.clear();
+
                     } else {
                         // WO différent — bloquer et alerter l'opérateur
                         android.util.Log.w(TAG, "Livraison en cours: " + active.woNum
