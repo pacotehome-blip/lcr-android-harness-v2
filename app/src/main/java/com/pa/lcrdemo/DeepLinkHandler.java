@@ -292,6 +292,27 @@ public class DeepLinkHandler {
             return;
         }
 
+        // ✅ Attendre que le controller LCP soit CONNECTED (probeAndIdentify terminé)
+        // TransportStatus.READY ne garantit pas que le controller est prêt
+        for (int i = 0; i < 10; i++) {
+            try {
+                com.pa.lcr.lcp.DeliveryController dc =
+                    com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                        .getController(transportKey, node);
+                if (dc != null) {
+                    com.pa.lcr.lcp.ApiResult snap = dc.api_tickSnapshot();
+                    if (snap != null && snap.data != null) {
+                        String st = snap.data.optString("state", "");
+                        if (!st.isEmpty() && !"STOPPED".equals(st)) {
+                            android.util.Log.i(TAG, "Controller prêt: state=" + st);
+                            break;
+                        }
+                    }
+                }
+            } catch (Exception ignored) {}
+            try { Thread.sleep(300); } catch (Exception ignored) {}
+        }
+
         // Démarrer oneshot/start
         int product = 1;
         double preset = 0.0;
