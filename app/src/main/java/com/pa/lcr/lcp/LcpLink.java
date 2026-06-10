@@ -1,4 +1,3 @@
-
 package com.pa.lcr.lcp;
 
 import com.pa.lcr.lcp.transport.TransportIo;
@@ -268,6 +267,13 @@ public class LcpLink {
             }
 
             t("RX: " + hexDump(f.raw));
+
+            // ✅ Rejeter les trames d'un autre node — évite contamination buffer BT
+            if (f.from != toAddr) {
+                t("RX: ignoré — from=0x" + hex2(f.from) + " attendu=0x" + hex2(toAddr));
+                continue;
+            }
+
             int rc = (f.payload.length > 0) ? (f.payload[0] & 0xFF) : 0xFF;
 
             // 3) Busy/queued handling
