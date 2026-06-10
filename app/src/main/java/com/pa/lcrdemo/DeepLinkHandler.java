@@ -133,12 +133,136 @@ public class DeepLinkHandler {
 
             activity.toast("📦 Livraison — " + woNum);
             int finalNode = (lcrnode != null ? lcrnode : 250);
-            connectBtByMacAndOpenTab(btMac, finalNode, serialId, woNum, woIdGuid, produit, presetStr);
+            final int fNode = finalNode;
+            final String fBtMac = btMac;
+            final String fProduit = produit;
+            final String fPresetStr = presetStr;
+
+            // ✅ Résolution transport universel: USB / BT / TCP
+            // Chercher d'abord un transport actif pour ce node/serial via RSM.
+            // Si trouvé → utiliser directement. Si non → fallback BT si MAC fourni.
+            btExec.execute(() -> {
+                try {
+                    com.pa.lcr.lcp.RegisterSessionManager rsm =
+                        com.pa.lcr.lcp.RegisterSessionManager.get(activity);
+
+                    if (fSerialId != null && !fSerialId.isEmpty()) {
+                        rsm.bindExpectedSerial(fNode, fSerialId);
+                    }
+
+                    com.pa.lcr.lcp.DeliveryController dc =
+                        rsm.resolveOrCreateForNode(fNode, 255);
+
+                    if (dc != null) {
+                        String foundKey = rsm.findTransportKeyForController(dc);
+                        android.util.Log.i(TAG, "Transport trouvé pour node=" + fNode
+                            + " transportKey=" + foundKey);
+                        lancerLivraison(foundKey != null ? foundKey : "", fNode,
+                            fSerialId, woNum, woIdGuid, fProduit, fPresetStr, fBtMac);
+                    } else if (fBtMac != null && !fBtMac.trim().isEmpty()) {
+                        android.util.Log.i(TAG, "Aucun transport actif — connexion BT: " + fBtMac);
+                        connectBtByMacAndOpenTab(fBtMac, fNode, serialId, woNum, woIdGuid,
+                            fProduit, fPresetStr);
+                    } else {
+                        android.util.Log.w(TAG, "Aucun transport actif et pas de BT MAC");
+                        activity.runOnUiThread(() ->
+                            activity.toast("⚠️ Registre non connecté — connectez le registre"));
+                        retournerFieldService(woNum, woIdGuid, "erreur_registre",
+                            buildErrorJson("NO_TRANSPORT", "Registre non connecté"));
+                    }
+                } catch (Exception e) {
+                    android.util.Log.e(TAG, "Résolution transport ERR: " + e.getMessage());
+                    if (fBtMac != null && !fBtMac.trim().isEmpty()) {
+                        connectBtByMacAndOpenTab(fBtMac, fNode, serialId, woNum, woIdGuid,
+                            fProduit, fPresetStr);
+                    }
+                }
+            });
         }
     }
 
     // =========================================================
     // Connexion BT + oneshot/start
+    // =========================================================
+
+    // =========================================================
+    // Lancer livraison sur transport déjà actif (USB/BT/TCP)
+    // =========================================================
+
+    private void lancerLivraison(String transportKey, int node, String serialId,
+                                  String woNum, String woIdGuid,
+                                  String produit, String presetStr, String mac) {
+        // Ouvrir/activer le tab
+        final String fSerialId = serialId != null ? serialId : "";
+        activity.runOnUiThread(() -> {
+            try {
+                if (!transportKey.isEmpty()) {
+                    activity.onConfigureMediaActivated(transportKey, "DEEPLINK");
+                    activity.upsertRegisterTabFromScan(transportKey, node, 255, fSerialId, true);
+                    activity.getUiHandler().postDelayed(() -> {
+                        try {
+                            String mediaShort = activity.mediaShortFromTransportKey(transportKey);
+                            String tabKey = activity.tabKeyOf(mediaShort, node, fSerialId);
+                            Fragment f = activity.getSupportFragmentManager()
+                                .findFragmentByTag("regtab_" + tabKey);
+                            if (f instanceof RegisterTabFragment) {
+                                ((RegisterTabFragment) f).prefillFromDeepLink(
+                                    woNum, produit, presetStr);
+                            }
+                        } catch (Exception ignored) {}
+                    }, 800);
+                    activity.refreshAllTabsMediaStatus();
+                    activity.showPage(0);
+                }
+            } catch (Exception ignored) {}
+        });
+
+        // Démarrer oneshot/start
+        int product = 1;
+        double preset = 0.0;
+        try { product = Integer.parseInt(produit);     } catch (Exception ignored) {}
+        try { preset  = Double.parseDouble(presetStr); } catch (Exception ignored) {}
+
+        final int fProduct = product;
+        final double fPresetD = preset;
+        final String fMac = mac != null ? mac : "";
+
+        try {
+            MultiRegisterApiFacadeImpl facade = new MultiRegisterApiFacadeImpl(activity);
+            com.pa.lcr.lcp.ApiResult r = facade.api_deliveryOneShotStart(
+                node, 255, woNum, fProduct, fPresetD, null,
+                fMac.isEmpty() ? "usb" : "bt",
+                fMac.isEmpty() ? null : fMac);
+
+            android.util.Log.i(TAG, "oneshot/start: code=" + r.code + " msg=" + r.msg);
+
+            if (r.code == 1) {
+                String jobId = (r.data != null) ? r.data.optString("jobId", null) : null;
+                logEvent(fSerialId, woNum, DeliveryLogStore.LEVEL_INFO,
+                    "ONESHOT_START", "ARMED jobId=" + jobId, null);
+                if (jobId != null && !jobId.isEmpty()) {
+                    activity.runOnUiThread(() ->
+                        activity.toast("📦 Livraison démarrée — " + woNum));
+                    pollJobUntilDone(jobId, node, woNum, woIdGuid, fSerialId,
+                        fMac.isEmpty() ? transportKey : fMac);
+                }
+            } else {
+                android.util.Log.w(TAG, "oneshot/start code=0: " + r.msg);
+                logEvent(fSerialId, woNum, DeliveryLogStore.LEVEL_WARN,
+                    "ONESHOT_ERROR", r.msg, r.data != null ? r.data.toString() : null);
+                retournerFieldService(woNum, woIdGuid, "erreur_oneshot",
+                    buildErrorJson("ONESHOT_FAILED", r.msg));
+            }
+        } catch (Exception e) {
+            android.util.Log.e(TAG, "lancerLivraison ERR: " + e.getMessage());
+            logError(fSerialId, woNum, "ONESHOT_EXCEPTION", e.getMessage());
+            retournerFieldService(woNum, woIdGuid, "erreur",
+                buildErrorJson("ONESHOT_EXCEPTION", e.getMessage()));
+        }
+    }
+
+    // =========================================================
+    // Connexion BT + oneshot/start (fallback si pas de transport actif)
     // =========================================================
 
     private void connectBtByMacAndOpenTab(String btMac, int node, String serialId,
