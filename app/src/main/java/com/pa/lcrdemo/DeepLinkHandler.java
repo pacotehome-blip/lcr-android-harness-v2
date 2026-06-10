@@ -167,6 +167,74 @@ public class DeepLinkHandler {
                     }
                 }
 
+                // ✅ Si BT déjà connecté — valider l'état du registre avant tout
+                if (btDejaConnecte) {
+                    try {
+                        String tKey = MediaTransportManager.btKey(mac);
+                        com.pa.lcr.lcp.DeliveryController dc =
+                            com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                                .getController(tKey, node);
+
+                        if (dc == null) {
+                            // Controller absent — BT zombi
+                            android.util.Log.w(TAG, "BT zombi — controller absent, restart BT");
+                            activity.btDisconnect();
+                            try { Thread.sleep(1500); } catch (Exception ignored) {}
+                            btDejaConnecte = false; // forcer reconnexion
+                        } else {
+                            // Lire l'état du registre via tickSnapshot
+                            com.pa.lcr.lcp.ApiResult snap = dc.api_tickSnapshot();
+                            int delCode = (snap != null && snap.data != null)
+                                ? snap.data.optInt("delCode", 0) : 0;
+                            boolean deliveryActive = (delCode & 0x0008) != 0;
+                            boolean ticketPending  = (delCode & 0x0001) != 0;
+
+                            if (deliveryActive) {
+                                // Livraison active sur le registre
+                                ActiveDeliveryStore ads = new ActiveDeliveryStore(activity);
+                                ActiveDeliveryStore.ActiveDelivery active = ads.load();
+                                if (active != null && woNum != null && woNum.equals(active.woNum)) {
+                                    // Même WO — déjà géré dans handleDeepLink, ne devrait pas arriver ici
+                                    android.util.Log.i(TAG, "Livraison active même WO — reprise tab");
+                                } else {
+                                    // WO différent ou inconnu — bloquer
+                                    String activeWo = (active != null) ? active.woNum : "inconnue";
+                                    android.util.Log.w(TAG, "Registre: livraison active " + activeWo
+                                        + " — impossible de démarrer " + woNum);
+                                    final String fActiveWo = activeWo;
+                                    activity.runOnUiThread(() ->
+                                        activity.toast("⚠️ Livraison " + fActiveWo
+                                            + " active sur le registre — terminez-la d'abord"));
+                                    retournerFieldService(woNum, woIdGuid, "erreur_livraison_en_cours",
+                                        buildErrorJson("DELIVERY_IN_PROGRESS",
+                                            "Livraison " + fActiveWo + " active sur le registre"));
+                                    return;
+                                }
+                            } else if (ticketPending) {
+                                // Ticket pending seulement — impression en attente
+                                // Le registre permet de démarrer une nouvelle livraison
+                                // On laisse passer — juste loguer
+                                android.util.Log.i(TAG, "Ticket pending détecté — démarrage nouvelle livraison quand même");
+                            } else {
+                                // Registre idle — vérifier si le controller répond (zombi?)
+                                com.pa.lcr.lcp.ApiResult statusCheck = dc.api_tickSnapshot();
+                                if (statusCheck == null) {
+                                    android.util.Log.w(TAG, "Registre zombi — pas de réponse");
+                                    activity.runOnUiThread(() ->
+                                        activity.toast("⚠️ Registre ne répond pas — utilisez Résoudre (A) dans le tab"));
+                                }
+                            }
+                        }
+                    } catch (Exception e) {
+                        android.util.Log.w(TAG, "Validation état registre ERR: " + e.getMessage());
+                        // BT zombi probable — restart
+                        android.util.Log.w(TAG, "Possible BT zombi — restart BT");
+                        activity.btDisconnect();
+                        try { Thread.sleep(1500); } catch (Exception ignored) {}
+                        btDejaConnecte = false;
+                    }
+                }
+
                 if (!btDejaConnecte) {
                     android.bluetooth.BluetoothAdapter btAdapter = activity.getBtAdapter();
                     String lastMac = activity.getLastBtMac();
