@@ -42,12 +42,16 @@ public class ActiveDeliveryStore {
         public String mac;
         public int    node;
         public String serialId;
+        public int    produit;
+        public double preset;
+        public String status;   // PENDING / STARTED / DONE
         public long   tsStartedMs;
 
         @Override
         public String toString() {
             return "ActiveDelivery{woNum=" + woNum + " jobId=" + jobId
-                + " mac=" + mac + " node=" + node + " serial=" + serialId + "}";
+                + " mac=" + mac + " node=" + node + " serial=" + serialId
+                + " produit=" + produit + " preset=" + preset + " status=" + status + "}";
         }
     }
 
@@ -56,7 +60,8 @@ public class ActiveDeliveryStore {
     // =========================================================
 
     public void save(String woNum, String woIdGuid, String jobId,
-                     String mac, int node, String serialId) {
+                     String mac, int node, String serialId,
+                     int produit, double preset, String status) {
         try {
             SQLiteDatabase db = dbHelper.getWritableDatabase();
             ContentValues v = new ContentValues();
@@ -67,12 +72,34 @@ public class ActiveDeliveryStore {
             v.put("mac",           mac        != null ? mac        : "");
             v.put("node",          node);
             v.put("serial_id",     serialId   != null ? serialId   : "");
+            v.put("produit",       produit);
+            v.put("preset",        preset);
+            v.put("status",        status     != null ? status     : "PENDING");
             v.put("ts_started_ms", System.currentTimeMillis());
             db.insertWithOnConflict("active_delivery", null, v,
                     SQLiteDatabase.CONFLICT_REPLACE);
-            Log.i(TAG, "save: woNum=" + woNum + " jobId=" + jobId);
+            Log.i(TAG, "save: woNum=" + woNum + " jobId=" + jobId + " status=" + status);
         } catch (Exception e) {
             Log.e(TAG, "save ERR: " + e.getMessage());
+        }
+    }
+
+    // Compatibilité — save sans produit/preset (status=PENDING)
+    public void save(String woNum, String woIdGuid, String jobId,
+                     String mac, int node, String serialId) {
+        save(woNum, woIdGuid, jobId, mac, node, serialId, 1, 0.0, "PENDING");
+    }
+
+    public void updateStatus(String status) {
+        try {
+            SQLiteDatabase db = dbHelper.getWritableDatabase();
+            ContentValues v = new ContentValues();
+            v.put("status", status);
+            db.update("active_delivery", v, "id=?",
+                new String[]{String.valueOf(ROW_ID)});
+            Log.i(TAG, "updateStatus: " + status);
+        } catch (Exception e) {
+            Log.e(TAG, "updateStatus ERR: " + e.getMessage());
         }
     }
 
@@ -88,12 +115,15 @@ public class ActiveDeliveryStore {
                     null, null, null)) {
                 if (c.moveToFirst()) {
                     ActiveDelivery d = new ActiveDelivery();
-                    d.woNum      = c.getString(c.getColumnIndexOrThrow("wo_num"));
-                    d.woIdGuid   = c.getString(c.getColumnIndexOrThrow("wo_id_guid"));
-                    d.jobId      = c.getString(c.getColumnIndexOrThrow("job_id"));
-                    d.mac        = c.getString(c.getColumnIndexOrThrow("mac"));
-                    d.node       = c.getInt(c.getColumnIndexOrThrow("node"));
-                    d.serialId   = c.getString(c.getColumnIndexOrThrow("serial_id"));
+                    d.woNum       = c.getString(c.getColumnIndexOrThrow("wo_num"));
+                    d.woIdGuid    = c.getString(c.getColumnIndexOrThrow("wo_id_guid"));
+                    d.jobId       = c.getString(c.getColumnIndexOrThrow("job_id"));
+                    d.mac         = c.getString(c.getColumnIndexOrThrow("mac"));
+                    d.node        = c.getInt(c.getColumnIndexOrThrow("node"));
+                    d.serialId    = c.getString(c.getColumnIndexOrThrow("serial_id"));
+                    d.produit     = c.getInt(c.getColumnIndexOrThrow("produit"));
+                    d.preset      = c.getDouble(c.getColumnIndexOrThrow("preset"));
+                    d.status      = c.getString(c.getColumnIndexOrThrow("status"));
                     d.tsStartedMs = c.getLong(c.getColumnIndexOrThrow("ts_started_ms"));
                     Log.i(TAG, "load: " + d);
                     return d;

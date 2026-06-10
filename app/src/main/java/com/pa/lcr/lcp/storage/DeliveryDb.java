@@ -21,7 +21,8 @@ public class DeliveryDb extends SQLiteOpenHelper {
     // v4: add structured error columns to delivery_event (event_level/event_code/event_where/detail_short)
     // v5: add truck_profile + truck_drift tables
     // v6: add active_delivery table (livraison courante persistée)
-    public static final int DB_VERSION = 6;
+    // v7: add produit/preset/status to active_delivery
+    public static final int DB_VERSION = 7;
 
     private static final String TAG = "DeliveryDb";
 
@@ -84,6 +85,13 @@ public class DeliveryDb extends SQLiteOpenHelper {
         // v6: active_delivery
         if (oldVersion < 6) {
             createActiveDeliveryTable(db);
+        }
+        // v7: produit/preset/status dans active_delivery
+        if (oldVersion < 7) {
+            addColumnIfMissing(db, "active_delivery", "produit",  "INTEGER");
+            addColumnIfMissing(db, "active_delivery", "preset",   "REAL");
+            addColumnIfMissing(db, "active_delivery", "status",   "TEXT");
+            addColumnIfMissing(db, "active_delivery", "wo_id_guid", "TEXT");
         }
     }
 
@@ -257,6 +265,9 @@ public class DeliveryDb extends SQLiteOpenHelper {
             "mac TEXT," +
             "node INTEGER," +
             "serial_id TEXT," +
+            "produit INTEGER," +
+            "preset REAL," +
+            "status TEXT," +
             "ts_started_ms INTEGER" +
             ");"
         );

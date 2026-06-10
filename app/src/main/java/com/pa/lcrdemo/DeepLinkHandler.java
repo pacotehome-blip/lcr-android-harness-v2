@@ -99,6 +99,20 @@ public class DeepLinkHandler {
             final String fSerialId = serialId != null ? serialId : "";
             logDeliveryStart(fSerialId, fWoNum, btMac, lcrnode, produit, presetStr);
 
+            // ✅ Sauvegarder PENDING dès réception — avant connexion BT
+            // Le tab peut lire ces infos même si la livraison n'est pas encore démarrée
+            try {
+                int iProduit = 1;
+                double dPreset = 0.0;
+                try { iProduit = Integer.parseInt(produit); } catch (Exception ignored) {}
+                try { dPreset = Double.parseDouble(presetStr); } catch (Exception ignored) {}
+                new ActiveDeliveryStore(activity).save(
+                    woNum, woIdGuid, "", // jobId vide — pas encore démarré
+                    btMac != null ? btMac : "",
+                    lcrnode != null ? lcrnode : 250,
+                    fSerialId, iProduit, dPreset, "PENDING");
+            } catch (Exception ignored) {}
+
             // ✅ Vérifier si une livraison est déjà en cours
             try {
                 ActiveDeliveryStore ads = new ActiveDeliveryStore(activity);
@@ -605,9 +619,14 @@ public class DeepLinkHandler {
             android.util.Log.w(TAG, "pollJobUntilDone: déjà actif pour jobId=" + jobId + " — ignoré");
             return;
         }
-        // ✅ Persister la livraison courante
+        // ✅ Persister la livraison courante avec status STARTED
         try {
-            new ActiveDeliveryStore(activity).save(woNum, woIdGuid, jobId, mac, node, serialId);
+            ActiveDeliveryStore ads = new ActiveDeliveryStore(activity);
+            ActiveDeliveryStore.ActiveDelivery existing = ads.load();
+            int produitSave = (existing != null) ? existing.produit : 1;
+            double presetSave = (existing != null) ? existing.preset : 0.0;
+            ads.save(woNum, woIdGuid, jobId, mac, node, serialId,
+                produitSave, presetSave, "STARTED");
         } catch (Exception ignored) {}
 
         btExec.execute(() -> {
