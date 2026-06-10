@@ -159,16 +159,36 @@ public class DeepLinkHandler {
                             + " transportKey=" + foundKey);
                         lancerLivraison(foundKey != null ? foundKey : "", fNode,
                             fSerialId, woNum, woIdGuid, fProduit, fPresetStr, fBtMac);
-                    } else if (fBtMac != null && !fBtMac.trim().isEmpty()) {
-                        android.util.Log.i(TAG, "Aucun transport actif — connexion BT: " + fBtMac);
-                        connectBtByMacAndOpenTab(fBtMac, fNode, serialId, woNum, woIdGuid,
-                            fProduit, fPresetStr);
                     } else {
-                        android.util.Log.w(TAG, "Aucun transport actif et pas de BT MAC");
-                        activity.runOnUiThread(() ->
-                            activity.toast("⚠️ Registre non connecté — connectez le registre"));
-                        retournerFieldService(woNum, woIdGuid, "erreur_registre",
-                            buildErrorJson("NO_TRANSPORT", "Registre non connecté"));
+                        // Aucun transport actif — tenter auto-connect (USB / BT / TCP)
+                        android.util.Log.i(TAG, "Aucun transport actif — tentative auto-connect node="
+                            + fNode + " serial=" + fSerialId);
+                        MultiRegisterApiFacadeImpl facadeAuto = new MultiRegisterApiFacadeImpl(activity);
+                        com.pa.lcr.lcp.ApiResult ra = facadeAuto.api_registerConnectAuto(
+                            fSerialId.isEmpty() ? null : fSerialId, fNode);
+                        android.util.Log.i(TAG, "auto-connect: code=" + (ra != null ? ra.code : "null")
+                            + " msg=" + (ra != null ? ra.msg : "null"));
+
+                        if (ra != null && ra.code == 1) {
+                            // Auto-connect réussi — résoudre à nouveau
+                            com.pa.lcr.lcp.DeliveryController dc2 =
+                                rsm.resolveOrCreateForNode(fNode, 255);
+                            String foundKey2 = dc2 != null ? rsm.findTransportKeyForController(dc2) : null;
+                            lancerLivraison(foundKey2 != null ? foundKey2 : "", fNode,
+                                fSerialId, woNum, woIdGuid, fProduit, fPresetStr, fBtMac);
+                        } else if (fBtMac != null && !fBtMac.trim().isEmpty()) {
+                            // Fallback BT explicite
+                            android.util.Log.i(TAG, "Auto-connect échoué — connexion BT: " + fBtMac);
+                            connectBtByMacAndOpenTab(fBtMac, fNode, serialId, woNum, woIdGuid,
+                                fProduit, fPresetStr);
+                        } else {
+                            android.util.Log.w(TAG, "Registre introuvable — node=" + fNode);
+                            activity.runOnUiThread(() ->
+                                activity.toast("⚠️ Registre non connecté — connectez le registre"));
+                            retournerFieldService(woNum, woIdGuid, "erreur_registre",
+                                buildErrorJson("NO_TRANSPORT",
+                                    "Registre node=" + fNode + " introuvable sur tous les transports"));
+                        }
                     }
                 } catch (Exception e) {
                     android.util.Log.e(TAG, "Résolution transport ERR: " + e.getMessage());
