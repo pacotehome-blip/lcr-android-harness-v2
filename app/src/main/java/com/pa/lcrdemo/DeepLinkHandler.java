@@ -214,23 +214,35 @@ public class DeepLinkHandler {
                                   String produit, String presetStr, String mac) {
         // Ouvrir/activer le tab
         final String fSerialId = serialId != null ? serialId : "";
+        final String fWoNum = woNum;
+        final String fProduit = produit;
+        final String fPresetStr = presetStr;
         activity.runOnUiThread(() -> {
             try {
                 if (!transportKey.isEmpty()) {
                     activity.onConfigureMediaActivated(transportKey, "DEEPLINK");
                     activity.upsertRegisterTabFromScan(transportKey, node, 255, fSerialId, true);
-                    activity.getUiHandler().postDelayed(() -> {
-                        try {
-                            String mediaShort = activity.mediaShortFromTransportKey(transportKey);
-                            String tabKey = activity.tabKeyOf(mediaShort, node, fSerialId);
-                            Fragment f = activity.getSupportFragmentManager()
-                                .findFragmentByTag("regtab_" + tabKey);
-                            if (f instanceof RegisterTabFragment) {
-                                ((RegisterTabFragment) f).prefillFromDeepLink(
-                                    woNum, produit, presetStr);
-                            }
-                        } catch (Exception ignored) {}
-                    }, 800);
+
+                    // ✅ Retry prefill — le tab peut prendre du temps à être créé après auto-connect
+                    Runnable prefill = new Runnable() {
+                        int attempts = 0;
+                        @Override public void run() {
+                            try {
+                                String mediaShort = activity.mediaShortFromTransportKey(transportKey);
+                                String tabKey = activity.tabKeyOf(mediaShort, node, fSerialId);
+                                Fragment f = activity.getSupportFragmentManager()
+                                    .findFragmentByTag("regtab_" + tabKey);
+                                if (f instanceof RegisterTabFragment) {
+                                    ((RegisterTabFragment) f).prefillFromDeepLink(
+                                        fWoNum, fProduit, fPresetStr);
+                                } else if (attempts++ < 5) {
+                                    // Tab pas encore créé — réessayer
+                                    activity.getUiHandler().postDelayed(this, 800);
+                                }
+                            } catch (Exception ignored) {}
+                        }
+                    };
+                    activity.getUiHandler().postDelayed(prefill, 1200);
                     activity.refreshAllTabsMediaStatus();
                     activity.showPage(0);
                 }
