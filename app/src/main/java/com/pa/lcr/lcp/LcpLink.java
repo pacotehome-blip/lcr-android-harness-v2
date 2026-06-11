@@ -44,6 +44,7 @@ public class LcpLink {
 
     private static final byte MSG_GET_FIELD = 0x20;
     private static final byte MSG_SET_FIELD = 0x21;
+    private static final byte MSG_PRINT_TEXT         = 0x22;
     private static final byte MSG_GET_MACHINE_STATUS = 0x23;
     private static final byte MSG_ISSUE_COMMAND = 0x24;
     private static final byte MSG_GET_DELIVERY_STATUS = 0x28;
@@ -171,6 +172,19 @@ public class LcpLink {
     public void opIssueCommand(int cmd) throws IOException {
         Response r = sendRecv(buildPayload(MSG_ISSUE_COMMAND, new byte[]{(byte) cmd}), OP_QUEUEABLE_TIMEOUT_MS);
         ensureOk(r, "ISSUE_COMMAND 0x" + hex2(cmd));
+    }
+
+    /**
+     * Envoie une ligne de texte à l'imprimante LCR-II via MSG_PRINT_TEXT (0x22).
+     * Chaque appel envoie une ligne; l'appelant gère les sauts de ligne si nécessaire.
+     */
+    public void opPrintText(String line) throws IOException {
+        byte[] data = line.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+        byte[] pl = new byte[1 + data.length];
+        pl[0] = MSG_PRINT_TEXT;
+        System.arraycopy(data, 0, pl, 1, data.length);
+        Response r = sendRecv(pl, OP_QUEUEABLE_TIMEOUT_MS);
+        ensureOk(r, "PRINT_TEXT");
     }
 
     public byte[] opGetField(int field) throws IOException {

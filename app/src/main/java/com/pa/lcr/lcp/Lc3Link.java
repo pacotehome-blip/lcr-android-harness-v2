@@ -315,6 +315,15 @@ public class Lc3Link extends LcpLink {
         }
     }
 
+    /**
+     * NO-OP pour LC3 — impression texte custom non supportée via ce protocole.
+     */
+    @Override
+    public void opPrintText(String line) throws IOException {
+        // LC3 ne supporte pas MSG_PRINT_TEXT; ignoré silencieusement.
+        android.util.Log.d("Lc3Link", "opPrintText: NO-OP LC3 (len=" + line.length() + ")");
+    }
+
     // ── startDelivery ─────────────────────────────────────────────────────
     private void startDelivery() throws IOException {
         android.util.Log.i("Lc3Link", "startDelivery product=" + pendingProduct
