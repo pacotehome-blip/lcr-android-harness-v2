@@ -1176,13 +1176,13 @@ try {
     // =========================
     // LIVE sample (UI logic)
     // =========================
-    @Override
     // ✅ Configurer l'intervalle live tick selon profil registre
     // Appeler depuis applyRegisterProfile: LCR-II → 200ms, LC3 → 800ms
     public void setLiveTickIntervalMs(long intervalMs) {
         liveTickIntervalMs = Math.max(100, intervalMs);
     }
 
+    @Override
     public void requestLiveSample() {
         io.execute(() -> {
             if (isStopped()) return;
