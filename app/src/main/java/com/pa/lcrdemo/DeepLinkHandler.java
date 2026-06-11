@@ -756,9 +756,18 @@ public class DeepLinkHandler {
 
                         android.util.Log.i(TAG, "pollJob: state=" + state);
 
-                        // ✅ state=null = job disparu du controller — sortir immédiatement
+                        // ✅ state=null = job disparu du controller
+                        // Si on a vu ENDING ou FLOWING → livraison terminée normalement
                         if (state == null || state.isEmpty()) {
                             android.util.Log.w(TAG, "pollJob: state=null — job disparu, arrêt poll");
+                            if (deliveryDone[0]) return;
+                            if ("ENDING".equals(lastState) || hasSeenFlowing) {
+                                deliveryDone[0] = true;
+                                String extraJson = (r.data != null) ? r.data.toString() : "{}";
+                                android.util.Log.i(TAG, "pollJob: state=null après " + lastState + " → onDeliveryEnded");
+                                logDeliveryEnd(serialId, woNum, jobId, "DONE", extraJson, null);
+                                onDeliveryEnded(woNum, woIdGuid, extraJson);
+                            }
                             return;
                         }
 
