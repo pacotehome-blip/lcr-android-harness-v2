@@ -1154,7 +1154,7 @@ try {
                 while (!isStopped() && System.currentTimeMillis() < deadline) {
                     FullStatus fs = safeReadFullStatusNoThrow();
                     if (fs != null && !fs.deliveryActive && !fs.flowActive) break;
-                    try { Thread.sleep(250); } catch (InterruptedException ignored) {}
+                    try { Thread.sleep(500); } catch (InterruptedException ignored) {}
                 }
 
                 FullStatus fsAfter = safeReadFullStatusNoThrow();
