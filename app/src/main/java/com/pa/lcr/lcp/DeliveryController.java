@@ -281,7 +281,7 @@ private void reproEvent(String level, String type, String message, JSONObject da
     private static final long TICKET_DEVICE_LOOP_MS = 30_000;
 
     // LIVE backoff
-    private static final long LIVE_BASE_MS = 200;
+    private static final long LIVE_BASE_MS = 150;
 
     // ✅ Intervalle live tick — configurable selon profil registre
     // LCR-II (19200 baud): 200ms, LC3 (9600 baud): 800ms
@@ -770,6 +770,12 @@ try {
     public void shutdown(boolean closeTransport) {
         stopped = true;
 
+        // ✅ Arrêter la boucle live tick
+        try {
+            if (liveTickFuture != null) { liveTickFuture.cancel(false); liveTickFuture = null; }
+            liveTickScheduler.shutdownNow();
+        } catch (Exception ignored) {}
+
 // ✅ REPRO: close session best-effort
 try { reproStopBestEffort(closeTransport ? "shutdown/closeTransport" : "shutdown/logicOnly"); }
 catch (Exception ignored) {}
@@ -801,7 +807,11 @@ catch (Exception ignored) {}
         if (s == DeliveryState.RUNNING_FLOWING) {
             if (liveTickFuture == null || liveTickFuture.isDone()) {
                 liveTickFuture = liveTickScheduler.scheduleWithFixedDelay(
-                    () -> { try { requestLiveSample(); } catch (Exception ignored) {} },
+                    () -> {
+                        try {
+                            if (!isStopped()) requestLiveSample();
+                        } catch (Exception ignored) {}
+                    },
                     0, liveTickIntervalMs, java.util.concurrent.TimeUnit.MILLISECONDS);
             }
         } else {
