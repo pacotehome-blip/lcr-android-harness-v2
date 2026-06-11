@@ -281,7 +281,7 @@ private void reproEvent(String level, String type, String message, JSONObject da
     private static final long TICKET_DEVICE_LOOP_MS = 30_000;
 
     // LIVE backoff
-    private static final long LIVE_BASE_MS = 150;
+    private static final long LIVE_BASE_MS = 300;
 
     // ✅ Intervalle live tick — configurable selon profil registre
     // LCR-II (19200 baud): 200ms, LC3 (9600 baud): 800ms
@@ -809,7 +809,7 @@ catch (Exception ignored) {}
                 liveTickFuture = liveTickScheduler.scheduleWithFixedDelay(
                     () -> {
                         try {
-                            if (!isStopped()) requestLiveSample();
+                            if (!isStopped()) requestLiveSampleFast();
                         } catch (Exception ignored) {}
                     },
                     0, liveTickIntervalMs, java.util.concurrent.TimeUnit.MILLISECONDS);
@@ -1191,6 +1191,41 @@ try {
     // Appeler depuis applyRegisterProfile: LCR-II → 200ms, LC3 → 800ms
     public void setLiveTickIntervalMs(long intervalMs) {
         liveTickIntervalMs = Math.max(100, intervalMs);
+    }
+
+    // ✅ Lecture rapide net/gross uniquement — pour le live tick pendant RUNNING_FLOWING
+    // Évite GET_DELIVERY_STATUS + GET_MACHINE_STATUS à chaque tick
+    private void requestLiveSampleFast() {
+        io.execute(() -> {
+            if (isStopped()) return;
+            if (state != DeliveryState.RUNNING_FLOWING) return;
+            long now = System.currentTimeMillis();
+            if (now < liveNextAllowedMs) return;
+            if (!liveInFlight.compareAndSet(false, true)) return;
+            inLiveSample.set(true);
+            try {
+                try { ensureDigits(); } catch (Exception ignored) { return; }
+                double scale = Math.pow(10, cachedDigits);
+                int g, n;
+                try {
+                    g = beI32(lcpGetField(FIELD_GROSS_COUNT));
+                    n = beI32(lcpGetField(FIELD_NET_COUNT));
+                } catch (Exception e) {
+                    return;
+                }
+                double gross = (g & 0xFFFFFFFFL) / scale;
+                double net   = (n & 0xFFFFFFFFL) / scale;
+                if (listener != null) listener.onLiveQty(net, gross);
+                publishTickIfChanged(net, gross,
+                    lastDevStatusKnown, lastPrnStatusKnown,
+                    (lastTick != null ? lastTick.delStatus : 0),
+                    (lastTick != null ? lastTick.delCode   : 0),
+                    state);
+            } finally {
+                inLiveSample.set(false);
+                liveInFlight.set(false);
+            }
+        });
     }
 
     @Override
