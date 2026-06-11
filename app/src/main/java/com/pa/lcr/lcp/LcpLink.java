@@ -110,6 +110,10 @@ public class LcpLink {
     // ===================== LIFECYCLE =====================
     public boolean isClosed() { return closed; }
 
+    // ✅ Intervalle recommandé pour le live tick — LCR-II 19200 baud → 200ms
+    // Override dans Lc3Link pour LC3 9600 baud → 800ms
+    public long getRecommendedLiveIntervalMs() { return 200L; }
+
     // getters utiles validate/log/UI
     public int getToAddr() { return toAddr; }
     public int getHostAddr() { return hostAddr; }

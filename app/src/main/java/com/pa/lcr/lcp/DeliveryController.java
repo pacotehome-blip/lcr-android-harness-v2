@@ -1,4 +1,3 @@
-
 package com.pa.lcr.lcp;
 
 import com.pa.lcr.lcp.storage.DeliveryLogStore;
@@ -283,6 +282,10 @@ private void reproEvent(String level, String type, String message, JSONObject da
 
     // LIVE backoff
     private static final long LIVE_BASE_MS = 200;
+
+    // ✅ Intervalle live tick — configurable selon profil registre
+    // LCR-II (19200 baud): 200ms, LC3 (9600 baud): 800ms
+    private volatile long liveTickIntervalMs = LIVE_BASE_MS;
     private static final long LIVE_MAX_MS = 2000;
     private static final long LIVE_LOG_THROTTLE_MS = 1000;
 
@@ -296,6 +299,11 @@ private void reproEvent(String level, String type, String message, JSONObject da
 
     private final LcpLink link;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
+
+    // ✅ Live tick automatique pendant RUNNING_FLOWING/PAUSED
+    private final java.util.concurrent.ScheduledExecutorService liveTickScheduler =
+        java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+    private volatile java.util.concurrent.ScheduledFuture<?> liveTickFuture = null;
     private Listener listener;
 
     private volatile DeliveryState state = DeliveryState.DISCONNECTED;
@@ -632,6 +640,8 @@ private void reproEvent(String level, String type, String message, JSONObject da
     
     public DeliveryController(LcpLink link) {
         this.link = link;
+        // ✅ Adapter l'intervalle live tick au profil du registre (LCR-II vs LC3)
+        this.liveTickIntervalMs = link != null ? link.getRecommendedLiveIntervalMs() : LIVE_BASE_MS;
     }
 
     private boolean isStopped() {
@@ -785,6 +795,20 @@ catch (Exception ignored) {}
         if (state == s) return;
         DeliveryState prevState = state;
         state = s;
+
+        // ✅ Live tick automatique — démarrer sur FLOWING/PAUSED, arrêter sinon
+        if (s == DeliveryState.RUNNING_FLOWING || s == DeliveryState.RUNNING_PAUSED) {
+            if (liveTickFuture == null || liveTickFuture.isDone()) {
+                liveTickFuture = liveTickScheduler.scheduleWithFixedDelay(
+                    () -> { try { requestLiveSample(); } catch (Exception ignored) {} },
+                    0, liveTickIntervalMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+            }
+        } else {
+            if (liveTickFuture != null) {
+                liveTickFuture.cancel(false);
+                liveTickFuture = null;
+            }
+        }
  // Auto close delivery on end-of-delivery transitions
  if ((prevState == DeliveryState.RUNNING_FLOWING || prevState == DeliveryState.RUNNING_PAUSED)
          && s == DeliveryState.CONNECTED) {
@@ -1153,6 +1177,12 @@ try {
     // LIVE sample (UI logic)
     // =========================
     @Override
+    // ✅ Configurer l'intervalle live tick selon profil registre
+    // Appeler depuis applyRegisterProfile: LCR-II → 200ms, LC3 → 800ms
+    public void setLiveTickIntervalMs(long intervalMs) {
+        liveTickIntervalMs = Math.max(100, intervalMs);
+    }
+
     public void requestLiveSample() {
         io.execute(() -> {
             if (isStopped()) return;

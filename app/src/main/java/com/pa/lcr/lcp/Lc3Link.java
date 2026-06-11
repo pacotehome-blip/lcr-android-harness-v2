@@ -129,6 +129,9 @@ public class Lc3Link extends LcpLink {
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────
+    // ✅ LC3 à 9600 baud — intervalle live tick plus conservateur
+    @Override public long getRecommendedLiveIntervalMs() { return 800L; }
+
     @Override public boolean isClosed() {
         return lc3closed || lc3io == null || !lc3io.isOpen();
     }
