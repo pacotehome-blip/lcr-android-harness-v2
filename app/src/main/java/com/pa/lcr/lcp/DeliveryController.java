@@ -796,8 +796,9 @@ catch (Exception ignored) {}
         DeliveryState prevState = state;
         state = s;
 
-        // ✅ Live tick automatique — démarrer sur FLOWING/PAUSED, arrêter sinon
-        if (s == DeliveryState.RUNNING_FLOWING || s == DeliveryState.RUNNING_PAUSED) {
+        // ✅ Live tick automatique — seulement pendant RUNNING_FLOWING (flow ON)
+        // Arrêt sur RUNNING_PAUSED, CONNECTED, ENDING, etc.
+        if (s == DeliveryState.RUNNING_FLOWING) {
             if (liveTickFuture == null || liveTickFuture.isDone()) {
                 liveTickFuture = liveTickScheduler.scheduleWithFixedDelay(
                     () -> { try { requestLiveSample(); } catch (Exception ignored) {} },
@@ -1320,6 +1321,12 @@ try {
                     listener.onLiveStatus(flowOffStable
                             ? "LIVE: RUNNING_PAUSED (FLOW OFF confirmed)"
                             : "LIVE: RUNNING_FLOWING (FLOW OFF - confirming...)");
+                }
+
+                // ✅ Arrêter boucle live dès que flow off stable — APK fluide
+                if (flowOffStable && liveTickFuture != null) {
+                    liveTickFuture.cancel(false);
+                    liveTickFuture = null;
                 }
 
                 if (flowOffStable) setState(DeliveryState.RUNNING_PAUSED);
