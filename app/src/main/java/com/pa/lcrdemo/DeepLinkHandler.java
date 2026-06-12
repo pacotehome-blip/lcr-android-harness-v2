@@ -168,12 +168,19 @@ public class DeepLinkHandler {
 
                     if (dc != null) {
                         // ✅ Attendre que le DC soit CONNECTED (probeAndIdentify terminé)
-                        // max 5s, 200ms par itération
-                        for (int w = 0; w < 25; w++) {
+                        // max 15s, 200ms par itération
+                        activity.runOnUiThread(() -> activity.toast("🔌 Connexion au registre..."));
+                        for (int w = 0; w < 75; w++) {
                             if (dc.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
                             try { Thread.sleep(200); } catch (Exception ignored) {}
                         }
                         android.util.Log.i(TAG, "DC state avant lancerLivraison: " + dc.getState());
+                        if (dc.getState() != com.pa.lcr.lcp.DeliveryState.CONNECTED) {
+                            android.util.Log.w(TAG, "DC non prêt après 15s — état: " + dc.getState());
+                            activity.runOnUiThread(() ->
+                                activity.toast("⚠️ Registre non joignable — vérifiez le Bluetooth"));
+                            return;
+                        }
                         String foundKey = rsm.findTransportKeyForController(dc);
                         android.util.Log.i(TAG, "Transport trouvé pour node=" + fNode
                             + " transportKey=" + foundKey);
@@ -190,9 +197,22 @@ public class DeepLinkHandler {
                             + " msg=" + (ra != null ? ra.msg : "null"));
 
                         if (ra != null && ra.code == 1) {
-                            // Auto-connect réussi — résoudre à nouveau
+                            // Auto-connect réussi — attendre DC CONNECTED
                             com.pa.lcr.lcp.DeliveryController dc2 =
                                 rsm.resolveOrCreateForNode(fNode, 255);
+                            if (dc2 != null) {
+                                activity.runOnUiThread(() -> activity.toast("🔌 Connexion au registre..."));
+                                for (int w = 0; w < 75; w++) {
+                                    if (dc2.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
+                                    try { Thread.sleep(200); } catch (Exception ignored) {}
+                                }
+                                if (dc2.getState() != com.pa.lcr.lcp.DeliveryState.CONNECTED) {
+                                    android.util.Log.w(TAG, "DC2 non prêt après 15s — état: " + dc2.getState());
+                                    activity.runOnUiThread(() ->
+                                        activity.toast("⚠️ Registre non joignable — vérifiez le Bluetooth"));
+                                    return;
+                                }
+                            }
                             String foundKey2 = dc2 != null ? rsm.findTransportKeyForController(dc2) : null;
                             lancerLivraison(foundKey2 != null ? foundKey2 : "", fNode,
                                 fSerialId, woNum, woIdGuid, fProduit, fPresetStr, fBtMac);
