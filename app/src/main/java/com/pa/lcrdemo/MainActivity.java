@@ -497,6 +497,11 @@ public class MainActivity extends AppCompatActivity {
                         android.util.Log.i("MSAL", "Token OK — Dataverse prêt");
                         // Déclencher sync immédiat si items en attente
                         DeliverySyncScheduler.triggerNow(MainActivity.this);
+                        // ✅ Sync lcr_delivery_status + lcr_note_template au lancement
+                        new Thread(() ->
+                            com.pa.lcrdemo.dataverse.LcrDeliverySync.syncAll(
+                                MainActivity.this, token)
+                        ).start();
                     }
                     @Override
                     public void onError(Exception e) {
