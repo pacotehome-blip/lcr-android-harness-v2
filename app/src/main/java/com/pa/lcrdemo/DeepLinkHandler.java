@@ -372,8 +372,30 @@ public class DeepLinkHandler {
                 android.util.Log.w(TAG, "oneshot/start code=0: " + r.msg);
                 logEvent(fSerialId, woNum, DeliveryLogStore.LEVEL_WARN,
                     "ONESHOT_ERROR", r.msg, r.data != null ? r.data.toString() : null);
-                retournerFieldService(woNum, woIdGuid, "erreur_oneshot",
-                    buildErrorJson("ONESHOT_FAILED", r.msg));
+
+                // ✅ Détecter ticket pending — ne pas retourner dans FSM
+                // ds=0x0400 = ticketPending sur le registre
+                boolean ticketPending = false;
+                if (r.data != null) {
+                    ticketPending = r.data.optBoolean("ticketPending", false)
+                        || r.data.optInt("delStatus", 0) == 0x0400;
+                }
+                if (r.msg != null && r.msg.toLowerCase().contains("ticket")) {
+                    ticketPending = true;
+                }
+
+                if (ticketPending) {
+                    // Ticket pending — rester dans l'APK, alerter le chauffeur
+                    android.util.Log.w(TAG, "oneshot/start: ticket pending — rester dans APK");
+                    activity.runOnUiThread(() ->
+                        activity.toast("⚠️ Ticket en attente — imprimez le ticket précédent avant de démarrer"));
+                    // Afficher l'onglet registre pour que le chauffeur gère via bouton A
+                    activity.runOnUiThread(() -> activity.showPage(0));
+                } else {
+                    // Vraie erreur orchestration — retour FSM
+                    retournerFieldService(woNum, woIdGuid, "erreur_oneshot",
+                        buildErrorJson("ONESHOT_FAILED", r.msg));
+                }
             }
         } catch (Exception e) {
             android.util.Log.e(TAG, "lancerLivraison ERR: " + e.getMessage());
