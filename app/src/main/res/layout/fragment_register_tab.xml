@@ -363,6 +363,19 @@
                     android:text="Reprint (last ticket)"
                     android:layout_marginTop="8dp" />
 
+                <!-- ✅ NOUVEAU: Retour au Work Order (Bloc 5) -->
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnRetourWO"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="✅ Retour au Bon de travail"
+                    android:visibility="gone"
+                    android:backgroundTint="#1976D2"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp"
+                    android:padding="12dp" />
+
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 

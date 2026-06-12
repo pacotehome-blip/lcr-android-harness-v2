@@ -61,6 +61,7 @@ public class RegisterTabFragment extends Fragment {
     private EditText edtPreset;
     private Button btnConnect, btnA, btnB, btnC, btnContinue, btnFinish;
     private Button btnReprintTicket;
+    private Button btnRetourWO;
     private NestedScrollView regRootScroll;
     private CheckBox cbShowLog, cbTxRx, cbLogTs;
     private View logPanel;
@@ -398,6 +399,7 @@ public class RegisterTabFragment extends Fragment {
         txtQtyGross = v.findViewById(R.id.txtQtyGross);
         txtDeliveryUid = v.findViewById(R.id.txtDeliveryUid);
         btnReprintTicket = v.findViewById(R.id.btnReprintTicket);
+        btnRetourWO      = v.findViewById(R.id.btnRetourWO);
         cbShowLog = v.findViewById(R.id.cbShowLog);
         logPanel = v.findViewById(R.id.logPanel);
         txtLog = v.findViewById(R.id.txtLog);
@@ -646,6 +648,11 @@ public class RegisterTabFragment extends Fragment {
                 });
             });
         }
+
+        // ✅ RETOUR WO: câblage du bouton Retour au Work Order (Bloc 5)
+        if (btnRetourWO != null) {
+            btnRetourWO.setOnClickListener(v -> retournerAuWorkOrder());
+        }
     }
 
     public void onTabMediaStatusChanged(boolean ready, String mediaShort) {
@@ -892,6 +899,208 @@ public class RegisterTabFragment extends Fragment {
         if (btnReprintTicket != null) {
             btnReprintTicket.setEnabled(connected || paused || ending);
         }
+
+        // ✅ RETOUR WO: visible seulement quand livraison terminée (CONNECTED post-livraison)
+        // et qu'on a des données de livraison (ticket non vide)
+        if (btnRetourWO != null) {
+            boolean hasDeliveryData = false;
+            try {
+                String ticket = txtTicketNo != null ?
+                    txtTicketNo.getText().toString().replace("Ticket Number : ", "").trim() : "";
+                hasDeliveryData = !ticket.isEmpty() && !ticket.equals("—");
+            } catch (Exception ignored) {}
+            btnRetourWO.setVisibility(connected && hasDeliveryData
+                ? android.view.View.VISIBLE : android.view.View.GONE);
+        }
+    }
+
+    // =========================================================
+    // ✅ Retour au Work Order — Bloc 5
+    // Compile payload complet → SQLite local → MSAL push → deep link FSM
+    // =========================================================
+    private void retournerAuWorkOrder() {
+        if (!(getActivity() instanceof MainActivity)) return;
+        MainActivity main = (MainActivity) getActivity();
+
+        // Désactiver le bouton pendant le traitement
+        if (btnRetourWO != null) btnRetourWO.setEnabled(false);
+
+        bg.execute(() -> {
+            try {
+                // 1. Compiler le payload complet
+                String ticketNo   = "";
+                String saleNo     = "";
+                double netL       = 0.0;
+                double grossL     = 0.0;
+                String woNum      = "";
+                String woIdGuid   = "";
+                String payloadJson = "{}";
+
+                try {
+                    if (txtTicketNo != null)
+                        ticketNo = txtTicketNo.getText().toString()
+                            .replace("Ticket Number : ", "").trim();
+                    if (txtQtyNet != null)
+                        netL = Double.parseDouble(
+                            txtQtyNet.getText().toString().replace("NET: ", "").trim());
+                    if (txtQtyGross != null)
+                        grossL = Double.parseDouble(
+                            txtQtyGross.getText().toString().replace("GROSS: ", "").trim());
+                    if (txtDeliveryUid != null)
+                        woNum = txtDeliveryUid.getText().toString()
+                            .replace("Delivery UID : ", "").trim();
+                } catch (Exception ignored) {}
+
+                // Récupérer snapshot complet du controller
+                org.json.JSONObject snap = new org.json.JSONObject();
+                try {
+                    if (controller != null) {
+                        ApiResult sr = controller.api_tickSnapshot();
+                        if (sr != null && sr.data != null) {
+                            snap = sr.data;
+                            // Extraire saleNo depuis snap
+                            saleNo = snap.optString("sale_no", "");
+                            // Extraire woIdGuid depuis result si disponible
+                            org.json.JSONObject result = snap.optJSONObject("result");
+                            if (result != null) {
+                                if (netL == 0.0)   netL   = result.optDouble("fs_net_l",   netL);
+                                if (grossL == 0.0) grossL = result.optDouble("fs_gross_l", grossL);
+                                if (ticketNo.isEmpty()) ticketNo = result.optString("ticket_no", "");
+                                if (saleNo.isEmpty())   saleNo   = result.optString("sale_no", "");
+                            }
+                        }
+                    }
+                } catch (Exception ignored) {}
+
+                // Récupérer woIdGuid depuis ActiveDeliveryStore
+                try {
+                    com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
+                        new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
+                    com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery active = ads.load();
+                    if (active != null) {
+                        if (active.woIdGuid != null && !active.woIdGuid.isEmpty())
+                            woIdGuid = active.woIdGuid;
+                        if (woNum.isEmpty() && active.woNum != null)
+                            woNum = active.woNum;
+                    }
+                } catch (Exception ignored) {}
+
+                snap.put("ticketNo", ticketNo);
+                snap.put("saleNo",   saleNo);
+                snap.put("netL",     netL);
+                snap.put("grossL",   grossL);
+                snap.put("woNum",    woNum);
+                snap.put("woIdGuid", woIdGuid);
+                payloadJson = snap.toString();
+
+                // 2. Écrire dans LcrDeliveryStatusDb — PENDING
+                android.content.ContentValues cv = new android.content.ContentValues();
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,      woNum);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID,  woIdGuid);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO,   ticketNo);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SALE_NO,     saleNo);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,       netL);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L,     grossL);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,      "REGISTRE");
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE,   "LIVRAISON");
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PAYLOAD_JSON, payloadJson);
+
+                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
+                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                long localId = lcrDb.insertDelivery(cv);
+                android.util.Log.i("RetourWO", "Delivery sauvegardée localId=" + localId
+                    + " wo=" + woNum + " net=" + netL + " gross=" + grossL);
+
+                // 3. Tenter push MSAL vers Dataverse
+                try {
+                    com.pa.lcrdemo.auth.MsalTokenProvider msal =
+                        new com.pa.lcrdemo.auth.MsalTokenProvider(requireContext());
+                    final String[] tokenHolder = {null};
+                    final java.util.concurrent.CountDownLatch latch =
+                        new java.util.concurrent.CountDownLatch(1);
+                    msal.init(new com.pa.lcrdemo.auth.MsalTokenProvider.InitCallback() {
+                        @Override public void onReady() {
+                            msal.acquireTokenSilentFromWorker(
+                                new com.pa.lcrdemo.auth.MsalTokenProvider.TokenCallback() {
+                                    @Override public void onSuccess(String token) {
+                                        tokenHolder[0] = token;
+                                        latch.countDown();
+                                    }
+                                    @Override public void onError(Exception e) {
+                                        android.util.Log.w("RetourWO", "Token silent ERR: " + e.getMessage());
+                                        latch.countDown();
+                                    }
+                                });
+                        }
+                        @Override public void onError(Exception e) {
+                            android.util.Log.w("RetourWO", "MSAL init ERR: " + e.getMessage());
+                            latch.countDown();
+                        }
+                    });
+                    latch.await(8, java.util.concurrent.TimeUnit.SECONDS);
+                    if (tokenHolder[0] != null) {
+                        com.pa.lcrdemo.dataverse.LcrDeliverySync.pushPending(
+                            requireContext(), tokenHolder[0]);
+                        android.util.Log.i("RetourWO", "Push Dataverse OK");
+                    } else {
+                        android.util.Log.w("RetourWO", "Pas de token — données en PENDING local");
+                    }
+                } catch (Exception e) {
+                    android.util.Log.w("RetourWO", "Push Dataverse ERR: " + e.getMessage());
+                }
+
+                // 4. Effacer ActiveDeliveryStore
+                try {
+                    new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext()).clear();
+                } catch (Exception ignored) {}
+
+                // 5. Deep link ms-apps:// → FSM sur le WO
+                final String fWoIdGuid = woIdGuid;
+                final String fsAppId   = com.pa.lcrdemo.config.LcrConfig.getFsAppId(requireContext());
+                ui.post(() -> {
+                    try {
+                        if (!fWoIdGuid.isEmpty()) {
+                            String url = "ms-apps://d365/va/"
+                                + "?appid=" + fsAppId
+                                + "&pagetype=entityrecord"
+                                + "&etn=msdyn_workorder"
+                                + "&id=" + fWoIdGuid;
+                            android.content.Intent intent = new android.content.Intent(
+                                android.content.Intent.ACTION_VIEW,
+                                android.net.Uri.parse(url));
+                            intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                            requireContext().startActivity(intent);
+                            android.util.Log.i("RetourWO", "Deep link FSM envoyé: " + url);
+                        } else {
+                            android.util.Log.w("RetourWO", "woIdGuid vide — impossible de retourner FSM");
+                            android.widget.Toast.makeText(requireContext(),
+                                "⚠️ WO ID manquant — retournez manuellement dans Field Service",
+                                android.widget.Toast.LENGTH_LONG).show();
+                        }
+                    } catch (Exception e) {
+                        android.util.Log.e("RetourWO", "Deep link FSM ERR: " + e.getMessage());
+                        android.widget.Toast.makeText(requireContext(),
+                            "Retour FSM: " + e.getMessage(),
+                            android.widget.Toast.LENGTH_SHORT).show();
+                    } finally {
+                        if (btnRetourWO != null) btnRetourWO.setEnabled(true);
+                    }
+                });
+
+            } catch (Exception e) {
+                android.util.Log.e("RetourWO", "retournerAuWorkOrder ERR: " + e.getMessage());
+                ui.post(() -> {
+                    android.widget.Toast.makeText(requireContext(),
+                        "Erreur retour WO: " + e.getMessage(),
+                        android.widget.Toast.LENGTH_SHORT).show();
+                    if (btnRetourWO != null) btnRetourWO.setEnabled(true);
+                });
+            }
+        });
     }
 
     private void refreshLogView() {
