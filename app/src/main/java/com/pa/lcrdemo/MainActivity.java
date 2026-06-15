@@ -1852,7 +1852,20 @@ private void scanUsb() {
 
     public void onUsbPortReady(UsbSerialPort port) {
         if (port == null) return;
+
+        // ✅ Si usbPort stale (fermé ou différent du nouveau) → remplacer
+        if (usbPort != null && usbPort != port) {
+            boolean stale = false;
+            try { stale = !usbPort.isOpen(); } catch (Exception e) { stale = true; }
+            if (stale) {
+                try { usbPort.close(); } catch (Exception ignore) {}
+                usbPort = null;
+                logUi(null, "USB: port stale remplacé");
+            }
+        }
+
         if (usbPort != null) {
+            // Port valide déjà ouvert — fermer le doublon
             try { port.close(); } catch (Exception ignore) {}
             return;
         }
