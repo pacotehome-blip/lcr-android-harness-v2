@@ -751,16 +751,17 @@ public class DeepLinkHandler {
                 boolean hasSeenFlowing = false;
                 boolean terminateSent  = false;
                 String  lastState      = "";
-                String  ticketNoAtStart = ""; // ✅ Ticket au démarrage — pour détecter changement
 
                 // ✅ Lire ticket# au démarrage pour détecter changement ultérieur
+                String ticketNoAtStartTmp = "";
                 try {
                     MultiRegisterApiFacadeImpl facadeT =
                         new MultiRegisterApiFacadeImpl(activity);
                     com.pa.lcr.lcp.ApiResult tickSnap = facadeT.api_deliveryJobGet(jobId);
                     if (tickSnap != null && tickSnap.data != null)
-                        ticketNoAtStart = tickSnap.data.optString("ticket_no", "");
+                        ticketNoAtStartTmp = tickSnap.data.optString("ticket_no", "");
                 } catch (Exception ignored) {}
+                final String ticketNoAtStart = ticketNoAtStartTmp;
 
                 // ✅ Délai avant premier continue — USB est plus lent que BT
                 if (transportKey.toUpperCase().startsWith("USB")) {
