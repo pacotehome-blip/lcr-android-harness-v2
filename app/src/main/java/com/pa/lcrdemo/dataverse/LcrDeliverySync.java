@@ -142,14 +142,14 @@ public class LcrDeliverySync {
             } else if (code == 200 || code == 201) {
                 // POST OK — extraire le GUID depuis la réponse
                 InputStream is = conn.getInputStream();
-                byte[] respBytes = is.readAllBytes();
+                byte[] respBytes = readStream(is);
                 String respStr = new String(respBytes, StandardCharsets.UTF_8);
                 JSONObject resp = new JSONObject(respStr);
                 return resp.optString("lcr_lcr_delivery_statusid", row.woNum + "-" + row.id);
             } else {
                 String err = "";
                 try {
-                    byte[] errBytes = conn.getErrorStream().readAllBytes();
+                    byte[] errBytes = readStream(conn.getErrorStream());
                     err = new String(errBytes, StandardCharsets.UTF_8);
                 } catch (Exception ignored) {}
                 throw new RuntimeException("HTTP " + code + ": " +
@@ -257,7 +257,7 @@ public class LcrDeliverySync {
                 return;
             }
 
-            byte[] respBytes = conn.getInputStream().readAllBytes();
+            byte[] respBytes = readStream(conn.getInputStream());
             String respStr = new String(respBytes, StandardCharsets.UTF_8);
             JSONObject resp = new JSONObject(respStr);
             JSONArray values = resp.optJSONArray("value");
@@ -289,8 +289,17 @@ public class LcrDeliverySync {
     }
 
     // =========================================================
-    // Helpers JSON
+    // Helper — lire un InputStream complètement (compatible Android 9 / API 28)
     // =========================================================
+    private static byte[] readStream(java.io.InputStream is) throws java.io.IOException {
+        java.io.ByteArrayOutputStream buffer = new java.io.ByteArrayOutputStream();
+        byte[] chunk = new byte[4096];
+        int n;
+        while ((n = is.read(chunk)) != -1) {
+            buffer.write(chunk, 0, n);
+        }
+        return buffer.toByteArray();
+    }
     private static void putStr(JSONObject j, String key, String val) throws Exception {
         if (val != null && !val.isEmpty()) j.put(key, val);
     }

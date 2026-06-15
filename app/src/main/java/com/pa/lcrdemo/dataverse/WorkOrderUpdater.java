@@ -74,8 +74,14 @@ public class WorkOrderUpdater {
             } else {
                 String err = "";
                 try {
-                    byte[] errBytes = conn.getErrorStream().readAllBytes();
-                    err = new String(errBytes, StandardCharsets.UTF_8);
+                    java.io.InputStream es = conn.getErrorStream();
+                    if (es != null) {
+                        java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
+                        byte[] chunk = new byte[4096];
+                        int n;
+                        while ((n = es.read(chunk)) != -1) buf.write(chunk, 0, n);
+                        err = buf.toString(StandardCharsets.UTF_8.name());
+                    }
                 } catch (Exception ignored) {}
                 throw new RuntimeException("PATCH HTTP " + code + ": " + err.substring(0, Math.min(200, err.length())));
             }
