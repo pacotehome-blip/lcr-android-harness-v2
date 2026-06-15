@@ -908,6 +908,90 @@ public class DeepLinkHandler {
         try { new ActiveDeliveryStore(activity).clear(); } catch (Exception ignored) {}
         android.util.Log.i(TAG,
             "Livraison terminée — WO=" + woNum + " extra=" + extraJson);
+
+        // ✅ Écrire dans LcrDeliveryStatusDb (offline safe) avant retour FSM
+        btExec.execute(() -> {
+            try {
+                JSONObject d      = new JSONObject(extraJson != null ? extraJson : "{}");
+                JSONObject result = d.optJSONObject("result");
+                JSONObject tick   = d.optJSONObject("tick");
+
+                double netL      = 0, grossL   = 0;
+                double deltaNet  = 0, deltaGross = 0;
+                String ticketNo  = "", saleNo = "";
+                String startUtc  = "", endUtc = "";
+                double durationS = 0;
+                int    produitNo = 0;
+                String presetStatus = "EXACT";
+
+                if (result != null) {
+                    netL       = result.optDouble("fs_net_l",    0);
+                    grossL     = result.optDouble("fs_gross_l",  0);
+                    deltaNet   = result.optDouble("net_delta_l", 0);
+                    deltaGross = result.optDouble("gross_delta_l", 0);
+                    ticketNo   = result.optString("ticket_no",   "");
+                    saleNo     = result.optString("sale_no",     "");
+                    startUtc   = result.optString("start_utc",   "");
+                    endUtc     = result.optString("end_utc",     "");
+                    durationS  = result.optDouble("duration_s",  0);
+                    produitNo  = result.optInt("product_number", 0);
+                }
+                // Fallback tick
+                if ((netL == 0 || grossL == 0) && tick != null) {
+                    double tn = tick.optDouble("net", 0);
+                    double tg = tick.optDouble("gross", 0);
+                    if (tn > 0) netL   = tn;
+                    if (tg > 0) grossL = tg;
+                }
+
+                // preset_status
+                double presetL = d.optDouble("preset_requested", 0);
+                if (presetL > 0) {
+                    if (Math.abs(netL - presetL) < 0.2)       presetStatus = "EXACT";
+                    else if (netL < presetL)                   presetStatus = "UNDER";
+                    else                                       presetStatus = "OVER";
+                }
+
+                // lcrnode depuis ActiveDeliveryStore (déjà effacé — utiliser fNode)
+                int lcrnode = fNode;
+
+                android.content.ContentValues cv = new android.content.ContentValues();
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,       woNum != null ? woNum : "");
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID,   woIdGuid != null ? woIdGuid.replace("{","").replace("}","") : "");
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID,    fSerialId);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_LCRNODE,      lcrnode);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PRODUIT_NO,   produitNo);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO,    ticketNo);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SALE_NO,      saleNo);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,        netL);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L,      grossL);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_DELTA_NET_L,  deltaNet);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_DELTA_GROSS_L,deltaGross);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PRESET_L,     presetL);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PRESET_STATUS,presetStatus);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_START_UTC,    startUtc);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_END_UTC,      endUtc);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_DURATION_S,   durationS);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,       "REGISTRE");
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE,    "LIVRAISON");
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PAYLOAD_JSON, extraJson);
+
+                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
+                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
+                long localId = lcrDb.insertDelivery(cv);
+                android.util.Log.i(TAG, "LcrDeliveryStatusDb: id=" + localId
+                    + " wo=" + woNum + " net=" + netL + " gross=" + grossL
+                    + " ticket=" + ticketNo + " duration=" + durationS);
+
+            } catch (Exception e) {
+                android.util.Log.e(TAG, "LcrDeliveryStatusDb ERR: " + e.getMessage());
+            }
+        });
+
         retournerFieldService(woNum, woIdGuid, "termine", extraJson);
     }
 
