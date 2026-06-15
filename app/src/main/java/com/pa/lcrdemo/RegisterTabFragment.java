@@ -1058,34 +1058,14 @@ public class RegisterTabFragment extends Fragment {
                     new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext()).clear();
                 } catch (Exception ignored) {}
 
-                // 5. Deep link ms-apps:// → FSM sur le WO
+                // 5. Retour FSM via finish() — taskAffinity ramène FSM au premier plan
                 final String fWoIdGuid = woIdGuid;
-                final String fsAppId   = com.pa.lcrdemo.config.LcrConfig.getFsAppId(requireContext());
                 ui.post(() -> {
                     try {
-                        if (!fWoIdGuid.isEmpty()) {
-                            String url = "ms-apps://d365/va/"
-                                + "?appid=" + fsAppId
-                                + "&pagetype=entityrecord"
-                                + "&etn=msdyn_workorder"
-                                + "&id=" + fWoIdGuid;
-                            android.content.Intent intent = new android.content.Intent(
-                                android.content.Intent.ACTION_VIEW,
-                                android.net.Uri.parse(url));
-                            intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
-                            requireContext().startActivity(intent);
-                            android.util.Log.i("RetourWO", "Deep link FSM envoyé: " + url);
-                        } else {
-                            android.util.Log.w("RetourWO", "woIdGuid vide — impossible de retourner FSM");
-                            android.widget.Toast.makeText(requireContext(),
-                                "⚠️ WO ID manquant — retournez manuellement dans Field Service",
-                                android.widget.Toast.LENGTH_LONG).show();
-                        }
+                        android.util.Log.i("RetourWO", "finish() → FSM via taskAffinity woId=" + fWoIdGuid);
+                        if (getActivity() != null) getActivity().finish();
                     } catch (Exception e) {
-                        android.util.Log.e("RetourWO", "Deep link FSM ERR: " + e.getMessage());
-                        android.widget.Toast.makeText(requireContext(),
-                            "Retour FSM: " + e.getMessage(),
-                            android.widget.Toast.LENGTH_SHORT).show();
+                        android.util.Log.e("RetourWO", "finish() ERR: " + e.getMessage());
                     } finally {
                         if (btnRetourWO != null) btnRetourWO.setEnabled(true);
                     }
