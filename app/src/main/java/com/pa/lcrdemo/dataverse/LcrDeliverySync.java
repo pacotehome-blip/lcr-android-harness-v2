@@ -107,17 +107,15 @@ public class LcrDeliverySync {
         String bodyStr  = body.toString();
         byte[] bodyBytes = bodyStr.getBytes(StandardCharsets.UTF_8);
 
-        // Si dataverse_id connu → PATCH, sinon → POST nouvelle ligne
-        boolean isUpdate = row.dataverseId != null && !row.dataverseId.isEmpty();
-
-        String urlStr = orgUrl + "/api/data/v9.2/" + TABLE_DELIVERY +
-            (isUpdate ? "(" + row.dataverseId + ")" : "");
+        // Toujours POST — une ligne SQLite = une nouvelle ligne Dataverse
+        // Chaque impression génère son propre enregistrement
+        String urlStr = orgUrl + "/api/data/v9.2/" + TABLE_DELIVERY;
 
         URL url = new URL(urlStr);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
 
         try {
-            conn.setRequestMethod(isUpdate ? "PATCH" : "POST");
+            conn.setRequestMethod("POST");
             conn.setDoOutput(true);
             conn.setConnectTimeout(15000);
             conn.setReadTimeout(15000);
@@ -126,11 +124,8 @@ public class LcrDeliverySync {
             conn.setRequestProperty("Accept",           "application/json");
             conn.setRequestProperty("OData-MaxVersion", "4.0");
             conn.setRequestProperty("OData-Version",    "4.0");
-            if (!isUpdate) {
-                // POST — retourner le GUID créé
-                conn.setRequestProperty("Prefer", "return=representation");
-            }
-            conn.setRequestProperty("Content-Length", String.valueOf(bodyBytes.length));
+            conn.setRequestProperty("Prefer",           "return=representation");
+            conn.setRequestProperty("Content-Length",   String.valueOf(bodyBytes.length));
 
             try (OutputStream os = conn.getOutputStream()) {
                 os.write(bodyBytes);
@@ -138,16 +133,16 @@ public class LcrDeliverySync {
 
             int code = conn.getResponseCode();
 
-            if (code == 204) {
-                // PATCH OK — retourner l'ID existant
-                return row.dataverseId;
-            } else if (code == 200 || code == 201) {
-                // POST OK — extraire le GUID depuis la réponse
+            if (code == 200 || code == 201) {
+                // POST OK — extraire le GUID Dataverse créé
                 InputStream is = conn.getInputStream();
                 byte[] respBytes = readStream(is);
                 String respStr = new String(respBytes, StandardCharsets.UTF_8);
                 JSONObject resp = new JSONObject(respStr);
                 return resp.optString("lcr_lcr_delivery_statusid", row.woNum + "-" + row.id);
+            } else if (code == 204) {
+                // Pas de corps retourné
+                return row.woNum + "-" + row.id;
             } else {
                 String err = "";
                 try {
