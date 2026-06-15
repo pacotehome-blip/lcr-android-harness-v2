@@ -288,7 +288,7 @@ public class LcpLink {
         return result;
     }
 
-
+    public byte[] opGetField(int field) throws IOException {
         Response r = sendRecv(buildPayload(MSG_GET_FIELD, new byte[]{(byte) field}), 5000);
         ensureOk(r, "GET_FIELD #" + field);
         byte[] out = new byte[r.payload.length - 2];
