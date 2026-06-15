@@ -640,8 +640,74 @@ public class RegisterTabFragment extends Fragment {
                             MediaTransportManager.get(requireContext())
                                     .activateExclusive(tabTransportKey, "REPRINT");
                         }
+
+                        // ✅ Lire ticket_no AVANT reprint (field #23 s'incrémente après)
+                        String ticketNoBefore = "";
+                        try {
+                            ApiResult snap = c.api_tickSnapshot();
+                            if (snap != null && snap.data != null) {
+                                ticketNoBefore = snap.data.optString("ticket_no", "");
+                                org.json.JSONObject result = snap.data.optJSONObject("result");
+                                if (result != null && ticketNoBefore.isEmpty())
+                                    ticketNoBefore = result.optString("ticket_no", "");
+                            }
+                        } catch (Exception ignored) {}
+
+                        // ✅ Envoyer CMD_PRINT_LAST_TICKET (0x06)
                         ApiResult r = c.api_ticketReprintCurrent();
                         LogBus.api(node, "[REPRINT] " + (r != null ? r.msg : "null"));
+
+                        // ✅ Lire ticket_no APRÈS reprint
+                        String ticketNoAfter = "";
+                        double netL = 0, grossL = 0;
+                        String woNum = "", woIdGuid = "";
+                        try {
+                            Thread.sleep(500); // attendre que le registre incrémente
+                            ApiResult snap2 = c.api_tickSnapshot();
+                            if (snap2 != null && snap2.data != null) {
+                                org.json.JSONObject result = snap2.data.optJSONObject("result");
+                                if (result != null) {
+                                    ticketNoAfter = result.optString("ticket_no", "");
+                                    netL   = result.optDouble("fs_net_l",  0);
+                                    grossL = result.optDouble("fs_gross_l",0);
+                                }
+                            }
+                        } catch (Exception ignored) {}
+
+                        // Récupérer woNum + woIdGuid depuis lastResultJson
+                        try {
+                            String last = com.pa.lcrdemo.DeepLinkHandler.lastResultJson;
+                            if (last != null) {
+                                org.json.JSONObject j = new org.json.JSONObject(last);
+                                woNum    = j.optString("wonum", "");
+                                woIdGuid = j.optString("woid",  "");
+                            }
+                        } catch (Exception ignored) {}
+
+                        // ✅ Créer nouvelle ligne REPRINT dans LcrDeliveryStatusDb
+                        if (!ticketNoAfter.isEmpty() && !ticketNoAfter.equals(ticketNoBefore)) {
+                            android.content.ContentValues cv = new android.content.ContentValues();
+                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,       woNum);
+                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID,   woIdGuid);
+                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO,    ticketNoAfter);
+                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO_REF,ticketNoBefore);
+                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,        netL);
+                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L,      grossL);
+                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
+                                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_REPRINT);
+                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,       "REGISTRE");
+                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE,    "LIVRAISON");
+                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
+                                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
+
+                            // REPRINT = nouvelle ligne (pas UPSERT) — forcer INSERT
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
+                                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                            lcrDb.insertDelivery(cv);
+                            android.util.Log.i("REPRINT", "Nouveau ticket tracé: "
+                                + ticketNoBefore + " → " + ticketNoAfter + " wo=" + woNum);
+                        }
+
                     } catch (Exception e) {
                         LogBus.api(node, "[REPRINT] ERR: " + safeMsg(e));
                     }

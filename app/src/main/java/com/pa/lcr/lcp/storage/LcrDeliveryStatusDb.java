@@ -123,6 +123,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     public static final String TYPE_CORRECTION  = "CORRECTION";
     public static final String TYPE_ANNULATION  = "ANNULATION";
     public static final String TYPE_MANUELLE    = "MANUELLE";
+    public static final String TYPE_REPRINT     = "REPRINT";
 
     // Valeurs preset_status
     public static final String PRESET_EXACT   = "EXACT";
@@ -298,69 +299,57 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     // =========================================================
 
     /**
-     * Insère ou met à jour une transaction de livraison pour un WO.
-     * Si une ligne existe déjà pour ce wo_num → UPSERT (mise à jour).
-     * Retourne l'ID local.
+     * Insère une nouvelle transaction — toujours un nouvel enregistrement.
+     * Chaque impression = une nouvelle ligne dans lcr_delivery_status.
+     * Calcule automatiquement previous/total/count depuis les lignes précédentes.
      */
     public long insertDelivery(ContentValues cv) {
         long now = System.currentTimeMillis();
+        cv.put(COL_TS_CREATED_MS, now);
         cv.put(COL_TS_UPDATED_MS, now);
         if (!cv.containsKey(COL_SYNC_STATUS)) {
             cv.put(COL_SYNC_STATUS, SYNC_PENDING);
         }
 
-        // Vérifier si une ligne existe déjà pour ce wo_num
+        // Calculer les champs historique depuis la dernière ligne du même wo_num
         String woNum = cv.getAsString(COL_WO_NUM);
         if (woNum != null && !woNum.isEmpty()) {
             DeliveryRow existing = getLatestForWo(woNum);
             if (existing != null) {
-                // Calculer les champs historique
-                double prevNet   = existing.netL;
-                double prevGross = existing.grossL;
-                String prevTicket = existing.ticketNo;
-                double newNet    = cv.getAsDouble(COL_NET_L)   != null ? cv.getAsDouble(COL_NET_L)   : 0;
-                double newGross  = cv.getAsDouble(COL_GROSS_L) != null ? cv.getAsDouble(COL_GROSS_L) : 0;
-                int    count     = existing.deliveryCount + 1;
-                double totalNet  = existing.totalNetL + newNet;
-                double totalGross= existing.totalGrossL + newGross;
-                double presetL   = cv.getAsDouble(COL_PRESET_L) != null ? cv.getAsDouble(COL_PRESET_L) : existing.presetL;
-                double overage   = totalNet > presetL ? totalNet - presetL : 0;
+                double newNet   = cv.getAsDouble(COL_NET_L)    != null ? cv.getAsDouble(COL_NET_L)    : 0;
+                double newGross = cv.getAsDouble(COL_GROSS_L)  != null ? cv.getAsDouble(COL_GROSS_L)  : 0;
+                double presetL  = cv.getAsDouble(COL_PRESET_L) != null ? cv.getAsDouble(COL_PRESET_L) : existing.presetL;
+                double totalNet   = existing.totalNetL  + newNet;
+                double totalGross = existing.totalGrossL + newGross;
+                int    count      = existing.deliveryCount + 1;
+                double overage    = totalNet > presetL && presetL > 0 ? totalNet - presetL : 0;
 
-                cv.put(COL_PREVIOUS_NET_L,      prevNet);
-                cv.put(COL_PREVIOUS_GROSS_L,    prevGross);
-                cv.put(COL_PREVIOUS_TICKET_NO,  prevTicket);
-                cv.put(COL_TOTAL_NET_L,         totalNet);
-                cv.put(COL_TOTAL_GROSS_L,       totalGross);
-                cv.put(COL_DELIVERY_COUNT,      count);
-                cv.put(COL_PRESET_OVERAGE_L,    overage);
-
-                // UPSERT — mettre à jour la ligne existante
-                cv.put(COL_SYNC_STATUS, SYNC_PENDING);
-                try {
-                    getWritableDatabase().update(TABLE_DELIVERY, cv,
-                        COL_ID + "=?", new String[]{String.valueOf(existing.id)});
-                    Log.i(TAG, "insertDelivery UPSERT id=" + existing.id + " wo=" + woNum
-                        + " count=" + count + " totalNet=" + totalNet);
-                    return existing.id;
-                } catch (Exception e) {
-                    Log.e(TAG, "insertDelivery UPSERT ERR: " + e.getMessage());
-                }
+                cv.put(COL_PREVIOUS_NET_L,     existing.netL);
+                cv.put(COL_PREVIOUS_GROSS_L,   existing.grossL);
+                cv.put(COL_PREVIOUS_TICKET_NO, existing.ticketNo);
+                cv.put(COL_TOTAL_NET_L,        totalNet);
+                cv.put(COL_TOTAL_GROSS_L,      totalGross);
+                cv.put(COL_DELIVERY_COUNT,     count);
+                cv.put(COL_PRESET_OVERAGE_L,   overage);
             } else {
-                // Première livraison — total = net courant
-                double newNet   = cv.getAsDouble(COL_NET_L)   != null ? cv.getAsDouble(COL_NET_L)   : 0;
-                double newGross = cv.getAsDouble(COL_GROSS_L) != null ? cv.getAsDouble(COL_GROSS_L) : 0;
+                // Première ligne pour ce WO
+                double newNet   = cv.getAsDouble(COL_NET_L)    != null ? cv.getAsDouble(COL_NET_L)    : 0;
+                double newGross = cv.getAsDouble(COL_GROSS_L)  != null ? cv.getAsDouble(COL_GROSS_L)  : 0;
                 double presetL  = cv.getAsDouble(COL_PRESET_L) != null ? cv.getAsDouble(COL_PRESET_L) : 0;
                 cv.put(COL_TOTAL_NET_L,      newNet);
                 cv.put(COL_TOTAL_GROSS_L,    newGross);
                 cv.put(COL_DELIVERY_COUNT,   1);
-                cv.put(COL_PRESET_OVERAGE_L, newNet > presetL ? newNet - presetL : 0);
+                cv.put(COL_PRESET_OVERAGE_L, newNet > presetL && presetL > 0 ? newNet - presetL : 0);
             }
         }
 
-        // Nouvelle ligne
-        cv.put(COL_TS_CREATED_MS, now);
         try {
-            return getWritableDatabase().insertOrThrow(TABLE_DELIVERY, null, cv);
+            long id = getWritableDatabase().insertOrThrow(TABLE_DELIVERY, null, cv);
+            Log.i(TAG, "insertDelivery INSERT id=" + id + " wo=" + woNum
+                + " type=" + cv.getAsString(COL_TYPE)
+                + " ticket=" + cv.getAsString(COL_TICKET_NO)
+                + " net=" + cv.getAsDouble(COL_NET_L));
+            return id;
         } catch (Exception e) {
             Log.e(TAG, "insertDelivery ERR: " + e.getMessage());
             return -1;

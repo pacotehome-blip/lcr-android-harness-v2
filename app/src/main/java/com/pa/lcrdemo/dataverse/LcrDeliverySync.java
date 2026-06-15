@@ -107,17 +107,8 @@ public class LcrDeliverySync {
         String bodyStr  = body.toString();
         byte[] bodyBytes = bodyStr.getBytes(StandardCharsets.UTF_8);
 
-        // Si dataverse_id connu → PATCH direct
+        // Si dataverse_id connu → PATCH, sinon → POST nouvelle ligne
         boolean isUpdate = row.dataverseId != null && !row.dataverseId.isEmpty();
-
-        // Sinon → chercher par wo_num dans Dataverse
-        if (!isUpdate && row.woNum != null && !row.woNum.isEmpty()) {
-            String existingId = findDataverseIdByWoNum(row.woNum, orgUrl, accessToken);
-            if (existingId != null) {
-                isUpdate = true;
-                row.dataverseId = existingId;
-            }
-        }
 
         String urlStr = orgUrl + "/api/data/v9.2/" + TABLE_DELIVERY +
             (isUpdate ? "(" + row.dataverseId + ")" : "");
