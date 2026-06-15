@@ -324,6 +324,16 @@ public class Lc3Link extends LcpLink {
         android.util.Log.d("Lc3Link", "opPrintText: NO-OP LC3 (len=" + line.length() + ")");
     }
 
+    /**
+     * NO-OP pour LC3 — diagnostic reset non implémenté (comportement à définir avec spec LC3).
+     * TODO: implémenter quand la spec LC3 sera disponible.
+     */
+    @Override
+    public int[] opDiagnosticReset(int maxWaitMs) throws IOException {
+        android.util.Log.d("Lc3Link", "opDiagnosticReset: NO-OP LC3");
+        return new int[]{0, 0};
+    }
+
     // ── startDelivery ─────────────────────────────────────────────────────
     private void startDelivery() throws IOException {
         android.util.Log.i("Lc3Link", "startDelivery product=" + pendingProduct

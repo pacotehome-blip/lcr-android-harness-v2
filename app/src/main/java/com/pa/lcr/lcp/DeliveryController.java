@@ -2218,9 +2218,126 @@ public ApiResult api_registerValidate(
         return "LIVE: CONNECTED - ARMED (en attente CONTINUER)";
     }
 
+    /**
+     * Diagnostic reset — remet les compteurs net/gross à zéro si négatifs.
+     *
+     * Appelable depuis :
+     *   - api_deliveryOneShotStart() (automatique si net/gross < 0)
+     *   - UI entretien (manuel)
+     *   - UI admin (bouton diagnostic)
+     *
+     * LCR-II : opDiagnosticReset() → Auxiliary(0x03) + Print(0x06) + poll
+     * LC3    : NO-OP (à implémenter quand spec LC3 disponible)
+     *
+     * Colonnes Dataverse à ajouter (TODO):
+     *   lcr_pre_delivery_net, lcr_pre_delivery_gross, lcr_diagnostic_reset
+     */
+    public ApiResult api_diagnosticReset() {
+        JSONObject d = new JSONObject();
+        try {
+            // Lire net/gross actuels
+            byte[] netRaw   = lcpGetField(45); // FIELD_NET_COUNT
+            byte[] grossRaw = lcpGetField(44); // FIELD_GROSS_COUNT
+            int netRaw32    = toInt32(netRaw);
+            int grossRaw32  = toInt32(grossRaw);
+
+            // Lire décimales pour affichage
+            byte[] decRaw = lcpGetField(39);
+            int decimals  = decRaw != null && decRaw.length > 0
+                ? new int[]{2,1,0,3}[decRaw[0] & 0x03] : 1;
+            double scale  = Math.pow(10, decimals);
+            double netL   = netRaw32   / scale;
+            double grossL = grossRaw32 / scale;
+
+            safeJsonPut(d, "net_before_l",   netL);
+            safeJsonPut(d, "gross_before_l", grossL);
+            safeJsonPut(d, "reset_done",     false);
+
+            if (netRaw32 >= 0 && grossRaw32 >= 0) {
+                // Pas de reset nécessaire
+                safeJsonPut(d, "msg", "net/gross OK — pas de reset nécessaire");
+                return ApiResult.ok("Diagnostic: pas de reset nécessaire", d);
+            }
+
+            emitLog("[DIAGNOSTIC] net=" + netL + " gross=" + grossL
+                + " négatif — reset en cours...");
+
+            // Envoyer séquence reset via link
+            withLcpLockVoid(() -> {
+                link.opDiagnosticReset(10000);
+                return null;
+            });
+
+            safeJsonPut(d, "reset_done", true);
+            safeJsonPut(d, "msg", "Reset effectué — net_avant=" + netL + " gross_avant=" + grossL);
+            emitLog("[DIAGNOSTIC] Reset OK");
+            return ApiResult.ok("Diagnostic reset OK", d);
+
+        } catch (Exception e) {
+            safeJsonPut(d, "error", e.getMessage());
+            emitLog("[DIAGNOSTIC] ERR: " + e.getMessage());
+            return ApiResult.fail("Diagnostic reset ERR: " + e.getMessage(), d);
+        }
+    }
+
+    /** Convertit bytes big-endian signé en int */
+    private static int toInt32(byte[] b) {
+        if (b == null || b.length < 4) return 0;
+        return ((b[0] & 0xFF) << 24) | ((b[1] & 0xFF) << 16)
+             | ((b[2] & 0xFF) << 8)  |  (b[3] & 0xFF);
+    }
+
     public ApiResult api_deliveryOneShotStart(String numero_livraison, int product1to16, double presetNetL, String compartment) {
         if (link == null || link.isClosed()) {
             return ApiResult.fail("Delivery OneShot: 0 - USB not ready.", "USB_NOT_READY");
+        }
+
+        // =====================================================================
+        // TODO: DIAGNOSTIC RESET — à implémenter (LCR-II + LC3)
+        // ---------------------------------------------------------------------
+        // Avant de démarrer la livraison, vérifier si net/gross sont négatifs
+        // (retour d'air après livraison précédente — ex: -0.1L).
+        //
+        // Si négatif → appeler api_diagnosticReset() — méthode STANDALONE:
+        //
+        //   public ApiResult api_diagnosticReset()
+        //     → utilisable depuis: démarrage livraison, entretien, UI admin
+        //     → LCR-II : opDiagnosticReset() dans LcpLink
+        //                  issue_command(0x03 Auxiliary)
+        //                  issue_command(0x06 Print)
+        //                  poll net/gross jusqu'à == 0 (max 10s)
+        //     → LC3    : opDiagnosticReset() dans Lc3Link — NO-OP
+        //                  (comportement à définir avec spec LC3)
+        //
+        // Logger dans lcr_delivery_status:
+        //   lcr_pre_delivery_net   = valeur net avant reset
+        //   lcr_pre_delivery_gross = valeur gross avant reset
+        //   lcr_diagnostic_reset   = true (bit Dataverse)
+        //
+        // Colonnes Dataverse à ajouter via pac CLI:
+        //   lcr_pre_delivery_net   (decimal)
+        //   lcr_pre_delivery_gross (decimal)
+        //   lcr_diagnostic_reset   (bit)
+        //
+        // Référence Python: lcp_bypass3_test.py + lcp_print_and_bypass.py
+        //
+        // NOTE: vérifier si oneshot/start remet lui-même les compteurs à zéro
+        // auquel cas le reset manuel n'est peut-être pas nécessaire — juste logger.
+        // =====================================================================
+
+        // ✅ Vérifier net/gross avant démarrage — diagnostic reset si négatif
+        try {
+            ApiResult resetResult = api_diagnosticReset();
+            if (resetResult != null && resetResult.data != null) {
+                boolean didReset = resetResult.data.optBoolean("reset_done", false);
+                if (didReset) {
+                    emitLog("[DIAGNOSTIC] Reset effectué avant oneshot — net_avant="
+                        + resetResult.data.optDouble("net_before_l", 0)
+                        + " gross_avant=" + resetResult.data.optDouble("gross_before_l", 0));
+                }
+            }
+        } catch (Exception e) {
+            emitLog("[DIAGNOSTIC] Reset ERR: " + e.getMessage());
         }
         
  // ✅ Mémoriser le NUM (WorkOrder) pour l’UI: delivery_uid = NUM-ticketNo

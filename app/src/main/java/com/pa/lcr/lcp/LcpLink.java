@@ -187,6 +187,60 @@ public class LcpLink {
         ensureOk(r, "PRINT_TEXT");
     }
 
+    /**
+     * Diagnostic reset LCR-II — remet les compteurs net/gross à zéro.
+     * Séquence: Auxiliary (0x03) → Print last ticket (0x06) → poll net/gross == 0.
+     *
+     * Utilisé quand le registre affiche une valeur négative après retour d'air
+     * (ex: -0.1L) avant le démarrage d'une nouvelle livraison.
+     *
+     * @param maxWaitMs timeout poll (recommandé: 10000ms)
+     * @return int[] {netBefore, grossBefore} en unités brutes du registre
+     * @throws IOException si la communication BT échoue
+     */
+    public int[] opDiagnosticReset(int maxWaitMs) throws IOException {
+        // Lire net/gross avant reset (fields #45 net, #44 gross)
+        byte[] netRaw   = opGetField(45);
+        byte[] grossRaw = opGetField(44);
+        int netBefore   = toInt32(netRaw);
+        int grossBefore = toInt32(grossRaw);
+
+        android.util.Log.i("LcpLink",
+            "opDiagnosticReset: avant net=" + netBefore + " gross=" + grossBefore);
+
+        // Séquence reset: Auxiliary → Print last ticket
+        opIssueCommand(0x03); // CMD_AUXILIARY
+        try { Thread.sleep(300); } catch (Exception ignored) {}
+        opIssueCommand(0x06); // CMD_PRINT_LAST_TICKET
+
+        // Poll jusqu'à net >= 0 et gross >= 0
+        long deadline = System.currentTimeMillis() + maxWaitMs;
+        while (System.currentTimeMillis() < deadline) {
+            try { Thread.sleep(500); } catch (Exception ignored) {}
+            try {
+                byte[] n = opGetField(45);
+                byte[] g = opGetField(44);
+                int net   = toInt32(n);
+                int gross = toInt32(g);
+                android.util.Log.i("LcpLink",
+                    "opDiagnosticReset poll: net=" + net + " gross=" + gross);
+                if (net >= 0 && gross >= 0) {
+                    android.util.Log.i("LcpLink", "opDiagnosticReset: reset OK");
+                    break;
+                }
+            } catch (Exception ignored) {}
+        }
+
+        return new int[]{netBefore, grossBefore};
+    }
+
+    /** Convertit 4 bytes big-endian signé en int */
+    private static int toInt32(byte[] b) {
+        if (b == null || b.length < 4) return 0;
+        return ((b[0] & 0xFF) << 24) | ((b[1] & 0xFF) << 16)
+             | ((b[2] & 0xFF) << 8)  |  (b[3] & 0xFF);
+    }
+
     public byte[] opGetField(int field) throws IOException {
         Response r = sendRecv(buildPayload(MSG_GET_FIELD, new byte[]{(byte) field}), 5000);
         ensureOk(r, "GET_FIELD #" + field);
