@@ -184,9 +184,30 @@ public class DeepLinkHandler {
                         }
                         android.util.Log.i(TAG, "DC state avant lancerLivraison: " + dc.getState());
                         if (dc.getState() != com.pa.lcr.lcp.DeliveryState.CONNECTED) {
-                            android.util.Log.w(TAG, "DC non prêt après 15s — état: " + dc.getState());
+                            android.util.Log.w(TAG, "DC non prêt après 15s — état: " + dc.getState()
+                                + " — tentative auto-connect");
+                            // ✅ Tenter auto-connect (USB ou BT) avant d'abandonner
+                            MultiRegisterApiFacadeImpl facadeRetry = new MultiRegisterApiFacadeImpl(activity);
+                            com.pa.lcr.lcp.ApiResult ra2 = facadeRetry.api_registerConnectAuto(
+                                fSerialId.isEmpty() ? null : fSerialId, fNode);
+                            if (ra2 != null && ra2.code == 1) {
+                                com.pa.lcr.lcp.DeliveryController dc3 =
+                                    rsm.resolveOrCreateForNode(fNode, 255);
+                                if (dc3 != null) {
+                                    for (int w = 0; w < 75; w++) {
+                                        if (dc3.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
+                                        try { Thread.sleep(200); } catch (Exception ignored) {}
+                                    }
+                                    if (dc3.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) {
+                                        String foundKey3 = rsm.findTransportKeyForController(dc3);
+                                        lancerLivraison(foundKey3 != null ? foundKey3 : "", fNode,
+                                            fSerialId, woNum, woIdGuid, fProduit, fPresetStr, fBtMac);
+                                        return;
+                                    }
+                                }
+                            }
                             activity.runOnUiThread(() ->
-                                activity.toast("⚠️ Registre non joignable — vérifiez le Bluetooth"));
+                                activity.toast("⚠️ Registre non joignable — vérifiez la connexion USB ou BT"));
                             return;
                         }
                         String foundKey = rsm.findTransportKeyForController(dc);
@@ -217,7 +238,7 @@ public class DeepLinkHandler {
                                 if (dc2.getState() != com.pa.lcr.lcp.DeliveryState.CONNECTED) {
                                     android.util.Log.w(TAG, "DC2 non prêt après 15s — état: " + dc2.getState());
                                     activity.runOnUiThread(() ->
-                                        activity.toast("⚠️ Registre non joignable — vérifiez le Bluetooth"));
+                                        activity.toast("⚠️ Registre non joignable — vérifiez la connexion USB ou BT"));
                                     return;
                                 }
                             }
