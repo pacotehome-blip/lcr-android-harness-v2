@@ -750,6 +750,16 @@ private void reproEvent(String level, String type, String message, JSONObject da
             emitLog("LCP pret (sans refresh automatique)");
             if (listener != null) listener.onLiveStatus("LIVE: CONNECTED - (pret)");
 
+            // ✅ Sync date/heure tablette → registre à chaque connexion
+            try {
+                if (link instanceof com.pa.lcr.lcp.LcpLink) {
+                    ((com.pa.lcr.lcp.LcpLink) link).opSyncDateTime();
+                    emitLog("[DATETIME] Sync date/heure OK");
+                }
+            } catch (Exception e) {
+                emitLog("[DATETIME] Sync date/heure ERR: " + e.getMessage());
+            }
+
 // ✅ REPRO: APP_START best-effort (sans TX/RX)
 try {
     JSONObject d = new JSONObject();
@@ -2326,19 +2336,10 @@ public ApiResult api_registerValidate(
         // =====================================================================
 
         // ✅ Vérifier net/gross avant démarrage — diagnostic reset si négatif
-        try {
-            ApiResult resetResult = api_diagnosticReset();
-            if (resetResult != null && resetResult.data != null) {
-                boolean didReset = resetResult.data.optBoolean("reset_done", false);
-                if (didReset) {
-                    emitLog("[DIAGNOSTIC] Reset effectué avant oneshot — net_avant="
-                        + resetResult.data.optDouble("net_before_l", 0)
-                        + " gross_avant=" + resetResult.data.optDouble("gross_before_l", 0));
-                }
-            }
-        } catch (Exception e) {
-            emitLog("[DIAGNOSTIC] Reset ERR: " + e.getMessage());
-        }
+        // NOTE: api_diagnosticReset() est disponible comme commande standalone
+        // depuis l'entretien ou l'UI admin. Ne pas l'appeler automatiquement ici
+        // pour éviter de saturer le transport si le média n'est pas encore stabilisé.
+        // TODO: réactiver quand le flux média est déterminé AVANT cet appel.
         
  // ✅ Mémoriser le NUM (WorkOrder) pour l’UI: delivery_uid = NUM-ticketNo
  if (numero_livraison != null && !numero_livraison.trim().isEmpty()) {

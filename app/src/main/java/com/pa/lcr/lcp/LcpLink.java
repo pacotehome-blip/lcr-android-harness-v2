@@ -241,7 +241,54 @@ public class LcpLink {
              | ((b[2] & 0xFF) << 8)  |  (b[3] & 0xFF);
     }
 
-    public byte[] opGetField(int field) throws IOException {
+    /**
+     * Synchronise date (Field #20) et heure (Field #21) du registre LCR-II
+     * avec l'heure système de la tablette.
+     * Format date : MM/DD/YY (selon Field #19 = 0, valeur par défaut)
+     * Format heure : HH:MM:SS
+     * Appelé après probeAndIdentify() à chaque connexion BT ou USB.
+     */
+    public void opSyncDateTime() throws IOException {
+        // Lire Field #19 pour déterminer le format date (0=MM/DD/YY, 1=DD/MM/YY)
+        byte[] fmt19 = null;
+        try { fmt19 = opGetField(19, 800); } catch (Exception ignored) {}
+        int dateFormatIdx = (fmt19 != null && fmt19.length > 0) ? (fmt19[0] & 0xFF) : 0;
+
+        java.time.LocalDateTime now = java.time.LocalDateTime.now();
+        String dateStr, timeStr;
+        if (dateFormatIdx == 1) {
+            // DD/MM/YY
+            dateStr = String.format(java.util.Locale.ROOT, "%02d/%02d/%02d",
+                now.getDayOfMonth(), now.getMonthValue(), now.getYear() % 100);
+        } else {
+            // MM/DD/YY (défaut)
+            dateStr = String.format(java.util.Locale.ROOT, "%02d/%02d/%02d",
+                now.getMonthValue(), now.getDayOfMonth(), now.getYear() % 100);
+        }
+        timeStr = String.format(java.util.Locale.ROOT, "%02d:%02d:%02d",
+            now.getHour(), now.getMinute(), now.getSecond());
+
+        // Encoder en ASCIIZ (null-terminated)
+        byte[] dateBytes = toAsciiz(dateStr);
+        byte[] timeBytes = toAsciiz(timeStr);
+
+        opSetField(20, dateBytes);
+        opSetField(21, timeBytes);
+
+        android.util.Log.i("LcpLink",
+            "opSyncDateTime: date=" + dateStr + " heure=" + timeStr
+            + " format=" + (dateFormatIdx == 1 ? "DD/MM/YY" : "MM/DD/YY"));
+    }
+
+    private static byte[] toAsciiz(String s) {
+        byte[] ascii = s.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        byte[] result = new byte[ascii.length + 1]; // +1 pour null terminator
+        System.arraycopy(ascii, 0, result, 0, ascii.length);
+        result[ascii.length] = 0x00;
+        return result;
+    }
+
+
         Response r = sendRecv(buildPayload(MSG_GET_FIELD, new byte[]{(byte) field}), 5000);
         ensureOk(r, "GET_FIELD #" + field);
         byte[] out = new byte[r.payload.length - 2];
