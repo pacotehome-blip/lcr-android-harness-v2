@@ -936,37 +936,61 @@ public class RegisterTabFragment extends Fragment {
                 String woIdGuid   = "";
                 String payloadJson = "{}";
 
+                // ✅ Source primaire — lastResultJson (statique, persiste après finish())
                 try {
-                    if (txtTicketNo != null)
-                        ticketNo = txtTicketNo.getText().toString()
-                            .replace("Ticket Number : ", "").trim();
-                    if (txtQtyNet != null)
-                        netL = Double.parseDouble(
-                            txtQtyNet.getText().toString().replace("NET: ", "").trim());
-                    if (txtQtyGross != null)
-                        grossL = Double.parseDouble(
-                            txtQtyGross.getText().toString().replace("GROSS: ", "").trim());
-                    if (txtDeliveryUid != null)
-                        woNum = txtDeliveryUid.getText().toString()
-                            .replace("Delivery UID : ", "").trim();
+                    String lastJson = com.pa.lcrdemo.DeepLinkHandler.lastResultJson;
+                    if (lastJson != null && !lastJson.isEmpty()) {
+                        org.json.JSONObject last = new org.json.JSONObject(lastJson);
+                        org.json.JSONObject payload = last.optJSONObject("payload");
+                        if (payload != null) {
+                            org.json.JSONObject result = payload.optJSONObject("result");
+                            if (result != null) {
+                                ticketNo = result.optString("ticket_no", "");
+                                saleNo   = result.optString("sale_no",   "");
+                                netL     = result.optDouble("fs_net_l",  0);
+                                grossL   = result.optDouble("fs_gross_l",0);
+                            }
+                            // Fallback tick si result vide
+                            if (netL == 0) {
+                                org.json.JSONObject tick = payload.optJSONObject("tick");
+                                if (tick != null) {
+                                    netL   = tick.optDouble("net",   0);
+                                    grossL = tick.optDouble("gross", 0);
+                                }
+                            }
+                        }
+                        woNum    = last.optString("wonum", "");
+                        woIdGuid = last.optString("woid",  "");
+                    }
                 } catch (Exception ignored) {}
 
-                // Récupérer snapshot complet du controller
+                // Fallback TextViews si lastResultJson vide
+                try {
+                    if (ticketNo.isEmpty() && txtTicketNo != null)
+                        ticketNo = txtTicketNo.getText().toString()
+                            .replace("Ticket Number : ", "").trim();
+                    if (netL == 0.0 && txtQtyNet != null)
+                        netL = Double.parseDouble(
+                            txtQtyNet.getText().toString().replace("NET: ", "").trim());
+                    if (grossL == 0.0 && txtQtyGross != null)
+                        grossL = Double.parseDouble(
+                            txtQtyGross.getText().toString().replace("GROSS: ", "").trim());
+                } catch (Exception ignored) {}
+
+                // Récupérer snapshot complet du controller si encore dispo
                 org.json.JSONObject snap = new org.json.JSONObject();
                 try {
                     if (controller != null) {
                         ApiResult sr = controller.api_tickSnapshot();
                         if (sr != null && sr.data != null) {
                             snap = sr.data;
-                            // Extraire saleNo depuis snap
-                            saleNo = snap.optString("sale_no", "");
-                            // Extraire woIdGuid depuis result si disponible
+                            if (saleNo.isEmpty()) saleNo = snap.optString("sale_no", "");
                             org.json.JSONObject result = snap.optJSONObject("result");
                             if (result != null) {
-                                if (netL == 0.0)   netL   = result.optDouble("fs_net_l",   netL);
-                                if (grossL == 0.0) grossL = result.optDouble("fs_gross_l", grossL);
+                                if (netL == 0.0)      netL      = result.optDouble("fs_net_l",   netL);
+                                if (grossL == 0.0)    grossL    = result.optDouble("fs_gross_l", grossL);
                                 if (ticketNo.isEmpty()) ticketNo = result.optString("ticket_no", "");
-                                if (saleNo.isEmpty())   saleNo   = result.optString("sale_no", "");
+                                if (saleNo.isEmpty())   saleNo   = result.optString("sale_no",   "");
                             }
                         }
                     }
