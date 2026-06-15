@@ -107,7 +107,18 @@ public class LcrDeliverySync {
         String bodyStr  = body.toString();
         byte[] bodyBytes = bodyStr.getBytes(StandardCharsets.UTF_8);
 
+        // Si dataverse_id connu → PATCH direct
         boolean isUpdate = row.dataverseId != null && !row.dataverseId.isEmpty();
+
+        // Sinon → chercher par wo_num dans Dataverse
+        if (!isUpdate && row.woNum != null && !row.woNum.isEmpty()) {
+            String existingId = findDataverseIdByWoNum(row.woNum, orgUrl, accessToken);
+            if (existingId != null) {
+                isUpdate = true;
+                row.dataverseId = existingId;
+            }
+        }
+
         String urlStr = orgUrl + "/api/data/v9.2/" + TABLE_DELIVERY +
             (isUpdate ? "(" + row.dataverseId + ")" : "");
 
@@ -222,6 +233,19 @@ public class LcrDeliverySync {
         putStr(j, "lcr_sync_status",       LcrDeliveryStatusDb.SYNC_SYNCED);
         putStr(j, "lcr_payload_json",      row.payloadJson);
 
+        // Historique
+        putDbl(j, "lcr_previous_net_l",    row.previousNetL);
+        putDbl(j, "lcr_previous_gross_l",  row.previousGrossL);
+        putStr(j, "lcr_previous_ticket_no", row.previousTicketNo);
+        putDbl(j, "lcr_total_net_l",       row.totalNetL);
+        putDbl(j, "lcr_total_gross_l",     row.totalGrossL);
+        putInt(j, "lcr_delivery_count",    row.deliveryCount);
+        putDbl(j, "lcr_preset_overage_l",  row.presetOverageL);
+
+        // Erreurs
+        putStr(j, "lcr_error_code",        row.errorCode);
+        putStr(j, "lcr_error_msg",         row.errorMsg);
+
         return j;
     }
 
@@ -286,6 +310,45 @@ public class LcrDeliverySync {
         } finally {
             conn.disconnect();
         }
+    }
+
+    // =========================================================
+    // Helper — chercher un enregistrement Dataverse par wo_num
+    // =========================================================
+    private static String findDataverseIdByWoNum(String woNum, String orgUrl,
+                                                   String accessToken) {
+        try {
+            String urlStr = orgUrl + "/api/data/v9.2/" + TABLE_DELIVERY
+                + "?$select=lcr_lcr_delivery_statusid"
+                + "&$filter=lcr_wo_num eq '" + woNum + "'"
+                + "&$top=1";
+            URL url = new URL(urlStr);
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            try {
+                conn.setRequestMethod("GET");
+                conn.setConnectTimeout(8000);
+                conn.setReadTimeout(8000);
+                conn.setRequestProperty("Authorization",    "Bearer " + accessToken);
+                conn.setRequestProperty("Accept",           "application/json");
+                conn.setRequestProperty("OData-MaxVersion", "4.0");
+                conn.setRequestProperty("OData-Version",    "4.0");
+
+                if (conn.getResponseCode() == 200) {
+                    byte[] resp = readStream(conn.getInputStream());
+                    JSONObject json = new JSONObject(new String(resp, StandardCharsets.UTF_8));
+                    JSONArray values = json.optJSONArray("value");
+                    if (values != null && values.length() > 0) {
+                        return values.getJSONObject(0)
+                            .optString("lcr_lcr_delivery_statusid", null);
+                    }
+                }
+            } finally {
+                conn.disconnect();
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "findDataverseIdByWoNum ERR: " + e.getMessage());
+        }
+        return null;
     }
 
     // =========================================================

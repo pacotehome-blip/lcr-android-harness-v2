@@ -21,7 +21,7 @@ import java.util.List;
 public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
 
     public static final String DB_NAME    = "lcr_delivery_status.db";
-    public static final int    DB_VERSION = 1;
+    public static final int    DB_VERSION = 2;
 
     private static final String TAG = "LcrDeliveryStatusDb";
 
@@ -95,6 +95,19 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     public static final String COL_TS_CREATED_MS       = "ts_created_ms";
     public static final String COL_TS_UPDATED_MS       = "ts_updated_ms";
 
+    // Historique livraisons précédentes
+    public static final String COL_PREVIOUS_NET_L      = "previous_net_l";
+    public static final String COL_PREVIOUS_GROSS_L    = "previous_gross_l";
+    public static final String COL_PREVIOUS_TICKET_NO  = "previous_ticket_no";
+    public static final String COL_TOTAL_NET_L         = "total_net_l";
+    public static final String COL_TOTAL_GROSS_L       = "total_gross_l";
+    public static final String COL_DELIVERY_COUNT      = "delivery_count";
+    public static final String COL_PRESET_OVERAGE_L    = "preset_overage_l";
+
+    // Erreurs
+    public static final String COL_ERROR_CODE          = "error_code";
+    public static final String COL_ERROR_MSG           = "error_msg";
+
     // Valeurs sync_status
     public static final String SYNC_PENDING = "PENDING";
     public static final String SYNC_SYNCED  = "SYNCED";
@@ -154,7 +167,18 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
 
     @Override
     public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
-        // v1: tables initiales — rien à migrer
+        // v2: champs historique + erreurs
+        if (oldVersion < 2) {
+            addColumnIfMissing(db, TABLE_DELIVERY, COL_PREVIOUS_NET_L,     "REAL DEFAULT 0");
+            addColumnIfMissing(db, TABLE_DELIVERY, COL_PREVIOUS_GROSS_L,   "REAL DEFAULT 0");
+            addColumnIfMissing(db, TABLE_DELIVERY, COL_PREVIOUS_TICKET_NO, "TEXT");
+            addColumnIfMissing(db, TABLE_DELIVERY, COL_TOTAL_NET_L,        "REAL DEFAULT 0");
+            addColumnIfMissing(db, TABLE_DELIVERY, COL_TOTAL_GROSS_L,      "REAL DEFAULT 0");
+            addColumnIfMissing(db, TABLE_DELIVERY, COL_DELIVERY_COUNT,     "INTEGER DEFAULT 1");
+            addColumnIfMissing(db, TABLE_DELIVERY, COL_PRESET_OVERAGE_L,   "REAL DEFAULT 0");
+            addColumnIfMissing(db, TABLE_DELIVERY, COL_ERROR_CODE,         "TEXT");
+            addColumnIfMissing(db, TABLE_DELIVERY, COL_ERROR_MSG,          "TEXT");
+        }
     }
 
     // =========================================================
@@ -222,7 +246,20 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
             COL_SYNC_STATUS        + " TEXT NOT NULL DEFAULT 'PENDING'," +
             COL_PAYLOAD_JSON       + " TEXT," +
             COL_TS_CREATED_MS      + " INTEGER NOT NULL," +
-            COL_TS_UPDATED_MS      + " INTEGER NOT NULL" +
+            COL_TS_UPDATED_MS      + " INTEGER NOT NULL," +
+
+            // Historique
+            COL_PREVIOUS_NET_L     + " REAL DEFAULT 0," +
+            COL_PREVIOUS_GROSS_L   + " REAL DEFAULT 0," +
+            COL_PREVIOUS_TICKET_NO + " TEXT," +
+            COL_TOTAL_NET_L        + " REAL DEFAULT 0," +
+            COL_TOTAL_GROSS_L      + " REAL DEFAULT 0," +
+            COL_DELIVERY_COUNT     + " INTEGER DEFAULT 1," +
+            COL_PRESET_OVERAGE_L   + " REAL DEFAULT 0," +
+
+            // Erreurs
+            COL_ERROR_CODE         + " TEXT," +
+            COL_ERROR_MSG          + " TEXT" +
             ");"
         );
 
@@ -261,16 +298,67 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     // =========================================================
 
     /**
-     * Insère une nouvelle transaction de livraison.
-     * Retourne l'ID local généré.
+     * Insère ou met à jour une transaction de livraison pour un WO.
+     * Si une ligne existe déjà pour ce wo_num → UPSERT (mise à jour).
+     * Retourne l'ID local.
      */
     public long insertDelivery(ContentValues cv) {
         long now = System.currentTimeMillis();
-        cv.put(COL_TS_CREATED_MS, now);
         cv.put(COL_TS_UPDATED_MS, now);
         if (!cv.containsKey(COL_SYNC_STATUS)) {
             cv.put(COL_SYNC_STATUS, SYNC_PENDING);
         }
+
+        // Vérifier si une ligne existe déjà pour ce wo_num
+        String woNum = cv.getAsString(COL_WO_NUM);
+        if (woNum != null && !woNum.isEmpty()) {
+            DeliveryRow existing = getLatestForWo(woNum);
+            if (existing != null) {
+                // Calculer les champs historique
+                double prevNet   = existing.netL;
+                double prevGross = existing.grossL;
+                String prevTicket = existing.ticketNo;
+                double newNet    = cv.getAsDouble(COL_NET_L)   != null ? cv.getAsDouble(COL_NET_L)   : 0;
+                double newGross  = cv.getAsDouble(COL_GROSS_L) != null ? cv.getAsDouble(COL_GROSS_L) : 0;
+                int    count     = existing.deliveryCount + 1;
+                double totalNet  = existing.totalNetL + newNet;
+                double totalGross= existing.totalGrossL + newGross;
+                double presetL   = cv.getAsDouble(COL_PRESET_L) != null ? cv.getAsDouble(COL_PRESET_L) : existing.presetL;
+                double overage   = totalNet > presetL ? totalNet - presetL : 0;
+
+                cv.put(COL_PREVIOUS_NET_L,      prevNet);
+                cv.put(COL_PREVIOUS_GROSS_L,    prevGross);
+                cv.put(COL_PREVIOUS_TICKET_NO,  prevTicket);
+                cv.put(COL_TOTAL_NET_L,         totalNet);
+                cv.put(COL_TOTAL_GROSS_L,       totalGross);
+                cv.put(COL_DELIVERY_COUNT,      count);
+                cv.put(COL_PRESET_OVERAGE_L,    overage);
+
+                // UPSERT — mettre à jour la ligne existante
+                cv.put(COL_SYNC_STATUS, SYNC_PENDING);
+                try {
+                    getWritableDatabase().update(TABLE_DELIVERY, cv,
+                        COL_ID + "=?", new String[]{String.valueOf(existing.id)});
+                    Log.i(TAG, "insertDelivery UPSERT id=" + existing.id + " wo=" + woNum
+                        + " count=" + count + " totalNet=" + totalNet);
+                    return existing.id;
+                } catch (Exception e) {
+                    Log.e(TAG, "insertDelivery UPSERT ERR: " + e.getMessage());
+                }
+            } else {
+                // Première livraison — total = net courant
+                double newNet   = cv.getAsDouble(COL_NET_L)   != null ? cv.getAsDouble(COL_NET_L)   : 0;
+                double newGross = cv.getAsDouble(COL_GROSS_L) != null ? cv.getAsDouble(COL_GROSS_L) : 0;
+                double presetL  = cv.getAsDouble(COL_PRESET_L) != null ? cv.getAsDouble(COL_PRESET_L) : 0;
+                cv.put(COL_TOTAL_NET_L,      newNet);
+                cv.put(COL_TOTAL_GROSS_L,    newGross);
+                cv.put(COL_DELIVERY_COUNT,   1);
+                cv.put(COL_PRESET_OVERAGE_L, newNet > presetL ? newNet - presetL : 0);
+            }
+        }
+
+        // Nouvelle ligne
+        cv.put(COL_TS_CREATED_MS, now);
         try {
             return getWritableDatabase().insertOrThrow(TABLE_DELIVERY, null, cv);
         } catch (Exception e) {
@@ -506,6 +594,19 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
         public long   tsCreatedMs;
         public long   tsUpdatedMs;
 
+        // Historique
+        public double previousNetL;
+        public double previousGrossL;
+        public String previousTicketNo;
+        public double totalNetL;
+        public double totalGrossL;
+        public int    deliveryCount;
+        public double presetOverageL;
+
+        // Erreurs
+        public String errorCode;
+        public String errorMsg;
+
         public static DeliveryRow fromCursor(Cursor c) {
             DeliveryRow r = new DeliveryRow();
             r.id                 = getLong(c, COL_ID);
@@ -556,6 +657,15 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
             r.payloadJson        = getString(c, COL_PAYLOAD_JSON);
             r.tsCreatedMs        = getLong(c, COL_TS_CREATED_MS);
             r.tsUpdatedMs        = getLong(c, COL_TS_UPDATED_MS);
+            r.previousNetL       = getDouble(c, COL_PREVIOUS_NET_L);
+            r.previousGrossL     = getDouble(c, COL_PREVIOUS_GROSS_L);
+            r.previousTicketNo   = getString(c, COL_PREVIOUS_TICKET_NO);
+            r.totalNetL          = getDouble(c, COL_TOTAL_NET_L);
+            r.totalGrossL        = getDouble(c, COL_TOTAL_GROSS_L);
+            r.deliveryCount      = getInt(c, COL_DELIVERY_COUNT);
+            r.presetOverageL     = getDouble(c, COL_PRESET_OVERAGE_L);
+            r.errorCode          = getString(c, COL_ERROR_CODE);
+            r.errorMsg           = getString(c, COL_ERROR_MSG);
             return r;
         }
 
