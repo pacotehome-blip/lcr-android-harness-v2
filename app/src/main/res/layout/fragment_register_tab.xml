@@ -266,6 +266,19 @@
                         android:text="Terminer" />
                 </LinearLayout>
 
+                <!-- ✅ Retour au Bon de travail — visible après livraison terminée -->
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnRetourWO"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="✅ Retour au Bon de travail"
+                    android:visibility="gone"
+                    android:backgroundTint="#1976D2"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp"
+                    android:padding="12dp" />
+
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
@@ -363,18 +376,15 @@
                     android:text="Reprint (last ticket)"
                     android:layout_marginTop="8dp" />
 
-                <!-- ✅ NOUVEAU: Retour au Work Order (Bloc 5) -->
+                <!-- ✅ NOUVEAU: Impression custom ligne par ligne -->
                 <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnRetourWO"
+                    android:id="@+id/btnCustomPrint"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
-                    android:text="✅ Retour au Bon de travail"
-                    android:visibility="gone"
-                    android:backgroundTint="#1976D2"
-                    android:textColor="#FFFFFF"
-                    android:textSize="16sp"
-                    android:padding="12dp" />
+                    android:text="🖨️ Impression custom"
+                    android:visibility="gone" />
 
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
