@@ -418,12 +418,14 @@ public class DeepLinkHandler {
                     android.util.Log.w(TAG, "oneshot/start: ticket pending — rester dans APK");
                     activity.runOnUiThread(() ->
                         activity.toast("⚠️ Ticket en attente — imprimez le ticket précédent avant de démarrer"));
-                    // Afficher l'onglet registre pour que le chauffeur gère via bouton A
                     activity.runOnUiThread(() -> activity.showPage(0));
                 } else {
-                    // Vraie erreur orchestration — retour FSM
-                    retournerFieldService(woNum, woIdGuid, "erreur_oneshot",
-                        buildErrorJson("ONESHOT_FAILED", r.msg));
+                    // Erreur orchestration — rester dans l'APK (pas de finish() pour éviter bounce FSM)
+                    android.util.Log.w(TAG, "oneshot/start: orchestration error — rester dans APK");
+                    activity.runOnUiThread(() -> {
+                        activity.toast("⚠️ Registre non disponible — vérifiez l'état du registre et réessayez");
+                        activity.showPage(0);
+                    });
                 }
             }
         } catch (Exception e) {
@@ -679,8 +681,11 @@ public class DeepLinkHandler {
                             logEvent(fSerialId, woNum, DeliveryLogStore.LEVEL_WARN,
                                 "ONESHOT_ERROR", r.msg,
                                 r.data != null ? r.data.toString() : null);
-                            retournerFieldService(woNum, woIdGuid, "erreur_oneshot",
-                                buildErrorJson("ONESHOT_FAILED", r.msg));
+                            // Rester dans l'APK — pas de finish() pour éviter bounce FSM
+                            activity.runOnUiThread(() -> {
+                                activity.toast("⚠️ Registre non disponible — vérifiez l'état du registre et réessayez");
+                                activity.showPage(0);
+                            });
                         }
 
                     } catch (Exception e) {
