@@ -1075,13 +1075,10 @@ public class RegisterTabFragment extends Fragment {
                     }
                 } catch (Exception ignored) {}
 
-                // Fallback txtDeliveryUid seulement si woNum encore vide
+                // ⚠️ Ne pas utiliser txtDeliveryUid comme fallback — contient delivery_uid pas wo_num
+                // woNum doit venir de lastResultJson ou ActiveDeliveryStore uniquement
                 if (woNum.isEmpty()) {
-                    try {
-                        if (txtDeliveryUid != null)
-                            woNum = txtDeliveryUid.getText().toString()
-                                .replace("Delivery UID : ", "").trim();
-                    } catch (Exception ignored) {}
+                    android.util.Log.w("RetourWO", "woNum vide — lastResultJson et ActiveDeliveryStore épuisés");
                 }
 
                 snap.put("ticketNo", ticketNo);

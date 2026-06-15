@@ -1001,9 +1001,10 @@ public class DeepLinkHandler {
             }
         });
 
-        // ✅ Retour automatique FSM supprimé — le chauffeur utilise le bouton "Retour au Bon de travail"
-        // retournerFieldService(woNum, woIdGuid, "termine", extraJson);
+        // ✅ Mettre à jour FSM (patchDataverse + lastResult) sans retourner dans FSM
+        // Le chauffeur utilise le bouton "Retour au Bon de travail"
         android.util.Log.i(TAG, "onDeliveryEnded: livraison enregistrée — en attente bouton Retour");
+        mettreAJourFieldService(woNum, woIdGuid, "termine", extraJson);
     }
 
     // =========================================================
@@ -1137,6 +1138,71 @@ public class DeepLinkHandler {
         } catch (Exception e) {
             android.util.Log.e(TAG, "Retour FS failed: " + e.getMessage());
             activity.moveTaskToBack(true);
+        }
+    }
+
+    /**
+     * Met à jour FSM (patchDataverse + lastResult) sans retourner dans FSM.
+     * Appelé depuis onDeliveryEnded() — le chauffeur reste dans l'APK.
+     */
+    private void mettreAJourFieldService(String woNum, String woIdGuid,
+                                          String status, String extraJson) {
+        try {
+            String net = "", gross = "", ticket = "";
+            try {
+                JSONObject d = new JSONObject(extraJson != null ? extraJson : "{}");
+                JSONObject result = d.optJSONObject("result");
+                if (result != null) {
+                    net    = String.valueOf(result.optDouble("fs_net_l",   0));
+                    gross  = String.valueOf(result.optDouble("fs_gross_l", 0));
+                    ticket = result.optString("ticket_no", "");
+                    boolean stale  = d.optBoolean("stale", false);
+                    double fsNet   = result.optDouble("fs_net_l",   0);
+                    double fsGross = result.optDouble("fs_gross_l", 0);
+                    if (stale || fsNet == 0 || fsGross == 0) {
+                        JSONObject tick = d.optJSONObject("tick");
+                        if (tick != null) {
+                            double tn = tick.optDouble("net",   0);
+                            double tg = tick.optDouble("gross", 0);
+                            if (tn > 0 && tg > 0) { net = String.valueOf(tn); gross = String.valueOf(tg); }
+                        }
+                    }
+                } else {
+                    net   = String.valueOf(d.optDouble("net",   0));
+                    gross = String.valueOf(d.optDouble("gross", 0));
+                }
+            } catch (Exception ignored) {}
+
+            String woGuid = (woIdGuid != null && !woIdGuid.isEmpty()) ? woIdGuid : "";
+            woGuid = woGuid.replace("{", "").replace("}", "");
+
+            // Sauvegarder lastResult
+            JSONObject lastResult = new JSONObject();
+            lastResult.put("wonum",  woNum  != null ? woNum  : "");
+            lastResult.put("woid",   woGuid);
+            lastResult.put("net",    net);
+            lastResult.put("gross",  gross);
+            lastResult.put("ticket", ticket);
+            lastResult.put("status", status != null ? status : "ok");
+            lastResult.put("ts",     System.currentTimeMillis());
+            if (extraJson != null) {
+                try { lastResult.put("payload", new JSONObject(extraJson)); } catch (Exception ignored) {}
+            }
+            lastResultJson   = lastResult.toString();
+            lastResultWoNum  = woNum;
+            lastResultWoGuid = woGuid;
+            lastResultTs     = System.currentTimeMillis();
+            com.pa.lcrdemo.LcrHttpService.lastResultJson = lastResult.toString();
+            android.util.Log.i(TAG, "last-result sauvegardé: wonum=" + woNum
+                + " net=" + net + " gross=" + gross + " ticket=" + ticket);
+
+            // Patch Dataverse (msdyn_workordersummary) sans finish()
+            final String fNet = net, fGross = gross, fTicket = ticket;
+            final String fGuid = woGuid, fWoNum = woNum, fStatus = status;
+            patchDataverse(fGuid, fWoNum, fNet, fGross, fTicket, fStatus);
+
+        } catch (Exception e) {
+            android.util.Log.e(TAG, "mettreAJourFieldService ERR: " + e.getMessage());
         }
     }
 
