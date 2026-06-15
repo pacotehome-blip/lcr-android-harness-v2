@@ -2276,7 +2276,7 @@ public ApiResult api_registerValidate(
         } catch (Exception e) {
             safeJsonPut(d, "error", e.getMessage());
             emitLog("[DIAGNOSTIC] ERR: " + e.getMessage());
-            return ApiResult.fail("Diagnostic reset ERR: " + e.getMessage(), d);
+            return ApiResult.fail("Diagnostic reset ERR: " + e.getMessage(), "DIAGNOSTIC_ERR", d);
         }
     }
 
