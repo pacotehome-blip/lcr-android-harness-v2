@@ -1125,6 +1125,14 @@ public class DeepLinkHandler {
             return;
         }
 
+        // ✅ Bloquer si net=0 et status=erreur — ne jamais écraser avec des données vides
+        double netVal = 0;
+        try { netVal = net != null ? Double.parseDouble(net) : 0; } catch (Exception ignored) {}
+        if (netVal == 0 && status != null && status.startsWith("erreur")) {
+            android.util.Log.w(TAG, "patchDataverse: net=0 + status=" + status + " — ignoré");
+            return;
+        }
+
         String deliveryUid = "";
         try {
             if (lastResultJson != null) {

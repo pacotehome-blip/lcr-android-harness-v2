@@ -972,7 +972,7 @@ public class RegisterTabFragment extends Fragment {
                     }
                 } catch (Exception ignored) {}
 
-                // Récupérer woIdGuid depuis ActiveDeliveryStore
+                // Récupérer woIdGuid + woNum depuis ActiveDeliveryStore en priorité
                 try {
                     com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
                         new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
@@ -980,10 +980,19 @@ public class RegisterTabFragment extends Fragment {
                     if (active != null) {
                         if (active.woIdGuid != null && !active.woIdGuid.isEmpty())
                             woIdGuid = active.woIdGuid;
-                        if (woNum.isEmpty() && active.woNum != null)
+                        if (active.woNum != null && !active.woNum.isEmpty())
                             woNum = active.woNum;
                     }
                 } catch (Exception ignored) {}
+
+                // Fallback txtDeliveryUid seulement si woNum encore vide
+                if (woNum.isEmpty()) {
+                    try {
+                        if (txtDeliveryUid != null)
+                            woNum = txtDeliveryUid.getText().toString()
+                                .replace("Delivery UID : ", "").trim();
+                    } catch (Exception ignored) {}
+                }
 
                 snap.put("ticketNo", ticketNo);
                 snap.put("saleNo",   saleNo);
