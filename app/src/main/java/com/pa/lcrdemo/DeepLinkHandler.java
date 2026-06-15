@@ -346,7 +346,7 @@ public class DeepLinkHandler {
 
         if (!ready) {
             android.util.Log.w(TAG, "lancerLivraison: média non prêt après 10s");
-            activity.runOnUiThread(() -> activity.toast("BT non prêt — réessayez"));
+            activity.runOnUiThread(() -> activity.toast("Média non prêt — réessayez"));
             logError(fSerialId, woNum, "MEDIA_NOT_READY", "Média non prêt après 10s");
             retournerFieldService(woNum, woIdGuid, "erreur_media",
                 buildErrorJson("MEDIA_NOT_READY", "Média non prêt après 10s"));
@@ -723,6 +723,17 @@ public class DeepLinkHandler {
             android.util.Log.w(TAG, "pollJobUntilDone: déjà actif pour jobId=" + jobId + " — ignoré");
             return;
         }
+
+        // ✅ Déterminer le transportKey correct — BT ou USB
+        // mac peut contenir un BT MAC ("00:01:95:87:72:A1") ou directement "USB"
+        final String transportKey;
+        if (mac != null && mac.toUpperCase().startsWith("USB")) {
+            transportKey = MediaTransportManager.KEY_USB; // USB
+        } else if (mac != null && mac.contains(":")) {
+            transportKey = MediaTransportManager.btKey(mac); // BT:XX:XX:XX
+        } else {
+            transportKey = mac != null ? mac : "";
+        }
         // ✅ Persister la livraison courante avec status STARTED
         try {
             ActiveDeliveryStore ads = new ActiveDeliveryStore(activity);
@@ -740,6 +751,21 @@ public class DeepLinkHandler {
                 boolean hasSeenFlowing = false;
                 boolean terminateSent  = false;
                 String  lastState      = "";
+                String  ticketNoAtStart = ""; // ✅ Ticket au démarrage — pour détecter changement
+
+                // ✅ Lire ticket# au démarrage pour détecter changement ultérieur
+                try {
+                    MultiRegisterApiFacadeImpl facadeT =
+                        new MultiRegisterApiFacadeImpl(activity);
+                    com.pa.lcr.lcp.ApiResult tickSnap = facadeT.api_deliveryJobGet(jobId);
+                    if (tickSnap != null && tickSnap.data != null)
+                        ticketNoAtStart = tickSnap.data.optString("ticket_no", "");
+                } catch (Exception ignored) {}
+
+                // ✅ Délai avant premier continue — USB est plus lent que BT
+                if (transportKey.toUpperCase().startsWith("USB")) {
+                    try { Thread.sleep(800); } catch (Exception ignored) {}
+                }
 
                 try {
                     // ✅ Vérifier l'état avant d'envoyer continue
@@ -774,10 +800,9 @@ public class DeepLinkHandler {
                         if (tp) {
                             android.util.Log.i(TAG, "Reprise: ticket pending — status B + attente opérateur");
                             try {
-                                String tKey = MediaTransportManager.btKey(mac);
                                 com.pa.lcr.lcp.DeliveryController dc =
                                     com.pa.lcr.lcp.RegisterSessionManager.get(activity)
-                                        .getController(tKey, node);
+                                        .getController(transportKey, node);
                                 if (dc != null) {
                                     dc.requestStatus();
                                     Thread.sleep(200);
@@ -788,31 +813,176 @@ public class DeepLinkHandler {
                             // Sortir du poll — l'opérateur gère via bouton A
                             return;
                         } else {
-                            // CONNECTED sans ticket pending — envoyer continue normalement
+                            // CONNECTED sans ticket pending — envoyer continue avec retry
+                            boolean continueOk = false;
+                            for (int retry = 0; retry < 5; retry++) {
+                                if (retry > 0) {
+                                    try { Thread.sleep(600 + retry * 400L); } catch (Exception ignored) {}
+                                }
+                                MultiRegisterApiFacadeImpl facadeCont =
+                                    new MultiRegisterApiFacadeImpl(activity);
+                                com.pa.lcr.lcp.ApiResult rc =
+                                    facadeCont.api_deliveryContinue(jobId, node);
+                                android.util.Log.i(TAG,
+                                    "job/continue [" + (retry+1) + "/5]: code="
+                                    + (rc != null ? rc.code : "null")
+                                    + " msg=" + (rc != null ? rc.msg : "null"));
+                                logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
+                                    "JOB_CONTINUE",
+                                    "retry=" + retry + " code=" + (rc != null ? rc.code : "null") +
+                                    " msg=" + (rc != null ? rc.msg : "null"), null);
+                                if (rc != null && rc.code == 1) {
+                                    continueOk = true;
+                                    break;
+                                }
+                            }
+                            if (!continueOk) {
+                                android.util.Log.w(TAG, "job/continue: échec après 5 tentatives — chauffeur prend charge");
+
+                                // ✅ Détecter changement de ticket (impression entre-temps)
+                                String ticketNow = "";
+                                try {
+                                    MultiRegisterApiFacadeImpl facadeT2 =
+                                        new MultiRegisterApiFacadeImpl(activity);
+                                    com.pa.lcr.lcp.ApiResult snap2 = facadeT2.api_deliveryJobGet(jobId);
+                                    if (snap2 != null && snap2.data != null)
+                                        ticketNow = snap2.data.optString("ticket_no", "");
+                                } catch (Exception ignored) {}
+
+                                final boolean ticketChanged = !ticketNoAtStart.isEmpty()
+                                    && !ticketNow.isEmpty()
+                                    && !ticketNoAtStart.equals(ticketNow);
+                                final String fTicketNow = ticketNow;
+
+                                // ✅ Logger événement dans LcrDeliveryStatusDb + Dataverse
+                                final String fWoNum2 = woNum;
+                                final String fWoId2  = woIdGuid;
+                                activity.runOnUiThread(() -> {
+                                    activity.toast(ticketChanged
+                                        ? "⚠️ Connexion perdue — ticket changé (" + ticketNoAtStart
+                                            + "→" + fTicketNow + "). Reconnectez et relancez manuellement."
+                                        : "⚠️ Registre non joignable — reconnectez via Configure et relancez manuellement.");
+                                    activity.showPage(0);
+                                });
+
+                                // Logger dans SQLite + Dataverse
+                                btExec.execute(() -> {
+                                    try {
+                                        android.content.ContentValues cv =
+                                            new android.content.ContentValues();
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,    fWoNum2);
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID, fWoId2);
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO, fTicketNow);
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
+                                            ticketChanged ? "TICKET_CHANGE" : "ERROR");
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_ERROR_CODE,
+                                            "CONTINUE_FAILED");
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_ERROR_MSG,
+                                            ticketChanged
+                                                ? "Ticket changé pendant perte connexion: "
+                                                    + ticketNoAtStart + "→" + fTicketNow
+                                                : "job/continue échec après 5 tentatives");
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,    "SYSTEM");
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE, "LIVRAISON");
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
+                                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
+                                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity)
+                                            .insertDelivery(cv);
+                                    } catch (Exception ignored) {}
+                                });
+
+                                // ✅ Arrêter le poll — chauffeur prend charge
+                                // ActiveDeliveryStore conserve woNum/woIdGuid/jobId pour reprise
+                                logEvent(serialId, woNum, DeliveryLogStore.LEVEL_WARN,
+                                    ticketChanged ? "TICKET_CHANGE" : "CONTINUE_FAILED",
+                                    ticketChanged
+                                        ? "Ticket " + ticketNoAtStart + "→" + fTicketNow
+                                        : "job/continue échec après 5 tentatives", null);
+                                return; // Sortir du poll
+                            }
+                        }
+                    } else {
+                        boolean continueOk2 = false;
+                        for (int retry = 0; retry < 5; retry++) {
+                            if (retry > 0) {
+                                try { Thread.sleep(600 + retry * 400L); } catch (Exception ignored) {}
+                            }
                             MultiRegisterApiFacadeImpl facadeCont =
                                 new MultiRegisterApiFacadeImpl(activity);
                             com.pa.lcr.lcp.ApiResult rc =
                                 facadeCont.api_deliveryContinue(jobId, node);
                             android.util.Log.i(TAG,
-                                "job/continue: code=" + (rc != null ? rc.code : "null")
+                                "job/continue [" + (retry+1) + "/5]: code="
+                                + (rc != null ? rc.code : "null")
                                 + " msg=" + (rc != null ? rc.msg : "null"));
                             logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
                                 "JOB_CONTINUE",
-                                "code=" + (rc != null ? rc.code : "null") +
+                                "retry=" + retry + " code=" + (rc != null ? rc.code : "null") +
                                 " msg=" + (rc != null ? rc.msg : "null"), null);
+                            if (rc != null && rc.code == 1) {
+                                continueOk2 = true;
+                                break;
+                            }
                         }
-                    } else {
-                        MultiRegisterApiFacadeImpl facadeCont =
-                            new MultiRegisterApiFacadeImpl(activity);
-                        com.pa.lcr.lcp.ApiResult rc =
-                            facadeCont.api_deliveryContinue(jobId, node);
-                        android.util.Log.i(TAG,
-                            "job/continue: code=" + (rc != null ? rc.code : "null")
-                            + " msg=" + (rc != null ? rc.msg : "null"));
-                        logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
-                            "JOB_CONTINUE",
-                            "code=" + (rc != null ? rc.code : "null") +
-                            " msg=" + (rc != null ? rc.msg : "null"), null);
+                        if (!continueOk2) {
+                            android.util.Log.w(TAG, "job/continue: échec après 5 tentatives — chauffeur prend charge");
+
+                            // ✅ Détecter changement de ticket
+                            String ticketNow2 = "";
+                            try {
+                                MultiRegisterApiFacadeImpl facadeT3 =
+                                    new MultiRegisterApiFacadeImpl(activity);
+                                com.pa.lcr.lcp.ApiResult snap3 = facadeT3.api_deliveryJobGet(jobId);
+                                if (snap3 != null && snap3.data != null)
+                                    ticketNow2 = snap3.data.optString("ticket_no", "");
+                            } catch (Exception ignored) {}
+
+                            final boolean ticketChanged2 = !ticketNoAtStart.isEmpty()
+                                && !ticketNow2.isEmpty()
+                                && !ticketNoAtStart.equals(ticketNow2);
+                            final String fTicketNow2 = ticketNow2;
+                            final String fWoNum3 = woNum;
+                            final String fWoId3  = woIdGuid;
+
+                            activity.runOnUiThread(() -> {
+                                activity.toast(ticketChanged2
+                                    ? "⚠️ Connexion perdue — ticket changé (" + ticketNoAtStart
+                                        + "→" + fTicketNow2 + "). Reconnectez et relancez manuellement."
+                                    : "⚠️ Registre non joignable — reconnectez via Configure et relancez manuellement.");
+                                activity.showPage(0);
+                            });
+
+                            btExec.execute(() -> {
+                                try {
+                                    android.content.ContentValues cv =
+                                        new android.content.ContentValues();
+                                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,    fWoNum3);
+                                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID, fWoId3);
+                                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO, fTicketNow2);
+                                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
+                                        ticketChanged2 ? "TICKET_CHANGE" : "ERROR");
+                                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_ERROR_CODE,
+                                        "CONTINUE_FAILED");
+                                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_ERROR_MSG,
+                                        ticketChanged2
+                                            ? "Ticket changé: " + ticketNoAtStart + "→" + fTicketNow2
+                                            : "job/continue échec après 5 tentatives");
+                                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,    "SYSTEM");
+                                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE, "LIVRAISON");
+                                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
+                                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
+                                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity)
+                                        .insertDelivery(cv);
+                                } catch (Exception ignored) {}
+                            });
+
+                            logEvent(serialId, woNum, DeliveryLogStore.LEVEL_WARN,
+                                ticketChanged2 ? "TICKET_CHANGE" : "CONTINUE_FAILED",
+                                ticketChanged2
+                                    ? "Ticket " + ticketNoAtStart + "→" + fTicketNow2
+                                    : "job/continue échec après 5 tentatives", null);
+                            return; // Sortir du poll
+                        }
                     }
                 } catch (Exception e) {
                     android.util.Log.e(TAG, "job/continue ERR: " + e.getMessage());
