@@ -1001,7 +1001,9 @@ public class DeepLinkHandler {
             }
         });
 
-        retournerFieldService(woNum, woIdGuid, "termine", extraJson);
+        // ✅ Retour automatique FSM supprimé — le chauffeur utilise le bouton "Retour au Bon de travail"
+        // retournerFieldService(woNum, woIdGuid, "termine", extraJson);
+        android.util.Log.i(TAG, "onDeliveryEnded: livraison enregistrée — en attente bouton Retour");
     }
 
     // =========================================================

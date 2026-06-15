@@ -1092,8 +1092,15 @@ public class RegisterTabFragment extends Fragment {
                 snap.put("woIdGuid", woIdGuid);
                 payloadJson = snap.toString();
 
-                // 2. Écrire dans LcrDeliveryStatusDb — PENDING
-                android.content.ContentValues cv = new android.content.ContentValues();
+                // 2. Écrire dans LcrDeliveryStatusDb — vérifier si ticket déjà enregistré
+                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
+                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow existing =
+                    lcrDb.getLatestForWo(woNum);
+                if (existing != null && ticketNo.equals(existing.ticketNo)) {
+                    android.util.Log.i("RetourWO", "Ticket " + ticketNo
+                        + " déjà enregistré (id=" + existing.id + ") — skip INSERT");
+                } else {
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,      woNum);
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID,  woIdGuid);
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO,   ticketNo);
@@ -1108,11 +1115,10 @@ public class RegisterTabFragment extends Fragment {
                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PAYLOAD_JSON, payloadJson);
 
-                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
-                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
                 long localId = lcrDb.insertDelivery(cv);
                 android.util.Log.i("RetourWO", "Delivery sauvegardée localId=" + localId
                     + " wo=" + woNum + " net=" + netL + " gross=" + grossL);
+                } // fin else (ticket pas encore enregistré)
 
                 // 3. Tenter push MSAL vers Dataverse
                 try {
