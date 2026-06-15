@@ -48,6 +48,10 @@ public class DeepLinkHandler {
     private final DeliveryLogStore deliveryStore;
     private final ExecutorService btExec;
 
+    // ✅ Contexte livraison courante — persisté pour onDeliveryEnded
+    private volatile int    currentNode     = 0;
+    private volatile String currentSerialId = "";
+
     public DeepLinkHandler(MainActivity activity,
                            DeliveryLogStore deliveryStore,
                            ExecutorService btExec) {
@@ -99,6 +103,9 @@ public class DeepLinkHandler {
             final String fSerialId = serialId != null ? serialId : "";
             logDeliveryStart(fSerialId, fWoNum, btMac, lcrnode, produit, presetStr);
 
+            // ✅ Persister le contexte livraison pour onDeliveryEnded
+            currentSerialId = fSerialId;
+
             // ✅ Sauvegarder PENDING dès réception — avant connexion BT
             // Le tab peut lire ces infos même si la livraison n'est pas encore démarrée
             try {
@@ -146,6 +153,7 @@ public class DeepLinkHandler {
 
             activity.toast("📦 Livraison — " + woNum);
             int finalNode = (lcrnode != null ? lcrnode : 250);
+            currentNode = finalNode;
             final int fNode = finalNode;
             final String fBtMac = btMac;
             final String fProduit = produit;
@@ -952,13 +960,14 @@ public class DeepLinkHandler {
                     else                                       presetStatus = "OVER";
                 }
 
-                // lcrnode depuis ActiveDeliveryStore (déjà effacé — utiliser fNode)
-                int lcrnode = fNode;
+                // lcrnode + serialId depuis contexte livraison courante
+                int lcrnode = currentNode;
+                String serialId = currentSerialId;
 
                 android.content.ContentValues cv = new android.content.ContentValues();
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,       woNum != null ? woNum : "");
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID,   woIdGuid != null ? woIdGuid.replace("{","").replace("}","") : "");
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID,    fSerialId);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID,    serialId);
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_LCRNODE,      lcrnode);
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PRODUIT_NO,   produitNo);
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO,    ticketNo);
