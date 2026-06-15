@@ -2711,7 +2711,24 @@ job.presetNetL_requested = presetNetL;
             return ApiResult.fail("StatusB: 0 - Read error", "STATUS_B_READ_FAIL", d);
         }
     }
-    
+
+    /**
+     * Impression custom ligne par ligne via MSG_PRINT_TEXT (0x22).
+     * LCR-II : envoie la ligne à l'imprimante série du registre.
+     * LC3    : NO-OP (opPrintText est NO-OP dans Lc3Link).
+     */
+    public ApiResult api_printTextLine(String line) {
+        JSONObject d = new JSONObject();
+        try {
+            withLcpLockVoid(() -> { link.opPrintText(line); return null; });
+            safeJsonPut(d, "line", line);
+            return ApiResult.ok("PrintText: OK", d);
+        } catch (Exception e) {
+            safeJsonPut(d, "error", e.getMessage());
+            return ApiResult.fail("PrintText ERR: " + e.getMessage(), "PRINT_ERR", d);
+        }
+    }
+
         public ApiResult api_printerStatus() {
         try {
             int prn = lastPrnStatusKnown;

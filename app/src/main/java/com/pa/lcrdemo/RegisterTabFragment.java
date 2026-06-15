@@ -62,6 +62,7 @@ public class RegisterTabFragment extends Fragment {
     private Button btnConnect, btnA, btnB, btnC, btnContinue, btnFinish;
     private Button btnReprintTicket;
     private Button btnRetourWO;
+    private Button btnCustomPrint;
     private NestedScrollView regRootScroll;
     private CheckBox cbShowLog, cbTxRx, cbLogTs;
     private View logPanel;
@@ -400,6 +401,7 @@ public class RegisterTabFragment extends Fragment {
         txtDeliveryUid = v.findViewById(R.id.txtDeliveryUid);
         btnReprintTicket = v.findViewById(R.id.btnReprintTicket);
         btnRetourWO      = v.findViewById(R.id.btnRetourWO);
+        btnCustomPrint   = v.findViewById(R.id.btnCustomPrint);
         cbShowLog = v.findViewById(R.id.cbShowLog);
         logPanel = v.findViewById(R.id.logPanel);
         txtLog = v.findViewById(R.id.txtLog);
@@ -719,6 +721,11 @@ public class RegisterTabFragment extends Fragment {
         if (btnRetourWO != null) {
             btnRetourWO.setOnClickListener(v -> retournerAuWorkOrder());
         }
+
+        // ✅ Custom print — impression ligne par ligne via opPrintText
+        if (btnCustomPrint != null) {
+            btnCustomPrint.setOnClickListener(v -> lancerImpressionCustom());
+        }
     }
 
     public void onTabMediaStatusChanged(boolean ready, String mediaShort) {
@@ -966,6 +973,13 @@ public class RegisterTabFragment extends Fragment {
             btnReprintTicket.setEnabled(connected || paused || ending);
         }
 
+        // ✅ Custom print — même visibilité que Reprint
+        if (btnCustomPrint != null) {
+            btnCustomPrint.setVisibility(connected || paused || ending
+                ? android.view.View.VISIBLE : android.view.View.GONE);
+            btnCustomPrint.setEnabled(connected || paused || ending);
+        }
+
         // ✅ RETOUR WO: visible seulement quand livraison terminée (CONNECTED post-livraison)
         // et qu'on a des données de livraison (ticket non vide)
         if (btnRetourWO != null) {
@@ -981,7 +995,116 @@ public class RegisterTabFragment extends Fragment {
     }
 
     // =========================================================
-    // ✅ Retour au Work Order — Bloc 5
+    // ✅ Impression custom — ticket ligne par ligne via opPrintText
+    // =========================================================
+    private void lancerImpressionCustom() {
+        DeliveryController c = controller;
+        if (c == null) return;
+
+        if (btnCustomPrint != null) btnCustomPrint.setEnabled(false);
+
+        bg.execute(() -> {
+            try {
+                // Lire données depuis lastResultJson
+                String ticketNo = "", saleNo = "", serialId = "", woNum = "";
+                double netL = 0, grossL = 0;
+                String startUtc = "", endUtc = "";
+
+                try {
+                    String last = com.pa.lcrdemo.DeepLinkHandler.lastResultJson;
+                    if (last != null) {
+                        org.json.JSONObject j = new org.json.JSONObject(last);
+                        woNum = j.optString("wonum", "");
+                        org.json.JSONObject payload = j.optJSONObject("payload");
+                        if (payload != null) {
+                            org.json.JSONObject result = payload.optJSONObject("result");
+                            if (result != null) {
+                                ticketNo = result.optString("ticket_no",  "");
+                                saleNo   = result.optString("sale_no",    "");
+                                serialId = result.optString("serial_id",  "");
+                                netL     = result.optDouble("fs_net_l",   0);
+                                grossL   = result.optDouble("fs_gross_l", 0);
+                                startUtc = result.optString("start_utc",  "");
+                                endUtc   = result.optString("end_utc",    "");
+                            }
+                        }
+                    }
+                } catch (Exception ignored) {}
+
+                // Construire les lignes du ticket
+                int cols = 40;
+                String sep = "=".repeat(cols);
+                String dashs = "-".repeat(cols);
+                java.util.List<String> lines = new java.util.ArrayList<>();
+                lines.add(sep);
+                lines.add(center("TICKET DE LIVRAISON", cols));
+                lines.add(sep);
+                lines.add("WO       : " + woNum);
+                lines.add("Ticket # : " + ticketNo);
+                lines.add("Vente #  : " + saleNo);
+                lines.add("Serie    : " + serialId);
+                lines.add(dashs);
+                lines.add(String.format("NET      : %.1f L", netL));
+                lines.add(String.format("GROSS    : %.1f L", grossL));
+                lines.add(dashs);
+                lines.add("Debut    : " + formatUtc(startUtc));
+                lines.add("Fin      : " + formatUtc(endUtc));
+                lines.add(sep);
+                lines.add("");
+
+                // Envoyer ligne par ligne via opPrintText
+                if (tabTransportKey != null) {
+                    MediaTransportManager.get(requireContext())
+                        .activateExclusive(tabTransportKey, "CUSTOM_PRINT");
+                }
+                int errors = 0;
+                for (String line : lines) {
+                    try {
+                        c.api_printTextLine(line);
+                        Thread.sleep(150);
+                    } catch (Exception e) {
+                        errors++;
+                        LogBus.api(node, "[CUSTOM_PRINT] ERR ligne: " + safeMsg(e));
+                    }
+                }
+
+                final int fErrors = errors;
+                ui.post(() -> {
+                    if (fErrors == 0) {
+                        android.widget.Toast.makeText(requireContext(),
+                            "✅ Impression custom envoyée", android.widget.Toast.LENGTH_SHORT).show();
+                    } else {
+                        android.widget.Toast.makeText(requireContext(),
+                            "⚠️ " + fErrors + " ligne(s) en erreur", android.widget.Toast.LENGTH_SHORT).show();
+                    }
+                    if (btnCustomPrint != null) btnCustomPrint.setEnabled(true);
+                });
+
+            } catch (Exception e) {
+                LogBus.api(node, "[CUSTOM_PRINT] ERR: " + safeMsg(e));
+                ui.post(() -> {
+                    android.widget.Toast.makeText(requireContext(),
+                        "Erreur impression: " + safeMsg(e), android.widget.Toast.LENGTH_SHORT).show();
+                    if (btnCustomPrint != null) btnCustomPrint.setEnabled(true);
+                });
+            }
+        });
+    }
+
+    private static String center(String s, int cols) {
+        if (s.length() >= cols) return s.substring(0, cols);
+        int pad = (cols - s.length()) / 2;
+        return " ".repeat(pad) + s;
+    }
+
+    private static String formatUtc(String utc) {
+        if (utc == null || utc.isEmpty()) return "—";
+        // 2026-06-15T17:43:42.549Z → 15/06 17:43
+        try {
+            return utc.substring(8, 10) + "/" + utc.substring(5, 7)
+                + " " + utc.substring(11, 16);
+        } catch (Exception ignored) { return utc; }
+    }
     // Compile payload complet → SQLite local → MSAL push → deep link FSM
     // =========================================================
     private void retournerAuWorkOrder() {
