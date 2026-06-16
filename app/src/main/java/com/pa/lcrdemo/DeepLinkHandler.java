@@ -89,6 +89,15 @@ public class DeepLinkHandler {
             String produit    = data.getQueryParameter("produit");
             String presetStr  = data.getQueryParameter("preset");
             String lcrnodeStr = data.getQueryParameter("lcrnode");
+            String orgUrl     = data.getQueryParameter("orgurl"); // ✅ env auto-detect
+
+            // ✅ Configurer l'environnement selon l'URL Dataverse reçue de FSM
+            // Un seul APK pour DEV / QA / STAGING / PROD
+            if (orgUrl != null && !orgUrl.isEmpty()) {
+                com.pa.lcrdemo.config.LcrConfig.applyFromOrgUrl(activity, orgUrl);
+                android.util.Log.i(TAG, "Env détecté depuis orgurl: " + orgUrl
+                    + " → " + com.pa.lcrdemo.config.LcrConfig.getEnvironmentName(activity));
+            }
 
             Integer lcrnode = null;
             try { if (lcrnodeStr != null) lcrnode = Integer.parseInt(lcrnodeStr); }

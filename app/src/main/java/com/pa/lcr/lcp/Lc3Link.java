@@ -325,13 +325,22 @@ public class Lc3Link extends LcpLink {
     }
 
     /**
-     * NO-OP pour LC3 — diagnostic reset non implémenté (comportement à définir avec spec LC3).
-     * TODO: implémenter quand la spec LC3 sera disponible.
+     * NO-OP pour LC3 — pas de champs date/heure (#20/#21) sur terminal VT-100.
+     * La sync date/heure est gérée par l'horloge interne du LC3.
+     */
+    @Override
+    public void opSyncDateTime() throws IOException {
+        android.util.Log.d("Lc3Link", "opSyncDateTime: NO-OP LC3");
+    }
+
+    /**
+     * NO-OP pour LC3 — pas de commande diagnostic reset équivalente.
+     * À implémenter quand spec LC3 disponible.
      */
     @Override
     public int[] opDiagnosticReset(int maxWaitMs) throws IOException {
         android.util.Log.d("Lc3Link", "opDiagnosticReset: NO-OP LC3");
-        return new int[]{0, 0};
+        return new int[]{ 0, 0 }; // net=0, gross=0
     }
 
     // ── startDelivery ─────────────────────────────────────────────────────

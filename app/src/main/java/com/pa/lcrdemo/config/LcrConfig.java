@@ -66,6 +66,90 @@ public class LcrConfig {
         Log.i(TAG, "Config réinitialisée");
     }
 
+    /**
+     * Détecte et applique l'environnement depuis l'URL Dataverse reçue de FSM.
+     * Écrit dans le fichier externe sur la tablette (priorité 1) et réinitialise le cache.
+     *
+     * Mapping URL → environnement :
+     *   dev-filgo-sonic   → DEV
+     *   qa-filgo-sonic    → QA
+     *   staging-filgo-sonic → STAGING
+     *   filgo.crm3        → PROD  (FILGO Production)
+     *
+     * Un seul APK pour tous les environnements.
+     */
+    public static void applyFromOrgUrl(Context ctx, String orgUrl) {
+        if (orgUrl == null || orgUrl.isEmpty()) return;
+        String lower = orgUrl.toLowerCase();
+
+        String env, dvUrl, scope, fsAppId;
+
+        if (lower.contains("dev-filgo-sonic")) {
+            env      = "DEV";
+            dvUrl    = "https://dev-filgo-sonic.crm3.dynamics.com";
+            scope    = dvUrl + "/.default";
+            fsAppId  = "91a8643f-21db-ee11-904c-002248b1ce29";
+        } else if (lower.contains("qa-filgo-sonic")) {
+            env      = "QA";
+            dvUrl    = "https://qa-filgo-sonic.crm3.dynamics.com";
+            scope    = dvUrl + "/.default";
+            fsAppId  = ""; // TODO — App ID FSM QA
+        } else if (lower.contains("staging-filgo-sonic")) {
+            env      = "STAGING";
+            dvUrl    = "https://staging-filgo-sonic.crm3.dynamics.com";
+            scope    = dvUrl + "/.default";
+            fsAppId  = ""; // TODO — App ID FSM STAGING
+        } else if (lower.contains("filgo.crm3")) {
+            env      = "PROD";
+            dvUrl    = "https://filgo.crm3.dynamics.com";
+            scope    = dvUrl + "/.default";
+            fsAppId  = ""; // TODO — App ID FSM PROD
+        } else {
+            Log.w(TAG, "applyFromOrgUrl: URL non reconnue: " + orgUrl + " — env inchangé");
+            return;
+        }
+
+        // Écrire dans le fichier externe (priorité 1 de load())
+        try {
+            java.io.File dir = ctx.getExternalFilesDir(null);
+            if (dir != null && (dir.exists() || dir.mkdirs())) {
+                java.io.File f = new java.io.File(dir, FILE_NAME);
+                Properties p = new Properties();
+                // Charger les propriétés existantes pour ne pas écraser les autres clés
+                if (f.exists()) {
+                    try (java.io.FileInputStream fis = new java.io.FileInputStream(f)) {
+                        p.load(fis);
+                    }
+                }
+                // Appliquer les valeurs de l'env détecté
+                p.setProperty("lcr_environment",                    env);
+                p.setProperty("lcr_dataverse_url_" + env.toLowerCase(),   dvUrl);
+                p.setProperty("lcr_dataverse_scope_" + env.toLowerCase(), scope);
+                p.setProperty("lcr_fs_app_id_" + env.toLowerCase(),       fsAppId);
+                try (java.io.FileOutputStream fos = new java.io.FileOutputStream(f)) {
+                    p.store(fos, "Auto-généré par LcrConfig.applyFromOrgUrl — " + env);
+                }
+                Log.i(TAG, "applyFromOrgUrl: env=" + env + " → " + dvUrl);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "applyFromOrgUrl: échec écriture fichier: " + e.getMessage());
+        }
+
+        // Réinitialiser le cache pour que le prochain get() recharge le fichier
+        reset();
+    }
+
+    /** Nom lisible de l'environnement courant. */
+    public static String getEnvironmentName(Context ctx) {
+        return env(ctx);
+    }
+
+    /** Résumé lisible pour logs/UI. Ex: "[DEV] dev-filgo-sonic.crm3.dynamics.com" */
+    public static String getSummary(Context ctx) {
+        return "[" + env(ctx) + "] "
+            + getDataverseUrl(ctx).replace("https://", "");
+    }
+
     // =========================================================
     // Lecture propriétés
     // =========================================================
