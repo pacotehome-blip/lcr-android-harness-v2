@@ -112,22 +112,42 @@ public class RegisterTabFragment extends Fragment {
 
     /**
      * Affiche une bannière de reprise avec message et bouton retour FSM.
+     * Force l'attachement du listener UI pour que le live suive.
      */
     private void showResumeBanner(com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad) {
         try {
+            // ✅ Forcer l'attachement du listener UI pour que le live suive
+            connectThisRegister(false);
+
+            // ✅ Lire le ticket courant depuis l'UI ou le controller
+            String ticketNo = "";
+            try {
+                if (txtTicketNo != null) {
+                    String t = txtTicketNo.getText().toString()
+                        .replace("Ticket Number : ", "").trim();
+                    if (!t.isEmpty() && !t.equals("—")) ticketNo = t;
+                }
+            } catch (Exception ignored) {}
+
+            // ✅ Construire le delivery_uid = woNum-ticketNo
+            final String deliveryUid = ad.woNum
+                + (ticketNo.isEmpty() ? "" : "-" + ticketNo);
+
             if (txtDeliveryUid != null) {
-                txtDeliveryUid.setText("⚠️ Livraison en attente : " + ad.woNum
-                    + " | preset=" + (int)ad.preset + "L");
+                txtDeliveryUid.setText("Delivery UID : " + deliveryUid);
                 txtDeliveryUid.setTextColor(
                     android.graphics.Color.parseColor("#e6a800"));
             }
+
             if (btnRetourWO != null) {
                 btnRetourWO.setVisibility(android.view.View.VISIBLE);
                 btnRetourWO.setText("↩ Retourner dans Field Service");
             }
+
             android.widget.Toast.makeText(getContext(),
                 "✅ Registre connecté — retournez dans Field Service pour lancer la livraison",
                 android.widget.Toast.LENGTH_LONG).show();
+
         } catch (Exception e) {
             android.util.Log.w("RegisterTabFragment", "showResumeBanner ERR: " + e.getMessage());
         }
