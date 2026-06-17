@@ -66,8 +66,9 @@ public class RegisterTabFragment extends Fragment {
             android.content.Context ctx = getContext();
             if (ctx == null) return;
 
-            com.pa.lcr.lcp.storage.ActiveDelivery ad =
-                com.pa.lcr.lcp.storage.ActiveDeliveryStore.load(ctx);
+            com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
+                new com.pa.lcr.lcp.storage.ActiveDeliveryStore(ctx);
+            com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad = ads.load();
 
             if (ad == null || !"PENDING".equals(ad.status)) return;
             if (ad.woNum == null || ad.woNum.isEmpty()) return;
@@ -78,7 +79,6 @@ public class RegisterTabFragment extends Fragment {
             boolean nodeMatch   = (node == ad.node);
 
             if (!serialMatch || !nodeMatch) {
-                // Mauvais registre — ne pas pré-remplir
                 android.util.Log.w("RegisterTabFragment",
                     "Livraison PENDING pour serial=" + ad.serialId + "/node=" + ad.node
                     + " mais ce tab est serial=" + serialFromArgs + "/node=" + node
@@ -87,18 +87,14 @@ public class RegisterTabFragment extends Fragment {
             }
 
             // ✅ Bon registre — pré-remplir le tab
-            final com.pa.lcr.lcp.storage.ActiveDelivery fAd = ad;
+            final com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery fAd = ad;
             ui.post(() -> {
                 try {
-                    // Pré-remplir woNum, produit, preset
                     prefillFromDeepLink(
                         fAd.woNum,
                         String.valueOf(fAd.produit),
                         String.valueOf((int) fAd.preset));
-
-                    // Afficher bannière de reprise
                     showResumeBanner(fAd);
-
                     android.util.Log.i("RegisterTabFragment",
                         "Livraison PENDING détectée — pré-rempli: wo=" + fAd.woNum
                         + " preset=" + fAd.preset + " produit=" + fAd.produit);
@@ -115,32 +111,23 @@ public class RegisterTabFragment extends Fragment {
     }
 
     /**
-     * Affiche une bannière de reprise en haut du tab avec un bouton
-     * "Retourner dans Field Service" pour relancer le deep link.
+     * Affiche une bannière de reprise avec message et bouton retour FSM.
      */
-    private void showResumeBanner(com.pa.lcr.lcp.storage.ActiveDelivery ad) {
+    private void showResumeBanner(com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad) {
         try {
-            // Chercher ou créer la bannière
-            android.view.View root = getView();
-            if (root == null) return;
-
-            // Utiliser un TextView existant pour afficher le message de reprise
             if (txtDeliveryUid != null) {
                 txtDeliveryUid.setText("⚠️ Livraison en attente : " + ad.woNum
                     + " | preset=" + (int)ad.preset + "L");
                 txtDeliveryUid.setTextColor(
                     android.graphics.Color.parseColor("#e6a800"));
             }
-
-            // Afficher le bouton Retour WO pour permettre au chauffeur de retourner dans FSM
             if (btnRetourWO != null) {
                 btnRetourWO.setVisibility(android.view.View.VISIBLE);
                 btnRetourWO.setText("↩ Retourner dans Field Service");
             }
-
-            // Toast informatif
-            activity.toast("✅ Registre connecté — retournez dans Field Service pour lancer la livraison");
-
+            android.widget.Toast.makeText(getContext(),
+                "✅ Registre connecté — retournez dans Field Service pour lancer la livraison",
+                android.widget.Toast.LENGTH_LONG).show();
         } catch (Exception e) {
             android.util.Log.w("RegisterTabFragment", "showResumeBanner ERR: " + e.getMessage());
         }
