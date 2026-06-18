@@ -232,6 +232,7 @@ public class RegisterTabFragment extends Fragment {
     private String transportFromArgs = null;
     private boolean starting = false;
     private long startingSinceMs = 0L;
+    private boolean deliveryInProgressOnce = false;
     private static final int TAB_LOG_MAX_LINES = 400;
     private static final long LOG_REFRESH_MIN_MS = 800;
     private long lastLogRefreshMs = 0L;
@@ -346,6 +347,20 @@ public class RegisterTabFragment extends Fragment {
                 // ✅ Retour Field Service quand livraison terminée
                 if (state == DeliveryState.ENDED) {
                     notifyDeliveryEndedToMainActivity();
+                }
+
+                // ✅ Registre prêt pour nouvelle livraison — remettre live à zéro
+                // Seulement si on revient de RUNNING_FLOWING (pas la première connexion)
+                if (state == DeliveryState.CONNECTED && !starting && deliveryInProgressOnce) {
+                    deliveryInProgressOnce = false;
+                    if (txtLive != null) txtLive.setText("LIVE: CONNECTED — prêt pour nouvelle livraison");
+                    if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
+                    if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
+                    if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : —");
+                    if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : —");
+                }
+                if (state == DeliveryState.RUNNING_FLOWING) {
+                    deliveryInProgressOnce = true;
                 }
             });
         }
