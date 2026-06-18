@@ -1695,10 +1695,10 @@ softResync("retry/" + step);
             // Envoyer valeur max (0x7FFFFFFF) → LCR-II ne s'arrête pas automatiquement
             // Le chauffeur arrête la pompe manuellement, CMD_END termine la livraison
             value = 0x7FFFFFFF;
-            android.util.Log.i(TAG, "writePresetNet: preset=0 → PLEIN COMPLET (max=0x7FFFFFFF)");
+            android.util.Log.i("DeliveryController", "writePresetNet: preset=0 → PLEIN COMPLET (max=0x7FFFFFFF)");
         } else {
             value = (int) Math.round(preset * scale);
-            android.util.Log.i(TAG, "writePresetNet: preset=" + preset + "L → value=" + value);
+            android.util.Log.i("DeliveryController", "writePresetNet: preset=" + preset + "L → value=" + value);
         }
 
         byte[] buf = new byte[] {
