@@ -8,16 +8,6 @@ import android.content.IntentFilter;
 import android.hardware.usb.UsbManager;
 import android.os.Bundle;
 import android.os.Handler;
-import android.os.Looper;package com.pa.lcrdemo;
-
-import com.pa.lcr.lcp.transport.TransportIo;
-import android.content.BroadcastReceiver;
-import android.content.Context;
-import android.content.Intent;
-import android.content.IntentFilter;
-import android.hardware.usb.UsbManager;
-import android.os.Bundle;
-import android.os.Handler;
 import android.os.Looper;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
@@ -28,13 +18,10 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.core.widget.NestedScrollView;
 import androidx.fragment.app.Fragment;
-
 import com.pa.lcr.lcp.*;
 import com.pa.lcr.lcp.log.LogBus;
 import com.pa.lcr.lcp.transport.MediaTransportManager;
-
 import org.json.JSONObject;
-
 import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
@@ -66,46 +53,65 @@ public class RegisterTabFragment extends Fragment {
         ui.postDelayed(() -> checkPendingDeliveryForThisRegister(), 600);
     }
 
+    /**
+     * Vérifie si ActiveDeliveryStore a une livraison PENDING pour ce registre.
+     * Si serial + node correspondent → valider + afficher infos + bouton Lancer.
+     */
     private void checkPendingDeliveryForThisRegister() {
         try {
             android.content.Context ctx = getContext();
             if (ctx == null) return;
+
             com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
                 new com.pa.lcr.lcp.storage.ActiveDeliveryStore(ctx);
             com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad = ads.load();
+
             if (ad == null || !"PENDING".equals(ad.status)) return;
             if (ad.woNum == null || ad.woNum.isEmpty()) return;
 
+            // Toast "Validation en cours..."
             ui.post(() -> android.widget.Toast.makeText(getContext(),
                 "🔍 Validation du registre en cours...",
                 android.widget.Toast.LENGTH_SHORT).show());
 
+            // Vérifier serial et node
             boolean serialMatch = (serialFromArgs != null && !serialFromArgs.isEmpty()
-                && serialFromArgs.trim().equals(ad.serialId != null ? ad.serialId.trim() : ""));
+                && serialFromArgs.trim().equals(
+                    ad.serialId != null ? ad.serialId.trim() : ""));
             boolean nodeMatch = (node == ad.node);
 
             if (!serialMatch || !nodeMatch) {
                 android.util.Log.w("RegisterTabFragment",
-                    "PENDING serial=" + ad.serialId + "/node=" + ad.node
-                    + " != tab serial=" + serialFromArgs + "/node=" + node);
+                    "Livraison PENDING serial=" + ad.serialId + "/node=" + ad.node
+                    + " ≠ tab serial=" + serialFromArgs + "/node=" + node);
+                // Mauvais registre — le dialog dans DeepLinkHandler a déjà averti
                 return;
             }
 
+            // ✅ Bon registre — effacer lastResultJson stale
             com.pa.lcrdemo.DeepLinkHandler.lastResultJson = null;
+
+            // Forcer attachement listener UI
             ui.post(() -> connectThisRegister(false));
 
+            // Attendre que le controller soit prêt puis afficher
             final com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery fAd = ad;
             ui.postDelayed(() -> showDeliveryReadyPanel(fAd), 800);
 
         } catch (Exception e) {
             android.util.Log.w("RegisterTabFragment",
-                "checkPendingDelivery ERR: " + e.getMessage());
+                "checkPendingDeliveryForThisRegister ERR: " + e.getMessage());
         }
     }
 
+    /**
+     * Affiche les infos de la livraison en attente et le bouton Lancer.
+     * Appelé après validation serial/node.
+     */
     private void showDeliveryReadyPanel(
             com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad) {
         try {
+            // ✅ Afficher infos livraison dans txtDeliveryUid
             if (txtDeliveryUid != null) {
                 txtDeliveryUid.setText(
                     "WO: " + ad.woNum
@@ -114,32 +120,44 @@ public class RegisterTabFragment extends Fragment {
                 txtDeliveryUid.setTextColor(
                     android.graphics.Color.parseColor("#15803d"));
             }
+
+            // ✅ Remplacer le bouton Retour WO par "Lancer la livraison"
             if (btnRetourWO != null) {
                 btnRetourWO.setVisibility(android.view.View.VISIBLE);
                 btnRetourWO.setText("🚀 Lancer la livraison");
                 btnRetourWO.setBackgroundColor(
                     android.graphics.Color.parseColor("#15803d"));
+
+                // ✅ Lancer directement sans repasser par FSM
                 final com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery fAd = ad;
                 btnRetourWO.setOnClickListener(v -> lancerDepuisStore(fAd));
             }
+
             android.widget.Toast.makeText(getContext(),
                 "✅ Registre validé — prêt pour " + ad.woNum,
                 android.widget.Toast.LENGTH_LONG).show();
+
         } catch (Exception e) {
             android.util.Log.w("RegisterTabFragment",
                 "showDeliveryReadyPanel ERR: " + e.getMessage());
         }
     }
 
+    /**
+     * Lance la livraison directement depuis ActiveDeliveryStore — sans repasser par FSM.
+     */
     private void lancerDepuisStore(
             com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad) {
         try {
+            // Remettre le bouton à son état normal
             if (btnRetourWO != null) {
                 btnRetourWO.setText("Retour au Bon de travail");
                 btnRetourWO.setBackgroundColor(
                     android.graphics.Color.parseColor("#185FA5"));
                 btnRetourWO.setOnClickListener(v -> retournerAuWorkOrder());
             }
+
+            // Construire le deep link URI et le traiter en interne
             android.net.Uri uri = android.net.Uri.parse(
                 "lcrdemo://livraison"
                 + "?wonum="    + android.net.Uri.encode(ad.woNum)
@@ -151,11 +169,16 @@ public class RegisterTabFragment extends Fragment {
                 + "&preset="   + (int) ad.preset
                 + "&orgurl="   + android.net.Uri.encode(
                     com.pa.lcrdemo.config.LcrConfig.getDataverseUrl(requireContext())));
+
             android.content.Intent intent = new android.content.Intent(
                 android.content.Intent.ACTION_VIEW, uri);
             intent.setPackage(requireContext().getPackageName());
-            android.util.Log.i("RegisterTabFragment", "lancerDepuisStore: " + uri);
+
+            android.util.Log.i("RegisterTabFragment",
+                "lancerDepuisStore: " + uri.toString());
+
             requireContext().startActivity(intent);
+
         } catch (Exception e) {
             android.util.Log.e("RegisterTabFragment",
                 "lancerDepuisStore ERR: " + e.getMessage());
