@@ -676,7 +676,9 @@ private void reproEvent(String level, String type, String message, JSONObject da
     // ====== Logging ======
     @Override
     public void setLogTimestampsEnabled(boolean enabled) {
-        io.execute(() -> logTsEnabled = enabled);
+        if (isStopped()) return;
+        try { io.execute(() -> logTsEnabled = enabled); }
+        catch (java.util.concurrent.RejectedExecutionException ignored) {}
     }
 
     private String ioTs() {
@@ -729,11 +731,16 @@ private void reproEvent(String level, String type, String message, JSONObject da
 
     @Override
     public void setTxRxLoggingEnabled(boolean enabled) {
-        io.execute(() -> {
-            if (isStopped()) return;
-            txRxEnabled = enabled;
-            emitLog("[LOG] TX/RX " + (enabled ? "ON" : "OFF"));
-        });
+        if (isStopped()) return;
+        try {
+            io.execute(() -> {
+                if (isStopped()) return;
+                txRxEnabled = enabled;
+                emitLog("[LOG] TX/RX " + (enabled ? "ON" : "OFF"));
+            });
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+            // Controller stale (executor déjà fermé) — ignorer silencieusement
+        }
     }
 
     // =========================
