@@ -1150,7 +1150,15 @@ public class RegisterTabFragment extends Fragment {
             double net   = parseDisplayNet();
             double gross = parseDisplayGross();
             boolean flowStarted = (net > 0.0 || gross > 0.0);
-            boolean canCancel = (connected || flowing || paused) && !starting;
+            // ✅ Annuler seulement si une livraison a été démarrée (WO présent)
+            boolean hasActiveDelivery = false;
+            try {
+                String uid = txtDeliveryUid != null ?
+                    txtDeliveryUid.getText().toString()
+                        .replace("Delivery UID : ", "").trim() : "";
+                hasActiveDelivery = !uid.isEmpty() && !uid.equals("—");
+            } catch (Exception ignored) {}
+            boolean canCancel = (connected || flowing || paused) && !starting && hasActiveDelivery;
             if (canCancel) {
                 btnAnnuler.setVisibility(android.view.View.VISIBLE);
                 if (flowing && flowStarted) {
