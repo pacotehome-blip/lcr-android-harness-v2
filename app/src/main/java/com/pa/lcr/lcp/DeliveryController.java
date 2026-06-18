@@ -1127,6 +1127,23 @@ try {
     }
 
     @Override
+    /**
+     * Termine la livraison quel que soit l'état courant (RUNNING_FLOWING ou RUNNING_PAUSED).
+     * Utilisé uniquement par le flux d'annulation opérateur.
+     * N'affecte pas endDelivery() ni le flux normal.
+     */
+    public void forceEnd() {
+        io.execute(() -> {
+            if (isStopped()) return;
+            try {
+                emitLog("[CANCEL] forceEnd — CMD_END depuis état " + state.name());
+                lcpIssueCommand(CMD_END);
+            } catch (Exception e) {
+                emitLog("[CANCEL] forceEnd ERR: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
+            }
+        });
+    }
+
     public void endDelivery() {
         io.execute(() -> {
             if (isStopped()) return;
@@ -1688,7 +1705,19 @@ softResync("retry/" + step);
         int digits = cachedDigits;
         if (digits < 0) digits = 1;
         int scale = (int) Math.pow(10, digits);
+
+        // ✅ preset=0 → plein complet — ne pas écrire de preset sur le registre
+        // Le LCR-II utilisera son propre preset max ou sera arrêté manuellement
+        if (preset <= 0.0) {
+            android.util.Log.i("DeliveryController",
+                "writePresetNet: preset=0 → PLEIN COMPLET — aucune écriture sur FIELD_PRESET_NET");
+            return;
+        }
+
         int value = (int) Math.round(preset * scale);
+        android.util.Log.i("DeliveryController",
+            "writePresetNet: preset=" + preset + "L → value=" + value);
+
         byte[] buf = new byte[] {
                 (byte) (value >> 24),
                 (byte) (value >> 16),
@@ -2439,10 +2468,11 @@ try {
             writePresetNet_WithCacheOrFallback(presetNetL);
 
             long presetRawU = beI32(lcpGetField(FIELD_PRESET_NET)) & 0xFFFFFFFFL;
-            double presetApplied = presetRawU / scale;
+            double presetApplied = presetNetL <= 0.0 ? 0.0 : (presetRawU / scale);
             double tol = 1.0 / scale;
 
-            if (Math.abs(presetApplied - presetNetL) > (tol * 1.5)) {
+            // ✅ Si preset=0 (plein complet) — skip vérification mismatch
+            if (presetNetL > 0.0 && Math.abs(presetApplied - presetNetL) > (tol * 1.5)) {
                 JSONObject d = new JSONObject();
                 safeJsonPut(d, "preset_requested", presetNetL);
                 safeJsonPut(d, "preset_applied", presetApplied);

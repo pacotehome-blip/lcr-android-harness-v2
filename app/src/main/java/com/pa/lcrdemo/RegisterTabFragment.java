@@ -1614,10 +1614,10 @@ public class RegisterTabFragment extends Fragment {
         cancelInProgress = true;
         bg.execute(() -> {
             try {
-                // 1. endDelivery() → registre imprime ticket, passe en PENDING_TICKET
-                try { c.endDelivery(); } catch (Exception ignored) {}
+                // 1. Terminer la livraison quel que soit l'état (FLOWING ou PAUSED)
+                try { c.forceEnd(); } catch (Exception ignored) {}
 
-                // 3. Attendre ENDED puis alignOrRecover() pour consommer le ticket pending
+                // 3. Attendre CONNECTED (max 6s)
                 for (int i = 0; i < 30; i++) {
                     try { Thread.sleep(200); } catch (Exception ignored) {}
                     com.pa.lcr.lcp.DeliveryState st = c.getState();
@@ -1704,19 +1704,18 @@ public class RegisterTabFragment extends Fragment {
                     }
                 } catch (Exception ignored) {}
 
-                // 8. Retour dans Field Service — finish() direct
-                // ActiveDeliveryStore garde CANCELLED → bouton C peut relancer
-                // retournerAuWorkOrder() fera clear() seulement quand le chauffeur le demande
+                // 8. Rester dans l'APK — remettre l'UI à zéro
                 cancelInProgress = false;
                 ui.post(() -> {
+                    if (txtQtyNet   != null) txtQtyNet.setText("NET: 0.0");
+                    if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
+                    if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : —");
+                    if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : —");
+                    if (btnAnnuler  != null) btnAnnuler.setEnabled(true);
+                    updateButtons(controller != null ? controller.getState() : null);
                     android.widget.Toast.makeText(getContext(),
-                        "Livraison annulée — retour au bon de livraison",
+                        "Livraison annulée — registre prêt",
                         android.widget.Toast.LENGTH_SHORT).show();
-                    try {
-                        if (getActivity() != null) getActivity().finish();
-                    } catch (Exception e) {
-                        android.util.Log.e("Annuler", "finish() ERR: " + e.getMessage());
-                    }
                 });
 
             } catch (Exception e) {
