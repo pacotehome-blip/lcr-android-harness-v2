@@ -1,13 +1,27 @@
 package com.pa.lcrdemo;
 
-import com.pa.lcr.lcp.transport.TransportIo;
-import android.content.BroadcastReceiver;
-import android.content.Context;
-import android.content.Intent;
-import android.content.IntentFilter;
-import android.hardware.usb.UsbManager;
-import android.os.Bundle;
-import android.os.Handler;
+import android.view.LayoutInflater;
+import android.view.MotionEvent;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.*;
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.core.widget.NestedScrollView;
+import androidx.fragment.app.Fragment;
+
+import com.pa.lcr.lcp.*;
+import com.pa.lcr.lcp.log.LogBus;
+import com.pa.lcr.lcp.transport.MediaTransportManager;
+
+import org.json.JSONObject;
+
+import java.text.SimpleDateFormat;
+import java.util.*;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+
 public class RegisterTabFragment extends Fragment {
 
     private static final String ARG_NODE = "node";
