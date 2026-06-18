@@ -232,7 +232,6 @@ public class RegisterTabFragment extends Fragment {
     private String transportFromArgs = null;
     private boolean starting = false;
     private long startingSinceMs = 0L;
-    private boolean deliveryInProgressOnce = false;
     private static final int TAB_LOG_MAX_LINES = 400;
     private static final long LOG_REFRESH_MIN_MS = 800;
     private long lastLogRefreshMs = 0L;
@@ -347,20 +346,6 @@ public class RegisterTabFragment extends Fragment {
                 // ✅ Retour Field Service quand livraison terminée
                 if (state == DeliveryState.ENDED) {
                     notifyDeliveryEndedToMainActivity();
-                }
-
-                // ✅ Registre prêt pour nouvelle livraison — remettre live à zéro
-                // Seulement si on revient de RUNNING_FLOWING (pas la première connexion)
-                if (state == DeliveryState.CONNECTED && !starting && deliveryInProgressOnce) {
-                    deliveryInProgressOnce = false;
-                    if (txtLive != null) txtLive.setText("LIVE: CONNECTED — prêt pour nouvelle livraison");
-                    if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
-                    if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
-                    if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : —");
-                    if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : —");
-                }
-                if (state == DeliveryState.RUNNING_FLOWING) {
-                    deliveryInProgressOnce = true;
                 }
             });
         }
@@ -1149,33 +1134,27 @@ public class RegisterTabFragment extends Fragment {
             btnCustomPrint.setEnabled(connected || paused || ending);
         }
 
-        // ✅ Bouton Annuler — visible si CONNECTED ou RUNNING_FLOWING
-        // Bloqué si flow actif ET volume détecté
+        // ✅ Bouton Annuler — visible si RUNNING_FLOWING et net/gross == 0
+        // ou si CONNECTED avant démarrage (preset armé mais pas encore de flow)
         if (btnAnnuler != null) {
             double net   = parseDisplayNet();
             double gross = parseDisplayGross();
-            boolean flowStarted = (net > 0.0 || gross > 0.0);
             boolean canCancel = (connected || flowing) && !starting;
-
-            if (canCancel) {
-                btnAnnuler.setVisibility(android.view.View.VISIBLE);
-                if (flowing && flowStarted) {
-                    // ❌ Impossible d'annuler — volume livré
-                    btnAnnuler.setText("⛔ Impossible d'annuler — terminez la livraison");
-                    btnAnnuler.setEnabled(false);
-                    btnAnnuler.setBackgroundTintList(
-                        android.content.res.ColorStateList.valueOf(
-                            android.graphics.Color.parseColor("#888888")));
-                } else {
-                    // ✅ Annulation possible
-                    btnAnnuler.setText("⛔ Annuler la livraison");
-                    btnAnnuler.setEnabled(true);
-                    btnAnnuler.setBackgroundTintList(
-                        android.content.res.ColorStateList.valueOf(
-                            android.graphics.Color.parseColor("#CC2222")));
-                }
+            boolean flowStarted = (net > 0.0 || gross > 0.0);
+            // Visible toujours si canCancel, mais texte différent
+            btnAnnuler.setVisibility(canCancel ? android.view.View.VISIBLE : android.view.View.GONE);
+            btnAnnuler.setEnabled(canCancel);
+            if (flowing && flowStarted) {
+                // Flow démarré — annulation possible mais avertissement fort
+                btnAnnuler.setText("⛔ Annuler (volume détecté)");
+                btnAnnuler.setBackgroundTintList(
+                    android.content.res.ColorStateList.valueOf(
+                        android.graphics.Color.parseColor("#FF8800")));
             } else {
-                btnAnnuler.setVisibility(android.view.View.GONE);
+                btnAnnuler.setText("⛔ Annuler la livraison");
+                btnAnnuler.setBackgroundTintList(
+                    android.content.res.ColorStateList.valueOf(
+                        android.graphics.Color.parseColor("#CC2222")));
             }
         }
 
