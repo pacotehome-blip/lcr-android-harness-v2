@@ -1138,7 +1138,7 @@ public class RegisterTabFragment extends Fragment {
             double net   = parseDisplayNet();
             double gross = parseDisplayGross();
             boolean flowStarted = (net > 0.0 || gross > 0.0);
-            boolean canCancel = (connected || flowing) && !starting;
+            boolean canCancel = (connected || flowing || paused) && !starting;
             if (canCancel) {
                 btnAnnuler.setVisibility(android.view.View.VISIBLE);
                 if (flowing && flowStarted) {
