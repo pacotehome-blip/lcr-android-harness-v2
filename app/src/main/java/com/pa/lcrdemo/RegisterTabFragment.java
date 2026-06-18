@@ -1700,33 +1700,32 @@ public class RegisterTabFragment extends Fragment {
                     android.util.Log.w("Annuler", "Insert ERR: " + e.getMessage());
                 }
 
-                // 7. Effacer ActiveDeliveryStore
-                try { new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext()).clear(); } catch (Exception ignored) {}
+                // 7. Marquer CANCELLED dans ActiveDeliveryStore — garder le contexte WO
+                // pour que retournerAuWorkOrder() ait encore le woNum/woIdGuid
+                // si le chauffeur relance avec bouton C sans repasser par FSM
+                try {
+                    com.pa.lcr.lcp.storage.ActiveDeliveryStore ads2 =
+                        new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
+                    com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad2 = ads2.load();
+                    if (ad2 != null) {
+                        ads2.save(ad2.woNum, ad2.woIdGuid, ad2.jobId,
+                            ad2.mac, ad2.node, ad2.serialId,
+                            ad2.produit, ad2.preset, "CANCELLED");
+                    }
+                } catch (Exception ignored) {}
 
-                // 8. Retour dans Field Service via onDeliveryEnded → navigue vers le bon WO
+                // 8. Retour dans Field Service — finish() direct
+                // ActiveDeliveryStore garde CANCELLED → bouton C peut relancer
+                // retournerAuWorkOrder() fera clear() seulement quand le chauffeur le demande
                 cancelInProgress = false;
-                final String fWoNum    = woNum;
-                final String fWoIdGuid = woIdGuid;
-                final String fTicketNo = ticketNo;
                 ui.post(() -> {
                     android.widget.Toast.makeText(getContext(),
                         "Livraison annulée — retour au bon de livraison",
                         android.widget.Toast.LENGTH_SHORT).show();
                     try {
-                        if (getActivity() instanceof MainActivity) {
-                            org.json.JSONObject extra = new org.json.JSONObject();
-                            extra.put("cancelled",     true);
-                            extra.put("ticket_no",     fTicketNo);
-                            extra.put("net_at_cancel", netAtCancel);
-                            extra.put("status",        "annulation");
-                            ((MainActivity) getActivity()).onDeliveryEnded(
-                                fWoNum, fWoIdGuid, extra.toString());
-                        } else {
-                            if (getActivity() != null) getActivity().finish();
-                        }
-                    } catch (Exception e) {
-                        android.util.Log.e("Annuler", "retour ERR: " + e.getMessage());
                         if (getActivity() != null) getActivity().finish();
+                    } catch (Exception e) {
+                        android.util.Log.e("Annuler", "finish() ERR: " + e.getMessage());
                     }
                 });
 
