@@ -91,25 +91,6 @@ public class RegisterTabFragment extends Fragment {
 
             if (ad.woNum == null || ad.woNum.isEmpty()) return;
 
-            // Toast "Validation en cours..."
-            ui.post(() -> android.widget.Toast.makeText(getContext(),
-                "🔍 Validation du registre en cours...",
-                android.widget.Toast.LENGTH_SHORT).show());
-
-            // Vérifier serial et node
-            boolean serialMatch = (serialFromArgs != null && !serialFromArgs.isEmpty()
-                && serialFromArgs.trim().equals(
-                    ad.serialId != null ? ad.serialId.trim() : ""));
-            boolean nodeMatch = (node == ad.node);
-
-            if (!serialMatch || !nodeMatch) {
-                android.util.Log.w("RegisterTabFragment",
-                    "Livraison PENDING serial=" + ad.serialId + "/node=" + ad.node
-                    + " ≠ tab serial=" + serialFromArgs + "/node=" + node);
-                // Mauvais registre — le dialog dans DeepLinkHandler a déjà averti
-                return;
-            }
-
             // ✅ Bon registre — effacer lastResultJson stale
             com.pa.lcrdemo.DeepLinkHandler.lastResultJson = null;
 
