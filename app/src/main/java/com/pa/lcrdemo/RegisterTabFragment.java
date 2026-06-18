@@ -236,6 +236,7 @@ public class RegisterTabFragment extends Fragment {
     private String transportFromArgs = null;
     private boolean starting = false;
     private long startingSinceMs = 0L;
+    private volatile boolean cancelInProgress = false;
     private static final int TAB_LOG_MAX_LINES = 400;
     private static final long LOG_REFRESH_MIN_MS = 800;
     private long lastLogRefreshMs = 0L;
@@ -349,7 +350,18 @@ public class RegisterTabFragment extends Fragment {
 
                 // ✅ Retour Field Service quand livraison terminée
                 if (state == DeliveryState.ENDED) {
-                    notifyDeliveryEndedToMainActivity();
+                    if (cancelInProgress) {
+                        // Annulation — ne pas retourner dans FSM
+                        // Remettre l'UI à zéro pour permettre une nouvelle livraison
+                        cancelInProgress = false;
+                        if (txtLive    != null) txtLive.setText("LIVE: CONNECTED — prêt pour nouvelle livraison");
+                        if (txtQtyNet  != null) txtQtyNet.setText("NET: 0.0");
+                        if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
+                        if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : —");
+                        if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : —");
+                    } else {
+                        notifyDeliveryEndedToMainActivity();
+                    }
                 }
             });
         }
@@ -1590,9 +1602,40 @@ public class RegisterTabFragment extends Fragment {
         double grossAtCancel = parseDisplayGross();
         bg.execute(() -> {
             try {
-                // 1. Diagnostic reset silencieux
-                try { c.api_diagnosticReset(); } catch (Exception ignored) {}
-                // 2. Contexte WO
+                // 1. Marquer annulation — empêche retour FSM dans onStateChanged(ENDED)
+                cancelInProgress = true;
+
+                // 2. endDelivery() → registre imprime ticket, passe en PENDING_TICKET
+                try { c.endDelivery(); } catch (Exception ignored) {}
+
+                // 3. Attendre ENDED puis alignOrRecover() pour consommer le ticket pending
+                for (int i = 0; i < 30; i++) {
+                    try { Thread.sleep(200); } catch (Exception ignored) {}
+                    com.pa.lcr.lcp.DeliveryState st = c.getState();
+                    if (st == com.pa.lcr.lcp.DeliveryState.CONNECTED
+                            || st == com.pa.lcr.lcp.DeliveryState.ENDED) break;
+                }
+                // Resolve — consomme le ticket pending → CONNECTED propre
+                try { c.alignOrRecover(); } catch (Exception ignored) {}
+                // Attendre CONNECTED propre (max 5s)
+                for (int i = 0; i < 25; i++) {
+                    try { Thread.sleep(200); } catch (Exception ignored) {}
+                    if (c.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
+                }
+
+                // 4. Lire le ticket UID généré par endDelivery
+                String ticketNo = "";
+                try {
+                    com.pa.lcr.lcp.ApiResult snap = c.api_tickSnapshot();
+                    if (snap != null && snap.data != null) {
+                        ticketNo = snap.data.optString("ticket_no", "");
+                        org.json.JSONObject result = snap.data.optJSONObject("result");
+                        if (result != null && ticketNo.isEmpty())
+                            ticketNo = result.optString("ticket_no", "");
+                    }
+                } catch (Exception ignored) {}
+
+                // 5. Contexte WO depuis ActiveDeliveryStore
                 String woNum = "", woIdGuid = "";
                 try {
                     com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
@@ -1603,12 +1646,13 @@ public class RegisterTabFragment extends Fragment {
                         woIdGuid = ad.woIdGuid != null ? ad.woIdGuid : "";
                     }
                 } catch (Exception ignored) {}
-                // 3. Enregistrer TYPE_ANNULATION dans SQLite
+
+                // 6. Logger TYPE_ANNULATION dans SQLite avec le ticket UID
                 try {
                     android.content.ContentValues cv = new android.content.ContentValues();
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,      woNum);
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID,  woIdGuid);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO,   "");
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO,   ticketNo);
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,       netAtCancel);
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L,     grossAtCancel);
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
@@ -1623,24 +1667,38 @@ public class RegisterTabFragment extends Fragment {
                     payload.put("net_at_cancel",   netAtCancel);
                     payload.put("gross_at_cancel", grossAtCancel);
                     payload.put("cancel_ts",       System.currentTimeMillis());
+                    payload.put("ticket_no",       ticketNo);
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PAYLOAD_JSON, payload.toString());
                     new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext()).insertDelivery(cv);
+                    android.util.Log.i("Annuler", "Annulation loggée wo=" + woNum + " ticket=" + ticketNo);
                 } catch (Exception e) {
                     android.util.Log.w("Annuler", "Insert ERR: " + e.getMessage());
                 }
-                // 4. Effacer ActiveDeliveryStore
+
+                // 7. Effacer ActiveDeliveryStore
                 try { new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext()).clear(); } catch (Exception ignored) {}
-                // 5. UI
+
+                // 8. Retour dans Field Service — chauffeur corrige produit/preset sur le WO
+                cancelInProgress = false;
                 ui.post(() -> {
-                    if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : —");
-                    if (txtTicketNo    != null) txtTicketNo.setText("Ticket Number : —");
-                    if (btnAnnuler     != null) btnAnnuler.setEnabled(true);
-                    android.widget.Toast.makeText(getContext(), "Livraison annulée", android.widget.Toast.LENGTH_LONG).show();
-                    updateButtons(controller != null ? controller.getState() : null);
+                    android.widget.Toast.makeText(getContext(),
+                        "Livraison annulée — retour au bon de livraison",
+                        android.widget.Toast.LENGTH_SHORT).show();
+                    retournerAuWorkOrder();
                 });
+
             } catch (Exception e) {
+                cancelInProgress = false;
                 android.util.Log.e("Annuler", "ERR: " + e.getMessage());
                 ui.post(() -> {
+                    if (btnAnnuler != null) btnAnnuler.setEnabled(true);
+                    android.widget.Toast.makeText(getContext(),
+                        "Erreur annulation: " + e.getMessage(),
+                        android.widget.Toast.LENGTH_SHORT).show();
+                });
+            }
+        });
+    }
                     if (btnAnnuler != null) btnAnnuler.setEnabled(true);
                     android.widget.Toast.makeText(getContext(), "Erreur annulation: " + e.getMessage(), android.widget.Toast.LENGTH_SHORT).show();
                 });
