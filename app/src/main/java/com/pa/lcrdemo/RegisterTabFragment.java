@@ -1,5 +1,24 @@
 package com.pa.lcrdemo;
 
+import com.pa.lcr.lcp.transport.TransportIo;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.hardware.usb.UsbManager;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;package com.pa.lcrdemo;
+
+import com.pa.lcr.lcp.transport.TransportIo;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.hardware.usb.UsbManager;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
@@ -20,7 +39,6 @@ import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-
 
 public class RegisterTabFragment extends Fragment {
 
@@ -48,100 +66,102 @@ public class RegisterTabFragment extends Fragment {
         ui.postDelayed(() -> checkPendingDeliveryForThisRegister(), 600);
     }
 
-    /**
-     * Vérifie si ActiveDeliveryStore a une livraison PENDING pour ce registre.
-     * Si le serial et le node correspondent → pré-remplir le tab automatiquement
-     * et afficher un bouton "Reprendre la livraison" qui renvoie vers FSM deep link.
-     */
     private void checkPendingDeliveryForThisRegister() {
         try {
             android.content.Context ctx = getContext();
             if (ctx == null) return;
-
             com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
                 new com.pa.lcr.lcp.storage.ActiveDeliveryStore(ctx);
             com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad = ads.load();
-
             if (ad == null || !"PENDING".equals(ad.status)) return;
             if (ad.woNum == null || ad.woNum.isEmpty()) return;
 
-            // Vérifier que ce tab correspond bien au registre attendu
+            ui.post(() -> android.widget.Toast.makeText(getContext(),
+                "🔍 Validation du registre en cours...",
+                android.widget.Toast.LENGTH_SHORT).show());
+
             boolean serialMatch = (serialFromArgs != null && !serialFromArgs.isEmpty()
                 && serialFromArgs.trim().equals(ad.serialId != null ? ad.serialId.trim() : ""));
-            boolean nodeMatch   = (node == ad.node);
+            boolean nodeMatch = (node == ad.node);
 
             if (!serialMatch || !nodeMatch) {
                 android.util.Log.w("RegisterTabFragment",
-                    "Livraison PENDING pour serial=" + ad.serialId + "/node=" + ad.node
-                    + " mais ce tab est serial=" + serialFromArgs + "/node=" + node
-                    + " — pré-remplissage ignoré");
+                    "PENDING serial=" + ad.serialId + "/node=" + ad.node
+                    + " != tab serial=" + serialFromArgs + "/node=" + node);
                 return;
             }
 
-            // ✅ Bon registre — pré-remplir le tab
+            com.pa.lcrdemo.DeepLinkHandler.lastResultJson = null;
+            ui.post(() -> connectThisRegister(false));
+
             final com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery fAd = ad;
-            ui.post(() -> {
-                try {
-                    prefillFromDeepLink(
-                        fAd.woNum,
-                        String.valueOf(fAd.produit),
-                        String.valueOf((int) fAd.preset));
-                    showResumeBanner(fAd);
-                    android.util.Log.i("RegisterTabFragment",
-                        "Livraison PENDING détectée — pré-rempli: wo=" + fAd.woNum
-                        + " preset=" + fAd.preset + " produit=" + fAd.produit);
-                } catch (Exception e) {
-                    android.util.Log.w("RegisterTabFragment",
-                        "checkPendingDelivery UI ERR: " + e.getMessage());
-                }
-            });
+            ui.postDelayed(() -> showDeliveryReadyPanel(fAd), 800);
 
         } catch (Exception e) {
             android.util.Log.w("RegisterTabFragment",
-                "checkPendingDeliveryForThisRegister ERR: " + e.getMessage());
+                "checkPendingDelivery ERR: " + e.getMessage());
         }
     }
 
-    /**
-     * Affiche une bannière de reprise avec message et bouton retour FSM.
-     * Force l'attachement du listener UI pour que le live suive.
-     */
-    private void showResumeBanner(com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad) {
+    private void showDeliveryReadyPanel(
+            com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad) {
         try {
-            // ✅ Forcer l'attachement du listener UI pour que le live suive
-            connectThisRegister(false);
-
-            // ✅ Lire le ticket courant depuis l'UI ou le controller
-            String ticketNo = "";
-            try {
-                if (txtTicketNo != null) {
-                    String t = txtTicketNo.getText().toString()
-                        .replace("Ticket Number : ", "").trim();
-                    if (!t.isEmpty() && !t.equals("—")) ticketNo = t;
-                }
-            } catch (Exception ignored) {}
-
-            // ✅ Construire le delivery_uid = woNum-ticketNo
-            final String deliveryUid = ad.woNum
-                + (ticketNo.isEmpty() ? "" : "-" + ticketNo);
-
             if (txtDeliveryUid != null) {
-                txtDeliveryUid.setText("Delivery UID : " + deliveryUid);
+                txtDeliveryUid.setText(
+                    "WO: " + ad.woNum
+                    + "  |  Produit: " + ad.produit
+                    + "  |  Preset: " + (int) ad.preset + " L");
                 txtDeliveryUid.setTextColor(
-                    android.graphics.Color.parseColor("#e6a800"));
+                    android.graphics.Color.parseColor("#15803d"));
             }
-
             if (btnRetourWO != null) {
                 btnRetourWO.setVisibility(android.view.View.VISIBLE);
-                btnRetourWO.setText("↩ Retourner dans Field Service");
+                btnRetourWO.setText("🚀 Lancer la livraison");
+                btnRetourWO.setBackgroundColor(
+                    android.graphics.Color.parseColor("#15803d"));
+                final com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery fAd = ad;
+                btnRetourWO.setOnClickListener(v -> lancerDepuisStore(fAd));
             }
-
             android.widget.Toast.makeText(getContext(),
-                "✅ Registre connecté — retournez dans Field Service pour lancer la livraison",
+                "✅ Registre validé — prêt pour " + ad.woNum,
                 android.widget.Toast.LENGTH_LONG).show();
-
         } catch (Exception e) {
-            android.util.Log.w("RegisterTabFragment", "showResumeBanner ERR: " + e.getMessage());
+            android.util.Log.w("RegisterTabFragment",
+                "showDeliveryReadyPanel ERR: " + e.getMessage());
+        }
+    }
+
+    private void lancerDepuisStore(
+            com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad) {
+        try {
+            if (btnRetourWO != null) {
+                btnRetourWO.setText("Retour au Bon de travail");
+                btnRetourWO.setBackgroundColor(
+                    android.graphics.Color.parseColor("#185FA5"));
+                btnRetourWO.setOnClickListener(v -> retournerAuWorkOrder());
+            }
+            android.net.Uri uri = android.net.Uri.parse(
+                "lcrdemo://livraison"
+                + "?wonum="    + android.net.Uri.encode(ad.woNum)
+                + "&woid="     + android.net.Uri.encode(ad.woIdGuid != null ? ad.woIdGuid : "")
+                + "&btmac="    + android.net.Uri.encode(ad.mac != null ? ad.mac : "")
+                + "&serialid=" + android.net.Uri.encode(ad.serialId != null ? ad.serialId : "")
+                + "&lcrnode="  + ad.node
+                + "&produit="  + ad.produit
+                + "&preset="   + (int) ad.preset
+                + "&orgurl="   + android.net.Uri.encode(
+                    com.pa.lcrdemo.config.LcrConfig.getDataverseUrl(requireContext())));
+            android.content.Intent intent = new android.content.Intent(
+                android.content.Intent.ACTION_VIEW, uri);
+            intent.setPackage(requireContext().getPackageName());
+            android.util.Log.i("RegisterTabFragment", "lancerDepuisStore: " + uri);
+            requireContext().startActivity(intent);
+        } catch (Exception e) {
+            android.util.Log.e("RegisterTabFragment",
+                "lancerDepuisStore ERR: " + e.getMessage());
+            android.widget.Toast.makeText(getContext(),
+                "Erreur lancement: " + e.getMessage(),
+                android.widget.Toast.LENGTH_LONG).show();
         }
     }
     private int node = 250;
@@ -1468,67 +1488,5 @@ public class RegisterTabFragment extends Fragment {
     public int getNodeFromArgs() {
         Bundle a = getArguments();
         return a != null ? a.getInt(ARG_NODE, 250) : 250;
-    }
-
-    private void showDeliveryReadyPanel(
-            com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad) {
-        try {
-            if (txtDeliveryUid != null) {
-                txtDeliveryUid.setText(
-                    "WO: " + ad.woNum
-                    + "  |  Produit: " + ad.produit
-                    + "  |  Preset: " + (int) ad.preset + " L");
-                txtDeliveryUid.setTextColor(
-                    android.graphics.Color.parseColor("#15803d"));
-            }
-            if (btnRetourWO != null) {
-                btnRetourWO.setVisibility(android.view.View.VISIBLE);
-                btnRetourWO.setText("🚀 Lancer la livraison");
-                btnRetourWO.setBackgroundColor(
-                    android.graphics.Color.parseColor("#15803d"));
-                final com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery fAd = ad;
-                btnRetourWO.setOnClickListener(v -> lancerDepuisStore(fAd));
-            }
-            android.widget.Toast.makeText(getContext(),
-                "✅ Registre validé — prêt pour " + ad.woNum,
-                android.widget.Toast.LENGTH_LONG).show();
-        } catch (Exception e) {
-            android.util.Log.w("RegisterTabFragment",
-                "showDeliveryReadyPanel ERR: " + e.getMessage());
-        }
-    }
-
-    private void lancerDepuisStore(
-            com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad) {
-        try {
-            if (btnRetourWO != null) {
-                btnRetourWO.setText("Retour au Bon de travail");
-                btnRetourWO.setBackgroundColor(
-                    android.graphics.Color.parseColor("#185FA5"));
-                btnRetourWO.setOnClickListener(v -> retournerAuWorkOrder());
-            }
-            android.net.Uri uri = android.net.Uri.parse(
-                "lcrdemo://livraison"
-                + "?wonum="    + android.net.Uri.encode(ad.woNum)
-                + "&woid="     + android.net.Uri.encode(ad.woIdGuid != null ? ad.woIdGuid : "")
-                + "&btmac="    + android.net.Uri.encode(ad.mac != null ? ad.mac : "")
-                + "&serialid=" + android.net.Uri.encode(ad.serialId != null ? ad.serialId : "")
-                + "&lcrnode="  + ad.node
-                + "&produit="  + ad.produit
-                + "&preset="   + (int) ad.preset
-                + "&orgurl="   + android.net.Uri.encode(
-                    com.pa.lcrdemo.config.LcrConfig.getDataverseUrl(requireContext())));
-            android.content.Intent intent = new android.content.Intent(
-                android.content.Intent.ACTION_VIEW, uri);
-            intent.setPackage(requireContext().getPackageName());
-            android.util.Log.i("RegisterTabFragment", "lancerDepuisStore: " + uri);
-            requireContext().startActivity(intent);
-        } catch (Exception e) {
-            android.util.Log.e("RegisterTabFragment",
-                "lancerDepuisStore ERR: " + e.getMessage());
-            android.widget.Toast.makeText(getContext(),
-                "Erreur lancement: " + e.getMessage(),
-                android.widget.Toast.LENGTH_LONG).show();
-        }
     }
 }
