@@ -1607,7 +1607,17 @@ public class RegisterTabFragment extends Fragment {
     private void annulerLivraison() {
         DeliveryController c = controller;
         if (c == null) return;
-        if (btnAnnuler != null) btnAnnuler.setEnabled(false);
+        if (btnAnnuler != null) {
+            btnAnnuler.setEnabled(false);
+            btnAnnuler.setText("⏳ Annulation en cours — veuillez patienter");
+        }
+        if (btnConnect  != null) btnConnect.setEnabled(false);
+        if (btnA        != null) btnA.setEnabled(false);
+        if (btnB        != null) btnB.setEnabled(false);
+        if (btnC        != null) btnC.setEnabled(false);
+        if (btnContinue != null) btnContinue.setEnabled(false);
+        if (btnFinish   != null) btnFinish.setEnabled(false);
+        if (btnRetourWO != null) btnRetourWO.setEnabled(false);
         double netAtCancel   = parseDisplayNet();
         double grossAtCancel = parseDisplayGross();
         // ✅ Poser le flag AVANT bg.execute — évite race avec onStateChanged(ENDED)
@@ -1637,6 +1647,8 @@ public class RegisterTabFragment extends Fragment {
                         com.pa.lcr.lcp.transport.MediaTransportManager.get(requireContext())
                             .activateExclusive(tabTransportKey, "ANNULATION_DONE");
                 } catch (Exception ignored) {}
+                // Rafraîchir l'état UI → CONNECTED Ready
+                try { c.requestStatus(); } catch (Exception ignored) {}
 
                 // 4. Lire le ticket UID généré par endDelivery
                 String ticketNo = "";
