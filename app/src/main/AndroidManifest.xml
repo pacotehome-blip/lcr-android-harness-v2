@@ -60,6 +60,7 @@
             android:exported="true"
             android:launchMode="singleTask"
             android:taskAffinity="com.microsoft.crm.crmphone.fieldServices"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout"
             android:resizeableActivity="true">
             <!-- Launcher normal -->
             <intent-filter>

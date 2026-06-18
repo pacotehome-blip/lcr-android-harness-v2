@@ -282,6 +282,19 @@
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
+        <!-- ===================== ANNULER LIVRAISON ===================== -->
+        <Button
+            android:id="@+id/btnAnnuler"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:layout_marginBottom="2dp"
+            android:text="⛔ Annuler la livraison"
+            android:textColor="#FFFFFF"
+            android:backgroundTint="#CC2222"
+            android:textStyle="bold"
+            android:visibility="gone" />
+
         <!-- ===================== LIVE + NET/GROSS (Card) ===================== -->
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"

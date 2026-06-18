@@ -616,6 +616,17 @@ public class MainActivity extends AppCompatActivity {
         super.onDestroy();
     }
 
+    @Override
+    public void onConfigurationChanged(@androidx.annotation.NonNull android.content.res.Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        // ✅ Rotation tablette — ne pas recréer les fragments/tabs
+        // Le manifest a configChanges="orientation|screenSize|keyboardHidden|screenLayout"
+        // donc Android appelle ici au lieu de recréer l'activité
+        // Rien à faire — les fragments gèrent leur propre état
+        android.util.Log.i("MainActivity",
+            "onConfigurationChanged: orientation=" + newConfig.orientation + " — tabs conservés");
+    }
+
     // ✅ Deep Link lcrdemo:// — appelé quand Field Service Mobile lance l'APK
     // Exemples:
     //   lcrdemo://livraison?idWorkOrder=123&serialId=16466294&lcrnode=250
