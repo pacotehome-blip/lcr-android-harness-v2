@@ -9,6 +9,7 @@ import android.hardware.usb.UsbManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
@@ -18,10 +19,13 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.core.widget.NestedScrollView;
 import androidx.fragment.app.Fragment;
+
 import com.pa.lcr.lcp.*;
 import com.pa.lcr.lcp.log.LogBus;
 import com.pa.lcr.lcp.transport.MediaTransportManager;
+
 import org.json.JSONObject;
+
 import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
@@ -700,8 +704,7 @@ public class RegisterTabFragment extends Fragment {
         if (btnA != null) btnA.setOnClickListener(v -> {
             if (controller == null) return;
             // ✅ Confirmation si RUNNING_FLOWING
-            DeliveryState stA = controller.getState();
-            if (stA == DeliveryState.RUNNING_FLOWING) {
+            if (controller.getState() == DeliveryState.RUNNING_FLOWING) {
                 new android.app.AlertDialog.Builder(requireContext())
                     .setTitle("⚠️ Resolve pendant livraison")
                     .setMessage("Une livraison est en cours.\nÊtes-vous sûr de vouloir résoudre l'état du registre ?")
@@ -716,14 +719,9 @@ public class RegisterTabFragment extends Fragment {
         // ✅ Bouton Annuler livraison
         if (btnAnnuler != null) {
             btnAnnuler.setOnClickListener(v -> {
-                double net   = parseDisplayNet();
-                double gross = parseDisplayGross();
-                String msg = (net == 0.0 && gross == 0.0)
-                    ? "Aucun volume livré. La livraison sera annulée et le registre réinitialisé."
-                    : "⚠️ Volume détecté (NET=" + net + "L / GROSS=" + gross + "L).\nVoulez-vous quand même annuler ?";
                 new android.app.AlertDialog.Builder(requireContext())
                     .setTitle("Confirmer l'annulation")
-                    .setMessage(msg)
+                    .setMessage("Aucun volume livré. La livraison sera annulée et le registre réinitialisé.")
                     .setPositiveButton("Annuler la livraison", (d, w) -> annulerLivraison())
                     .setNegativeButton("Continuer", null)
                     .show();
@@ -1134,27 +1132,31 @@ public class RegisterTabFragment extends Fragment {
             btnCustomPrint.setEnabled(connected || paused || ending);
         }
 
-        // ✅ Bouton Annuler — visible si RUNNING_FLOWING et net/gross == 0
-        // ou si CONNECTED avant démarrage (preset armé mais pas encore de flow)
+        // ✅ Bouton Annuler — visible si CONNECTED ou RUNNING_FLOWING
+        // Désactivé si volume détecté pendant le flow
         if (btnAnnuler != null) {
             double net   = parseDisplayNet();
             double gross = parseDisplayGross();
-            boolean canCancel = (connected || flowing) && !starting;
             boolean flowStarted = (net > 0.0 || gross > 0.0);
-            // Visible toujours si canCancel, mais texte différent
-            btnAnnuler.setVisibility(canCancel ? android.view.View.VISIBLE : android.view.View.GONE);
-            btnAnnuler.setEnabled(canCancel);
-            if (flowing && flowStarted) {
-                // Flow démarré — annulation possible mais avertissement fort
-                btnAnnuler.setText("⛔ Annuler (volume détecté)");
-                btnAnnuler.setBackgroundTintList(
-                    android.content.res.ColorStateList.valueOf(
-                        android.graphics.Color.parseColor("#FF8800")));
+            boolean canCancel = (connected || flowing) && !starting;
+            if (canCancel) {
+                btnAnnuler.setVisibility(android.view.View.VISIBLE);
+                if (flowing && flowStarted) {
+                    // Volume détecté — impossible d'annuler
+                    btnAnnuler.setText("⛔ Impossible d'annuler — terminez la livraison");
+                    btnAnnuler.setEnabled(false);
+                    btnAnnuler.setBackgroundTintList(
+                        android.content.res.ColorStateList.valueOf(
+                            android.graphics.Color.parseColor("#888888")));
+                } else {
+                    btnAnnuler.setText("⛔ Annuler la livraison");
+                    btnAnnuler.setEnabled(true);
+                    btnAnnuler.setBackgroundTintList(
+                        android.content.res.ColorStateList.valueOf(
+                            android.graphics.Color.parseColor("#CC2222")));
+                }
             } else {
-                btnAnnuler.setText("⛔ Annuler la livraison");
-                btnAnnuler.setBackgroundTintList(
-                    android.content.res.ColorStateList.valueOf(
-                        android.graphics.Color.parseColor("#CC2222")));
+                btnAnnuler.setVisibility(android.view.View.GONE);
             }
         }
 
@@ -1167,9 +1169,7 @@ public class RegisterTabFragment extends Fragment {
                     txtTicketNo.getText().toString().replace("Ticket Number : ", "").trim() : "";
                 hasDeliveryData = !ticket.isEmpty() && !ticket.equals("—");
             } catch (Exception ignored) {}
-
             if (connected && hasDeliveryData) {
-                // ✅ Livraison terminée — bouton retour au bon de livraison
                 btnRetourWO.setVisibility(android.view.View.VISIBLE);
                 btnRetourWO.setText("Retour au Bon de livraison");
                 btnRetourWO.setBackgroundColor(android.graphics.Color.parseColor("#185FA5"));
@@ -1563,7 +1563,7 @@ public class RegisterTabFragment extends Fragment {
         return a != null ? a.getInt(ARG_NODE, 250) : 250;
     }
 
-    // ── Resolve (btnA) ───────────────────────────────────────────────────
+    // ── Resolve (btnA) ───────────────────────────────────────────────────────────────
     private void doResolve() {
         if (controller == null) return;
         controller.alignOrRecover();
@@ -1581,23 +1581,19 @@ public class RegisterTabFragment extends Fragment {
         }, 900);
     }
 
-    // ── Annuler livraison ────────────────────────────────────────────────
+    // ── Annuler livraison ─────────────────────────────────────────────────────────────
     private void annulerLivraison() {
         DeliveryController c = controller;
         if (c == null) return;
         if (btnAnnuler != null) btnAnnuler.setEnabled(false);
-
         double netAtCancel   = parseDisplayNet();
         double grossAtCancel = parseDisplayGross();
-
         bg.execute(() -> {
             try {
-                // 1. Diagnostic reset silencieux (sans impression)
+                // 1. Diagnostic reset silencieux
                 try { c.api_diagnosticReset(); } catch (Exception ignored) {}
-
-                // 2. Récupérer contexte WO
-                String woNum    = "";
-                String woIdGuid = "";
+                // 2. Contexte WO
+                String woNum = "", woIdGuid = "";
                 try {
                     com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
                         new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
@@ -1607,8 +1603,7 @@ public class RegisterTabFragment extends Fragment {
                         woIdGuid = ad.woIdGuid != null ? ad.woIdGuid : "";
                     }
                 } catch (Exception ignored) {}
-
-                // 3. Enregistrer événement CANCELLED dans SQLite
+                // 3. Enregistrer TYPE_ANNULATION dans SQLite
                 try {
                     android.content.ContentValues cv = new android.content.ContentValues();
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,      woNum);
@@ -1622,49 +1617,32 @@ public class RegisterTabFragment extends Fragment {
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE,   "ANNULATION");
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
                         com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
-                    // Payload annulation
                     org.json.JSONObject payload = new org.json.JSONObject();
-                    payload.put("cancelled",        true);
-                    payload.put("cancel_reason",    "operator_cancel");
-                    payload.put("net_at_cancel",    netAtCancel);
-                    payload.put("gross_at_cancel",  grossAtCancel);
-                    payload.put("cancel_ts",        System.currentTimeMillis());
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PAYLOAD_JSON,
-                        payload.toString());
-
-                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext())
-                        .insertDelivery(cv);
-                    android.util.Log.i("Annuler",
-                        "Annulation enregistrée wo=" + woNum
-                        + " net=" + netAtCancel + " gross=" + grossAtCancel);
+                    payload.put("cancelled",       true);
+                    payload.put("cancel_reason",   "operator_cancel");
+                    payload.put("net_at_cancel",   netAtCancel);
+                    payload.put("gross_at_cancel", grossAtCancel);
+                    payload.put("cancel_ts",       System.currentTimeMillis());
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PAYLOAD_JSON, payload.toString());
+                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext()).insertDelivery(cv);
                 } catch (Exception e) {
                     android.util.Log.w("Annuler", "Insert ERR: " + e.getMessage());
                 }
-
                 // 4. Effacer ActiveDeliveryStore
-                try {
-                    new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext()).clear();
-                } catch (Exception ignored) {}
-
-                // 5. UI — remettre à zéro
+                try { new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext()).clear(); } catch (Exception ignored) {}
+                // 5. UI
                 ui.post(() -> {
                     if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : —");
                     if (txtTicketNo    != null) txtTicketNo.setText("Ticket Number : —");
                     if (btnAnnuler     != null) btnAnnuler.setEnabled(true);
-                    android.widget.Toast.makeText(getContext(),
-                        "Livraison annulée" + (netAtCancel > 0
-                            ? " (NET=" + netAtCancel + "L enregistré)" : ""),
-                        android.widget.Toast.LENGTH_LONG).show();
+                    android.widget.Toast.makeText(getContext(), "Livraison annulée", android.widget.Toast.LENGTH_LONG).show();
                     updateButtons(controller != null ? controller.getState() : null);
                 });
-
             } catch (Exception e) {
                 android.util.Log.e("Annuler", "ERR: " + e.getMessage());
                 ui.post(() -> {
                     if (btnAnnuler != null) btnAnnuler.setEnabled(true);
-                    android.widget.Toast.makeText(getContext(),
-                        "Erreur annulation: " + e.getMessage(),
-                        android.widget.Toast.LENGTH_SHORT).show();
+                    android.widget.Toast.makeText(getContext(), "Erreur annulation: " + e.getMessage(), android.widget.Toast.LENGTH_SHORT).show();
                 });
             }
         });
@@ -1673,16 +1651,14 @@ public class RegisterTabFragment extends Fragment {
     private double parseDisplayNet() {
         try {
             if (txtQtyNet == null) return 0.0;
-            String s = txtQtyNet.getText().toString().replace("NET: ", "").trim();
-            return Double.parseDouble(s);
+            return Double.parseDouble(txtQtyNet.getText().toString().replace("NET: ", "").trim());
         } catch (Exception e) { return 0.0; }
     }
 
     private double parseDisplayGross() {
         try {
             if (txtQtyGross == null) return 0.0;
-            String s = txtQtyGross.getText().toString().replace("GROSS: ", "").trim();
-            return Double.parseDouble(s);
+            return Double.parseDouble(txtQtyGross.getText().toString().replace("GROSS: ", "").trim());
         } catch (Exception e) { return 0.0; }
     }
 }
