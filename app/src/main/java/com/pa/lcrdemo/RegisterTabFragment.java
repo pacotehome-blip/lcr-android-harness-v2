@@ -1134,27 +1134,33 @@ public class RegisterTabFragment extends Fragment {
             btnCustomPrint.setEnabled(connected || paused || ending);
         }
 
-        // ✅ Bouton Annuler — visible si RUNNING_FLOWING et net/gross == 0
-        // ou si CONNECTED avant démarrage (preset armé mais pas encore de flow)
+        // ✅ Bouton Annuler — visible si CONNECTED ou RUNNING_FLOWING
+        // Bloqué si flow actif ET volume détecté
         if (btnAnnuler != null) {
             double net   = parseDisplayNet();
             double gross = parseDisplayGross();
-            boolean canCancel = (connected || flowing) && !starting;
             boolean flowStarted = (net > 0.0 || gross > 0.0);
-            // Visible toujours si canCancel, mais texte différent
-            btnAnnuler.setVisibility(canCancel ? android.view.View.VISIBLE : android.view.View.GONE);
-            btnAnnuler.setEnabled(canCancel);
-            if (flowing && flowStarted) {
-                // Flow démarré — annulation possible mais avertissement fort
-                btnAnnuler.setText("⛔ Annuler (volume détecté)");
-                btnAnnuler.setBackgroundTintList(
-                    android.content.res.ColorStateList.valueOf(
-                        android.graphics.Color.parseColor("#FF8800")));
+            boolean canCancel = (connected || flowing) && !starting;
+
+            if (canCancel) {
+                btnAnnuler.setVisibility(android.view.View.VISIBLE);
+                if (flowing && flowStarted) {
+                    // ❌ Impossible d'annuler — volume livré
+                    btnAnnuler.setText("⛔ Impossible d'annuler — terminez la livraison");
+                    btnAnnuler.setEnabled(false);
+                    btnAnnuler.setBackgroundTintList(
+                        android.content.res.ColorStateList.valueOf(
+                            android.graphics.Color.parseColor("#888888")));
+                } else {
+                    // ✅ Annulation possible
+                    btnAnnuler.setText("⛔ Annuler la livraison");
+                    btnAnnuler.setEnabled(true);
+                    btnAnnuler.setBackgroundTintList(
+                        android.content.res.ColorStateList.valueOf(
+                            android.graphics.Color.parseColor("#CC2222")));
+                }
             } else {
-                btnAnnuler.setText("⛔ Annuler la livraison");
-                btnAnnuler.setBackgroundTintList(
-                    android.content.res.ColorStateList.valueOf(
-                        android.graphics.Color.parseColor("#CC2222")));
+                btnAnnuler.setVisibility(android.view.View.GONE);
             }
         }
 
