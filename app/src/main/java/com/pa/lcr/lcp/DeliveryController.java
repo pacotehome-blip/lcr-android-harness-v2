@@ -1688,7 +1688,19 @@ softResync("retry/" + step);
         int digits = cachedDigits;
         if (digits < 0) digits = 1;
         int scale = (int) Math.pow(10, digits);
-        int value = (int) Math.round(preset * scale);
+
+        final int value;
+        if (preset <= 0.0) {
+            // ✅ preset = 0 → plein complet
+            // Envoyer valeur max (0x7FFFFFFF) → LCR-II ne s'arrête pas automatiquement
+            // Le chauffeur arrête la pompe manuellement, CMD_END termine la livraison
+            value = 0x7FFFFFFF;
+            android.util.Log.i(TAG, "writePresetNet: preset=0 → PLEIN COMPLET (max=0x7FFFFFFF)");
+        } else {
+            value = (int) Math.round(preset * scale);
+            android.util.Log.i(TAG, "writePresetNet: preset=" + preset + "L → value=" + value);
+        }
+
         byte[] buf = new byte[] {
                 (byte) (value >> 24),
                 (byte) (value >> 16),
@@ -2439,10 +2451,11 @@ try {
             writePresetNet_WithCacheOrFallback(presetNetL);
 
             long presetRawU = beI32(lcpGetField(FIELD_PRESET_NET)) & 0xFFFFFFFFL;
-            double presetApplied = presetRawU / scale;
+            double presetApplied = presetNetL <= 0.0 ? 0.0 : (presetRawU / scale);
             double tol = 1.0 / scale;
 
-            if (Math.abs(presetApplied - presetNetL) > (tol * 1.5)) {
+            // ✅ Si preset=0 (plein complet) — skip vérification mismatch
+            if (presetNetL > 0.0 && Math.abs(presetApplied - presetNetL) > (tol * 1.5)) {
                 JSONObject d = new JSONObject();
                 safeJsonPut(d, "preset_requested", presetNetL);
                 safeJsonPut(d, "preset_applied", presetApplied);
