@@ -1622,6 +1622,12 @@ public class RegisterTabFragment extends Fragment {
                     try { Thread.sleep(200); } catch (Exception ignored) {}
                     if (c.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
                 }
+                // Reconnecter le transport si nécessaire
+                try {
+                    if (tabTransportKey != null)
+                        com.pa.lcr.lcp.transport.MediaTransportManager.get(requireContext())
+                            .activateExclusive(tabTransportKey, "ANNULATION_DONE");
+                } catch (Exception ignored) {}
 
                 // 4. Lire le ticket UID généré par endDelivery
                 String ticketNo = "";
@@ -1678,13 +1684,17 @@ public class RegisterTabFragment extends Fragment {
                 // 7. Effacer ActiveDeliveryStore
                 try { new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext()).clear(); } catch (Exception ignored) {}
 
-                // 8. Retour dans Field Service — chauffeur corrige produit/preset sur le WO
+                // 8. Retour dans Field Service — finish() direct, pas de api_tickSnapshot supplémentaire
                 cancelInProgress = false;
                 ui.post(() -> {
                     android.widget.Toast.makeText(getContext(),
                         "Livraison annulée — retour au bon de livraison",
                         android.widget.Toast.LENGTH_SHORT).show();
-                    retournerAuWorkOrder();
+                    try {
+                        if (getActivity() != null) getActivity().finish();
+                    } catch (Exception e) {
+                        android.util.Log.e("Annuler", "finish() ERR: " + e.getMessage());
+                    }
                 });
 
             } catch (Exception e) {
