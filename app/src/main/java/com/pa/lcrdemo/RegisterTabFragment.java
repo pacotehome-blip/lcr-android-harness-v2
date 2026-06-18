@@ -1627,16 +1627,19 @@ public class RegisterTabFragment extends Fragment {
                 // 1. Terminer la livraison quel que soit l'état (FLOWING ou PAUSED)
                 try { c.forceEnd(); } catch (Exception ignored) {}
 
-                // 3. Attendre CONNECTED (max 6s)
-                for (int i = 0; i < 30; i++) {
+                // 2. Attendre que le registre quitte l'état de livraison (max 8s)
+                for (int i = 0; i < 40; i++) {
                     try { Thread.sleep(200); } catch (Exception ignored) {}
                     com.pa.lcr.lcp.DeliveryState st = c.getState();
                     if (st == com.pa.lcr.lcp.DeliveryState.CONNECTED
                             || st == com.pa.lcr.lcp.DeliveryState.ENDED) break;
                 }
-                // Resolve — consomme le ticket pending → CONNECTED propre
-                try { c.alignOrRecover(); } catch (Exception ignored) {}
-                // Attendre CONNECTED propre (max 5s)
+
+                // 3. Resolve synchrone — consomme le ticket pending → CONNECTED propre
+                // api_deliveryAlignA() est synchrone contrairement à alignOrRecover()
+                try { c.api_deliveryAlignA(); } catch (Exception ignored) {}
+
+                // 4. Attendre CONNECTED propre (max 5s)
                 for (int i = 0; i < 25; i++) {
                     try { Thread.sleep(200); } catch (Exception ignored) {}
                     if (c.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
