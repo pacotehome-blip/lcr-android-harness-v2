@@ -66,6 +66,14 @@ public class RegisterTabFragment extends Fragment {
             android.content.Context ctx = getContext();
             if (ctx == null) return;
 
+            // ✅ Si le controller est déjà en livraison — ne pas interférer
+            if (controller != null) {
+                com.pa.lcr.lcp.DeliveryState st = controller.getState();
+                if (st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
+                        || st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED
+                        || st == com.pa.lcr.lcp.DeliveryState.ENDING) return;
+            }
+
             com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
                 new com.pa.lcr.lcp.storage.ActiveDeliveryStore(ctx);
             com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad = ads.load();
@@ -1181,13 +1189,16 @@ public class RegisterTabFragment extends Fragment {
         }
 
         // ✅ RETOUR WO: visible seulement quand livraison terminée (CONNECTED post-livraison)
-        // et qu'on a des données de livraison (ticket non vide)
+        // et qu'on a des données de livraison (ticket non vide + WO actif)
         if (btnRetourWO != null) {
             boolean hasDeliveryData = false;
             try {
                 String ticket = txtTicketNo != null ?
                     txtTicketNo.getText().toString().replace("Ticket Number : ", "").trim() : "";
-                hasDeliveryData = !ticket.isEmpty() && !ticket.equals("—");
+                String uid = txtDeliveryUid != null ?
+                    txtDeliveryUid.getText().toString().replace("Delivery UID : ", "").trim() : "";
+                hasDeliveryData = !ticket.isEmpty() && !ticket.equals("—")
+                    && !uid.isEmpty() && !uid.equals("—");
             } catch (Exception ignored) {}
             if (connected && hasDeliveryData) {
                 btnRetourWO.setVisibility(android.view.View.VISIBLE);
@@ -1692,16 +1703,30 @@ public class RegisterTabFragment extends Fragment {
                 // 7. Effacer ActiveDeliveryStore
                 try { new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext()).clear(); } catch (Exception ignored) {}
 
-                // 8. Retour dans Field Service — finish() direct, pas de api_tickSnapshot supplémentaire
+                // 8. Retour dans Field Service via onDeliveryEnded → navigue vers le bon WO
                 cancelInProgress = false;
+                final String fWoNum    = woNum;
+                final String fWoIdGuid = woIdGuid;
+                final String fTicketNo = ticketNo;
                 ui.post(() -> {
                     android.widget.Toast.makeText(getContext(),
                         "Livraison annulée — retour au bon de livraison",
                         android.widget.Toast.LENGTH_SHORT).show();
                     try {
-                        if (getActivity() != null) getActivity().finish();
+                        if (getActivity() instanceof MainActivity) {
+                            org.json.JSONObject extra = new org.json.JSONObject();
+                            extra.put("cancelled",     true);
+                            extra.put("ticket_no",     fTicketNo);
+                            extra.put("net_at_cancel", netAtCancel);
+                            extra.put("status",        "annulation");
+                            ((MainActivity) getActivity()).onDeliveryEnded(
+                                fWoNum, fWoIdGuid, extra.toString());
+                        } else {
+                            if (getActivity() != null) getActivity().finish();
+                        }
                     } catch (Exception e) {
-                        android.util.Log.e("Annuler", "finish() ERR: " + e.getMessage());
+                        android.util.Log.e("Annuler", "retour ERR: " + e.getMessage());
+                        if (getActivity() != null) getActivity().finish();
                     }
                 });
 
