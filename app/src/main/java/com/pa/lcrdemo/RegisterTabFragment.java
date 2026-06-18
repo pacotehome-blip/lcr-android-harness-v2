@@ -1699,12 +1699,6 @@ public class RegisterTabFragment extends Fragment {
             }
         });
     }
-                    if (btnAnnuler != null) btnAnnuler.setEnabled(true);
-                    android.widget.Toast.makeText(getContext(), "Erreur annulation: " + e.getMessage(), android.widget.Toast.LENGTH_SHORT).show();
-                });
-            }
-        });
-    }
 
     private double parseDisplayNet() {
         try {
