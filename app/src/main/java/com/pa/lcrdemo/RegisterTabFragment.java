@@ -78,7 +78,17 @@ public class RegisterTabFragment extends Fragment {
                 new com.pa.lcr.lcp.storage.ActiveDeliveryStore(ctx);
             com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad = ads.load();
 
-            if (ad == null || !"PENDING".equals(ad.status)) return;
+            if (ad == null || ("PENDING".equals(ad.status) == false && "CANCELLED".equals(ad.status) == false)) return;
+
+            // ✅ Si CANCELLED — remettre net/gross à zéro (nouvelle livraison à venir)
+            if ("CANCELLED".equals(ad.status)) {
+                ui.post(() -> {
+                    if (txtQtyNet   != null) txtQtyNet.setText("NET: 0.0");
+                    if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
+                });
+                return;
+            }
+
             if (ad.woNum == null || ad.woNum.isEmpty()) return;
 
             // Toast "Validation en cours..."
@@ -1619,12 +1629,11 @@ public class RegisterTabFragment extends Fragment {
         if (btnAnnuler != null) btnAnnuler.setEnabled(false);
         double netAtCancel   = parseDisplayNet();
         double grossAtCancel = parseDisplayGross();
+        // ✅ Poser le flag AVANT bg.execute — évite race avec onStateChanged(ENDED)
+        cancelInProgress = true;
         bg.execute(() -> {
             try {
-                // 1. Marquer annulation — empêche retour FSM dans onStateChanged(ENDED)
-                cancelInProgress = true;
-
-                // 2. endDelivery() → registre imprime ticket, passe en PENDING_TICKET
+                // 1. endDelivery() → registre imprime ticket, passe en PENDING_TICKET
                 try { c.endDelivery(); } catch (Exception ignored) {}
 
                 // 3. Attendre ENDED puis alignOrRecover() pour consommer le ticket pending
