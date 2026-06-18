@@ -1126,7 +1126,6 @@ try {
         });
     }
 
-    @Override
     /**
      * Termine la livraison quel que soit l'état courant (RUNNING_FLOWING ou RUNNING_PAUSED).
      * Utilisé uniquement par le flux d'annulation opérateur.
