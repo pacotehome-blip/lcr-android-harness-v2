@@ -1818,6 +1818,26 @@ public class RegisterTabFragment extends Fragment {
 
                 // 8. Rester dans l'APK — remettre l'UI à zéro
                 cancelInProgress = false;
+
+                // ✅ Boucle de confirmation — réessaie jusqu'à ce que le bit ticket
+                // pending soit vraiment retombé (max 5s), au lieu d'un délai fixe
+                // qui pouvait être insuffisant et laisser btnC grisé à tort
+                try {
+                    DeliveryController cRefresh = controller;
+                    if (cRefresh != null) {
+                        for (int i = 0; i < 17; i++) {
+                            try { Thread.sleep(300); } catch (Exception ignored) {}
+                            com.pa.lcr.lcp.ApiResult snapRefresh = cRefresh.api_tickSnapshot();
+                            if (snapRefresh != null && snapRefresh.data != null) {
+                                int dcRefresh = snapRefresh.data.optInt("delCode", lastDelCode);
+                                lastDelCode = dcRefresh;
+                                boolean tpStill = (dcRefresh & 0x0001) != 0;
+                                if (!tpStill) break;
+                            }
+                        }
+                    }
+                } catch (Exception ignored) {}
+
                 ui.post(() -> {
                     if (txtQtyNet   != null) txtQtyNet.setText("NET: 0.0");
                     if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");

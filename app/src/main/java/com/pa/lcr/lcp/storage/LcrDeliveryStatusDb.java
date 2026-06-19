@@ -472,6 +472,28 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     }
 
     /**
+     * Retourne TOUTES les transactions pour un WO donné (toutes les livraisons,
+     * annulations incluses), triées chronologiquement. Utilisé par retournerAuWorkOrder()
+     * pour envoyer l'historique complet du WO dans un seul payload — le cumul logique
+     * (somme net/gross excluant les annulations) reste à faire côté Dataverse/FieldService.
+     */
+    public List<DeliveryRow> getAllForWo(String woNum) {
+        List<DeliveryRow> list = new ArrayList<>();
+        try (Cursor c = getReadableDatabase().query(
+                TABLE_DELIVERY, null,
+                COL_WO_NUM + "=?", new String[]{woNum},
+                null, null,
+                COL_TRANSACTION_NO + " ASC")) {
+            while (c.moveToNext()) {
+                list.add(DeliveryRow.fromCursor(c));
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "getAllForWo ERR: " + e.getMessage());
+        }
+        return list;
+    }
+
+    /**
      * Retourne toutes les transactions d'une tournée.
      */
     public List<DeliveryRow> getDeliveriesForTournee(String tourneeId) {

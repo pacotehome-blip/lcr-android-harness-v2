@@ -1583,6 +1583,9 @@ public class DeepLinkHandler {
             return;
         }
 
+        // ✅ Payload riche complet (lastResultJson) — capturé tel quel pour COL_PAYLOAD_JSON
+        String richPayloadJson = (lastResultJson != null) ? lastResultJson : "{}";
+
         String deliveryUid = "";
         try {
             if (lastResultJson != null) {
@@ -1598,6 +1601,33 @@ public class DeepLinkHandler {
         final String fDeliveryUid = deliveryUid.isEmpty()
             ? woNum + "-" + System.currentTimeMillis()
             : deliveryUid;
+
+        // ✅ Insérer UNE NOUVELLE LIGNE dans lcr_delivery_status (jamais d'écrasement)
+        // avec le payload riche complet — une ligne par livraison, peu importe le WO
+        try {
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
+                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
+            android.content.ContentValues cv = new android.content.ContentValues();
+            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,      woNum);
+            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID,
+                woGuid.replace("{", "").replace("}", ""));
+            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO,   ticket != null ? ticket : "");
+            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,       netVal);
+            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L,
+                gross != null ? Double.parseDouble(gross) : 0);
+            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
+                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
+            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,      "REGISTRE");
+            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE,   "LIVRAISON");
+            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
+                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
+            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PAYLOAD_JSON, richPayloadJson);
+            long localId = lcrDb.insertDelivery(cv);
+            android.util.Log.i(TAG, "patchDataverse: ligne ajoutée localId=" + localId
+                + " wo=" + woNum + " net=" + netVal);
+        } catch (Exception e) {
+            android.util.Log.e(TAG, "patchDataverse: insert lcr_delivery_status ERR: " + e.getMessage());
+        }
 
         try {
             DeliveryResultQueueDb queueDb = new DeliveryResultQueueDb(activity);
@@ -1625,11 +1655,31 @@ public class DeepLinkHandler {
                     public void onSuccess(String accessToken) {
                         btExec.execute(() -> {
                             try {
-                                WorkOrderUpdater.patchSummary(
-                                    accessToken, woGuid,
-                                    net, gross, ticket,
-                                    woNum, fDeliveryUid);
-                                android.util.Log.i(TAG, "patchDataverse MSAL: OK — wonum=" + woNum);
+                                // ✅ Construire le payload consolidé — TOUTES les livraisons
+                                // de ce WO, peu importe combien (livraisons + annulations)
+                                org.json.JSONArray allDeliveries = new org.json.JSONArray();
+                                try {
+                                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb2 =
+                                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
+                                    java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> rows =
+                                        lcrDb2.getAllForWo(woNum);
+                                    for (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow row : rows) {
+                                        JSONObject rowJson = new JSONObject();
+                                        rowJson.put("ticket_no", row.ticketNo != null ? row.ticketNo : "");
+                                        rowJson.put("net_l",     row.netL);
+                                        rowJson.put("gross_l",   row.grossL);
+                                        rowJson.put("type",      row.type != null ? row.type : "ORIGINAL");
+                                        rowJson.put("ts",        row.tsCreatedMs);
+                                        allDeliveries.put(rowJson);
+                                    }
+                                } catch (Exception exRows) {
+                                    android.util.Log.w(TAG, "getAllForWo ERR: " + exRows.getMessage());
+                                }
+
+                                WorkOrderUpdater.patchSummaryConsolidated(
+                                    accessToken, woGuid, woNum, allDeliveries);
+                                android.util.Log.i(TAG, "patchDataverse MSAL: OK (consolidé "
+                                    + allDeliveries.length() + " livraisons) — wonum=" + woNum);
                                 try {
                                     DeliveryResultQueueDb qdb = new DeliveryResultQueueDb(activity);
                                     java.util.List<DeliveryResultQueueDb.QueueItem> items =
