@@ -618,6 +618,19 @@ public class RegisterTabFragment extends Fragment {
             double net      = 0.0;
             double gross    = 0.0;
             String woNum    = "";
+            String woIdGuid = "";
+
+            // ✅ Source fiable pour woNum/woIdGuid — ActiveDeliveryStore plutôt
+            // que de parser txtDeliveryUid (fragile, parfois vide/non rempli)
+            try {
+                com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
+                    new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
+                com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad = ads.load();
+                if (ad != null) {
+                    if (ad.woNum    != null) woNum    = ad.woNum;
+                    if (ad.woIdGuid != null) woIdGuid = ad.woIdGuid;
+                }
+            } catch (Exception ignored) {}
 
             try {
                 if (txtTicketNo != null)
@@ -631,9 +644,6 @@ public class RegisterTabFragment extends Fragment {
                     gross = Double.parseDouble(
                         txtQtyGross.getText().toString()
                                    .replace("GROSS: ", "").trim());
-                if (txtDeliveryUid != null)
-                    woNum = txtDeliveryUid.getText().toString()
-                                .replace("Delivery UID : ", "").trim();
             } catch (Exception ignored) {}
 
             org.json.JSONObject extra = new org.json.JSONObject();
@@ -652,7 +662,7 @@ public class RegisterTabFragment extends Fragment {
                 extra.put("grossL",   gross);
             } catch (Exception ignored) {}
 
-            main.onDeliveryEnded(woNum, extra.toString());
+            main.onDeliveryEnded(woNum, woIdGuid, extra.toString());
 
         } catch (Exception ignored) {}
     }
@@ -1686,6 +1696,57 @@ public class RegisterTabFragment extends Fragment {
             refreshDelCodeFromTickSnapshotThrottled();
             updateButtons(controller != null ? controller.getState() : null);
         }, 1200);
+
+        // ✅ Surveiller la fin de cette livraison (bouton C) — le DeliveryController
+        // ne passe jamais à l'état ENDED automatiquement, donc rien ne déclenchait
+        // patchDataverse() pour les livraisons démarrées hors flux FSM. On poll le
+        // delCode jusqu'à confirmer la fin (deliveryActive retombe, pas d'annulation
+        // en cours), puis on notifie MainActivity comme le ferait le flux normal.
+        bg.execute(() -> {
+            DeliveryController cWatch = controller;
+            if (cWatch == null) return;
+            boolean wasActive = false;
+            for (int i = 0; i < 1200; i++) { // jusqu'à 10 min (500ms x 1200)
+                try { Thread.sleep(500); } catch (Exception ignored) { return; }
+                if (cancelInProgress) return; // annulation gère son propre flux
+                DeliveryController cNow = controller;
+                if (cNow == null || cNow != cWatch) return; // controller changé/détruit
+                try {
+                    com.pa.lcr.lcp.ApiResult snap = cWatch.api_tickSnapshot();
+                    if (snap == null || snap.data == null) continue;
+                    int dcWatch = snap.data.optInt("delCode", 0);
+                    boolean activeNow = (dcWatch & 0x0008) != 0; // DC_DELIVERY_ACTIVE
+                    if (activeNow) { wasActive = true; continue; }
+                    if (wasActive && !activeNow) {
+                        // Livraison terminée (preset atteint, deliveryActive retombé)
+                        double netWatch   = snap.data.optDouble("net", 0);
+                        double grossWatch = snap.data.optDouble("gross", 0);
+                        if (netWatch <= 0 && grossWatch <= 0) return; // pas de volume — pas une vraie fin
+
+                        // ✅ Attendre la résorption du ticket pending (impression)
+                        // avant de notifier — sinon btnC reste grisé jusqu'au Status manuel
+                        for (int j = 0; j < 17; j++) {
+                            try { Thread.sleep(300); } catch (Exception ignored) {}
+                            com.pa.lcr.lcp.ApiResult snap2 = cWatch.api_tickSnapshot();
+                            if (snap2 == null || snap2.data == null) continue;
+                            int dc2 = snap2.data.optInt("delCode", dcWatch);
+                            lastDelCode = dc2;
+                            boolean tpStillWatch = (dc2 & 0x0001) != 0;
+                            if (!tpStillWatch) break;
+                        }
+
+                        final double fNetWatch = netWatch, fGrossWatch = grossWatch;
+                        ui.post(() -> {
+                            if (txtQtyNet   != null) txtQtyNet.setText("NET: " + fNetWatch);
+                            if (txtQtyGross != null) txtQtyGross.setText("GROSS: " + fGrossWatch);
+                            notifyDeliveryEndedToMainActivity();
+                            updateButtons(controller != null ? controller.getState() : null);
+                        });
+                        return;
+                    }
+                } catch (Exception ignored) {}
+            }
+        });
     }
 
     private void doResolve() {
