@@ -757,42 +757,35 @@ public class RegisterTabFragment extends Fragment {
         if (btnC != null) {
             btnC.setOnClickListener(v -> {
                 if (controller == null) return;
-                refreshDelCodeFromTickSnapshotThrottled();
-                int dc = lastDelCode;
-                boolean tp = (dc & 0x0001) != 0;
-                boolean flow = (dc & 0x0004) != 0;
-                boolean act = (dc & 0x0008) != 0;
-                if (tp || flow || act) {
-                    if (txtLive != null) txtLive.setText("LIVE: registre non prêt — faire Status (B) / Resolve (A)");
-                    LogBus.ui(node, ts("C bloqué: delCode=0x" + Integer.toHexString(dc)));
-                    updateButtons(controller.getState());
-                    return;
-                }
-                starting = true;
-                startingSinceMs = System.currentTimeMillis();
-                updateButtons(controller.getState());
-                if (txtLive != null) txtLive.setText("LIVE: RUNNING_FLOWING (flow off - waiting progression)");
-                int prod = getPendingProduct();
-                double preset = parseDouble(edtPreset != null ? edtPreset.getText().toString() : "0", 0.0);
-                // ✅ Renseigner le WO pour que onTicketInfo() construise delivery_uid
-                // (sinon btnRetourWO reste invisible après bouton C manuel)
+
+                // ✅ Vérifier si ce WO a déjà une livraison complétée (hors annulation)
                 try {
-                    com.pa.lcr.lcp.storage.ActiveDeliveryStore ads3 =
+                    com.pa.lcr.lcp.storage.ActiveDeliveryStore ads4 =
                         new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
-                    com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad3 = ads3.load();
-                    if (ad3 != null && ad3.woNum != null && !ad3.woNum.isEmpty()) {
-                        controller.setNumeroLivraison(ad3.woNum);
+                    com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad4 = ads4.load();
+                    String curWoNum = (ad4 != null && ad4.woNum != null) ? ad4.woNum : "";
+                    if (!curWoNum.isEmpty()) {
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb statusDb =
+                            new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow existing =
+                            statusDb.getLatestForWo(curWoNum);
+                        if (existing != null && existing.type != null
+                                && !"ANNULATION".equals(existing.type)) {
+                            new android.app.AlertDialog.Builder(requireContext())
+                                .setTitle("⚠️ Bon déjà complété")
+                                .setMessage("Le bon " + curWoNum + " a déjà été livré"
+                                    + " (ticket #" + existing.ticketNo
+                                    + ", " + existing.netL + "L net).\n\n"
+                                    + "Voulez-vous créer une nouvelle livraison sur ce même bon ?")
+                                .setPositiveButton("Continuer", (d, w) -> startNewDeliveryC())
+                                .setNegativeButton("Annuler", null)
+                                .show();
+                            return;
+                        }
                     }
                 } catch (Exception ignored) {}
-                controller.startDelivery(prod, preset);
 
-                // ✅ Rafraîchir le statut pour voir le flow s'activer (live + boutons)
-                ui.postDelayed(() -> {
-                    try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
-                    try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
-                    refreshDelCodeFromTickSnapshotThrottled();
-                    updateButtons(controller != null ? controller.getState() : null);
-                }, 1200);
+                startNewDeliveryC();
             });
         }
         if (btnContinue != null) btnContinue.setOnClickListener(v -> {
@@ -1648,6 +1641,47 @@ public class RegisterTabFragment extends Fragment {
     }
 
     // ── Resolve (btnA) ───────────────────────────────────────────────────────────────
+    // ── Bouton C — nouvelle livraison ─────────────────────────────────
+    private void startNewDeliveryC() {
+        if (controller == null) return;
+        refreshDelCodeFromTickSnapshotThrottled();
+        int dc = lastDelCode;
+        boolean tp = (dc & 0x0001) != 0;
+        boolean flow = (dc & 0x0004) != 0;
+        boolean act = (dc & 0x0008) != 0;
+        if (tp || flow || act) {
+            if (txtLive != null) txtLive.setText("LIVE: registre non prêt — faire Status (B) / Resolve (A)");
+            LogBus.ui(node, ts("C bloqué: delCode=0x" + Integer.toHexString(dc)));
+            updateButtons(controller.getState());
+            return;
+        }
+        starting = true;
+        startingSinceMs = System.currentTimeMillis();
+        updateButtons(controller.getState());
+        if (txtLive != null) txtLive.setText("LIVE: RUNNING_FLOWING (flow off - waiting progression)");
+        int prod = getPendingProduct();
+        double preset = parseDouble(edtPreset != null ? edtPreset.getText().toString() : "0", 0.0);
+        // ✅ Renseigner le WO pour que onTicketInfo() construise delivery_uid
+        // (sinon btnRetourWO reste invisible après bouton C manuel)
+        try {
+            com.pa.lcr.lcp.storage.ActiveDeliveryStore ads3 =
+                new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
+            com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad3 = ads3.load();
+            if (ad3 != null && ad3.woNum != null && !ad3.woNum.isEmpty()) {
+                controller.setNumeroLivraison(ad3.woNum);
+            }
+        } catch (Exception ignored) {}
+        controller.startDelivery(prod, preset);
+
+        // ✅ Rafraîchir le statut pour voir le flow s'activer (live + boutons)
+        ui.postDelayed(() -> {
+            try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
+            try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
+            refreshDelCodeFromTickSnapshotThrottled();
+            updateButtons(controller != null ? controller.getState() : null);
+        }, 1200);
+    }
+
     private void doResolve() {
         if (controller == null) return;
         controller.alignOrRecover();
@@ -1686,16 +1720,11 @@ public class RegisterTabFragment extends Fragment {
         cancelInProgress = true;
         bg.execute(() -> {
             try {
-                // 1. Terminer la livraison quel que soit l'état (FLOWING ou PAUSED)
-                try { c.forceEnd(); } catch (Exception ignored) {}
-
-                // 2. Attendre que le registre quitte l'état de livraison (max 8s)
-                for (int i = 0; i < 40; i++) {
-                    try { Thread.sleep(200); } catch (Exception ignored) {}
-                    com.pa.lcr.lcp.DeliveryState st = c.getState();
-                    if (st == com.pa.lcr.lcp.DeliveryState.CONNECTED
-                            || st == com.pa.lcr.lcp.DeliveryState.ENDED) break;
-                }
+                // 1. Terminer la livraison ET confirmer via lecture réelle du registre
+                // (deliveryActive == false) — évite état transitoire au redémarrage
+                boolean confirmed = false;
+                try { confirmed = c.forceEndSync(8000); } catch (Exception ignored) {}
+                android.util.Log.i("Annuler", "forceEndSync confirmed=" + confirmed);
 
                 // 3. Resolve synchrone — consomme le ticket pending → CONNECTED propre
                 // api_deliveryAlignA() est synchrone contrairement à alignOrRecover()

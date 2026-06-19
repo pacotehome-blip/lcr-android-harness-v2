@@ -1161,6 +1161,39 @@ try {
         });
     }
 
+    /**
+     * Version SYNCHRONE de forceEnd() — bloque l'appelant jusqu'à confirmation
+     * que le registre a quitté l'état de livraison (deliveryActive == false),
+     * ou jusqu'au timeout. Utilisé par le flux d'annulation opérateur pour
+     * éviter qu'un oneshot/start suivant tombe sur un état transitoire.
+     * N'affecte pas forceEnd() (asynchrone) ni le flux normal.
+     */
+    public boolean forceEndSync(long timeoutMs) {
+        if (isStopped()) return false;
+        try {
+            emitLog("[CANCEL] forceEndSync — CMD_END depuis état " + state.name());
+            lcpIssueCommand(CMD_END);
+        } catch (Exception e) {
+            emitLog("[CANCEL] forceEndSync ERR: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
+            return false;
+        }
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            try { Thread.sleep(300); } catch (InterruptedException ignored) {}
+            try {
+                int[] ds = lcpDeliveryStatus();
+                int delCode = ds[1];
+                boolean deliveryActive = (delCode & DC_DELIVERY_ACTIVE) != 0;
+                if (!deliveryActive) {
+                    emitLog("[CANCEL] forceEndSync confirmed=true");
+                    return true;
+                }
+            } catch (Exception ignored) {}
+        }
+        emitLog("[CANCEL] forceEndSync confirmed=false (timeout)");
+        return false;
+    }
+
     public void endDelivery() {
         io.execute(() -> {
             if (isStopped()) return;
