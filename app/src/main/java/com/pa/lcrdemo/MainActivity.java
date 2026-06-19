@@ -648,6 +648,22 @@ public class MainActivity extends AppCompatActivity {
     public void onDeliveryEnded(String woNum, String woIdGuid, String extraJson) {
         if (deepLinkHandler != null) deepLinkHandler.onDeliveryEnded(woNum, woIdGuid, extraJson);
     }
+
+    /**
+     * ✅ Délégation à DeepLinkHandler.lancerLivraison() — permet au bouton C
+     * (relance manuelle dans l'APK) d'utiliser EXACTEMENT le même chemin que
+     * le deep link FieldService: stabilisation BT, oneshot/start, poll de fin,
+     * patchDataverse automatique. Seul le ticket number du registre change
+     * à chaque appel — woNum/woIdGuid/produit/preset restent ceux du WO en cours.
+     */
+    public void lancerLivraisonDepuisTab(String transportKey, int node, String serialId,
+                                          String woNum, String woIdGuid,
+                                          String produit, String presetStr, String mac) {
+        if (deepLinkHandler != null) {
+            deepLinkHandler.lancerLivraison(transportKey, node, serialId,
+                woNum, woIdGuid, produit, presetStr, mac);
+        }
+    }
     /**
      * Retourner à Field Service Mobile après la livraison.
      * Construit l'URL ms-dynamicsxrm:// avec le statut et les données

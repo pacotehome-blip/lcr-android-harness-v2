@@ -78,6 +78,12 @@ public class RegisterTabFragment extends Fragment {
                 new com.pa.lcr.lcp.storage.ActiveDeliveryStore(ctx);
             com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad = ads.load();
 
+            // ✅ Filet de sécurité — capturer le contexte WO stable dès qu'on le voit
+            if (ad != null && ad.woNum != null && !ad.woNum.isEmpty()) {
+                currentWoNum = ad.woNum;
+                if (ad.woIdGuid != null && !ad.woIdGuid.isEmpty()) currentWoIdGuid = ad.woIdGuid;
+            }
+
             if (ad == null || ("PENDING".equals(ad.status) == false && "CANCELLED".equals(ad.status) == false)) return;
 
             // ✅ Si CANCELLED — remettre net/gross à zéro (nouvelle livraison à venir)
@@ -248,6 +254,12 @@ public class RegisterTabFragment extends Fragment {
     private boolean starting = false;
     private long startingSinceMs = 0L;
     private volatile boolean cancelInProgress = false;
+
+    // ✅ Contexte WO stable du fragment — peuplé une fois au deep link initial,
+    // jamais effacé par les flux concurrents (ActiveDeliveryStore peut être
+    // écrasé/vidé par annulation, autre poll, etc. — ces champs ne le sont pas)
+    private volatile String currentWoNum    = "";
+    private volatile String currentWoIdGuid = "";
     private static final int TAB_LOG_MAX_LINES = 400;
     private static final long LOG_REFRESH_MIN_MS = 800;
     private long lastLogRefreshMs = 0L;
@@ -601,6 +613,12 @@ public class RegisterTabFragment extends Fragment {
     }
 
     public void prefillFromDeepLink(String woNum, String produit, String preset) {
+        prefillFromDeepLink(woNum, "", produit, preset);
+    }
+
+    public void prefillFromDeepLink(String woNum, String woIdGuid, String produit, String preset) {
+        if (woNum != null && !woNum.isEmpty()) currentWoNum = woNum;
+        if (woIdGuid != null && !woIdGuid.isEmpty()) currentWoIdGuid = woIdGuid;
         if (edtPreset != null && preset != null && !preset.isEmpty())
             edtPreset.setText(preset);
         if (spnProduct != null && produit != null && !produit.isEmpty())
@@ -610,18 +628,22 @@ public class RegisterTabFragment extends Fragment {
     }
 
     private void notifyDeliveryEndedToMainActivity() {
-        String woNum = "", woIdGuid = "";
-        // ✅ Source fiable pour woNum/woIdGuid — ActiveDeliveryStore plutôt
-        // que de parser txtDeliveryUid (fragile, parfois vide/non rempli)
-        try {
-            com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
-                new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
-            com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad = ads.load();
-            if (ad != null) {
-                if (ad.woNum    != null) woNum    = ad.woNum;
-                if (ad.woIdGuid != null) woIdGuid = ad.woIdGuid;
-            }
-        } catch (Exception ignored) {}
+        // ✅ Source primaire — champs stables du fragment, jamais effacés
+        String woNum    = currentWoNum;
+        String woIdGuid = currentWoIdGuid;
+        // Fallback — ActiveDeliveryStore si les champs stables sont vides
+        // (ex: tout premier appel avant tout deep link/prefill)
+        if (woNum.isEmpty()) {
+            try {
+                com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
+                    new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
+                com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad = ads.load();
+                if (ad != null) {
+                    if (ad.woNum    != null) woNum    = ad.woNum;
+                    if (ad.woIdGuid != null) woIdGuid = ad.woIdGuid;
+                }
+            } catch (Exception ignored) {}
+        }
         notifyDeliveryEndedToMainActivity(woNum, woIdGuid);
     }
 
@@ -1383,8 +1405,9 @@ public class RegisterTabFragment extends Fragment {
                 String saleNo     = "";
                 double netL       = 0.0;
                 double grossL     = 0.0;
-                String woNum      = "";
-                String woIdGuid   = "";
+                // ✅ Source primaire — champs stables du fragment, jamais effacés
+                String woNum      = currentWoNum;
+                String woIdGuid   = currentWoIdGuid;
                 String payloadJson = "{}";
 
                 // ✅ Source primaire — lecture FRAÎCHE du registre (toujours à jour,
@@ -1681,93 +1704,26 @@ public class RegisterTabFragment extends Fragment {
             updateButtons(controller.getState());
             return;
         }
+        if (!(getActivity() instanceof MainActivity)) return;
+        MainActivity main = (MainActivity) getActivity();
+
         starting = true;
         startingSinceMs = System.currentTimeMillis();
         updateButtons(controller.getState());
         if (txtLive != null) txtLive.setText("LIVE: RUNNING_FLOWING (flow off - waiting progression)");
+
         int prod = getPendingProduct();
-        double preset = parseDouble(edtPreset != null ? edtPreset.getText().toString() : "0", 0.0);
-        // ✅ Capturer woNum/woIdGuid MAINTENANT (figés) — évite que le poll de fin
-        // (qui peut tourner plusieurs minutes) lise ActiveDeliveryStore à un moment
-        // où il a été modifié par un autre bouton C ou un autre flux concurrent
-        final String[] fWoNumHolder    = {""};
-        final String[] fWoIdGuidHolder = {""};
-        try {
-            com.pa.lcr.lcp.storage.ActiveDeliveryStore ads3 =
-                new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
-            com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad3 = ads3.load();
-            if (ad3 != null) {
-                if (ad3.woNum    != null) fWoNumHolder[0]    = ad3.woNum;
-                if (ad3.woIdGuid != null) fWoIdGuidHolder[0] = ad3.woIdGuid;
-                // ✅ Renseigner le WO pour que onTicketInfo() construise delivery_uid
-                // (sinon btnRetourWO reste invisible après bouton C manuel)
-                if (!fWoNumHolder[0].isEmpty()) {
-                    controller.setNumeroLivraison(fWoNumHolder[0]);
-                }
-            }
-        } catch (Exception ignored) {}
-        controller.startDelivery(prod, preset);
+        String presetStr = edtPreset != null ? edtPreset.getText().toString() : "0";
 
-        // ✅ Rafraîchir le statut pour voir le flow s'activer (live + boutons)
-        ui.postDelayed(() -> {
-            try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
-            try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
-            refreshDelCodeFromTickSnapshotThrottled();
-            updateButtons(controller != null ? controller.getState() : null);
-        }, 1200);
-
-        // ✅ Surveiller la fin de cette livraison (bouton C) — le DeliveryController
-        // ne passe jamais à l'état ENDED automatiquement, donc rien ne déclenchait
-        // patchDataverse() pour les livraisons démarrées hors flux FSM. On poll le
-        // delCode jusqu'à confirmer la fin (deliveryActive retombe, pas d'annulation
-        // en cours), puis on notifie MainActivity comme le ferait le flux normal.
-        final String fWoNumForPoll    = fWoNumHolder[0];
-        final String fWoIdGuidForPoll = fWoIdGuidHolder[0];
-        bg.execute(() -> {
-            DeliveryController cWatch = controller;
-            if (cWatch == null) return;
-            boolean wasActive = false;
-            for (int i = 0; i < 1200; i++) { // jusqu'à 10 min (500ms x 1200)
-                try { Thread.sleep(500); } catch (Exception ignored) { return; }
-                if (cancelInProgress) return; // annulation gère son propre flux
-                DeliveryController cNow = controller;
-                if (cNow == null || cNow != cWatch) return; // controller changé/détruit
-                try {
-                    com.pa.lcr.lcp.ApiResult snap = cWatch.api_tickSnapshot();
-                    if (snap == null || snap.data == null) continue;
-                    int dcWatch = snap.data.optInt("delCode", 0);
-                    boolean activeNow = (dcWatch & 0x0008) != 0; // DC_DELIVERY_ACTIVE
-                    if (activeNow) { wasActive = true; continue; }
-                    if (wasActive && !activeNow) {
-                        // Livraison terminée (preset atteint, deliveryActive retombé)
-                        double netWatch   = snap.data.optDouble("net", 0);
-                        double grossWatch = snap.data.optDouble("gross", 0);
-                        if (netWatch <= 0 && grossWatch <= 0) return; // pas de volume — pas une vraie fin
-
-                        // ✅ Attendre la résorption du ticket pending (impression)
-                        // avant de notifier — sinon btnC reste grisé jusqu'au Status manuel
-                        for (int j = 0; j < 17; j++) {
-                            try { Thread.sleep(300); } catch (Exception ignored) {}
-                            com.pa.lcr.lcp.ApiResult snap2 = cWatch.api_tickSnapshot();
-                            if (snap2 == null || snap2.data == null) continue;
-                            int dc2 = snap2.data.optInt("delCode", dcWatch);
-                            lastDelCode = dc2;
-                            boolean tpStillWatch = (dc2 & 0x0001) != 0;
-                            if (!tpStillWatch) break;
-                        }
-
-                        final double fNetWatch = netWatch, fGrossWatch = grossWatch;
-                        ui.post(() -> {
-                            if (txtQtyNet   != null) txtQtyNet.setText("NET: " + fNetWatch);
-                            if (txtQtyGross != null) txtQtyGross.setText("GROSS: " + fGrossWatch);
-                            notifyDeliveryEndedToMainActivity(fWoNumForPoll, fWoIdGuidForPoll);
-                            updateButtons(controller != null ? controller.getState() : null);
-                        });
-                        return;
-                    }
-                } catch (Exception ignored) {}
-            }
-        });
+        // ✅ Même principe que le deep link FieldService — woNum/woIdGuid déjà
+        // connus du fragment (stables, jamais effacés), seul le ticket number
+        // du registre change à chaque nouvelle livraison. Réutilise
+        // lancerLivraison() de DeepLinkHandler: stabilisation BT, oneshot/start,
+        // poll de fin, patchDataverse automatique — exactement le chemin testé
+        // et fonctionnel du flux FSM normal.
+        String tk = (tabTransportKey != null) ? tabTransportKey.trim() : "";
+        main.lancerLivraisonDepuisTab(tk, node, serialFromArgs,
+            currentWoNum, currentWoIdGuid, String.valueOf(prod), presetStr, "");
     }
 
     private void doResolve() {
