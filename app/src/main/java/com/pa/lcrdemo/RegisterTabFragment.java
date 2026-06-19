@@ -1368,35 +1368,62 @@ public class RegisterTabFragment extends Fragment {
                 String woIdGuid   = "";
                 String payloadJson = "{}";
 
-                // ✅ Source primaire — lastResultJson (statique, persiste après finish())
+                // ✅ Source primaire — lecture FRAÎCHE du registre (toujours à jour,
+                // même après bouton C qui ne passe pas par DeepLinkHandler)
+                org.json.JSONObject freshSnap = null;
                 try {
-                    String lastJson = com.pa.lcrdemo.DeepLinkHandler.lastResultJson;
-                    if (lastJson != null && !lastJson.isEmpty()) {
-                        org.json.JSONObject last = new org.json.JSONObject(lastJson);
-                        org.json.JSONObject payload = last.optJSONObject("payload");
-                        if (payload != null) {
-                            org.json.JSONObject result = payload.optJSONObject("result");
+                    if (controller != null) {
+                        ApiResult sr = controller.api_tickSnapshot();
+                        if (sr != null && sr.data != null) {
+                            freshSnap = sr.data;
+                            org.json.JSONObject result = freshSnap.optJSONObject("result");
                             if (result != null) {
                                 ticketNo = result.optString("ticket_no", "");
                                 saleNo   = result.optString("sale_no",   "");
                                 netL     = result.optDouble("fs_net_l",  0);
                                 grossL   = result.optDouble("fs_gross_l",0);
                             }
-                            // Fallback tick si result vide
-                            if (netL == 0) {
-                                org.json.JSONObject tick = payload.optJSONObject("tick");
-                                if (tick != null) {
-                                    netL   = tick.optDouble("net",   0);
-                                    grossL = tick.optDouble("gross", 0);
-                                }
-                            }
                         }
-                        woNum    = last.optString("wonum", "");
-                        woIdGuid = last.optString("woid",  "");
                     }
                 } catch (Exception ignored) {}
 
-                // Fallback TextViews si lastResultJson vide
+                // ✅ Fallback — lastResultJson (statique) seulement si lecture fraîche vide
+                try {
+                    if (ticketNo.isEmpty()) {
+                        String lastJson = com.pa.lcrdemo.DeepLinkHandler.lastResultJson;
+                        if (lastJson != null && !lastJson.isEmpty()) {
+                            org.json.JSONObject last = new org.json.JSONObject(lastJson);
+                            org.json.JSONObject payload = last.optJSONObject("payload");
+                            if (payload != null) {
+                                org.json.JSONObject result = payload.optJSONObject("result");
+                                if (result != null) {
+                                    ticketNo = result.optString("ticket_no", "");
+                                    saleNo   = result.optString("sale_no",   "");
+                                    netL     = result.optDouble("fs_net_l",  0);
+                                    grossL   = result.optDouble("fs_gross_l",0);
+                                }
+                                // Fallback tick si result vide
+                                if (netL == 0) {
+                                    org.json.JSONObject tick = payload.optJSONObject("tick");
+                                    if (tick != null) {
+                                        netL   = tick.optDouble("net",   0);
+                                        grossL = tick.optDouble("gross", 0);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // woNum/woIdGuid viennent toujours de lastResultJson ou ActiveDeliveryStore
+                    // (pas du registre — le registre ne connaît pas le WO)
+                    String lastJson2 = com.pa.lcrdemo.DeepLinkHandler.lastResultJson;
+                    if (lastJson2 != null && !lastJson2.isEmpty()) {
+                        org.json.JSONObject last2 = new org.json.JSONObject(lastJson2);
+                        woNum    = last2.optString("wonum", "");
+                        woIdGuid = last2.optString("woid",  "");
+                    }
+                } catch (Exception ignored) {}
+
+                // Fallback TextViews si tout est vide
                 try {
                     if (ticketNo.isEmpty() && txtTicketNo != null)
                         ticketNo = txtTicketNo.getText().toString()
