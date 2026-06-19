@@ -313,6 +313,17 @@ private void reproEvent(String level, String type, String message, JSONObject da
  // ✅ Cache du dernier NUM reçu via API (numero_livraison) pour reconstruire delivery_uid côté UI
  private volatile String lastNumeroLivraison = null;
 
+ /**
+  * Permet aux flux manuels (ex: bouton C) de renseigner le numero_livraison
+  * pour que onTicketInfo() puisse reconstruire delivery_uid correctement.
+  * Sans effet sur api_deliveryOneShotStart() qui le fait déjà automatiquement.
+  */
+ public void setNumeroLivraison(String numeroLivraison) {
+     if (numeroLivraison != null && !numeroLivraison.trim().isEmpty()) {
+         lastNumeroLivraison = numeroLivraison.trim();
+     }
+ }
+
  // ✅ Media actif (usb/bt) - best-effort (déduit du transport si non fixé)
  private volatile String activeMedia = null;
 
