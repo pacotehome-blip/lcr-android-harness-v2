@@ -114,6 +114,18 @@ public class RegisterTabFragment extends Fragment {
     private void showDeliveryReadyPanel(
             com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad) {
         try {
+            // ✅ Garde: ne pas écraser btnRetourWO si une livraison vient de se terminer
+            // (ticket déjà présent = une vraie livraison a eu lieu entre temps)
+            try {
+                String ticket = txtTicketNo != null ?
+                    txtTicketNo.getText().toString().replace("Ticket Number : ", "").trim() : "";
+                if (!ticket.isEmpty() && !ticket.equals("—")) {
+                    android.util.Log.i("RegisterTabFragment",
+                        "showDeliveryReadyPanel annulé — ticket déjà présent: " + ticket);
+                    return;
+                }
+            } catch (Exception ignored) {}
+
             // ✅ Afficher infos livraison dans txtDeliveryUid
             if (txtDeliveryUid != null) {
                 txtDeliveryUid.setText(
@@ -762,7 +774,25 @@ public class RegisterTabFragment extends Fragment {
                 if (txtLive != null) txtLive.setText("LIVE: RUNNING_FLOWING (flow off - waiting progression)");
                 int prod = getPendingProduct();
                 double preset = parseDouble(edtPreset != null ? edtPreset.getText().toString() : "0", 0.0);
+                // ✅ Renseigner le WO pour que onTicketInfo() construise delivery_uid
+                // (sinon btnRetourWO reste invisible après bouton C manuel)
+                try {
+                    com.pa.lcr.lcp.storage.ActiveDeliveryStore ads3 =
+                        new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
+                    com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad3 = ads3.load();
+                    if (ad3 != null && ad3.woNum != null && !ad3.woNum.isEmpty()) {
+                        controller.setNumeroLivraison(ad3.woNum);
+                    }
+                } catch (Exception ignored) {}
                 controller.startDelivery(prod, preset);
+
+                // ✅ Rafraîchir le statut pour voir le flow s'activer (live + boutons)
+                ui.postDelayed(() -> {
+                    try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
+                    try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
+                    refreshDelCodeFromTickSnapshotThrottled();
+                    updateButtons(controller != null ? controller.getState() : null);
+                }, 1200);
             });
         }
         if (btnContinue != null) btnContinue.setOnClickListener(v -> {
@@ -1160,8 +1190,8 @@ public class RegisterTabFragment extends Fragment {
             boolean canCancel = (connected || flowing || paused) && !starting && hasActiveDelivery;
             if (canCancel) {
                 btnAnnuler.setVisibility(android.view.View.VISIBLE);
-                if (flowing && flowStarted) {
-                    // Volume détecté — impossible d'annuler
+                if (flowStarted) {
+                    // Volume détecté (peu importe l'état — flowing ou ticket pending) — impossible d'annuler
                     btnAnnuler.setText("⛔ Impossible d'annuler — terminez la livraison");
                     btnAnnuler.setEnabled(false);
                     btnAnnuler.setBackgroundTintList(
@@ -1193,6 +1223,7 @@ public class RegisterTabFragment extends Fragment {
             } catch (Exception ignored) {}
             if (connected && hasDeliveryData) {
                 btnRetourWO.setVisibility(android.view.View.VISIBLE);
+                btnRetourWO.setEnabled(true);
                 btnRetourWO.setText("Retour au Bon de livraison");
                 btnRetourWO.setBackgroundColor(android.graphics.Color.parseColor("#185FA5"));
                 btnRetourWO.setOnClickListener(v -> retournerAuWorkOrder());
@@ -1316,7 +1347,11 @@ public class RegisterTabFragment extends Fragment {
     // Compile payload complet → SQLite local → MSAL push → deep link FSM
     // =========================================================
     private void retournerAuWorkOrder() {
-        if (!(getActivity() instanceof MainActivity)) return;
+        android.util.Log.i("RetourWO", "Clic reçu — démarrage retournerAuWorkOrder()");
+        if (!(getActivity() instanceof MainActivity)) {
+            android.util.Log.w("RetourWO", "getActivity() n'est pas MainActivity — abandon");
+            return;
+        }
         MainActivity main = (MainActivity) getActivity();
 
         // Désactiver le bouton pendant le traitement
@@ -1726,7 +1761,15 @@ public class RegisterTabFragment extends Fragment {
                     if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
                     if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : —");
                     if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : —");
+                    // ✅ Réactiver tous les boutons désactivés pendant l'annulation
                     if (btnAnnuler  != null) btnAnnuler.setEnabled(true);
+                    if (btnConnect  != null) btnConnect.setEnabled(true);
+                    if (btnA        != null) btnA.setEnabled(true);
+                    if (btnB        != null) btnB.setEnabled(true);
+                    if (btnC        != null) btnC.setEnabled(true);
+                    if (btnContinue != null) btnContinue.setEnabled(true);
+                    if (btnFinish   != null) btnFinish.setEnabled(true);
+                    if (btnRetourWO != null) btnRetourWO.setEnabled(true);
                     updateButtons(controller != null ? controller.getState() : null);
                     android.widget.Toast.makeText(getContext(),
                         "Livraison annulée — registre prêt",
@@ -1737,7 +1780,14 @@ public class RegisterTabFragment extends Fragment {
                 cancelInProgress = false;
                 android.util.Log.e("Annuler", "ERR: " + e.getMessage());
                 ui.post(() -> {
-                    if (btnAnnuler != null) btnAnnuler.setEnabled(true);
+                    if (btnAnnuler  != null) btnAnnuler.setEnabled(true);
+                    if (btnConnect  != null) btnConnect.setEnabled(true);
+                    if (btnA        != null) btnA.setEnabled(true);
+                    if (btnB        != null) btnB.setEnabled(true);
+                    if (btnC        != null) btnC.setEnabled(true);
+                    if (btnContinue != null) btnContinue.setEnabled(true);
+                    if (btnFinish   != null) btnFinish.setEnabled(true);
+                    if (btnRetourWO != null) btnRetourWO.setEnabled(true);
                     android.widget.Toast.makeText(getContext(),
                         "Erreur annulation: " + e.getMessage(),
                         android.widget.Toast.LENGTH_SHORT).show();
