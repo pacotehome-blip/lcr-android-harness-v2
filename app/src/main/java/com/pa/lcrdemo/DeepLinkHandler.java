@@ -281,11 +281,35 @@ public class DeepLinkHandler {
                                 fProduit, fPresetStr);
                         } else {
                             android.util.Log.w(TAG, "Registre introuvable — node=" + fNode);
-                            activity.runOnUiThread(() ->
-                                activity.toast("⚠️ Registre non connecté — connectez le registre"));
-                            retournerFieldService(woNum, woIdGuid, "erreur_registre",
-                                buildErrorJson("NO_TRANSPORT",
-                                    "Registre node=" + fNode + " introuvable sur tous les transports"));
+
+                            // ✅ Rester dans l'APK — pas de finish() pour éviter bounce FSM
+                            // Le chauffeur va dans Configure pour connecter le registre
+                            final String fWoNumR = woNum;
+                            final String fWoIdR  = woIdGuid;
+                            final int    fNodeR  = fNode;
+                            activity.runOnUiThread(() -> {
+                                android.app.AlertDialog.Builder dlg =
+                                    new android.app.AlertDialog.Builder(activity);
+                                dlg.setTitle("⚠️ Registre non connecté");
+                                dlg.setMessage(
+                                    "Le registre (node " + fNodeR + " · serial " + fSerialId + ") "
+                                    + "n'est pas détecté sur USB ou Bluetooth.\n\n"
+                                    + "1. Branchez le câble USB-C du registre\n"
+                                    + "   — ou —\n"
+                                    + "2. Activez le Bluetooth et connectez le registre\n\n"
+                                    + "Ensuite, allez dans l'onglet Configure pour établir\n"
+                                    + "la connexion, puis relancez depuis Field Service.");
+                                dlg.setPositiveButton("Aller à Configure", (d, w) -> {
+                                    activity.showPage(1); // onglet Configure
+                                });
+                                dlg.setNegativeButton("Annuler", null);
+                                dlg.setCancelable(true);
+                                dlg.show();
+                            });
+
+                            // Logger l'événement
+                            logError(fSerialId, woNum, "NO_TRANSPORT",
+                                "Registre node=" + fNode + " introuvable sur tous les transports");
                         }
                     }
                 } catch (Exception e) {
@@ -380,6 +404,15 @@ public class DeepLinkHandler {
             retournerFieldService(woNum, woIdGuid, "erreur_media",
                 buildErrorJson("MEDIA_NOT_READY", "Média non prêt après 10s"));
             return;
+        }
+
+        // ✅ Délai de stabilisation BT — le transport socket est READY mais le
+        // registre peut avoir besoin de quelques centaines de ms supplémentaires
+        // pour stabiliser sa pile de communication LCP après une (re)connexion BT.
+        // Sans ce délai: "Timeout waiting LCP response" sur le premier oneshot/start.
+        // N'affecte pas l'USB (déjà stable, pas ce symptôme).
+        if (transportKey != null && transportKey.toUpperCase().startsWith("BT:")) {
+            try { Thread.sleep(700); } catch (Exception ignored) {}
         }
 
         // Démarrer oneshot/start
@@ -616,10 +649,35 @@ public class DeepLinkHandler {
                         if (ra.code != 1) {
                             logError(serialId, woNum, "REGISTER_INVALID",
                                 "Registre invalide: " + rv.msg);
-                            activity.runOnUiThread(() ->
-                                activity.toast("⚠️ Registre invalide — " + rv.msg));
-                            retournerFieldService(woNum, woIdGuid, "erreur_registre",
-                                buildErrorJson("REGISTER_INVALID", rv.msg));
+
+                            // ✅ Mauvais registre — anomalie opérationnelle
+                            // Le chauffeur doit aviser le répartiteur
+                            final String fSerialConnecte = ra.data != null
+                                ? ra.data.optString("serial_id", "inconnu") : "inconnu";
+                            final String fSerialAttendu  = serialId != null ? serialId : "inconnu";
+                            final int    fNodeAttendu    = node;
+                            final String fWoNumI         = woNum;
+
+                            activity.runOnUiThread(() -> {
+                                android.app.AlertDialog.Builder dlg =
+                                    new android.app.AlertDialog.Builder(activity);
+                                dlg.setTitle("⚠️ Mauvais registre détecté");
+                                dlg.setMessage(
+                                    "Le registre connecté ne correspond pas au bon de travail.\n\n"
+                                    + "Attendu  : serial=" + fSerialAttendu
+                                        + " · node=" + fNodeAttendu + "\n"
+                                    + "Connecté : serial=" + fSerialConnecte + "\n\n"
+                                    + "AVISEZ LE RÉPARTITEUR avant de continuer.\n\n"
+                                    + "Il se peut que le camion soit équipé du mauvais registre "
+                                    + "ou que la configuration du bon de travail soit incorrecte.");
+                                dlg.setPositiveButton("J'ai avisé le répartiteur", (d, w) -> {
+                                    // Le chauffeur confirme — rester dans l'APK
+                                    activity.showPage(0);
+                                });
+                                dlg.setNegativeButton("Annuler", null);
+                                dlg.setCancelable(false); // Force la lecture du message
+                                dlg.show();
+                            });
                             return;
                         }
                     }
