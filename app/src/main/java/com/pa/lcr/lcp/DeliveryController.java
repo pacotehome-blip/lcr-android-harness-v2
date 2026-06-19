@@ -655,7 +655,7 @@ private void reproEvent(String level, String type, String message, JSONObject da
         this.liveTickIntervalMs = link != null ? link.getRecommendedLiveIntervalMs() : LIVE_BASE_MS;
     }
 
-    private boolean isStopped() {
+    public boolean isStopped() {
         return stopped || link == null || link.isClosed();
     }
 

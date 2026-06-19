@@ -953,6 +953,12 @@ public class RegisterTabFragment extends Fragment {
 
 
     private void connectThisRegister(boolean userInitiated) {
+        // ✅ Si le controller existant est mort (shutdown après erreur BT "Error writing"
+        // par exemple) — forcer la recréation au lieu de continuer à l'utiliser
+        if (controller != null && controller.isStopped()) {
+            LogBus.api(node, "Controller mort détecté — recréation forcée");
+            controller = null;
+        }
         // Si controller existe et transport prêt — pas besoin de recréer
         if (controller != null && tabMediaReady) {
             syncUiFromController();

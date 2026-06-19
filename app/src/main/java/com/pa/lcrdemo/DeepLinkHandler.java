@@ -427,7 +427,12 @@ public class DeepLinkHandler {
                         fMac.isEmpty() ? transportKey : fMac);
                 }
             } else {
-                android.util.Log.w(TAG, "oneshot/start code=0: " + r.msg);
+                String detail = "";
+                try {
+                    if (r.data != null) detail = r.data.optString("detail", "");
+                } catch (Exception ignored) {}
+                android.util.Log.w(TAG, "oneshot/start code=0: " + r.msg
+                    + (detail.isEmpty() ? "" : " | detail=" + detail));
                 logEvent(fSerialId, woNum, DeliveryLogStore.LEVEL_WARN,
                     "ONESHOT_ERROR", r.msg, r.data != null ? r.data.toString() : null);
 
