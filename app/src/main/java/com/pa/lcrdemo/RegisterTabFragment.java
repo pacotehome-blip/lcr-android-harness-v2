@@ -610,6 +610,28 @@ public class RegisterTabFragment extends Fragment {
     }
 
     private void notifyDeliveryEndedToMainActivity() {
+        String woNum = "", woIdGuid = "";
+        // ✅ Source fiable pour woNum/woIdGuid — ActiveDeliveryStore plutôt
+        // que de parser txtDeliveryUid (fragile, parfois vide/non rempli)
+        try {
+            com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
+                new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
+            com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad = ads.load();
+            if (ad != null) {
+                if (ad.woNum    != null) woNum    = ad.woNum;
+                if (ad.woIdGuid != null) woIdGuid = ad.woIdGuid;
+            }
+        } catch (Exception ignored) {}
+        notifyDeliveryEndedToMainActivity(woNum, woIdGuid);
+    }
+
+    /**
+     * Version explicite — utilisée par le poll de fin de livraison du bouton C,
+     * où woNum/woIdGuid ont été capturés au DÉBUT de la livraison (figés) plutôt
+     * que relus depuis ActiveDeliveryStore à la fin, qui peut avoir changé entre
+     * temps si un autre bouton C a été cliqué pendant le poll (plusieurs minutes).
+     */
+    private void notifyDeliveryEndedToMainActivity(String woNumIn, String woIdGuidIn) {
         try {
             if (!(getActivity() instanceof MainActivity)) return;
             MainActivity main = (MainActivity) getActivity();
@@ -617,20 +639,8 @@ public class RegisterTabFragment extends Fragment {
             String ticketNo = "";
             double net      = 0.0;
             double gross    = 0.0;
-            String woNum    = "";
-            String woIdGuid = "";
-
-            // ✅ Source fiable pour woNum/woIdGuid — ActiveDeliveryStore plutôt
-            // que de parser txtDeliveryUid (fragile, parfois vide/non rempli)
-            try {
-                com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
-                    new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
-                com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad = ads.load();
-                if (ad != null) {
-                    if (ad.woNum    != null) woNum    = ad.woNum;
-                    if (ad.woIdGuid != null) woIdGuid = ad.woIdGuid;
-                }
-            } catch (Exception ignored) {}
+            String woNum    = (woNumIn    != null) ? woNumIn    : "";
+            String woIdGuid = (woIdGuidIn != null) ? woIdGuidIn : "";
 
             try {
                 if (txtTicketNo != null)
@@ -1677,14 +1687,23 @@ public class RegisterTabFragment extends Fragment {
         if (txtLive != null) txtLive.setText("LIVE: RUNNING_FLOWING (flow off - waiting progression)");
         int prod = getPendingProduct();
         double preset = parseDouble(edtPreset != null ? edtPreset.getText().toString() : "0", 0.0);
-        // ✅ Renseigner le WO pour que onTicketInfo() construise delivery_uid
-        // (sinon btnRetourWO reste invisible après bouton C manuel)
+        // ✅ Capturer woNum/woIdGuid MAINTENANT (figés) — évite que le poll de fin
+        // (qui peut tourner plusieurs minutes) lise ActiveDeliveryStore à un moment
+        // où il a été modifié par un autre bouton C ou un autre flux concurrent
+        final String[] fWoNumHolder    = {""};
+        final String[] fWoIdGuidHolder = {""};
         try {
             com.pa.lcr.lcp.storage.ActiveDeliveryStore ads3 =
                 new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
             com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad3 = ads3.load();
-            if (ad3 != null && ad3.woNum != null && !ad3.woNum.isEmpty()) {
-                controller.setNumeroLivraison(ad3.woNum);
+            if (ad3 != null) {
+                if (ad3.woNum    != null) fWoNumHolder[0]    = ad3.woNum;
+                if (ad3.woIdGuid != null) fWoIdGuidHolder[0] = ad3.woIdGuid;
+                // ✅ Renseigner le WO pour que onTicketInfo() construise delivery_uid
+                // (sinon btnRetourWO reste invisible après bouton C manuel)
+                if (!fWoNumHolder[0].isEmpty()) {
+                    controller.setNumeroLivraison(fWoNumHolder[0]);
+                }
             }
         } catch (Exception ignored) {}
         controller.startDelivery(prod, preset);
@@ -1702,6 +1721,8 @@ public class RegisterTabFragment extends Fragment {
         // patchDataverse() pour les livraisons démarrées hors flux FSM. On poll le
         // delCode jusqu'à confirmer la fin (deliveryActive retombe, pas d'annulation
         // en cours), puis on notifie MainActivity comme le ferait le flux normal.
+        final String fWoNumForPoll    = fWoNumHolder[0];
+        final String fWoIdGuidForPoll = fWoIdGuidHolder[0];
         bg.execute(() -> {
             DeliveryController cWatch = controller;
             if (cWatch == null) return;
@@ -1739,7 +1760,7 @@ public class RegisterTabFragment extends Fragment {
                         ui.post(() -> {
                             if (txtQtyNet   != null) txtQtyNet.setText("NET: " + fNetWatch);
                             if (txtQtyGross != null) txtQtyGross.setText("GROSS: " + fGrossWatch);
-                            notifyDeliveryEndedToMainActivity();
+                            notifyDeliveryEndedToMainActivity(fWoNumForPoll, fWoIdGuidForPoll);
                             updateButtons(controller != null ? controller.getState() : null);
                         });
                         return;
