@@ -521,6 +521,8 @@ public class RegisterTabFragment extends Fragment {
         } else {
             ui.post(() -> attemptAttachIfPossible(false));
         }
+        // ✅ Toujours vérifier si livraison PENDING à afficher quand le tab devient visible
+        ui.postDelayed(() -> checkPendingDeliveryForThisRegister(), 800);
     }
 
     @Override
@@ -1035,6 +1037,8 @@ public class RegisterTabFragment extends Fragment {
                         } catch (Exception eKill) {
                             android.util.Log.w("RegisterTabFragment", "btDisconnect ERR: " + eKill.getMessage());
                         }
+                        // ✅ Après nettoyage BT — recheck PENDING pour afficher bouton vert
+                        ui.postDelayed(() -> checkPendingDeliveryForThisRegister(), 2000);
                     }).start();
                     tabMediaReady = false;
                     pendingReconnect = true;
