@@ -1620,6 +1620,19 @@ public class DeepLinkHandler {
         try {
             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
                 new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
+            // ✅ Anti-doublon — vérifier si delivery_uid déjà présent
+            if (!fDeliveryUid.isEmpty()) {
+                java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> existing =
+                    lcrDb.getAllForWo(woNum);
+                for (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow r : existing) {
+                    String existingUid = r.ticketNo != null ? woNum + "-" + r.ticketNo : "";
+                    if (fDeliveryUid.equals(existingUid)) {
+                        android.util.Log.i(TAG, "patchDataverse: delivery_uid=" + fDeliveryUid
+                            + " déjà présent — insert ignoré");
+                        return;
+                    }
+                }
+            }
             android.content.ContentValues cv = new android.content.ContentValues();
             cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,      woNum);
             cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID,

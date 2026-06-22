@@ -21,7 +21,7 @@ import java.util.List;
 public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
 
     public static final String DB_NAME    = "filgo_delivery_status.db";
-    public static final int    DB_VERSION = 2;
+    public static final int    DB_VERSION = 3; // v3: UNIQUE(wo_num, ticket_no) anti-doublon
 
     private static final String TAG = "LcrDeliveryStatusDb";
 
@@ -180,6 +180,15 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
             addColumnIfMissing(db, TABLE_DELIVERY, COL_ERROR_CODE,         "TEXT");
             addColumnIfMissing(db, TABLE_DELIVERY, COL_ERROR_MSG,          "TEXT");
         }
+        // v3: contrainte UNIQUE(wo_num, ticket_no) — recréer la table
+        if (oldVersion < 3) {
+            db.execSQL("DROP TABLE IF EXISTS " + TABLE_DELIVERY + "_old");
+            db.execSQL("ALTER TABLE " + TABLE_DELIVERY + " RENAME TO " + TABLE_DELIVERY + "_old");
+            onCreate(db);
+            db.execSQL("INSERT OR IGNORE INTO " + TABLE_DELIVERY +
+                " SELECT * FROM " + TABLE_DELIVERY + "_old");
+            db.execSQL("DROP TABLE IF EXISTS " + TABLE_DELIVERY + "_old");
+        }
     }
 
     // =========================================================
@@ -260,7 +269,9 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
 
             // Erreurs
             COL_ERROR_CODE         + " TEXT," +
-            COL_ERROR_MSG          + " TEXT" +
+            COL_ERROR_MSG          + " TEXT," +
+            // Anti-doublon: une seule ligne par (wo_num, ticket_no)
+            "UNIQUE(" + COL_WO_NUM + "," + COL_TICKET_NO + ") ON CONFLICT IGNORE" +
             ");"
         );
 
