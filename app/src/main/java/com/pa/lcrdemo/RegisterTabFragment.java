@@ -1024,34 +1024,17 @@ public class RegisterTabFragment extends Fragment {
                 } catch (Exception ignored) {}
 
                 if (io == null || !io.isOpen()) {
-                    // ✅ Transport mort — killer le BT zombi et planifier reconnexion
-                    android.util.Log.i("RegisterTabFragment",
-                        "Transport " + tkPinned + " mort — btDisconnect + nettoyage");
-                    new Thread(() -> {
-                        try {
-                            if (requireActivity() instanceof com.pa.lcrdemo.MainActivity) {
-                                ((com.pa.lcrdemo.MainActivity) requireActivity()).btDisconnect();
-                                Thread.sleep(1000);
-                            }
-                        } catch (Exception eKill) {
-                            android.util.Log.w("RegisterTabFragment", "btDisconnect ERR: " + eKill.getMessage());
-                        }
-                        // ✅ Après nettoyage BT — recheck PENDING pour afficher bouton vert
-                        ui.postDelayed(() -> checkPendingDeliveryForThisRegister(), 2000);
-                    }).start();
                     tabMediaReady = false;
                     pendingReconnect = true;
-                    String msg = tabMediaShort + "(OFF) — connexion morte, reconnexion en cours";
+                    String msg = tabMediaShort + "(OFF) — reconnect requis";
                     LogBus.api(node, msg);
                     reportMediaOffToApi("CONNECT_CLICK", msg);
                     ui.post(() -> {
                         if (!isAdded() || getView() == null) return;
-                        if (txtLive != null) txtLive.setText("LIVE: " + tabMediaShort + "(OFF) — Désactivez/Réactivez le BT");
+                        if (txtLive != null) txtLive.setText("LIVE: " + tabMediaShort + "(OFF) — reconnect requis");
                         updateButtons(null);
                         if (userInitiated) {
-                            try { Toast.makeText(requireContext(),
-                                "Connexion morte — désactivez et réactivez le Bluetooth",
-                                Toast.LENGTH_LONG).show(); } catch (Exception ignored2) {}
+                            try { Toast.makeText(requireContext(), msg, Toast.LENGTH_SHORT).show(); } catch (Exception ignored2) {}
                         }
                     });
                     return;
