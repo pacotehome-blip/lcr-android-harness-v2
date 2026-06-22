@@ -66,12 +66,13 @@ public class RegisterTabFragment extends Fragment {
             android.content.Context ctx = getContext();
             if (ctx == null) return;
 
-            // ✅ Si le controller est déjà en livraison — ne pas interférer
+            // ✅ Si le controller est déjà en livraison ou connecté et actif — ne pas interférer
             if (controller != null) {
                 com.pa.lcr.lcp.DeliveryState st = controller.getState();
                 if (st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
                         || st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED
-                        || st == com.pa.lcr.lcp.DeliveryState.ENDING) return;
+                        || st == com.pa.lcr.lcp.DeliveryState.ENDING
+                        || st == com.pa.lcr.lcp.DeliveryState.CONNECTED) return;
             }
 
             com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
@@ -960,8 +961,21 @@ public class RegisterTabFragment extends Fragment {
         ui.post(() -> {
             if (!isAdded() || getView() == null) return;
             if (!tabMediaReady) {
-                if (txtLive != null) txtLive.setText("LIVE: " + tabMediaShort + "(OFF) — reconnect requis");
-                // Ne pas nullifier controller si transport suspendu — garder pour reconnexion rapide
+                // ✅ Message contextuel selon l'état de la livraison
+                String liveMsg;
+                if (controller != null) {
+                    com.pa.lcr.lcp.DeliveryState st = controller.getState();
+                    if (st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING) {
+                        liveMsg = "⚠️ " + tabMediaShort + " COUPÉ pendant livraison — le registre continue physiquement — reconnectez le BT";
+                    } else if (st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED) {
+                        liveMsg = "⚠️ " + tabMediaShort + " COUPÉ — livraison en pause — reconnectez le BT";
+                    } else {
+                        liveMsg = "LIVE: " + tabMediaShort + "(OFF) — reconnect requis";
+                    }
+                } else {
+                    liveMsg = "LIVE: " + tabMediaShort + "(OFF) — reconnect requis";
+                }
+                if (txtLive != null) txtLive.setText(liveMsg);
                 pendingReconnect = true;
                 updateButtons(controller != null ? controller.getState() : null);
                 return;
@@ -1083,6 +1097,30 @@ public class RegisterTabFragment extends Fragment {
         ui.postDelayed(() -> runStatusBLikeButton("AUTO_AFTER_TAB_CREATE"), 250);
         if (userInitiated) LogBus.api(node, "Connect TAB: 1 - UI attached");
         scheduleLogRefresh();
+
+        // ✅ Récupération WO depuis mémoire physique du registre (field #106)
+        // Si currentWoNum est vide (tablette remplacée, app redémarrée)
+        // et qu'ActiveDeliveryStore n'a pas de PENDING — lire field #106
+        if (currentWoNum == null || currentWoNum.isEmpty()) {
+            final com.pa.lcr.lcp.DeliveryController dcFinal = controller;
+            bg.execute(() -> {
+                try {
+                    String woFromReg = dcFinal.api_readWoNumSync();
+                    if (woFromReg != null && !woFromReg.isEmpty()) {
+                        android.util.Log.i("RegisterTabFragment",
+                            "Récupération WO depuis field #106: " + woFromReg);
+                        currentWoNum = woFromReg;
+                        ui.post(() -> {
+                            if (!isAdded() || getView() == null) return;
+                            updateButtons(dcFinal.getState());
+                        });
+                    }
+                } catch (Exception e) {
+                    android.util.Log.w("RegisterTabFragment",
+                        "api_readWoNumSync ERR: " + e.getMessage());
+                }
+            });
+        }
     }
 
     private void detachUiListenerSafe() {
@@ -1188,15 +1226,11 @@ public class RegisterTabFragment extends Fragment {
         boolean flowing   = (st == DeliveryState.RUNNING_FLOWING);
         boolean ending    = (st == DeliveryState.ENDING);
 
-        btnConnect.setEnabled(true);
+        btnConnect.setEnabled(!flowing);
         btnB.setEnabled(true);
-        btnA.setEnabled(connected || paused || flowing);
+        btnA.setEnabled((connected || paused || flowing) && tabMediaReady);
 
-        int dc = lastDelCode;
-        boolean tp   = (dc & 0x0001) != 0;
-        boolean flow = (dc & 0x0004) != 0;
-        boolean act  = (dc & 0x0008) != 0;
-        btnC.setEnabled(connected && !tp && !flow && !act);
+        btnC.setEnabled(connected);
 
         if (starting) {
             btnContinue.setEnabled(false);
@@ -1204,7 +1238,7 @@ public class RegisterTabFragment extends Fragment {
         } else {
             String lt = lastLiveText;
             boolean flowOffPhase = (lt != null && lt.contains("Flow OFF"));
-            boolean enable = paused || flowOffPhase;
+            boolean enable = (paused || flowOffPhase) && tabMediaReady;
             btnContinue.setEnabled(enable);
             btnFinish.setEnabled(enable);
         }
@@ -1233,7 +1267,8 @@ public class RegisterTabFragment extends Fragment {
                 String uid = txtDeliveryUid != null ?
                     txtDeliveryUid.getText().toString()
                         .replace("Delivery UID : ", "").trim() : "";
-                hasActiveDelivery = !uid.isEmpty() && !uid.equals("—");
+                hasActiveDelivery = (!uid.isEmpty() && !uid.equals("—"))
+                    || (currentWoNum != null && !currentWoNum.isEmpty());
             } catch (Exception ignored) {}
             boolean canCancel = (connected || flowing || paused) && !starting && hasActiveDelivery;
             if (canCancel) {
@@ -1780,6 +1815,8 @@ public class RegisterTabFragment extends Fragment {
                 // 3. Resolve synchrone — consomme le ticket pending → CONNECTED propre
                 // api_deliveryAlignA() est synchrone contrairement à alignOrRecover()
                 try { c.api_deliveryAlignA(); } catch (Exception ignored) {}
+                // ✅ Reset lastDelCode — évite btnC grisé à cause de bits stale
+                lastDelCode = 0;
 
                 // 4. Attendre CONNECTED propre (max 5s)
                 for (int i = 0; i < 25; i++) {
