@@ -1047,10 +1047,9 @@ public class RegisterTabFragment extends Fragment {
             }
             // ✅ Si le controller du session manager est aussi mort — le retirer avant getOrCreate
             try {
-                DeliveryController existing = sm.get(tkPinned);
-                if (existing != null && existing.isStopped()) {
-                    sm.remove(tkPinned);
-                    android.util.Log.i("RegisterTabFragment", "Controller mort retiré du SessionManager — recréation");
+                if (controller != null && controller.isStopped()) {
+                    android.util.Log.i("RegisterTabFragment", "Controller mort — recréation forcée");
+                    controller = null;
                 }
             } catch (Exception ignored) {}
             dc = sm.getOrCreate(tkPinned, node, from, io);
