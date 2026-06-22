@@ -164,73 +164,73 @@ public class LcrDeliverySync {
         JSONObject j = new JSONObject();
 
         // Identification
-        putStr(j, "lcr_wo_num",          row.woNum);
-        putStr(j, "lcr_wo_id_guid",      row.woIdGuid);
-        putStr(j, "lcr_tournee_id",       row.tourneeId);
-        putInt(j, "lcr_transaction_no",   row.transactionNo);
-        putInt(j, "lcr_stop_sequence",    row.stopSequence);
-        putStr(j, "lcr_livreur_id",       row.livreurId);
-        putStr(j, "lcr_camion_id",        row.camionId);
-        putStr(j, "lcr_serial_id",        row.serialId);
-        putInt(j, "lcr_lcrnode",          row.lcrnode);
-        putStr(j, "lcr_btmac",            row.btmac);
+        putStr(j, "filgo_wo_num",          row.woNum);
+        putStr(j, "filgo_wo_id_guid",      row.woIdGuid);
+        putStr(j, "filgo_tournee_id",       row.tourneeId);
+        putInt(j, "filgo_transaction_no",   row.transactionNo);
+        putInt(j, "filgo_stop_sequence",    row.stopSequence);
+        putStr(j, "filgo_livreur_id",       row.livreurId);
+        putStr(j, "filgo_camion_id",        row.camionId);
+        putStr(j, "filgo_serial_id",        row.serialId);
+        putInt(j, "filgo_lcrnode",          row.lcrnode);
+        putStr(j, "filgo_btmac",            row.btmac);
 
         // Type transaction
-        putStr(j, "lcr_stop_type",        row.stopType);
-        putStr(j, "lcr_type",             row.type);
-        putStr(j, "lcr_source",           row.source);
-        putStr(j, "lcr_ticket_no_ref",    row.ticketNoRef);
-        j.put("lcr_approbation_required", row.approbationRequired == 1);
-        putStr(j, "lcr_approbation_status", row.approbationStatus);
-        putStr(j, "lcr_approbation_by",   row.approbationBy);
-        putStr(j, "lcr_approbation_ts",   row.approbationTs);
+        putStr(j, "filgo_stop_type",        row.stopType);
+        putStr(j, "filgo_type",             row.type);
+        putStr(j, "filgo_source",           row.source);
+        putStr(j, "filgo_ticket_no_ref",    row.ticketNoRef);
+        j.put("filgo_approbation_required", row.approbationRequired == 1);
+        putStr(j, "filgo_approbation_status", row.approbationStatus);
+        putStr(j, "filgo_approbation_by",   row.approbationBy);
+        putStr(j, "filgo_approbation_ts",   row.approbationTs);
 
         // Données commerciales
-        putStr(j, "lcr_client",           row.client);
-        putInt(j, "lcr_produit_no",        row.produitNo);
-        putInt(j, "lcr_compartiment_id",   row.compartimentId);
-        putDbl(j, "lcr_preset_l",          row.presetL);
-        putDbl(j, "lcr_prix_unitaire",     row.prixUnitaire);
-        putDbl(j, "lcr_tps",               row.tps);
-        putDbl(j, "lcr_tvq",               row.tvq);
-        putDbl(j, "lcr_taxe_carbone",      row.taxeCarbone);
-        putStr(j, "lcr_memo_dispatch",     row.memoDispatch);
+        putStr(j, "filgo_client",           row.client);
+        putInt(j, "filgo_produit_no",        row.produitNo);
+        putInt(j, "filgo_compartiment_id",   row.compartimentId);
+        putDbl(j, "filgo_preset_l",          row.presetL);
+        putDbl(j, "filgo_prix_unitaire",     row.prixUnitaire);
+        putDbl(j, "filgo_tps",               row.tps);
+        putDbl(j, "filgo_tvq",               row.tvq);
+        putDbl(j, "filgo_taxe_carbone",      row.taxeCarbone);
+        putStr(j, "filgo_memo_dispatch",     row.memoDispatch);
 
         // Données terrain
-        putStr(j, "lcr_ticket_no",         row.ticketNo);
-        putStr(j, "lcr_sale_no",           row.saleNo);
-        putDbl(j, "lcr_net_l",             row.netL);
-        putDbl(j, "lcr_gross_l",           row.grossL);
-        putDbl(j, "lcr_delta_net_l",       row.deltaNetL);
-        putDbl(j, "lcr_delta_gross_l",     row.deltaGrossL);
-        putStr(j, "lcr_preset_status",     row.presetStatus);
-        putStr(j, "lcr_start_utc",         row.startUtc);
-        putStr(j, "lcr_end_utc",           row.endUtc);
-        putDbl(j, "lcr_duration_s",        row.durationS);
+        putStr(j, "filgo_ticket_no",         row.ticketNo);
+        putStr(j, "filgo_sale_no",           row.saleNo);
+        putDbl(j, "filgo_net_l",             row.netL);
+        putDbl(j, "filgo_gross_l",           row.grossL);
+        putDbl(j, "filgo_delta_net_l",       row.deltaNetL);
+        putDbl(j, "filgo_delta_gross_l",     row.deltaGrossL);
+        putStr(j, "filgo_preset_status",     row.presetStatus);
+        putStr(j, "filgo_start_utc",         row.startUtc);
+        putStr(j, "filgo_end_utc",           row.endUtc);
+        putDbl(j, "filgo_duration_s",        row.durationS);
 
         // Inventaire
-        putDbl(j, "lcr_inventaire_avant_l", row.inventaireAvantL);
-        putDbl(j, "lcr_inventaire_apres_l", row.inventaireApresL);
-        putStr(j, "lcr_serial_id_original", row.serialIdOriginal);
-        putStr(j, "lcr_serial_id_nouveau",  row.serialIdNouveau);
+        putDbl(j, "filgo_inventaire_avant_l", row.inventaireAvantL);
+        putDbl(j, "filgo_inventaire_apres_l", row.inventaireApresL);
+        putStr(j, "filgo_serial_id_original", row.serialIdOriginal);
+        putStr(j, "filgo_serial_id_nouveau",  row.serialIdNouveau);
 
         // Notes et payload
-        putStr(j, "lcr_notes_livreur",     row.notesLivreur);
-        putStr(j, "lcr_sync_status",       LcrDeliveryStatusDb.SYNC_SYNCED);
-        putStr(j, "lcr_payload_json",      row.payloadJson);
+        putStr(j, "filgo_notes_livreur",     row.notesLivreur);
+        putStr(j, "filgo_sync_status",       LcrDeliveryStatusDb.SYNC_SYNCED);
+        putStr(j, "filgo_payload_json",      row.payloadJson);
 
         // Historique
-        putDbl(j, "lcr_previous_net_l",    row.previousNetL);
-        putDbl(j, "lcr_previous_gross_l",  row.previousGrossL);
-        putStr(j, "lcr_previous_ticket_no", row.previousTicketNo);
-        putDbl(j, "lcr_total_net_l",       row.totalNetL);
-        putDbl(j, "lcr_total_gross_l",     row.totalGrossL);
-        putInt(j, "lcr_delivery_count",    row.deliveryCount);
-        putDbl(j, "lcr_preset_overage_l",  row.presetOverageL);
+        putDbl(j, "filgo_previous_net_l",    row.previousNetL);
+        putDbl(j, "filgo_previous_gross_l",  row.previousGrossL);
+        putStr(j, "filgo_previous_ticket_no", row.previousTicketNo);
+        putDbl(j, "filgo_total_net_l",       row.totalNetL);
+        putDbl(j, "filgo_total_gross_l",     row.totalGrossL);
+        putInt(j, "filgo_delivery_count",    row.deliveryCount);
+        putDbl(j, "filgo_preset_overage_l",  row.presetOverageL);
 
         // Erreurs
-        putStr(j, "lcr_error_code",        row.errorCode);
-        putStr(j, "lcr_error_msg",         row.errorMsg);
+        putStr(j, "filgo_error_code",        row.errorCode);
+        putStr(j, "filgo_error_msg",         row.errorMsg);
 
         return j;
     }
@@ -281,12 +281,12 @@ public class LcrDeliverySync {
             for (int i = 0; i < values.length(); i++) {
                 JSONObject n = values.getJSONObject(i);
                 ContentValues cv = new ContentValues();
-                cv.put(LcrDeliveryStatusDb.NOTE_COL_CODE,       n.optString("lcr_code"));
-                cv.put(LcrDeliveryStatusDb.NOTE_COL_LIBELLE_FR, n.optString("lcr_libelle_fr"));
-                cv.put(LcrDeliveryStatusDb.NOTE_COL_LIBELLE_EN, n.optString("lcr_libelle_en"));
-                cv.put(LcrDeliveryStatusDb.NOTE_COL_CATEGORIE,  n.optString("lcr_categorie"));
-                cv.put(LcrDeliveryStatusDb.NOTE_COL_ACTIVE,     n.optBoolean("lcr_active", true) ? 1 : 0);
-                cv.put(LcrDeliveryStatusDb.NOTE_COL_ORDRE,      n.optInt("lcr_ordre", 0));
+                cv.put(LcrDeliveryStatusDb.NOTE_COL_CODE,       n.optString("filgo_code"));
+                cv.put(LcrDeliveryStatusDb.NOTE_COL_LIBELLE_FR, n.optString("filgo_libelle_fr"));
+                cv.put(LcrDeliveryStatusDb.NOTE_COL_LIBELLE_EN, n.optString("filgo_libelle_en"));
+                cv.put(LcrDeliveryStatusDb.NOTE_COL_CATEGORIE,  n.optString("filgo_categorie"));
+                cv.put(LcrDeliveryStatusDb.NOTE_COL_ACTIVE,     n.optBoolean("filgo_active", true) ? 1 : 0);
+                cv.put(LcrDeliveryStatusDb.NOTE_COL_ORDRE,      n.optInt("filgo_ordre", 0));
                 notes.add(cv);
             }
 
