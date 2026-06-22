@@ -11,16 +11,16 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * SQLite local APK — miroir de la table Dataverse lcr_delivery_status.
+ * SQLite local APK — miroir de la table Dataverse filgo_delivery_status.
  *
  * Maître des données terrain (registre LCR).
  * Synchronisé vers Dataverse via MSAL quand réseau disponible.
  *
- * v1: lcr_delivery_status + lcr_note_template
+ * v1: filgo_delivery_status + filgo_note_template
  */
 public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
 
-    public static final String DB_NAME    = "lcr_delivery_status.db";
+    public static final String DB_NAME    = "filgo_delivery_status.db";
     public static final int    DB_VERSION = 2;
 
     private static final String TAG = "LcrDeliveryStatusDb";
@@ -28,11 +28,11 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     // =========================================================
     // Tables
     // =========================================================
-    public static final String TABLE_DELIVERY = "lcr_delivery_status";
-    public static final String TABLE_NOTE     = "lcr_note_template";
+    public static final String TABLE_DELIVERY = "filgo_delivery_status";
+    public static final String TABLE_NOTE     = "filgo_note_template";
 
     // =========================================================
-    // Colonnes — lcr_delivery_status
+    // Colonnes — filgo_delivery_status
     // =========================================================
     public static final String COL_ID                  = "id";                  // PK locale autoincrement
     public static final String COL_DATAVERSE_ID        = "dataverse_id";        // GUID Dataverse si déjà créé
@@ -132,7 +132,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     public static final String PRESET_RESOLVE = "RESOLVE";
 
     // =========================================================
-    // Colonnes — lcr_note_template
+    // Colonnes — filgo_note_template
     // =========================================================
     public static final String NOTE_COL_ID          = "id";
     public static final String NOTE_COL_CODE        = "code";
@@ -183,7 +183,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     }
 
     // =========================================================
-    // Création table lcr_delivery_status
+    // Création table filgo_delivery_status
     // =========================================================
     private static void createDeliveryStatusTable(SQLiteDatabase db) {
         db.execSQL(
@@ -276,7 +276,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     }
 
     // =========================================================
-    // Création table lcr_note_template
+    // Création table filgo_note_template
     // =========================================================
     private static void createNoteTemplateTable(SQLiteDatabase db) {
         db.execSQL(
@@ -295,12 +295,12 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     }
 
     // =========================================================
-    // CRUD — lcr_delivery_status
+    // CRUD — filgo_delivery_status
     // =========================================================
 
     /**
      * Insère une nouvelle transaction — toujours un nouvel enregistrement.
-     * Chaque impression = une nouvelle ligne dans lcr_delivery_status.
+     * Chaque impression = une nouvelle ligne dans filgo_delivery_status.
      * Calcule automatiquement previous/total/count depuis les lignes précédentes.
      */
     public long insertDelivery(ContentValues cv) {
@@ -472,28 +472,6 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     }
 
     /**
-     * Retourne TOUTES les transactions pour un WO donné (toutes les livraisons,
-     * annulations incluses), triées chronologiquement. Utilisé par retournerAuWorkOrder()
-     * pour envoyer l'historique complet du WO dans un seul payload — le cumul logique
-     * (somme net/gross excluant les annulations) reste à faire côté Dataverse/FieldService.
-     */
-    public List<DeliveryRow> getAllForWo(String woNum) {
-        List<DeliveryRow> list = new ArrayList<>();
-        try (Cursor c = getReadableDatabase().query(
-                TABLE_DELIVERY, null,
-                COL_WO_NUM + "=?", new String[]{woNum},
-                null, null,
-                COL_TRANSACTION_NO + " ASC")) {
-            while (c.moveToNext()) {
-                list.add(DeliveryRow.fromCursor(c));
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "getAllForWo ERR: " + e.getMessage());
-        }
-        return list;
-    }
-
-    /**
      * Retourne toutes les transactions d'une tournée.
      */
     public List<DeliveryRow> getDeliveriesForTournee(String tourneeId) {
@@ -512,7 +490,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     }
 
     // =========================================================
-    // CRUD — lcr_note_template
+    // CRUD — filgo_note_template
     // =========================================================
 
     /**

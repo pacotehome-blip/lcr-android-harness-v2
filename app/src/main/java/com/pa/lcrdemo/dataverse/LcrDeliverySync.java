@@ -34,9 +34,9 @@ public class LcrDeliverySync {
 
     private static final String TAG = "LcrDeliverySync";
 
-    // Noms des tables Dataverse (avec préfixe lcr_lcr_ car publisher lcr + nom lcr_xxx)
-    private static final String TABLE_DELIVERY = "lcr_lcr_delivery_statuses";
-    private static final String TABLE_NOTE     = "lcr_lcr_note_templates";
+    // Noms des tables Dataverse (préfixe filgo_ — publisher Filgo, colonnes lcr_)
+    private static final String TABLE_DELIVERY = "filgo_lcr_delivery_statuses";
+    private static final String TABLE_NOTE     = "filgo_lcr_note_templates";
 
     // =========================================================
     // Point d'entrée principal — appelé depuis MainActivity après MSAL
@@ -139,7 +139,7 @@ public class LcrDeliverySync {
                 byte[] respBytes = readStream(is);
                 String respStr = new String(respBytes, StandardCharsets.UTF_8);
                 JSONObject resp = new JSONObject(respStr);
-                return resp.optString("lcr_lcr_delivery_statusid", row.woNum + "-" + row.id);
+                return resp.optString("filgo_lcr_delivery_statusid", row.woNum + "-" + row.id);
             } else if (code == 204) {
                 // Pas de corps retourné
                 return row.woNum + "-" + row.id;
@@ -305,7 +305,7 @@ public class LcrDeliverySync {
                                                    String accessToken) {
         try {
             String urlStr = orgUrl + "/api/data/v9.2/" + TABLE_DELIVERY
-                + "?$select=lcr_lcr_delivery_statusid"
+                + "?$select=filgo_lcr_delivery_statusid"
                 + "&$filter=lcr_wo_num eq '" + woNum + "'"
                 + "&$top=1";
             URL url = new URL(urlStr);
@@ -325,7 +325,7 @@ public class LcrDeliverySync {
                     JSONArray values = json.optJSONArray("value");
                     if (values != null && values.length() > 0) {
                         return values.getJSONObject(0)
-                            .optString("lcr_lcr_delivery_statusid", null);
+                            .optString("filgo_lcr_delivery_statusid", null);
                     }
                 }
             } finally {
