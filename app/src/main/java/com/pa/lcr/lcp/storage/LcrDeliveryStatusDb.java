@@ -472,6 +472,25 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     }
 
     /**
+     * Retourne toutes les livraisons/annulations pour un WO donné,
+     * triées par transaction_no ASC. Utilisé pour le payload consolidé Dataverse.
+     */
+    public List<DeliveryRow> getAllForWo(String woNum) {
+        List<DeliveryRow> list = new ArrayList<>();
+        try (Cursor c = getReadableDatabase().query(
+                TABLE_DELIVERY, null,
+                COL_WO_NUM + "=?", new String[]{woNum},
+                null, null, COL_TRANSACTION_NO + " ASC")) {
+            while (c.moveToNext()) {
+                list.add(DeliveryRow.fromCursor(c));
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "getAllForWo ERR: " + e.getMessage());
+        }
+        return list;
+    }
+
+    /**
      * Retourne toutes les transactions d'une tournée.
      */
     public List<DeliveryRow> getDeliveriesForTournee(String tourneeId) {
