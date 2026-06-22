@@ -994,6 +994,19 @@ public class RegisterTabFragment extends Fragment {
             }
             return;
         }
+        // ✅ Ne pas nullifier le controller si livraison active — le tick continue
+        // Réattacher seulement le listener UI
+        if (controller != null) {
+            com.pa.lcr.lcp.DeliveryState st = controller.getState();
+            if (st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
+                    || st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED
+                    || st == com.pa.lcr.lcp.DeliveryState.ENDING) {
+                android.util.Log.i("RegisterTabFragment",
+                    "reconnect: livraison active (" + st + ") — réattach UI seulement, controller préservé");
+                connectThisRegister(userInitiated);
+                return;
+            }
+        }
         try { detachUiListenerSafe(); } catch (Exception ignored) {}
         controller = null;
         starting = false;
