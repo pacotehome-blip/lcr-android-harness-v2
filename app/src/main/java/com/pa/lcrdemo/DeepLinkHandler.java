@@ -331,12 +331,13 @@ public class DeepLinkHandler {
     // Lancer livraison sur transport déjà actif (USB/BT/TCP)
     // =========================================================
 
-    private void lancerLivraison(String transportKey, int node, String serialId,
+    public void lancerLivraison(String transportKey, int node, String serialId,
                                   String woNum, String woIdGuid,
                                   String produit, String presetStr, String mac) {
         // Ouvrir/activer le tab
         final String fSerialId = serialId != null ? serialId : "";
         final String fWoNum = woNum;
+        final String fWoIdGuid = woIdGuid;
         final String fProduit = produit;
         final String fPresetStr = presetStr;
         activity.runOnUiThread(() -> {
@@ -356,7 +357,7 @@ public class DeepLinkHandler {
                                     .findFragmentByTag("regtab_" + tabKey);
                                 if (f instanceof RegisterTabFragment) {
                                     ((RegisterTabFragment) f).prefillFromDeepLink(
-                                        fWoNum, fProduit, fPresetStr);
+                                        fWoNum, fWoIdGuid, fProduit, fPresetStr);
                                 } else if (attempts++ < 5) {
                                     // Tab pas encore créé — réessayer
                                     activity.getUiHandler().postDelayed(this, 800);
@@ -690,6 +691,7 @@ public class DeepLinkHandler {
                 final String fProduit      = produit;
                 final String fPreset       = presetStr;
                 final String fWoNum        = woNum;
+                final String fWoIdGuid     = woIdGuid;
                 final String fSerialId     = serialId != null ? serialId : "";
                 final String fTransportKey = transportKey;
 
@@ -705,7 +707,7 @@ public class DeepLinkHandler {
                                                               .findFragmentByTag("regtab_" + tabKey);
                                 if (f instanceof RegisterTabFragment) {
                                     ((RegisterTabFragment) f).prefillFromDeepLink(
-                                        fWoNum, fProduit, fPreset);
+                                        fWoNum, fWoIdGuid, fProduit, fPreset);
                                 }
                             } catch (Exception ignored) {}
                         }, 800);
@@ -1201,8 +1203,19 @@ public class DeepLinkHandler {
     }
 
     public void onDeliveryEnded(String woNum, String woIdGuid, String extraJson) {
-        // ✅ Effacer la livraison courante
-        try { new ActiveDeliveryStore(activity).clear(); } catch (Exception ignored) {}
+        // ✅ Garder le contexte WO (statut DONE) au lieu de l'effacer — permet
+        // au bouton C (relance manuelle hors flux FSM) de toujours connaître
+        // le woNum courant pour sa vérification de duplicata et pour
+        // setNumeroLivraison(). clear() supprimait ce contexte trop tôt.
+        try {
+            ActiveDeliveryStore ads = new ActiveDeliveryStore(activity);
+            ActiveDeliveryStore.ActiveDelivery ad = ads.load();
+            if (ad != null) {
+                ads.save(ad.woNum, ad.woIdGuid, ad.jobId,
+                    ad.mac, ad.node, ad.serialId,
+                    ad.produit, ad.preset, "DONE");
+            }
+        } catch (Exception ignored) {}
         android.util.Log.i(TAG,
             "Livraison terminée — WO=" + woNum + " extra=" + extraJson);
 
@@ -1602,7 +1615,7 @@ public class DeepLinkHandler {
             ? woNum + "-" + System.currentTimeMillis()
             : deliveryUid;
 
-        // ✅ Insérer UNE NOUVELLE LIGNE dans lcr_delivery_status (jamais d'écrasement)
+        // ✅ Insérer UNE NOUVELLE LIGNE dans filgo_delivery_status (jamais d'écrasement)
         // avec le payload riche complet — une ligne par livraison, peu importe le WO
         try {
             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
@@ -1626,7 +1639,7 @@ public class DeepLinkHandler {
             android.util.Log.i(TAG, "patchDataverse: ligne ajoutée localId=" + localId
                 + " wo=" + woNum + " net=" + netVal);
         } catch (Exception e) {
-            android.util.Log.e(TAG, "patchDataverse: insert lcr_delivery_status ERR: " + e.getMessage());
+            android.util.Log.e(TAG, "patchDataverse: insert filgo_delivery_status ERR: " + e.getMessage());
         }
 
         try {
