@@ -968,7 +968,10 @@ public class RegisterTabFragment extends Fragment {
                 updateButtons(controller != null ? controller.getState() : null);
                 return;
             }
-            if (pendingReconnect) { pendingReconnect = false; reconnectThisRegister(false); }
+            if (pendingReconnect) { pendingReconnect = false; reconnectThisRegister(false);
+                // ✅ Relancer le check livraison PENDING après reconnexion BT
+                ui.postDelayed(() -> checkPendingDeliveryForThisRegister(), 1200);
+            }
         });
     }
 
