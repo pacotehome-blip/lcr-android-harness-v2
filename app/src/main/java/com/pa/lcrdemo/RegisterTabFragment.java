@@ -120,17 +120,13 @@ public class RegisterTabFragment extends Fragment {
     private void showDeliveryReadyPanel(
             com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad) {
         try {
-            // ✅ Garde: ne pas écraser btnRetourWO si une livraison vient de se terminer
-            // (ticket déjà présent = une vraie livraison a eu lieu entre temps)
-            try {
-                String ticket = txtTicketNo != null ?
-                    txtTicketNo.getText().toString().replace("Ticket Number : ", "").trim() : "";
-                if (!ticket.isEmpty() && !ticket.equals("—")) {
-                    android.util.Log.i("RegisterTabFragment",
-                        "showDeliveryReadyPanel annulé — ticket déjà présent: " + ticket);
-                    return;
-                }
-            } catch (Exception ignored) {}
+            // ✅ Garde: ne pas afficher si le status est DONE (livraison déjà complétée)
+            // On ne bloque plus sur le ticket affiché — trop agressif pour les nouvelles livraisons
+            if ("DONE".equals(ad.status)) {
+                android.util.Log.i("RegisterTabFragment",
+                    "showDeliveryReadyPanel annulé — status DONE");
+                return;
+            }
 
             // ✅ Afficher infos livraison dans txtDeliveryUid
             if (txtDeliveryUid != null) {
@@ -1027,9 +1023,22 @@ public class RegisterTabFragment extends Fragment {
                 } catch (Exception ignored) {}
 
                 if (io == null || !io.isOpen()) {
+                    // ✅ Transport mort — killer le BT zombi et planifier reconnexion
+                    android.util.Log.i("RegisterTabFragment",
+                        "Transport " + tkPinned + " mort — btDisconnect + nettoyage");
+                    new Thread(() -> {
+                        try {
+                            if (requireActivity() instanceof com.pa.lcrdemo.MainActivity) {
+                                ((com.pa.lcrdemo.MainActivity) requireActivity()).btDisconnect();
+                                Thread.sleep(1000);
+                            }
+                        } catch (Exception eKill) {
+                            android.util.Log.w("RegisterTabFragment", "btDisconnect ERR: " + eKill.getMessage());
+                        }
+                    }).start();
                     tabMediaReady = false;
                     pendingReconnect = true;
-                    String msg = tabMediaShort + "(OFF) — Désactivez/Réactivez le BT pour reconnecter";
+                    String msg = tabMediaShort + "(OFF) — connexion morte, reconnexion en cours";
                     LogBus.api(node, msg);
                     reportMediaOffToApi("CONNECT_CLICK", msg);
                     ui.post(() -> {
@@ -1038,7 +1047,7 @@ public class RegisterTabFragment extends Fragment {
                         updateButtons(null);
                         if (userInitiated) {
                             try { Toast.makeText(requireContext(),
-                                "BT déconnecté — désactivez et réactivez le Bluetooth",
+                                "Connexion morte — désactivez et réactivez le Bluetooth",
                                 Toast.LENGTH_LONG).show(); } catch (Exception ignored2) {}
                         }
                     });

@@ -282,8 +282,20 @@ public class DeepLinkHandler {
                         } else {
                             android.util.Log.w(TAG, "Registre introuvable — node=" + fNode);
 
+                            // ✅ Sauver PENDING dans ActiveDeliveryStore pour reprise manuelle
+                            // Quand le chauffeur connecte le BT, checkPendingDeliveryForThisRegister
+                            // trouvera ce PENDING et affichera le bouton vert
+                            try {
+                                new ActiveDeliveryStore(activity).save(
+                                    woNum, woIdGuid, "", "", fNode, fSerialId,
+                                    fProduit.isEmpty() ? 1 : Integer.parseInt(fProduit),
+                                    fPresetStr.isEmpty() ? 0 : Double.parseDouble(fPresetStr),
+                                    "PENDING");
+                                android.util.Log.i(TAG, "ActiveDeliveryStore: PENDING sauvé pour reprise — wo=" + woNum);
+                            } catch (Exception eSave) {
+                                android.util.Log.w(TAG, "ActiveDeliveryStore save ERR: " + eSave.getMessage());
+                            }
                             // ✅ Rester dans l'APK — pas de finish() pour éviter bounce FSM
-                            // Le chauffeur va dans Configure pour connecter le registre
                             final String fWoNumR = woNum;
                             final String fWoIdR  = woIdGuid;
                             final int    fNodeR  = fNode;
@@ -294,11 +306,10 @@ public class DeepLinkHandler {
                                 dlg.setMessage(
                                     "Le registre (node " + fNodeR + " · serial " + fSerialId + ") "
                                     + "n'est pas détecté sur USB ou Bluetooth.\n\n"
-                                    + "1. Branchez le câble USB-C du registre\n"
-                                    + "   — ou —\n"
-                                    + "2. Activez le Bluetooth et connectez le registre\n\n"
-                                    + "Ensuite, allez dans l'onglet Configure pour établir\n"
-                                    + "la connexion, puis relancez depuis Field Service.");
+                                    + "1. Activez le Bluetooth\n"
+                                    + "2. Allez dans Configure et connectez le registre\n\n"
+                                    + "Le bouton vert 🚀 apparaîtra automatiquement\n"
+                                    + "dans l'onglet du registre une fois connecté.");
                                 dlg.setPositiveButton("Aller à Configure", (d, w) -> {
                                     activity.showPage(1); // onglet Configure
                                 });
