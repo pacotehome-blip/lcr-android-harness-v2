@@ -84,7 +84,7 @@ public class RegisterTabFragment extends Fragment {
                 if (ad.woIdGuid != null && !ad.woIdGuid.isEmpty()) currentWoIdGuid = ad.woIdGuid;
             }
 
-            if (ad == null || ("PENDING".equals(ad.status) == false && "CANCELLED".equals(ad.status) == false)) return;
+            if (ad == null || (!"PENDING".equals(ad.status) && !"CANCELLED".equals(ad.status) && !"STARTED".equals(ad.status))) return;
 
             // ✅ Si CANCELLED — remettre net/gross à zéro (nouvelle livraison à venir)
             if ("CANCELLED".equals(ad.status)) {
@@ -1020,21 +1020,39 @@ public class RegisterTabFragment extends Fragment {
             TransportIo io = null;
             try { io = MediaTransportManager.get(requireContext()).getByKey(tkPinned); } catch (Exception ignored) {}
             if (io == null || !io.isOpen()) {
-                tabMediaReady = false;
-                pendingReconnect = true;
-                String msg = tabMediaShort + "(OFF) — impossible de connecter";
-                LogBus.api(node, msg);
-                reportMediaOffToApi("CONNECT_CLICK", msg);
-                ui.post(() -> {
-                    if (!isAdded() || getView() == null) return;
-                    if (txtLive != null) txtLive.setText("LIVE: " + tabMediaShort + "(OFF) — reconnect requis");
-                    updateButtons(null);
-                    if (userInitiated) {
-                        try { Toast.makeText(requireContext(), msg, Toast.LENGTH_SHORT).show(); } catch (Exception ignored2) {}
-                    }
-                });
-                return;
+                // ✅ Tenter reconnexion via activateExclusive — parfois suffit après reset BT
+                try {
+                    MediaTransportManager.get(requireContext()).activateExclusive(tkPinned, "TAB_RECONNECT");
+                    io = MediaTransportManager.get(requireContext()).getByKey(tkPinned);
+                } catch (Exception ignored) {}
+
+                if (io == null || !io.isOpen()) {
+                    tabMediaReady = false;
+                    pendingReconnect = true;
+                    String msg = tabMediaShort + "(OFF) — Désactivez/Réactivez le BT pour reconnecter";
+                    LogBus.api(node, msg);
+                    reportMediaOffToApi("CONNECT_CLICK", msg);
+                    ui.post(() -> {
+                        if (!isAdded() || getView() == null) return;
+                        if (txtLive != null) txtLive.setText("LIVE: " + tabMediaShort + "(OFF) — Désactivez/Réactivez le BT");
+                        updateButtons(null);
+                        if (userInitiated) {
+                            try { Toast.makeText(requireContext(),
+                                "BT déconnecté — désactivez et réactivez le Bluetooth",
+                                Toast.LENGTH_LONG).show(); } catch (Exception ignored2) {}
+                        }
+                    });
+                    return;
+                }
             }
+            // ✅ Si le controller du session manager est aussi mort — le retirer avant getOrCreate
+            try {
+                DeliveryController existing = sm.get(tkPinned);
+                if (existing != null && existing.isStopped()) {
+                    sm.remove(tkPinned);
+                    android.util.Log.i("RegisterTabFragment", "Controller mort retiré du SessionManager — recréation");
+                }
+            } catch (Exception ignored) {}
             dc = sm.getOrCreate(tkPinned, node, from, io);
         }
         if (dc == null && (tabTransportKey == null || tabTransportKey.trim().isEmpty())) {
