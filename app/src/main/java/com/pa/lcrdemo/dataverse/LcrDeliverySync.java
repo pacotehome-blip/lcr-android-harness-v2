@@ -165,6 +165,8 @@ public class LcrDeliverySync {
 
         // Identification
         putStr(j, "filgo_wo_num",          row.woNum);
+        // ✅ Champ primaire requis par Dataverse
+        putStr(j, "filgo_name",            row.woNum + "-" + (row.ticketNo != null ? row.ticketNo : row.id));
         putStr(j, "filgo_wo_id_guid",      row.woIdGuid);
         putStr(j, "filgo_tournee_id",       row.tourneeId);
         putInt(j, "filgo_transaction_no",   row.transactionNo);
