@@ -1693,6 +1693,12 @@ public class DeepLinkHandler {
                                     accessToken, woGuid, woNum, allDeliveries);
                                 android.util.Log.i(TAG, "patchDataverse MSAL: OK (consolidé "
                                     + allDeliveries.length() + " livraisons) — wonum=" + woNum);
+                                // ✅ Pousser les lignes PENDING vers filgo_lcr_delivery_statuses
+                                try {
+                                    com.pa.lcrdemo.dataverse.LcrDeliverySync.syncAll(activity, accessToken);
+                                } catch (Exception exSync) {
+                                    android.util.Log.w(TAG, "syncAll post-livraison ERR: " + exSync.getMessage());
+                                }
                                 try {
                                     DeliveryResultQueueDb qdb = new DeliveryResultQueueDb(activity);
                                     java.util.List<DeliveryResultQueueDb.QueueItem> items =
