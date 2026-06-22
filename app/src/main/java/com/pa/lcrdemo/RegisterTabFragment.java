@@ -1017,28 +1017,20 @@ public class RegisterTabFragment extends Fragment {
             TransportIo io = null;
             try { io = MediaTransportManager.get(requireContext()).getByKey(tkPinned); } catch (Exception ignored) {}
             if (io == null || !io.isOpen()) {
-                // ✅ Tenter reconnexion via activateExclusive — parfois suffit après reset BT
-                try {
-                    MediaTransportManager.get(requireContext()).activateExclusive(tkPinned, "TAB_RECONNECT");
-                    io = MediaTransportManager.get(requireContext()).getByKey(tkPinned);
-                } catch (Exception ignored) {}
-
-                if (io == null || !io.isOpen()) {
-                    tabMediaReady = false;
-                    pendingReconnect = true;
-                    String msg = tabMediaShort + "(OFF) — reconnect requis";
-                    LogBus.api(node, msg);
-                    reportMediaOffToApi("CONNECT_CLICK", msg);
-                    ui.post(() -> {
-                        if (!isAdded() || getView() == null) return;
-                        if (txtLive != null) txtLive.setText("LIVE: " + tabMediaShort + "(OFF) — reconnect requis");
-                        updateButtons(null);
-                        if (userInitiated) {
-                            try { Toast.makeText(requireContext(), msg, Toast.LENGTH_SHORT).show(); } catch (Exception ignored2) {}
-                        }
-                    });
-                    return;
-                }
+                tabMediaReady = false;
+                pendingReconnect = true;
+                String msg = tabMediaShort + "(OFF) — reconnect requis";
+                LogBus.api(node, msg);
+                reportMediaOffToApi("CONNECT_CLICK", msg);
+                ui.post(() -> {
+                    if (!isAdded() || getView() == null) return;
+                    if (txtLive != null) txtLive.setText("LIVE: " + tabMediaShort + "(OFF) — reconnect requis");
+                    updateButtons(null);
+                    if (userInitiated) {
+                        try { Toast.makeText(requireContext(), msg, Toast.LENGTH_SHORT).show(); } catch (Exception ignored2) {}
+                    }
+                });
+                return;
             }
             // ✅ Si le controller du session manager est aussi mort — le retirer avant getOrCreate
             try {
