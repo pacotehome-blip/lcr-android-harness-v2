@@ -710,10 +710,11 @@ public class RegisterTabFragment extends Fragment {
     private void runStatusBLikeButton(String reason) {
         try {
             if (controller == null) return;
+            if (!verifierIoAvantAction("STATUS_B")) return;
             try {
-                if (tabTransportKey != null) {
-                    MediaTransportManager.get(requireContext()).activateExclusive(tabTransportKey, (reason != null ? reason : "STATUS_B"));
-                }
+                if (tabTransportKey != null)
+                    MediaTransportManager.get(requireContext())
+                        .activateExclusive(tabTransportKey, reason != null ? reason : "STATUS_B");
             } catch (Exception ignored) {}
             try {
                 controller.requestStatus();
@@ -1068,7 +1069,7 @@ public class RegisterTabFragment extends Fragment {
                             .validerConnexion(
                                 tabTransportKey != null ? tabTransportKey : "",
                                 node,
-                                tabMediaShort != null ? tabMediaShort : "",
+                                serialFromArgs != null ? serialFromArgs : "",
                                 currentWoNum != null ? currentWoNum : "");
                     }
                 } catch (Exception eDiag) {
@@ -1103,7 +1104,7 @@ public class RegisterTabFragment extends Fragment {
                         .validerConnexion(
                             tabTransportKey != null ? tabTransportKey : "",
                             node,
-                            tabMediaShort != null ? tabMediaShort : "",
+                            serialFromArgs != null ? serialFromArgs : "",
                             currentWoNum != null ? currentWoNum : "");
                 }
             } catch (Exception eDiag) {
@@ -1747,6 +1748,30 @@ public class RegisterTabFragment extends Fragment {
      * ✅ Appelé dans chaque catch qui attrape une erreur LCP/BT.
      * Si c'est une erreur de connexion → affiche immédiatement l'écran de diagnostic.
      */
+    /**
+     * ✅ Vérifie que le transport io est ouvert avant toute action sur le registre.
+     * Si fermé → déclenche immédiatement l'écran de diagnostic.
+     * @return true si io est ouvert, false si diagnostic lancé
+     */
+    private boolean verifierIoAvantAction(String contexte) {
+        try {
+            if (tabTransportKey != null) {
+                com.pa.lcr.lcp.transport.TransportIo io =
+                    MediaTransportManager.get(requireContext()).getByKey(tabTransportKey);
+                if (io == null || !io.isOpen()) {
+                    surErreurConnexion(
+                        new java.io.IOException("Transport fermé — BT/USB débranché"),
+                        contexte);
+                    return false;
+                }
+            }
+        } catch (Exception e) {
+            surErreurConnexion(e, contexte);
+            return false;
+        }
+        return true;
+    }
+
     private void surErreurConnexion(Exception e, String contexte) {
         android.util.Log.w("RegisterTabFragment", "surErreurConnexion [" + contexte + "]: "
             + (e != null ? e.getMessage() : "null"));
@@ -1758,7 +1783,7 @@ public class RegisterTabFragment extends Fragment {
                         .validerConnexion(
                             tabTransportKey != null ? tabTransportKey : "",
                             node,
-                            tabMediaShort != null ? tabMediaShort : "",
+                            serialFromArgs != null ? serialFromArgs : "",
                             currentWoNum != null ? currentWoNum : "");
                 }
             } catch (Exception ignored) {}
@@ -1828,6 +1853,7 @@ public class RegisterTabFragment extends Fragment {
 
     private void doResolve() {
         if (controller == null) return;
+        if (!verifierIoAvantAction("RESOLVE")) return;
         try { controller.alignOrRecover(); } catch (Exception e) { surErreurConnexion(e, "RESOLVE"); return; }
         ui.postDelayed(() -> {
             try {
@@ -1847,6 +1873,7 @@ public class RegisterTabFragment extends Fragment {
     private void annulerLivraison() {
         DeliveryController c = controller;
         if (c == null) return;
+        if (!verifierIoAvantAction("ANNULER")) return;
         if (btnAnnuler != null) {
             btnAnnuler.setEnabled(false);
             btnAnnuler.setText("⏳ Annulation en cours — veuillez patienter");
