@@ -1085,6 +1085,15 @@ public class RegisterTabFragment extends Fragment {
                 LogBus.api(node, "Aucun média prêt / registre introuvable pour ce node");
                 Toast.makeText(requireContext(), "Aucun média prêt (USB/BT)", Toast.LENGTH_SHORT).show();
             }
+            // ✅ Lancer diagnostic via RegisterConnectionHelper
+            if (userInitiated && requireActivity() instanceof MainActivity) {
+                new com.pa.lcrdemo.RegisterConnectionHelper((MainActivity) requireActivity())
+                    .validerConnexion(
+                        tabTransportKey != null ? tabTransportKey : "",
+                        node,
+                        tabMediaShort != null ? tabMediaShort : "",
+                        currentWoNum != null ? currentWoNum : "");
+            }
             return;
         }
 
