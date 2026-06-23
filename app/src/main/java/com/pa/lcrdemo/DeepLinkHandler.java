@@ -294,8 +294,6 @@ public class DeepLinkHandler {
                             android.util.Log.w(TAG, "Registre introuvable — node=" + fNode);
 
                             // ✅ Sauver PENDING dans ActiveDeliveryStore pour reprise manuelle
-                            // Quand le chauffeur connecte le BT, checkPendingDeliveryForThisRegister
-                            // trouvera ce PENDING et affichera le bouton vert
                             try {
                                 new ActiveDeliveryStore(activity).save(
                                     woNum, woIdGuid, "", "", fNode, fSerialId,
@@ -306,32 +304,17 @@ public class DeepLinkHandler {
                             } catch (Exception eSave) {
                                 android.util.Log.w(TAG, "ActiveDeliveryStore save ERR: " + eSave.getMessage());
                             }
-                            // ✅ Rester dans l'APK — pas de finish() pour éviter bounce FSM
-                            final String fWoNumR = woNum;
-                            final String fWoIdR  = woIdGuid;
-                            final int    fNodeR  = fNode;
-                            activity.runOnUiThread(() -> {
-                                android.app.AlertDialog.Builder dlg =
-                                    new android.app.AlertDialog.Builder(activity);
-                                dlg.setTitle("⚠️ Registre non connecté");
-                                dlg.setMessage(
-                                    "Le registre (node " + fNodeR + " · serial " + fSerialId + ") "
-                                    + "n'est pas détecté sur USB ou Bluetooth.\n\n"
-                                    + "1. Activez le Bluetooth\n"
-                                    + "2. Allez dans Configure et connectez le registre\n\n"
-                                    + "Le bouton vert 🚀 apparaîtra automatiquement\n"
-                                    + "dans l'onglet du registre une fois connecté.");
-                                dlg.setPositiveButton("Aller à Configure", (d, w) -> {
-                                    activity.showPage(1); // onglet Configure
-                                });
-                                dlg.setNegativeButton("Annuler", null);
-                                dlg.setCancelable(true);
-                                dlg.show();
-                            });
 
-                            // Logger l'événement
+                            // ✅ Écran diagnostic avec progression 4 étapes
+                            // Remplace l'ancien dialog "Aller à Configure"
                             logError(fSerialId, woNum, "NO_TRANSPORT",
                                 "Registre node=" + fNode + " introuvable sur tous les transports");
+                            new RegisterConnectionHelper(activity)
+                                .validerConnexion(
+                                    transportKey != null ? transportKey : "",
+                                    fNode,
+                                    fSerialId != null ? fSerialId : "",
+                                    woNum);
                         }
                     }
                 } catch (Exception e) {
