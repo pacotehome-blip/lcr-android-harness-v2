@@ -311,7 +311,8 @@ public class DeepLinkHandler {
                                 "Registre node=" + fNode + " introuvable sur tous les transports");
                             new RegisterConnectionHelper(activity)
                                 .validerConnexion(
-                                    transportKey != null ? transportKey : "",
+                                    fBtMac != null && !fBtMac.isEmpty()
+                                        ? MediaTransportManager.btKey(fBtMac) : "",
                                     fNode,
                                     fSerialId != null ? fSerialId : "",
                                     woNum);
