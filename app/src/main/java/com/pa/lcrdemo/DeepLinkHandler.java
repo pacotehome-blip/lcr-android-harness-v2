@@ -524,12 +524,22 @@ public class DeepLinkHandler {
                         activity.toast("⚠️ Ticket en attente — imprimez le ticket précédent avant de démarrer"));
                     activity.runOnUiThread(() -> activity.showPage(0));
                 } else {
-                    // Erreur orchestration — rester dans l'APK (pas de finish() pour éviter bounce FSM)
-                    android.util.Log.w(TAG, "oneshot/start: orchestration error — rester dans APK");
-                    activity.runOnUiThread(() -> {
-                        activity.toast("⚠️ Registre non disponible — vérifiez l'état du registre et réessayez");
-                        activity.showPage(0);
-                    });
+                    // Erreur orchestration (Timeout LCP) — déclencher progression reconnexion
+                    android.util.Log.w(TAG, "oneshot/start: orchestration error — tentative reconnexion registre");
+                    // Récupérer le dernier ticket pour le dialog support
+                    String lastTicket = "";
+                    try {
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbCheck =
+                            new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow lastRow =
+                            dbCheck.getLatestForWo(woNum != null ? woNum : "");
+                        if (lastRow != null && lastRow.ticketNo != null) lastTicket = lastRow.ticketNo;
+                    } catch (Exception ignored) {}
+                    final String fLastTicket = lastTicket;
+                    final String fTransportKey = transportKey;
+                    final int fNodeFinal = node;
+                    new Thread(() -> tentativeConnexionRegistre(
+                        fTransportKey, fNodeFinal, fSerialId, woNum, fLastTicket)).start();
                 }
             }
         } catch (Exception e) {
@@ -1820,6 +1830,22 @@ public class DeepLinkHandler {
                 .setMessage(resumeComplet)
                 .setCancelable(false)
                 .setPositiveButton("🔄 Réessayer", (d, w) -> d.dismiss())
+                .setNeutralButton("🔁 Redémarrer APK", (d, w) -> {
+                    // ✅ Redémarrer l'APK — après restart, reprise automatique
+                    // depuis ActiveDeliveryStore (PENDING/STARTED) via checkPendingDeliveryForThisRegister
+                    try {
+                        android.content.Intent intent = activity.getPackageManager()
+                            .getLaunchIntentForPackage(activity.getPackageName());
+                        if (intent != null) {
+                            intent.addFlags(android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
+                                | android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                            activity.startActivity(intent);
+                        }
+                        android.os.Process.killProcess(android.os.Process.myPid());
+                    } catch (Exception eRestart) {
+                        android.util.Log.e(TAG, "Restart ERR: " + eRestart.getMessage());
+                    }
+                })
                 .setNegativeButton("📧 Envoyer courriel", (d, w) -> {
                     try {
                         android.content.Intent email = new android.content.Intent(
