@@ -719,6 +719,7 @@ public class RegisterTabFragment extends Fragment {
                 controller.requestStatus();
             } catch (Exception e) {
                 LogBus.api(node, "Status(B) ERR: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
+                surErreurConnexion(e, "STATUS_B");
                 return;
             }
             ui.postDelayed(() -> {
@@ -948,6 +949,7 @@ public class RegisterTabFragment extends Fragment {
 
                     } catch (Exception e) {
                         LogBus.api(node, "[REPRINT] ERR: " + safeMsg(e));
+                        surErreurConnexion(e, "REPRINT");
                     }
                 });
             });
@@ -1407,6 +1409,7 @@ public class RegisterTabFragment extends Fragment {
                     } catch (Exception e) {
                         errors++;
                         LogBus.api(node, "[CUSTOM_PRINT] ERR ligne: " + safeMsg(e));
+                        surErreurConnexion(e, "CUSTOM_PRINT");
                     }
                 }
 
@@ -1727,6 +1730,28 @@ public class RegisterTabFragment extends Fragment {
         return f;
     }
 
+    /**
+     * ✅ Appelé dans chaque catch qui attrape une erreur LCP/BT.
+     * Si c'est une erreur de connexion → affiche immédiatement l'écran de diagnostic.
+     */
+    private void surErreurConnexion(Exception e, String contexte) {
+        android.util.Log.w("RegisterTabFragment", "surErreurConnexion [" + contexte + "]: "
+            + (e != null ? e.getMessage() : "null"));
+        if (com.pa.lcrdemo.RegisterConnectionHelper.estErreurConnexion(e)) {
+            try {
+                if (requireActivity() instanceof com.pa.lcrdemo.MainActivity) {
+                    new com.pa.lcrdemo.RegisterConnectionHelper(
+                        (com.pa.lcrdemo.MainActivity) requireActivity())
+                        .validerConnexion(
+                            tabTransportKey != null ? tabTransportKey : "",
+                            node,
+                            tabMediaShort != null ? tabMediaShort : "",
+                            currentWoNum != null ? currentWoNum : "");
+                }
+            } catch (Exception ignored) {}
+        }
+    }
+
     private void reportMediaOffToApi(String origin, String detail) {
         try {
             if (getActivity() instanceof MainActivity) {
@@ -1790,7 +1815,7 @@ public class RegisterTabFragment extends Fragment {
 
     private void doResolve() {
         if (controller == null) return;
-        controller.alignOrRecover();
+        try { controller.alignOrRecover(); } catch (Exception e) { surErreurConnexion(e, "RESOLVE"); return; }
         ui.postDelayed(() -> {
             try {
                 if (tabTransportKey != null)

@@ -339,6 +339,25 @@ public class RegisterConnectionHelper {
     // Utilitaires
     // =========================================================
 
+    /**
+     * Détecte si une exception est une erreur de connexion au registre.
+     * Utilisé dans les catch de RegisterTabFragment pour déclencher
+     * automatiquement l'écran de diagnostic.
+     */
+    public static boolean estErreurConnexion(Exception e) {
+        if (e == null) return false;
+        if (e instanceof java.io.IOException) return true;
+        String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
+        return msg.contains("timeout")
+            || msg.contains("socket")
+            || msg.contains("broken pipe")
+            || msg.contains("connection")
+            || msg.contains("transport")
+            || msg.contains("bt")
+            || msg.contains("lcp")
+            || msg.contains("io error");
+    }
+
     private int getPremierEchec(boolean[] etapesOk) {
         for (int i = 0; i < etapesOk.length; i++) {
             if (!etapesOk[i]) return i;
