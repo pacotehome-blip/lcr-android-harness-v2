@@ -467,17 +467,9 @@ public class DeepLinkHandler {
         try {
             MultiRegisterApiFacadeImpl facade = new MultiRegisterApiFacadeImpl(activity);
 
-            // ✅ Écrire woNum dans field #106 (customerid) du registre
-            // Persiste après power cycle — récupération en cas de remplacement tablette
-            try {
-                com.pa.lcr.lcp.RegisterSessionManager rsmW =
-                    com.pa.lcr.lcp.RegisterSessionManager.get(activity);
-                com.pa.lcr.lcp.DeliveryController dcW =
-                    rsmW.getController(transportKey, node);
-                if (dcW != null) dcW.api_writeWoNum(woNum);
-            } catch (Exception eWo) {
-                android.util.Log.w(TAG, "api_writeWoNum ERR: " + eWo.getMessage());
-            }
+            // TODO: api_writeWoNum(woNum) dans field #106 du registre
+            // En attente push DeliveryController.java + LcpLink.java avec les nouvelles méthodes
+            // Voir session 6 — persistance WO après power cycle LCR-II
 
             com.pa.lcr.lcp.ApiResult r = facade.api_deliveryOneShotStart(
                 node, 255, woNum, fProduct, fPresetD, null,
