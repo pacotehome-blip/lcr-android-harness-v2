@@ -421,12 +421,21 @@ public class DeepLinkHandler {
         }
 
         if (!ready) {
-            android.util.Log.w(TAG, "lancerLivraison: média non prêt après 10s");
-            activity.runOnUiThread(() -> activity.toast("Média non prêt — réessayez"));
-            logError(fSerialId, woNum, "MEDIA_NOT_READY", "Média non prêt après 10s");
-            retournerFieldService(woNum, woIdGuid, "erreur_media",
-                buildErrorJson("MEDIA_NOT_READY", "Média non prêt après 10s"));
-            return;
+            android.util.Log.w(TAG, "lancerLivraison: média non prêt après 10s — tentative connexion registre");
+            // ✅ Lancer la progression de reconnexion (4 étapes, 3 tentatives BT)
+            // Si succès → continuer la livraison, sinon → dialog erreur avec courriel support
+            String lastTicket = "";
+            try {
+                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbCheck =
+                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
+                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow lastRow =
+                    dbCheck.getLatestForWo(woNum != null ? woNum : "");
+                if (lastRow != null && lastRow.ticketNo != null) lastTicket = lastRow.ticketNo;
+            } catch (Exception ignored) {}
+            boolean reconnecte = tentativeConnexionRegistre(
+                transportKey, node, fSerialId, woNum, lastTicket);
+            if (!reconnecte) return; // dialog déjà affiché
+            // Reconnecté — continuer la livraison
         }
 
         // ✅ Délai de stabilisation BT — le transport socket est READY mais le
@@ -1639,6 +1648,192 @@ public class DeepLinkHandler {
                     deliveryStore.addEventAsync(
                         attemptId, level, type, message, dataJson));
         } catch (Exception ignored) {}
+    }
+
+    // =========================================================
+    // ✅ Progression de connexion au registre — 4 étapes, 3 tentatives BT
+    // Affiche chaque étape en temps réel dans un dialog Android
+    // Si échec final → dialog avec courriel support
+    //
+    // TODO — Amélioration future: envoyer via webhook Teams
+    // Canal: Filgo-Sonic Support / Power Automate Flow
+    // Voir session 6 — plan intégration Teams via Azure
+    // =========================================================
+    private boolean tentativeConnexionRegistre(
+            String transportKey, int node, String serialId,
+            String woNum, String ticketNo) {
+
+        final String[] etapes = new String[4];
+        final boolean[] etapesOk = new boolean[4];
+        final String[] erreurDetail = {""};
+
+        // Dialog progressif
+        final android.app.AlertDialog.Builder dlgBuilder =
+            new android.app.AlertDialog.Builder(activity);
+        dlgBuilder.setTitle("🔄 Connexion au registre...");
+        dlgBuilder.setCancelable(false);
+        final android.widget.TextView txtProgress = new android.widget.TextView(activity);
+        txtProgress.setPadding(40, 20, 40, 20);
+        txtProgress.setTextSize(13f);
+        dlgBuilder.setView(txtProgress);
+
+        final android.app.AlertDialog[] dlg = {null};
+        activity.runOnUiThread(() -> { dlg[0] = dlgBuilder.show(); });
+
+        Runnable updateDlg = () -> activity.runOnUiThread(() -> {
+            if (dlg[0] == null || !dlg[0].isShowing()) return;
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < 4; i++) {
+                if (etapes[i] == null) break;
+                String icon = etapesOk[i] ? "✅" : (i == 3 && !erreurDetail[0].isEmpty() ? "❌" : "🔄");
+                sb.append(icon).append(" Étape ").append(i+1).append("/4 — ").append(etapes[i]).append("\n");
+            }
+            txtProgress.setText(sb.toString().trim());
+        });
+
+        // ÉTAPE 1 — Fermeture connexion existante
+        etapes[0] = "Fermeture connexion existante";
+        updateDlg.run();
+        try {
+            activity.btDisconnect();
+            Thread.sleep(800);
+            etapesOk[0] = true;
+        } catch (Exception e) {
+            etapesOk[0] = true; // non bloquant
+        }
+        updateDlg.run();
+
+        // ÉTAPE 2 — Réinitialisation Bluetooth
+        etapes[1] = "Réinitialisation Bluetooth";
+        updateDlg.run();
+        try {
+            android.bluetooth.BluetoothAdapter bt =
+                android.bluetooth.BluetoothAdapter.getDefaultAdapter();
+            if (bt != null && bt.isEnabled()) {
+                bt.disable();
+                Thread.sleep(1500);
+                bt.enable();
+                Thread.sleep(2000);
+            }
+            etapesOk[1] = true;
+        } catch (Exception e) {
+            etapesOk[1] = true; // non bloquant
+        }
+        updateDlg.run();
+
+        // ÉTAPE 3 — Connexion BT au registre (3 tentatives)
+        boolean btConnecte = false;
+        for (int t = 1; t <= 3; t++) {
+            final int tFinal = t;
+            etapes[2] = "Connexion au registre... (tentative " + t + "/3)";
+            updateDlg.run();
+            try {
+                com.pa.lcr.lcp.ApiResult r =
+                    new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(activity)
+                        .api_registerConnectAuto(serialId, node, transportKey);
+                if (r != null && r.code == 1) {
+                    btConnecte = true;
+                    etapesOk[2] = true;
+                    break;
+                }
+                erreurDetail[0] = r != null ? r.msg : "Timeout";
+            } catch (Exception e) {
+                erreurDetail[0] = e.getMessage() != null ? e.getMessage() : "Erreur inconnue";
+            }
+            if (t < 3) {
+                try { Thread.sleep(1500); } catch (Exception ignored) {}
+            }
+        }
+        updateDlg.run();
+
+        if (!btConnecte) {
+            // BT fail — afficher dialog final
+            afficherEchecConnexion(dlg[0], etapes, etapesOk,
+                "BT Failed to connect (3/3 tentatives)\n" + erreurDetail[0],
+                woNum, ticketNo, node, serialId);
+            return false;
+        }
+
+        // ÉTAPE 4 — Vérification registre LCR (ping)
+        etapes[3] = "Vérification registre LCR...";
+        updateDlg.run();
+        boolean lcpOk = false;
+        try {
+            Thread.sleep(700); // stabilisation BT
+            com.pa.lcr.lcp.ApiResult ping =
+                new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(activity)
+                    .api_tickSnapshot(node, transportKey);
+            lcpOk = (ping != null && ping.code == 1);
+            if (!lcpOk) erreurDetail[0] = ping != null ? ping.msg : "Pas de réponse LCP";
+        } catch (Exception e) {
+            erreurDetail[0] = e.getMessage() != null ? e.getMessage() : "Timeout LCP";
+        }
+        etapesOk[3] = lcpOk;
+        updateDlg.run();
+
+        if (!lcpOk) {
+            afficherEchecConnexion(dlg[0], etapes, etapesOk,
+                "BT connecté mais registre LCR ne répond pas\n"
+                    + "Vérifiez que le registre est allumé\n" + erreurDetail[0],
+                woNum, ticketNo, node, serialId);
+            return false;
+        }
+
+        // Succès — fermer dialog
+        activity.runOnUiThread(() -> { if (dlg[0] != null) dlg[0].dismiss(); });
+        return true;
+    }
+
+    private void afficherEchecConnexion(
+            android.app.AlertDialog dlgPrev,
+            String[] etapes, boolean[] etapesOk,
+            String erreur, String woNum, String ticketNo,
+            int node, String serialId) {
+
+        activity.runOnUiThread(() -> {
+            if (dlgPrev != null && dlgPrev.isShowing()) dlgPrev.dismiss();
+
+            // Construire le résumé des étapes
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < 4; i++) {
+                if (etapes[i] == null) break;
+                sb.append(etapesOk[i] ? "✅" : "❌")
+                  .append(" Étape ").append(i+1).append("/4 — ").append(etapes[i]).append("\n");
+            }
+            sb.append("\n⛔ ").append(erreur);
+            sb.append("\n\nWO: ").append(woNum != null ? woNum : "—");
+            sb.append(" | Ticket: ").append(ticketNo != null ? ticketNo : "—");
+            sb.append("\nNode: ").append(node).append(" | Serial: ").append(serialId);
+            sb.append("\n\nContactez le support :\npaul-andre.cote@filgo.ca");
+
+            final String resumeComplet = sb.toString();
+            final String sujet = "[Filgo-Sonic] Registre non joignable — WO:" + woNum;
+            final String corps = resumeComplet
+                + "\n\nTimestamp: " + new java.util.Date().toString();
+
+            new android.app.AlertDialog.Builder(activity)
+                .setTitle("⛔ Registre non joignable")
+                .setMessage(resumeComplet)
+                .setCancelable(false)
+                .setPositiveButton("🔄 Réessayer", (d, w) -> d.dismiss())
+                .setNegativeButton("📧 Envoyer courriel", (d, w) -> {
+                    try {
+                        android.content.Intent email = new android.content.Intent(
+                            android.content.Intent.ACTION_SEND);
+                        email.setType("message/rfc822");
+                        email.putExtra(android.content.Intent.EXTRA_EMAIL,
+                            new String[]{"paul-andre.cote@filgo.ca"});
+                        email.putExtra(android.content.Intent.EXTRA_SUBJECT, sujet);
+                        email.putExtra(android.content.Intent.EXTRA_TEXT, corps);
+                        activity.startActivity(android.content.Intent.createChooser(
+                            email, "Envoyer courriel support"));
+                    } catch (Exception e) {
+                        android.util.Log.e(TAG, "Email ERR: " + e.getMessage());
+                    }
+                    d.dismiss();
+                })
+                .show();
+        });
     }
 
     private void logError(String serialId, String woNum, String code, String message) {
