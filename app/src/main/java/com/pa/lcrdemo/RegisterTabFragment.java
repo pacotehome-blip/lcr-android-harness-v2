@@ -1110,30 +1110,6 @@ public class RegisterTabFragment extends Fragment {
         ui.postDelayed(() -> runStatusBLikeButton("AUTO_AFTER_TAB_CREATE"), 250);
         if (userInitiated) LogBus.api(node, "Connect TAB: 1 - UI attached");
         scheduleLogRefresh();
-
-        // ✅ Récupération WO depuis mémoire physique du registre (field #106)
-        // Si currentWoNum est vide (tablette remplacée, app redémarrée)
-        // et qu'ActiveDeliveryStore n'a pas de PENDING — lire field #106
-        if (currentWoNum == null || currentWoNum.isEmpty()) {
-            final com.pa.lcr.lcp.DeliveryController dcFinal = controller;
-            bg.execute(() -> {
-                try {
-                    String woFromReg = dcFinal.api_readWoNumSync();
-                    if (woFromReg != null && !woFromReg.isEmpty()) {
-                        android.util.Log.i("RegisterTabFragment",
-                            "Récupération WO depuis field #106: " + woFromReg);
-                        currentWoNum = woFromReg;
-                        ui.post(() -> {
-                            if (!isAdded() || getView() == null) return;
-                            updateButtons(dcFinal.getState());
-                        });
-                    }
-                } catch (Exception e) {
-                    android.util.Log.w("RegisterTabFragment",
-                        "api_readWoNumSync ERR: " + e.getMessage());
-                }
-            });
-        }
     }
 
     private void detachUiListenerSafe() {
