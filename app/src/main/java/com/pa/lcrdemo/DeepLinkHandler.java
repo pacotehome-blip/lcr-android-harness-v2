@@ -1724,13 +1724,12 @@ public class DeepLinkHandler {
         // ÉTAPE 3 — Connexion BT au registre (3 tentatives)
         boolean btConnecte = false;
         for (int t = 1; t <= 3; t++) {
-            final int tFinal = t;
             etapes[2] = "Connexion au registre... (tentative " + t + "/3)";
             updateDlg.run();
             try {
                 com.pa.lcr.lcp.ApiResult r =
                     new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(activity)
-                        .api_registerConnectAuto(serialId, node, transportKey);
+                        .api_registerConnectAuto(serialId.isEmpty() ? null : serialId, node);
                 if (r != null && r.code == 1) {
                     btConnecte = true;
                     etapesOk[2] = true;
@@ -1754,17 +1753,22 @@ public class DeepLinkHandler {
             return false;
         }
 
-        // ÉTAPE 4 — Vérification registre LCR (ping)
+        // ÉTAPE 4 — Vérification registre LCR (ping via controller)
         etapes[3] = "Vérification registre LCR...";
         updateDlg.run();
         boolean lcpOk = false;
         try {
             Thread.sleep(700); // stabilisation BT
-            com.pa.lcr.lcp.ApiResult ping =
-                new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(activity)
-                    .api_tickSnapshot(node, transportKey);
-            lcpOk = (ping != null && ping.code == 1);
-            if (!lcpOk) erreurDetail[0] = ping != null ? ping.msg : "Pas de réponse LCP";
+            com.pa.lcr.lcp.RegisterSessionManager rsm =
+                com.pa.lcr.lcp.RegisterSessionManager.get(activity);
+            com.pa.lcr.lcp.DeliveryController dc = rsm.getController(transportKey, node);
+            if (dc != null) {
+                com.pa.lcr.lcp.ApiResult ping = dc.api_tickSnapshot();
+                lcpOk = (ping != null && ping.code == 1);
+                if (!lcpOk) erreurDetail[0] = ping != null ? ping.msg : "Pas de réponse LCP";
+            } else {
+                erreurDetail[0] = "Controller non disponible";
+            }
         } catch (Exception e) {
             erreurDetail[0] = e.getMessage() != null ? e.getMessage() : "Timeout LCP";
         }
