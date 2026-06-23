@@ -533,6 +533,22 @@ public class RegisterTabFragment extends Fragment {
         }
         // ✅ Toujours vérifier si livraison PENDING à afficher quand le tab devient visible
         ui.postDelayed(() -> checkPendingDeliveryForThisRegister(), 800);
+
+        // ✅ Si controller existe et io mort → diagnostic au moment où on arrive dans le tab
+        ui.postDelayed(() -> {
+            if (!isAdded() || getView() == null) return;
+            if (controller != null && tabTransportKey != null) {
+                try {
+                    com.pa.lcr.lcp.transport.TransportIo io =
+                        MediaTransportManager.get(requireContext()).getByKey(tabTransportKey);
+                    if (io == null || !io.isOpen()) {
+                        surErreurConnexion(
+                            new java.io.IOException("BT mort — détecté à l'arrivée dans le tab"),
+                            "TAB_SELECTED");
+                    }
+                } catch (Exception ignored) {}
+            }
+        }, 500);
     }
 
     @Override
@@ -842,6 +858,7 @@ public class RegisterTabFragment extends Fragment {
         }
         if (btnContinue != null) btnContinue.setOnClickListener(v -> {
             if (controller == null) return;
+            if (!verifierIoAvantAction("CONTINUE")) return;
             if (controller.getState() != DeliveryState.RUNNING_PAUSED) {
                 try { controller.requestLiveSample(); } catch (Exception ignored) {}
                 try { Toast.makeText(requireContext(), "Attendre confirmation FLOW OFF", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
@@ -852,6 +869,7 @@ public class RegisterTabFragment extends Fragment {
         });
         if (btnFinish != null) btnFinish.setOnClickListener(v -> {
             if (controller == null) return;
+            if (!verifierIoAvantAction("FINISH")) return;
             boolean stableOff2 = false;
             try { stableOff2 = controller.isFlowOffStable(); } catch (Exception ignored) {}
             if (!stableOff2) {
