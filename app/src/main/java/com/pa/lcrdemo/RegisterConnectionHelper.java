@@ -148,33 +148,60 @@ public class RegisterConnectionHelper {
             txtProgress.setText(sb.toString().trim());
         });
 
+        // ✅ Vérifier si livraison active avant de déconnecter quoi que ce soit
+        boolean livraisonActive = false;
+        try {
+            com.pa.lcr.lcp.DeliveryController dcCheck =
+                com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                    .getController(transportKey, node);
+            if (dcCheck != null) {
+                com.pa.lcr.lcp.DeliveryState st = dcCheck.getState();
+                livraisonActive = (st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
+                    || st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED
+                    || st == com.pa.lcr.lcp.DeliveryState.ENDING);
+                if (livraisonActive) {
+                    Log.i(TAG, "Livraison active (" + st + ") — étapes 1 et 2 ignorées");
+                }
+            }
+        } catch (Exception ignored) {}
+
         // ÉTAPE 1 — Fermeture connexion existante
         etapes[0] = "Fermeture connexion existante";
         updateDlg.run();
-        try {
-            activity.btDisconnect();
-            Thread.sleep(800);
+        if (livraisonActive) {
+            etapes[0] = "Fermeture connexion — ignorée (livraison active)";
             etapesOk[0] = true;
-        } catch (Exception e) {
-            etapesOk[0] = true; // non bloquant
+        } else {
+            try {
+                activity.btDisconnect();
+                Thread.sleep(800);
+                etapesOk[0] = true;
+            } catch (Exception e) {
+                etapesOk[0] = true; // non bloquant
+            }
         }
         updateDlg.run();
 
         // ÉTAPE 2 — Réinitialisation Bluetooth
         etapes[1] = "Réinitialisation Bluetooth";
         updateDlg.run();
-        try {
-            android.bluetooth.BluetoothAdapter bt =
-                android.bluetooth.BluetoothAdapter.getDefaultAdapter();
-            if (bt != null && bt.isEnabled()) {
-                bt.disable();
-                Thread.sleep(1500);
-                bt.enable();
-                Thread.sleep(2000);
-            }
+        if (livraisonActive) {
+            etapes[1] = "Réinitialisation BT — ignorée (livraison active)";
             etapesOk[1] = true;
-        } catch (Exception e) {
-            etapesOk[1] = true; // non bloquant
+        } else {
+            try {
+                android.bluetooth.BluetoothAdapter bt =
+                    android.bluetooth.BluetoothAdapter.getDefaultAdapter();
+                if (bt != null && bt.isEnabled()) {
+                    bt.disable();
+                    Thread.sleep(1500);
+                    bt.enable();
+                    Thread.sleep(2000);
+                }
+                etapesOk[1] = true;
+            } catch (Exception e) {
+                etapesOk[1] = true; // non bloquant
+            }
         }
         updateDlg.run();
 
