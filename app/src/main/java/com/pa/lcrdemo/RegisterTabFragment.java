@@ -1284,21 +1284,34 @@ public class RegisterTabFragment extends Fragment {
         // ✅ RETOUR WO: visible seulement quand livraison terminée (CONNECTED post-livraison)
         // et qu'on a des données de livraison (ticket non vide + WO actif)
         if (btnRetourWO != null) {
-            boolean hasDeliveryData = false;
-            try {
-                String ticket = txtTicketNo != null ?
-                    txtTicketNo.getText().toString().replace("Ticket Number : ", "").trim() : "";
-                String uid = txtDeliveryUid != null ?
-                    txtDeliveryUid.getText().toString().replace("Delivery UID : ", "").trim() : "";
-                hasDeliveryData = !ticket.isEmpty() && !ticket.equals("—")
-                    && !uid.isEmpty() && !uid.equals("—");
-            } catch (Exception ignored) {}
-            if (connected && hasDeliveryData) {
-                btnRetourWO.setVisibility(android.view.View.VISIBLE);
-                btnRetourWO.setEnabled(true);
-                btnRetourWO.setText("Retour au Bon de livraison");
-                btnRetourWO.setBackgroundColor(android.graphics.Color.parseColor("#185FA5"));
-                btnRetourWO.setOnClickListener(v -> retournerAuWorkOrder());
+            // ✅ Source de vérité: LcrDeliveryStatusDb — indépendant du timing UI
+            // Lecture en background pour ne pas bloquer le UI thread
+            final boolean connectedFinal = connected;
+            if (currentWoNum != null && !currentWoNum.isEmpty()) {
+                final String woCheck = currentWoNum;
+                bg.execute(() -> {
+                    boolean hasData = false;
+                    try {
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db =
+                            new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow row =
+                            db.getLatestForWo(woCheck);
+                        hasData = (row != null && row.ticketNo != null && !row.ticketNo.isEmpty());
+                    } catch (Exception ignored) {}
+                    final boolean show = connectedFinal && hasData;
+                    ui.post(() -> {
+                        if (!isAdded() || getView() == null || btnRetourWO == null) return;
+                        if (show) {
+                            btnRetourWO.setVisibility(android.view.View.VISIBLE);
+                            btnRetourWO.setEnabled(true);
+                            btnRetourWO.setText("Retour au Bon de livraison");
+                            btnRetourWO.setBackgroundColor(android.graphics.Color.parseColor("#185FA5"));
+                            btnRetourWO.setOnClickListener(v -> retournerAuWorkOrder());
+                        } else {
+                            btnRetourWO.setVisibility(android.view.View.GONE);
+                        }
+                    });
+                });
             } else {
                 btnRetourWO.setVisibility(android.view.View.GONE);
             }
