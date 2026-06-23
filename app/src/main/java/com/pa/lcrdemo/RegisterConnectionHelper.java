@@ -269,11 +269,20 @@ public class RegisterConnectionHelper {
             }
 
             if (dc != null) {
-                com.pa.lcr.lcp.ApiResult ping = dc.api_tickSnapshot();
-                lcpOk = (ping != null && ping.code == 1);
-                if (!lcpOk) erreurDetail[0] = ping != null ? ping.msg : "Pas de réponse LCP";
-                Log.i(TAG, "étape 4: tickSnapshot code=" + (ping != null ? ping.code : "null")
-                    + " state=" + dc.getState());
+                com.pa.lcr.lcp.DeliveryState st = dc.getState();
+                // ✅ CONNECTED ou RUNNING_FLOWING = registre joignable
+                lcpOk = (st == com.pa.lcr.lcp.DeliveryState.CONNECTED
+                    || st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
+                    || st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED
+                    || st == com.pa.lcr.lcp.DeliveryState.ENDING);
+                if (!lcpOk) {
+                    // Tenter un tickSnapshot comme vérification supplémentaire
+                    com.pa.lcr.lcp.ApiResult ping = dc.api_tickSnapshot();
+                    lcpOk = (ping != null && ping.code == 1);
+                    erreurDetail[0] = lcpOk ? "" :
+                        "État: " + st + (ping != null ? " — " + ping.msg : "");
+                }
+                Log.i(TAG, "étape 4: state=" + st + " lcpOk=" + lcpOk);
             } else {
                 erreurDetail[0] = "Controller non disponible après reconnexion";
             }
