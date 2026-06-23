@@ -1061,23 +1061,9 @@ public class RegisterTabFragment extends Fragment {
                 String msg = tabMediaShort + "(OFF) — reconnect requis";
                 LogBus.api(node, msg);
                 reportMediaOffToApi("CONNECT_CLICK", msg);
-                // ✅ Déclencher écran diagnostic immédiatement
-                try {
-                    if (requireActivity() instanceof MainActivity) {
-                        new com.pa.lcrdemo.RegisterConnectionHelper(
-                            (MainActivity) requireActivity())
-                            .validerConnexion(
-                                tabTransportKey != null ? tabTransportKey : "",
-                                node,
-                                serialFromArgs != null ? serialFromArgs : "",
-                                currentWoNum != null ? currentWoNum : "");
-                    }
-                } catch (Exception eDiag) {
-                    android.util.Log.w("RegisterTabFragment", "diagnostic ERR: " + eDiag.getMessage());
-                }
                 ui.post(() -> {
                     if (!isAdded() || getView() == null) return;
-                    if (txtLive != null) txtLive.setText("LIVE: " + tabMediaShort + "(OFF) — reconnect en cours...");
+                    if (txtLive != null) txtLive.setText("LIVE: " + tabMediaShort + "(OFF) — reconnect requis");
                     updateButtons(null);
                 });
                 return;
@@ -1096,19 +1082,8 @@ public class RegisterTabFragment extends Fragment {
         }
         if (dc == null) {
             LogBus.api(node, "Aucun média prêt / registre introuvable pour ce node");
-            // ✅ Déclencher écran diagnostic — toujours, pas seulement si userInitiated
-            try {
-                if (requireActivity() instanceof MainActivity) {
-                    new com.pa.lcrdemo.RegisterConnectionHelper(
-                        (MainActivity) requireActivity())
-                        .validerConnexion(
-                            tabTransportKey != null ? tabTransportKey : "",
-                            node,
-                            serialFromArgs != null ? serialFromArgs : "",
-                            currentWoNum != null ? currentWoNum : "");
-                }
-            } catch (Exception eDiag) {
-                android.util.Log.w("RegisterTabFragment", "diagnostic ERR: " + eDiag.getMessage());
+            if (userInitiated) {
+                try { Toast.makeText(requireContext(), "Aucun média prêt (USB/BT)", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
             }
             return;
         }
