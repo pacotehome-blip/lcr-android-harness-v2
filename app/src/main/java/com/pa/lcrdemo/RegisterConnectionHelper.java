@@ -237,13 +237,20 @@ public class RegisterConnectionHelper {
             com.pa.lcr.lcp.DeliveryController dc =
                 rsm.getController(transportKey, node);
 
-            // ✅ Si controller absent — le créer via getOrCreate
+            // ✅ Si controller absent — le créer via getOrCreate avec le bon serialId
             if (dc == null) {
                 com.pa.lcr.lcp.transport.TransportIo io =
                     activity.getMediaTransportManager().getByKey(transportKey);
                 if (io != null && io.isOpen()) {
-                    dc = rsm.getOrCreate(transportKey, node, 255, io);
-                    Log.i(TAG, "étape 4: controller créé — attente CONNECTED");
+                    // Parser le serialId comme entier (ex: "16466294" → 16466294)
+                    int serialInt = 255;
+                    try {
+                        if (fSerialId != null && !fSerialId.isEmpty())
+                            serialInt = Integer.parseInt(fSerialId.trim());
+                    } catch (Exception ignored) {}
+                    dc = rsm.getOrCreate(transportKey, node, serialInt, io);
+                    Log.i(TAG, "étape 4: controller créé — serial=" + serialInt
+                        + " node=" + node + " — attente CONNECTED");
                     // Attendre CONNECTED max 15s
                     for (int w = 0; w < 75; w++) {
                         if (dc.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
