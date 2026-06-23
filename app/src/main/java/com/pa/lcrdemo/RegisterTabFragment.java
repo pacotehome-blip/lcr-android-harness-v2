@@ -1060,13 +1060,24 @@ public class RegisterTabFragment extends Fragment {
                 String msg = tabMediaShort + "(OFF) — reconnect requis";
                 LogBus.api(node, msg);
                 reportMediaOffToApi("CONNECT_CLICK", msg);
+                // ✅ Déclencher écran diagnostic immédiatement
+                try {
+                    if (requireActivity() instanceof MainActivity) {
+                        new com.pa.lcrdemo.RegisterConnectionHelper(
+                            (MainActivity) requireActivity())
+                            .validerConnexion(
+                                tabTransportKey != null ? tabTransportKey : "",
+                                node,
+                                tabMediaShort != null ? tabMediaShort : "",
+                                currentWoNum != null ? currentWoNum : "");
+                    }
+                } catch (Exception eDiag) {
+                    android.util.Log.w("RegisterTabFragment", "diagnostic ERR: " + eDiag.getMessage());
+                }
                 ui.post(() -> {
                     if (!isAdded() || getView() == null) return;
-                    if (txtLive != null) txtLive.setText("LIVE: " + tabMediaShort + "(OFF) — reconnect requis");
+                    if (txtLive != null) txtLive.setText("LIVE: " + tabMediaShort + "(OFF) — reconnect en cours...");
                     updateButtons(null);
-                    if (userInitiated) {
-                        try { Toast.makeText(requireContext(), msg, Toast.LENGTH_SHORT).show(); } catch (Exception ignored2) {}
-                    }
                 });
                 return;
             }
