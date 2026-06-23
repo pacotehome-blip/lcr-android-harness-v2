@@ -17,6 +17,22 @@ import java.util.List;
  * Synchronisé vers Dataverse via MSAL quand réseau disponible.
  *
  * v1: filgo_delivery_status + filgo_note_template
+ *
+ * TODO — Fonctionnalité future: Backup/Restore tablette
+ * =====================================================
+ * Permettre le téléchargement (export) de la base filgo_delivery_status.db
+ * depuis la tablette vers un serveur ou un fichier local, et le re-téléversement
+ * (import) sur une nouvelle tablette en cas de remplacement.
+ * Cela permettrait de repartir de zéro avec une nouvelle tablette en reprenant
+ * l'historique complet des livraisons sans perte de données.
+ *
+ * Approche suggérée:
+ * - Export: sérialiser toutes les entrées de filgo_lcr_delivery_statuses en JSON
+ *   et uploader vers Dataverse ou un endpoint dédié
+ * - Import: au démarrage APK sur nouvelle tablette, détecter si DB vide + token
+ *   Dataverse disponible → proposer de télécharger l'historique depuis Dataverse
+ * - Prérequis: endpoint API REST ou utiliser directement
+ *   filgo_lcr_delivery_statuses comme source de vérité distante
  */
 public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
 

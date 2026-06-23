@@ -368,6 +368,15 @@ public class RegisterTabFragment extends Fragment {
                 updateButtons(state);
                 scheduleLogRefresh();
 
+                // ✅ CONNECTED post-livraison — forcer un refresh après 2s
+                // pour laisser le temps à bg.execute (DB read pour btnRetourWO) de retourner
+                if (state == DeliveryState.CONNECTED) {
+                    ui.postDelayed(() -> {
+                        if (!isAdded() || getView() == null || controller == null) return;
+                        updateButtons(controller.getState());
+                    }, 2000);
+                }
+
                 // ✅ Retour Field Service quand livraison terminée
                 if (state == DeliveryState.ENDED) {
                     if (cancelInProgress) {

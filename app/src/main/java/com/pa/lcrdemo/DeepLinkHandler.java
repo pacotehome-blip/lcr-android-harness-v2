@@ -132,6 +132,17 @@ public class DeepLinkHandler {
             final String fSerialId = serialId != null ? serialId : "";
             logDeliveryStart(fSerialId, fWoNum, btMac, lcrnode, produit, presetStr);
 
+            // ✅ Preset null = paramètre manquant dans le deep link = erreur FSM
+            // preset=0 est valide (plein), preset=null est invalide
+            if (presetStr == null) {
+                android.util.Log.e(TAG, "preset=null — paramètre manquant — livraison impossible");
+                activity.runOnUiThread(() -> activity.toast(
+                    "⛔ Paramètre preset manquant — vérifiez la configuration Field Service"));
+                retournerFieldService(woNum, woIdGuid, "erreur_preset_null",
+                    buildErrorJson("PRESET_NULL", "Paramètre preset absent du deep link"));
+                return;
+            }
+
             // ✅ Persister le contexte livraison pour onDeliveryEnded
             currentSerialId = fSerialId;
 
@@ -289,7 +300,7 @@ public class DeepLinkHandler {
                                 new ActiveDeliveryStore(activity).save(
                                     woNum, woIdGuid, "", "", fNode, fSerialId,
                                     fProduit.isEmpty() ? 1 : Integer.parseInt(fProduit),
-                                    fPresetStr.isEmpty() ? 0 : Double.parseDouble(fPresetStr),
+                                    (fPresetStr == null || fPresetStr.isEmpty()) ? 0.0 : Double.parseDouble(fPresetStr),
                                     "PENDING");
                                 android.util.Log.i(TAG, "ActiveDeliveryStore: PENDING sauvé pour reprise — wo=" + woNum);
                             } catch (Exception eSave) {
@@ -455,6 +466,19 @@ public class DeepLinkHandler {
 
         try {
             MultiRegisterApiFacadeImpl facade = new MultiRegisterApiFacadeImpl(activity);
+
+            // ✅ Écrire woNum dans field #106 (customerid) du registre
+            // Persiste après power cycle — récupération en cas de remplacement tablette
+            try {
+                com.pa.lcr.lcp.RegisterSessionManager rsmW =
+                    com.pa.lcr.lcp.RegisterSessionManager.get(activity);
+                com.pa.lcr.lcp.DeliveryController dcW =
+                    rsmW.getController(transportKey, node);
+                if (dcW != null) dcW.api_writeWoNum(woNum);
+            } catch (Exception eWo) {
+                android.util.Log.w(TAG, "api_writeWoNum ERR: " + eWo.getMessage());
+            }
+
             com.pa.lcr.lcp.ApiResult r = facade.api_deliveryOneShotStart(
                 node, 255, woNum, fProduct, fPresetD, null,
                 mediaType, btMacForFacade);
@@ -1300,7 +1324,58 @@ public class DeepLinkHandler {
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE,    "LIVRAISON");
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PAYLOAD_JSON, extraJson);
+
+                // ✅ Corroboration: vérifier si livraison précédente non terminée
+                // pour ce WO — enrichir le payload et tracer l'anomalie
+                // Détection: getLatestForWo → endUtc vide ou netL=0 et ticket différent
+                String enrichedPayload = extraJson;
+                String anomalyCode     = null;
+                String anomalyMsg      = null;
+                try {
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDbCheck =
+                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow prev =
+                        lcrDbCheck.getLatestForWo(woNum != null ? woNum : "");
+                    boolean prevIncomplete = prev != null
+                        && (prev.endUtc == null || prev.endUtc.isEmpty() || prev.netL == 0.0)
+                        && !ticketNo.equals(prev.ticketNo)
+                        && !"ANNULATION".equals(prev.type);
+                    if (prevIncomplete) {
+                        anomalyCode = "PREV_INCOMPLETE";
+                        anomalyMsg  = "WO:" + prev.woNum
+                            + " ticket:" + (prev.ticketNo != null ? prev.ticketNo : "?")
+                            + " non terminé avant nouvelle livraison WO:" + woNum
+                            + " ticket:" + ticketNo;
+                        android.util.Log.w(TAG, "PREV_INCOMPLETE: " + anomalyMsg);
+                        try {
+                            org.json.JSONObject payload =
+                                new org.json.JSONObject(extraJson != null ? extraJson : "{}");
+                            org.json.JSONObject prevContext = new org.json.JSONObject();
+                            prevContext.put("prev_wo_num",    prev.woNum != null ? prev.woNum : "");
+                            prevContext.put("prev_ticket_no", prev.ticketNo != null ? prev.ticketNo : "");
+                            prevContext.put("prev_status",    prev.endUtc == null || prev.endUtc.isEmpty()
+                                ? "STARTED" : "PENDING");
+                            prevContext.put("prev_net_l",     prev.netL);
+                            prevContext.put("prev_gross_l",   prev.grossL);
+                            prevContext.put("anomaly_code",   anomalyCode);
+                            prevContext.put("anomaly_ts",     endUtc != null ? endUtc :
+                                new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'",
+                                    java.util.Locale.ROOT).format(new java.util.Date()));
+                            payload.put("previous_incomplete", prevContext);
+                            enrichedPayload = payload.toString();
+                        } catch (Exception eJson) {
+                            android.util.Log.w(TAG, "enrichPayload ERR: " + eJson.getMessage());
+                        }
+                    }
+                } catch (Exception ePrev) {
+                    android.util.Log.w(TAG, "corroboration ERR: " + ePrev.getMessage());
+                }
+
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PAYLOAD_JSON, enrichedPayload);
+                if (anomalyCode != null) {
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_ERROR_CODE, anomalyCode);
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_ERROR_MSG,  anomalyMsg);
+                }
 
                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
                     new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
