@@ -247,7 +247,12 @@ public class DeepLinkHandler {
                                 }
                             }
                             activity.runOnUiThread(() ->
-                                activity.toast("⚠️ Registre non joignable — vérifiez la connexion USB ou BT"));
+                                activity.toast("⚠️ Registre non joignable — diagnostic en cours..."));
+                            // ✅ Déclencher écran diagnostic au lieu du simple toast
+                            String fTransportForDiag = rsm.findTransportKeyForController(dc);
+                            new RegisterConnectionHelper(activity).validerConnexion(
+                                fTransportForDiag != null ? fTransportForDiag : "",
+                                fNode, fSerialId, woNum);
                             return;
                         }
                         String foundKey = rsm.findTransportKeyForController(dc);
@@ -277,8 +282,10 @@ public class DeepLinkHandler {
                                 }
                                 if (dc2.getState() != com.pa.lcr.lcp.DeliveryState.CONNECTED) {
                                     android.util.Log.w(TAG, "DC2 non prêt après 15s — état: " + dc2.getState());
-                                    activity.runOnUiThread(() ->
-                                        activity.toast("⚠️ Registre non joignable — vérifiez la connexion USB ou BT"));
+                                    String fTransportDc2 = rsm.findTransportKeyForController(dc2);
+                                    new RegisterConnectionHelper(activity).validerConnexion(
+                                        fTransportDc2 != null ? fTransportDc2 : "",
+                                        fNode, fSerialId, woNum);
                                     return;
                                 }
                             }
