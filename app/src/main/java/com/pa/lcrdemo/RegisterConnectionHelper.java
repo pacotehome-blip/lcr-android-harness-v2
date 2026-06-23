@@ -232,14 +232,43 @@ public class RegisterConnectionHelper {
         boolean lcpOk = false;
         try {
             Thread.sleep(700);
+            com.pa.lcr.lcp.RegisterSessionManager rsm =
+                com.pa.lcr.lcp.RegisterSessionManager.get(activity);
             com.pa.lcr.lcp.DeliveryController dc =
-                RegisterSessionManager.get(activity).getController(transportKey, node);
+                rsm.getController(transportKey, node);
+
+            // ✅ Si controller absent — le créer via getOrCreate
+            if (dc == null) {
+                com.pa.lcr.lcp.transport.TransportIo io =
+                    activity.getMediaTransportManager().getByKey(transportKey);
+                if (io != null && io.isOpen()) {
+                    dc = rsm.getOrCreate(transportKey, node, 255, io);
+                    Log.i(TAG, "étape 4: controller créé — attente CONNECTED");
+                    // Attendre CONNECTED max 15s
+                    for (int w = 0; w < 75; w++) {
+                        if (dc.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
+                        Thread.sleep(200);
+                    }
+                }
+            }
+
+            // ✅ Vérifier que le controller est vraiment CONNECTED avant de pinger
+            if (dc != null && dc.getState() != com.pa.lcr.lcp.DeliveryState.CONNECTED) {
+                Log.w(TAG, "étape 4: controller état=" + dc.getState() + " — attente supplémentaire");
+                for (int w = 0; w < 25; w++) {
+                    if (dc.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
+                    Thread.sleep(200);
+                }
+            }
+
             if (dc != null) {
                 com.pa.lcr.lcp.ApiResult ping = dc.api_tickSnapshot();
                 lcpOk = (ping != null && ping.code == 1);
                 if (!lcpOk) erreurDetail[0] = ping != null ? ping.msg : "Pas de réponse LCP";
+                Log.i(TAG, "étape 4: tickSnapshot code=" + (ping != null ? ping.code : "null")
+                    + " state=" + dc.getState());
             } else {
-                erreurDetail[0] = "Controller non disponible";
+                erreurDetail[0] = "Controller non disponible après reconnexion";
             }
         } catch (Exception e) {
             erreurDetail[0] = e.getMessage() != null ? e.getMessage() : "Timeout LCP";
@@ -255,9 +284,26 @@ public class RegisterConnectionHelper {
             return;
         }
 
-        // Succès — fermer dialog
-        Log.i(TAG, "diagnostic: registre joignable après reconnexion");
-        activity.runOnUiThread(() -> { if (dlg[0] != null) dlg[0].dismiss(); });
+        // Succès — fermer dialog et basculer vers le tab du registre
+        Log.i(TAG, "diagnostic: registre joignable après reconnexion — basculer vers tab registre");
+        activity.runOnUiThread(() -> {
+            if (dlg[0] != null) dlg[0].dismiss();
+            // ✅ Basculer vers le tab du registre
+            try { activity.showPage(0); } catch (Exception ignored) {}
+            // ✅ Forcer lecture état registre après 1s — ticket, net, status
+            activity.getUiHandler().postDelayed(() -> {
+                try {
+                    com.pa.lcr.lcp.RegisterSessionManager rsm2 =
+                        com.pa.lcr.lcp.RegisterSessionManager.get(activity);
+                    com.pa.lcr.lcp.DeliveryController dc2 =
+                        rsm2.getController(transportKey, node);
+                    if (dc2 != null) {
+                        dc2.requestStatus();
+                        dc2.requestLiveSample();
+                    }
+                } catch (Exception ignored) {}
+            }, 1000);
+        });
     }
 
     // =========================================================
