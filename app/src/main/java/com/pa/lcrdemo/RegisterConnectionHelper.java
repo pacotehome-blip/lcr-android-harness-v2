@@ -290,7 +290,7 @@ public class RegisterConnectionHelper {
             final String corps = resumeComplet + "\n\nTimestamp: " + new java.util.Date();
 
             new android.app.AlertDialog.Builder(activity)
-                .setTitle("⛔ Registre non joignable")
+                .setTitle("⛔ Registre non joignable  ✕")
                 .setMessage(resumeComplet)
                 .setCancelable(false)
                 .setPositiveButton("🔄 Réessayer", (d, w) -> {
@@ -331,6 +331,7 @@ public class RegisterConnectionHelper {
                     }
                     d.dismiss();
                 })
+                .setCancelable(true) // ✅ X ferme le dialog (bouton Back ou tap extérieur)
                 .show();
         });
     }
