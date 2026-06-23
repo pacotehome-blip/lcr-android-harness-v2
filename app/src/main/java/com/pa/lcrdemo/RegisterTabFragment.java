@@ -1094,18 +1094,20 @@ public class RegisterTabFragment extends Fragment {
             dc = sm.resolveOrCreateForNode(node, from);
         }
         if (dc == null) {
-            if (userInitiated) {
-                LogBus.api(node, "Aucun média prêt / registre introuvable pour ce node");
-                Toast.makeText(requireContext(), "Aucun média prêt (USB/BT)", Toast.LENGTH_SHORT).show();
-            }
-            // ✅ Lancer diagnostic via RegisterConnectionHelper
-            if (userInitiated && requireActivity() instanceof MainActivity) {
-                new com.pa.lcrdemo.RegisterConnectionHelper((MainActivity) requireActivity())
-                    .validerConnexion(
-                        tabTransportKey != null ? tabTransportKey : "",
-                        node,
-                        tabMediaShort != null ? tabMediaShort : "",
-                        currentWoNum != null ? currentWoNum : "");
+            LogBus.api(node, "Aucun média prêt / registre introuvable pour ce node");
+            // ✅ Déclencher écran diagnostic — toujours, pas seulement si userInitiated
+            try {
+                if (requireActivity() instanceof MainActivity) {
+                    new com.pa.lcrdemo.RegisterConnectionHelper(
+                        (MainActivity) requireActivity())
+                        .validerConnexion(
+                            tabTransportKey != null ? tabTransportKey : "",
+                            node,
+                            tabMediaShort != null ? tabMediaShort : "",
+                            currentWoNum != null ? currentWoNum : "");
+                }
+            } catch (Exception eDiag) {
+                android.util.Log.w("RegisterTabFragment", "diagnostic ERR: " + eDiag.getMessage());
             }
             return;
         }
