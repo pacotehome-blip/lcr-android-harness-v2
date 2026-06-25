@@ -404,6 +404,85 @@ public class RegisterConnectionHelper {
     // Utilitaires
     // =========================================================
 
+    private int getPremierEchec(boolean[] etapesOk) {
+        for (int i = 0; i < etapesOk.length; i++) {
+            if (!etapesOk[i]) return i;
+        }
+        return etapesOk.length - 1;
+    }
+
+    private void afficherEchec(
+            android.app.AlertDialog dlgPrev,
+            String[] etapes, boolean[] etapesOk,
+            String erreur, String woNum, String ticketNo,
+            int node, String serialId) {
+
+        activity.runOnUiThread(() -> {
+            if (dlgPrev != null && dlgPrev.isShowing()) dlgPrev.dismiss();
+
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < 4; i++) {
+                if (etapes[i] == null) break;
+                sb.append(etapesOk[i] ? "✅" : "❌")
+                  .append(" Étape ").append(i+1).append("/4 — ").append(etapes[i]).append("\n");
+            }
+            sb.append("\n⛔ ").append(erreur);
+            if (woNum == null || woNum.isEmpty()) {
+                sb.append("\n\nℹ️ Aucun bon de travail actif\nLivraison manuelle — aucun WO associé");
+            } else {
+                sb.append("\n\nWO: ").append(woNum);
+                sb.append(" | Ticket: ").append(ticketNo != null && !ticketNo.isEmpty() ? ticketNo : "—");
+            }
+            sb.append("\nNode: ").append(node).append(" | Serial: ").append(serialId);
+            sb.append("\n\nContactez le support :\n").append(SUPPORT_EMAIL);
+
+            final String resumeComplet = sb.toString();
+            final String sujet = "[Filgo-Sonic] Registre non joignable — "
+                + (woNum != null && !woNum.isEmpty() ? "WO:" + woNum : "Livraison manuelle");
+            final String corps = resumeComplet + "\n\nTimestamp: " + new java.util.Date();
+
+            new android.app.AlertDialog.Builder(activity)
+                .setTitle("⛔ Registre non joignable  ✕")
+                .setMessage(resumeComplet)
+                .setCancelable(true)
+                .setPositiveButton("🔄 Réessayer", (d, w) -> {
+                    d.dismiss();
+                    lancerDiagnostic("", node, serialId, woNum);
+                })
+                .setNeutralButton("🔁 Redémarrer APK", (d, w) -> {
+                    try {
+                        android.content.Intent intent = activity.getPackageManager()
+                            .getLaunchIntentForPackage(activity.getPackageName());
+                        if (intent != null) {
+                            intent.addFlags(android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
+                                | android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                            activity.startActivity(intent);
+                        }
+                        android.os.Process.killProcess(android.os.Process.myPid());
+                    } catch (Exception e) {
+                        Log.e(TAG, "Restart ERR: " + e.getMessage());
+                    }
+                })
+                .setNegativeButton("📧 Envoyer courriel", (d, w) -> {
+                    try {
+                        android.content.Intent email = new android.content.Intent(
+                            android.content.Intent.ACTION_SEND);
+                        email.setType("message/rfc822");
+                        email.putExtra(android.content.Intent.EXTRA_EMAIL,
+                            new String[]{SUPPORT_EMAIL});
+                        email.putExtra(android.content.Intent.EXTRA_SUBJECT, sujet);
+                        email.putExtra(android.content.Intent.EXTRA_TEXT, corps);
+                        activity.startActivity(android.content.Intent.createChooser(
+                            email, "Envoyer courriel support"));
+                    } catch (Exception e) {
+                        Log.e(TAG, "Email ERR: " + e.getMessage());
+                    }
+                    d.dismiss();
+                })
+                .show();
+        });
+    }
+
     public static boolean estErreurConnexion(Exception e) {
         if (e == null) return false;
         if (e instanceof java.io.IOException) return true;
