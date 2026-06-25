@@ -261,23 +261,19 @@ public class RegisterConnectionHelper {
         updateDlg.run();
 
         // ÉTAPE 3 — Scan médias (même logique que Configure connectManualBtSlot)
-        // Pour chaque BT pairé : LcpLink → opGetField(80) → serial → valider node + serial
         boolean btConnecte = false;
         com.pa.lcr.lcp.DeliveryController dcFinal = null;
 
         java.util.ArrayList<android.bluetooth.BluetoothDevice> bonded =
             new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(activity).listBondedSorted();
-        java.util.List<String> mediasATester = new java.util.ArrayList<>();
 
-        // USB en premier si branché
+        java.util.List<String> mediasATester = new java.util.ArrayList<>();
         try {
             android.hardware.usb.UsbManager usbMgr =
                 (android.hardware.usb.UsbManager) activity.getSystemService(android.content.Context.USB_SERVICE);
             if (usbMgr != null && !usbMgr.getDeviceList().isEmpty())
                 mediasATester.add(com.pa.lcr.lcp.transport.MediaTransportManager.KEY_USB);
         } catch (Exception ignored) {}
-
-        // BT pairés
         for (android.bluetooth.BluetoothDevice dev : bonded) {
             if (dev != null && dev.getAddress() != null)
                 mediasATester.add("BT:" + dev.getAddress().toUpperCase());
@@ -287,84 +283,107 @@ public class RegisterConnectionHelper {
 
         for (String mediaKey : mediasATester) {
             if (btConnecte) break;
-            String mediaLabel = mediaKey.startsWith("BT:") ? "BT: " + mediaKey.substring(3) : "USB-C";
+
+            // Nom lisible du device BT
+            String devName = "";
+            try {
+                if (mediaKey.startsWith("BT:")) {
+                    android.bluetooth.BluetoothDevice dev =
+                        android.bluetooth.BluetoothAdapter.getDefaultAdapter()
+                            .getRemoteDevice(mediaKey.substring(3));
+                    devName = dev.getName() != null ? dev.getName() : "";
+                }
+            } catch (Exception ignored) {}
+            String mediaLabel = mediaKey.startsWith("BT:")
+                ? (devName.isEmpty() ? "" : devName + " ") + "(" + mediaKey.substring(3) + ")"
+                : "USB-C";
+
             etapes[2] = "Test " + mediaLabel;
             updateDlg.run();
+            Log.i(TAG, "étape 3: test " + mediaKey + " [" + devName + "]");
 
-            Log.i(TAG, "étape 3: test " + mediaKey);
+            android.bluetooth.BluetoothSocket sockOpened = null;
             try {
                 com.pa.lcr.lcp.transport.MediaTransportManager mtm =
                     activity.getMediaTransportManager();
                 com.pa.lcr.lcp.transport.TransportIo io = mtm.getByKey(mediaKey);
 
-                // Si socket pas ouvert — connecter
                 if (io == null || !io.isOpen()) {
                     if (!mediaKey.startsWith("BT:")) continue;
                     String mac = mediaKey.substring(3);
                     android.bluetooth.BluetoothDevice dev =
                         android.bluetooth.BluetoothAdapter.getDefaultAdapter().getRemoteDevice(mac);
-                    android.bluetooth.BluetoothSocket sock =
-                        dev.createRfcommSocketToServiceRecord(
-                            java.util.UUID.fromString("00001101-0000-1000-8000-00805F9B34FB"));
-                    sock.connect();
-                    mtm.onBtConnected(dev, sock, sock.getInputStream(), sock.getOutputStream(), "diag");
+                    sockOpened = dev.createRfcommSocketToServiceRecord(
+                        java.util.UUID.fromString("00001101-0000-1000-8000-00805F9B34FB"));
+                    sockOpened.connect();
+                    mtm.onBtConnected(dev, sockOpened,
+                        sockOpened.getInputStream(), sockOpened.getOutputStream(), "diag");
                     io = mtm.getByKey(mediaKey);
                     Log.i(TAG, "étape 3: socket SPP établi — " + mediaKey);
                 } else {
                     Log.i(TAG, "étape 3: socket déjà ouvert — " + mediaKey);
                 }
 
-                if (io == null || !io.isOpen()) {
-                    Log.w(TAG, "étape 3: " + mediaKey + " — io non disponible");
-                    continue;
-                }
+                if (io == null || !io.isOpen()) continue;
 
                 // ✅ LcpLink direct — même chose que Configure
                 com.pa.lcr.lcp.LcpLink tmp =
                     new com.pa.lcr.lcp.LcpLink(io, fNodeFinal, 255, true);
                 byte[] b80 = tmp.opGetField(80, 600);
-                String serial = (b80 != null && b80.length > 0)
-                    ? new String(b80, java.nio.charset.StandardCharsets.UTF_8).trim() : "";
-                // Retirer null bytes
-                int nul = serial.indexOf('\0');
-                if (nul >= 0) serial = serial.substring(0, nul).trim();
-
+                String serial = "";
+                if (b80 != null && b80.length > 0) {
+                    serial = new String(b80, java.nio.charset.StandardCharsets.UTF_8).trim();
+                    int nul = serial.indexOf('\0');
+                    if (nul >= 0) serial = serial.substring(0, nul).trim();
+                }
                 Log.i(TAG, "étape 3: " + mediaKey + " serial lu=" + serial);
 
                 if (serial.isEmpty()) {
-                    Log.w(TAG, "étape 3: " + mediaKey + " — serial vide (registre ne répond pas)");
+                    Log.w(TAG, "étape 3: " + mediaKey + " — pas un registre LCR");
+                    // Fermer le socket ouvert par le diagnostic
+                    if (sockOpened != null) {
+                        try { io.close(); } catch (Exception ignored) {}
+                    }
                     continue;
                 }
 
-                // Vérifier le serial attendu
                 if (!fSerialIdFinal.isEmpty() && !fSerialIdFinal.equalsIgnoreCase(serial)) {
-                    Log.w(TAG, "étape 3: " + mediaKey + " — mauvais serial: attendu=" + fSerialIdFinal + " trouvé=" + serial);
+                    Log.w(TAG, "étape 3: " + mediaKey + " — mauvais serial: attendu="
+                        + fSerialIdFinal + " trouvé=" + serial);
+                    // Fermer le socket ouvert par le diagnostic si c'est pas le bon
+                    if (sockOpened != null) {
+                        try { io.close(); } catch (Exception ignored) {}
+                    }
                     continue;
                 }
 
-                // ✅ Bon registre trouvé — upsertRegisterTabFromScan comme Configure
+                // ✅ Bon registre — upsertRegisterTabFromScan comme Configure
                 final String fSerial = serial;
-                final String fMediaKey = mediaKey;
-                final String fMediaLabel = mediaLabel;
+                final String fKey = mediaKey;
+                final String fLabel = mediaLabel;
                 activity.runOnUiThread(() -> {
-                    activity.upsertRegisterTabFromScan(fMediaKey, fNodeFinal, 255, fSerial, true);
+                    activity.upsertRegisterTabFromScan(fKey, fNodeFinal, 255, fSerial, true);
                     activity.refreshAllTabsMediaStatus();
                 });
                 Thread.sleep(500);
 
-                etapes[2] = "✅ Registre trouvé — " + fMediaLabel + " | Serial: " + serial;
+                etapes[2] = "✅ " + fLabel + " | Serial: " + serial;
                 updateDlg.run();
 
-                // Récupérer le controller créé par upsertRegisterTabFromScan
-                com.pa.lcr.lcp.RegisterSessionManager rsm =
-                    com.pa.lcr.lcp.RegisterSessionManager.get(activity);
-                dcFinal = rsm.resolveOrCreateForNode(fNodeFinal, 255);
+                dcFinal = com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                    .resolveOrCreateForNode(fNodeFinal, 255);
                 btConnecte = true;
                 etapesOk[2] = true;
                 Log.i(TAG, "étape 3: TROUVÉ ✓ " + mediaKey + " serial=" + serial);
 
             } catch (Exception e) {
                 Log.w(TAG, "étape 3: " + mediaKey + " ERR: " + e.getMessage());
+                // ✅ Fermer le socket ouvert par le diagnostic en cas d'erreur
+                if (sockOpened != null) {
+                    try {
+                        activity.getMediaTransportManager().getByKey(mediaKey).close();
+                    } catch (Exception ignored) {}
+                }
             }
         }
         updateDlg.run();
