@@ -271,31 +271,33 @@ public class RegisterConnectionHelper {
         com.pa.lcr.lcp.MultiRegisterApiFacadeImpl facade =
             new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(activity);
 
-        // Construire le body comme ApiServer le fait
-        org.json.JSONObject body = new org.json.JSONObject();
-        try {
-            body.put("lcrnode", fNodeFinal);
-            if (!fSerialIdFinal.isEmpty()) body.put("expected_serial_id", fSerialIdFinal);
-        } catch (Exception ignored) {}
+        // ✅ Étape A: api_registerConnectAuto — trouve et connecte le registre
+        // Même chose que withAutoConnectRetry dans ApiServer
+        etapes[2] = "Recherche du registre...";
+        updateDlg.run();
+
+        com.pa.lcr.lcp.ApiResult connectResult = null;
+        for (int attempt = 1; attempt <= 3 && !btConnecte; attempt++) {
+            etapes[2] = "Connexion au registre... (" + attempt + "/3)";
+            updateDlg.run();
+            Log.i(TAG, "étape 3: api_registerConnectAuto tentative " + attempt + " node=" + fNodeFinal + " serial=" + fSerialIdFinal);
+            connectResult = facade.api_registerConnectAuto(
+                fSerialIdFinal.isEmpty() ? null : fSerialIdFinal, fNodeFinal);
+            Log.i(TAG, "étape 3: api_registerConnectAuto code=" + connectResult.code + " msg=" + connectResult.msg);
+            if (connectResult.code == 1) break;
+            try { Thread.sleep(1000); } catch (Exception ignored) {}
+        }
 
         com.pa.lcr.lcp.ApiResult r = null;
 
-        // Récupérer l'ApiServer depuis MainActivity pour utiliser withAutoConnectRetry
-        com.pa.lcr.lcp.ApiServer apiSrv = activity.getApiServer();
-
-        if (apiSrv != null) {
-            // ✅ Utiliser withAutoConnectRetry exactement comme ApiServer le fait
-            final org.json.JSONObject fBody = body;
-            final com.pa.lcr.lcp.MultiRegisterApiFacadeImpl fFacade = facade;
-            r = apiSrv.withAutoConnectRetry(body, () ->
-                fFacade.api_registerValidate(null, fNodeFinal, 255,
-                    fSerialIdFinal.isEmpty() ? null : fSerialIdFinal,
-                    null, null, "auto", null));
-        } else {
-            // Fallback si apiServer non démarré
+        if (connectResult != null && connectResult.code == 1) {
+            // ✅ Étape B: api_registerValidate pour confirmer node + serial
             r = facade.api_registerValidate(null, fNodeFinal, 255,
                 fSerialIdFinal.isEmpty() ? null : fSerialIdFinal,
                 null, null, "auto", null);
+            Log.i(TAG, "étape 3: api_registerValidate code=" + r.code + " msg=" + r.msg);
+        } else {
+            r = connectResult;
         }
 
         Log.i(TAG, "étape 3: api_registerValidate — code=" + (r != null ? r.code : "null")
