@@ -341,28 +341,85 @@ public class RegisterConnectionHelper {
                     continue;
                 }
 
-                // ✅ Créer le controller si absent — resolveOrCreateForNode comme DeepLinkHandler
+                // ✅ Fermer et rouvrir le socket SEULEMENT si pas de livraison active
+                // Si RUNNING_FLOWING avec net > 0 — ne pas toucher au socket
+                boolean livraisonEnCours = false;
+                try {
+                    com.pa.lcr.lcp.DeliveryController dcExist =
+                        com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                            .getController(mediaKey, fNodeFinal);
+                    if (dcExist != null) {
+                        com.pa.lcr.lcp.DeliveryState st = dcExist.getState();
+                        livraisonEnCours = (st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
+                            || st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED
+                            || st == com.pa.lcr.lcp.DeliveryState.ENDING);
+                    }
+                } catch (Exception ignored) {}
+
+                if (!livraisonEnCours) {
+                    try {
+                        com.pa.lcr.lcp.transport.TransportIo existingIo = mtm.getByKey(mediaKey);
+                        if (existingIo != null && existingIo.isOpen()) {
+                            existingIo.close();
+                            Thread.sleep(500);
+                        }
+                    } catch (Exception ignored) {}
+
+                    // Rouvrir le socket SPP
+                    if (mediaKey.startsWith("BT:")) {
+                        String mac2 = mediaKey.substring(3);
+                        try {
+                            android.bluetooth.BluetoothDevice dev2 =
+                                android.bluetooth.BluetoothAdapter.getDefaultAdapter().getRemoteDevice(mac2);
+                            android.bluetooth.BluetoothSocket sock2 =
+                                dev2.createRfcommSocketToServiceRecord(
+                                    java.util.UUID.fromString("00001101-0000-1000-8000-00805F9B34FB"));
+                            sock2.connect();
+                            mtm.onBtConnected(dev2, sock2, sock2.getInputStream(), sock2.getOutputStream(), "diag reconnect");
+                            Thread.sleep(500);
+                            Log.i(TAG, "étape 3: " + mediaKey + " — socket réouvert");
+                        } catch (Exception e) {
+                            Log.w(TAG, "étape 3: " + mediaKey + " — réouverture socket ERR: " + e.getMessage());
+                            continue;
+                        }
+                    }
+                } else {
+                    Log.i(TAG, "étape 3: " + mediaKey + " — livraison active, probe sans déconnecter");
+                }
+
+                // ✅ Utiliser RegisterSessionManager singleton
                 com.pa.lcr.lcp.RegisterSessionManager rsmLocal =
                     com.pa.lcr.lcp.RegisterSessionManager.get(activity);
                 if (!fSerialIdFinal.isEmpty()) rsmLocal.bindExpectedSerial(fNodeFinal, fSerialIdFinal);
-                rsmLocal.resolveOrCreateForNode(fNodeFinal, 255);
 
-                // api_connectLcp avec le bon média et MAC — même chose que Configure
-                String mac = mediaKey.startsWith("BT:") ? mediaKey.substring(3) : "";
-                String mediaType = mediaKey.startsWith("BT:") ? "bt" : "usb";
-                com.pa.lcr.lcp.ApiResult r = facade.api_connectLcp(fNodeFinal, 255, mediaType, mac);
-                Log.i(TAG, "étape 3: " + mediaKey + " api_connectLcp(" + mediaType + ") — code=" + r.code + " msg=" + r.msg);
+                com.pa.lcr.lcp.transport.TransportIo ioLocal = mtm.getByKey(mediaKey);
+                if (ioLocal == null || !ioLocal.isOpen()) {
+                    Log.w(TAG, "étape 3: " + mediaKey + " — io null après activation");
+                    continue;
+                }
+
+                // Créer ou récupérer le controller via RSM singleton
+                com.pa.lcr.lcp.DeliveryController dcLocal =
+                    rsmLocal.getOrCreate(mediaKey, fNodeFinal, 255, ioLocal);
+                if (dcLocal == null) {
+                    Log.w(TAG, "étape 3: " + mediaKey + " — getOrCreate retourne null");
+                    continue;
+                }
+
+                // Connecter LCP sur ce controller
+                com.pa.lcr.lcp.ApiResult r = dcLocal.api_connectLcp();
+                Log.i(TAG, "étape 3: " + mediaKey + " api_connectLcp — code=" + r.code + " msg=" + r.msg);
 
                 if (r.code == 1) {
-                    // ✅ Valider que c'est le bon registre (node + serial) via BT explicite
-                    com.pa.lcr.lcp.ApiResult val = facade.api_registerValidate(
-                        null, fNodeFinal, 255,
+                    // ✅ Valider node + serial sur ce controller
+                    com.pa.lcr.lcp.ApiResult val = dcLocal.api_registerValidate(
+                        null, fNodeFinal,
                         fSerialIdFinal.isEmpty() ? null : fSerialIdFinal,
-                        null, null, "bt", mac);
+                        null, null);
                     Log.i(TAG, "étape 3: " + mediaKey + " validateSerial — code=" + val.code + " msg=" + val.msg);
 
                     if (!fSerialIdFinal.isEmpty() && val.code != 1) {
-                        Log.w(TAG, "étape 3: " + mediaKey + " — mauvais registre (serial/node ne correspond pas)");
+                        Log.w(TAG, "étape 3: " + mediaKey + " — mauvais registre: " + val.msg);
                         continue;
                     }
 
@@ -378,10 +435,7 @@ public class RegisterConnectionHelper {
                     etapes[2] = "✅ Registre trouvé — " + mediaLabel
                         + (foundSerial.isEmpty() ? "" : " | Serial: " + foundSerial);
                     updateDlg.run();
-                    com.pa.lcr.lcp.RegisterSessionManager rsm2 =
-                        com.pa.lcr.lcp.RegisterSessionManager.get(activity);
-                    dcFinal = rsm2.getController(mediaKey, fNodeFinal);
-                    if (dcFinal == null) dcFinal = rsm2.resolveOrCreateForNode(fNodeFinal, 255);
+                    dcFinal = dcLocal;
                     btConnecte = true;
                     etapesOk[2] = true;
                 } else {
