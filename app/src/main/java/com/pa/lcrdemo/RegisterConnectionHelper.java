@@ -280,7 +280,6 @@ public class RegisterConnectionHelper {
         // 2. Si trouvé → upsertRegisterTabFromScan → tab rafraîchi avec état registre
         boolean btConnecte = false;
         com.pa.lcr.lcp.DeliveryController dcFinal = null;
-        String[] erreurDetail = {""};
 
         com.pa.lcr.lcp.MultiRegisterApiFacadeImpl facade =
             new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(activity);
