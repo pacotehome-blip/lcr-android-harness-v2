@@ -1008,6 +1008,10 @@ public class RegisterTabFragment extends Fragment {
                 if (txtLive != null) txtLive.setText(liveMsg);
                 pendingReconnect = true;
                 updateButtons(controller != null ? controller.getState() : null);
+                // ✅ Déclencher diagnostic automatiquement quand le média se déconnecte
+                surErreurConnexion(
+                    new java.io.IOException("Média " + tabMediaShort + " déconnecté"),
+                    "MEDIA_OFF");
                 return;
             }
             if (pendingReconnect) { pendingReconnect = false; reconnectThisRegister(false); }
