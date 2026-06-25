@@ -291,12 +291,23 @@ public class RegisterConnectionHelper {
             etapes[2] = "Recherche registre... (" + attempt + "/3)";
             updateDlg.run();
 
-            // ✅ Nettoyer les sockets zombis avant chaque tentative
+            // ✅ Étape 1: btDisconnect — nettoyer sockets zombis
             try {
                 activity.btDisconnect();
                 Thread.sleep(1500);
             } catch (Exception ignored) {}
 
+            // ✅ Étape 2: api_btActivate — ouvrir socket BT (comme bouton Connect BT manuel)
+            com.pa.lcr.lcp.ApiResult btRes = facade.api_btActivate();
+            Log.i(TAG, "étape 3: api_btActivate code=" + btRes.code + " msg=" + btRes.msg);
+            if (btRes.code != 1) {
+                erreurDetail[0] = btRes.msg;
+                if (attempt < 3) try { Thread.sleep(2000); } catch (Exception ignored) {}
+                continue;
+            }
+            try { Thread.sleep(500); } catch (Exception ignored) {}
+
+            // ✅ Étape 3: api_registerConnectAuto — probe LCP, valide node + serial
             Log.i(TAG, "étape 3: api_registerConnectAuto tentative " + attempt
                 + " node=" + fNodeFinal + " serial=" + fSerialIdFinal);
             com.pa.lcr.lcp.ApiResult r = facade.api_registerConnectAuto(
