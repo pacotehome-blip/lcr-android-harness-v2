@@ -316,7 +316,7 @@ public class RegisterConnectionHelper {
                     activity.upsertRegisterTabFromScan(fKey, fNodeFinal, 255, fSerial, true);
                 activity.refreshAllTabsMediaStatus();
             });
-            Thread.sleep(500);
+            try { Thread.sleep(500); } catch (Exception ignored) {}
 
             etapes[2] = "✅ Registre trouvé | Serial: " + foundSerial;
             updateDlg.run();
