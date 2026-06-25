@@ -537,17 +537,6 @@ public class RegisterTabFragment extends Fragment {
         // ✅ Si controller existe et io mort → diagnostic au moment où on arrive dans le tab
         ui.postDelayed(() -> {
             if (!isAdded() || getView() == null) return;
-            if (controller != null && tabTransportKey != null) {
-                try {
-                    com.pa.lcr.lcp.transport.TransportIo io =
-                        MediaTransportManager.get(requireContext()).getByKey(tabTransportKey);
-                    if (io == null || !io.isOpen()) {
-                        surErreurConnexion(
-                            new java.io.IOException("BT mort — détecté à l'arrivée dans le tab"),
-                            "TAB_SELECTED");
-                    }
-                } catch (Exception ignored) {}
-            }
         }, 500);
     }
 
@@ -1008,10 +997,6 @@ public class RegisterTabFragment extends Fragment {
                 if (txtLive != null) txtLive.setText(liveMsg);
                 pendingReconnect = true;
                 updateButtons(controller != null ? controller.getState() : null);
-                // ✅ Déclencher diagnostic automatiquement quand le média se déconnecte
-                surErreurConnexion(
-                    new java.io.IOException("Média " + tabMediaShort + " déconnecté"),
-                    "MEDIA_OFF");
                 return;
             }
             if (pendingReconnect) { pendingReconnect = false; reconnectThisRegister(false); }
