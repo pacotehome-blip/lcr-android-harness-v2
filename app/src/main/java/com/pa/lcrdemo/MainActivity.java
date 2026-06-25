@@ -167,6 +167,7 @@ public class MainActivity extends AppCompatActivity {
     // ===== API runtime =====
     private static final int API_PORT = 8765;
     private ApiServer apiServer;
+    public ApiServer getApiServer() { return apiServer; }
     private DeliveryLogStore deliveryStore;
     private DeepLinkHandler deepLinkHandler; // ✅ Gestion deep link Field Service
 

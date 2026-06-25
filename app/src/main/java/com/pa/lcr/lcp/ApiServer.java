@@ -293,7 +293,7 @@ public synchronized void start() throws Exception {
         try { Thread.sleep(ms); } catch (Exception ignored) {}
     }
 
-    private ApiResult withAutoConnectRetry(JSONObject body, Supplier<ApiResult> op) {
+    public ApiResult withAutoConnectRetry(JSONObject body, Supplier<ApiResult> op) {
         ApiResult r0 = op.get();
         if (!shouldRetryViaConnectAuto(r0)) return r0;
 

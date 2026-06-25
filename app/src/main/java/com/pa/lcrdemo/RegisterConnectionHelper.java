@@ -260,121 +260,80 @@ public class RegisterConnectionHelper {
         etapesOk[1] = true;
         updateDlg.run();
 
-        // ÉTAPE 3 — Connexion au registre (même logique que Configure connectManualBtSlot)
-        // Utiliser les transports READY, puis btActivate si aucun disponible
+        // ÉTAPE 3 — Connexion au registre via withAutoConnectRetry + api_registerValidate
+        // Même logique que ApiServer /v1/register/validate avec retry auto
         boolean btConnecte = false;
         com.pa.lcr.lcp.DeliveryController dcFinal = null;
+
+        etapes[2] = "Connexion au registre...";
+        updateDlg.run();
+
         com.pa.lcr.lcp.MultiRegisterApiFacadeImpl facade =
             new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(activity);
-        com.pa.lcr.lcp.transport.MediaTransportManager mtm = activity.getMediaTransportManager();
 
-        // 1. Collecter les transports READY (socket déjà ouvert)
-        java.util.List<com.pa.lcr.lcp.transport.TransportSnapshot> readySnaps = new java.util.ArrayList<>();
+        // Construire le body comme ApiServer le fait
+        org.json.JSONObject body = new org.json.JSONObject();
         try {
-            for (com.pa.lcr.lcp.transport.TransportSnapshot s : mtm.listSnapshots()) {
-                if (s == null || s.key == null) continue;
-                com.pa.lcr.lcp.transport.TransportIo io = mtm.getByKey(s.key);
-                if (io != null && io.isOpen()) readySnaps.add(s);
-            }
+            body.put("lcrnode", fNodeFinal);
+            if (!fSerialIdFinal.isEmpty()) body.put("expected_serial_id", fSerialIdFinal);
         } catch (Exception ignored) {}
 
-        // 2. Si aucun transport READY — btActivate pour en ouvrir un
-        if (readySnaps.isEmpty()) {
-            Log.i(TAG, "étape 3: aucun transport READY — btActivate");
-            etapes[2] = "Activation Bluetooth...";
-            updateDlg.run();
-            try { facade.api_btActivate(); Thread.sleep(1000); } catch (Exception ignored) {}
-            try {
-                for (com.pa.lcr.lcp.transport.TransportSnapshot s : mtm.listSnapshots()) {
-                    if (s == null || s.key == null) continue;
-                    com.pa.lcr.lcp.transport.TransportIo io = mtm.getByKey(s.key);
-                    if (io != null && io.isOpen()) readySnaps.add(s);
-                }
-            } catch (Exception ignored) {}
+        com.pa.lcr.lcp.ApiResult r = null;
+
+        // Récupérer l'ApiServer depuis MainActivity pour utiliser withAutoConnectRetry
+        com.pa.lcr.lcp.ApiServer apiSrv = activity.getApiServer();
+
+        if (apiSrv != null) {
+            // ✅ Utiliser withAutoConnectRetry exactement comme ApiServer le fait
+            final org.json.JSONObject fBody = body;
+            final com.pa.lcr.lcp.MultiRegisterApiFacadeImpl fFacade = facade;
+            r = apiSrv.withAutoConnectRetry(body, () ->
+                fFacade.api_registerValidate(null, fNodeFinal, 255,
+                    fSerialIdFinal.isEmpty() ? null : fSerialIdFinal,
+                    null, null, "auto", null));
+        } else {
+            // Fallback si apiServer non démarré
+            r = facade.api_registerValidate(null, fNodeFinal, 255,
+                fSerialIdFinal.isEmpty() ? null : fSerialIdFinal,
+                null, null, "auto", null);
         }
 
-        Log.i(TAG, "étape 3: " + readySnaps.size() + " transports READY à tester");
+        Log.i(TAG, "étape 3: api_registerValidate — code=" + (r != null ? r.code : "null")
+            + " msg=" + (r != null ? r.msg : "null"));
 
-        for (com.pa.lcr.lcp.transport.TransportSnapshot snap : readySnaps) {
-            if (btConnecte) break;
-            String mediaKey = snap.key;
+        if (r != null && r.code == 1) {
+            String foundSerial = r.data != null ? r.data.optString("serial_id",
+                r.data.optString("serial", fSerialIdFinal)) : fSerialIdFinal;
+            String foundKey = r.data != null ? r.data.optString("transportKey", "") : "";
 
-            // Nom lisible
-            String devName = "";
-            try {
-                if (mediaKey.startsWith("BT:")) {
-                    android.bluetooth.BluetoothDevice dev =
-                        android.bluetooth.BluetoothAdapter.getDefaultAdapter()
-                            .getRemoteDevice(mediaKey.substring(3));
-                    devName = dev.getName() != null ? dev.getName() : "";
-                }
-            } catch (Exception ignored) {}
-            String mediaLabel = mediaKey.startsWith("BT:")
-                ? (devName.isEmpty() ? "" : devName + " ") + "(" + mediaKey.substring(3) + ")"
-                : "USB-C";
+            Log.i(TAG, "étape 3: TROUVÉ ✓ transport=" + foundKey + " serial=" + foundSerial);
 
-            etapes[2] = "Test " + mediaLabel;
-            updateDlg.run();
-            Log.i(TAG, "étape 3: test " + mediaKey + " [" + devName + "]");
-
-            try {
-                com.pa.lcr.lcp.transport.TransportIo io = mtm.getByKey(mediaKey);
-                if (io == null || !io.isOpen()) continue;
-
-                // ✅ ensureActiveTransport comme Configure
-                try { mtm.activateExclusive(mediaKey, "DIAGNOSTIC"); } catch (Exception ignored) {}
-
-                // ✅ LcpLink direct — même chose que Configure connectManualWithIo
-                com.pa.lcr.lcp.LcpLink tmp =
-                    new com.pa.lcr.lcp.LcpLink(io, fNodeFinal, 255, true);
-                byte[] b80 = tmp.opGetField(80, 600);
-                String serial = "";
-                if (b80 != null && b80.length > 0) {
-                    serial = new String(b80, java.nio.charset.StandardCharsets.UTF_8).trim();
-                    int nul = serial.indexOf((char)0);
-                    if (nul >= 0) serial = serial.substring(0, nul).trim();
-                }
-                Log.i(TAG, "étape 3: " + mediaKey + " serial lu=" + serial);
-
-                if (serial.isEmpty()) {
-                    Log.w(TAG, "étape 3: " + mediaKey + " — pas de réponse LCP");
-                    continue;
-                }
-
-                if (!fSerialIdFinal.isEmpty() && !fSerialIdFinal.equalsIgnoreCase(serial)) {
-                    Log.w(TAG, "étape 3: " + mediaKey + " — mauvais serial: attendu="
-                        + fSerialIdFinal + " trouvé=" + serial);
-                    continue;
-                }
-
-                // ✅ Bon registre — upsertRegisterTabFromScan comme Configure
-                final String fSerial = serial;
-                final String fKey = mediaKey;
-                final String fLabel = mediaLabel;
-                activity.runOnUiThread(() -> {
+            // ✅ upsertRegisterTabFromScan comme Configure
+            final String fSerial = foundSerial;
+            final String fKey = foundKey;
+            activity.runOnUiThread(() -> {
+                if (!fKey.isEmpty())
                     activity.upsertRegisterTabFromScan(fKey, fNodeFinal, 255, fSerial, true);
-                    activity.refreshAllTabsMediaStatus();
-                });
-                Thread.sleep(500);
+                activity.refreshAllTabsMediaStatus();
+            });
+            Thread.sleep(500);
 
-                etapes[2] = "✅ " + fLabel + " | Serial: " + serial;
-                updateDlg.run();
+            etapes[2] = "✅ Registre trouvé | Serial: " + foundSerial;
+            updateDlg.run();
 
-                dcFinal = com.pa.lcr.lcp.RegisterSessionManager.get(activity)
-                    .resolveOrCreateForNode(fNodeFinal, 255);
-                btConnecte = true;
-                etapesOk[2] = true;
-                Log.i(TAG, "étape 3: TROUVÉ ✓ " + mediaKey + " serial=" + serial);
-
-            } catch (Exception e) {
-                Log.w(TAG, "étape 3: " + mediaKey + " ERR: " + e.getMessage());
-            }
+            dcFinal = com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                .resolveOrCreateForNode(fNodeFinal, 255);
+            btConnecte = true;
+            etapesOk[2] = true;
+        } else {
+            etapes[2] = "❌ Registre non trouvé — " + (r != null ? r.msg : "null");
+            updateDlg.run();
         }
         updateDlg.run();
 
         if (!btConnecte) {
             afficherEchec(dlg[0], etapes, etapesOk,
-                "BT Failed to connect (3/3 tentatives)\n" + erreurDetail[0] + "\n\n"
+                "Registre non trouvé\n"
                 + "⚡ Assurez-vous que :\n• Le Bluetooth est activé\n• Le registre est sous tension\n• Le registre est en mode communication BT",
                 woNum, fTicketNo, fNodeFinal, fSerialIdFinal);
             return;
@@ -429,9 +388,9 @@ public class RegisterConnectionHelper {
             try { activity.showPage(0); } catch (Exception ignored) {}
             activity.getUiHandler().postDelayed(() -> {
                 try {
-                    com.pa.lcr.lcp.RegisterSessionManager rsm2 =
-                        com.pa.lcr.lcp.RegisterSessionManager.get(activity);
-                    com.pa.lcr.lcp.DeliveryController dc2 = rsm2.resolveOrCreateForNode(fNodeFinal, 255);
+                    com.pa.lcr.lcp.DeliveryController dc2 =
+                        com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                            .resolveOrCreateForNode(fNodeFinal, 255);
                     if (dc2 != null) {
                         dc2.requestStatus();
                         dc2.requestLiveSample();
@@ -441,98 +400,10 @@ public class RegisterConnectionHelper {
         });
     }
 
-
-    private void afficherEchec(
-            android.app.AlertDialog dlgPrev,
-            String[] etapes, boolean[] etapesOk,
-            String erreur, String woNum, String ticketNo,
-            int node, String serialId) {
-
-        activity.runOnUiThread(() -> {
-            if (dlgPrev != null && dlgPrev.isShowing()) dlgPrev.dismiss();
-
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < 4; i++) {
-                if (etapes[i] == null) break;
-                sb.append(etapesOk[i] ? "✅" : "❌")
-                  .append(" Étape ").append(i+1).append("/4 — ").append(etapes[i]).append("\n");
-            }
-            sb.append("\n⛔ ").append(erreur);
-            // ✅ WO vide = ouverture directe APK ou livraison manuelle
-            if (woNum == null || woNum.isEmpty()) {
-                sb.append("\n\nℹ️ Aucun bon de travail actif\n");
-                sb.append("Livraison manuelle — aucun WO associé\n");
-                sb.append("\nVous pouvez :\n");
-                sb.append("• Lancer une livraison depuis Field Service Mobile\n");
-                sb.append("• Ou connecter le registre via l'onglet Configure");
-            } else {
-                sb.append("\n\nWO: ").append(woNum);
-                sb.append(" | Ticket: ").append(ticketNo != null && !ticketNo.isEmpty() ? ticketNo : "—");
-            }
-            sb.append("\nNode: ").append(node).append(" | Serial: ").append(serialId);
-            sb.append("\n\nContactez le support :\n").append(SUPPORT_EMAIL);
-
-            final String resumeComplet = sb.toString();
-            final String sujet = "[Filgo-Sonic] Registre non joignable — "
-                + (woNum != null && !woNum.isEmpty() ? "WO:" + woNum : "Livraison manuelle");
-            final String corps = resumeComplet + "\n\nTimestamp: " + new java.util.Date();
-
-            new android.app.AlertDialog.Builder(activity)
-                .setTitle("⛔ Registre non joignable  ✕")
-                .setMessage(resumeComplet)
-                .setCancelable(false)
-                .setPositiveButton("🔄 Réessayer", (d, w) -> {
-                    d.dismiss();
-                    // Relancer le diagnostic
-                    lancerDiagnostic(
-                        activity.getMediaTransportManager().listSnapshots() != null
-                            && !activity.getMediaTransportManager().listSnapshots().isEmpty()
-                            ? activity.getMediaTransportManager().listSnapshots().get(0).key : "",
-                        node, serialId, woNum);
-                })
-                .setNeutralButton("🔁 Redémarrer APK", (d, w) -> {
-                    // Après restart → reprise automatique depuis ActiveDeliveryStore
-                    // via checkPendingDeliveryForThisRegister (PENDING/STARTED)
-                    try {
-                        Intent intent = activity.getPackageManager()
-                            .getLaunchIntentForPackage(activity.getPackageName());
-                        if (intent != null) {
-                            intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP
-                                | Intent.FLAG_ACTIVITY_NEW_TASK);
-                            activity.startActivity(intent);
-                        }
-                        android.os.Process.killProcess(android.os.Process.myPid());
-                    } catch (Exception e) {
-                        Log.e(TAG, "Restart ERR: " + e.getMessage());
-                    }
-                })
-                .setNegativeButton("📧 Envoyer courriel", (d, w) -> {
-                    try {
-                        Intent email = new Intent(Intent.ACTION_SEND);
-                        email.setType("message/rfc822");
-                        email.putExtra(Intent.EXTRA_EMAIL, new String[]{SUPPORT_EMAIL});
-                        email.putExtra(Intent.EXTRA_SUBJECT, sujet);
-                        email.putExtra(Intent.EXTRA_TEXT, corps);
-                        activity.startActivity(Intent.createChooser(email, "Envoyer courriel support"));
-                    } catch (Exception e) {
-                        Log.e(TAG, "Email ERR: " + e.getMessage());
-                    }
-                    d.dismiss();
-                })
-                .setCancelable(true) // ✅ X ferme le dialog (bouton Back ou tap extérieur)
-                .show();
-        });
-    }
-
     // =========================================================
     // Utilitaires
     // =========================================================
 
-    /**
-     * Détecte si une exception est une erreur de connexion au registre.
-     * Utilisé dans les catch de RegisterTabFragment pour déclencher
-     * automatiquement l'écran de diagnostic.
-     */
     public static boolean estErreurConnexion(Exception e) {
         if (e == null) return false;
         if (e instanceof java.io.IOException) return true;
@@ -545,12 +416,5 @@ public class RegisterConnectionHelper {
             || msg.contains("bt")
             || msg.contains("lcp")
             || msg.contains("io error");
-    }
-
-    private int getPremierEchec(boolean[] etapesOk) {
-        for (int i = 0; i < etapesOk.length; i++) {
-            if (!etapesOk[i]) return i;
-        }
-        return etapesOk.length - 1;
     }
 }
