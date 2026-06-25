@@ -260,9 +260,6 @@ public class RegisterConnectionHelper {
         etapesOk[1] = true;
         updateDlg.run();
 
-        // ÉTAPE 3 — Connexion au registre via api_registerConnectAuto (même logique que DeepLinkHandler)
-        boolean btConnecte = false;
-        com.pa.lcr.lcp.DeliveryController dcFinal = null;
         // ÉTAPE 3 — Connexion au registre via api_registerConnectAuto
         // Même fonction que DeepLinkHandler — scan BT/USB, probe serial, connexion LCP
         boolean btConnecte = false;
