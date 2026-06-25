@@ -108,6 +108,7 @@ public class RegisterConnectionHelper {
                     || st == com.pa.lcr.lcp.DeliveryState.ENDING);
 
                 // ✅ Vérifier l'âge du dernier tick — si > 10s = zombi BT
+                boolean zombiDetected = false;
                 if (tickOk && (st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
                         || st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED)) {
                     try {
@@ -117,11 +118,13 @@ public class RegisterConnectionHelper {
                         if (tickAge > 10000) {
                             Log.w(TAG, "validerConnexion: tick_age=" + tickAge + "ms — zombi BT détecté");
                             tickOk = false;
+                            zombiDetected = true;
                         }
                     } catch (Exception ignored) {}
                 }
 
-                if (!tickOk) {
+                // ✅ Re-tester seulement si pas un zombi
+                if (!tickOk && !zombiDetected) {
                     com.pa.lcr.lcp.ApiResult ping = dc.api_tickSnapshot();
                     tickOk = (ping != null && ping.code == 1);
                     if (!tickOk) Log.w(TAG, "tickSnapshot fail: " + (ping != null ? ping.msg : "null"));
