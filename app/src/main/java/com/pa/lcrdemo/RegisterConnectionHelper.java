@@ -260,84 +260,98 @@ public class RegisterConnectionHelper {
         etapesOk[1] = true;
         updateDlg.run();
 
-        // ÉTAPE 3 — Connexion au registre via api_registerConnectAuto
-        // Même fonction que DeepLinkHandler — scan BT/USB, probe serial, connexion LCP
+        // ÉTAPE 3 — Scan de tous les médias disponibles (BT pairés + USB)
+        // Pour chaque média : afficher MAC → activer socket → probe LCP → vérifier node + serial
         boolean btConnecte = false;
         com.pa.lcr.lcp.DeliveryController dcFinal = null;
-        for (int t = 1; t <= 3; t++) {
-            etapes[2] = "Connexion au registre... (tentative " + t + "/3)";
+
+        com.pa.lcr.lcp.MultiRegisterApiFacadeImpl facade =
+            new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(activity);
+
+        // Lister tous les BT pairés
+        java.util.ArrayList<android.bluetooth.BluetoothDevice> bonded = facade.listBondedSorted();
+        java.util.List<String> mediasATester = new java.util.ArrayList<>();
+
+        // Ajouter BT pairés
+        for (android.bluetooth.BluetoothDevice dev : bonded) {
+            if (dev != null && dev.getAddress() != null)
+                mediasATester.add("BT:" + dev.getAddress().toUpperCase());
+        }
+
+        // Ajouter USB si branché
+        try {
+            android.hardware.usb.UsbManager usbMgr =
+                (android.hardware.usb.UsbManager) activity.getSystemService(android.content.Context.USB_SERVICE);
+            if (usbMgr != null && !usbMgr.getDeviceList().isEmpty())
+                mediasATester.add(0, com.pa.lcr.lcp.transport.MediaTransportManager.KEY_USB);
+        } catch (Exception ignored) {}
+
+        Log.i(TAG, "étape 3: " + mediasATester.size() + " médias à tester: " + mediasATester);
+
+        for (int idx = 0; idx < mediasATester.size() && !btConnecte; idx++) {
+            String mediaKey = mediasATester.get(idx);
+            String mediaLabel = mediaKey.startsWith("BT:") ? "BT: " + mediaKey.substring(3) : "USB-C";
+
+            etapes[2] = "Test " + mediaLabel + " (" + (idx+1) + "/" + mediasATester.size() + ")";
             updateDlg.run();
+            Log.i(TAG, "étape 3: test " + mediaKey + " node=" + fNodeFinal + " serial=" + fSerialIdFinal);
+
             try {
                 com.pa.lcr.lcp.RegisterSessionManager rsm =
                     com.pa.lcr.lcp.RegisterSessionManager.get(activity);
                 if (!fSerialIdFinal.isEmpty()) rsm.bindExpectedSerial(fNodeFinal, fSerialIdFinal);
 
-                Log.i(TAG, "étape 3: tentative " + t + "/3 — api_registerConnectAuto node=" + fNodeFinal + " serial=" + fSerialIdFinal);
-                com.pa.lcr.lcp.ApiResult r =
-                    new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(activity)
-                        .api_registerConnectAuto(fSerialIdFinal.isEmpty() ? null : fSerialIdFinal, fNodeFinal);
-                Log.i(TAG, "étape 3: tentative " + t + "/3 — code=" + (r != null ? r.code : "null") + " msg=" + (r != null ? r.msg : "null"));
+                // Activer ce transport spécifiquement
+                com.pa.lcr.lcp.transport.MediaTransportManager mtm =
+                    activity.getMediaTransportManager();
+                com.pa.lcr.lcp.transport.TransportIo io = mtm.getByKey(mediaKey);
 
-                // ✅ Enrichir le message avec BT MAC et identifiant
-                String transportInfo = "";
-                if (r != null && r.data != null) {
-                    String tk = r.data.optString("transportKey", "");
-                    String serial = r.data.optString("serial", "");
-                    if (!tk.isEmpty()) {
-                        String mac = tk.startsWith("BT:") ? tk.substring(3) : tk;
-                        transportInfo = "\nBT: " + mac + (serial.isEmpty() ? "" : " | Serial: " + serial);
+                if (io == null || !io.isOpen()) {
+                    // Socket pas ouvert — tenter connexion BT
+                    if (mediaKey.startsWith("BT:")) {
+                        String mac = mediaKey.substring(3);
+                        android.bluetooth.BluetoothDevice dev =
+                            android.bluetooth.BluetoothAdapter.getDefaultAdapter().getRemoteDevice(mac);
+                        android.bluetooth.BluetoothSocket sock =
+                            dev.createRfcommSocketToServiceRecord(
+                                java.util.UUID.fromString("00001101-0000-1000-8000-00805F9B34FB"));
+                        sock.connect();
+                        java.io.InputStream in = sock.getInputStream();
+                        java.io.OutputStream out = sock.getOutputStream();
+                        mtm.onBtConnected(dev, sock, in, out, "BT diagnostic");
+                        io = mtm.getByKey(mediaKey);
+                        Log.i(TAG, "étape 3: socket SPP établi — " + mediaKey);
                     }
-                    // Si code=0, afficher les transports essayés
-                    if (r.code != 1) {
-                        org.json.JSONArray tried = r.data.optJSONArray("tried");
-                        if (tried != null && tried.length() > 0) {
-                            StringBuilder sb2 = new StringBuilder("\nEssayé: ");
-                            for (int i = 0; i < tried.length(); i++) {
-                                String k = tried.optString(i, "");
-                                if (k.startsWith("BT:")) k = "BT:" + k.substring(3);
-                                sb2.append(k).append(" ");
-                            }
-                            transportInfo = sb2.toString().trim();
-                        }
-                    }
+                } else {
+                    Log.i(TAG, "étape 3: socket déjà ouvert — " + mediaKey);
                 }
-                final String tInfo = transportInfo;
-                final int tFinal = t;
-                activity.runOnUiThread(() -> {
-                    if (dlg[0] == null || !dlg[0].isShowing()) return;
-                    StringBuilder sb = new StringBuilder();
-                    for (int i = 0; i < 4; i++) {
-                        if (etapes[i] == null) break;
-                        String icon = etapesOk[i] ? "✅" : (i == 2 && !tInfo.isEmpty() ? "🔄" : "🔄");
-                        sb.append(icon).append(" Étape ").append(i+1).append("/4 — ").append(etapes[i]).append("\n");
-                    }
-                    if (!tInfo.isEmpty()) sb.append(tInfo).append("\n");
-                    txtProgress.setText(sb.toString().trim());
-                });
 
-                if (r != null && r.code == 1) {
-                    // ✅ Registre trouvé — récupérer le controller créé par api_registerConnectAuto
-                    String foundKey = r.data != null ? r.data.optString("transportKey", "") : "";
-                    if (!foundKey.isEmpty()) {
-                        dcFinal = rsm.getController(foundKey, fNodeFinal);
-                    }
-                    if (dcFinal == null) {
-                        dcFinal = rsm.resolveOrCreateForNode(fNodeFinal, 255);
-                    }
+                if (io == null || !io.isOpen()) {
+                    Log.w(TAG, "étape 3: " + mediaKey + " — socket non disponible");
+                    continue;
+                }
+
+                // Probe LCP — vérifier node + serial
+                mtm.activateExclusive(mediaKey, "DIAGNOSTIC_PROBE");
+                com.pa.lcr.lcp.ApiResult r =
+                    facade.api_registerConnectAuto(fSerialIdFinal.isEmpty() ? null : fSerialIdFinal, fNodeFinal);
+                Log.i(TAG, "étape 3: " + mediaKey + " — code=" + r.code + " msg=" + r.msg);
+
+                if (r.code == 1) {
+                    String foundSerial = r.data != null ? r.data.optString("serial", "") : "";
+                    String foundKey = r.data != null ? r.data.optString("transportKey", mediaKey) : mediaKey;
+                    Log.i(TAG, "étape 3: TROUVÉ ✓ " + foundKey + " serial=" + foundSerial);
+                    etapes[2] = "✅ Registre trouvé — " + mediaLabel + " | Serial: " + foundSerial;
+                    updateDlg.run();
+                    dcFinal = rsm.getController(foundKey, fNodeFinal);
+                    if (dcFinal == null) dcFinal = rsm.resolveOrCreateForNode(fNodeFinal, 255);
                     btConnecte = true;
                     etapesOk[2] = true;
-                    Log.i(TAG, "étape 3: CONNECTED ✓ transport=" + foundKey);
-                    break;
+                } else {
+                    Log.w(TAG, "étape 3: " + mediaKey + " — " + r.msg);
                 }
-                erreurDetail[0] = r != null ? r.msg : "Timeout";
             } catch (Exception e) {
-                erreurDetail[0] = e.getMessage() != null ? e.getMessage() : "Erreur inconnue";
-                Log.w(TAG, "étape 3 ERR: " + erreurDetail[0]);
-            }
-            if (t < 3) {
-                etapes[2] = "Connexion au registre... tentative " + t + " échouée — nouvelle tentative dans 5s";
-                updateDlg.run();
-                try { Thread.sleep(5000); } catch (Exception ignored) {}
+                Log.w(TAG, "étape 3: " + mediaKey + " ERR: " + e.getMessage());
             }
         }
         updateDlg.run();

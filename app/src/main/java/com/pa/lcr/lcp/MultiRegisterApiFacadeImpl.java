@@ -78,7 +78,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         catch (Exception ignored) { return null; }
     }
 
-    private ArrayList<BluetoothDevice> listBondedSorted() {
+    public ArrayList<BluetoothDevice> listBondedSorted() {
         BluetoothAdapter ad = btAdapterSafe();
         ArrayList<BluetoothDevice> out = new ArrayList<>();
         if (ad == null) return out;
