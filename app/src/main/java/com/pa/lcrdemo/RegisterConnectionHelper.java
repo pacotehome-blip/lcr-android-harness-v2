@@ -269,27 +269,36 @@ public class RegisterConnectionHelper {
             try {
                 com.pa.lcr.lcp.RegisterSessionManager rsm =
                     com.pa.lcr.lcp.RegisterSessionManager.get(activity);
-                // ✅ Même logique que DeepLinkHandler
                 if (!fSerialIdFinal.isEmpty()) rsm.bindExpectedSerial(fNodeFinal, fSerialIdFinal);
+
+                // ✅ 1. Tenter api_registerConnectAuto (scan BT/USB)
                 Log.i(TAG, "étape 3: tentative " + t + "/3 — api_registerConnectAuto node=" + fNodeFinal + " serial=" + fSerialIdFinal);
                 com.pa.lcr.lcp.ApiResult r =
                     new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(activity)
                         .api_registerConnectAuto(fSerialIdFinal.isEmpty() ? null : fSerialIdFinal, fNodeFinal);
                 Log.i(TAG, "étape 3: tentative " + t + "/3 — code=" + (r != null ? r.code : "null") + " msg=" + (r != null ? r.msg : "null"));
-                if (r != null && r.code == 1) {                    dcFinal = rsm.resolveOrCreateForNode(fNodeFinal, 255);
-                    if (dcFinal != null) {
-                        // Attendre CONNECTED max 15s
-                        for (int w = 0; w < 75; w++) {
-                            if (dcFinal.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
-                            Thread.sleep(200);
-                        }
-                        if (dcFinal.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED
-                            || dcFinal.getState() == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
-                            || dcFinal.getState() == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED) {
-                            btConnecte = true;
-                            etapesOk[2] = true;
-                            break;
-                        }
+
+                if (r != null && r.code == 1) {
+                    dcFinal = rsm.resolveOrCreateForNode(fNodeFinal, 255);
+                } else {
+                    // ✅ 2. Fallback: resolveOrCreateForNode comme Configure
+                    Log.i(TAG, "étape 3: fallback resolveOrCreateForNode node=" + fNodeFinal);
+                    dcFinal = rsm.resolveOrCreateForNode(fNodeFinal, 255);
+                }
+
+                if (dcFinal != null) {
+                    for (int w = 0; w < 75; w++) {
+                        if (dcFinal.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
+                        Thread.sleep(200);
+                    }
+                    Log.i(TAG, "étape 3: tentative " + t + " state=" + dcFinal.getState());
+                    if (dcFinal.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED
+                        || dcFinal.getState() == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
+                        || dcFinal.getState() == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED) {
+                        btConnecte = true;
+                        etapesOk[2] = true;
+                        Log.i(TAG, "étape 3: CONNECTED ✓");
+                        break;
                     }
                 }
                 erreurDetail[0] = r != null ? r.msg : "Timeout";
@@ -297,7 +306,6 @@ public class RegisterConnectionHelper {
                 erreurDetail[0] = e.getMessage() != null ? e.getMessage() : "Erreur inconnue";
             }
             if (t < 3) {
-                // ✅ Forcer btDisconnect entre les tentatives — nettoyer le socket BT stale
                 Log.i(TAG, "étape 3: btDisconnect avant tentative " + (t+1));
                 try { activity.btDisconnect(); Thread.sleep(2000); } catch (Exception ignored) {}
             }
