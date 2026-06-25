@@ -342,12 +342,12 @@ public class RegisterConnectionHelper {
                 }
 
                 // ✅ Créer le controller si absent — nécessaire avant api_connectLcp
-                com.pa.lcr.lcp.RegisterSessionManager rsm =
+                com.pa.lcr.lcp.RegisterSessionManager rsmLocal =
                     com.pa.lcr.lcp.RegisterSessionManager.get(activity);
-                if (!fSerialIdFinal.isEmpty()) rsm.bindExpectedSerial(fNodeFinal, fSerialIdFinal);
+                if (!fSerialIdFinal.isEmpty()) rsmLocal.bindExpectedSerial(fNodeFinal, fSerialIdFinal);
                 com.pa.lcr.lcp.transport.TransportIo ioForCreate = mtm.getByKey(mediaKey);
                 if (ioForCreate != null && ioForCreate.isOpen()) {
-                    rsm.getOrCreate(mediaKey, fNodeFinal, 255, ioForCreate);
+                    rsmLocal.getOrCreate(mediaKey, fNodeFinal, 255, ioForCreate);
                 }
 
                 // api_connectLcp avec le bon média et MAC — même chose que Configure
