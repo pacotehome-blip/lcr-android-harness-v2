@@ -341,9 +341,11 @@ public class RegisterConnectionHelper {
                     continue;
                 }
 
-                // api_connectLcp sur le transport actif = même chose que bouton Connect LCP dans Configure
-                com.pa.lcr.lcp.ApiResult r = facade.api_connectLcp(fNodeFinal, 255);
-                Log.i(TAG, "étape 3: " + mediaKey + " api_connectLcp — code=" + r.code + " msg=" + r.msg);
+                // api_connectLcp avec le bon média et MAC — même chose que Configure
+                String mac = mediaKey.startsWith("BT:") ? mediaKey.substring(3) : "";
+                String mediaType = mediaKey.startsWith("BT:") ? "bt" : "usb";
+                com.pa.lcr.lcp.ApiResult r = facade.api_connectLcp(fNodeFinal, 255, mediaType, mac);
+                Log.i(TAG, "étape 3: " + mediaKey + " api_connectLcp(" + mediaType + ") — code=" + r.code + " msg=" + r.msg);
 
                 if (r.code == 1) {
                     // Vérifier le serial si disponible
