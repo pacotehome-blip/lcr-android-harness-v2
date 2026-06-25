@@ -106,6 +106,21 @@ public class RegisterConnectionHelper {
                     || st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
                     || st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED
                     || st == com.pa.lcr.lcp.DeliveryState.ENDING);
+
+                // ✅ Vérifier l'âge du dernier tick — si > 10s = zombi BT
+                if (tickOk && (st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
+                        || st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED)) {
+                    try {
+                        com.pa.lcr.lcp.ApiResult snap = dc.api_tickSnapshot();
+                        long tickAge = snap != null && snap.data != null
+                            ? snap.data.optLong("tick_age_ms", Long.MAX_VALUE) : Long.MAX_VALUE;
+                        if (tickAge > 10000) {
+                            Log.w(TAG, "validerConnexion: tick_age=" + tickAge + "ms — zombi BT détecté");
+                            tickOk = false;
+                        }
+                    } catch (Exception ignored) {}
+                }
+
                 if (!tickOk) {
                     com.pa.lcr.lcp.ApiResult ping = dc.api_tickSnapshot();
                     tickOk = (ping != null && ping.code == 1);
@@ -260,76 +275,46 @@ public class RegisterConnectionHelper {
         etapesOk[1] = true;
         updateDlg.run();
 
-        // ÉTAPE 3 — Connexion au registre via withAutoConnectRetry + api_registerValidate
-        // Même logique que ApiServer /v1/register/validate avec retry auto
+        // ÉTAPE 3 — Scan médias via api_registerConnectAuto
+        // 1. connect-auto → trouve le bon média (BT/USB)
+        // 2. Si trouvé → upsertRegisterTabFromScan → tab rafraîchi avec état registre
         boolean btConnecte = false;
         com.pa.lcr.lcp.DeliveryController dcFinal = null;
-
-        etapes[2] = "Connexion au registre...";
-        updateDlg.run();
+        String[] erreurDetail = {""};
 
         com.pa.lcr.lcp.MultiRegisterApiFacadeImpl facade =
             new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(activity);
 
-        // ✅ Étape A: api_registerConnectAuto — trouve et connecte le registre
-        // Même chose que withAutoConnectRetry dans ApiServer
-        etapes[2] = "Recherche du registre...";
-        updateDlg.run();
-
-        com.pa.lcr.lcp.ApiResult connectResult = null;
         for (int attempt = 1; attempt <= 3 && !btConnecte; attempt++) {
-            etapes[2] = "Connexion au registre... (" + attempt + "/3)";
+            etapes[2] = "Recherche registre... (" + attempt + "/3)";
             updateDlg.run();
-            Log.i(TAG, "étape 3: api_registerConnectAuto tentative " + attempt + " node=" + fNodeFinal + " serial=" + fSerialIdFinal);
-            connectResult = facade.api_registerConnectAuto(
+            Log.i(TAG, "étape 3: api_registerConnectAuto tentative " + attempt
+                + " node=" + fNodeFinal + " serial=" + fSerialIdFinal);
+            com.pa.lcr.lcp.ApiResult r = facade.api_registerConnectAuto(
                 fSerialIdFinal.isEmpty() ? null : fSerialIdFinal, fNodeFinal);
-            Log.i(TAG, "étape 3: api_registerConnectAuto code=" + connectResult.code + " msg=" + connectResult.msg);
-            if (connectResult.code == 1) break;
-            try { Thread.sleep(1000); } catch (Exception ignored) {}
-        }
-
-        com.pa.lcr.lcp.ApiResult r = null;
-
-        if (connectResult != null && connectResult.code == 1) {
-            // ✅ Étape B: api_registerValidate pour confirmer node + serial
-            r = facade.api_registerValidate(null, fNodeFinal, 255,
-                fSerialIdFinal.isEmpty() ? null : fSerialIdFinal,
-                null, null, "auto", null);
-            Log.i(TAG, "étape 3: api_registerValidate code=" + r.code + " msg=" + r.msg);
-        } else {
-            r = connectResult;
-        }
-
-        Log.i(TAG, "étape 3: api_registerValidate — code=" + (r != null ? r.code : "null")
-            + " msg=" + (r != null ? r.msg : "null"));
-
-        if (r != null && r.code == 1) {
-            String foundSerial = r.data != null ? r.data.optString("serial_id",
-                r.data.optString("serial", fSerialIdFinal)) : fSerialIdFinal;
-            String foundKey = r.data != null ? r.data.optString("transportKey", "") : "";
-
-            Log.i(TAG, "étape 3: TROUVÉ ✓ transport=" + foundKey + " serial=" + foundSerial);
-
-            // ✅ upsertRegisterTabFromScan comme Configure
-            final String fSerial = foundSerial;
-            final String fKey = foundKey;
-            activity.runOnUiThread(() -> {
-                if (!fKey.isEmpty())
-                    activity.upsertRegisterTabFromScan(fKey, fNodeFinal, 255, fSerial, true);
-                activity.refreshAllTabsMediaStatus();
-            });
-            try { Thread.sleep(500); } catch (Exception ignored) {}
-
-            etapes[2] = "✅ Registre trouvé | Serial: " + foundSerial;
-            updateDlg.run();
-
-            dcFinal = com.pa.lcr.lcp.RegisterSessionManager.get(activity)
-                .resolveOrCreateForNode(fNodeFinal, 255);
-            btConnecte = true;
-            etapesOk[2] = true;
-        } else {
-            etapes[2] = "❌ Registre non trouvé — " + (r != null ? r.msg : "null");
-            updateDlg.run();
+            Log.i(TAG, "étape 3: code=" + r.code + " msg=" + r.msg);
+            if (r.code == 1) {
+                String foundKey    = r.data != null ? r.data.optString("transportKey", "") : "";
+                String foundSerial = r.data != null ? r.data.optString("serial", fSerialIdFinal) : fSerialIdFinal;
+                Log.i(TAG, "étape 3: TROUVÉ ✓ transport=" + foundKey + " serial=" + foundSerial);
+                final String fKey    = foundKey;
+                final String fSerial = foundSerial;
+                activity.runOnUiThread(() -> {
+                    if (!fKey.isEmpty())
+                        activity.upsertRegisterTabFromScan(fKey, fNodeFinal, 255, fSerial, true);
+                    activity.refreshAllTabsMediaStatus();
+                });
+                try { Thread.sleep(500); } catch (Exception ignored) {}
+                etapes[2] = "✅ Registre trouvé — " + foundKey.replace("BT:", "BT: ") + " | Serial: " + foundSerial;
+                updateDlg.run();
+                dcFinal = com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                    .resolveOrCreateForNode(fNodeFinal, 255);
+                btConnecte = true;
+                etapesOk[2] = true;
+            } else {
+                erreurDetail[0] = r.msg;
+                if (attempt < 3) try { Thread.sleep(2000); } catch (Exception ignored) {}
+            }
         }
         updateDlg.run();
 
