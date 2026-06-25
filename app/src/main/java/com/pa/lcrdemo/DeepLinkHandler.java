@@ -1303,8 +1303,18 @@ public class DeepLinkHandler {
                 int lcrnode = currentNode;
                 String serialId = currentSerialId;
 
+                // ✅ Livraison manuelle — WO vide = hors FSM
+                // Générer un identifiant synthétique traçable avec timestamp
+                String woNumFinal = (woNum != null && !woNum.isEmpty()) ? woNum
+                    : "MANUEL-" + new java.text.SimpleDateFormat("yyyyMMdd-HHmmss",
+                        java.util.Locale.ROOT).format(new java.util.Date());
+                boolean isManuel = (woNum == null || woNum.isEmpty());
+                android.util.Log.i(TAG, isManuel
+                    ? "Livraison manuelle — WO synthétique: " + woNumFinal
+                    : "Livraison FSM — WO: " + woNumFinal);
+
                 android.content.ContentValues cv = new android.content.ContentValues();
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,       woNum != null ? woNum : "");
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,       woNumFinal);
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID,   woIdGuid != null ? woIdGuid.replace("{","").replace("}","") : "");
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID,    serialId);
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_LCRNODE,      lcrnode);
@@ -1320,9 +1330,11 @@ public class DeepLinkHandler {
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_START_UTC,    startUtc);
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_END_UTC,      endUtc);
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_DURATION_S,   durationS);
+                // ✅ TYPE_MANUEL si livraison hors FSM — traçable dans Dataverse
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
-                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,       "REGISTRE");
+                    isManuel ? "MANUEL"
+                             : com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,       isManuel ? "MANUEL" : "REGISTRE");
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE,    "LIVRAISON");
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
@@ -1465,18 +1477,18 @@ public class DeepLinkHandler {
                     catch (Exception ignored) {}
                 }
                 lastResultJson   = lastResult.toString();
-                lastResultWoNum  = woNum;
+                lastResultWoNum  = woNumFinal;
                 lastResultWoGuid = woGuid;
                 lastResultTs     = System.currentTimeMillis();
                 com.pa.lcrdemo.LcrHttpService.lastResultJson = lastResult.toString();
-                android.util.Log.i(TAG, "last-result sauvegardé: wonum=" + woNum
+                android.util.Log.i(TAG, "last-result sauvegardé: wonum=" + woNumFinal
                     + " net=" + net + " gross=" + gross + " ticket=" + ticket);
 
                 final String fNetP   = net;
                 final String fGrossP = gross;
                 final String fTicketP = ticket;
                 final String fGuidP  = woGuid;
-                final String fWoNumP = woNum;
+                final String fWoNumP = woNumFinal;
                 final String fStatusP = status;
                 patchDataverse(fGuidP, fWoNumP, fNetP, fGrossP, fTicketP, fStatusP);
 

@@ -35,6 +35,8 @@ public class RegisterConnectionHelper {
 
     private static final String TAG = "RegisterConnHelper";
     private static final String SUPPORT_EMAIL = "paul-andre.cote@filgo.ca";
+    // ✅ Guard anti-double diagnostic
+    private static volatile boolean diagnosticEnCours = false;
 
     private final MainActivity activity;
 
@@ -61,7 +63,8 @@ public class RegisterConnectionHelper {
                     activity.getMediaTransportManager().listSnapshots();
                 if (snaps != null) {
                     for (com.pa.lcr.lcp.transport.TransportSnapshot s : snaps) {
-                        if (s.key != null && s.key.startsWith("BT:")) {
+                        // ✅ Supporter BT, USB, TCP — pas de filtre par type
+                        if (s.key != null && !s.key.isEmpty()) {
                             tkResolu = s.key;
                             Log.i(TAG, "validerConnexion: transport auto-détecté = " + tkResolu);
                             break;
@@ -125,7 +128,18 @@ public class RegisterConnectionHelper {
     // =========================================================
 
     private void lancerDiagnostic(String transportKey, int node, String serialId, String woNum) {
-        new Thread(() -> diagnostic(transportKey, node, serialId, woNum)).start();
+        if (diagnosticEnCours) {
+            Log.w(TAG, "lancerDiagnostic: diagnostic déjà en cours — ignoré");
+            return;
+        }
+        diagnosticEnCours = true;
+        new Thread(() -> {
+            try {
+                diagnostic(transportKey, node, serialId, woNum);
+            } finally {
+                diagnosticEnCours = false;
+            }
+        }).start();
     }
 
     private void diagnostic(String transportKey, int node, String serialId, String woNum) {
@@ -272,12 +286,18 @@ public class RegisterConnectionHelper {
 
         if (!btConnecte) {
             afficherEchec(dlg[0], etapes, etapesOk,
-                "BT Failed to connect (3/3 tentatives)\n" + erreurDetail[0],
+                "BT Failed to connect (3/3 tentatives)\n"
+                + erreurDetail[0] + "\n\n"
+                + "⚡ Assurez-vous que :\n"
+                + "• Le Bluetooth est activé sur la tablette\n"
+                + "• Le registre est sous tension\n"
+                + "• Le registre est en mode communication BT",
                 woNum, fTicketNo, node, fSerialId);
             return;
         }
 
-        // ÉTAPE 4 — Vérification registre LCR (ping)
+        // ÉTAPE 4 — Vérification registre LCR
+        // Récupérer le bon transport depuis api_registerConnectAuto (node + serial validés)
         etapes[3] = "Vérification registre LCR...";
         updateDlg.run();
         boolean lcpOk = false;
@@ -285,60 +305,86 @@ public class RegisterConnectionHelper {
             Thread.sleep(700);
             com.pa.lcr.lcp.RegisterSessionManager rsm =
                 com.pa.lcr.lcp.RegisterSessionManager.get(activity);
-            com.pa.lcr.lcp.DeliveryController dc =
-                rsm.getController(transportKey, node);
 
-            // ✅ Si controller absent — le créer via getOrCreate avec le bon serialId
-            if (dc == null) {
-                com.pa.lcr.lcp.transport.TransportIo io =
-                    activity.getMediaTransportManager().getByKey(transportKey);
-                if (io != null && io.isOpen()) {
-                    // Parser le serialId comme entier (ex: "16466294" → 16466294)
-                    int serialInt = 255;
-                    try {
-                        if (fSerialId != null && !fSerialId.isEmpty())
-                            serialInt = Integer.parseInt(fSerialId.trim());
-                    } catch (Exception ignored) {}
-                    dc = rsm.getOrCreate(transportKey, node, serialInt, io);
-                    Log.i(TAG, "étape 4: controller créé — serial=" + serialInt
-                        + " node=" + node + " — attente CONNECTED");
-                    // Attendre CONNECTED max 15s
-                    for (int w = 0; w < 75; w++) {
-                        if (dc.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
-                        Thread.sleep(200);
+            // ✅ Chercher le controller via tous les transports disponibles
+            com.pa.lcr.lcp.DeliveryController dc = null;
+            java.util.List<com.pa.lcr.lcp.transport.TransportSnapshot> snaps =
+                activity.getMediaTransportManager().listSnapshots();
+            if (snaps != null) {
+                for (com.pa.lcr.lcp.transport.TransportSnapshot s : snaps) {
+                    if (s.key != null) {
+                        dc = rsm.getController(s.key, node);
+                        if (dc != null) {
+                            Log.i(TAG, "étape 4: controller trouvé via transport=" + s.key);
+                            break;
+                        }
                     }
                 }
             }
 
-            // ✅ Vérifier que le controller est vraiment CONNECTED avant de pinger
-            if (dc != null && dc.getState() != com.pa.lcr.lcp.DeliveryState.CONNECTED) {
-                Log.w(TAG, "étape 4: controller état=" + dc.getState() + " — attente supplémentaire");
-                for (int w = 0; w < 25; w++) {
-                    if (dc.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
-                    Thread.sleep(200);
+            // ✅ Si toujours null — créer le controller avec le bon serial
+            if (dc == null) {
+                java.util.List<com.pa.lcr.lcp.transport.TransportSnapshot> snaps2 =
+                    activity.getMediaTransportManager().listSnapshots();
+                if (snaps2 != null) {
+                    for (com.pa.lcr.lcp.transport.TransportSnapshot s : snaps2) {
+                        com.pa.lcr.lcp.transport.TransportIo io =
+                            activity.getMediaTransportManager().getByKey(s.key);
+                        if (io != null && io.isOpen()) {
+                            int serialInt = 255;
+                            try {
+                                if (fSerialId != null && !fSerialId.isEmpty())
+                                    serialInt = Integer.parseInt(fSerialId.trim());
+                            } catch (Exception ignored) {}
+                            dc = rsm.getOrCreate(s.key, node, serialInt, io);
+                            Log.i(TAG, "étape 4: controller créé — serial=" + serialInt
+                                + " node=" + node + " transport=" + s.key);
+                            // Attendre CONNECTED max 15s
+                            for (int w = 0; w < 75; w++) {
+                                if (dc != null && (dc.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED
+                                    || dc.getState() == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
+                                    || dc.getState() == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED)) break;
+                                Thread.sleep(200);
+                            }
+                            break;
+                        }
+                    }
                 }
             }
 
+            // ✅ NPE guard — vérifier que dc est non null avant d'appeler getState()
             if (dc != null) {
                 com.pa.lcr.lcp.DeliveryState st = dc.getState();
-                // ✅ CONNECTED ou RUNNING_FLOWING = registre joignable
                 lcpOk = (st == com.pa.lcr.lcp.DeliveryState.CONNECTED
                     || st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
                     || st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED
                     || st == com.pa.lcr.lcp.DeliveryState.ENDING);
-                if (!lcpOk) {
-                    // Tenter un tickSnapshot comme vérification supplémentaire
-                    com.pa.lcr.lcp.ApiResult ping = dc.api_tickSnapshot();
-                    lcpOk = (ping != null && ping.code == 1);
-                    erreurDetail[0] = lcpOk ? "" :
-                        "État: " + st + (ping != null ? " — " + ping.msg : "");
+                if (lcpOk) {
+                    Log.i(TAG, "étape 4: state=" + st + " — registre joignable ✓");
+                } else {
+                    // Forcer requestLiveSample et attendre
+                    Log.i(TAG, "étape 4: state=" + st + " — forcer requestLiveSample");
+                    try { dc.requestLiveSample(); } catch (Exception ignored) {}
+                    for (int w = 0; w < 30; w++) {
+                        try { Thread.sleep(300); } catch (Exception ignored) {}
+                        st = dc.getState();
+                        if (st == com.pa.lcr.lcp.DeliveryState.CONNECTED
+                            || st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
+                            || st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED) {
+                            lcpOk = true;
+                            Log.i(TAG, "étape 4: state=" + st + " après requestLiveSample ✓");
+                            break;
+                        }
+                    }
+                    if (!lcpOk) erreurDetail[0] = "État: " + st + " — registre ne répond pas";
                 }
-                Log.i(TAG, "étape 4: state=" + st + " lcpOk=" + lcpOk);
             } else {
-                erreurDetail[0] = "Controller non disponible après reconnexion";
+                erreurDetail[0] = "Controller non disponible — node=" + node + " serial=" + fSerialId;
+                Log.w(TAG, "étape 4: " + erreurDetail[0]);
             }
         } catch (Exception e) {
             erreurDetail[0] = e.getMessage() != null ? e.getMessage() : "Timeout LCP";
+            Log.w(TAG, "étape 4 ERR: " + erreurDetail[0]);
         }
         etapesOk[3] = lcpOk;
         updateDlg.run();
@@ -346,7 +392,11 @@ public class RegisterConnectionHelper {
         if (!lcpOk) {
             afficherEchec(dlg[0], etapes, etapesOk,
                 "BT connecté mais registre LCR ne répond pas\n"
-                    + "Vérifiez que le registre est allumé\n" + erreurDetail[0],
+                + erreurDetail[0] + "\n\n"
+                + "⚡ Assurez-vous que :\n"
+                + "• L'alimentation du registre est branchée\n"
+                + "• Le registre est bien en mode communication\n"
+                + "• Aucun autre appareil n'est connecté au registre",
                 woNum, fTicketNo, node, fSerialId);
             return;
         }
