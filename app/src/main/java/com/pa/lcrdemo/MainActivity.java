@@ -453,6 +453,9 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
+        // ✅ Reset guard diagnostic au démarrage
+        com.pa.lcrdemo.RegisterConnectionHelper.resetDiagnostic();
+
         usbManager = (UsbManager) getSystemService(USB_SERVICE);
 
         bindUi();
@@ -497,7 +500,7 @@ public class MainActivity extends AppCompatActivity {
                         android.util.Log.i("MSAL", "Token OK — Dataverse prêt");
                         // Déclencher sync immédiat si items en attente
                         DeliverySyncScheduler.triggerNow(MainActivity.this);
-                        // ✅ Sync lcr_delivery_status + lcr_note_template au lancement
+                        // ✅ Sync filgo_delivery_status + filgo_note_template au lancement
                         new Thread(() ->
                             com.pa.lcrdemo.dataverse.LcrDeliverySync.syncAll(
                                 MainActivity.this, token)
