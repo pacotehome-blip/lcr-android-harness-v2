@@ -184,7 +184,15 @@ public class RegisterConnectionHelper {
         txtProgress.setTextSize(13f);
         dlgBuilder.setView(txtProgress);
         final android.app.AlertDialog[] dlg = {null};
-        activity.runOnUiThread(() -> dlg[0] = dlgBuilder.show());
+        final Object dlgLock = new Object();
+        activity.runOnUiThread(() -> {
+            dlg[0] = dlgBuilder.show();
+            synchronized (dlgLock) { dlgLock.notifyAll(); }
+        });
+        // Attendre que le dialog soit créé
+        synchronized (dlgLock) {
+            try { if (dlg[0] == null) dlgLock.wait(2000); } catch (Exception ignored) {}
+        }
 
         Runnable updateDlg = () -> activity.runOnUiThread(() -> {
             if (dlg[0] == null || !dlg[0].isShowing()) return;
