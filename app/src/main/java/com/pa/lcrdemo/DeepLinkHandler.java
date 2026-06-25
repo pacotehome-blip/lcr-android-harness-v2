@@ -1477,18 +1477,18 @@ public class DeepLinkHandler {
                     catch (Exception ignored) {}
                 }
                 lastResultJson   = lastResult.toString();
-                lastResultWoNum  = woNumFinal;
+                lastResultWoNum  = (woNum != null && !woNum.isEmpty()) ? woNum : "MANUEL";
                 lastResultWoGuid = woGuid;
                 lastResultTs     = System.currentTimeMillis();
                 com.pa.lcrdemo.LcrHttpService.lastResultJson = lastResult.toString();
-                android.util.Log.i(TAG, "last-result sauvegardé: wonum=" + woNumFinal
+                android.util.Log.i(TAG, "last-result sauvegardé: wonum=" + lastResultWoNum
                     + " net=" + net + " gross=" + gross + " ticket=" + ticket);
 
                 final String fNetP   = net;
                 final String fGrossP = gross;
                 final String fTicketP = ticket;
                 final String fGuidP  = woGuid;
-                final String fWoNumP = woNumFinal;
+                final String fWoNumP = (woNum != null && !woNum.isEmpty()) ? woNum : "MANUEL";
                 final String fStatusP = status;
                 patchDataverse(fGuidP, fWoNumP, fNetP, fGrossP, fTicketP, fStatusP);
 
