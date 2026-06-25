@@ -276,8 +276,7 @@ public class RegisterConnectionHelper {
                     new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(activity)
                         .api_registerConnectAuto(fSerialIdFinal.isEmpty() ? null : fSerialIdFinal, fNodeFinal);
                 Log.i(TAG, "étape 3: tentative " + t + "/3 — code=" + (r != null ? r.code : "null") + " msg=" + (r != null ? r.msg : "null"));
-                if (r != null && r.code == 1) {
-                    dcFinal = rsm.resolveOrCreateForNode(fNodeFinal, 255);
+                if (r != null && r.code == 1) {                    dcFinal = rsm.resolveOrCreateForNode(fNodeFinal, 255);
                     if (dcFinal != null) {
                         // Attendre CONNECTED max 15s
                         for (int w = 0; w < 75; w++) {
@@ -297,7 +296,11 @@ public class RegisterConnectionHelper {
             } catch (Exception e) {
                 erreurDetail[0] = e.getMessage() != null ? e.getMessage() : "Erreur inconnue";
             }
-            if (t < 3) { try { Thread.sleep(1500); } catch (Exception ignored) {} }
+            if (t < 3) {
+                // ✅ Forcer btDisconnect entre les tentatives — nettoyer le socket BT stale
+                Log.i(TAG, "étape 3: btDisconnect avant tentative " + (t+1));
+                try { activity.btDisconnect(); Thread.sleep(2000); } catch (Exception ignored) {}
+            }
         }
         updateDlg.run();
 
