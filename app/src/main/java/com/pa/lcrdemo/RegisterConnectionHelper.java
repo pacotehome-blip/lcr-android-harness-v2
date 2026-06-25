@@ -341,14 +341,11 @@ public class RegisterConnectionHelper {
                     continue;
                 }
 
-                // ✅ Créer le controller si absent — nécessaire avant api_connectLcp
+                // ✅ Créer le controller si absent — resolveOrCreateForNode comme DeepLinkHandler
                 com.pa.lcr.lcp.RegisterSessionManager rsmLocal =
                     com.pa.lcr.lcp.RegisterSessionManager.get(activity);
                 if (!fSerialIdFinal.isEmpty()) rsmLocal.bindExpectedSerial(fNodeFinal, fSerialIdFinal);
-                com.pa.lcr.lcp.transport.TransportIo ioForCreate = mtm.getByKey(mediaKey);
-                if (ioForCreate != null && ioForCreate.isOpen()) {
-                    rsmLocal.getOrCreate(mediaKey, fNodeFinal, 255, ioForCreate);
-                }
+                rsmLocal.resolveOrCreateForNode(fNodeFinal, 255);
 
                 // api_connectLcp avec le bon média et MAC — même chose que Configure
                 String mac = mediaKey.startsWith("BT:") ? mediaKey.substring(3) : "";
