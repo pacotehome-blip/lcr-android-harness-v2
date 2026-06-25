@@ -331,20 +331,38 @@ public class RegisterConnectionHelper {
                     continue;
                 }
 
-                // Probe LCP — vérifier node + serial
-                mtm.activateExclusive(mediaKey, "DIAGNOSTIC_PROBE");
-                com.pa.lcr.lcp.ApiResult r =
-                    facade.api_registerConnectAuto(fSerialIdFinal.isEmpty() ? null : fSerialIdFinal, fNodeFinal);
-                Log.i(TAG, "étape 3: " + mediaKey + " — code=" + r.code + " msg=" + r.msg);
+                // ✅ Activer ce transport — vérifier que c'est bien le transport actif
+                boolean activated = mtm.activateExclusive(mediaKey, "DIAGNOSTIC_PROBE");
+                String activeKey = com.pa.lcr.lcp.transport.MediaTransportManager.getActiveKeyStatic();
+                Log.i(TAG, "étape 3: " + mediaKey + " activated=" + activated + " activeKey=" + activeKey);
+
+                if (!mediaKey.equals(activeKey)) {
+                    Log.w(TAG, "étape 3: " + mediaKey + " — activateExclusive n'a pas pris effet");
+                    continue;
+                }
+
+                // api_connectLcp sur le transport actif = même chose que bouton Connect LCP dans Configure
+                com.pa.lcr.lcp.ApiResult r = facade.api_connectLcp(fNodeFinal, 255);
+                Log.i(TAG, "étape 3: " + mediaKey + " api_connectLcp — code=" + r.code + " msg=" + r.msg);
 
                 if (r.code == 1) {
-                    String foundSerial = r.data != null ? r.data.optString("serial", "") : "";
-                    String foundKey = r.data != null ? r.data.optString("transportKey", mediaKey) : mediaKey;
-                    Log.i(TAG, "étape 3: TROUVÉ ✓ " + foundKey + " serial=" + foundSerial);
-                    etapes[2] = "✅ Registre trouvé — " + mediaLabel + " | Serial: " + foundSerial;
+                    // Vérifier le serial si disponible
+                    String foundSerial = r.data != null ? r.data.optString("serial",
+                        r.data.optString("serialId", "")) : "";
+                    // Si serial spécifié, vérifier qu'il correspond
+                    if (!fSerialIdFinal.isEmpty() && !foundSerial.isEmpty()
+                            && !fSerialIdFinal.equalsIgnoreCase(foundSerial)) {
+                        Log.w(TAG, "étape 3: " + mediaKey + " — serial mismatch attendu=" + fSerialIdFinal + " trouvé=" + foundSerial);
+                        continue;
+                    }
+                    Log.i(TAG, "étape 3: TROUVÉ ✓ " + mediaKey + " serial=" + foundSerial);
+                    etapes[2] = "✅ Registre trouvé — " + mediaLabel
+                        + (foundSerial.isEmpty() ? "" : " | Serial: " + foundSerial);
                     updateDlg.run();
-                    dcFinal = rsm.getController(foundKey, fNodeFinal);
-                    if (dcFinal == null) dcFinal = rsm.resolveOrCreateForNode(fNodeFinal, 255);
+                    com.pa.lcr.lcp.RegisterSessionManager rsm2 =
+                        com.pa.lcr.lcp.RegisterSessionManager.get(activity);
+                    dcFinal = rsm2.getController(mediaKey, fNodeFinal);
+                    if (dcFinal == null) dcFinal = rsm2.resolveOrCreateForNode(fNodeFinal, 255);
                     btConnecte = true;
                     etapesOk[2] = true;
                 } else {
