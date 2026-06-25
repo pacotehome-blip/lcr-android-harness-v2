@@ -263,6 +263,10 @@ public class RegisterConnectionHelper {
         // ÉTAPE 3 — Connexion au registre via api_registerConnectAuto (même logique que DeepLinkHandler)
         boolean btConnecte = false;
         com.pa.lcr.lcp.DeliveryController dcFinal = null;
+        // ÉTAPE 3 — Connexion au registre via api_registerConnectAuto
+        // Même fonction que DeepLinkHandler — scan BT/USB, probe serial, connexion LCP
+        boolean btConnecte = false;
+        com.pa.lcr.lcp.DeliveryController dcFinal = null;
         for (int t = 1; t <= 3; t++) {
             etapes[2] = "Connexion au registre... (tentative " + t + "/3)";
             updateDlg.run();
@@ -271,43 +275,72 @@ public class RegisterConnectionHelper {
                     com.pa.lcr.lcp.RegisterSessionManager.get(activity);
                 if (!fSerialIdFinal.isEmpty()) rsm.bindExpectedSerial(fNodeFinal, fSerialIdFinal);
 
-                // ✅ 1. Tenter api_registerConnectAuto (scan BT/USB)
                 Log.i(TAG, "étape 3: tentative " + t + "/3 — api_registerConnectAuto node=" + fNodeFinal + " serial=" + fSerialIdFinal);
                 com.pa.lcr.lcp.ApiResult r =
                     new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(activity)
                         .api_registerConnectAuto(fSerialIdFinal.isEmpty() ? null : fSerialIdFinal, fNodeFinal);
                 Log.i(TAG, "étape 3: tentative " + t + "/3 — code=" + (r != null ? r.code : "null") + " msg=" + (r != null ? r.msg : "null"));
 
-                if (r != null && r.code == 1) {
-                    dcFinal = rsm.resolveOrCreateForNode(fNodeFinal, 255);
-                } else {
-                    // ✅ 2. Fallback: resolveOrCreateForNode comme Configure
-                    Log.i(TAG, "étape 3: fallback resolveOrCreateForNode node=" + fNodeFinal);
-                    dcFinal = rsm.resolveOrCreateForNode(fNodeFinal, 255);
+                // ✅ Enrichir le message avec BT MAC et identifiant
+                String transportInfo = "";
+                if (r != null && r.data != null) {
+                    String tk = r.data.optString("transportKey", "");
+                    String serial = r.data.optString("serial", "");
+                    if (!tk.isEmpty()) {
+                        String mac = tk.startsWith("BT:") ? tk.substring(3) : tk;
+                        transportInfo = "\nBT: " + mac + (serial.isEmpty() ? "" : " | Serial: " + serial);
+                    }
+                    // Si code=0, afficher les transports essayés
+                    if (r.code != 1) {
+                        org.json.JSONArray tried = r.data.optJSONArray("tried");
+                        if (tried != null && tried.length() > 0) {
+                            StringBuilder sb2 = new StringBuilder("\nEssayé: ");
+                            for (int i = 0; i < tried.length(); i++) {
+                                String k = tried.optString(i, "");
+                                if (k.startsWith("BT:")) k = "BT:" + k.substring(3);
+                                sb2.append(k).append(" ");
+                            }
+                            transportInfo = sb2.toString().trim();
+                        }
+                    }
                 }
+                final String tInfo = transportInfo;
+                final int tFinal = t;
+                activity.runOnUiThread(() -> {
+                    if (dlg[0] == null || !dlg[0].isShowing()) return;
+                    StringBuilder sb = new StringBuilder();
+                    for (int i = 0; i < 4; i++) {
+                        if (etapes[i] == null) break;
+                        String icon = etapesOk[i] ? "✅" : (i == 2 && !tInfo.isEmpty() ? "🔄" : "🔄");
+                        sb.append(icon).append(" Étape ").append(i+1).append("/4 — ").append(etapes[i]).append("\n");
+                    }
+                    if (!tInfo.isEmpty()) sb.append(tInfo).append("\n");
+                    txtProgress.setText(sb.toString().trim());
+                });
 
-                if (dcFinal != null) {
-                    for (int w = 0; w < 75; w++) {
-                        if (dcFinal.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
-                        Thread.sleep(200);
+                if (r != null && r.code == 1) {
+                    // ✅ Registre trouvé — récupérer le controller créé par api_registerConnectAuto
+                    String foundKey = r.data != null ? r.data.optString("transportKey", "") : "";
+                    if (!foundKey.isEmpty()) {
+                        dcFinal = rsm.getController(foundKey, fNodeFinal);
                     }
-                    Log.i(TAG, "étape 3: tentative " + t + " state=" + dcFinal.getState());
-                    if (dcFinal.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED
-                        || dcFinal.getState() == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
-                        || dcFinal.getState() == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED) {
-                        btConnecte = true;
-                        etapesOk[2] = true;
-                        Log.i(TAG, "étape 3: CONNECTED ✓");
-                        break;
+                    if (dcFinal == null) {
+                        dcFinal = rsm.resolveOrCreateForNode(fNodeFinal, 255);
                     }
+                    btConnecte = true;
+                    etapesOk[2] = true;
+                    Log.i(TAG, "étape 3: CONNECTED ✓ transport=" + foundKey);
+                    break;
                 }
                 erreurDetail[0] = r != null ? r.msg : "Timeout";
             } catch (Exception e) {
                 erreurDetail[0] = e.getMessage() != null ? e.getMessage() : "Erreur inconnue";
+                Log.w(TAG, "étape 3 ERR: " + erreurDetail[0]);
             }
             if (t < 3) {
-                Log.i(TAG, "étape 3: btDisconnect avant tentative " + (t+1));
-                try { activity.btDisconnect(); Thread.sleep(2000); } catch (Exception ignored) {}
+                etapes[2] = "Connexion au registre... tentative " + t + " échouée — nouvelle tentative dans 5s";
+                updateDlg.run();
+                try { Thread.sleep(5000); } catch (Exception ignored) {}
             }
         }
         updateDlg.run();
