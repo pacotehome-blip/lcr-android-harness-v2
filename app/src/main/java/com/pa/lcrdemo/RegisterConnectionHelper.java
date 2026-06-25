@@ -341,6 +341,15 @@ public class RegisterConnectionHelper {
                     continue;
                 }
 
+                // ✅ Créer le controller si absent — nécessaire avant api_connectLcp
+                com.pa.lcr.lcp.RegisterSessionManager rsm =
+                    com.pa.lcr.lcp.RegisterSessionManager.get(activity);
+                if (!fSerialIdFinal.isEmpty()) rsm.bindExpectedSerial(fNodeFinal, fSerialIdFinal);
+                com.pa.lcr.lcp.transport.TransportIo ioForCreate = mtm.getByKey(mediaKey);
+                if (ioForCreate != null && ioForCreate.isOpen()) {
+                    rsm.getOrCreate(mediaKey, fNodeFinal, 255, ioForCreate);
+                }
+
                 // api_connectLcp avec le bon média et MAC — même chose que Configure
                 String mac = mediaKey.startsWith("BT:") ? mediaKey.substring(3) : "";
                 String mediaType = mediaKey.startsWith("BT:") ? "bt" : "usb";
@@ -348,12 +357,11 @@ public class RegisterConnectionHelper {
                 Log.i(TAG, "étape 3: " + mediaKey + " api_connectLcp(" + mediaType + ") — code=" + r.code + " msg=" + r.msg);
 
                 if (r.code == 1) {
-                    // ✅ Valider que c'est le bon registre (node + serial)
-                    // api_connectLcp peut réussir sur un registre différent (LC3 vs LCR-II)
+                    // ✅ Valider que c'est le bon registre (node + serial) via BT explicite
                     com.pa.lcr.lcp.ApiResult val = facade.api_registerValidate(
                         null, fNodeFinal, 255,
                         fSerialIdFinal.isEmpty() ? null : fSerialIdFinal,
-                        null, null);
+                        null, null, "bt", mac);
                     Log.i(TAG, "étape 3: " + mediaKey + " validateSerial — code=" + val.code + " msg=" + val.msg);
 
                     if (!fSerialIdFinal.isEmpty() && val.code != 1) {
