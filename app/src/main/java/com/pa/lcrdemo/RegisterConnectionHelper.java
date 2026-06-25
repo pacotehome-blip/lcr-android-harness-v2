@@ -53,46 +53,70 @@ public class RegisterConnectionHelper {
      * @return true si le registre répond, false si diagnostic lancé
      */
     public boolean validerConnexion(String transportKey, int node, String serialId, String woNum) {
+        // ✅ Si transportKey vide — chercher le transport BT actif automatiquement
+        String tkResolu = transportKey;
+        if (tkResolu == null || tkResolu.isEmpty()) {
+            try {
+                java.util.List<com.pa.lcr.lcp.transport.TransportSnapshot> snaps =
+                    activity.getMediaTransportManager().listSnapshots();
+                if (snaps != null) {
+                    for (com.pa.lcr.lcp.transport.TransportSnapshot s : snaps) {
+                        if (s.key != null && s.key.startsWith("BT:")) {
+                            tkResolu = s.key;
+                            Log.i(TAG, "validerConnexion: transport auto-détecté = " + tkResolu);
+                            break;
+                        }
+                    }
+                }
+            } catch (Exception ignored) {}
+        }
+        final String tkFinal = tkResolu;
+
         // 1. Vérifier io.isOpen()
         boolean ioOk = false;
         try {
-            TransportIo io = activity.getMediaTransportManager().getByKey(transportKey);
+            TransportIo io = activity.getMediaTransportManager().getByKey(tkFinal);
             ioOk = (io != null && io.isOpen());
         } catch (Exception e) {
             Log.w(TAG, "isOpen check ERR: " + e.getMessage());
         }
 
         if (!ioOk) {
-            Log.w(TAG, "validerConnexion: io mort — transport=" + transportKey);
-            lancerDiagnostic(transportKey, node, serialId, woNum);
+            Log.w(TAG, "validerConnexion: io mort — transport=" + tkFinal);
+            lancerDiagnostic(tkFinal, node, serialId, woNum);
             return false;
         }
 
-        // 2. Vérifier api_tickSnapshot()
+        // 2. Vérifier état controller
         boolean tickOk = false;
         try {
             com.pa.lcr.lcp.DeliveryController dc =
-                RegisterSessionManager.get(activity).getController(transportKey, node);
+                RegisterSessionManager.get(activity).getController(tkFinal, node);
             if (dc != null) {
-                com.pa.lcr.lcp.ApiResult ping = dc.api_tickSnapshot();
-                tickOk = (ping != null && ping.code == 1);
+                com.pa.lcr.lcp.DeliveryState st = dc.getState();
+                tickOk = (st == com.pa.lcr.lcp.DeliveryState.CONNECTED
+                    || st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
+                    || st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED
+                    || st == com.pa.lcr.lcp.DeliveryState.ENDING);
                 if (!tickOk) {
-                    Log.w(TAG, "tickSnapshot fail: " + (ping != null ? ping.msg : "null"));
+                    com.pa.lcr.lcp.ApiResult ping = dc.api_tickSnapshot();
+                    tickOk = (ping != null && ping.code == 1);
+                    if (!tickOk) Log.w(TAG, "tickSnapshot fail: " + (ping != null ? ping.msg : "null"));
                 }
             } else {
-                Log.w(TAG, "validerConnexion: controller null");
+                Log.w(TAG, "validerConnexion: controller null pour transport=" + tkFinal);
             }
         } catch (Exception e) {
             Log.w(TAG, "tickSnapshot ERR: " + e.getMessage());
         }
 
         if (!tickOk) {
-            Log.w(TAG, "validerConnexion: registre ne répond pas — transport=" + transportKey);
-            lancerDiagnostic(transportKey, node, serialId, woNum);
+            Log.w(TAG, "validerConnexion: registre ne répond pas — transport=" + tkFinal);
+            lancerDiagnostic(tkFinal, node, serialId, woNum);
             return false;
         }
 
-        Log.i(TAG, "validerConnexion: OK — transport=" + transportKey + " node=" + node);
+        Log.i(TAG, "validerConnexion: OK — transport=" + tkFinal + " node=" + node);
         return true;
     }
 
