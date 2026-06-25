@@ -287,6 +287,13 @@ public class RegisterConnectionHelper {
         for (int attempt = 1; attempt <= 3 && !btConnecte; attempt++) {
             etapes[2] = "Recherche registre... (" + attempt + "/3)";
             updateDlg.run();
+
+            // ✅ Nettoyer les sockets zombis avant chaque tentative
+            try {
+                activity.btDisconnect();
+                Thread.sleep(1500);
+            } catch (Exception ignored) {}
+
             Log.i(TAG, "étape 3: api_registerConnectAuto tentative " + attempt
                 + " node=" + fNodeFinal + " serial=" + fSerialIdFinal);
             com.pa.lcr.lcp.ApiResult r = facade.api_registerConnectAuto(
