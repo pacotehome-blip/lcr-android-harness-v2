@@ -348,9 +348,21 @@ public class RegisterConnectionHelper {
                 Log.i(TAG, "étape 3: " + mediaKey + " api_connectLcp(" + mediaType + ") — code=" + r.code + " msg=" + r.msg);
 
                 if (r.code == 1) {
-                    // Vérifier le serial si disponible
-                    String foundSerial = r.data != null ? r.data.optString("serial",
-                        r.data.optString("serialId", "")) : "";
+                    // ✅ Valider que c'est le bon registre (node + serial)
+                    // api_connectLcp peut réussir sur un registre différent (LC3 vs LCR-II)
+                    com.pa.lcr.lcp.ApiResult val = facade.api_registerValidate(
+                        null, fNodeFinal, 255,
+                        fSerialIdFinal.isEmpty() ? null : fSerialIdFinal,
+                        null, null);
+                    Log.i(TAG, "étape 3: " + mediaKey + " validateSerial — code=" + val.code + " msg=" + val.msg);
+
+                    if (!fSerialIdFinal.isEmpty() && val.code != 1) {
+                        Log.w(TAG, "étape 3: " + mediaKey + " — mauvais registre (serial/node ne correspond pas)");
+                        continue;
+                    }
+
+                    String foundSerial = val.data != null ? val.data.optString("serial",
+                        val.data.optString("serialId", fSerialIdFinal)) : fSerialIdFinal;
                     // Si serial spécifié, vérifier qu'il correspond
                     if (!fSerialIdFinal.isEmpty() && !foundSerial.isEmpty()
                             && !fSerialIdFinal.equalsIgnoreCase(foundSerial)) {
