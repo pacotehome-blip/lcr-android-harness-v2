@@ -516,21 +516,22 @@ public class DeepLinkHandler {
                         activity.toast("⚠️ Ticket en attente — imprimez le ticket précédent avant de démarrer"));
                     activity.runOnUiThread(() -> activity.showPage(0));
                 } else {
-                    // Erreur orchestration (Timeout LCP) — déclencher progression reconnexion
-                    android.util.Log.w(TAG, "oneshot/start: orchestration error — tentative reconnexion registre");
-                    // Récupérer le dernier ticket pour le dialog support
-                    String lastTicket = "";
-                    try {
-                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbCheck =
-                            new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
-                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow lastRow =
-                            dbCheck.getLatestForWo(woNum != null ? woNum : "");
-                        if (lastRow != null && lastRow.ticketNo != null) lastTicket = lastRow.ticketNo;
-                    } catch (Exception ignored) {}
+                    // Erreur orchestration (Timeout LCP) — câble série débranché ou registre hors ligne
+                    android.util.Log.w(TAG, "oneshot/start: orchestration error — lancer diagnostic connexion registre");
                     final String fTransportKey = transportKey;
                     final int fNodeFinal = node;
-                    new RegisterConnectionHelper(activity).validerConnexion(
-                        fTransportKey, fNodeFinal, fSerialId, woNum);
+                    final String fSerialFinal = fSerialId;
+                    final String fWoFinal = woNum;
+                    // ✅ Forcer le diagnostic — ne pas passer par validerConnexion qui peut dire OK
+                    // même si le registre ne répond pas (BT vivant mais câble série débranché)
+                    new Thread(() -> {
+                        try {
+                            new RegisterConnectionHelper(activity)
+                                .lancerDiagnosticForce(fTransportKey, fNodeFinal, fSerialFinal, fWoFinal);
+                        } catch (Exception e) {
+                            android.util.Log.e(TAG, "diagnostic ERR: " + e.getMessage());
+                        }
+                    }).start();
                 }
             }
         } catch (Exception e) {

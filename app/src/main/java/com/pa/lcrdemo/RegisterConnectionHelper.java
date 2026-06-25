@@ -147,6 +147,24 @@ public class RegisterConnectionHelper {
         }).start();
     }
 
+    /**
+     * ✅ Force le diagnostic même si diagnosticEnCours=true.
+     * Utilisé après oneshot/start orchestration error — le registre ne répond pas
+     * même si BT est connecté (câble série débranché par exemple).
+     */
+    public void lancerDiagnosticForce(String transportKey, int node, String serialId, String woNum) {
+        if (diagnosticEnCours) {
+            Log.w(TAG, "lancerDiagnosticForce: reset guard et relance");
+            diagnosticEnCours = false;
+        }
+        diagnosticEnCours = true;
+        try {
+            diagnostic(transportKey, node, serialId, woNum);
+        } finally {
+            diagnosticEnCours = false;
+        }
+    }
+
     private void diagnostic(String transportKey, int node, String serialId, String woNum) {
         // Lire contexte depuis LcrDeliveryStatusDb
         String ticketNo = "";
