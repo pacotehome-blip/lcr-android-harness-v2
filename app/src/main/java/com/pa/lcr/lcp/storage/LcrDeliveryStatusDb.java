@@ -499,6 +499,23 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     }
 
     /**
+     * ✅ Retourne la dernière livraison peu importe le WO.
+     * Utilisé pour récupérer node et serial en mode manuel (sans deep link FSM).
+     */
+    public DeliveryRow getLastDelivery() {
+        try (Cursor c = getReadableDatabase().query(
+                TABLE_DELIVERY, null,
+                null, null,
+                null, null,
+                COL_TRANSACTION_NO + " DESC", "1")) {
+            if (c.moveToFirst()) return DeliveryRow.fromCursor(c);
+        } catch (Exception e) {
+            Log.e(TAG, "getLastDelivery ERR: " + e.getMessage());
+        }
+        return null;
+    }
+
+    /**
      * Retourne toutes les livraisons/annulations pour un WO donné,
      * triées par transaction_no ASC. Utilisé pour le payload consolidé Dataverse.
      */

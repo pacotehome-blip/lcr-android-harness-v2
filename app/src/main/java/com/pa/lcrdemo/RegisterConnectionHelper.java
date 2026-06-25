@@ -145,13 +145,23 @@ public class RegisterConnectionHelper {
     private void diagnostic(String transportKey, int node, String serialId, String woNum) {
         // Lire contexte depuis LcrDeliveryStatusDb
         String ticketNo = "";
-        String serialIdDb = serialId;
+        String serialIdDb = serialId; // ✅ Garder le serial du paramètre par défaut
+        int nodeDb = node;            // ✅ Garder le node du paramètre par défaut
         try {
             LcrDeliveryStatusDb db = new LcrDeliveryStatusDb(activity);
-            LcrDeliveryStatusDb.DeliveryRow row = db.getLatestForWo(woNum != null ? woNum : "");
+            LcrDeliveryStatusDb.DeliveryRow row = (woNum != null && !woNum.isEmpty())
+                ? db.getLatestForWo(woNum)
+                : db.getLastDelivery(); // ✅ Mode manuel — prendre la dernière livraison
             if (row != null) {
                 if (row.ticketNo != null) ticketNo = row.ticketNo;
-                if (row.serialId != null && !row.serialId.isEmpty()) serialIdDb = row.serialId;
+                // ✅ N'écraser serial et node que si les paramètres sont vides
+                if ((serialIdDb == null || serialIdDb.isEmpty())
+                        && row.serialId != null && !row.serialId.isEmpty())
+                    serialIdDb = row.serialId;
+                if (nodeDb <= 0 && row.lcrnode > 0)
+                    nodeDb = row.lcrnode;
+                Log.i(TAG, "diagnostic: contexte DB — node=" + nodeDb + " serial=" + serialIdDb
+                    + " ticket=" + ticketNo + " wo=" + row.woNum);
             }
         } catch (Exception e) {
             Log.w(TAG, "DB read ERR: " + e.getMessage());
@@ -159,6 +169,7 @@ public class RegisterConnectionHelper {
 
         final String fTicketNo  = ticketNo;
         final String fSerialId  = serialIdDb;
+        final int    fNode      = nodeDb;
         final String[] etapes   = new String[4];
         final boolean[] etapesOk = new boolean[4];
         final String[] erreurDetail = {""};
@@ -191,7 +202,7 @@ public class RegisterConnectionHelper {
         try {
             com.pa.lcr.lcp.DeliveryController dcCheck =
                 com.pa.lcr.lcp.RegisterSessionManager.get(activity)
-                    .getController(transportKey, node);
+                    .getController(transportKey, fNode);
             if (dcCheck != null) {
                 com.pa.lcr.lcp.DeliveryState st = dcCheck.getState();
                 livraisonActive = (st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
@@ -267,7 +278,7 @@ public class RegisterConnectionHelper {
                     com.pa.lcr.lcp.ApiResult r =
                         new MultiRegisterApiFacadeImpl(activity)
                             .api_registerConnectAuto(
-                                fSerialId.isEmpty() ? null : fSerialId, node);
+                                fSerialId.isEmpty() ? null : fSerialId, fNode);
                     if (r != null && r.code == 1) {
                         btConnecte = true;
                         etapesOk[2] = true;
@@ -292,7 +303,7 @@ public class RegisterConnectionHelper {
                 + "• Le Bluetooth est activé sur la tablette\n"
                 + "• Le registre est sous tension\n"
                 + "• Le registre est en mode communication BT",
-                woNum, fTicketNo, node, fSerialId);
+                woNum, fTicketNo, fNode, fSerialId);
             return;
         }
 
@@ -313,7 +324,7 @@ public class RegisterConnectionHelper {
             if (snaps != null) {
                 for (com.pa.lcr.lcp.transport.TransportSnapshot s : snaps) {
                     if (s.key != null) {
-                        dc = rsm.getController(s.key, node);
+                        dc = rsm.getController(s.key, fNode);
                         if (dc != null) {
                             Log.i(TAG, "étape 4: controller trouvé via transport=" + s.key);
                             break;
@@ -336,9 +347,9 @@ public class RegisterConnectionHelper {
                                 if (fSerialId != null && !fSerialId.isEmpty())
                                     serialInt = Integer.parseInt(fSerialId.trim());
                             } catch (Exception ignored) {}
-                            dc = rsm.getOrCreate(s.key, node, serialInt, io);
+                            dc = rsm.getOrCreate(s.key, fNode, serialInt, io);
                             Log.i(TAG, "étape 4: controller créé — serial=" + serialInt
-                                + " node=" + node + " transport=" + s.key);
+                                + " fNode=" + fNode + " transport=" + s.key);
                             // Attendre CONNECTED max 15s
                             for (int w = 0; w < 75; w++) {
                                 if (dc != null && (dc.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED
@@ -379,7 +390,7 @@ public class RegisterConnectionHelper {
                     if (!lcpOk) erreurDetail[0] = "État: " + st + " — registre ne répond pas";
                 }
             } else {
-                erreurDetail[0] = "Controller non disponible — node=" + node + " serial=" + fSerialId;
+                erreurDetail[0] = "Controller non disponible — fNode=" + node + " serial=" + fSerialId;
                 Log.w(TAG, "étape 4: " + erreurDetail[0]);
             }
         } catch (Exception e) {
@@ -397,7 +408,7 @@ public class RegisterConnectionHelper {
                 + "• L'alimentation du registre est branchée\n"
                 + "• Le registre est bien en mode communication\n"
                 + "• Aucun autre appareil n'est connecté au registre",
-                woNum, fTicketNo, node, fSerialId);
+                woNum, fTicketNo, fNode, fSerialId);
             return;
         }
 
@@ -413,7 +424,7 @@ public class RegisterConnectionHelper {
                     com.pa.lcr.lcp.RegisterSessionManager rsm2 =
                         com.pa.lcr.lcp.RegisterSessionManager.get(activity);
                     com.pa.lcr.lcp.DeliveryController dc2 =
-                        rsm2.getController(transportKey, node);
+                        rsm2.getController(transportKey, fNode);
                     if (dc2 != null) {
                         dc2.requestStatus();
                         dc2.requestLiveSample();
@@ -443,13 +454,23 @@ public class RegisterConnectionHelper {
                   .append(" Étape ").append(i+1).append("/4 — ").append(etapes[i]).append("\n");
             }
             sb.append("\n⛔ ").append(erreur);
-            sb.append("\n\nWO: ").append(woNum != null ? woNum : "—");
-            sb.append(" | Ticket: ").append(ticketNo != null && !ticketNo.isEmpty() ? ticketNo : "—");
+            // ✅ WO vide = ouverture directe APK ou livraison manuelle
+            if (woNum == null || woNum.isEmpty()) {
+                sb.append("\n\nℹ️ Aucun bon de travail actif\n");
+                sb.append("Livraison manuelle — aucun WO associé\n");
+                sb.append("\nVous pouvez :\n");
+                sb.append("• Lancer une livraison depuis Field Service Mobile\n");
+                sb.append("• Ou connecter le registre via l'onglet Configure");
+            } else {
+                sb.append("\n\nWO: ").append(woNum);
+                sb.append(" | Ticket: ").append(ticketNo != null && !ticketNo.isEmpty() ? ticketNo : "—");
+            }
             sb.append("\nNode: ").append(node).append(" | Serial: ").append(serialId);
             sb.append("\n\nContactez le support :\n").append(SUPPORT_EMAIL);
 
             final String resumeComplet = sb.toString();
-            final String sujet = "[Filgo-Sonic] Registre non joignable — WO:" + woNum;
+            final String sujet = "[Filgo-Sonic] Registre non joignable — "
+                + (woNum != null && !woNum.isEmpty() ? "WO:" + woNum : "Livraison manuelle");
             final String corps = resumeComplet + "\n\nTimestamp: " + new java.util.Date();
 
             new android.app.AlertDialog.Builder(activity)
