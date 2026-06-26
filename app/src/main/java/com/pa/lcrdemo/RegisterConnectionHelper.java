@@ -343,6 +343,23 @@ public class RegisterConnectionHelper {
                 updateDlg.run();
                 dcFinal = com.pa.lcr.lcp.RegisterSessionManager.get(activity)
                     .resolveOrCreateForNode(fNodeFinal, 255);
+
+                // ✅ Forcer la réattachement du controller au socket actuel
+                // Comme Configure le fait — sinon le controller a un io zombi
+                try {
+                    com.pa.lcr.lcp.transport.MediaTransportManager mtmReattach =
+                        activity.getMediaTransportManager();
+                    com.pa.lcr.lcp.transport.TransportIo ioReattach =
+                        mtmReattach.getByKey(fKey);
+                    if (ioReattach != null && ioReattach.isOpen()) {
+                        com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                            .getOrCreate(fKey, fNodeFinal, 255, ioReattach);
+                        Log.i(TAG, "étape 3: controller réattaché au socket " + fKey);
+                    }
+                } catch (Exception e) {
+                    Log.w(TAG, "étape 3: réattach ERR: " + e.getMessage());
+                }
+
                 btConnecte = true;
                 etapesOk[2] = true;
             } else {
