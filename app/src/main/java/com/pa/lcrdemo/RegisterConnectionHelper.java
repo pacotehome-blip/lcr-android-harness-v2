@@ -402,46 +402,24 @@ public class RegisterConnectionHelper {
             return;
         }
 
-        // Succès — fermer dialog, basculer vers le tab et relancer la livraison
+        // Succès — fermer dialog et basculer vers le tab
         Log.i(TAG, "diagnostic: registre joignable — node=" + fNodeFinal + " serial=" + fSerialIdFinal);
         activity.runOnUiThread(() -> {
             if (dlg[0] != null) dlg[0].dismiss();
             try { activity.showPage(0); } catch (Exception ignored) {}
 
-            // ✅ Relancer la livraison automatiquement depuis ActiveDeliveryStore
+            // ✅ Juste rafraîchir le status du registre — pas de relance auto
+            // Le chauffeur cliquera le bouton vert "Lancer la livraison" dans le tab
             activity.getUiHandler().postDelayed(() -> {
                 try {
-                    com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
-                        new com.pa.lcr.lcp.storage.ActiveDeliveryStore(activity);
-                    com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad = ads.load();
-                    if (ad != null && ad.woNum != null && !ad.woNum.isEmpty()) {
-                        Log.i(TAG, "diagnostic: relance deep link wo=" + ad.woNum);
-                        // Reconstruire le deep link URI et relancer
-                        String url = "lcrdemo://livraison?wonum=" + ad.woNum
-                            + "&woid=" + (ad.woIdGuid != null ? ad.woIdGuid : "")
-                            + "&serialid=" + fSerialIdFinal
-                            + "&lcrnode=" + fNodeFinal
-                            + "&produit=" + (ad.produit > 0 ? ad.produit : 1)
-                            + "&preset=" + ad.preset;
-                        android.content.Intent intent = new android.content.Intent(
-                            android.content.Intent.ACTION_VIEW,
-                            android.net.Uri.parse(url));
-                        intent.setPackage(activity.getPackageName());
-                        intent.addFlags(android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP);
-                        activity.startActivity(intent);
-                    } else {
-                        // Pas de livraison en attente — juste rafraîchir le tab
-                        com.pa.lcr.lcp.DeliveryController dc2 =
-                            com.pa.lcr.lcp.RegisterSessionManager.get(activity)
-                                .resolveOrCreateForNode(fNodeFinal, 255);
-                        if (dc2 != null) {
-                            dc2.requestStatus();
-                            dc2.requestLiveSample();
-                        }
+                    com.pa.lcr.lcp.DeliveryController dc2 =
+                        com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                            .resolveOrCreateForNode(fNodeFinal, 255);
+                    if (dc2 != null) {
+                        dc2.requestStatus();
+                        dc2.requestLiveSample();
                     }
-                } catch (Exception e) {
-                    Log.w(TAG, "diagnostic: relance deep link ERR: " + e.getMessage());
-                }
+                } catch (Exception ignored) {}
             }, 1000);
         });
     }
