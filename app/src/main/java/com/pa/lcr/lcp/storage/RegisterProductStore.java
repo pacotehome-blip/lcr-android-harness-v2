@@ -11,17 +11,6 @@ import com.pa.lcr.lcp.LcpLink;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * DAO pour la table register_products dans DeliveryDb (v10).
- *
- * Stocke les descriptions des 16 produits lus depuis un registre LCR-II.
- * PK : (serial_id, note_idx 1-based).
- *
- * Usage principal :
- *   - Peupler le spinner "Produit" avec "1 - PROPANE", "2 - Diesel", etc.
- *   - Résoudre un produit avant livraison (par numéro ou par nom)
- *   - Sync vers Dataverse filgo_register_product (via sync_status)
- */
 public class RegisterProductStore {
 
     private static final String TAG = "RegisterProductStore";
@@ -44,12 +33,12 @@ public class RegisterProductStore {
         this.helper = new DeliveryDb(context);
     }
 
-    // ===================== ROW =====================
+    // ── Row ──────────────────────────────────────────────────
 
     public static final class Row {
         public final String  serialId;
-        public final int     noteIdx;      // 1-based (1..16)
-        public final String  description;  // Field #11
+        public final int     noteIdx;
+        public final String  description;
         public final int     lcrNode;
         public final boolean isPropane;
         public final long    updatedAt;
@@ -66,33 +55,27 @@ public class RegisterProductStore {
             this.syncStatus  = syncStatus != null ? syncStatus : SYNC_PENDING;
         }
 
-        /** "1 - PROPANE" ou "1" si description vide. */
         public String toSpinnerLabel() {
             if (description.isEmpty()) return String.valueOf(noteIdx);
             return noteIdx + " - " + description;
         }
 
-        /** Vrai si la description correspond au nom cherché (insensible casse, partiel). */
         public boolean matchesName(String name) {
             if (name == null || description.isEmpty()) return false;
-            String a = normalize(description);
-            String b = normalize(name);
+            String a = norm(description);
+            String b = norm(name);
             return a.equals(b) || a.contains(b) || b.contains(a);
         }
 
-        private static String normalize(String s) {
+        private static String norm(String s) {
             return s.trim().toLowerCase(java.util.Locale.ROOT)
                      .replace("-", " ").replace("_", " ")
                      .replaceAll("\\s+", " ");
         }
     }
 
-    // ===================== ÉCRITURE =====================
+    // ── Écriture ─────────────────────────────────────────────
 
-    /**
-     * Upsert batch depuis opScanAllProductNames().
-     * results : List<LcpLink.ProductScanResult> (noteIdx 1-based, description, isPropane).
-     */
     public void upsertAll(String serialId, int lcrNode,
                           List<LcpLink.ProductScanResult> results) {
         if (serialId == null || serialId.isEmpty() || results == null) return;
@@ -112,7 +95,6 @@ public class RegisterProductStore {
                 db.insertWithOnConflict(TABLE, null, cv, SQLiteDatabase.CONFLICT_REPLACE);
             }
             db.setTransactionSuccessful();
-            Log.i(TAG, "upsertAll: " + results.size() + " produits serial=" + serialId);
         } catch (Exception e) {
             Log.e(TAG, "upsertAll ERR: " + e.getMessage());
         } finally {
@@ -120,9 +102,9 @@ public class RegisterProductStore {
         }
     }
 
-    // ===================== LECTURE =====================
+    // ── Lecture ───────────────────────────────────────────────
 
-    /** Tous les produits d'un registre filtrés par serial_id + lcr_node, triés par noteIdx ASC. */
+    /** Tous les produits filtrés par serial_id + lcr_node. */
     public List<Row> getAll(String serialId, int lcrNode) {
         List<Row> rows = new ArrayList<>();
         if (serialId == null) return rows;
@@ -138,7 +120,7 @@ public class RegisterProductStore {
         return rows;
     }
 
-    /** Tous les produits d'un registre par serial_id seulement (fallback sans node). */
+    /** Fallback sans node. */
     public List<Row> getAll(String serialId) {
         List<Row> rows = new ArrayList<>();
         if (serialId == null) return rows;
@@ -153,7 +135,6 @@ public class RegisterProductStore {
         return rows;
     }
 
-    /** Description d'un noteIdx (1-based). Null si absent. */
     public String getDescription(String serialId, int noteIdx) {
         if (serialId == null) return null;
         try {
@@ -168,7 +149,6 @@ public class RegisterProductStore {
         return null;
     }
 
-    /** Recherche par noteIdx (1-based). */
     public Row findByNoteIdx(String serialId, int noteIdx) {
         if (serialId == null) return null;
         try {
@@ -183,7 +163,6 @@ public class RegisterProductStore {
         return null;
     }
 
-    /** Recherche par nom/description (contains, insensible casse). */
     public Row findByName(String serialId, String name) {
         if (serialId == null || name == null || name.isEmpty()) return null;
         for (Row r : getAll(serialId)) {
@@ -193,28 +172,22 @@ public class RegisterProductStore {
     }
 
     /**
-     * Résolution produit avant livraison.
-     *
-     * noteIdx seul  → findByNoteIdx
-     * name seul     → findByName
-     * les deux      → findByNoteIdx + valide cohérence description
-     * conflit       → null (livraison bloquée)
+     * Résout noteIdx ou name vers un Row.
+     * "1" ou 1      → findByNoteIdx
+     * "propane" etc → findByName (insensible casse)
+     * Les deux      → vérifie cohérence
      */
     public Row resolveProduct(String serialId, Integer noteIdx, String name) {
         if (noteIdx != null && name != null && !name.isEmpty()) {
             Row r = findByNoteIdx(serialId, noteIdx);
-            if (r == null || !r.matchesName(name)) {
-                Log.w(TAG, "resolveProduct: conflit idx=" + noteIdx + " name=" + name);
-                return null;
-            }
+            if (r == null || !r.matchesName(name)) return null;
             return r;
         }
         if (noteIdx != null) return findByNoteIdx(serialId, noteIdx);
-        if (name   != null && !name.isEmpty()) return findByName(serialId, name);
+        if (name != null && !name.isEmpty()) return findByName(serialId, name);
         return null;
     }
 
-    /** noteIdx du propane — priorité notes 1 et 2, sinon premier trouvé. -1 si aucun. */
     public int findPropaneNoteIdx(String serialId) {
         int fallback = -1;
         for (Row r : getAll(serialId)) {
@@ -225,7 +198,6 @@ public class RegisterProductStore {
         return fallback;
     }
 
-    /** Vrai si ce registre a déjà des produits en DB. */
     public boolean hasProducts(String serialId) {
         if (serialId == null) return false;
         try {
@@ -238,7 +210,6 @@ public class RegisterProductStore {
         return false;
     }
 
-    /** Produits en attente de sync Dataverse. */
     public List<Row> getPending() {
         List<Row> rows = new ArrayList<>();
         try {
@@ -246,15 +217,13 @@ public class RegisterProductStore {
             try (Cursor c = db.query(TABLE, null, COL_SYNC_STATUS + "=?",
                     new String[]{SYNC_PENDING}, null, null,
                     COL_SERIAL + ", " + COL_NOTE_IDX + " ASC")) {
-                while (c != null && c.moveToNext()) {
+                while (c != null && c.moveToNext())
                     rows.add(map(c, c.getString(c.getColumnIndexOrThrow(COL_SERIAL))));
-                }
             }
         } catch (Exception e) { Log.e(TAG, "getPending ERR: " + e.getMessage()); }
         return rows;
     }
 
-    /** Marque un produit synchronisé. */
     public void markSynced(String serialId, int noteIdx) {
         if (serialId == null) return;
         try {
@@ -268,7 +237,7 @@ public class RegisterProductStore {
 
     public void close() { try { helper.close(); } catch (Exception ignored) {} }
 
-    // ===================== MAP =====================
+    // ── Map ───────────────────────────────────────────────────
 
     private static Row map(Cursor c, String serialId) {
         return new Row(
