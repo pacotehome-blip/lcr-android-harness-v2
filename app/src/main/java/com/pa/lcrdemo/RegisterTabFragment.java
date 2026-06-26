@@ -624,12 +624,13 @@ public class RegisterTabFragment extends Fragment {
         txtTicketPending = v.findViewById(R.id.txtTicketPending);
         spnProduct = v.findViewById(R.id.spnProduct);
         if (spnProduct != null) {
-            // Liste suggestions 1-16
             String[] items = new String[16];
             for (int i = 0; i < 16; i++) items[i] = String.valueOf(i + 1);
             android.widget.ArrayAdapter<String> ad = new android.widget.ArrayAdapter<>(
                 requireContext(), android.R.layout.simple_dropdown_item_1line, items);
             spnProduct.setAdapter(ad);
+            spnProduct.setThreshold(0);
+            spnProduct.setOnClickListener(v2 -> spnProduct.showDropDown());
         }
         edtPreset = v.findViewById(R.id.edtPreset);
         btnConnect = v.findViewById(R.id.btnConnectTab);
