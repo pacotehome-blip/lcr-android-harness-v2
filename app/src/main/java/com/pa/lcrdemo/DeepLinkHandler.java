@@ -108,40 +108,9 @@ public class DeepLinkHandler {
                 " serial=" + serialId + " node=" + lcrnode +
                 " produit=" + produit + " preset=" + presetStr);
 
-            // ✅ Vérifier si ce WO a déjà une livraison complétée (hors annulation)
-            // — avertit le chauffeur sans bloquer le flux (double passage légitime possible)
-            try {
-                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb statusDb =
-                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
-                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow existing =
-                    statusDb.getLatestForWo(woNum);
-                if (existing != null && existing.type != null
-                        && !"ANNULATION".equals(existing.type)) {
-                    final String fWoNum2  = woNum;
-                    final String fTicket  = existing.ticketNo;
-                    final double fNet     = existing.netL;
-                    android.util.Log.w(TAG, "⚠️ WO déjà livré — WO=" + fWoNum2
-                        + " ticket=" + fTicket + " net=" + fNet + "L — nouvelle livraison quand même");
-                    activity.runOnUiThread(() -> activity.toast(
-                        "⚠️ Bon déjà complété (ticket #" + fTicket + ", " + fNet + "L)"
-                        + " — nouvelle livraison en cours"));
-                }
-            } catch (Exception ignored) {}
-
             final String fWoNum    = woNum;
             final String fSerialId = serialId != null ? serialId : "";
             logDeliveryStart(fSerialId, fWoNum, btMac, lcrnode, produit, presetStr);
-
-            // ✅ Preset null = paramètre manquant dans le deep link = erreur FSM
-            // preset=0 est valide (plein), preset=null est invalide
-            if (presetStr == null) {
-                android.util.Log.e(TAG, "preset=null — paramètre manquant — livraison impossible");
-                activity.runOnUiThread(() -> activity.toast(
-                    "⛔ Paramètre preset manquant — vérifiez la configuration Field Service"));
-                retournerFieldService(woNum, woIdGuid, "erreur_preset_null",
-                    buildErrorJson("PRESET_NULL", "Paramètre preset absent du deep link"));
-                return;
-            }
 
             // ✅ Persister le contexte livraison pour onDeliveryEnded
             currentSerialId = fSerialId;
@@ -247,12 +216,7 @@ public class DeepLinkHandler {
                                 }
                             }
                             activity.runOnUiThread(() ->
-                                activity.toast("⚠️ Registre non joignable — diagnostic en cours..."));
-                            // ✅ Déclencher écran diagnostic au lieu du simple toast
-                            String fTransportForDiag = rsm.findTransportKeyForController(dc);
-                            new RegisterConnectionHelper(activity).validerConnexion(
-                                fTransportForDiag != null ? fTransportForDiag : "",
-                                fNode, fSerialId, woNum);
+                                activity.toast("⚠️ Registre non joignable — vérifiez la connexion USB ou BT"));
                             return;
                         }
                         String foundKey = rsm.findTransportKeyForController(dc);
@@ -282,10 +246,8 @@ public class DeepLinkHandler {
                                 }
                                 if (dc2.getState() != com.pa.lcr.lcp.DeliveryState.CONNECTED) {
                                     android.util.Log.w(TAG, "DC2 non prêt après 15s — état: " + dc2.getState());
-                                    String fTransportDc2 = rsm.findTransportKeyForController(dc2);
-                                    new RegisterConnectionHelper(activity).validerConnexion(
-                                        fTransportDc2 != null ? fTransportDc2 : "",
-                                        fNode, fSerialId, woNum);
+                                    activity.runOnUiThread(() ->
+                                        activity.toast("⚠️ Registre non joignable — vérifiez la connexion USB ou BT"));
                                     return;
                                 }
                             }
@@ -300,29 +262,34 @@ public class DeepLinkHandler {
                         } else {
                             android.util.Log.w(TAG, "Registre introuvable — node=" + fNode);
 
-                            // ✅ Sauver PENDING dans ActiveDeliveryStore pour reprise manuelle
-                            try {
-                                new ActiveDeliveryStore(activity).save(
-                                    woNum, woIdGuid, "", "", fNode, fSerialId,
-                                    fProduit.isEmpty() ? 1 : Integer.parseInt(fProduit),
-                                    (fPresetStr == null || fPresetStr.isEmpty()) ? 0.0 : Double.parseDouble(fPresetStr),
-                                    "PENDING");
-                                android.util.Log.i(TAG, "ActiveDeliveryStore: PENDING sauvé pour reprise — wo=" + woNum);
-                            } catch (Exception eSave) {
-                                android.util.Log.w(TAG, "ActiveDeliveryStore save ERR: " + eSave.getMessage());
-                            }
+                            // ✅ Rester dans l'APK — pas de finish() pour éviter bounce FSM
+                            // Le chauffeur va dans Configure pour connecter le registre
+                            final String fWoNumR = woNum;
+                            final String fWoIdR  = woIdGuid;
+                            final int    fNodeR  = fNode;
+                            activity.runOnUiThread(() -> {
+                                android.app.AlertDialog.Builder dlg =
+                                    new android.app.AlertDialog.Builder(activity);
+                                dlg.setTitle("⚠️ Registre non connecté");
+                                dlg.setMessage(
+                                    "Le registre (node " + fNodeR + " · serial " + fSerialId + ") "
+                                    + "n'est pas détecté sur USB ou Bluetooth.\n\n"
+                                    + "1. Branchez le câble USB-C du registre\n"
+                                    + "   — ou —\n"
+                                    + "2. Activez le Bluetooth et connectez le registre\n\n"
+                                    + "Ensuite, allez dans l'onglet Configure pour établir\n"
+                                    + "la connexion, puis relancez depuis Field Service.");
+                                dlg.setPositiveButton("Aller à Configure", (d, w) -> {
+                                    activity.showPage(1); // onglet Configure
+                                });
+                                dlg.setNegativeButton("Annuler", null);
+                                dlg.setCancelable(true);
+                                dlg.show();
+                            });
 
-                            // ✅ Écran diagnostic avec progression 4 étapes
-                            // Remplace l'ancien dialog "Aller à Configure"
+                            // Logger l'événement
                             logError(fSerialId, woNum, "NO_TRANSPORT",
                                 "Registre node=" + fNode + " introuvable sur tous les transports");
-                            new RegisterConnectionHelper(activity)
-                                .validerConnexion(
-                                    fBtMac != null && !fBtMac.isEmpty()
-                                        ? MediaTransportManager.btKey(fBtMac) : "",
-                                    fNode,
-                                    fSerialId != null ? fSerialId : "",
-                                    woNum);
                         }
                     }
                 } catch (Exception e) {
@@ -344,13 +311,12 @@ public class DeepLinkHandler {
     // Lancer livraison sur transport déjà actif (USB/BT/TCP)
     // =========================================================
 
-    public void lancerLivraison(String transportKey, int node, String serialId,
+    private void lancerLivraison(String transportKey, int node, String serialId,
                                   String woNum, String woIdGuid,
                                   String produit, String presetStr, String mac) {
         // Ouvrir/activer le tab
         final String fSerialId = serialId != null ? serialId : "";
         final String fWoNum = woNum;
-        final String fWoIdGuid = woIdGuid;
         final String fProduit = produit;
         final String fPresetStr = presetStr;
         activity.runOnUiThread(() -> {
@@ -370,7 +336,7 @@ public class DeepLinkHandler {
                                     .findFragmentByTag("regtab_" + tabKey);
                                 if (f instanceof RegisterTabFragment) {
                                     ((RegisterTabFragment) f).prefillFromDeepLink(
-                                        fWoNum, fWoIdGuid, fProduit, fPresetStr);
+                                        fWoNum, fProduit, fPresetStr);
                                 } else if (attempts++ < 5) {
                                     // Tab pas encore créé — réessayer
                                     activity.getUiHandler().postDelayed(this, 800);
@@ -412,31 +378,12 @@ public class DeepLinkHandler {
         }
 
         if (!ready) {
-            android.util.Log.w(TAG, "lancerLivraison: média non prêt après 10s — tentative connexion registre");
-            // ✅ Lancer la progression de reconnexion (4 étapes, 3 tentatives BT)
-            // Si succès → continuer la livraison, sinon → dialog erreur avec courriel support
-            String lastTicket = "";
-            try {
-                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbCheck =
-                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
-                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow lastRow =
-                    dbCheck.getLatestForWo(woNum != null ? woNum : "");
-                if (lastRow != null && lastRow.ticketNo != null) lastTicket = lastRow.ticketNo;
-            } catch (Exception ignored) {}
-            // ✅ Lancer diagnostic via RegisterConnectionHelper
-            // Après reconnexion réussie, le chauffeur relance via bouton vert ou deep link
-            new RegisterConnectionHelper(activity).validerConnexion(
-                transportKey, node, fSerialId, woNum);
-            return; // attendre que le chauffeur relance
-        }
-
-        // ✅ Délai de stabilisation BT — le transport socket est READY mais le
-        // registre peut avoir besoin de quelques centaines de ms supplémentaires
-        // pour stabiliser sa pile de communication LCP après une (re)connexion BT.
-        // Sans ce délai: "Timeout waiting LCP response" sur le premier oneshot/start.
-        // N'affecte pas l'USB (déjà stable, pas ce symptôme).
-        if (transportKey != null && transportKey.toUpperCase().startsWith("BT:")) {
-            try { Thread.sleep(700); } catch (Exception ignored) {}
+            android.util.Log.w(TAG, "lancerLivraison: média non prêt après 10s");
+            activity.runOnUiThread(() -> activity.toast("Média non prêt — réessayez"));
+            logError(fSerialId, woNum, "MEDIA_NOT_READY", "Média non prêt après 10s");
+            retournerFieldService(woNum, woIdGuid, "erreur_media",
+                buildErrorJson("MEDIA_NOT_READY", "Média non prêt après 10s"));
+            return;
         }
 
         // Démarrer oneshot/start
@@ -467,11 +414,6 @@ public class DeepLinkHandler {
 
         try {
             MultiRegisterApiFacadeImpl facade = new MultiRegisterApiFacadeImpl(activity);
-
-            // TODO: api_writeWoNum(woNum) dans field #106 du registre
-            // En attente push DeliveryController.java + LcpLink.java avec les nouvelles méthodes
-            // Voir session 6 — persistance WO après power cycle LCR-II
-
             com.pa.lcr.lcp.ApiResult r = facade.api_deliveryOneShotStart(
                 node, 255, woNum, fProduct, fPresetD, null,
                 mediaType, btMacForFacade);
@@ -489,12 +431,7 @@ public class DeepLinkHandler {
                         fMac.isEmpty() ? transportKey : fMac);
                 }
             } else {
-                String detail = "";
-                try {
-                    if (r.data != null) detail = r.data.optString("detail", "");
-                } catch (Exception ignored) {}
-                android.util.Log.w(TAG, "oneshot/start code=0: " + r.msg
-                    + (detail.isEmpty() ? "" : " | detail=" + detail));
+                android.util.Log.w(TAG, "oneshot/start code=0: " + r.msg);
                 logEvent(fSerialId, woNum, DeliveryLogStore.LEVEL_WARN,
                     "ONESHOT_ERROR", r.msg, r.data != null ? r.data.toString() : null);
 
@@ -516,22 +453,12 @@ public class DeepLinkHandler {
                         activity.toast("⚠️ Ticket en attente — imprimez le ticket précédent avant de démarrer"));
                     activity.runOnUiThread(() -> activity.showPage(0));
                 } else {
-                    // Erreur orchestration (Timeout LCP) — câble série débranché ou registre hors ligne
-                    android.util.Log.w(TAG, "oneshot/start: orchestration error — lancer diagnostic connexion registre");
-                    final String fTransportKey = transportKey;
-                    final int fNodeFinal = node;
-                    final String fSerialFinal = fSerialId;
-                    final String fWoFinal = woNum;
-                    // ✅ Forcer le diagnostic — ne pas passer par validerConnexion qui peut dire OK
-                    // même si le registre ne répond pas (BT vivant mais câble série débranché)
-                    new Thread(() -> {
-                        try {
-                            new RegisterConnectionHelper(activity)
-                                .lancerDiagnosticForce(fTransportKey, fNodeFinal, fSerialFinal, fWoFinal);
-                        } catch (Exception e) {
-                            android.util.Log.e(TAG, "diagnostic ERR: " + e.getMessage());
-                        }
-                    }).start();
+                    // Erreur orchestration — rester dans l'APK (pas de finish() pour éviter bounce FSM)
+                    android.util.Log.w(TAG, "oneshot/start: orchestration error — rester dans APK");
+                    activity.runOnUiThread(() -> {
+                        activity.toast("⚠️ Registre non disponible — vérifiez l'état du registre et réessayez");
+                        activity.showPage(0);
+                    });
                 }
             }
         } catch (Exception e) {
@@ -729,7 +656,6 @@ public class DeepLinkHandler {
                 final String fProduit      = produit;
                 final String fPreset       = presetStr;
                 final String fWoNum        = woNum;
-                final String fWoIdGuid     = woIdGuid;
                 final String fSerialId     = serialId != null ? serialId : "";
                 final String fTransportKey = transportKey;
 
@@ -745,7 +671,7 @@ public class DeepLinkHandler {
                                                               .findFragmentByTag("regtab_" + tabKey);
                                 if (f instanceof RegisterTabFragment) {
                                     ((RegisterTabFragment) f).prefillFromDeepLink(
-                                        fWoNum, fWoIdGuid, fProduit, fPreset);
+                                        fWoNum, fProduit, fPreset);
                                 }
                             } catch (Exception ignored) {}
                         }, 800);
@@ -1241,19 +1167,8 @@ public class DeepLinkHandler {
     }
 
     public void onDeliveryEnded(String woNum, String woIdGuid, String extraJson) {
-        // ✅ Garder le contexte WO (statut DONE) au lieu de l'effacer — permet
-        // au bouton C (relance manuelle hors flux FSM) de toujours connaître
-        // le woNum courant pour sa vérification de duplicata et pour
-        // setNumeroLivraison(). clear() supprimait ce contexte trop tôt.
-        try {
-            ActiveDeliveryStore ads = new ActiveDeliveryStore(activity);
-            ActiveDeliveryStore.ActiveDelivery ad = ads.load();
-            if (ad != null) {
-                ads.save(ad.woNum, ad.woIdGuid, ad.jobId,
-                    ad.mac, ad.node, ad.serialId,
-                    ad.produit, ad.preset, "DONE");
-            }
-        } catch (Exception ignored) {}
+        // ✅ Effacer la livraison courante
+        try { new ActiveDeliveryStore(activity).clear(); } catch (Exception ignored) {}
         android.util.Log.i(TAG,
             "Livraison terminée — WO=" + woNum + " extra=" + extraJson);
 
@@ -1304,18 +1219,8 @@ public class DeepLinkHandler {
                 int lcrnode = currentNode;
                 String serialId = currentSerialId;
 
-                // ✅ Livraison manuelle — WO vide = hors FSM
-                // Générer un identifiant synthétique traçable avec timestamp
-                String woNumFinal = (woNum != null && !woNum.isEmpty()) ? woNum
-                    : "MANUEL-" + new java.text.SimpleDateFormat("yyyyMMdd-HHmmss",
-                        java.util.Locale.ROOT).format(new java.util.Date());
-                boolean isManuel = (woNum == null || woNum.isEmpty());
-                android.util.Log.i(TAG, isManuel
-                    ? "Livraison manuelle — WO synthétique: " + woNumFinal
-                    : "Livraison FSM — WO: " + woNumFinal);
-
                 android.content.ContentValues cv = new android.content.ContentValues();
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,       woNumFinal);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,       woNum != null ? woNum : "");
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID,   woIdGuid != null ? woIdGuid.replace("{","").replace("}","") : "");
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID,    serialId);
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_LCRNODE,      lcrnode);
@@ -1331,66 +1236,13 @@ public class DeepLinkHandler {
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_START_UTC,    startUtc);
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_END_UTC,      endUtc);
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_DURATION_S,   durationS);
-                // ✅ TYPE_MANUEL si livraison hors FSM — traçable dans Dataverse
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
-                    isManuel ? "MANUEL"
-                             : com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,       isManuel ? "MANUEL" : "REGISTRE");
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,       "REGISTRE");
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE,    "LIVRAISON");
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
-
-                // ✅ Corroboration: vérifier si livraison précédente non terminée
-                // pour ce WO — enrichir le payload et tracer l'anomalie
-                // Détection: getLatestForWo → endUtc vide ou netL=0 et ticket différent
-                String enrichedPayload = extraJson;
-                String anomalyCode     = null;
-                String anomalyMsg      = null;
-                try {
-                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDbCheck =
-                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
-                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow prev =
-                        lcrDbCheck.getLatestForWo(woNum != null ? woNum : "");
-                    boolean prevIncomplete = prev != null
-                        && (prev.endUtc == null || prev.endUtc.isEmpty() || prev.netL == 0.0)
-                        && !ticketNo.equals(prev.ticketNo)
-                        && !"ANNULATION".equals(prev.type);
-                    if (prevIncomplete) {
-                        anomalyCode = "PREV_INCOMPLETE";
-                        anomalyMsg  = "WO:" + prev.woNum
-                            + " ticket:" + (prev.ticketNo != null ? prev.ticketNo : "?")
-                            + " non terminé avant nouvelle livraison WO:" + woNum
-                            + " ticket:" + ticketNo;
-                        android.util.Log.w(TAG, "PREV_INCOMPLETE: " + anomalyMsg);
-                        try {
-                            org.json.JSONObject payload =
-                                new org.json.JSONObject(extraJson != null ? extraJson : "{}");
-                            org.json.JSONObject prevContext = new org.json.JSONObject();
-                            prevContext.put("prev_wo_num",    prev.woNum != null ? prev.woNum : "");
-                            prevContext.put("prev_ticket_no", prev.ticketNo != null ? prev.ticketNo : "");
-                            prevContext.put("prev_status",    prev.endUtc == null || prev.endUtc.isEmpty()
-                                ? "STARTED" : "PENDING");
-                            prevContext.put("prev_net_l",     prev.netL);
-                            prevContext.put("prev_gross_l",   prev.grossL);
-                            prevContext.put("anomaly_code",   anomalyCode);
-                            prevContext.put("anomaly_ts",     endUtc != null ? endUtc :
-                                new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'",
-                                    java.util.Locale.ROOT).format(new java.util.Date()));
-                            payload.put("previous_incomplete", prevContext);
-                            enrichedPayload = payload.toString();
-                        } catch (Exception eJson) {
-                            android.util.Log.w(TAG, "enrichPayload ERR: " + eJson.getMessage());
-                        }
-                    }
-                } catch (Exception ePrev) {
-                    android.util.Log.w(TAG, "corroboration ERR: " + ePrev.getMessage());
-                }
-
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PAYLOAD_JSON, enrichedPayload);
-                if (anomalyCode != null) {
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_ERROR_CODE, anomalyCode);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_ERROR_MSG,  anomalyMsg);
-                }
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PAYLOAD_JSON, extraJson);
 
                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
                     new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
@@ -1478,18 +1330,18 @@ public class DeepLinkHandler {
                     catch (Exception ignored) {}
                 }
                 lastResultJson   = lastResult.toString();
-                lastResultWoNum  = (woNum != null && !woNum.isEmpty()) ? woNum : "MANUEL";
+                lastResultWoNum  = woNum;
                 lastResultWoGuid = woGuid;
                 lastResultTs     = System.currentTimeMillis();
                 com.pa.lcrdemo.LcrHttpService.lastResultJson = lastResult.toString();
-                android.util.Log.i(TAG, "last-result sauvegardé: wonum=" + lastResultWoNum
+                android.util.Log.i(TAG, "last-result sauvegardé: wonum=" + woNum
                     + " net=" + net + " gross=" + gross + " ticket=" + ticket);
 
                 final String fNetP   = net;
                 final String fGrossP = gross;
                 final String fTicketP = ticket;
                 final String fGuidP  = woGuid;
-                final String fWoNumP = (woNum != null && !woNum.isEmpty()) ? woNum : "MANUEL";
+                final String fWoNumP = woNum;
                 final String fStatusP = status;
                 patchDataverse(fGuidP, fWoNumP, fNetP, fGrossP, fTicketP, fStatusP);
 
@@ -1664,13 +1516,7 @@ public class DeepLinkHandler {
         } catch (Exception ignored) {}
     }
 
-    // ✅ Diagnostic connexion registre — délégué à RegisterConnectionHelper
-    // Voir RegisterConnectionHelper.java pour la logique complète
-    private void lancerDiagnosticConnexion(String transportKey, int node, String serialId, String woNum) {
-        new RegisterConnectionHelper(activity).validerConnexion(transportKey, node, serialId, woNum);
-    }
-
-        private void logError(String serialId, String woNum, String code, String message) {
+    private void logError(String serialId, String woNum, String code, String message) {
         if (deliveryStore == null) return;
         try {
             String errorJson = new JSONObject()
@@ -1703,9 +1549,6 @@ public class DeepLinkHandler {
             return;
         }
 
-        // ✅ Payload riche complet (lastResultJson) — capturé tel quel pour COL_PAYLOAD_JSON
-        String richPayloadJson = (lastResultJson != null) ? lastResultJson : "{}";
-
         String deliveryUid = "";
         try {
             if (lastResultJson != null) {
@@ -1721,46 +1564,6 @@ public class DeepLinkHandler {
         final String fDeliveryUid = deliveryUid.isEmpty()
             ? woNum + "-" + System.currentTimeMillis()
             : deliveryUid;
-
-        // ✅ Insérer UNE NOUVELLE LIGNE dans filgo_delivery_status (jamais d'écrasement)
-        // avec le payload riche complet — une ligne par livraison, peu importe le WO
-        try {
-            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
-                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
-            // ✅ Anti-doublon — vérifier si delivery_uid déjà présent
-            if (!fDeliveryUid.isEmpty()) {
-                java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> existing =
-                    lcrDb.getAllForWo(woNum);
-                for (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow r : existing) {
-                    String existingUid = r.ticketNo != null ? woNum + "-" + r.ticketNo : "";
-                    if (fDeliveryUid.equals(existingUid)) {
-                        android.util.Log.i(TAG, "patchDataverse: delivery_uid=" + fDeliveryUid
-                            + " déjà présent — insert ignoré");
-                        return;
-                    }
-                }
-            }
-            android.content.ContentValues cv = new android.content.ContentValues();
-            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,      woNum);
-            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID,
-                woGuid.replace("{", "").replace("}", ""));
-            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO,   ticket != null ? ticket : "");
-            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,       netVal);
-            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L,
-                gross != null ? Double.parseDouble(gross) : 0);
-            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
-                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
-            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,      "REGISTRE");
-            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE,   "LIVRAISON");
-            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
-                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
-            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PAYLOAD_JSON, richPayloadJson);
-            long localId = lcrDb.insertDelivery(cv);
-            android.util.Log.i(TAG, "patchDataverse: ligne ajoutée localId=" + localId
-                + " wo=" + woNum + " net=" + netVal);
-        } catch (Exception e) {
-            android.util.Log.e(TAG, "patchDataverse: insert filgo_delivery_status ERR: " + e.getMessage());
-        }
 
         try {
             DeliveryResultQueueDb queueDb = new DeliveryResultQueueDb(activity);
@@ -1788,37 +1591,11 @@ public class DeepLinkHandler {
                     public void onSuccess(String accessToken) {
                         btExec.execute(() -> {
                             try {
-                                // ✅ Construire le payload consolidé — TOUTES les livraisons
-                                // de ce WO, peu importe combien (livraisons + annulations)
-                                org.json.JSONArray allDeliveries = new org.json.JSONArray();
-                                try {
-                                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb2 =
-                                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
-                                    java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> rows =
-                                        lcrDb2.getAllForWo(woNum);
-                                    for (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow row : rows) {
-                                        JSONObject rowJson = new JSONObject();
-                                        rowJson.put("ticket_no", row.ticketNo != null ? row.ticketNo : "");
-                                        rowJson.put("net_l",     row.netL);
-                                        rowJson.put("gross_l",   row.grossL);
-                                        rowJson.put("type",      row.type != null ? row.type : "ORIGINAL");
-                                        rowJson.put("ts",        row.tsCreatedMs);
-                                        allDeliveries.put(rowJson);
-                                    }
-                                } catch (Exception exRows) {
-                                    android.util.Log.w(TAG, "getAllForWo ERR: " + exRows.getMessage());
-                                }
-
-                                WorkOrderUpdater.patchSummaryConsolidated(
-                                    accessToken, woGuid, woNum, allDeliveries);
-                                android.util.Log.i(TAG, "patchDataverse MSAL: OK (consolidé "
-                                    + allDeliveries.length() + " livraisons) — wonum=" + woNum);
-                                // ✅ Pousser les lignes PENDING vers filgo_lcr_delivery_statuses
-                                try {
-                                    com.pa.lcrdemo.dataverse.LcrDeliverySync.syncAll(activity, accessToken);
-                                } catch (Exception exSync) {
-                                    android.util.Log.w(TAG, "syncAll post-livraison ERR: " + exSync.getMessage());
-                                }
+                                WorkOrderUpdater.patchSummary(
+                                    accessToken, woGuid,
+                                    net, gross, ticket,
+                                    woNum, fDeliveryUid);
+                                android.util.Log.i(TAG, "patchDataverse MSAL: OK — wonum=" + woNum);
                                 try {
                                     DeliveryResultQueueDb qdb = new DeliveryResultQueueDb(activity);
                                     java.util.List<DeliveryResultQueueDb.QueueItem> items =
