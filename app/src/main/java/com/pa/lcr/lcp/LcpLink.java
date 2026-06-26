@@ -155,24 +155,19 @@ public class LcpLink {
         }
     }
 
-    /** Callback de progression pour opScanAllProductNames. */
     public interface ScanProgressCallback {
         void onProduct(String message);
     }
 
-    /** Résultat d'un scan produit (Field #0 index + Field #11 description). */
     public static final class ProductScanResult {
-        public final int     noteIdx;     // 1-based
-        public final String  description; // Field #11 ProductDescriptor
+        public final int     noteIdx;
+        public final String  description;
         public final boolean isPropane;
-
         public ProductScanResult(int noteIdx, String description) {
             this.noteIdx     = noteIdx;
             this.description = description != null ? description.trim() : "";
             this.isPropane   = this.description.toLowerCase(java.util.Locale.ROOT).contains("propane");
         }
-
-        /** "1 - PROPANE" ou "1" si description vide. */
         public String toSpinnerLabel() {
             if (description.isEmpty()) return String.valueOf(noteIdx);
             return noteIdx + " - " + description;
@@ -339,49 +334,22 @@ public class LcpLink {
         ensureOk(r, "SET_FIELD #" + field);
     }
 
-    /**
-     * Scanne les 16 produits du registre LCR-II.
-     *
-     * Prérequis : CONNECTED, hors livraison active (sec=0x02).
-     * Séquence : ping 0x00 → GET #0 (save) → boucle SET #0 + GET #11 → restore.
-     * Field #11 = ProductDescriptor (18 chars ASCIIZ).
-     *
-     * @param progressLog callback "Produit N: desc" par produit (nullable)
-     * @return List<ProductScanResult> noteIdx 1-based, description, isPropane
-     */
     public java.util.List<ProductScanResult> opScanAllProductNames(
             ScanProgressCallback progressLog) throws IOException {
-
-        // Ping — resync session LCP (comme Python lcp_build_sync)
         try { sendRecv(new byte[]{0x00}, 3000); } catch (Exception ignored) {}
-
-        // Security level — diagnostic log
-        try {
-            Response sec = sendRecv(new byte[]{0x27}, 3000);
-            int sl = (sec.payload.length > 1) ? (sec.payload[1] & 0xFF) : -1;
-            android.util.Log.i("LcpLink", "opScanAllProductNames: sec=0x" + hex2(sl)
-                + (sl == 0x02 ? " UNLOCKED" : sl == 0x01 ? " LOCKED" : ""));
-        } catch (Exception ignored) {}
-
-        // Sauvegarder produit actif
         byte[] curRaw = opGetField(0);
         int originalIdx = (curRaw != null && curRaw.length > 0) ? (curRaw[0] & 0xFF) : 0;
-
         java.util.List<ProductScanResult> result = new java.util.ArrayList<>();
         try {
             for (int idx = 0; idx < 16; idx++) {
                 try {
                     opSetField(0, new byte[]{(byte) idx});
-                } catch (Exception eSw) {
-                    android.util.Log.w("LcpLink",
-                        "opScanAllProductNames: SET #0 idx=" + idx + " ERR: " + eSw.getMessage());
+                } catch (Exception e) {
                     result.add(new ProductScanResult(idx + 1, ""));
                     if (progressLog != null) progressLog.onProduct("Produit " + (idx + 1) + ": ");
                     continue;
                 }
                 try { Thread.sleep(80); } catch (Exception ignored) {}
-
-                // Field #11 — ProductDescriptor
                 String desc = "";
                 try {
                     byte[] f11 = opGetField(11);
@@ -389,15 +357,11 @@ public class LcpLink {
                         desc = new String(f11, java.nio.charset.StandardCharsets.US_ASCII)
                                    .replace("\0", "").trim();
                 } catch (Exception ignored) {}
-
                 result.add(new ProductScanResult(idx + 1, desc));
                 if (progressLog != null) progressLog.onProduct("Produit " + (idx + 1) + ": " + desc);
             }
         } finally {
-            try { opSetField(0, new byte[]{(byte) originalIdx}); }
-            catch (Exception ignored) {
-                android.util.Log.w("LcpLink", "opScanAllProductNames: restore ERR");
-            }
+            try { opSetField(0, new byte[]{(byte) originalIdx}); } catch (Exception ignored) {}
         }
         return result;
     }

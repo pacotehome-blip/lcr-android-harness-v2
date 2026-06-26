@@ -2811,25 +2811,26 @@ job.presetNetL_requested = presetNetL;
     }
 
     /**
-     * Scanne les 16 produits du registre LCR-II.
-     * Retourne List<LcpLink.ProductScanResult> (noteIdx 1-based, description, isPropane).
+     * Scanne les 16 descriptions produit depuis le registre LCR-II.
+     * Délègue à LcpLink.opScanAllProductNames() via withLcpLock.
      *
-     * Pré-check : si ticket pending → imprime d'abord (SET_FIELD #0 bloqué sinon).
-     * Si livraison active → exception (scan impossible).
+     * Le callback progressLog est appelé à chaque produit lu, depuis le thread BT.
+     * Format : "Produit N: description" (N = 1..16).
+     *
+     * @param progressLog Consumer<String> pour la progression (nullable)
+     * @return Map<Integer, String> index 0-based → description (jamais null)
+     * @throws java.io.IOException si la communication LCP échoue
      */
     public java.util.List<LcpLink.ProductScanResult> api_scanProductNames(
             LcpLink.ScanProgressCallback progressLog) throws java.io.IOException {
         try {
             return withLcpLock(() -> {
-                // Vérifier état registre avant scan
                 try {
                     int[] ds = link.opDeliveryStatus();
                     int delCode = ds[1];
                     if ((delCode & DC_DELIVERY_ACTIVE) != 0)
                         throw new java.io.IOException("api_scanProductNames: livraison active");
                     if ((delCode & DC_TICKET_PENDING) != 0) {
-                        android.util.Log.i("DeliveryController",
-                            "api_scanProductNames: ticket pending → print");
                         link.opIssueCommand(CMD_PRINT_LAST_TICKET);
                         long deadline = System.currentTimeMillis() + 15_000;
                         while (System.currentTimeMillis() < deadline) {
@@ -2839,7 +2840,6 @@ job.presetNetL_requested = presetNetL;
                     }
                 } catch (java.io.IOException e) { throw e; }
                 catch (Exception ignored) {}
-
                 return link.opScanAllProductNames(progressLog);
             });
         } catch (java.io.IOException e) {

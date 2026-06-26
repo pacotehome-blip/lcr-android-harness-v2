@@ -23,8 +23,9 @@ public class DeliveryDb extends SQLiteOpenHelper {
     // v6: add active_delivery table (livraison courante persistée)
     // v7: add produit/preset/status to active_delivery
     // v8: add bt_signal table (perdue lors du revert à 3f79a08)
-    // v9: add register_products table (descriptions produits par registre LCR-II)
-    public static final int DB_VERSION = 9;
+    // v9: add register_products table
+    // v10: add is_propane, lcr_node to register_products
+    public static final int DB_VERSION = 10;
 
     private static final String TAG = "DeliveryDb";
 
@@ -101,9 +102,12 @@ public class DeliveryDb extends SQLiteOpenHelper {
         if (oldVersion < 8) {
             createBtSignalTable(db);
         }
-        // v9: register_products table
         if (oldVersion < 9) {
             createRegisterProductsTable(db);
+        }
+        if (oldVersion < 10) {
+            addColumnIfMissing(db, "register_products", "is_propane", "INTEGER NOT NULL DEFAULT 0");
+            addColumnIfMissing(db, "register_products", "lcr_node",   "INTEGER NOT NULL DEFAULT 0");
         }
     }
 
@@ -304,28 +308,21 @@ public class DeliveryDb extends SQLiteOpenHelper {
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_bt_signal_ts ON bt_signal(transport_key, ts_ms);");
     }
 
-    // =========================================================
-    // Register products table (v9)
-    // Descriptions des produits lues depuis le registre LCR-II.
-    // PK (serial_id, note_idx) — UPSERT via INSERT OR REPLACE.
-    // sync_status : PENDING → à synchroniser vers Dataverse
-    //               SYNCED  → déjà synchronisé
-    // =========================================================
     private static void createRegisterProductsTable(SQLiteDatabase db) {
         db.execSQL(
             "CREATE TABLE IF NOT EXISTS register_products (" +
             "serial_id   TEXT    NOT NULL," +
             "note_idx    INTEGER NOT NULL," +
             "description TEXT    NOT NULL DEFAULT ''," +
+            "lcr_node    INTEGER NOT NULL DEFAULT 0," +
+            "is_propane  INTEGER NOT NULL DEFAULT 0," +
             "updated_at  INTEGER NOT NULL DEFAULT 0," +
             "sync_status TEXT    NOT NULL DEFAULT 'PENDING'," +
             "PRIMARY KEY (serial_id, note_idx)" +
             ");"
         );
-        db.execSQL(
-            "CREATE INDEX IF NOT EXISTS idx_register_products_sync " +
-            "ON register_products(sync_status);"
-        );
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_rp_sync ON register_products(sync_status);");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_rp_serial_desc ON register_products(serial_id, description);");
     }
 
     // =========================================================
