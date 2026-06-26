@@ -66,13 +66,13 @@ public class RegisterTabFragment extends Fragment {
             android.content.Context ctx = getContext();
             if (ctx == null) return;
 
-            // ✅ Si le controller est déjà en livraison ou connecté et actif — ne pas interférer
+            // ✅ Si le controller est déjà en livraison ACTIVE — ne pas interférer
+            // CONNECTED = registre prêt pour nouvelle livraison → afficher bouton vert si PENDING
             if (controller != null) {
                 com.pa.lcr.lcp.DeliveryState st = controller.getState();
                 if (st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
                         || st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED
-                        || st == com.pa.lcr.lcp.DeliveryState.ENDING
-                        || st == com.pa.lcr.lcp.DeliveryState.CONNECTED) return;
+                        || st == com.pa.lcr.lcp.DeliveryState.ENDING) return;
             }
 
             com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
