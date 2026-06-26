@@ -2811,51 +2811,34 @@ job.presetNetL_requested = presetNetL;
     }
 
     /**
-     * Scanne les 16 descriptions produit depuis le registre LCR-II.
-     * Délègue à LcpLink.opScanAllProductNames() via withLcpLock.
+     * Scanne les 16 produits du registre LCR-II.
+     * Retourne List<LcpLink.ProductScanResult> (noteIdx 1-based, description, isPropane).
      *
-     * Le callback progressLog est appelé à chaque produit lu, depuis le thread BT.
-     * Format : "Produit N: description" (N = 1..16).
-     *
-     * @param progressLog Consumer<String> pour la progression (nullable)
-     * @return Map<Integer, String> index 0-based → description (jamais null)
-     * @throws java.io.IOException si la communication LCP échoue
+     * Pré-check : si ticket pending → imprime d'abord (SET_FIELD #0 bloqué sinon).
+     * Si livraison active → exception (scan impossible).
      */
-    public java.util.Map<Integer, String> api_scanProductNames(
+    public java.util.List<LcpLink.ProductScanResult> api_scanProductNames(
             LcpLink.ScanProgressCallback progressLog) throws java.io.IOException {
         try {
             return withLcpLock(() -> {
-                // ── Pré-check : vérifier et effacer ticket pending avant scan ──
-                // Miroir de api_deliveryOneShotStart : SET_FIELD #0 (_DL) échoue
-                // avec rc=0x71 si TICKET_PENDING est actif (comportement R260v2.30).
+                // Vérifier état registre avant scan
                 try {
                     int[] ds = link.opDeliveryStatus();
                     int delCode = ds[1];
-                    boolean ticketPending  = (delCode & DC_TICKET_PENDING)  != 0;
-                    boolean deliveryActive = (delCode & DC_DELIVERY_ACTIVE) != 0;
-
-                    if (deliveryActive) {
-                        throw new java.io.IOException(
-                            "api_scanProductNames: livraison active — scan impossible");
-                    }
-                    if (ticketPending) {
-                        // Imprimer le ticket pour libérer le verrou du registre
+                    if ((delCode & DC_DELIVERY_ACTIVE) != 0)
+                        throw new java.io.IOException("api_scanProductNames: livraison active");
+                    if ((delCode & DC_TICKET_PENDING) != 0) {
                         android.util.Log.i("DeliveryController",
-                            "api_scanProductNames: ticket pending → CMD_PRINT_LAST_TICKET");
+                            "api_scanProductNames: ticket pending → print");
                         link.opIssueCommand(CMD_PRINT_LAST_TICKET);
-                        // Attendre que TICKET_PENDING retombe (max 15s)
                         long deadline = System.currentTimeMillis() + 15_000;
                         while (System.currentTimeMillis() < deadline) {
                             try { Thread.sleep(300); } catch (Exception ignored) {}
-                            int[] ds2 = link.opDeliveryStatus();
-                            if ((ds2[1] & DC_TICKET_PENDING) == 0) break;
+                            if ((link.opDeliveryStatus()[1] & DC_TICKET_PENDING) == 0) break;
                         }
                     }
-                } catch (java.io.IOException e) {
-                    throw e; // re-throw si livraison active
-                } catch (Exception ignored) {
-                    // Pré-check non bloquant — on tente le scan quand même
-                }
+                } catch (java.io.IOException e) { throw e; }
+                catch (Exception ignored) {}
 
                 return link.opScanAllProductNames(progressLog);
             });
