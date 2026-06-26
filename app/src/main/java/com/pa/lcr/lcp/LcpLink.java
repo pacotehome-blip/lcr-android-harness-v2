@@ -358,12 +358,33 @@ public class LcpLink {
      */
     public java.util.Map<Integer, String> opScanAllProductNames(
             ScanProgressCallback progressLog) throws IOException {
-        // Unlock avec clé vide (field #72) avant de switcher les produits
+
+        // ── Unlock (miroir Python unlock_userkey) ──────────────────────────
+        // 1. Essai clé vide (\x00)
+        boolean unlocked = false;
         try {
             opSetField(72, new byte[]{0x00});
-        } catch (Exception ignored) {
-            android.util.Log.w("LcpLink", "opScanAllProductNames: unlock ignoré");
+            unlocked = true;
+            android.util.Log.i("LcpLink", "opScanAllProductNames: unlock clé vide OK");
+        } catch (Exception e1) {
+            android.util.Log.w("LcpLink",
+                "opScanAllProductNames: unlock clé vide échoué (" + e1.getMessage()
+                + ") — essai 0000");
+            // 2. Fallback "0000\0" comme Python try0000
+            try {
+                opSetField(72, new byte[]{'0','0','0','0', 0x00});
+                unlocked = true;
+                android.util.Log.i("LcpLink", "opScanAllProductNames: unlock 0000 OK");
+            } catch (Exception e2) {
+                android.util.Log.w("LcpLink",
+                    "opScanAllProductNames: unlock 0000 échoué (" + e2.getMessage()
+                    + ") — on tente quand même");
+            }
         }
+        // Délai post-unlock — laisser le registre traiter avant SET_FIELD #0
+        try { Thread.sleep(300); } catch (Exception ignored) {}
+
+        // ── Scan des 16 produits ───────────────────────────────────────────
         byte[] curRaw = opGetField(0);
         int originalIdx = (curRaw != null && curRaw.length > 0) ? (curRaw[0] & 0xFF) : 0;
         java.util.LinkedHashMap<Integer, String> result = new java.util.LinkedHashMap<>();
