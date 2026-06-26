@@ -369,29 +369,21 @@ public class LcpLink {
     /**
      * Scanne les 16 descriptions produit du registre LCR-II.
      *
-     * Séquence (miroir opDiagnosticReset) :
-     * 1. CMD_AUXILIARY (0x03) → place le registre en mode auxiliaire/diagnostic
-     *    (Field #0 ProductNumber devient "Delivery Level" = éditable)
-     * 2. Pour chaque idx 0..15 : SET_FIELD #0 → GET_FIELD #11 (ProductDescriptor)
-     * 3. Restaure le produit original dans le finally
+     * Prérequis : registre en état CONNECTED (pas de livraison active).
+     * - sec=0x02 (Unlocked) → Field #0 (_DL) éditable hors livraison
+     * - Pendant livraison (bit 0x80) → security level négative → SET_FIELD #0 bloqué
      *
-     * Utilisable en état CONNECTED — pas besoin d'une livraison active.
-     * Compatible avec l'approche Python : CMD #3 puis SET_FIELD #0.
+     * Séquence : GET_FIELD #0 (sauvegarder) → boucle 0..15 : SET_FIELD #0 + GET_FIELD #11 → restaurer
      *
      * @param progressLog callback "Produit N: desc" après chaque lecture (nullable)
-     * @return Map index 0-based → description (ASCIIZ 18 chars max)
+     * @return Map index 0-based → description (ASCIIZ 18 chars max, Field #11 ProductDescriptor)
      */
     public java.util.Map<Integer, String> opScanAllProductNames(
             ScanProgressCallback progressLog) throws IOException {
 
-        // Lire le produit actif avant de modifier quoi que ce soit
+        // Sauvegarder le produit actif courant
         byte[] curRaw = opGetField(0);
         int originalIdx = (curRaw != null && curRaw.length > 0) ? (curRaw[0] & 0xFF) : 0;
-
-        // CMD_AUXILIARY (0x03) — place le registre en mode diagnostic
-        // Miroir de opDiagnosticReset / Python CMD_AUXILIARY
-        opIssueCommand(0x03);
-        try { Thread.sleep(300); } catch (Exception ignored) {}
 
         java.util.LinkedHashMap<Integer, String> result = new java.util.LinkedHashMap<>();
         try {
@@ -415,7 +407,6 @@ public class LcpLink {
                 }
             }
         } finally {
-            // Restaurer le produit original
             try {
                 opSetField(0, new byte[]{(byte) originalIdx});
             } catch (Exception ignored) {
