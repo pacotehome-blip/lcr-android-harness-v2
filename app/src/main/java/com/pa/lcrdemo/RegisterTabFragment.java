@@ -176,11 +176,19 @@ public class RegisterTabFragment extends Fragment {
             }
 
             // Construire le deep link URI et le traiter en interne
+            // ✅ Si ad.mac est vide, prendre le MAC du transport actif du tab
+            String macToUse = ad.mac != null ? ad.mac : "";
+            if (macToUse.isEmpty() && tabTransportKey != null && tabTransportKey.startsWith("BT:")) {
+                macToUse = tabTransportKey.substring(3);
+                android.util.Log.i("RegisterTabFragment",
+                    "lancerDepuisStore: ad.mac vide → utilise tab MAC=" + macToUse);
+            }
+
             android.net.Uri uri = android.net.Uri.parse(
                 "lcrdemo://livraison"
                 + "?wonum="    + android.net.Uri.encode(ad.woNum)
                 + "&woid="     + android.net.Uri.encode(ad.woIdGuid != null ? ad.woIdGuid : "")
-                + "&btmac="    + android.net.Uri.encode(ad.mac != null ? ad.mac : "")
+                + "&btmac="    + android.net.Uri.encode(macToUse)
                 + "&serialid=" + android.net.Uri.encode(ad.serialId != null ? ad.serialId : "")
                 + "&lcrnode="  + ad.node
                 + "&produit="  + ad.produit
