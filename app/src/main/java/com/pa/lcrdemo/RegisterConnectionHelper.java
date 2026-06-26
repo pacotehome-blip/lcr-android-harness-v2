@@ -421,7 +421,7 @@ public class RegisterConnectionHelper {
                             + "&serialid=" + fSerialIdFinal
                             + "&lcrnode=" + fNodeFinal
                             + "&produit=" + (ad.produit > 0 ? ad.produit : 1)
-                            + "&preset=" + (ad.preset != null ? ad.preset : "");
+                            + "&preset=" + ad.preset;
                         android.content.Intent intent = new android.content.Intent(
                             android.content.Intent.ACTION_VIEW,
                             android.net.Uri.parse(url));
