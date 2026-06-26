@@ -160,13 +160,22 @@ public class LcpLink {
         void onProduct(String message);
     }
 
-    /** Info d'un produit lue depuis le registre (message 0x00). */
-    public static final class ProductInfo {
-        public final int productId; // index 0-based tel que retourné par le registre
-        public final String name;   // description ASCII, trimée
-        public ProductInfo(int productId, String name) {
-            this.productId = productId;
-            this.name = (name != null) ? name : "";
+    /** Résultat d'un scan produit (Field #0 index + Field #11 description). */
+    public static final class ProductScanResult {
+        public final int     noteIdx;     // 1-based
+        public final String  description; // Field #11 ProductDescriptor
+        public final boolean isPropane;
+
+        public ProductScanResult(int noteIdx, String description) {
+            this.noteIdx     = noteIdx;
+            this.description = description != null ? description.trim() : "";
+            this.isPropane   = this.description.toLowerCase(java.util.Locale.ROOT).contains("propane");
+        }
+
+        /** "1 - PROPANE" ou "1" si description vide. */
+        public String toSpinnerLabel() {
+            if (description.isEmpty()) return String.valueOf(noteIdx);
+            return noteIdx + " - " + description;
         }
     }
 
@@ -331,84 +340,34 @@ public class LcpLink {
     }
 
     /**
-     * Lit le produit ACTIF depuis le registre LCR-II.
-     *
-     * - Field #0  (ProductNumber)    → index 0-based du produit actif
-     * - Field #11 (ProductDescriptor) → description AZ du produit actif (ex: "Propane", "Diesel #2")
-     *
-     * Aucun SET_FIELD — compatible BT en état CONNECTED.
-     */
-    public ProductInfo opGetProductInfo() throws IOException {
-        // Field #0 → index 0-based du produit actif
-        byte[] f0 = opGetField(0);
-        int productId = (f0 != null && f0.length > 0) ? (f0[0] & 0xFF) : 0;
-
-        // Field #11 → ProductDescriptor (ASCIIZ, 0-18 chars)
-        String name = "";
-        try {
-            byte[] f11 = opGetField(11);
-            if (f11 != null && f11.length > 0) {
-                name = new String(f11, java.nio.charset.StandardCharsets.US_ASCII)
-                           .replace("\0", "").trim();
-            }
-        } catch (Exception ignored) {
-            // ProductDescriptor non configuré — pas bloquant
-        }
-
-        return new ProductInfo(productId, name);
-    }
-
-    /**
      * Scanne les 16 produits du registre LCR-II.
-     * Pour chaque index 0..15 : SET_FIELD #0 → GET_PRODUCT_INFO → mémoriser le nom.
-     * Restaure le produit actif original à la fin (même en cas d'erreur).
      *
-     * @param progressLog callback appelé après chaque produit, format "Produit N: desc" (nullable)
-     * @return Map index 0-based → description
+     * Prérequis : CONNECTED, hors livraison active (sec=0x02).
+     * Séquence : ping 0x00 → GET #0 (save) → boucle SET #0 + GET #11 → restore.
+     * Field #11 = ProductDescriptor (18 chars ASCIIZ).
+     *
+     * @param progressLog callback "Produit N: desc" par produit (nullable)
+     * @return List<ProductScanResult> noteIdx 1-based, description, isPropane
      */
-    /**
-     * Scanne les 16 descriptions produit du registre LCR-II.
-     *
-     * Prérequis : registre en état CONNECTED (pas de livraison active).
-     * sec=0x02 (Unlocked) → Field #0 (_DL) éditable hors livraison.
-     *
-     * Séquence :
-     * 1. Ping/AreYouThere (0x00) — resync session LCP
-     * 2. GET_FIELD #0 → sauvegarder index actif
-     * 3. Boucle 0..15 : SET_FIELD #0 + GET_FIELD #11 (ProductDescriptor)
-     * 4. finally : SET_FIELD #0 restaurer
-     */
-    public java.util.Map<Integer, String> opScanAllProductNames(
+    public java.util.List<ProductScanResult> opScanAllProductNames(
             ScanProgressCallback progressLog) throws IOException {
 
-        // 1. Ping (message 0x00 = AreYouThere/GetRegisterID) — resync LCP session
-        // Le Python fait toujours ça avant tout SET_FIELD
-        try {
-            Response ping = sendRecv(new byte[]{0x00}, 3000);
-            android.util.Log.i("LcpLink",
-                "opScanAllProductNames: ping rc=0x" + hex2(ping.payload.length > 0 ? ping.payload[0] & 0xFF : 0xFF));
-        } catch (Exception ePing) {
-            android.util.Log.w("LcpLink", "opScanAllProductNames: ping ERR: " + ePing.getMessage());
-        }
+        // Ping — resync session LCP (comme Python lcp_build_sync)
+        try { sendRecv(new byte[]{0x00}, 3000); } catch (Exception ignored) {}
 
-        // 2. Lire le security level (message 0x27) — diagnostic
+        // Security level — diagnostic log
         try {
-            Response secResp = sendRecv(new byte[]{0x27}, 3000);
-            int secLevel = (secResp.payload.length > 1) ? (secResp.payload[1] & 0xFF) : -1;
-            android.util.Log.i("LcpLink",
-                "opScanAllProductNames: sec=0x" + hex2(secLevel)
-                + (secLevel == 0x02 ? " (UNLOCKED)" : secLevel == 0x01 ? " (LOCKED)" : ""));
-            if (progressLog != null)
-                progressLog.onProduct("sec=0x" + hex2(secLevel));
-        } catch (Exception eSec) {
-            android.util.Log.w("LcpLink", "opScanAllProductNames: sec ERR: " + eSec.getMessage());
-        }
+            Response sec = sendRecv(new byte[]{0x27}, 3000);
+            int sl = (sec.payload.length > 1) ? (sec.payload[1] & 0xFF) : -1;
+            android.util.Log.i("LcpLink", "opScanAllProductNames: sec=0x" + hex2(sl)
+                + (sl == 0x02 ? " UNLOCKED" : sl == 0x01 ? " LOCKED" : ""));
+        } catch (Exception ignored) {}
 
-        // 3. Sauvegarder le produit actif
+        // Sauvegarder produit actif
         byte[] curRaw = opGetField(0);
         int originalIdx = (curRaw != null && curRaw.length > 0) ? (curRaw[0] & 0xFF) : 0;
 
-        java.util.LinkedHashMap<Integer, String> result = new java.util.LinkedHashMap<>();
+        java.util.List<ProductScanResult> result = new java.util.ArrayList<>();
         try {
             for (int idx = 0; idx < 16; idx++) {
                 try {
@@ -416,32 +375,28 @@ public class LcpLink {
                 } catch (Exception eSw) {
                     android.util.Log.w("LcpLink",
                         "opScanAllProductNames: SET #0 idx=" + idx + " ERR: " + eSw.getMessage());
-                    result.put(idx, "");
-                    if (progressLog != null)
-                        progressLog.onProduct("Produit " + (idx + 1) + ": ");
+                    result.add(new ProductScanResult(idx + 1, ""));
+                    if (progressLog != null) progressLog.onProduct("Produit " + (idx + 1) + ": ");
                     continue;
                 }
                 try { Thread.sleep(80); } catch (Exception ignored) {}
 
-                String name = "";
+                // Field #11 — ProductDescriptor
+                String desc = "";
                 try {
                     byte[] f11 = opGetField(11);
-                    if (f11 != null && f11.length > 0) {
-                        name = new String(f11, java.nio.charset.StandardCharsets.US_ASCII)
+                    if (f11 != null && f11.length > 0)
+                        desc = new String(f11, java.nio.charset.StandardCharsets.US_ASCII)
                                    .replace("\0", "").trim();
-                    }
                 } catch (Exception ignored) {}
 
-                result.put(idx, name);
-                if (progressLog != null)
-                    progressLog.onProduct("Produit " + (idx + 1) + ": " + name);
+                result.add(new ProductScanResult(idx + 1, desc));
+                if (progressLog != null) progressLog.onProduct("Produit " + (idx + 1) + ": " + desc);
             }
         } finally {
-            try {
-                opSetField(0, new byte[]{(byte) originalIdx});
-            } catch (Exception ignored) {
-                android.util.Log.w("LcpLink",
-                    "opScanAllProductNames: échec restauration produit " + originalIdx);
+            try { opSetField(0, new byte[]{(byte) originalIdx}); }
+            catch (Exception ignored) {
+                android.util.Log.w("LcpLink", "opScanAllProductNames: restore ERR");
             }
         }
         return result;
