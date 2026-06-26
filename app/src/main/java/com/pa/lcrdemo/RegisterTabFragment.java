@@ -689,8 +689,44 @@ public class RegisterTabFragment extends Fragment {
         if (woIdGuid != null && !woIdGuid.isEmpty()) currentWoIdGuid = woIdGuid;
         if (edtPreset != null && preset != null && !preset.isEmpty())
             edtPreset.setText(preset);
-        if (spnProduct != null && produit != null && !produit.isEmpty())
-            spnProduct.setText(produit, false);
+        if (spnProduct != null && produit != null && !produit.isEmpty()) {
+            // produit peut être "3" (index) ou "propane" (nom) depuis Field Service
+            String label = produit;
+            try {
+                String sId = (serialFromArgs != null) ? serialFromArgs.trim() : "";
+                com.pa.lcr.lcp.storage.RegisterProductStore db = sId.isEmpty() ? null
+                    : new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
+                try {
+                    // Cas 1 : produit est un entier → chercher la description
+                    int noteIdx = Integer.parseInt(produit.trim());
+                    if (db != null) {
+                        String desc = db.getDescription(sId, noteIdx);
+                        if (desc != null && !desc.isEmpty())
+                            label = noteIdx + " - " + desc;
+                        else
+                            label = String.valueOf(noteIdx);
+                    }
+                } catch (NumberFormatException nfe) {
+                    // Cas 2 : produit est un nom ("propane") → résoudre via DB
+                    if (db != null) {
+                        String needle = produit.trim().toLowerCase(java.util.Locale.ROOT);
+                        java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> rows =
+                            db.getAll(sId);
+                        for (com.pa.lcr.lcp.storage.RegisterProductStore.Row r : rows) {
+                            if (r.description != null
+                                    && r.description.toLowerCase(java.util.Locale.ROOT).contains(needle)) {
+                                label = r.noteIdx + " - " + r.description;
+                                break;
+                            }
+                        }
+                        // si pas trouvé en DB, label reste le nom brut ("propane")
+                    }
+                } finally {
+                    if (db != null) try { db.close(); } catch (Exception ignored) {}
+                }
+            } catch (Exception ignored) {}
+            spnProduct.setText(label, false);
+        }
         if (txtDeliveryUid != null && woNum != null && !woNum.isEmpty())
             txtDeliveryUid.setText("Delivery UID : " + woNum);
     }
@@ -1843,7 +1879,10 @@ public class RegisterTabFragment extends Fragment {
         if (spnProduct != null) {
             String txt = spnProduct.getText().toString().trim();
             if (!txt.isEmpty()) {
-                try { return Integer.parseInt(txt); } catch (Exception ignored) {}
+                // Format peut être "1" ou "1 - PROPANE" après scan produits
+                // Extraire le numéro avant le " - "
+                String numPart = txt.contains(" - ") ? txt.substring(0, txt.indexOf(" - ")).trim() : txt;
+                try { return Integer.parseInt(numPart); } catch (Exception ignored) {}
             }
         }
         return 1;
@@ -2168,13 +2207,13 @@ public class RegisterTabFragment extends Fragment {
                 // Charger ce qui est déjà en DB pour ce serial
                 if (serialId != null && !serialId.isEmpty()) {
                     try {
-                        com.pa.lcr.lcp.storage.RegisterProductDb dbRead =
-                            new com.pa.lcr.lcp.storage.RegisterProductDb(requireContext());
-                        java.util.List<com.pa.lcr.lcp.storage.RegisterProductDb.Row> rows =
+                        com.pa.lcr.lcp.storage.RegisterProductStore dbRead =
+                            new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
+                        java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> rows =
                             dbRead.getAll(serialId);
                         dbRead.close();
                         for (int i = 0; i < 16; i++) spinnerLabels[i] = String.valueOf(i + 1);
-                        for (com.pa.lcr.lcp.storage.RegisterProductDb.Row r : rows) {
+                        for (com.pa.lcr.lcp.storage.RegisterProductStore.Row r : rows) {
                             int idx = r.noteIdx - 1;
                             if (idx >= 0 && idx < 16) spinnerLabels[idx] = r.toSpinnerLabel();
                             if (r.isPropane() && propaneRef[0] == -1 && r.noteIdx <= 2)
@@ -2189,8 +2228,8 @@ public class RegisterTabFragment extends Fragment {
 
                 // Persister dans SQLite si serial connu
                 if (serialId != null && !serialId.isEmpty()) {
-                    com.pa.lcr.lcp.storage.RegisterProductDb db =
-                        new com.pa.lcr.lcp.storage.RegisterProductDb(requireContext());
+                    com.pa.lcr.lcp.storage.RegisterProductStore db =
+                        new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
                     db.upsertAll(serialId, products);
                     db.close();
                     android.util.Log.i("RegisterTabFragment",
@@ -2267,9 +2306,9 @@ public class RegisterTabFragment extends Fragment {
         if (serialId == null || serialId.isEmpty()) return;
         bg.execute(() -> {
             try {
-                com.pa.lcr.lcp.storage.RegisterProductDb db =
-                    new com.pa.lcr.lcp.storage.RegisterProductDb(requireContext());
-                java.util.List<com.pa.lcr.lcp.storage.RegisterProductDb.Row> rows =
+                com.pa.lcr.lcp.storage.RegisterProductStore db =
+                    new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
+                java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> rows =
                     db.getAll(serialId);
                 db.close();
 
@@ -2279,7 +2318,7 @@ public class RegisterTabFragment extends Fragment {
                 for (int i = 0; i < 16; i++) {
                     labels[i] = String.valueOf(i + 1); // fallback numérique
                 }
-                for (com.pa.lcr.lcp.storage.RegisterProductDb.Row r : rows) {
+                for (com.pa.lcr.lcp.storage.RegisterProductStore.Row r : rows) {
                     int idx = r.noteIdx - 1; // 1-based → 0-based
                     if (idx >= 0 && idx < 16) {
                         labels[idx] = r.toSpinnerLabel();

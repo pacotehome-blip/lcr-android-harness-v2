@@ -1626,7 +1626,7 @@ public class DeepLinkHandler {
      * Résout le produit depuis Field Service.
      *
      * Si produit est un entier (ex: "1") → retourne directement.
-     * Si produit est un nom (ex: "propane") → cherche dans RegisterProductDb
+     * Si produit est un nom (ex: "propane") → cherche dans RegisterProductStore
      * pour le serialId donné et retourne le noteIdx (1-based) correspondant.
      * Fallback : 1.
      *
@@ -1639,16 +1639,16 @@ public class DeepLinkHandler {
         if (produit == null || produit.isEmpty()) return 1;
         // 1. Essayer parsing numérique direct
         try { return Integer.parseInt(produit.trim()); } catch (Exception ignored) {}
-        // 2. Chercher par nom dans RegisterProductDb
+        // 2. Chercher par nom dans RegisterProductStore
         if (serialId != null && !serialId.isEmpty()) {
             try {
-                com.pa.lcr.lcp.storage.RegisterProductDb db =
-                    new com.pa.lcr.lcp.storage.RegisterProductDb(ctx);
-                java.util.List<com.pa.lcr.lcp.storage.RegisterProductDb.Row> rows =
+                com.pa.lcr.lcp.storage.RegisterProductStore db =
+                    new com.pa.lcr.lcp.storage.RegisterProductStore(ctx);
+                java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> rows =
                     db.getAll(serialId);
                 db.close();
                 String needle = produit.trim().toLowerCase(java.util.Locale.ROOT);
-                for (com.pa.lcr.lcp.storage.RegisterProductDb.Row r : rows) {
+                for (com.pa.lcr.lcp.storage.RegisterProductStore.Row r : rows) {
                     if (r.description != null
                             && r.description.toLowerCase(java.util.Locale.ROOT).contains(needle)) {
                         android.util.Log.i(TAG,
