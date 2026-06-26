@@ -291,24 +291,25 @@ public class RegisterConnectionHelper {
             etapes[2] = "Recherche registre... (" + attempt + "/3)";
             updateDlg.run();
 
-            // ✅ Étape 1: Fermer TOUS les sockets BT zombis (pas seulement lastBtMac)
-            try {
-                com.pa.lcr.lcp.transport.MediaTransportManager mtmClose =
-                    activity.getMediaTransportManager();
-                for (com.pa.lcr.lcp.transport.TransportSnapshot s : mtmClose.listSnapshots()) {
-                    if (s == null || s.key == null || !s.key.startsWith("BT:")) continue;
-                    com.pa.lcr.lcp.transport.TransportIo ioClose = mtmClose.getByKey(s.key);
-                    if (ioClose != null) {
-                        try { ioClose.close(); } catch (Exception ignored) {}
-                        Log.i(TAG, "étape 3: socket fermé " + s.key);
+            // ✅ Fermer les sockets BT zombis SEULEMENT à la 1ère tentative
+            if (attempt == 1) {
+                try {
+                    com.pa.lcr.lcp.transport.MediaTransportManager mtmClose =
+                        activity.getMediaTransportManager();
+                    for (com.pa.lcr.lcp.transport.TransportSnapshot s : mtmClose.listSnapshots()) {
+                        if (s == null || s.key == null || !s.key.startsWith("BT:")) continue;
+                        com.pa.lcr.lcp.transport.TransportIo ioClose = mtmClose.getByKey(s.key);
+                        if (ioClose != null) {
+                            try { ioClose.close(); } catch (Exception ignored) {}
+                            Log.i(TAG, "étape 3: socket fermé " + s.key);
+                        }
+                        String mac = s.key.substring(3);
+                        try { mtmClose.onBtDisconnected(mac, "diag cleanup"); } catch (Exception ignored) {}
                     }
-                    // Notifier MediaTransportManager du disconnect
-                    String mac = s.key.substring(3);
-                    try { mtmClose.onBtDisconnected(mac, "diag cleanup"); } catch (Exception ignored) {}
-                }
-                activity.btDisconnect();
-                Thread.sleep(2000);
-            } catch (Exception ignored) {}
+                    activity.btDisconnect();
+                    Thread.sleep(2000);
+                } catch (Exception ignored) {}
+            }
 
             // ✅ Étape 2: api_btActivate — ouvrir socket BT (comme bouton Connect BT manuel)
             com.pa.lcr.lcp.ApiResult btRes = facade.api_btActivate();
