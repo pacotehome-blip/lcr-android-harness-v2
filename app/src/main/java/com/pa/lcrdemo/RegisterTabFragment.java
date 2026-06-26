@@ -175,7 +175,7 @@ public class RegisterTabFragment extends Fragment {
                 btnRetourWO.setOnClickListener(v -> retournerAuWorkOrder());
             }
 
-            // ✅ MAC depuis ad ou transport actif
+            // ✅ MAC pour deep link de retour
             String macToUse = ad.mac != null ? ad.mac : "";
             if (macToUse.isEmpty() && tabTransportKey != null && tabTransportKey.startsWith("BT:")) {
                 macToUse = tabTransportKey.substring(3);
@@ -189,48 +189,36 @@ public class RegisterTabFragment extends Fragment {
             final double fPreset = ad.preset;
 
             android.util.Log.i("RegisterTabFragment",
-                "lancerDepuisStore: wo=" + fWoNum + " mac=" + fMac + " node=" + fNode);
+                "lancerDepuisStore: wo=" + fWoNum + " node=" + fNode + " preset=" + fPreset);
 
-            // ✅ Appel direct via withAutoConnectRetry (même chose que l'API /v1/delivery/oneshot/start)
+            // ✅ Vérifier que le controller du tab est prêt — pas créer nouveau facade
+            if (controller == null) {
+                android.util.Log.w("RegisterTabFragment", "lancerDepuisStore: controller null");
+                android.widget.Toast.makeText(requireContext(),
+                    "Registre non connecté", android.widget.Toast.LENGTH_SHORT).show();
+                return;
+            }
+            if (!verifierIoAvantAction("LANCER_LIVRAISON")) return;
+
+            // ✅ Activer le transport du tab AVANT oneshot
+            try {
+                if (tabTransportKey != null)
+                    MediaTransportManager.get(requireContext())
+                        .activateExclusive(tabTransportKey, "LANCER_LIVRAISON");
+            } catch (Exception ignored) {}
+
+            // ✅ Appel direct sur le controller du tab — un seul socket
             new Thread(() -> {
                 try {
-                    com.pa.lcr.lcp.MultiRegisterApiFacadeImpl facade =
-                        new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(requireContext());
-                    final String mediaType = (fMac != null && !fMac.isEmpty()) ? "bt" : "usb";
-                    final String btMacFacade = (fMac != null && !fMac.isEmpty()) ? fMac : null;
-
-                    com.pa.lcrdemo.MainActivity act =
-                        (com.pa.lcrdemo.MainActivity) requireActivity();
-                    com.pa.lcr.lcp.ApiServer apiSrv = act.getApiServer();
-
-                    com.pa.lcr.lcp.ApiResult r;
-                    if (apiSrv != null) {
-                        // ✅ Utiliser withAutoConnectRetry — gère le retry automatiquement
-                        org.json.JSONObject body = new org.json.JSONObject();
-                        try {
-                            body.put("lcrnode", fNode);
-                            if (!fSerialId.isEmpty()) body.put("expected_serial_id", fSerialId);
-                        } catch (Exception ignored) {}
-                        r = apiSrv.withAutoConnectRetry(body, () ->
-                            facade.api_deliveryOneShotStart(fNode, 255, fWoNum, fProduit,
-                                fPreset, null, mediaType, btMacFacade));
-                    } else {
-                        // Fallback — avec retry manuel
-                        r = facade.api_deliveryOneShotStart(fNode, 255, fWoNum, fProduit,
-                            fPreset, null, mediaType, btMacFacade);
-                        if (r.code != 1) {
-                            facade.api_registerConnectAuto(fSerialId, fNode);
-                            r = facade.api_deliveryOneShotStart(fNode, 255, fWoNum, fProduit,
-                                fPreset, null, mediaType, btMacFacade);
-                        }
-                    }
+                    com.pa.lcr.lcp.ApiResult r = controller.api_deliveryOneShotStart(
+                        fWoNum, fProduit, fPreset, null);
 
                     android.util.Log.i("RegisterTabFragment",
                         "lancerDepuisStore oneshot: code=" + r.code + " msg=" + r.msg);
 
                     final com.pa.lcr.lcp.ApiResult fR = r;
                     if (r.code == 1) {
-                        // ✅ Succès — relancer le deep link pour le poll/retour FSM
+                        // ✅ Succès — relancer deep link pour poll FSM
                         ui.post(() -> {
                             try {
                                 android.net.Uri uri = android.net.Uri.parse(
@@ -252,12 +240,13 @@ public class RegisterTabFragment extends Fragment {
                         });
                     } else {
                         ui.post(() -> android.widget.Toast.makeText(requireContext(),
-                            "Échec démarrage livraison: " + fR.msg,
+                            "Échec démarrage: " + fR.msg,
                             android.widget.Toast.LENGTH_LONG).show());
                     }
                 } catch (Exception e) {
                     android.util.Log.e("RegisterTabFragment",
-                        "lancerDepuisStore thread ERR: " + e.getMessage());
+                        "lancerDepuisStore ERR: " + e.getMessage());
+                    ui.post(() -> surErreurConnexion(e, "LANCER_LIVRAISON"));
                 }
             }).start();
 
