@@ -689,44 +689,8 @@ public class RegisterTabFragment extends Fragment {
         if (woIdGuid != null && !woIdGuid.isEmpty()) currentWoIdGuid = woIdGuid;
         if (edtPreset != null && preset != null && !preset.isEmpty())
             edtPreset.setText(preset);
-        if (spnProduct != null && produit != null && !produit.isEmpty()) {
-            // produit peut être "3" (index) ou "propane" (nom) depuis Field Service
-            String label = produit;
-            try {
-                String sId = (serialFromArgs != null) ? serialFromArgs.trim() : "";
-                com.pa.lcr.lcp.storage.RegisterProductStore db = sId.isEmpty() ? null
-                    : new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
-                try {
-                    // Cas 1 : produit est un entier → chercher la description
-                    int noteIdx = Integer.parseInt(produit.trim());
-                    if (db != null) {
-                        String desc = db.getDescription(sId, noteIdx);
-                        if (desc != null && !desc.isEmpty())
-                            label = noteIdx + " - " + desc;
-                        else
-                            label = String.valueOf(noteIdx);
-                    }
-                } catch (NumberFormatException nfe) {
-                    // Cas 2 : produit est un nom ("propane") → résoudre via DB
-                    if (db != null) {
-                        String needle = produit.trim().toLowerCase(java.util.Locale.ROOT);
-                        java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> rows =
-                            db.getAll(sId);
-                        for (com.pa.lcr.lcp.storage.RegisterProductStore.Row r : rows) {
-                            if (r.description != null
-                                    && r.description.toLowerCase(java.util.Locale.ROOT).contains(needle)) {
-                                label = r.noteIdx + " - " + r.description;
-                                break;
-                            }
-                        }
-                        // si pas trouvé en DB, label reste le nom brut ("propane")
-                    }
-                } finally {
-                    if (db != null) try { db.close(); } catch (Exception ignored) {}
-                }
-            } catch (Exception ignored) {}
-            spnProduct.setText(label, false);
-        }
+        if (spnProduct != null && produit != null && !produit.isEmpty())
+            spnProduct.setText(produit, false);
         if (txtDeliveryUid != null && woNum != null && !woNum.isEmpty())
             txtDeliveryUid.setText("Delivery UID : " + woNum);
     }
@@ -1063,10 +1027,8 @@ public class RegisterTabFragment extends Fragment {
         if (btnCustomPrint != null) {
             btnCustomPrint.setOnClickListener(v -> lancerImpressionCustom());
         }
-
-        // ✅ Scan produits — lit les 16 descriptions depuis le registre LCR-II
         if (btnScanProducts != null) {
-            btnScanProducts.setOnClickListener(v2 -> lancerScanProduits());
+            btnScanProducts.setOnClickListener(v -> lancerScanProduits());
         }
     }
 
@@ -1298,6 +1260,11 @@ public class RegisterTabFragment extends Fragment {
                         refreshDelCodeFromTickSnapshotThrottled();
                         updateButtons(controller != null ? controller.getState() : null);
                         scheduleLogRefresh();
+
+                        // Recharger le spinner produits depuis register_products (serial + node)
+                        if (fSerial != null && !fSerial.trim().isEmpty()) {
+                            applierDescriptionsProduits(fSerial);
+                        }
                     });
                 } catch (Exception e) {
                     LogBus.api(node, "validate header fail: " + safeMsg(e));
@@ -1879,10 +1846,9 @@ public class RegisterTabFragment extends Fragment {
         if (spnProduct != null) {
             String txt = spnProduct.getText().toString().trim();
             if (!txt.isEmpty()) {
-                // Format peut être "1" ou "1 - PROPANE" après scan produits
-                // Extraire le numéro avant le " - "
-                String numPart = txt.contains(" - ") ? txt.substring(0, txt.indexOf(" - ")).trim() : txt;
-                try { return Integer.parseInt(numPart); } catch (Exception ignored) {}
+                // Format "1" ou "1 - PROPANE" après scan produits
+                String num = txt.contains(" - ") ? txt.substring(0, txt.indexOf(" - ")).trim() : txt;
+                try { return Integer.parseInt(num); } catch (Exception ignored) {}
             }
         }
         return 1;
@@ -2127,13 +2093,10 @@ public class RegisterTabFragment extends Fragment {
     }
 
     /**
-     * Lance la lecture des 16 descriptions produit depuis le registre LCR-II.
-     * Stocke les résultats dans RegisterProductDb (upsert par serial_id + note_idx).
-     * Met à jour le spinner spnProduct avec les descriptions.
-     * Auto-sélectionne le produit propane si note 1 ou note 2 = propane.
-     *
-     * Déclencheur : bouton "🔍 Scan produits" dans l'interface de configuration.
-     * Prérequis : registre connecté (state == CONNECTED), pas de livraison en cours.
+     * Lit les 16 descriptions produit depuis le registre LCR-II
+     * et peuple le spinner spnProduct avec "1 - PROPANE", "2 - Diesel", etc.
+     * Auto-sélectionne propane si trouvé en note 1 ou 2.
+     * Stocke dans DeliveryDb.register_products (PENDING → sync Dataverse).
      */
     private void lancerScanProduits() {
         DeliveryController c = controller;
@@ -2142,132 +2105,89 @@ public class RegisterTabFragment extends Fragment {
                 "Registre non connecté", android.widget.Toast.LENGTH_SHORT).show();
             return;
         }
-
-        // Guard : ne pas scanner pendant une livraison active
-        // CMD_AUXILIARY ne peut être émis que hors livraison
         com.pa.lcr.lcp.DeliveryState st = c.getState();
         if (st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
                 || st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED
                 || st == com.pa.lcr.lcp.DeliveryState.ENDING) {
             android.widget.Toast.makeText(requireContext(),
-                "Impossible pendant une livraison active",
-                android.widget.Toast.LENGTH_SHORT).show();
+                "Impossible pendant une livraison", android.widget.Toast.LENGTH_SHORT).show();
             return;
         }
-
         if (btnScanProducts != null) {
             btnScanProducts.setEnabled(false);
-            btnScanProducts.setText("⏳ Lecture...");
+            btnScanProducts.setText("⏳ Scan...");
         }
-
-        // Récupérer le numéro de série du tab
         final String serialId = (serialFromArgs != null && !serialFromArgs.trim().isEmpty())
             ? serialFromArgs.trim() : null;
 
-        // Afficher l'état initial dans txtLive
-        ui.post(() -> {
-            if (txtLive != null) txtLive.setText("🔍 Scan produits — mode diagnostic en cours...");
-        });
+        ui.post(() -> { if (txtLive != null) txtLive.setText("🔍 Scan produits 1 / 16..."); });
 
         bg.execute(() -> {
             try {
-                // Activer le transport de ce tab
-                if (tabTransportKey != null) {
+                if (tabTransportKey != null)
                     com.pa.lcr.lcp.transport.MediaTransportManager
-                        .get(requireContext())
-                        .activateExclusive(tabTransportKey, "SCAN_PRODUITS");
-                }
+                        .get(requireContext()).activateExclusive(tabTransportKey, "SCAN_PRODUITS");
 
-                // Déléguer le scan au controller → LcpLink.
-                // Le callback de progression met à jour txtLive en temps réel à chaque produit lu.
-                java.util.Map<Integer, String> products =
+                java.util.List<com.pa.lcr.lcp.LcpLink.ProductScanResult> results =
                     c.api_scanProductNames(msg -> {
                         LogBus.api(node, "[SCAN] " + msg);
                         try {
-                            int colonPos = msg.indexOf(':');
-                            int prodNum  = Integer.parseInt(
-                                msg.substring("Produit ".length(), colonPos).trim());
-                            String desc  = msg.substring(colonPos + 1).trim();
+                            int colon = msg.indexOf(':');
+                            int n = Integer.parseInt(msg.substring("Produit ".length(), colon).trim());
+                            String d = msg.substring(colon + 1).trim();
                             ui.post(() -> {
                                 if (!isAdded() || getView() == null) return;
-                                if (txtLive != null) {
-                                    txtLive.setText(
-                                        "🔍 Produit actif : " + prodNum
-                                        + (desc.isEmpty() ? "" : "  —  " + desc));
-                                }
+                                if (txtLive != null)
+                                    txtLive.setText("🔍 Scan " + n + " / 16"
+                                        + (d.isEmpty() ? "" : "  —  " + d));
                             });
                         } catch (Exception ignored) {}
                     });
 
-                // Construire les labels du spinner — maj uniquement le produit lu
-                // Les autres restent numériques sauf si déjà en DB
-                final String[] spinnerLabels = new String[16];
-                final int[]    propaneRef    = {-1};
-
-                // Charger ce qui est déjà en DB pour ce serial
-                if (serialId != null && !serialId.isEmpty()) {
-                    try {
-                        com.pa.lcr.lcp.storage.RegisterProductStore dbRead =
-                            new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
-                        java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> rows =
-                            dbRead.getAll(serialId);
-                        dbRead.close();
-                        for (int i = 0; i < 16; i++) spinnerLabels[i] = String.valueOf(i + 1);
-                        for (com.pa.lcr.lcp.storage.RegisterProductStore.Row r : rows) {
-                            int idx = r.noteIdx - 1;
-                            if (idx >= 0 && idx < 16) spinnerLabels[idx] = r.toSpinnerLabel();
-                            if (r.isPropane() && propaneRef[0] == -1 && r.noteIdx <= 2)
-                                propaneRef[0] = r.noteIdx;
-                            else if (r.isPropane() && propaneRef[0] == -1)
-                                propaneRef[0] = r.noteIdx;
-                        }
-                    } catch (Exception ignored) {}
-                } else {
-                    for (int i = 0; i < 16; i++) spinnerLabels[i] = String.valueOf(i + 1);
+                // Persister
+                if (serialId != null) {
+                    com.pa.lcr.lcp.storage.RegisterProductStore store =
+                        new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
+                    store.upsertAll(serialId, node, results);
+                    store.close();
                 }
 
-                // Persister dans SQLite si serial connu
-                if (serialId != null && !serialId.isEmpty()) {
-                    com.pa.lcr.lcp.storage.RegisterProductStore db =
-                        new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
-                    db.upsertAll(serialId, products);
-                    db.close();
-                    android.util.Log.i("RegisterTabFragment",
-                        "Scan produits OK — " + products.size() + " produits pour serial=" + serialId);
+                // Spinner labels
+                final String[] labels = new String[16];
+                for (int i = 0; i < 16; i++) labels[i] = String.valueOf(i + 1);
+                final int[] propaneRef = {-1};
+                for (com.pa.lcr.lcp.LcpLink.ProductScanResult r : results) {
+                    int idx = r.noteIdx - 1;
+                    if (idx >= 0 && idx < 16) labels[idx] = r.toSpinnerLabel();
+                    if (r.isPropane && propaneRef[0] == -1) {
+                        if (r.noteIdx <= 2) propaneRef[0] = r.noteIdx;
+                        else if (propaneRef[0] == -1) propaneRef[0] = r.noteIdx;
+                    }
                 }
 
                 ui.post(() -> {
                     try {
                         if (spnProduct != null) {
-                            android.widget.ArrayAdapter<String> adapter =
-                                new android.widget.ArrayAdapter<>(
-                                    requireContext(),
-                                    android.R.layout.simple_dropdown_item_1line,
-                                    spinnerLabels);
-                            spnProduct.setAdapter(adapter);
+                            spnProduct.setAdapter(new android.widget.ArrayAdapter<>(
+                                requireContext(),
+                                android.R.layout.simple_dropdown_item_1line, labels));
                         }
-
                         if (propaneRef[0] > 0 && spnProduct != null) {
-                            spnProduct.setText(spinnerLabels[propaneRef[0] - 1], false);
-                            android.util.Log.i("RegisterTabFragment",
-                                "Propane détecté → spnProduct = note " + propaneRef[0]);
+                            spnProduct.setText(labels[propaneRef[0] - 1], false);
                             if (txtLive != null)
-                                txtLive.setText("✅ Produit enregistré — Propane sur produit "
-                                    + propaneRef[0] + " sélectionné");
+                                txtLive.setText("✅ Scan terminé — Propane produit " + propaneRef[0]);
                             android.widget.Toast.makeText(requireContext(),
-                                "✅ Propane détecté — produit " + propaneRef[0] + " sélectionné",
+                                "✅ Propane — produit " + propaneRef[0] + " sélectionné",
                                 android.widget.Toast.LENGTH_LONG).show();
                         } else {
                             if (txtLive != null)
-                                txtLive.setText("✅ Produit actif enregistré");
+                                txtLive.setText("✅ Scan terminé — " + results.size() + " produits");
                             android.widget.Toast.makeText(requireContext(),
-                                "✅ Produit actif enregistré",
+                                "✅ " + results.size() + " produits chargés",
                                 android.widget.Toast.LENGTH_SHORT).show();
                         }
-
                     } catch (Exception e) {
-                        android.util.Log.w("RegisterTabFragment",
-                            "lancerScanProduits UI update ERR: " + e.getMessage());
+                        android.util.Log.w("RegisterTabFragment", "scan UI ERR: " + e.getMessage());
                     } finally {
                         if (btnScanProducts != null) {
                             btnScanProducts.setEnabled(true);
@@ -2275,16 +2195,12 @@ public class RegisterTabFragment extends Fragment {
                         }
                     }
                 });
-
             } catch (Exception e) {
-                android.util.Log.e("RegisterTabFragment",
-                    "lancerScanProduits ERR: " + e.getMessage());
+                android.util.Log.e("RegisterTabFragment", "lancerScanProduits ERR: " + e.getMessage());
                 ui.post(() -> {
-                    if (txtLive != null)
-                        txtLive.setText("❌ Scan interrompu — " + e.getMessage());
+                    if (txtLive != null) txtLive.setText("❌ Scan ERR: " + e.getMessage());
                     android.widget.Toast.makeText(requireContext(),
-                        "Erreur scan: " + e.getMessage(),
-                        android.widget.Toast.LENGTH_LONG).show();
+                        "Erreur scan: " + e.getMessage(), android.widget.Toast.LENGTH_LONG).show();
                     if (btnScanProducts != null) {
                         btnScanProducts.setEnabled(true);
                         btnScanProducts.setText("🔍 Scan produits");
@@ -2295,53 +2211,42 @@ public class RegisterTabFragment extends Fragment {
     }
 
     /**
-     * Applique les descriptions produits depuis RegisterProductDb au spinner.
-     * Appelé au connect si des descriptions existent déjà pour ce serial.
-     * Ne déclenche pas de communication BT — lecture SQLite seulement.
-     *
-     * À appeler depuis connectThisRegister() après identification du serial :
-     *   applierDescriptionsProduits(serialFromArgs);
+     * Recharge les descriptions produits depuis DeliveryDb au connect
+     * sans toucher au registre. Met à jour le spinner si la DB est peuplée.
      */
     public void applierDescriptionsProduits(String serialId) {
+        applierDescriptionsProduits(serialId, node);
+    }
+
+    public void applierDescriptionsProduits(String serialId, int lcrNode) {
         if (serialId == null || serialId.isEmpty()) return;
         bg.execute(() -> {
             try {
-                com.pa.lcr.lcp.storage.RegisterProductStore db =
+                com.pa.lcr.lcp.storage.RegisterProductStore store =
                     new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
+                // Filtre par serial_id + lcr_node
                 java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> rows =
-                    db.getAll(serialId);
-                db.close();
-
-                if (rows.isEmpty()) return; // Pas encore scanné pour ce registre
-
+                    store.getAll(serialId, lcrNode);
+                // Fallback sans node si vide (migration v9 → v10)
+                if (rows.isEmpty()) rows = store.getAll(serialId);
+                store.close();
+                if (rows.isEmpty()) return;
                 final String[] labels = new String[16];
-                for (int i = 0; i < 16; i++) {
-                    labels[i] = String.valueOf(i + 1); // fallback numérique
-                }
+                for (int i = 0; i < 16; i++) labels[i] = String.valueOf(i + 1);
                 for (com.pa.lcr.lcp.storage.RegisterProductStore.Row r : rows) {
-                    int idx = r.noteIdx - 1; // 1-based → 0-based
-                    if (idx >= 0 && idx < 16) {
-                        labels[idx] = r.toSpinnerLabel();
-                    }
+                    int idx = r.noteIdx - 1;
+                    if (idx >= 0 && idx < 16) labels[idx] = r.toSpinnerLabel();
                 }
-
                 ui.post(() -> {
-                    if (!isAdded() || getView() == null) return;
-                    if (spnProduct == null) return;
-                    String currentVal = spnProduct.getText().toString();
-                    android.widget.ArrayAdapter<String> adapter =
-                        new android.widget.ArrayAdapter<>(
-                            requireContext(),
-                            android.R.layout.simple_dropdown_item_1line,
-                            labels);
-                    spnProduct.setAdapter(adapter);
-                    // Conserver la valeur actuelle si possible
-                    if (!currentVal.isEmpty()) spnProduct.setText(currentVal, false);
+                    if (!isAdded() || getView() == null || spnProduct == null) return;
+                    String cur = spnProduct.getText().toString();
+                    spnProduct.setAdapter(new android.widget.ArrayAdapter<>(
+                        requireContext(),
+                        android.R.layout.simple_dropdown_item_1line, labels));
+                    if (!cur.isEmpty()) spnProduct.setText(cur, false);
                 });
-
             } catch (Exception e) {
-                android.util.Log.w("RegisterTabFragment",
-                    "applierDescriptionsProduits ERR: " + e.getMessage());
+                android.util.Log.w("RegisterTabFragment", "applierDescriptions ERR: " + e.getMessage());
             }
         });
     }
