@@ -785,6 +785,10 @@ ensureRegisterTab(250, 255, true);
                     if (tag instanceof String) showRegisterFragmentByKey((String) tag);
                 }
             });
+
+            // Long press → dialogue Reconnect / Supprimer
+            tabRegisters.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) ->
+                attachTabLongPressListeners());
         }
 
         // Log global
@@ -1272,6 +1276,56 @@ private void setupTabsTop() {
     /**
      * ✅ Clear ciblé A1: retire TAB + Fragment explicitement.
      */
+    private void attachTabLongPressListeners() {
+        if (tabRegisters == null) return;
+        android.view.ViewGroup strip = (android.view.ViewGroup) tabRegisters.getChildAt(0);
+        if (strip == null) return;
+        for (int i = 0; i < strip.getChildCount(); i++) {
+            android.view.View tabView = strip.getChildAt(i);
+            final int idx = i;
+            tabView.setOnLongClickListener(v -> {
+                TabLayout.Tab tab = tabRegisters.getTabAt(idx);
+                if (tab == null) return true;
+                Object tag = tab.getTag();
+                if (!(tag instanceof String)) return true;
+                showTabContextDialog((String) tag, tab.getText() != null ? tab.getText().toString() : "");
+                return true;
+            });
+        }
+    }
+
+    private void showTabContextDialog(String tabKey, String tabLabel) {
+        new androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle(tabLabel)
+            .setItems(new String[]{"Reconnect", "Supprimer"}, (dialog, which) -> {
+                if (which == 0) {
+                    // Reconnect — activer le fragment et appeler onTabActivated
+                    FragmentManager fm = getSupportFragmentManager();
+                    Fragment f = fm.findFragmentByTag("regtab_" + tabKey);
+                    if (f instanceof RegisterTabFragment) {
+                        showRegisterFragmentByKey(tabKey);
+                        ((RegisterTabFragment) f).onTabActivated();
+                    }
+                } else {
+                    // Supprimer
+                    new androidx.appcompat.app.AlertDialog.Builder(this)
+                        .setTitle("Supprimer le tab ?")
+                        .setMessage("Supprimer " + tabLabel + " ?")
+                        .setPositiveButton("Supprimer", (d, w) -> {
+                            removeTabAndFragment(tabKey, "user deleted");
+                            // Si plus aucun tab registre → afficher tab par défaut
+                            if (tabRegisters != null && tabRegisters.getTabCount() == 0) {
+                                showPage(0); // retour à MAIN
+                                logUi(null, "Tous les tabs supprimés — retour MAIN");
+                            }
+                        })
+                        .setNegativeButton("Annuler", null)
+                        .show();
+                }
+            })
+            .show();
+    }
+
     private void removeTabAndFragment(String tabKey, String reason) {
         if (tabKey == null) return;
 
