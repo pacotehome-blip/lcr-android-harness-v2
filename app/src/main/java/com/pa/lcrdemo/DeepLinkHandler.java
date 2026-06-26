@@ -311,7 +311,7 @@ public class DeepLinkHandler {
     // Lancer livraison sur transport déjà actif (USB/BT/TCP)
     // =========================================================
 
-    private void lancerLivraison(String transportKey, int node, String serialId,
+    public void lancerLivraison(String transportKey, int node, String serialId,
                                   String woNum, String woIdGuid,
                                   String produit, String presetStr, String mac) {
         // Ouvrir/activer le tab
