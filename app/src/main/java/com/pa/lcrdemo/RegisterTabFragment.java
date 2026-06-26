@@ -1064,6 +1064,11 @@ public class RegisterTabFragment extends Fragment {
         });
     }
 
+    /** Appelé depuis MainActivity dialog long press. */
+    public void reconnectFromDialog() {
+        ui.post(() -> reconnectThisRegister(true));
+    }
+
     private void reconnectThisRegister(boolean userInitiated) {
         if (!tabMediaReady) {
             pendingReconnect = true;

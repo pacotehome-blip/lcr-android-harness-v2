@@ -1299,12 +1299,13 @@ private void setupTabsTop() {
             .setTitle(tabLabel)
             .setItems(new String[]{"Reconnect", "Supprimer"}, (dialog, which) -> {
                 if (which == 0) {
-                    // Reconnect — activer le fragment et appeler onTabActivated
+                    // Reconnect
                     FragmentManager fm = getSupportFragmentManager();
                     Fragment f = fm.findFragmentByTag("regtab_" + tabKey);
                     if (f instanceof RegisterTabFragment) {
+                        selectRegisterTabByKey(tabKey);
                         showRegisterFragmentByKey(tabKey);
-                        ((RegisterTabFragment) f).onTabActivated();
+                        ((RegisterTabFragment) f).reconnectFromDialog();
                     }
                 } else {
                     // Supprimer
