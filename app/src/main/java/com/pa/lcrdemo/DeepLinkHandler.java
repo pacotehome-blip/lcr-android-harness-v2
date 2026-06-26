@@ -118,8 +118,9 @@ public class DeepLinkHandler {
             // ✅ Sauvegarder PENDING dès réception — avant connexion BT
             // Le tab peut lire ces infos même si la livraison n'est pas encore démarrée
             try {
-                int iProduit = resolveProductId(produit, fSerialId, activity);
+                int iProduit = 1;
                 double dPreset = 0.0;
+                try { iProduit = Integer.parseInt(produit); } catch (Exception ignored) {}
                 try { dPreset = Double.parseDouble(presetStr); } catch (Exception ignored) {}
                 new ActiveDeliveryStore(activity).save(
                     woNum, woIdGuid, "", // jobId vide — pas encore démarré
@@ -386,8 +387,9 @@ public class DeepLinkHandler {
         }
 
         // Démarrer oneshot/start
-        int product = resolveProductId(produit, fSerialId, activity);
+        int product = 1;
         double preset = 0.0;
+        try { product = Integer.parseInt(produit);     } catch (Exception ignored) {}
         try { preset  = Double.parseDouble(presetStr); } catch (Exception ignored) {}
 
         final int fProduct = product;
@@ -430,6 +432,7 @@ public class DeepLinkHandler {
                 }
             } else {
                 android.util.Log.w(TAG, "oneshot/start code=0: " + r.msg);
+                android.util.Log.w(TAG, "oneshot/start detail: " + (r.data != null ? r.data.toString() : "null"));
                 logEvent(fSerialId, woNum, DeliveryLogStore.LEVEL_WARN,
                     "ONESHOT_ERROR", r.msg, r.data != null ? r.data.toString() : null);
 
@@ -679,9 +682,10 @@ public class DeepLinkHandler {
                     } catch (Exception ignored) {}
                 });
 
-                int    product = resolveProductId(produit, fSerialId, activity);
+                int    product = 1;
                 double preset  = 0.0;
-                try { preset = Double.parseDouble(presetStr); } catch (Exception ignored) {}
+                try { product = Integer.parseInt(produit);     } catch (Exception ignored) {}
+                try { preset  = Double.parseDouble(presetStr); } catch (Exception ignored) {}
 
                 final int    fProduct = product;
                 final double fPresetD = preset;
@@ -1620,51 +1624,6 @@ public class DeepLinkHandler {
                 android.util.Log.w(TAG, "patchDataverse MSAL init ERR: " + e.getMessage());
             }
         });
-    }
-
-    /**
-     * Résout le produit depuis Field Service.
-     *
-     * Si produit est un entier (ex: "1") → retourne directement.
-     * Si produit est un nom (ex: "propane") → cherche dans RegisterProductStore
-     * pour le serialId donné et retourne le noteIdx (1-based) correspondant.
-     * Fallback : 1.
-     *
-     * @param produit  valeur brute du deep link (entier ou nom)
-     * @param serialId numéro de série du registre (pour lookup DB)
-     * @param ctx      Context Android
-     * @return product ID 1-based à passer au registre
-     */
-    private int resolveProductId(String produit, String serialId, android.content.Context ctx) {
-        if (produit == null || produit.isEmpty()) return 1;
-        // 1. Essayer parsing numérique direct
-        try { return Integer.parseInt(produit.trim()); } catch (Exception ignored) {}
-        // 2. Chercher par nom dans RegisterProductStore
-        if (serialId != null && !serialId.isEmpty()) {
-            try {
-                com.pa.lcr.lcp.storage.RegisterProductStore db =
-                    new com.pa.lcr.lcp.storage.RegisterProductStore(ctx);
-                java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> rows =
-                    db.getAll(serialId);
-                db.close();
-                String needle = produit.trim().toLowerCase(java.util.Locale.ROOT);
-                for (com.pa.lcr.lcp.storage.RegisterProductStore.Row r : rows) {
-                    if (r.description != null
-                            && r.description.toLowerCase(java.util.Locale.ROOT).contains(needle)) {
-                        android.util.Log.i(TAG,
-                            "resolveProductId: \"" + produit + "\" → noteIdx=" + r.noteIdx
-                            + " desc=\"" + r.description + "\" serial=" + serialId);
-                        return r.noteIdx;
-                    }
-                }
-                android.util.Log.w(TAG,
-                    "resolveProductId: \"" + produit + "\" non trouvé pour serial=" + serialId
-                    + " — fallback 1");
-            } catch (Exception e) {
-                android.util.Log.w(TAG, "resolveProductId ERR: " + e.getMessage());
-            }
-        }
-        return 1; // fallback
     }
 
     private static String buildErrorJson(String code, String message) {
