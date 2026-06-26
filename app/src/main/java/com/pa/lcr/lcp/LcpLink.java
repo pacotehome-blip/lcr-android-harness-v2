@@ -388,7 +388,17 @@ public class LcpLink {
         java.util.LinkedHashMap<Integer, String> result = new java.util.LinkedHashMap<>();
         try {
             for (int idx = 0; idx < 16; idx++) {
-                opSetField(0, new byte[]{(byte) idx});
+                try {
+                    opSetField(0, new byte[]{(byte) idx});
+                } catch (Exception eSw) {
+                    // Produit non configuré ou non accessible — on enregistre vide et on continue
+                    android.util.Log.w("LcpLink",
+                        "opScanAllProductNames: SET #0 idx=" + idx + " ERR: " + eSw.getMessage());
+                    result.put(idx, "");
+                    if (progressLog != null)
+                        progressLog.onProduct("Produit " + (idx + 1) + ": ");
+                    continue;
+                }
                 try { Thread.sleep(80); } catch (Exception ignored) {}
 
                 // Field #11 = ProductDescriptor (ASCIIZ, 0-18 chars)
