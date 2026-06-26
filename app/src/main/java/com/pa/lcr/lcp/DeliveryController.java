@@ -2810,6 +2810,30 @@ job.presetNetL_requested = presetNetL;
         }
     }
 
+    /**
+     * Scanne les 16 descriptions produit depuis le registre LCR-II.
+     * Délègue à LcpLink.opScanAllProductNames() via withLcpLock.
+     *
+     * Le callback progressLog est appelé à chaque produit lu, depuis le thread BT.
+     * Format : "Produit N: description" (N = 1..16).
+     *
+     * @param progressLog Consumer<String> pour la progression (nullable)
+     * @return Map<Integer, String> index 0-based → description (jamais null)
+     * @throws java.io.IOException si la communication LCP échoue
+     */
+    public java.util.Map<Integer, String> api_scanProductNames(
+            android.util.Consumer<String> progressLog) throws java.io.IOException {
+        try {
+            // opScanAllProductNames gère le lock interne via synchronized sendRecv —
+            // on l'enveloppe dans withLcpLock pour sérialiser avec les autres ops LCP.
+            return withLcpLock(() -> link.opScanAllProductNames(progressLog));
+        } catch (java.io.IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new java.io.IOException("api_scanProductNames ERR: " + e.getMessage(), e);
+        }
+    }
+
         public ApiResult api_printerStatus() {
         try {
             int prn = lastPrnStatusKnown;
