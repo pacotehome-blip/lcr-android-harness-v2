@@ -370,18 +370,41 @@ public class LcpLink {
      * Scanne les 16 descriptions produit du registre LCR-II.
      *
      * Prérequis : registre en état CONNECTED (pas de livraison active).
-     * - sec=0x02 (Unlocked) → Field #0 (_DL) éditable hors livraison
-     * - Pendant livraison (bit 0x80) → security level négative → SET_FIELD #0 bloqué
+     * sec=0x02 (Unlocked) → Field #0 (_DL) éditable hors livraison.
      *
-     * Séquence : GET_FIELD #0 (sauvegarder) → boucle 0..15 : SET_FIELD #0 + GET_FIELD #11 → restaurer
-     *
-     * @param progressLog callback "Produit N: desc" après chaque lecture (nullable)
-     * @return Map index 0-based → description (ASCIIZ 18 chars max, Field #11 ProductDescriptor)
+     * Séquence :
+     * 1. Ping/AreYouThere (0x00) — resync session LCP
+     * 2. GET_FIELD #0 → sauvegarder index actif
+     * 3. Boucle 0..15 : SET_FIELD #0 + GET_FIELD #11 (ProductDescriptor)
+     * 4. finally : SET_FIELD #0 restaurer
      */
     public java.util.Map<Integer, String> opScanAllProductNames(
             ScanProgressCallback progressLog) throws IOException {
 
-        // Sauvegarder le produit actif courant
+        // 1. Ping (message 0x00 = AreYouThere/GetRegisterID) — resync LCP session
+        // Le Python fait toujours ça avant tout SET_FIELD
+        try {
+            Response ping = sendRecv(new byte[]{0x00}, 3000);
+            android.util.Log.i("LcpLink",
+                "opScanAllProductNames: ping rc=0x" + hex2(ping.payload.length > 0 ? ping.payload[0] & 0xFF : 0xFF));
+        } catch (Exception ePing) {
+            android.util.Log.w("LcpLink", "opScanAllProductNames: ping ERR: " + ePing.getMessage());
+        }
+
+        // 2. Lire le security level (message 0x27) — diagnostic
+        try {
+            Response secResp = sendRecv(new byte[]{0x27}, 3000);
+            int secLevel = (secResp.payload.length > 1) ? (secResp.payload[1] & 0xFF) : -1;
+            android.util.Log.i("LcpLink",
+                "opScanAllProductNames: sec=0x" + hex2(secLevel)
+                + (secLevel == 0x02 ? " (UNLOCKED)" : secLevel == 0x01 ? " (LOCKED)" : ""));
+            if (progressLog != null)
+                progressLog.onProduct("sec=0x" + hex2(secLevel));
+        } catch (Exception eSec) {
+            android.util.Log.w("LcpLink", "opScanAllProductNames: sec ERR: " + eSec.getMessage());
+        }
+
+        // 3. Sauvegarder le produit actif
         byte[] curRaw = opGetField(0);
         int originalIdx = (curRaw != null && curRaw.length > 0) ? (curRaw[0] & 0xFF) : 0;
 
@@ -391,7 +414,6 @@ public class LcpLink {
                 try {
                     opSetField(0, new byte[]{(byte) idx});
                 } catch (Exception eSw) {
-                    // Produit non configuré ou non accessible — on enregistre vide et on continue
                     android.util.Log.w("LcpLink",
                         "opScanAllProductNames: SET #0 idx=" + idx + " ERR: " + eSw.getMessage());
                     result.put(idx, "");
@@ -401,7 +423,6 @@ public class LcpLink {
                 }
                 try { Thread.sleep(80); } catch (Exception ignored) {}
 
-                // Field #11 = ProductDescriptor (ASCIIZ, 0-18 chars)
                 String name = "";
                 try {
                     byte[] f11 = opGetField(11);
@@ -412,9 +433,8 @@ public class LcpLink {
                 } catch (Exception ignored) {}
 
                 result.put(idx, name);
-                if (progressLog != null) {
+                if (progressLog != null)
                     progressLog.onProduct("Produit " + (idx + 1) + ": " + name);
-                }
             }
         } finally {
             try {

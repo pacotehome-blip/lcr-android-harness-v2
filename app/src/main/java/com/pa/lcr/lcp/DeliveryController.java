@@ -2824,9 +2824,41 @@ job.presetNetL_requested = presetNetL;
     public java.util.Map<Integer, String> api_scanProductNames(
             LcpLink.ScanProgressCallback progressLog) throws java.io.IOException {
         try {
-            // opScanAllProductNames gère le lock interne via synchronized sendRecv —
-            // on l'enveloppe dans withLcpLock pour sérialiser avec les autres ops LCP.
-            return withLcpLock(() -> link.opScanAllProductNames(progressLog));
+            return withLcpLock(() -> {
+                // ── Pré-check : vérifier et effacer ticket pending avant scan ──
+                // Miroir de api_deliveryOneShotStart : SET_FIELD #0 (_DL) échoue
+                // avec rc=0x71 si TICKET_PENDING est actif (comportement R260v2.30).
+                try {
+                    int[] ds = link.opDeliveryStatus();
+                    int delCode = ds[1];
+                    boolean ticketPending  = (delCode & DC_TICKET_PENDING)  != 0;
+                    boolean deliveryActive = (delCode & DC_DELIVERY_ACTIVE) != 0;
+
+                    if (deliveryActive) {
+                        throw new java.io.IOException(
+                            "api_scanProductNames: livraison active — scan impossible");
+                    }
+                    if (ticketPending) {
+                        // Imprimer le ticket pour libérer le verrou du registre
+                        android.util.Log.i("DeliveryController",
+                            "api_scanProductNames: ticket pending → CMD_PRINT_LAST_TICKET");
+                        link.opIssueCommand(CMD_PRINT_LAST_TICKET);
+                        // Attendre que TICKET_PENDING retombe (max 15s)
+                        long deadline = System.currentTimeMillis() + 15_000;
+                        while (System.currentTimeMillis() < deadline) {
+                            try { Thread.sleep(300); } catch (Exception ignored) {}
+                            int[] ds2 = link.opDeliveryStatus();
+                            if ((ds2[1] & DC_TICKET_PENDING) == 0) break;
+                        }
+                    }
+                } catch (java.io.IOException e) {
+                    throw e; // re-throw si livraison active
+                } catch (Exception ignored) {
+                    // Pré-check non bloquant — on tente le scan quand même
+                }
+
+                return link.opScanAllProductNames(progressLog);
+            });
         } catch (java.io.IOException e) {
             throw e;
         } catch (Exception e) {
