@@ -358,6 +358,12 @@ public class LcpLink {
      */
     public java.util.Map<Integer, String> opScanAllProductNames(
             ScanProgressCallback progressLog) throws IOException {
+        // Unlock avec clé vide (field #72) avant de switcher les produits
+        try {
+            opSetField(72, new byte[]{0x00});
+        } catch (Exception ignored) {
+            android.util.Log.w("LcpLink", "opScanAllProductNames: unlock ignoré");
+        }
         byte[] curRaw = opGetField(0);
         int originalIdx = (curRaw != null && curRaw.length > 0) ? (curRaw[0] & 0xFF) : 0;
         java.util.LinkedHashMap<Integer, String> result = new java.util.LinkedHashMap<>();
