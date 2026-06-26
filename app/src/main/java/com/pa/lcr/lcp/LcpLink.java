@@ -331,20 +331,30 @@ public class LcpLink {
     }
 
     /**
-     * Lit le nom du produit ACTIF via le message LCP 0x00 (GET_PRODUCT_INFO).
-     * Réponse payload: [rc, productId, name_bytes...]
+     * Lit le produit ACTIF depuis le registre LCR-II.
+     *
+     * - Field #0  (ProductNumber)    → index 0-based du produit actif
+     * - Field #11 (ProductDescriptor) → description AZ du produit actif (ex: "Propane", "Diesel #2")
+     *
+     * Aucun SET_FIELD — compatible BT en état CONNECTED.
      */
     public ProductInfo opGetProductInfo() throws IOException {
-        Response r = sendRecv(new byte[]{0x00}, 5000);
-        ensureOk(r, "GET_PRODUCT_INFO");
-        int productId = (r.payload.length > 1) ? (r.payload[1] & 0xFF) : 0;
+        // Field #0 → index 0-based du produit actif
+        byte[] f0 = opGetField(0);
+        int productId = (f0 != null && f0.length > 0) ? (f0[0] & 0xFF) : 0;
+
+        // Field #11 → ProductDescriptor (ASCIIZ, 0-18 chars)
         String name = "";
-        if (r.payload.length > 2) {
-            byte[] nb = new byte[r.payload.length - 2];
-            System.arraycopy(r.payload, 2, nb, 0, nb.length);
-            name = new String(nb, java.nio.charset.StandardCharsets.US_ASCII)
-                       .replace("\0", "").trim();
+        try {
+            byte[] f11 = opGetField(11);
+            if (f11 != null && f11.length > 0) {
+                name = new String(f11, java.nio.charset.StandardCharsets.US_ASCII)
+                           .replace("\0", "").trim();
+            }
+        } catch (Exception ignored) {
+            // ProductDescriptor non configuré — pas bloquant
         }
+
         return new ProductInfo(productId, name);
     }
 
@@ -356,49 +366,56 @@ public class LcpLink {
      * @param progressLog callback appelé après chaque produit, format "Produit N: desc" (nullable)
      * @return Map index 0-based → description
      */
+    /**
+     * Scanne les 16 descriptions produit du registre LCR-II.
+     *
+     * Séquence (miroir opDiagnosticReset) :
+     * 1. CMD_AUXILIARY (0x03) → place le registre en mode auxiliaire/diagnostic
+     *    (Field #0 ProductNumber devient "Delivery Level" = éditable)
+     * 2. Pour chaque idx 0..15 : SET_FIELD #0 → GET_FIELD #11 (ProductDescriptor)
+     * 3. Restaure le produit original dans le finally
+     *
+     * Utilisable en état CONNECTED — pas besoin d'une livraison active.
+     * Compatible avec l'approche Python : CMD #3 puis SET_FIELD #0.
+     *
+     * @param progressLog callback "Produit N: desc" après chaque lecture (nullable)
+     * @return Map index 0-based → description (ASCIIZ 18 chars max)
+     */
     public java.util.Map<Integer, String> opScanAllProductNames(
             ScanProgressCallback progressLog) throws IOException {
 
-        // ── Unlock (miroir Python unlock_userkey) ──────────────────────────
-        // 1. Essai clé vide (\x00)
-        boolean unlocked = false;
-        try {
-            opSetField(72, new byte[]{0x00});
-            unlocked = true;
-            android.util.Log.i("LcpLink", "opScanAllProductNames: unlock clé vide OK");
-        } catch (Exception e1) {
-            android.util.Log.w("LcpLink",
-                "opScanAllProductNames: unlock clé vide échoué (" + e1.getMessage()
-                + ") — essai 0000");
-            // 2. Fallback "0000\0" comme Python try0000
-            try {
-                opSetField(72, new byte[]{'0','0','0','0', 0x00});
-                unlocked = true;
-                android.util.Log.i("LcpLink", "opScanAllProductNames: unlock 0000 OK");
-            } catch (Exception e2) {
-                android.util.Log.w("LcpLink",
-                    "opScanAllProductNames: unlock 0000 échoué (" + e2.getMessage()
-                    + ") — on tente quand même");
-            }
-        }
-        // Délai post-unlock — laisser le registre traiter avant SET_FIELD #0
-        try { Thread.sleep(300); } catch (Exception ignored) {}
-
-        // ── Scan des 16 produits ───────────────────────────────────────────
+        // Lire le produit actif avant de modifier quoi que ce soit
         byte[] curRaw = opGetField(0);
         int originalIdx = (curRaw != null && curRaw.length > 0) ? (curRaw[0] & 0xFF) : 0;
+
+        // CMD_AUXILIARY (0x03) — place le registre en mode diagnostic
+        // Miroir de opDiagnosticReset / Python CMD_AUXILIARY
+        opIssueCommand(0x03);
+        try { Thread.sleep(300); } catch (Exception ignored) {}
+
         java.util.LinkedHashMap<Integer, String> result = new java.util.LinkedHashMap<>();
         try {
             for (int idx = 0; idx < 16; idx++) {
                 opSetField(0, new byte[]{(byte) idx});
                 try { Thread.sleep(80); } catch (Exception ignored) {}
-                ProductInfo pi = opGetProductInfo();
-                result.put(idx, pi.name);
+
+                // Field #11 = ProductDescriptor (ASCIIZ, 0-18 chars)
+                String name = "";
+                try {
+                    byte[] f11 = opGetField(11);
+                    if (f11 != null && f11.length > 0) {
+                        name = new String(f11, java.nio.charset.StandardCharsets.US_ASCII)
+                                   .replace("\0", "").trim();
+                    }
+                } catch (Exception ignored) {}
+
+                result.put(idx, name);
                 if (progressLog != null) {
-                    progressLog.onProduct("Produit " + (idx + 1) + ": " + pi.name);
+                    progressLog.onProduct("Produit " + (idx + 1) + ": " + name);
                 }
             }
         } finally {
+            // Restaurer le produit original
             try {
                 opSetField(0, new byte[]{(byte) originalIdx});
             } catch (Exception ignored) {
