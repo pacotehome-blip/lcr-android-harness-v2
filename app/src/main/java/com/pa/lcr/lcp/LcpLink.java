@@ -155,6 +155,11 @@ public class LcpLink {
         }
     }
 
+    /** Callback de progression pour opScanAllProductNames. */
+    public interface ScanProgressCallback {
+        void onProduct(String message);
+    }
+
     /** Info d'un produit lue depuis le registre (message 0x00). */
     public static final class ProductInfo {
         public final int productId; // index 0-based tel que retourné par le registre
@@ -352,7 +357,7 @@ public class LcpLink {
      * @return Map index 0-based → description
      */
     public java.util.Map<Integer, String> opScanAllProductNames(
-            android.util.Consumer<String> progressLog) throws IOException {
+            ScanProgressCallback progressLog) throws IOException {
         byte[] curRaw = opGetField(0);
         int originalIdx = (curRaw != null && curRaw.length > 0) ? (curRaw[0] & 0xFF) : 0;
         java.util.LinkedHashMap<Integer, String> result = new java.util.LinkedHashMap<>();
@@ -363,7 +368,7 @@ public class LcpLink {
                 ProductInfo pi = opGetProductInfo();
                 result.put(idx, pi.name);
                 if (progressLog != null) {
-                    progressLog.accept("Produit " + (idx + 1) + ": " + pi.name);
+                    progressLog.onProduct("Produit " + (idx + 1) + ": " + pi.name);
                 }
             }
         } finally {

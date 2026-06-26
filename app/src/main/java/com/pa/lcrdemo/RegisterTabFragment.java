@@ -2145,7 +2145,6 @@ public class RegisterTabFragment extends Fragment {
                 // Le callback de progression met à jour txtLive en temps réel à chaque produit lu.
                 java.util.Map<Integer, String> products =
                     c.api_scanProductNames(msg -> {
-                        // msg = "Produit X: description" (depuis opScanAllProductNames)
                         LogBus.api(node, "[SCAN] " + msg);
                         // Extraire l'index depuis le message pour l'affichage de progression
                         try {

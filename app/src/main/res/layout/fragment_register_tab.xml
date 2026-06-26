@@ -399,6 +399,15 @@
                     android:text="🖨️ Impression custom"
                     android:visibility="gone" />
 
+                <!-- ✅ NOUVEAU: Scan descriptions produits depuis le registre LCR-II -->
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnScanProducts"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="🔍 Scan produits" />
+
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 

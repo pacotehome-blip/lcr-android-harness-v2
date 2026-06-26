@@ -2822,7 +2822,7 @@ job.presetNetL_requested = presetNetL;
      * @throws java.io.IOException si la communication LCP échoue
      */
     public java.util.Map<Integer, String> api_scanProductNames(
-            android.util.Consumer<String> progressLog) throws java.io.IOException {
+            LcpLink.ScanProgressCallback progressLog) throws java.io.IOException {
         try {
             // opScanAllProductNames gère le lock interne via synchronized sendRecv —
             // on l'enveloppe dans withLcpLock pour sérialiser avec les autres ops LCP.
