@@ -6,6 +6,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.hardware.usb.UsbManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -565,7 +566,16 @@ public class RegisterTabFragment extends Fragment {
         IntentFilter f = new IntentFilter();
         f.addAction(UsbReceiver.ACTION_USB_READY);
         f.addAction(UsbReceiver.ACTION_USB_DETACHED);
-        requireContext().registerReceiver(usbStateReceiver, f);
+        // ✅ Android 14+ (API 34+) exige RECEIVER_NOT_EXPORTED ou RECEIVER_EXPORTED
+        // Ce receiver écoute des broadcasts internes à l'APK — RECEIVER_NOT_EXPORTED
+        // Android 9-13 : registerReceiver(receiver, filter) — sans flag
+        // Android 14+  : registerReceiver(receiver, filter, RECEIVER_NOT_EXPORTED)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            requireContext().registerReceiver(usbStateReceiver, f,
+                Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            requireContext().registerReceiver(usbStateReceiver, f);
+        }
     }
 
     @Override
