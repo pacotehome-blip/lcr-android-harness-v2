@@ -51,8 +51,46 @@ public class LcrHttpService extends Service {
             return START_NOT_STICKY;
         }
 
-        Log.i(TAG, "Service démarré — foreground");
-        startForeground(NOTIF_ID, buildNotification("APK Filgo — démarrage..."));
+        Log.i(TAG, "Service démarré — foreground — Android API " + Build.VERSION.SDK_INT);
+
+        // ✅ Démarrage foreground selon la version Android détectée à l'exécution
+        //
+        // Android 9  (API 28) : startForeground(id, notif) — pas de type requis
+        // Android 10 (API 29) : idem
+        // Android 11 (API 30) : idem
+        // Android 12 (API 31) : idem — foregroundServiceType optionnel dans manifest
+        // Android 13 (API 33) : idem — foregroundServiceType recommandé
+        // Android 14 (API 34) : startForeground(id, notif, type) OBLIGATOIRE
+        //                        type doit correspondre au manifest foregroundServiceType
+        // Android 15 (API 35) : idem Android 14 + validation stricte specialUse
+        //
+        // Manifest déclare : foregroundServiceType="dataSync|connectedDevice|specialUse"
+        // Les types non supportés sur les API inférieures sont ignorés par Android.
+
+        Notification notif = buildNotification("APK Filgo — démarrage...");
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            // Android 14+ (API 34+) — type obligatoire dans startForeground()
+            // dataSync         : sync données livraison vers Dataverse
+            // connectedDevice  : connexion registre BT SPP + USB-C OTG
+            // specialUse       : serveur HTTP local 8765/8766 pour répartiteur
+            startForeground(NOTIF_ID, notif,
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                | android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                | android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+            Log.i(TAG, "startForeground avec type — Android 14+");
+
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // Android 10-13 (API 29-33) — type optionnel, signature sans type
+            // foregroundServiceType dans manifest est déclaré mais non imposé à l'exécution
+            startForeground(NOTIF_ID, notif);
+            Log.i(TAG, "startForeground sans type — Android 10-13");
+
+        } else {
+            // Android 9 (API 28) — signature classique, aucun type
+            startForeground(NOTIF_ID, notif);
+            Log.i(TAG, "startForeground sans type — Android 9");
+        }
 
         new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
             startApiServer();

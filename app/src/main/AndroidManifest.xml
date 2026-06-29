@@ -36,9 +36,18 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
-    <!-- ✅ Foreground service HTTP -->
+    <!-- ✅ Foreground service HTTP — compatible Android 9-15 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- dataSync : Android 9-13 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- specialUse : Android 14-15 — serveur HTTP local + API répartiteur -->
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"
+        android:minSdkVersion="34" />
+    <!-- connectedDevice : BT SPP + USB-C OTG — Android 14-15 -->
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"
+        android:minSdkVersion="34" />
 
     <!-- ✅ Démarrage automatique au boot -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
@@ -99,11 +108,13 @@
         </activity>
 
         <!-- ✅ Foreground service — maintient le serveur HTTP :8765/:8766 actif -->
+        <!--     foregroundServiceType Android 9-13 : dataSync                           -->
+        <!--     foregroundServiceType Android 14-15 : dataSync|connectedDevice|specialUse -->
         <service
             android:name="com.pa.lcrdemo.LcrHttpService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="dataSync"
+            android:foregroundServiceType="dataSync|connectedDevice|specialUse"
             android:stopWithTask="false" />
 
         <!-- ✅ Boot receiver — démarre LcrHttpService au boot -->
