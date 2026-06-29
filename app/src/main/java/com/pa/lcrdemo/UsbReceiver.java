@@ -1,4 +1,3 @@
-
 package com.pa.lcrdemo;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
@@ -28,18 +27,29 @@ public class UsbReceiver extends BroadcastReceiver {
  }
  }
  private void handleAttach(Context context, Intent intent) {
- UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
- if (device == null) return;
- UsbManager mgr = (UsbManager) context.getSystemService(Context.USB_SERVICE);
- PendingIntent pi = PendingIntent.getBroadcast(
- context,
- 0,
- new Intent(ACTION_USB_PERMISSION),
- // ✅ FIX: OR des flags
- PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE
- );
- mgr.requestPermission(device, pi);
- }
+        UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+        if (device == null) return;
+        UsbManager mgr = (UsbManager) context.getSystemService(Context.USB_SERVICE);
+
+        // Android 9-13  : FLAG_UPDATE_CURRENT | FLAG_MUTABLE
+        // Android 14-15 : FLAG_MUTABLE exige FLAG_ALLOW_UNSAFE_IMPLICIT_INTENT
+        //                 quand l'Intent n'a pas de composant explicite (USB permission)
+        int flags;
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            // Android 14+ — FLAG_MUTABLE requis par requestPermission() + implicit intent
+            flags = PendingIntent.FLAG_UPDATE_CURRENT
+                  | PendingIntent.FLAG_MUTABLE
+                  | PendingIntent.FLAG_ALLOW_UNSAFE_IMPLICIT_INTENT;
+        } else {
+            // Android 9-13
+            flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE;
+        }
+
+        Intent permIntent = new Intent(ACTION_USB_PERMISSION);
+        permIntent.setPackage(context.getPackageName()); // rend l'intent explicite
+        PendingIntent pi = PendingIntent.getBroadcast(context, 0, permIntent, flags);
+        mgr.requestPermission(device, pi);
+    }
  private void handlePermission(Context context, Intent intent) {
  UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
  if (device == null) return;
@@ -79,3 +89,4 @@ public class UsbReceiver extends BroadcastReceiver {
  context.sendBroadcast(det);
  }
 }
+
