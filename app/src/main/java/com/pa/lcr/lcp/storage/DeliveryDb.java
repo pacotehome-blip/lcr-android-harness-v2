@@ -25,7 +25,8 @@ public class DeliveryDb extends SQLiteOpenHelper {
     // v8: add bt_signal table (perdue lors du revert à 3f79a08)
     // v9: add register_products table
     // v10: add is_propane, lcr_node to register_products
-    public static final int DB_VERSION = 10;
+    // v11: add missing columns to bt_signal (mac, rssi_quality, source, io_errors, io_timeouts, io_latency_avg_ms)
+    public static final int DB_VERSION = 11;
 
     private static final String TAG = "DeliveryDb";
 
@@ -108,6 +109,15 @@ public class DeliveryDb extends SQLiteOpenHelper {
         if (oldVersion < 10) {
             addColumnIfMissing(db, "register_products", "is_propane", "INTEGER NOT NULL DEFAULT 0");
             addColumnIfMissing(db, "register_products", "lcr_node",   "INTEGER NOT NULL DEFAULT 0");
+        }
+        if (oldVersion < 11) {
+            addColumnIfMissing(db, "bt_signal", "mac",               "TEXT");
+            addColumnIfMissing(db, "bt_signal", "rssi_quality",      "TEXT");
+            addColumnIfMissing(db, "bt_signal", "source",            "TEXT");
+            addColumnIfMissing(db, "bt_signal", "io_errors",         "INTEGER");
+            addColumnIfMissing(db, "bt_signal", "io_timeouts",       "INTEGER");
+            addColumnIfMissing(db, "bt_signal", "io_latency_avg_ms", "INTEGER");
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_bt_signal_mac ON bt_signal(mac, ts_ms);");
         }
     }
 
@@ -297,15 +307,22 @@ public class DeliveryDb extends SQLiteOpenHelper {
             "CREATE TABLE IF NOT EXISTS bt_signal (" +
             "id INTEGER PRIMARY KEY AUTOINCREMENT," +
             "transport_key TEXT NOT NULL," +
+            "mac TEXT," +
             "ts_ms INTEGER NOT NULL," +
             "delivery_active INTEGER NOT NULL DEFAULT 0," +
+            "source TEXT," +
+            "rssi INTEGER," +
+            "rssi_quality TEXT," +
             "io_samples INTEGER," +
             "io_score TEXT," +
-            "rssi INTEGER," +
+            "io_errors INTEGER," +
+            "io_timeouts INTEGER," +
+            "io_latency_avg_ms INTEGER," +
             "notes TEXT" +
             ");"
         );
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_bt_signal_ts ON bt_signal(transport_key, ts_ms);");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_bt_signal_mac ON bt_signal(mac, ts_ms);");
     }
 
     private static void createRegisterProductsTable(SQLiteDatabase db) {
