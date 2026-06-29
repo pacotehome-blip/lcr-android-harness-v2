@@ -544,7 +544,13 @@ public class MainActivity extends AppCompatActivity {
         f.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
         // ✅ AJOUT: signal API -> UI (BT/USB)
         f.addAction(ACTION_NODE_SEEN);
-        registerReceiver(usbUiReceiver, f);
+        // Android 9-13 : registerReceiver(receiver, filter) — sans flag
+        // Android 14+  : registerReceiver(receiver, filter, RECEIVER_NOT_EXPORTED)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            registerReceiver(usbUiReceiver, f, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(usbUiReceiver, f);
+        }
 
         LogBus.addListener(mainLogListener);
 
