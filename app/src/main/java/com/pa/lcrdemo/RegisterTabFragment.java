@@ -1016,12 +1016,16 @@ public class RegisterTabFragment extends Fragment {
                             }
                         } catch (Exception ignored) {}
 
-                        // Forcer lecture fraiche — requestLiveSample puis getLastNet
-                        try { c.requestLiveSample(); Thread.sleep(300); }
-                        catch (Exception ignored) {}
-                        double netRegistre   = c.getLastNet();
-                        double grossRegistre = c.getLastGross();
-
+                        // Lire net/gross courant depuis le hardware
+                        // readNetGrossFromHardware() utilise cachedDigits existant
+                        // sans appeler ensureDigits() — ne casse pas les decimales
+                        double netRegistre   = -1.0;
+                        double grossRegistre = -1.0;
+                        try {
+                            double[] hw = c.readNetGrossFromHardware();
+                            netRegistre   = hw[0];
+                            grossRegistre = hw[1];
+                        } catch (Exception ignored) {}
                         final String fTicketNoBefore = ticketNoBefore;
                         final String fWoNum          = woNum;
                         final String fWoIdGuid       = woIdGuid;
@@ -2331,25 +2335,31 @@ public class RegisterTabFragment extends Fragment {
                     return;
                 }
                 bg.execute(() -> {
-                    try { if (controller != null) controller.requestLiveSample(); }
-                    catch (Exception ignored) {}
-                });
-                ui.postDelayed(() -> {
-                    if (!postDeliveryPollActive || !isAdded() || getView() == null) return;
                     double netCourant   = -1.0;
                     double grossCourant = -1.0;
-                    try { netCourant = controller.getLastNet(); grossCourant = controller.getLastGross(); }
-                    catch (Exception ignored) {}
-                    if (netCourant < 0) { ui.postDelayed(this, POST_DELIVERY_POLL_INTERVAL_MS); return; }
-                    double delta = netCourant - netRef;
-                    LogBus.api(node, "[POST-LIVRAISON] net=" + netCourant + "L ref=" + netRef + "L delta="
-                        + String.format(java.util.Locale.ROOT, "%.3f", delta) + "L");
-                    if (delta >= POST_DELIVERY_LEAK_THRESHOLD_L) {
-                        postDeliveryPollActive = false;
-                        afficherAlerteVanneOuverte(netRef, netCourant, grossRef, grossCourant, ticketNo, delta);
-                        return;
-                    }
-                    ui.postDelayed(this, POST_DELIVERY_POLL_INTERVAL_MS);
+                    try {
+                        if (controller != null) {
+                            double[] hw = controller.readNetGrossFromHardware();
+                            netCourant   = hw[0];
+                            grossCourant = hw[1];
+                        }
+                    } catch (Exception ignored) {}
+                    final double fNet   = netCourant;
+                    final double fGross = grossCourant;
+                    ui.post(() -> {
+                        if (!postDeliveryPollActive || !isAdded() || getView() == null) return;
+                        if (fNet < 0) { ui.postDelayed(this, POST_DELIVERY_POLL_INTERVAL_MS); return; }
+                        double delta = fNet - netRef;
+                        LogBus.api(node, "[POST-LIVRAISON] net=" + fNet + "L ref=" + netRef + "L delta="
+                            + String.format(java.util.Locale.ROOT, "%.3f", delta) + "L");
+                        if (delta >= POST_DELIVERY_LEAK_THRESHOLD_L) {
+                            postDeliveryPollActive = false;
+                            afficherAlerteVanneOuverte(netRef, fNet, grossRef, fGross, ticketNo, delta);
+                            return;
+                        }
+                        ui.postDelayed(this, POST_DELIVERY_POLL_INTERVAL_MS);
+                    });
+                });
                 }, 200);
             }
         };

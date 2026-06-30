@@ -1,5 +1,29 @@
 package com.pa.lcr.lcp;
 
+// ═══════════════════════════════════════════════════════════════════════
+// COMPATIBILITÉ ANDROID : API 28 (Android 9) → API 35 (Android 15)
+// ───────────────────────────────────────────────────────────────────────
+// Toute modification de ce fichier doit être testée sur :
+//   · Android 9  (API 28) — Samsung SM-T397U  · ADB 192.168.134.105:5555
+//   · Android 15 (API 35) — Samsung R52X508K2DR · ADB 192.168.134.126:5555
+//
+// Règles obligatoires :
+//   1. Détecter la version à l'exécution via Build.VERSION.SDK_INT
+//   2. Appliquer le comportement EXPLICITEMENT par version — pas de spéculation
+//   3. Ne jamais utiliser d'API introduite après API 28 sans guard de version
+//   4. registerReceiver() : RECEIVER_NOT_EXPORTED ou RECEIVER_EXPORTED sur API 34+
+//   5. PendingIntent     : FLAG_IMMUTABLE sur API 31+ · FLAG_MUTABLE + guard sur API 34+
+//   6. startForeground() : type obligatoire sur API 34+ — doit matcher le manifest
+//
+// Constantes utiles :
+//   Build.VERSION_CODES.P                = 28  (Android 9)
+//   Build.VERSION_CODES.Q                = 29  (Android 10)
+//   Build.VERSION_CODES.S                = 31  (Android 12)
+//   Build.VERSION_CODES.TIRAMISU         = 33  (Android 13)
+//   Build.VERSION_CODES.UPSIDE_DOWN_CAKE = 34  (Android 14)
+//   Build.VERSION_CODES.VANILLA_ICE_CREAM= 35  (Android 15)
+// ═══════════════════════════════════════════════════════════════════════
+
 import com.pa.lcr.lcp.storage.DeliveryLogStore;
 
 import org.json.JSONArray;
@@ -679,6 +703,27 @@ private void reproEvent(String level, String type, String message, JSONObject da
     public double getLastGross() {
         LastTick t = lastTick;
         return (t != null) ? t.gross : -1.0;
+    }
+
+    /**
+     * Lit les compteurs NET et GROSS directement depuis le registre hardware.
+     * Utilise cachedDigits existant — ne relit PAS FIELD_DECIMALS.
+     * A utiliser en etat CONNECTED pour detecter une fuite post-livraison.
+     * Compatible Android 9-15 : appel depuis bg.execute uniquement.
+     * @return double[]{net, gross} en litres, ou {-1,-1} si erreur
+     */
+    public double[] readNetGrossFromHardware() {
+        try {
+            int digits = (cachedDigits >= 0) ? cachedDigits : 1;
+            double scale = Math.pow(10, digits);
+            int g = beI32(lcpGetField(FIELD_GROSS_COUNT));
+            int n = beI32(lcpGetField(FIELD_NET_COUNT));
+            double netL   = (n & 0xFFFFFFFFL) / scale;
+            double grossL = (g & 0xFFFFFFFFL) / scale;
+            return new double[]{netL, grossL};
+        } catch (Exception e) {
+            return new double[]{-1.0, -1.0};
+        }
     }
     @Override public boolean isPaused() { return state == DeliveryState.RUNNING_PAUSED; }
 
