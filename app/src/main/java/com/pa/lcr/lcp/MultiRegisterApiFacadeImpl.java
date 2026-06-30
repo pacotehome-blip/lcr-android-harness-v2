@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.io.OutputStream;
 import java.io.InputStream;
 import org.json.JSONArray;
+import android.os.Build;
 import android.bluetooth.BluetoothSocket;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothAdapter;
@@ -532,7 +533,13 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             IntentFilter filter = new IntentFilter();
             filter.addAction(BluetoothDevice.ACTION_FOUND);
             filter.addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED);
-            appCtx.registerReceiver(receiver, filter);
+            // Android 9-13 : sans flag · Android 14+ : RECEIVER_EXPORTED requis
+            // BluetoothDevice.ACTION_FOUND est un broadcast système — RECEIVER_EXPORTED
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                appCtx.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
+            } else {
+                appCtx.registerReceiver(receiver, filter);
+            }
 
             // Annuler seulement si déjà en cours
             if (adapter.isDiscovering()) adapter.cancelDiscovery();

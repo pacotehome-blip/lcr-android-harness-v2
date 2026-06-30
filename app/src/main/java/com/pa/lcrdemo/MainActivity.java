@@ -1889,11 +1889,20 @@ private void scanUsb() {
         }
 
         if (!usbManager.hasPermission(dev)) {
-            PendingIntent pi = PendingIntent.getBroadcast(
-                    this, 0, new Intent(ACTION_USB_PERMISSION),
-                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE
-            );
-                        usbManager.requestPermission(dev, pi);
+            // Android 9-13 : FLAG_MUTABLE suffit pour requestPermission USB
+            // Android 14+  : intent doit être explicite OU FLAG_ALLOW_UNSAFE_IMPLICIT_INTENT
+            Intent permIntent = new Intent(ACTION_USB_PERMISSION);
+            permIntent.setPackage(getPackageName()); // explicit intent
+            int piFlags;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                piFlags = PendingIntent.FLAG_UPDATE_CURRENT
+                        | PendingIntent.FLAG_MUTABLE
+                        | PendingIntent.FLAG_ALLOW_UNSAFE_IMPLICIT_INTENT;
+            } else {
+                piFlags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE;
+            }
+            PendingIntent pi = PendingIntent.getBroadcast(this, 0, permIntent, piFlags);
+            usbManager.requestPermission(dev, pi);
             logUi(null, "Permission USB demandée");
             logMedia1("USB Open/Ping: permission requise");
             return;

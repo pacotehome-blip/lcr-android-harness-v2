@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.os.Build;
 import android.os.Bundle;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
@@ -161,7 +162,13 @@ public class FieldServiceActivity extends Activity {
             }
         };
         IntentFilter filter = new IntentFilter(LcrHttpService.BROADCAST_READY);
-        registerReceiver(readyReceiver, filter);
+        // Android 9-13 : sans flag · Android 14+ : RECEIVER_NOT_EXPORTED
+        // BROADCAST_READY est un broadcast interne à l'APK
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            registerReceiver(readyReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(readyReceiver, filter);
+        }
     }
 
     private void unregisterReadyReceiver() {
