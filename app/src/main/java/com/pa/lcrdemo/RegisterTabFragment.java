@@ -2479,17 +2479,5 @@ public class RegisterTabFragment extends Fragment {
             + "L delta=" + delta + "L — INCIDENT ENREGISTRÉ");
     }
 
-    private void attachUiListenerIfNeeded() {
-        if (uiListenerAttached) return;
-        try {
-            RegisterSessionManager sm = RegisterSessionManager.get(requireContext());
-            if (tabTransportKey != null) sm.attachUiListener(tabTransportKey, node, uiListener);
-            else sm.attachUiListener(node, uiListener);
-            uiListenerAttached = true;
-            syncUiFromController();
-            LogBus.api(node, "uiListener réattaché au retour du tab");
-        } catch (Exception ignored) {}
-    }
-
 
 }
