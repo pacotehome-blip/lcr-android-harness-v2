@@ -1255,16 +1255,17 @@ public class RegisterTabFragment extends Fragment {
     // ─────────────────────────────────────────────────────────────────
 
     private static final double POST_DELIVERY_LEAK_THRESHOLD_L = 0.5;
-    private static final long   POST_DELIVERY_POLL_INTERVAL_MS = 5_000;
-    private static final long   POST_DELIVERY_MAX_DURATION_MS  = 3 * 60 * 1000; // 3 minutes
+    private static final long   POST_DELIVERY_POLL_INTERVAL_MS = 5_000; // poll toutes les 5s
+    // Pas de durée max — le poll reste actif tant que CONNECTED + livraison terminée
+    // Il s'arrête uniquement si : nouvelle livraison / tab fermé / registre déconnecté
     private volatile boolean    postDeliveryPollActive = false;
 
     private void demarrerPollPostLivraison(double netRef, double grossRef, String ticketNo) {
-        if (postDeliveryPollActive) return; // déjà actif
+        if (postDeliveryPollActive) return;
         postDeliveryPollActive = true;
-        final long startMs = System.currentTimeMillis();
-        LogBus.api(node, "[POST-LIVRAISON] Poll fuite démarré — netRef=" + netRef
-            + "L ticket=" + ticketNo + " seuil=" + POST_DELIVERY_LEAK_THRESHOLD_L + "L");
+        LogBus.api(node, "[POST-LIVRAISON] Poll fuite demarré — netRef=" + netRef
+            + "L ticket=" + ticketNo + " seuil=" + POST_DELIVERY_LEAK_THRESHOLD_L + "L"
+            + " — actif jusqu'a nouvelle livraison ou fermeture du tab");
 
         Runnable pollRunnable = new Runnable() {
             @Override
@@ -1273,6 +1274,8 @@ public class RegisterTabFragment extends Fragment {
                 if (controller == null) { postDeliveryPollActive = false; return; }
 
                 // Arrêt si une nouvelle livraison a démarré
+                // NE PAS arrêter sur RUNNING_PAUSED ou FLOWING — c'est une erreur
+                // Le poll ne doit pas interférer avec un cycle actif
                 DeliveryState st = controller.getState();
                 if (st == DeliveryState.RUNNING_FLOWING
                         || st == DeliveryState.RUNNING_PAUSED
@@ -1283,41 +1286,50 @@ public class RegisterTabFragment extends Fragment {
                     return;
                 }
 
-                // Arrêt après 3 minutes
-                if (System.currentTimeMillis() - startMs > POST_DELIVERY_MAX_DURATION_MS) {
-                    postDeliveryPollActive = false;
-                    LogBus.api(node, "[POST-LIVRAISON] Arrêt — durée max atteinte (3 min)");
-                    return;
-                }
+                // ✅ Forcer une lecture active des compteurs du registre
+                // En état CONNECTED, liveTickFuture est arrêté dans DeliveryController.
+                // requestLiveSample() force une lecture LCP des compteurs net/gross
+                // pour détecter toute augmentation même longtemps après la livraison.
+                // Compatible Android 9-15 : appel depuis le thread UI via bg.execute
+                bg.execute(() -> {
+                    try {
+                        if (controller != null) controller.requestLiveSample();
+                    } catch (Exception ignored) {}
+                });
 
-                // Lire le net courant
-                double netCourant = -1.0;
-                double grossCourant = -1.0;
-                try {
-                    netCourant   = controller.getLastNet();
-                    grossCourant = controller.getLastGross();
-                } catch (Exception ignored) {}
+                // Attendre que requestLiveSample() ait mis à jour lastTick (200ms)
+                // puis lire le net courant
+                ui.postDelayed(() -> {
+                    if (!postDeliveryPollActive || !isAdded() || getView() == null) return;
 
-                if (netCourant < 0) {
-                    // Pas de tick disponible — replanifier
+                    double netCourant = -1.0;
+                    double grossCourant = -1.0;
+                    try {
+                        netCourant   = controller.getLastNet();
+                        grossCourant = controller.getLastGross();
+                    } catch (Exception ignored) {}
+
+                    if (netCourant < 0) {
+                        // Pas de tick disponible — replanifier
+                        ui.postDelayed(this, POST_DELIVERY_POLL_INTERVAL_MS);
+                        return;
+                    }
+
+                    double delta = netCourant - netRef;
+                    LogBus.api(node, "[POST-LIVRAISON] net=" + netCourant
+                        + "L ref=" + netRef + "L delta=" + String.format(java.util.Locale.ROOT, "%.3f", delta) + "L");
+
+                    if (delta >= POST_DELIVERY_LEAK_THRESHOLD_L) {
+                        // ⚠ Fuite détectée — arrêt poll + alerte
+                        postDeliveryPollActive = false;
+                        afficherAlerteVanneOuverte(netRef, netCourant, grossRef, grossCourant,
+                            ticketNo, delta);
+                        return;
+                    }
+
+                    // Pas de fuite — replanifier (pas de durée max)
                     ui.postDelayed(this, POST_DELIVERY_POLL_INTERVAL_MS);
-                    return;
-                }
-
-                double delta = netCourant - netRef;
-                LogBus.api(node, "[POST-LIVRAISON] net=" + netCourant
-                    + "L ref=" + netRef + "L delta=" + delta + "L");
-
-                if (delta >= POST_DELIVERY_LEAK_THRESHOLD_L) {
-                    // ⚠ Fuite détectée
-                    postDeliveryPollActive = false;
-                    afficherAlerteVanneOuverte(netRef, netCourant, grossRef, grossCourant,
-                        ticketNo, delta);
-                    return;
-                }
-
-                // Pas de fuite — replanifier
-                ui.postDelayed(this, POST_DELIVERY_POLL_INTERVAL_MS);
+                }, 200);
             }
         };
 
@@ -1377,27 +1389,112 @@ public class RegisterTabFragment extends Fragment {
         if (controller == null) return;
         bg.execute(() -> {
             try {
-                // Imprimer un nouveau ticket avec les volumes réels
-                controller.api_ticketReprintCurrent(); // reimprime le dernier ticket avec volumes reels
-                LogBus.api(node, "[POST-LIVRAISON] Impression ticket volumes réels — net="
-                    + netFinal + "L ticket_ref=" + ticketNoOriginal);
-                // Lire le nouveau numéro de ticket après impression
-                String newTicketNo = null;
+                // ✅ Impression custom avec les volumes réels courants
+                // N'utilise PAS api_ticketReprintCurrent() qui imprime l'ancien ticket du registre
+                // Utilise le même mécanisme que lancerImpressionCustom() — ligne par ligne via opPrintText
+                // Compatible Android 9-15 : appel depuis bg.execute, pas depuis le thread UI
+                double netRef = controller.netAtDeliveryEnd;
+                double grossRef = controller.grossAtDeliveryEnd;
+                double delta = netFinal - netRef;
+
+                // Récupérer les infos du lastResultJson pour le ticket
+                String woNum = "", saleNo = "", serialId = "";
                 try {
-                    com.pa.lcr.lcp.ApiResult snap = controller.api_tickSnapshot();
-                    if (snap != null && snap.data != null) {
-                        newTicketNo = snap.data.optString("ticket_no", null);
+                    String last = com.pa.lcrdemo.DeepLinkHandler.lastResultJson;
+                    if (last != null) {
+                        org.json.JSONObject j = new org.json.JSONObject(last);
+                        woNum = j.optString("wonum", "");
+                        org.json.JSONObject payload = j.optJSONObject("payload");
+                        if (payload != null) {
+                            org.json.JSONObject result = payload.optJSONObject("result");
+                            if (result != null) {
+                                saleNo   = result.optString("sale_no",   "");
+                                serialId = result.optString("serial_id", "");
+                            }
+                        }
                     }
                 } catch (Exception ignored) {}
-                final String finalTicket = newTicketNo;
-                logFuiteVanneDataverse(
-                    controller.netAtDeliveryEnd, netFinal,
-                    controller.grossAtDeliveryEnd, grossFinal,
-                    ticketNoOriginal + (finalTicket != null ? "→" + finalTicket : ""),
-                    netFinal - controller.netAtDeliveryEnd
-                );
+
+                // Construire le ticket incident fuite — 30 colonnes max (limite imprimante LCR-II)
+                int cols = 30;
+                String sep   = "=".repeat(cols);
+                String dashs = "-".repeat(cols);
+                java.util.List<String> lignes = new java.util.ArrayList<>();
+                lignes.add(sep);
+                lignes.add(center("INCIDENT VANNE", cols));
+                lignes.add(sep);
+                lignes.add("WO:" + woNum);
+                lignes.add("Tkt:" + ticketNoOriginal);
+                lignes.add("Ser:" + serialId);
+                lignes.add(dashs);
+                lignes.add(String.format(java.util.Locale.ROOT, "NET ref:%.3fL", netRef));
+                lignes.add(String.format(java.util.Locale.ROOT, "NET fin:%.3fL", netFinal));
+                lignes.add(String.format(java.util.Locale.ROOT, "GROSS: %.3fL", grossFinal));
+                lignes.add(String.format(java.util.Locale.ROOT, "DELTA:+%.3fL", delta));
+                lignes.add(dashs);
+                lignes.add("FUITE POST-PRESET");
+                lignes.add(new java.text.SimpleDateFormat("dd/MM HH:mm:ss",
+                    java.util.Locale.ROOT).format(new java.util.Date()));
+                lignes.add(sep);
+                lignes.add("");
+
+                // Envoyer ligne par ligne via opPrintText
+                if (tabTransportKey != null) {
+                    MediaTransportManager.get(requireContext())
+                        .activateExclusive(tabTransportKey, "POST_LIVRAISON_PRINT");
+                }
+                for (String ligne : lignes) {
+                    try {
+                        controller.api_printTextLine(ligne);
+                        Thread.sleep(150);
+                    } catch (Exception e) {
+                        LogBus.api(node, "[POST-LIVRAISON] ERR ligne impression: " + safeMsg(e));
+                    }
+                }
+
+                LogBus.api(node, "[POST-LIVRAISON] Ticket incident imprimé — net=" + netFinal
+                    + "L ref=" + netRef + "L delta=" + delta + "L");
+
+                // ✅ Enregistrer dans LcrDeliveryStatusDb (filgo_lcr_delivery_status)
+                // TYPE_REPRINT réutilisé — ajouter TYPE_FUITE_VANNE si la colonne est créée
+                try {
+                    android.content.ContentValues cv = new android.content.ContentValues();
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,        woNum);
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO,     ticketNoOriginal);
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO_REF, ticketNoOriginal);
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,         netFinal);
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L,       grossFinal);
+                    // TYPE_REPRINT — à remplacer par TYPE_FUITE_VANNE quand la constante est ajoutée
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_REPRINT);
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,        "FUITE_VANNE");
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE,     "INCIDENT");
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
+                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                    lcrDb.insertDelivery(cv);
+                    LogBus.api(node, "[POST-LIVRAISON] Incident enregistré dans LcrDeliveryStatusDb PENDING");
+                } catch (Exception e) {
+                    LogBus.api(node, "[POST-LIVRAISON] ERR DB: " + safeMsg(e));
+                }
+
+                // Toast confirmation sur thread UI
+                ui.post(() -> {
+                    if (!isAdded() || getView() == null) return;
+                    android.widget.Toast.makeText(requireContext(),
+                        "Incident enregistré et ticket imprimé",
+                        android.widget.Toast.LENGTH_SHORT).show();
+                });
+
             } catch (Exception e) {
-                LogBus.api(node, "[POST-LIVRAISON] Erreur impression: " + e.getMessage());
+                LogBus.api(node, "[POST-LIVRAISON] ERR: " + e.getMessage());
+                ui.post(() -> {
+                    if (!isAdded() || getView() == null) return;
+                    android.widget.Toast.makeText(requireContext(),
+                        "Erreur impression incident: " + safeMsg(e),
+                        android.widget.Toast.LENGTH_SHORT).show();
+                });
             }
         });
     }
@@ -1671,24 +1768,24 @@ public class RegisterTabFragment extends Fragment {
                     }
                 } catch (Exception ignored) {}
 
-                // Construire les lignes du ticket
-                int cols = 40;
+                // Construire les lignes du ticket — 30 colonnes max (limite imprimante LCR-II: 25-30)
+                int cols = 30;
                 String sep = "=".repeat(cols);
                 String dashs = "-".repeat(cols);
                 java.util.List<String> lines = new java.util.ArrayList<>();
                 lines.add(sep);
                 lines.add(center("TICKET DE LIVRAISON", cols));
                 lines.add(sep);
-                lines.add("WO       : " + woNum);
-                lines.add("Ticket # : " + ticketNo);
-                lines.add("Vente #  : " + saleNo);
-                lines.add("Serie    : " + serialId);
+                lines.add("WO    : " + woNum);
+                lines.add("Tkt # : " + ticketNo);
+                lines.add("Vente : " + saleNo);
+                lines.add("Serie : " + serialId);
                 lines.add(dashs);
-                lines.add(String.format("NET      : %.1f L", netL));
-                lines.add(String.format("GROSS    : %.1f L", grossL));
+                lines.add(String.format(java.util.Locale.ROOT, "NET   : %.3f L", netL));
+                lines.add(String.format(java.util.Locale.ROOT, "GROSS : %.3f L", grossL));
                 lines.add(dashs);
-                lines.add("Debut    : " + formatUtc(startUtc));
-                lines.add("Fin      : " + formatUtc(endUtc));
+                lines.add("Debut : " + formatUtc(startUtc));
+                lines.add("Fin   : " + formatUtc(endUtc));
                 lines.add(sep);
                 lines.add("");
 
