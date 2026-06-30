@@ -1016,15 +1016,16 @@ public class RegisterTabFragment extends Fragment {
                             }
                         } catch (Exception ignored) {}
 
-                        // Lire net/gross courant depuis le hardware
-                        // readNetGrossFromHardware() utilise cachedDigits existant
-                        // sans appeler ensureDigits() — ne casse pas les decimales
+                        // Lire net/gross courant via api_tickSnapshot
+                        // Meme approche que le bouton B — fiable en CONNECTED
                         double netRegistre   = -1.0;
                         double grossRegistre = -1.0;
                         try {
-                            double[] hw = c.readNetGrossFromHardware();
-                            netRegistre   = hw[0];
-                            grossRegistre = hw[1];
+                            ApiResult snap = c.api_tickSnapshot();
+                            if (snap != null && snap.data != null) {
+                                netRegistre   = snap.data.optDouble("net",   -1.0);
+                                grossRegistre = snap.data.optDouble("gross", -1.0);
+                            }
                         } catch (Exception ignored) {}
                         final String fTicketNoBefore = ticketNoBefore;
                         final String fWoNum          = woNum;
@@ -2339,9 +2340,11 @@ public class RegisterTabFragment extends Fragment {
                     double grossCourant = -1.0;
                     try {
                         if (controller != null) {
-                            double[] hw = controller.readNetGrossFromHardware();
-                            netCourant   = hw[0];
-                            grossCourant = hw[1];
+                            ApiResult snap = controller.api_tickSnapshot();
+                            if (snap != null && snap.data != null) {
+                                netCourant   = snap.data.optDouble("net",   -1.0);
+                                grossCourant = snap.data.optDouble("gross", -1.0);
+                            }
                         }
                     } catch (Exception ignored) {}
                     final double fNet   = netCourant;
