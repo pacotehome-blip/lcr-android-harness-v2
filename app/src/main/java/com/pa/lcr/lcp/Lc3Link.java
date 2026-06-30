@@ -747,20 +747,18 @@ public class Lc3Link extends LcpLink {
     @Override
     public String getLeakAlertMessage(String ticketNo, double netRef,
             double netNow, double delta) {
-        return "⚠ FERMEZ LA VANNE MANUELLEMENT
-\n"
-            + "Ticket : " + ticketNo + "\n"
-            + String.format(java.util.Locale.ROOT,
-                "Volume au preset  : %.3f L net\n"
-              + "Volume actuel     : %.3f L net\n"
-              + "Volume additionnel: %.3f L
-
-",
-                netRef, netNow, delta)
-            + "Le registre LC3 a atteint PRESET STOP.\n"
-            + "La vanne doit être fermée manuellement.\n"
-            + "Fermez la vanne physique immédiatement\n"
-            + "avant de continuer.";
+        // LC3 : pas de controle solenoide via protocole VT-100.
+        // Apres PRESET STOP, le chauffeur ferme la vanne manuellement.
+        StringBuilder sb = new StringBuilder();
+        sb.append("FERMEZ LA VANNE MANUELLEMENT").append("\n\n");
+        sb.append("Ticket : ").append(ticketNo).append("\n");
+        sb.append(String.format(java.util.Locale.ROOT, "Volume au preset   : %.3f L net\n", netRef));
+        sb.append(String.format(java.util.Locale.ROOT, "Volume actuel      : %.3f L net\n", netNow));
+        sb.append(String.format(java.util.Locale.ROOT, "Volume additionnel : %.3f L\n\n", delta));
+        sb.append("Le registre LC3 a atteint PRESET STOP.").append("\n");
+        sb.append("La vanne doit etre fermee manuellement.").append("\n");
+        sb.append("Fermez la vanne physique immediatement avant de continuer.");
+        return sb.toString();
     }
 
 

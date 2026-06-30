@@ -781,21 +781,19 @@ public class LcpLink {
      */
     public String getLeakAlertMessage(String ticketNo, double netRef,
             double netNow, double delta) {
-        // LCR-II — le registre a coupé le solénoïde, volume inattendu
-        return "⚠ VOLUME DÉTECTÉ APRÈS COUPURE DU REGISTRE
-\n"
-            + "Ticket : " + ticketNo + "\n"
-            + String.format(java.util.Locale.ROOT,
-                "Volume au preset  : %.3f L net\n"
-              + "Volume actuel     : %.3f L net\n"
-              + "Volume additionnel: %.3f L
-
-",
-                netRef, netNow, delta)
-            + "Le registre LCR-II a coupé le solénoïde au preset.\n"
-            + "Un volume continue d'être mesuré — vérifiez :\n"
-            + "  · La vanne physique et le circuit hydraulique\n"
-            + "  · Le solénoïde (défaillance possible)\n"
-            + "  · Toute vanne de bypass ouverte manuellement";
+        // LCR-II : le registre coupe le solenoide au preset via commande hardware.
+        // Si du volume sort apres DONE, defaillance mecanique ou electrique.
+        StringBuilder sb = new StringBuilder();
+        sb.append("VOLUME DETECTE APRES COUPURE DU REGISTRE").append("\n\n");
+        sb.append("Ticket : ").append(ticketNo).append("\n");
+        sb.append(String.format(java.util.Locale.ROOT, "Volume au preset   : %.3f L net\n", netRef));
+        sb.append(String.format(java.util.Locale.ROOT, "Volume actuel      : %.3f L net\n", netNow));
+        sb.append(String.format(java.util.Locale.ROOT, "Volume additionnel : %.3f L\n\n", delta));
+        sb.append("Le registre LCR-II a coupe le solenoide au preset.").append("\n");
+        sb.append("Un volume continue d'etre mesure - verifiez :").append("\n");
+        sb.append("  - La vanne physique et le circuit hydraulique").append("\n");
+        sb.append("  - Le solenoide (defaillance possible)").append("\n");
+        sb.append("  - Toute vanne de bypass ouverte manuellement");
+        return sb.toString();
     }
 }
