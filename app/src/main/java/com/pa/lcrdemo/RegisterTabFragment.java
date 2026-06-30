@@ -1044,18 +1044,11 @@ public class RegisterTabFragment extends Fragment {
                             ui.post(() -> {
                                 if (!isAdded() || getView() == null) return;
                                 StringBuilder sb = new StringBuilder();
-                                sb.append("DIVERGENCE DETECTEE
-
-");
-                                sb.append("Ticket ref : ").append(fTicketNoBefore).append("
-");
-                                sb.append(String.format(java.util.Locale.ROOT, "NET WO       : %.3f L
-", fNetWo));
-                                sb.append(String.format(java.util.Locale.ROOT, "NET registre : %.3f L
-", fNetReg));
-                                sb.append(String.format(java.util.Locale.ROOT, "DELTA        : %.3f L
-
-", fNetReg - fNetWo));
+                                sb.append("DIVERGENCE DETECTEE\n\n");
+                                sb.append("Ticket ref : ").append(fTicketNoBefore).append("\n");
+                                sb.append(String.format(java.util.Locale.ROOT, "NET WO       : %.3f L\n", fNetWo));
+                                sb.append(String.format(java.util.Locale.ROOT, "NET registre : %.3f L\n", fNetReg));
+                                sb.append(String.format(java.util.Locale.ROOT, "DELTA        : %.3f L\n\n", fNetReg - fNetWo));
                                 sb.append("Reprint standard bloque.");
                                 new android.app.AlertDialog.Builder(requireContext())
                                     .setTitle("Reprint bloque - Divergence")
