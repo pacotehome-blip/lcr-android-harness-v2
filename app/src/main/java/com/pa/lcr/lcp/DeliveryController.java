@@ -328,8 +328,11 @@ private void reproEvent(String level, String type, String message, JSONObject da
  private volatile String activeMedia = null;
 
  // ===== Livraison métier (auto-clôture) =====
- private volatile boolean deliveryInProgress = false;
- private volatile Long currentDeliveryAttemptId = null;
+     private volatile boolean deliveryInProgress = false;
+    // ✅ Référence post-livraison pour détection fuite vanne (seuil 0.5L)
+    public volatile double  netAtDeliveryEnd   = -1.0;
+    public volatile double  grossAtDeliveryEnd = -1.0;
+    public volatile String  ticketNoAtEnd      = null; private volatile Long currentDeliveryAttemptId = null;
  private volatile long deliveryStartMs = 0L;
 // LIVE
     private volatile boolean flowOffStable = false;
@@ -661,6 +664,17 @@ private void reproEvent(String level, String type, String message, JSONObject da
 
     // ====== DeliveryControllerPort ======
     @Override public DeliveryState getState() { return state; }
+
+    /** Net courant en litres depuis le dernier tick — -1.0 si aucun tick disponible */
+    public double getLastNet() {
+        LastTick t = lastTick;
+        return (t != null) ? t.net : -1.0;
+    }
+    /** Gross courant en litres depuis le dernier tick */
+    public double getLastGross() {
+        LastTick t = lastTick;
+        return (t != null) ? t.gross : -1.0;
+    }
     @Override public boolean isPaused() { return state == DeliveryState.RUNNING_PAUSED; }
 
     @Override
@@ -3368,6 +3382,16 @@ private String resolveActiveMedia() {
      final long startMs = (deliveryStartMs > 0L) ? deliveryStartMs : 0L;
      deliveryStartMs = 0L;
 
+     // ✅ Sauvegarder net/gross/ticket au moment exact de la fin de livraison
+     // Utilisé par RegisterTabFragment pour le poll de détection fuite vanne (seuil 0.5L)
+     try {
+         LastTick snapEnd = lastTick;
+         if (snapEnd != null) {
+             netAtDeliveryEnd   = snapEnd.net;
+             grossAtDeliveryEnd = snapEnd.gross;
+         }
+     } catch (Exception ignored) {}
+
      try {
          DeliveryLogStore store = this.logStore;
          if (store == null) return;
@@ -3377,6 +3401,7 @@ private String resolveActiveMedia() {
          String saleNo = null;
          try { serialId = decodeAzString(lcpGetField(FIELD_SERIAL_ID)); } catch (Exception ignored) {}
          try { ticketNo = readTicketNo23(); } catch (Exception ignored) {}
+         try { ticketNoAtEnd = ticketNo; } catch (Exception ignored) {} // ✅ mémoriser pour alerte fuite
          try { saleNo = readSaleNo22(); } catch (Exception ignored) {}
 
          if (serialId == null || serialId.trim().isEmpty()) serialId = "__UNKNOWN__";

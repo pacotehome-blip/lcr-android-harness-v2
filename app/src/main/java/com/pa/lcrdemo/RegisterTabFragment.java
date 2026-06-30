@@ -436,7 +436,6 @@ public class RegisterTabFragment extends Fragment {
                 if (state == DeliveryState.ENDED) {
                     if (cancelInProgress) {
                         // Annulation — ne pas retourner dans FSM
-                        // Remettre l'UI à zéro pour permettre une nouvelle livraison
                         cancelInProgress = false;
                         if (txtLive    != null) txtLive.setText("LIVE: CONNECTED — prêt pour nouvelle livraison");
                         if (txtQtyNet  != null) txtQtyNet.setText("NET: 0.0");
@@ -446,6 +445,20 @@ public class RegisterTabFragment extends Fragment {
                     } else {
                         notifyDeliveryEndedToMainActivity();
                     }
+                }
+
+                // ✅ Poll post-livraison — détection fuite vanne après CONNECTED
+                // Démarre uniquement si on vient de RUNNING_FLOWING ou RUNNING_PAUSED
+                // Ne démarre PAS pendant un cycle actif (RUNNING_FLOWING, RUNNING_PAUSED, PRESTART, ENDING)
+                if (state == DeliveryState.CONNECTED && controller != null
+                        && controller.netAtDeliveryEnd > 0
+                        && controller.ticketNoAtEnd != null
+                        && !controller.ticketNoAtEnd.isEmpty()) {
+                    demarrerPollPostLivraison(
+                        controller.netAtDeliveryEnd,
+                        controller.grossAtDeliveryEnd,
+                        controller.ticketNoAtEnd
+                    );
                 }
             });
         }
@@ -580,6 +593,7 @@ public class RegisterTabFragment extends Fragment {
 
     @Override
     public void onStop() {
+        arreterPollPostLivraison(); // ✅ arrêt poll fuite si tab quitte
         detachUiListenerSafe();
         LogBus.removeListener(logListener);
         try { requireContext().unregisterReceiver(usbStateReceiver); } catch (Exception ignored) {}
@@ -1210,6 +1224,164 @@ public class RegisterTabFragment extends Fragment {
         ui.postDelayed(() -> runStatusBLikeButton("AUTO_AFTER_TAB_CREATE"), 250);
         if (userInitiated) LogBus.api(node, "Connect TAB: 1 - UI attached");
         scheduleLogRefresh();
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Poll post-livraison — détection fuite vanne (seuil 0.5L)
+    // ─────────────────────────────────────────────────────────────────
+
+    private static final double POST_DELIVERY_LEAK_THRESHOLD_L = 0.5;
+    private static final long   POST_DELIVERY_POLL_INTERVAL_MS = 5_000;
+    private static final long   POST_DELIVERY_MAX_DURATION_MS  = 3 * 60 * 1000; // 3 minutes
+    private volatile boolean    postDeliveryPollActive = false;
+
+    private void demarrerPollPostLivraison(double netRef, double grossRef, String ticketNo) {
+        if (postDeliveryPollActive) return; // déjà actif
+        postDeliveryPollActive = true;
+        final long startMs = System.currentTimeMillis();
+        LogBus.api(node, "[POST-LIVRAISON] Poll fuite démarré — netRef=" + netRef
+            + "L ticket=" + ticketNo + " seuil=" + POST_DELIVERY_LEAK_THRESHOLD_L + "L");
+
+        Runnable pollRunnable = new Runnable() {
+            @Override
+            public void run() {
+                if (!postDeliveryPollActive || !isAdded() || getView() == null) return;
+                if (controller == null) { postDeliveryPollActive = false; return; }
+
+                // Arrêt si une nouvelle livraison a démarré
+                DeliveryState st = controller.getState();
+                if (st == DeliveryState.RUNNING_FLOWING
+                        || st == DeliveryState.RUNNING_PAUSED
+                        || st == DeliveryState.PRESTART
+                        || st == DeliveryState.ENDING) {
+                    postDeliveryPollActive = false;
+                    LogBus.api(node, "[POST-LIVRAISON] Arrêt — nouvelle livraison active");
+                    return;
+                }
+
+                // Arrêt après 3 minutes
+                if (System.currentTimeMillis() - startMs > POST_DELIVERY_MAX_DURATION_MS) {
+                    postDeliveryPollActive = false;
+                    LogBus.api(node, "[POST-LIVRAISON] Arrêt — durée max atteinte (3 min)");
+                    return;
+                }
+
+                // Lire le net courant
+                double netCourant = -1.0;
+                double grossCourant = -1.0;
+                try {
+                    netCourant   = controller.getLastNet();
+                    grossCourant = controller.getLastGross();
+                } catch (Exception ignored) {}
+
+                if (netCourant < 0) {
+                    // Pas de tick disponible — replanifier
+                    ui.postDelayed(this, POST_DELIVERY_POLL_INTERVAL_MS);
+                    return;
+                }
+
+                double delta = netCourant - netRef;
+                LogBus.api(node, "[POST-LIVRAISON] net=" + netCourant
+                    + "L ref=" + netRef + "L delta=" + delta + "L");
+
+                if (delta >= POST_DELIVERY_LEAK_THRESHOLD_L) {
+                    // ⚠ Fuite détectée
+                    postDeliveryPollActive = false;
+                    afficherAlerteVanneOuverte(netRef, netCourant, grossRef, grossCourant,
+                        ticketNo, delta);
+                    return;
+                }
+
+                // Pas de fuite — replanifier
+                ui.postDelayed(this, POST_DELIVERY_POLL_INTERVAL_MS);
+            }
+        };
+
+        ui.postDelayed(pollRunnable, POST_DELIVERY_POLL_INTERVAL_MS);
+    }
+
+    private void arreterPollPostLivraison() {
+        postDeliveryPollActive = false;
+    }
+
+    private void afficherAlerteVanneOuverte(double netRef, double netCourant,
+            double grossRef, double grossCourant, String ticketNo, double delta) {
+        if (!isAdded() || getView() == null) return;
+
+        String msg = "⚠ VOLUME DÉTECTÉ APRÈS ARRÊT DE LIVRAISON
+
+"
+            + "Ticket : " + ticketNo + "
+"
+            + "Volume au preset  : " + String.format(Locale.ROOT, "%.3f", netRef) + " L net
+"
+            + "Volume actuel     : " + String.format(Locale.ROOT, "%.3f", netCourant) + " L net
+"
+            + "Volume additionnel: " + String.format(Locale.ROOT, "%.3f", delta) + " L
+
+"
+            + "Vérifiez que la vanne est bien fermée.
+"
+            + "Si du produit a coulé, terminez la livraison avec les volumes réels.";
+
+        LogBus.api(node, "[ALERTE-FUITE] ticket=" + ticketNo
+            + " delta=" + delta + "L net=" + netCourant + "L");
+
+        new android.app.AlertDialog.Builder(requireContext())
+            .setTitle("⚠ Vanne encore ouverte ?")
+            .setMessage(msg)
+            .setCancelable(false)
+            .setPositiveButton("Terminer avec volumes réels", (d, w) -> {
+                // Terminer la livraison avec le net/gross final et imprimer nouveau ticket
+                terminerPostLivraisonAvecVolumesReels(netCourant, grossCourant, ticketNo);
+            })
+            .setNegativeButton("J'ai avisé le répartiteur", (d, w) -> {
+                // Rester dans l'APK — log Dataverse de l'incident
+                logFuiteVanneDataverse(netRef, netCourant, grossRef, grossCourant,
+                    ticketNo, delta);
+            })
+            .show();
+    }
+
+    private void terminerPostLivraisonAvecVolumesReels(double netFinal, double grossFinal,
+            String ticketNoOriginal) {
+        if (controller == null) return;
+        bg.execute(() -> {
+            try {
+                // Imprimer un nouveau ticket avec les volumes réels
+                controller.api_printCustomTicket();
+                LogBus.api(node, "[POST-LIVRAISON] Impression ticket volumes réels — net="
+                    + netFinal + "L ticket_ref=" + ticketNoOriginal);
+                // Lire le nouveau numéro de ticket après impression
+                String newTicketNo = null;
+                try {
+                    com.pa.lcr.lcp.ApiResult snap = controller.api_tickSnapshot();
+                    if (snap != null && snap.data != null) {
+                        newTicketNo = snap.data.optString("ticket_no", null);
+                    }
+                } catch (Exception ignored) {}
+                final String finalTicket = newTicketNo;
+                logFuiteVanneDataverse(
+                    controller.netAtDeliveryEnd, netFinal,
+                    controller.grossAtDeliveryEnd, grossFinal,
+                    ticketNoOriginal + (finalTicket != null ? "→" + finalTicket : ""),
+                    netFinal - controller.netAtDeliveryEnd
+                );
+            } catch (Exception e) {
+                LogBus.api(node, "[POST-LIVRAISON] Erreur impression: " + e.getMessage());
+            }
+        });
+    }
+
+    private void logFuiteVanneDataverse(double netRef, double netFinal,
+            double grossRef, double grossFinal, String ticketNo, double delta) {
+        // Log SQLite pour sync Dataverse future
+        LogBus.api(node, "[FUITE-VANNE] ticket=" + ticketNo
+            + " netRef=" + netRef + "L netFinal=" + netFinal
+            + "L grossRef=" + grossRef + "L grossFinal=" + grossFinal
+            + "L delta=" + delta + "L — INCIDENT ENREGISTRÉ");
+        // TODO: colonne Dataverse lcr_post_delivery_leak_l + lcr_post_delivery_ticket_no
+        // à ajouter quand les colonnes seront créées dans la solution FilgoSonic
     }
 
     private void attachUiListenerIfNeeded() {
