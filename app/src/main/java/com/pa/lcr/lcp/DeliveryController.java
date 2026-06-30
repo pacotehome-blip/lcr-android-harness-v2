@@ -706,18 +706,16 @@ private void reproEvent(String level, String type, String message, JSONObject da
     }
 
     /**
-     * Lit les compteurs NET et GROSS directement depuis le registre hardware.
-     * Utilise cachedDigits existant — ne relit PAS FIELD_DECIMALS.
-     * A utiliser en etat CONNECTED pour detecter une fuite post-livraison.
-     * Compatible Android 9-15 : appel depuis bg.execute uniquement.
+     * Lit net/gross depuis le hardware via withLcpLock — compatible avec le protocole LCP.
+     * Utilise cachedDigits existant sans appeler ensureDigits().
      * @return double[]{net, gross} en litres, ou {-1,-1} si erreur
      */
     public double[] readNetGrossFromHardware() {
         try {
             int digits = (cachedDigits >= 0) ? cachedDigits : 1;
             double scale = Math.pow(10, digits);
-            int g = beI32(lcpGetField(FIELD_GROSS_COUNT));
-            int n = beI32(lcpGetField(FIELD_NET_COUNT));
+            int g = beI32(withLcpLock(() -> link.opGetField(FIELD_GROSS_COUNT)));
+            int n = beI32(withLcpLock(() -> link.opGetField(FIELD_NET_COUNT)));
             double netL   = (n & 0xFFFFFFFFL) / scale;
             double grossL = (g & 0xFFFFFFFFL) / scale;
             return new double[]{netL, grossL};
