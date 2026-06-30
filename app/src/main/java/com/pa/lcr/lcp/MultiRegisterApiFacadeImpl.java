@@ -1,5 +1,29 @@
 package com.pa.lcr.lcp;
 
+// ═══════════════════════════════════════════════════════════════════════════
+// COMPATIBILITÉ ANDROID : API 28 (Android 9) → API 35 (Android 15)
+// ───────────────────────────────────────────────────────────────────────────
+// Toute modification de ce fichier doit être testée sur :
+//   · Android 9  (API 28) — Samsung SM-T397U         · ADB 192.168.134.105:5555
+//   · Android 15 (API 35) — Samsung R52X508K2DR     · ADB 192.168.134.126:5555
+//
+// Règles obligatoires :
+//   1. Détecter la version à l'exécution via Build.VERSION.SDK_INT
+//   2. Appliquer le comportement EXPLICITEMENT par version — pas de spéculation
+//   3. Ne jamais utiliser d'API introduite après API 28 sans guard de version
+//   4. registerReceiver()  : RECEIVER_NOT_EXPORTED ou RECEIVER_EXPORTED sur API 34+
+//   5. PendingIntent       : FLAG_IMMUTABLE sur API 31+ · FLAG_MUTABLE + guard sur API 34+
+//   6. startForeground()   : type obligatoire sur API 34+ — doit matcher le manifest
+//
+// Constantes utiles :
+//   Build.VERSION_CODES.P                 = 28  (Android 9)
+//   Build.VERSION_CODES.Q                 = 29  (Android 10)
+//   Build.VERSION_CODES.S                 = 31  (Android 12)
+//   Build.VERSION_CODES.TIRAMISU          = 33  (Android 13)
+//   Build.VERSION_CODES.UPSIDE_DOWN_CAKE  = 34  (Android 14)
+//   Build.VERSION_CODES.VANILLA_ICE_CREAM = 35  (Android 15)
+// ═══════════════════════════════════════════════════════════════════════════
+
 import java.util.UUID;
 import java.util.Set;
 import java.util.Comparator;

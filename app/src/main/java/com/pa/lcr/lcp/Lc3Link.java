@@ -1,5 +1,29 @@
 package com.pa.lcr.lcp;
 
+// ═══════════════════════════════════════════════════════════════════════
+// COMPATIBILITÉ ANDROID : API 28 (Android 9) → API 35 (Android 15)
+// ───────────────────────────────────────────────────────────────────────
+// Toute modification de ce fichier doit être testée sur :
+//   · Android 9  (API 28) — Samsung SM-T397U  · ADB 192.168.134.105:5555
+//   · Android 15 (API 35) — Samsung R52X508K2DR · ADB 192.168.134.126:5555
+//
+// Règles obligatoires :
+//   1. Détecter la version à l'exécution via Build.VERSION.SDK_INT
+//   2. Appliquer le comportement EXPLICITEMENT par version — pas de spéculation
+//   3. Ne jamais utiliser d'API introduite après API 28 sans guard de version
+//   4. registerReceiver() : RECEIVER_NOT_EXPORTED ou RECEIVER_EXPORTED sur API 34+
+//   5. PendingIntent     : FLAG_IMMUTABLE sur API 31+ · FLAG_MUTABLE + guard sur API 34+
+//   6. startForeground() : type obligatoire sur API 34+ — doit matcher le manifest
+//
+// Constantes utiles :
+//   Build.VERSION_CODES.P                = 28  (Android 9)
+//   Build.VERSION_CODES.Q                = 29  (Android 10)
+//   Build.VERSION_CODES.S                = 31  (Android 12)
+//   Build.VERSION_CODES.TIRAMISU         = 33  (Android 13)
+//   Build.VERSION_CODES.UPSIDE_DOWN_CAKE = 34  (Android 14)
+//   Build.VERSION_CODES.VANILLA_ICE_CREAM= 35  (Android 15)
+// ═══════════════════════════════════════════════════════════════════════
+
 import com.pa.lcr.lcp.transport.TransportIo;
 
 import java.io.IOException;
@@ -724,25 +748,18 @@ public class Lc3Link extends LcpLink {
     public String getLeakAlertMessage(String ticketNo, double netRef,
             double netNow, double delta) {
         return "⚠ FERMEZ LA VANNE MANUELLEMENT
-
-"
-            + "Ticket : " + ticketNo + "
-"
+\n"
+            + "Ticket : " + ticketNo + "\n"
             + String.format(java.util.Locale.ROOT,
-                "Volume au preset  : %.3f L net
-"
-              + "Volume actuel     : %.3f L net
-"
+                "Volume au preset  : %.3f L net\n"
+              + "Volume actuel     : %.3f L net\n"
               + "Volume additionnel: %.3f L
 
 ",
                 netRef, netNow, delta)
-            + "Le registre LC3 a atteint PRESET STOP.
-"
-            + "La vanne doit être fermée manuellement.
-"
-            + "Fermez la vanne physique immédiatement
-"
+            + "Le registre LC3 a atteint PRESET STOP.\n"
+            + "La vanne doit être fermée manuellement.\n"
+            + "Fermez la vanne physique immédiatement\n"
             + "avant de continuer.";
     }
 

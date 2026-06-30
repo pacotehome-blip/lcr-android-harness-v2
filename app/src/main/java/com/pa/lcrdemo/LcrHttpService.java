@@ -1,5 +1,29 @@
 package com.pa.lcrdemo;
 
+// ═══════════════════════════════════════════════════════════════════════════
+// COMPATIBILITÉ ANDROID : API 28 (Android 9) → API 35 (Android 15)
+// ───────────────────────────────────────────────────────────────────────────
+// Toute modification de ce fichier doit être testée sur :
+//   · Android 9  (API 28) — Samsung SM-T397U         · ADB 192.168.134.105:5555
+//   · Android 15 (API 35) — Samsung R52X508K2DR     · ADB 192.168.134.126:5555
+//
+// Règles obligatoires :
+//   1. Détecter la version à l'exécution via Build.VERSION.SDK_INT
+//   2. Appliquer le comportement EXPLICITEMENT par version — pas de spéculation
+//   3. Ne jamais utiliser d'API introduite après API 28 sans guard de version
+//   4. registerReceiver()  : RECEIVER_NOT_EXPORTED ou RECEIVER_EXPORTED sur API 34+
+//   5. PendingIntent       : FLAG_IMMUTABLE sur API 31+ · FLAG_MUTABLE + guard sur API 34+
+//   6. startForeground()   : type obligatoire sur API 34+ — doit matcher le manifest
+//
+// Constantes utiles :
+//   Build.VERSION_CODES.P                 = 28  (Android 9)
+//   Build.VERSION_CODES.Q                 = 29  (Android 10)
+//   Build.VERSION_CODES.S                 = 31  (Android 12)
+//   Build.VERSION_CODES.TIRAMISU          = 33  (Android 13)
+//   Build.VERSION_CODES.UPSIDE_DOWN_CAKE  = 34  (Android 14)
+//   Build.VERSION_CODES.VANILLA_ICE_CREAM = 35  (Android 15)
+// ═══════════════════════════════════════════════════════════════════════════
+
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -69,27 +93,38 @@ public class LcrHttpService extends Service {
 
         Notification notif = buildNotification("APK Filgo — démarrage...");
 
+        // ✅ Détection de version à l'exécution — compatible Android 9 à 15
+        //
+        // Android 9  (API 28) : startForeground(id, notif) — pas de type
+        // Android 10 (API 29) : idem
+        // Android 11 (API 30) : idem
+        // Android 12 (API 31) : idem
+        // Android 13 (API 33) : idem
+        // Android 14 (API 34) : startForeground(id, notif, type) OBLIGATOIRE
+        //                        type DOIT correspondre au manifest (dataSync)
+        // Android 15 (API 35) : idem Android 14
+        //
+        // IMPORTANT : le type dans startForeground() doit correspondre exactement
+        // à foregroundServiceType déclaré dans AndroidManifest.xml (dataSync).
+        // Déclarer un type non présent dans le manifest cause une SecurityException.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            // Android 14+ (API 34+) — type obligatoire dans startForeground()
-            // dataSync         : sync données livraison vers Dataverse
-            // connectedDevice  : connexion registre BT SPP + USB-C OTG
-            // specialUse       : serveur HTTP local 8765/8766 pour répartiteur
+            // Android 14+ (API 34+) — type obligatoire, doit matcher le manifest
             startForeground(NOTIF_ID, notif,
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-                | android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-                | android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
-            Log.i(TAG, "startForeground avec type — Android 14+");
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
+            Log.i(TAG, "startForeground TYPE_DATA_SYNC — Android 14+ (API "
+                + Build.VERSION.SDK_INT + ")");
 
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            // Android 10-13 (API 29-33) — type optionnel, signature sans type
-            // foregroundServiceType dans manifest est déclaré mais non imposé à l'exécution
+            // Android 10-13 (API 29-33) — sans type obligatoire
             startForeground(NOTIF_ID, notif);
-            Log.i(TAG, "startForeground sans type — Android 10-13");
+            Log.i(TAG, "startForeground sans type — Android 10-13 (API "
+                + Build.VERSION.SDK_INT + ")");
 
         } else {
-            // Android 9 (API 28) — signature classique, aucun type
+            // Android 9 (API 28) — signature classique
             startForeground(NOTIF_ID, notif);
-            Log.i(TAG, "startForeground sans type — Android 9");
+            Log.i(TAG, "startForeground sans type — Android 9 (API "
+                + Build.VERSION.SDK_INT + ")");
         }
 
         new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
