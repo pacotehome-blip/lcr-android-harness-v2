@@ -2360,7 +2360,6 @@ public class RegisterTabFragment extends Fragment {
                         ui.postDelayed(this, POST_DELIVERY_POLL_INTERVAL_MS);
                     });
                 });
-                }, 200);
             }
         };
         ui.postDelayed(pollRunnable, POST_DELIVERY_POLL_INTERVAL_MS);
