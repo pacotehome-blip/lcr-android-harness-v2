@@ -1,5 +1,11 @@
 package com.pa.lcrdemo;
 
+// ═══════════════════════════════════════════════════════════════════════════
+// COMPATIBILITÉ ANDROID : API 28 (Android 9) → API 35 (Android 15)
+// Toute modification doit être testée sur Android 9 ET Android 15
+// Constantes : UPSIDE_DOWN_CAKE=34 VANILLA_ICE_CREAM=35
+// ═══════════════════════════════════════════════════════════════════════════
+
 import com.pa.lcr.lcp.transport.TransportIo;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -435,8 +441,6 @@ public class RegisterTabFragment extends Fragment {
                 // ✅ Retour Field Service quand livraison terminée
                 if (state == DeliveryState.ENDED) {
                     if (cancelInProgress) {
-                        // Annulation — ne pas retourner dans FSM
-                        // Remettre l'UI à zéro pour permettre une nouvelle livraison
                         cancelInProgress = false;
                         if (txtLive    != null) txtLive.setText("LIVE: CONNECTED — prêt pour nouvelle livraison");
                         if (txtQtyNet  != null) txtQtyNet.setText("NET: 0.0");
@@ -446,6 +450,16 @@ public class RegisterTabFragment extends Fragment {
                     } else {
                         notifyDeliveryEndedToMainActivity();
                     }
+                }
+                // ✅ Poll post-livraison — détection fuite vanne après CONNECTED
+                if (state == DeliveryState.CONNECTED && controller != null
+                        && controller.netAtDeliveryEnd > 0
+                        && controller.ticketNoAtEnd != null
+                        && !controller.ticketNoAtEnd.isEmpty()) {
+                    demarrerPollPostLivraison(
+                        controller.netAtDeliveryEnd,
+                        controller.grossAtDeliveryEnd,
+                        controller.ticketNoAtEnd);
                 }
             });
         }
@@ -574,12 +588,17 @@ public class RegisterTabFragment extends Fragment {
             requireContext().registerReceiver(usbStateReceiver, f,
                 Context.RECEIVER_NOT_EXPORTED);
         } else {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            requireContext().registerReceiver(usbStateReceiver, f, Context.RECEIVER_NOT_EXPORTED);
+        } else {
             requireContext().registerReceiver(usbStateReceiver, f);
+        }
         }
     }
 
     @Override
     public void onStop() {
+        arreterPollPostLivraison();
         detachUiListenerSafe();
         LogBus.removeListener(logListener);
         try { requireContext().unregisterReceiver(usbStateReceiver); } catch (Exception ignored) {}
@@ -952,10 +971,8 @@ public class RegisterTabFragment extends Fragment {
             }, 1500);
         });
 
-        // ✅ REPRINT: câblage du bouton Reprint (last ticket)
-        // ✅ Vérification divergence net/gross AVANT impression
-        // Si net/gross courant du registre != net/gross du WO (delta >= 0.5L)
-        // → bloquer reprint standard + alerter + impression custom incident
+        // ✅ REPRINT: vérification divergence net/gross avant impression
+        // Si delta >= 0.5L → bloquer reprint standard + alerter + ticket incident
         if (btnReprintTicket != null) {
             btnReprintTicket.setOnClickListener(v -> {
                 DeliveryController c = controller;
@@ -967,7 +984,7 @@ public class RegisterTabFragment extends Fragment {
                                     .activateExclusive(tabTransportKey, "REPRINT");
                         }
 
-                        // ✅ Lire ticket_no AVANT reprint (field #23 s'incrémente après)
+                        // Lire ticket_no AVANT reprint
                         String ticketNoBefore = "";
                         try {
                             ApiResult snap = c.api_tickSnapshot();
@@ -979,7 +996,7 @@ public class RegisterTabFragment extends Fragment {
                             }
                         } catch (Exception ignored) {}
 
-                        // ✅ Lire net/gross du WO (valeurs au moment de la livraison)
+                        // Lire net/gross du WO
                         double netWo = -1.0, grossWo = -1.0;
                         String woNum = "", woIdGuid = "";
                         try {
@@ -999,15 +1016,13 @@ public class RegisterTabFragment extends Fragment {
                             }
                         } catch (Exception ignored) {}
 
-                        // ✅ Forcer une lecture fraîche des compteurs du registre
+                        // Forcer lecture fraîche des compteurs du registre
                         try { c.requestLiveSample(); Thread.sleep(300); }
                         catch (Exception ignored) {}
 
-                        // Lire net/gross courant du registre
                         double netRegistre   = c.getLastNet();
                         double grossRegistre = c.getLastGross();
 
-                        // ✅ Vérifier divergence entre WO et registre
                         final String fTicketNoBefore = ticketNoBefore;
                         final String fWoNum          = woNum;
                         final String fWoIdGuid       = woIdGuid;
@@ -1020,49 +1035,50 @@ public class RegisterTabFragment extends Fragment {
                             && Math.abs(netRegistre - netWo) >= POST_DELIVERY_LEAK_THRESHOLD_L);
 
                         if (divergence) {
-                            // ⚠ Divergence détectée — bloquer reprint standard + alerter
                             double delta = netRegistre - netWo;
-                            LogBus.api(node, "[REPRINT] DIVERGENCE — netWO=" + netWo
-                                + "L netReg=" + netRegistre + "L delta=" + delta + "L ticket=" + ticketNoBefore);
-
+                            LogBus.api(node, "[REPRINT] DIVERGENCE netWO=" + netWo
+                                + "L netReg=" + netRegistre + "L delta=" + delta + "L");
                             ui.post(() -> {
                                 if (!isAdded() || getView() == null) return;
                                 StringBuilder sb = new StringBuilder();
-                                sb.append("DIVERGENCE DETECTEE\n\n");
-                                sb.append("Le registre affiche un volume different\n");
-                                sb.append("du bon de travail.\n\n");
-                                sb.append("Ticket ref : ").append(fTicketNoBefore).append("\n");
-                                sb.append(String.format(java.util.Locale.ROOT, "NET WO       : %.3f L\n", fNetWo));
-                                sb.append(String.format(java.util.Locale.ROOT, "NET registre : %.3f L\n", fNetReg));
-                                sb.append(String.format(java.util.Locale.ROOT, "DELTA        : %.3f L\n\n", fNetReg - fNetWo));
-                                sb.append("Le reprint standard NE SERA PAS effectue.\n");
-                                sb.append("Un ticket incident sera imprime.");
+                                sb.append("DIVERGENCE DETECTEE
 
+");
+                                sb.append("Le registre affiche un volume
+");
+                                sb.append("different du bon de travail.
+
+");
+                                sb.append("Ticket ref : ").append(fTicketNoBefore).append("
+");
+                                sb.append(String.format(java.util.Locale.ROOT, "NET WO       : %.3f L
+", fNetWo));
+                                sb.append(String.format(java.util.Locale.ROOT, "NET registre : %.3f L
+", fNetReg));
+                                sb.append(String.format(java.util.Locale.ROOT, "DELTA        : %.3f L
+
+", fNetReg - fNetWo));
+                                sb.append("Le reprint standard ne sera
+");
+                                sb.append("pas effectue.");
                                 new android.app.AlertDialog.Builder(requireContext())
-                                    .setTitle("Reprint bloqué — Divergence")
+                                    .setTitle("Reprint bloque - Divergence")
                                     .setMessage(sb.toString())
                                     .setCancelable(false)
-                                    .setPositiveButton("Imprimer ticket incident", (d, w) -> {
-                                        // Impression custom + DB avec les valeurs courantes
-                                        terminerPostLivraisonAvecVolumesReels(
-                                            fNetReg, fGrossReg, fTicketNoBefore);
-                                    })
-                                    .setNegativeButton("Aviser le répartiteur", (d, w) -> {
-                                        // Log sans impression
-                                        logFuiteVanneDataverse(fNetWo, fNetReg,
-                                            fGrossWo, fGrossReg, fTicketNoBefore,
-                                            fNetReg - fNetWo);
-                                    })
+                                    .setPositiveButton("Imprimer ticket incident", (d, w) ->
+                                        terminerPostLivraisonAvecVolumesReels(fNetReg, fGrossReg, fTicketNoBefore))
+                                    .setNegativeButton("Aviser le repartiteur", (d, w) ->
+                                        logFuiteVanneDataverse(fNetWo, fNetReg, fGrossWo, fGrossReg,
+                                            fTicketNoBefore, fNetReg - fNetWo))
                                     .show();
                             });
-                            return; // ← bloquer le reprint standard
+                            return;
                         }
 
-                        // ✅ Pas de divergence — reprint standard normal
+                        // Pas de divergence — reprint standard normal
                         ApiResult r = c.api_ticketReprintCurrent();
                         LogBus.api(node, "[REPRINT] " + (r != null ? r.msg : "null"));
 
-                        // ✅ Lire ticket_no APRÈS reprint
                         String ticketNoAfter = "";
                         double netL = 0, grossL = 0;
                         try {
@@ -1078,7 +1094,6 @@ public class RegisterTabFragment extends Fragment {
                             }
                         } catch (Exception ignored) {}
 
-                        // ✅ Créer nouvelle ligne REPRINT dans LcrDeliveryStatusDb
                         if (!ticketNoAfter.isEmpty() && !ticketNoAfter.equals(ticketNoBefore)) {
                             android.content.ContentValues cv = new android.content.ContentValues();
                             cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,       woNum);
@@ -1093,11 +1108,10 @@ public class RegisterTabFragment extends Fragment {
                             cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE,    "LIVRAISON");
                             cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
                                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
-
                             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
                                 new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
                             lcrDb.insertDelivery(cv);
-                            android.util.Log.i("REPRINT", "Nouveau ticket tracé: "
+                            android.util.Log.i("REPRINT", "Ticket trace: "
                                 + ticketNoBefore + " -> " + ticketNoAfter + " wo=" + woNum);
                         }
 
@@ -1541,7 +1555,7 @@ public class RegisterTabFragment extends Fragment {
                 } catch (Exception ignored) {}
 
                 // Construire les lignes du ticket
-                int cols = 40;
+                int cols = 30;
                 String sep = "=".repeat(cols);
                 String dashs = "-".repeat(cols);
                 java.util.List<String> lines = new java.util.ArrayList<>();
@@ -2304,4 +2318,189 @@ public class RegisterTabFragment extends Fragment {
             return Double.parseDouble(txtQtyGross.getText().toString().replace("GROSS: ", "").trim());
         } catch (Exception e) { return 0.0; }
     }
+    // ═══════════════════════════════════════════════════════════════════
+    // Poll post-livraison — détection fuite vanne (seuil 0.5L)
+    // Compatible Android 9-15 : pas d'API spécifique à une version
+    // ═══════════════════════════════════════════════════════════════════
+
+    private static final double POST_DELIVERY_LEAK_THRESHOLD_L = 0.5;
+    private static final long   POST_DELIVERY_POLL_INTERVAL_MS = 5_000;
+    private volatile boolean    postDeliveryPollActive = false;
+
+    private void demarrerPollPostLivraison(double netRef, double grossRef, String ticketNo) {
+        if (postDeliveryPollActive) return;
+        postDeliveryPollActive = true;
+        LogBus.api(node, "[POST-LIVRAISON] Poll demarré netRef=" + netRef + "L ticket=" + ticketNo);
+        Runnable pollRunnable = new Runnable() {
+            @Override public void run() {
+                if (!postDeliveryPollActive || !isAdded() || getView() == null) return;
+                if (controller == null) { postDeliveryPollActive = false; return; }
+                DeliveryState st = controller.getState();
+                if (st == DeliveryState.RUNNING_FLOWING || st == DeliveryState.RUNNING_PAUSED
+                        || st == DeliveryState.PRESTART  || st == DeliveryState.ENDING) {
+                    postDeliveryPollActive = false;
+                    LogBus.api(node, "[POST-LIVRAISON] Arret — nouvelle livraison active");
+                    return;
+                }
+                bg.execute(() -> {
+                    try { if (controller != null) controller.requestLiveSample(); }
+                    catch (Exception ignored) {}
+                });
+                ui.postDelayed(() -> {
+                    if (!postDeliveryPollActive || !isAdded() || getView() == null) return;
+                    double netCourant   = -1.0;
+                    double grossCourant = -1.0;
+                    try { netCourant = controller.getLastNet(); grossCourant = controller.getLastGross(); }
+                    catch (Exception ignored) {}
+                    if (netCourant < 0) { ui.postDelayed(this, POST_DELIVERY_POLL_INTERVAL_MS); return; }
+                    double delta = netCourant - netRef;
+                    LogBus.api(node, "[POST-LIVRAISON] net=" + netCourant + "L ref=" + netRef + "L delta="
+                        + String.format(java.util.Locale.ROOT, "%.3f", delta) + "L");
+                    if (delta >= POST_DELIVERY_LEAK_THRESHOLD_L) {
+                        postDeliveryPollActive = false;
+                        afficherAlerteVanneOuverte(netRef, netCourant, grossRef, grossCourant, ticketNo, delta);
+                        return;
+                    }
+                    ui.postDelayed(this, POST_DELIVERY_POLL_INTERVAL_MS);
+                }, 200);
+            }
+        };
+        ui.postDelayed(pollRunnable, POST_DELIVERY_POLL_INTERVAL_MS);
+    }
+
+    private void arreterPollPostLivraison() { postDeliveryPollActive = false; }
+
+    private void afficherAlerteVanneOuverte(double netRef, double netCourant,
+            double grossRef, double grossCourant, String ticketNo, double delta) {
+        if (!isAdded() || getView() == null) return;
+        String msg;
+        try {
+            com.pa.lcr.lcp.LcpLink link = null;
+            if (controller != null) {
+                try { link = (com.pa.lcr.lcp.LcpLink) controller.getLink(); } catch (Exception ignored) {}
+            }
+            msg = (link != null)
+                ? link.getLeakAlertMessage(ticketNo, netRef, netCourant, delta)
+                : "Volume detecte apres arret — ticket " + ticketNo
+                    + " — delta " + String.format(java.util.Locale.ROOT, "%.3f", delta) + " L";
+        } catch (Exception e) {
+            msg = "Volume detecte apres arret — ticket " + ticketNo;
+        }
+        LogBus.api(node, "[ALERTE-FUITE] ticket=" + ticketNo + " delta=" + delta + "L net=" + netCourant + "L");
+        new android.app.AlertDialog.Builder(requireContext())
+            .setTitle("Vanne encore ouverte ?")
+            .setMessage(msg)
+            .setCancelable(false)
+            .setPositiveButton("Terminer avec volumes reels", (d, w) ->
+                terminerPostLivraisonAvecVolumesReels(netCourant, grossCourant, ticketNo))
+            .setNegativeButton("J'ai avise le repartiteur", (d, w) ->
+                logFuiteVanneDataverse(netRef, netCourant, grossRef, grossCourant, ticketNo, delta))
+            .show();
+    }
+
+    private void terminerPostLivraisonAvecVolumesReels(double netFinal, double grossFinal,
+            String ticketNoOriginal) {
+        if (controller == null) return;
+        bg.execute(() -> {
+            try {
+                double netRef   = controller.netAtDeliveryEnd;
+                double grossRef = controller.grossAtDeliveryEnd;
+                double delta    = netFinal - netRef;
+                String woNum = "", saleNo = "", serialId = "";
+                try {
+                    String last = com.pa.lcrdemo.DeepLinkHandler.lastResultJson;
+                    if (last != null) {
+                        org.json.JSONObject j = new org.json.JSONObject(last);
+                        woNum = j.optString("wonum", "");
+                        org.json.JSONObject payload = j.optJSONObject("payload");
+                        if (payload != null) {
+                            org.json.JSONObject result = payload.optJSONObject("result");
+                            if (result != null) {
+                                saleNo   = result.optString("sale_no",   "");
+                                serialId = result.optString("serial_id", "");
+                            }
+                        }
+                    }
+                } catch (Exception ignored) {}
+                int cols = 30;
+                String sep   = "=".repeat(cols);
+                String dashs = "-".repeat(cols);
+                java.util.List<String> lignes = new java.util.ArrayList<>();
+                lignes.add(sep);
+                lignes.add(center("INCIDENT VANNE", cols));
+                lignes.add(sep);
+                lignes.add("WO :" + woNum);
+                lignes.add("Tkt:" + ticketNoOriginal);
+                lignes.add("Ser:" + serialId);
+                lignes.add(dashs);
+                lignes.add(String.format(java.util.Locale.ROOT, "NET ref:%.3fL", netRef));
+                lignes.add(String.format(java.util.Locale.ROOT, "NET fin:%.3fL", netFinal));
+                lignes.add(String.format(java.util.Locale.ROOT, "GROSS : %.3fL", grossFinal));
+                lignes.add(String.format(java.util.Locale.ROOT, "DELTA :+%.3fL", delta));
+                lignes.add(dashs);
+                lignes.add("FUITE POST-PRESET");
+                lignes.add(new java.text.SimpleDateFormat("dd/MM HH:mm:ss",
+                    java.util.Locale.ROOT).format(new java.util.Date()));
+                lignes.add(sep);
+                lignes.add("");
+                if (tabTransportKey != null) {
+                    MediaTransportManager.get(requireContext())
+                        .activateExclusive(tabTransportKey, "POST_LIVRAISON_PRINT");
+                }
+                for (String ligne : lignes) {
+                    try { controller.api_printTextLine(ligne); Thread.sleep(150); }
+                    catch (Exception e) { LogBus.api(node, "[POST-LIVRAISON] ERR ligne: " + safeMsg(e)); }
+                }
+                LogBus.api(node, "[POST-LIVRAISON] Ticket incident imprimé net=" + netFinal + "L delta=" + delta + "L");
+                try {
+                    android.content.ContentValues cv = new android.content.ContentValues();
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,        woNum);
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO,     ticketNoOriginal);
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO_REF, ticketNoOriginal);
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,         netFinal);
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L,       grossFinal);
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_DELTA_NET_L,   delta);
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_DELTA_GROSS_L, grossFinal - grossRef);
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_FUITE_VANNE);
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,        "FUITE_VANNE");
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE,     "INCIDENT");
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
+                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                    lcrDb.insertDelivery(cv);
+                    LogBus.api(node, "[POST-LIVRAISON] Incident DB PENDING");
+                } catch (Exception e) { LogBus.api(node, "[POST-LIVRAISON] ERR DB: " + safeMsg(e)); }
+                ui.post(() -> {
+                    if (!isAdded() || getView() == null) return;
+                    android.widget.Toast.makeText(requireContext(),
+                        "Incident enregistré et ticket imprimé", android.widget.Toast.LENGTH_SHORT).show();
+                });
+            } catch (Exception e) {
+                LogBus.api(node, "[POST-LIVRAISON] ERR: " + e.getMessage());
+            }
+        });
+    }
+
+    private void logFuiteVanneDataverse(double netRef, double netFinal,
+            double grossRef, double grossFinal, String ticketNo, double delta) {
+        LogBus.api(node, "[FUITE-VANNE] ticket=" + ticketNo
+            + " netRef=" + netRef + "L netFinal=" + netFinal
+            + "L delta=" + delta + "L — INCIDENT ENREGISTRÉ");
+    }
+
+    private void attachUiListenerIfNeeded() {
+        if (uiListenerAttached) return;
+        try {
+            RegisterSessionManager sm = RegisterSessionManager.get(requireContext());
+            if (tabTransportKey != null) sm.attachUiListener(tabTransportKey, node, uiListener);
+            else sm.attachUiListener(node, uiListener);
+            uiListenerAttached = true;
+            syncUiFromController();
+            LogBus.api(node, "uiListener réattaché au retour du tab");
+        } catch (Exception ignored) {}
+    }
+
+
 }
