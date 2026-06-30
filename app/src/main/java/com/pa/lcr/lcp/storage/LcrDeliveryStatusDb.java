@@ -1,5 +1,10 @@
 package com.pa.lcr.lcp.storage;
 
+// ═══════════════════════════════════════════════════════════════════════
+// COMPATIBILITÉ ANDROID : API 28 (Android 9) → API 35 (Android 15)
+// Toute modification doit être testée sur Android 9 et Android 15
+// ═══════════════════════════════════════════════════════════════════════
+
 import android.content.ContentValues;
 import android.content.Context;
 import android.database.Cursor;
@@ -139,7 +144,8 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     public static final String TYPE_CORRECTION  = "CORRECTION";
     public static final String TYPE_ANNULATION  = "ANNULATION";
     public static final String TYPE_MANUELLE    = "MANUELLE";
-    public static final String TYPE_REPRINT     = "REPRINT";
+    public static final String TYPE_REPRINT       = "REPRINT";
+    public static final String TYPE_FUITE_VANNE   = "FUITE_VANNE"; // volume detecte apres preset
 
     // Valeurs preset_status
     public static final String PRESET_EXACT   = "EXACT";

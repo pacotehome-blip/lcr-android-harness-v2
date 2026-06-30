@@ -1464,9 +1464,10 @@ public class RegisterTabFragment extends Fragment {
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO_REF, ticketNoOriginal);
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,         netFinal);
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L,       grossFinal);
-                    // TYPE_REPRINT — à remplacer par TYPE_FUITE_VANNE quand la constante est ajoutée
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_DELTA_NET_L,   delta);
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_DELTA_GROSS_L, grossFinal - grossRef);
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
-                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_REPRINT);
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_FUITE_VANNE);
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,        "FUITE_VANNE");
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE,     "INCIDENT");
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
