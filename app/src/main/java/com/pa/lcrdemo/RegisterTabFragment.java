@@ -1308,21 +1308,26 @@ public class RegisterTabFragment extends Fragment {
             double grossRef, double grossCourant, String ticketNo, double delta) {
         if (!isAdded() || getView() == null) return;
 
-        String msg = "⚠ VOLUME DÉTECTÉ APRÈS ARRÊT DE LIVRAISON
-
-"
-            + "Ticket : " + ticketNo + "
-"
-            + "Volume au preset  : " + String.format(Locale.ROOT, "%.3f", netRef) + " L net
-"
-            + "Volume actuel     : " + String.format(Locale.ROOT, "%.3f", netCourant) + " L net
-"
-            + "Volume additionnel: " + String.format(Locale.ROOT, "%.3f", delta) + " L
-
-"
-            + "Vérifiez que la vanne est bien fermée.
-"
-            + "Si du produit a coulé, terminez la livraison avec les volumes réels.";
+        // ✅ Message adapté selon le type de registre via polymorphisme LcpLink/Lc3Link
+        // LCR-II (LcpLink) : solénoïde défaillant — vérifier circuit hydraulique
+        // LC3   (Lc3Link)  : fermeture manuelle requise par le chauffeur
+        String msg;
+        try {
+            com.pa.lcr.lcp.LcpLink link = null;
+            if (controller != null) {
+                try { link = (com.pa.lcr.lcp.LcpLink) controller.getLink(); }
+                catch (Exception ignored) {}
+            }
+            if (link != null) {
+                msg = link.getLeakAlertMessage(ticketNo, netRef, netCourant, delta);
+            } else {
+                msg = "\u26a0 Volume d\u00e9tect\u00e9 apr\u00e8s arr\u00eat \u2014 ticket " + ticketNo
+                    + " \u2014 delta " + String.format(Locale.ROOT, "%.3f", delta) + " L";
+            }
+        } catch (Exception e) {
+            msg = "\u26a0 Volume d\u00e9tect\u00e9 apr\u00e8s arr\u00eat \u2014 ticket " + ticketNo
+                + " \u2014 delta " + String.format(Locale.ROOT, "%.3f", delta) + " L";
+        }
 
         LogBus.api(node, "[ALERTE-FUITE] ticket=" + ticketNo
             + " delta=" + delta + "L net=" + netCourant + "L");

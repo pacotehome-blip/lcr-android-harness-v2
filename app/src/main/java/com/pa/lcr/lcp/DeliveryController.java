@@ -665,6 +665,11 @@ private void reproEvent(String level, String type, String message, JSONObject da
     // ====== DeliveryControllerPort ======
     @Override public DeliveryState getState() { return state; }
 
+    /** Retourne le lien protocole sous-jacent (LcpLink ou Lc3Link).
+     *  Permet à RegisterTabFragment d'appeler les méthodes polymorphiques
+     *  comme getLeakAlertMessage() et isValveControlledByRegister(). */
+    public com.pa.lcr.lcp.LcpLink getLink() { return link; }
+
     /** Net courant en litres depuis le dernier tick — -1.0 si aucun tick disponible */
     public double getLastNet() {
         LastTick t = lastTick;

@@ -703,4 +703,48 @@ public class Lc3Link extends LcpLink {
             Thread.currentThread().interrupt();
         }
     }
+    // ─────────────────────────────────────────────────────────────────────
+    // Comportement vanne post-preset — LC3 : pas de solénoïde via protocole
+    // ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * LC3 : le registre n'a pas de contrôle solénoïde via le protocole VT-100.
+     * Après PRESET STOP, le chauffeur doit fermer la vanne manuellement.
+     * Si du volume sort après DONE, c'est que la vanne n'est pas encore fermée.
+     */
+    @Override
+    public boolean isValveControlledByRegister() {
+        return false; // LC3 : fermeture manuelle requise par le chauffeur
+    }
+
+    /**
+     * LC3 — message adapté : le chauffeur est responsable de la fermeture.
+     */
+    @Override
+    public String getLeakAlertMessage(String ticketNo, double netRef,
+            double netNow, double delta) {
+        return "⚠ FERMEZ LA VANNE MANUELLEMENT
+
+"
+            + "Ticket : " + ticketNo + "
+"
+            + String.format(java.util.Locale.ROOT,
+                "Volume au preset  : %.3f L net
+"
+              + "Volume actuel     : %.3f L net
+"
+              + "Volume additionnel: %.3f L
+
+",
+                netRef, netNow, delta)
+            + "Le registre LC3 a atteint PRESET STOP.
+"
+            + "La vanne doit être fermée manuellement.
+"
+            + "Fermez la vanne physique immédiatement
+"
+            + "avant de continuer.";
+    }
+
+
 }

@@ -726,4 +726,60 @@ public class LcpLink {
             buf = nb;
         }
     }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Comportement vanne post-preset — à overrider dans Lc3Link
+    // ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * Indique si le registre contrôle la vanne mécaniquement via solénoïde.
+     *
+     * LCR-II (LcpLink) : true — le registre coupe le solénoïde au preset.
+     *   Si du volume sort après DONE, c'est une défaillance mécanique
+     *   (solénoïde défaillant, fuite hydraulique, bypass manuel).
+     *
+     * LC3 (Lc3Link override) : false — pas de contrôle solénoïde via protocole.
+     *   Le chauffeur doit fermer la vanne manuellement après PRESET STOP.
+     *   Si du volume sort après DONE, le chauffeur n'a pas encore fermé.
+     */
+    public boolean isValveControlledByRegister() {
+        return true; // LCR-II : solénoïde contrôlé par le registre
+    }
+
+    /**
+     * Message d'alerte fuite vanne à afficher au chauffeur.
+     * Adapté selon le type de registre et son mode de contrôle de vanne.
+     *
+     * @param ticketNo  numéro de ticket de la livraison terminée
+     * @param netRef    volume net au moment de la coupure (litres)
+     * @param netNow    volume net mesuré maintenant (litres)
+     * @param delta     volume additionnel détecté (litres)
+     */
+    public String getLeakAlertMessage(String ticketNo, double netRef,
+            double netNow, double delta) {
+        // LCR-II — le registre a coupé le solénoïde, volume inattendu
+        return "⚠ VOLUME DÉTECTÉ APRÈS COUPURE DU REGISTRE
+
+"
+            + "Ticket : " + ticketNo + "
+"
+            + String.format(java.util.Locale.ROOT,
+                "Volume au preset  : %.3f L net
+"
+              + "Volume actuel     : %.3f L net
+"
+              + "Volume additionnel: %.3f L
+
+",
+                netRef, netNow, delta)
+            + "Le registre LCR-II a coupé le solénoïde au preset.
+"
+            + "Un volume continue d'être mesuré — vérifiez :
+"
+            + "  · La vanne physique et le circuit hydraulique
+"
+            + "  · Le solénoïde (défaillance possible)
+"
+            + "  · Toute vanne de bypass ouverte manuellement";
+    }
 }
