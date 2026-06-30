@@ -1016,10 +1016,9 @@ public class RegisterTabFragment extends Fragment {
                             }
                         } catch (Exception ignored) {}
 
-                        // Forcer lecture fraîche des compteurs du registre
+                        // Forcer lecture fraiche — requestLiveSample puis getLastNet
                         try { c.requestLiveSample(); Thread.sleep(300); }
                         catch (Exception ignored) {}
-
                         double netRegistre   = c.getLastNet();
                         double grossRegistre = c.getLastGross();
 
