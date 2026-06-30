@@ -1028,28 +1028,14 @@ public class RegisterTabFragment extends Fragment {
                             ui.post(() -> {
                                 if (!isAdded() || getView() == null) return;
                                 StringBuilder sb = new StringBuilder();
-                                sb.append("DIVERGENCE DETECTEE").append("
-
-");
-                                sb.append("Le registre affiche un volume different").append("
-");
-                                sb.append("du bon de travail.").append("
-
-");
-                                sb.append("Ticket ref : ").append(fTicketNoBefore).append("
-");
-                                sb.append(String.format(java.util.Locale.ROOT,
-                                    "NET WO       : %.3f L
-", fNetWo));
-                                sb.append(String.format(java.util.Locale.ROOT,
-                                    "NET registre : %.3f L
-", fNetReg));
-                                sb.append(String.format(java.util.Locale.ROOT,
-                                    "DELTA        : %.3f L
-
-", fNetReg - fNetWo));
-                                sb.append("Le reprint standard NE SERA PAS effectue.").append("
-");
+                                sb.append("DIVERGENCE DETECTEE\n\n");
+                                sb.append("Le registre affiche un volume different\n");
+                                sb.append("du bon de travail.\n\n");
+                                sb.append("Ticket ref : ").append(fTicketNoBefore).append("\n");
+                                sb.append(String.format(java.util.Locale.ROOT, "NET WO       : %.3f L\n", fNetWo));
+                                sb.append(String.format(java.util.Locale.ROOT, "NET registre : %.3f L\n", fNetReg));
+                                sb.append(String.format(java.util.Locale.ROOT, "DELTA        : %.3f L\n\n", fNetReg - fNetWo));
+                                sb.append("Le reprint standard NE SERA PAS effectue.\n");
                                 sb.append("Un ticket incident sera imprime.");
 
                                 new android.app.AlertDialog.Builder(requireContext())
