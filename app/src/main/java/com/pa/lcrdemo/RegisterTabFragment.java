@@ -1,29 +1,5 @@
 package com.pa.lcrdemo;
 
-// ═══════════════════════════════════════════════════════════════════════
-// COMPATIBILITÉ ANDROID : API 28 (Android 9) → API 35 (Android 15)
-// ───────────────────────────────────────────────────────────────────────
-// Toute modification de ce fichier doit être testée sur :
-//   · Android 9  (API 28) — Samsung SM-T397U  · ADB 192.168.134.105:5555
-//   · Android 15 (API 35) — Samsung R52X508K2DR · ADB 192.168.134.126:5555
-//
-// Règles obligatoires :
-//   1. Détecter la version à l'exécution via Build.VERSION.SDK_INT
-//   2. Appliquer le comportement EXPLICITEMENT par version — pas de spéculation
-//   3. Ne jamais utiliser d'API introduite après API 28 sans guard de version
-//   4. registerReceiver() : RECEIVER_NOT_EXPORTED ou RECEIVER_EXPORTED sur API 34+
-//   5. PendingIntent     : FLAG_IMMUTABLE sur API 31+ · FLAG_MUTABLE + guard sur API 34+
-//   6. startForeground() : type obligatoire sur API 34+ — doit matcher le manifest
-//
-// Constantes utiles :
-//   Build.VERSION_CODES.P                = 28  (Android 9)
-//   Build.VERSION_CODES.Q                = 29  (Android 10)
-//   Build.VERSION_CODES.S                = 31  (Android 12)
-//   Build.VERSION_CODES.TIRAMISU         = 33  (Android 13)
-//   Build.VERSION_CODES.UPSIDE_DOWN_CAKE = 34  (Android 14)
-//   Build.VERSION_CODES.VANILLA_ICE_CREAM= 35  (Android 15)
-// ═══════════════════════════════════════════════════════════════════════
-
 import com.pa.lcr.lcp.transport.TransportIo;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -460,6 +436,7 @@ public class RegisterTabFragment extends Fragment {
                 if (state == DeliveryState.ENDED) {
                     if (cancelInProgress) {
                         // Annulation — ne pas retourner dans FSM
+                        // Remettre l'UI à zéro pour permettre une nouvelle livraison
                         cancelInProgress = false;
                         if (txtLive    != null) txtLive.setText("LIVE: CONNECTED — prêt pour nouvelle livraison");
                         if (txtQtyNet  != null) txtQtyNet.setText("NET: 0.0");
@@ -469,20 +446,6 @@ public class RegisterTabFragment extends Fragment {
                     } else {
                         notifyDeliveryEndedToMainActivity();
                     }
-                }
-
-                // ✅ Poll post-livraison — détection fuite vanne après CONNECTED
-                // Démarre uniquement si on vient de RUNNING_FLOWING ou RUNNING_PAUSED
-                // Ne démarre PAS pendant un cycle actif (RUNNING_FLOWING, RUNNING_PAUSED, PRESTART, ENDING)
-                if (state == DeliveryState.CONNECTED && controller != null
-                        && controller.netAtDeliveryEnd > 0
-                        && controller.ticketNoAtEnd != null
-                        && !controller.ticketNoAtEnd.isEmpty()) {
-                    demarrerPollPostLivraison(
-                        controller.netAtDeliveryEnd,
-                        controller.grossAtDeliveryEnd,
-                        controller.ticketNoAtEnd
-                    );
                 }
             });
         }
@@ -617,7 +580,6 @@ public class RegisterTabFragment extends Fragment {
 
     @Override
     public void onStop() {
-        arreterPollPostLivraison(); // ✅ arrêt poll fuite si tab quitte
         detachUiListenerSafe();
         LogBus.removeListener(logListener);
         try { requireContext().unregisterReceiver(usbStateReceiver); } catch (Exception ignored) {}
@@ -991,6 +953,9 @@ public class RegisterTabFragment extends Fragment {
         });
 
         // ✅ REPRINT: câblage du bouton Reprint (last ticket)
+        // ✅ Vérification divergence net/gross AVANT impression
+        // Si net/gross courant du registre != net/gross du WO (delta >= 0.5L)
+        // → bloquer reprint standard + alerter + impression custom incident
         if (btnReprintTicket != null) {
             btnReprintTicket.setOnClickListener(v -> {
                 DeliveryController c = controller;
@@ -1014,16 +979,108 @@ public class RegisterTabFragment extends Fragment {
                             }
                         } catch (Exception ignored) {}
 
-                        // ✅ Envoyer CMD_PRINT_LAST_TICKET (0x06)
+                        // ✅ Lire net/gross du WO (valeurs au moment de la livraison)
+                        double netWo = -1.0, grossWo = -1.0;
+                        String woNum = "", woIdGuid = "";
+                        try {
+                            String last = com.pa.lcrdemo.DeepLinkHandler.lastResultJson;
+                            if (last != null) {
+                                org.json.JSONObject j = new org.json.JSONObject(last);
+                                woNum    = j.optString("wonum", "");
+                                woIdGuid = j.optString("woid",  "");
+                                org.json.JSONObject payload = j.optJSONObject("payload");
+                                if (payload != null) {
+                                    org.json.JSONObject result = payload.optJSONObject("result");
+                                    if (result != null) {
+                                        netWo   = result.optDouble("fs_net_l",   -1.0);
+                                        grossWo = result.optDouble("fs_gross_l", -1.0);
+                                    }
+                                }
+                            }
+                        } catch (Exception ignored) {}
+
+                        // ✅ Forcer une lecture fraîche des compteurs du registre
+                        try { c.requestLiveSample(); Thread.sleep(300); }
+                        catch (Exception ignored) {}
+
+                        // Lire net/gross courant du registre
+                        double netRegistre   = c.getLastNet();
+                        double grossRegistre = c.getLastGross();
+
+                        // ✅ Vérifier divergence entre WO et registre
+                        final String fTicketNoBefore = ticketNoBefore;
+                        final String fWoNum          = woNum;
+                        final String fWoIdGuid       = woIdGuid;
+                        final double fNetWo          = netWo;
+                        final double fGrossWo        = grossWo;
+                        final double fNetReg         = netRegistre;
+                        final double fGrossReg       = grossRegistre;
+
+                        boolean divergence = (netWo > 0 && netRegistre > 0
+                            && Math.abs(netRegistre - netWo) >= POST_DELIVERY_LEAK_THRESHOLD_L);
+
+                        if (divergence) {
+                            // ⚠ Divergence détectée — bloquer reprint standard + alerter
+                            double delta = netRegistre - netWo;
+                            LogBus.api(node, "[REPRINT] DIVERGENCE — netWO=" + netWo
+                                + "L netReg=" + netRegistre + "L delta=" + delta + "L ticket=" + ticketNoBefore);
+
+                            ui.post(() -> {
+                                if (!isAdded() || getView() == null) return;
+                                StringBuilder sb = new StringBuilder();
+                                sb.append("DIVERGENCE DETECTEE").append("
+
+");
+                                sb.append("Le registre affiche un volume different").append("
+");
+                                sb.append("du bon de travail.").append("
+
+");
+                                sb.append("Ticket ref : ").append(fTicketNoBefore).append("
+");
+                                sb.append(String.format(java.util.Locale.ROOT,
+                                    "NET WO       : %.3f L
+", fNetWo));
+                                sb.append(String.format(java.util.Locale.ROOT,
+                                    "NET registre : %.3f L
+", fNetReg));
+                                sb.append(String.format(java.util.Locale.ROOT,
+                                    "DELTA        : %.3f L
+
+", fNetReg - fNetWo));
+                                sb.append("Le reprint standard NE SERA PAS effectue.").append("
+");
+                                sb.append("Un ticket incident sera imprime.");
+
+                                new android.app.AlertDialog.Builder(requireContext())
+                                    .setTitle("Reprint bloqué — Divergence")
+                                    .setMessage(sb.toString())
+                                    .setCancelable(false)
+                                    .setPositiveButton("Imprimer ticket incident", (d, w) -> {
+                                        // Impression custom + DB avec les valeurs courantes
+                                        terminerPostLivraisonAvecVolumesReels(
+                                            fNetReg, fGrossReg, fTicketNoBefore);
+                                    })
+                                    .setNegativeButton("Aviser le répartiteur", (d, w) -> {
+                                        // Log sans impression
+                                        logFuiteVanneDataverse(fNetWo, fNetReg,
+                                            fGrossWo, fGrossReg, fTicketNoBefore,
+                                            fNetReg - fNetWo);
+                                    })
+                                    .show();
+                            });
+                            return; // ← bloquer le reprint standard
+                        }
+
+                        // ✅ Pas de divergence — reprint standard normal
                         ApiResult r = c.api_ticketReprintCurrent();
                         LogBus.api(node, "[REPRINT] " + (r != null ? r.msg : "null"));
 
                         // ✅ Lire ticket_no APRÈS reprint
                         String ticketNoAfter = "";
                         double netL = 0, grossL = 0;
-                        String woNum = "", woIdGuid = "";
                         try {
-                            Thread.sleep(500); // attendre que le registre incrémente
+                            Thread.sleep(500);
                             ApiResult snap2 = c.api_tickSnapshot();
                             if (snap2 != null && snap2.data != null) {
                                 org.json.JSONObject result = snap2.data.optJSONObject("result");
@@ -1032,16 +1089,6 @@ public class RegisterTabFragment extends Fragment {
                                     netL   = result.optDouble("fs_net_l",  0);
                                     grossL = result.optDouble("fs_gross_l",0);
                                 }
-                            }
-                        } catch (Exception ignored) {}
-
-                        // Récupérer woNum + woIdGuid depuis lastResultJson
-                        try {
-                            String last = com.pa.lcrdemo.DeepLinkHandler.lastResultJson;
-                            if (last != null) {
-                                org.json.JSONObject j = new org.json.JSONObject(last);
-                                woNum    = j.optString("wonum", "");
-                                woIdGuid = j.optString("woid",  "");
                             }
                         } catch (Exception ignored) {}
 
@@ -1061,12 +1108,11 @@ public class RegisterTabFragment extends Fragment {
                             cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
                                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
 
-                            // REPRINT = nouvelle ligne (pas UPSERT) — forcer INSERT
                             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
                                 new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
                             lcrDb.insertDelivery(cv);
                             android.util.Log.i("REPRINT", "Nouveau ticket tracé: "
-                                + ticketNoBefore + " → " + ticketNoAfter + " wo=" + woNum);
+                                + ticketNoBefore + " -> " + ticketNoAfter + " wo=" + woNum);
                         }
 
                     } catch (Exception e) {
@@ -1248,267 +1294,6 @@ public class RegisterTabFragment extends Fragment {
         ui.postDelayed(() -> runStatusBLikeButton("AUTO_AFTER_TAB_CREATE"), 250);
         if (userInitiated) LogBus.api(node, "Connect TAB: 1 - UI attached");
         scheduleLogRefresh();
-    }
-
-    // ─────────────────────────────────────────────────────────────────
-    // Poll post-livraison — détection fuite vanne (seuil 0.5L)
-    // ─────────────────────────────────────────────────────────────────
-
-    private static final double POST_DELIVERY_LEAK_THRESHOLD_L = 0.5;
-    private static final long   POST_DELIVERY_POLL_INTERVAL_MS = 5_000; // poll toutes les 5s
-    // Pas de durée max — le poll reste actif tant que CONNECTED + livraison terminée
-    // Il s'arrête uniquement si : nouvelle livraison / tab fermé / registre déconnecté
-    private volatile boolean    postDeliveryPollActive = false;
-
-    private void demarrerPollPostLivraison(double netRef, double grossRef, String ticketNo) {
-        if (postDeliveryPollActive) return;
-        postDeliveryPollActive = true;
-        LogBus.api(node, "[POST-LIVRAISON] Poll fuite demarré — netRef=" + netRef
-            + "L ticket=" + ticketNo + " seuil=" + POST_DELIVERY_LEAK_THRESHOLD_L + "L"
-            + " — actif jusqu'a nouvelle livraison ou fermeture du tab");
-
-        Runnable pollRunnable = new Runnable() {
-            @Override
-            public void run() {
-                if (!postDeliveryPollActive || !isAdded() || getView() == null) return;
-                if (controller == null) { postDeliveryPollActive = false; return; }
-
-                // Arrêt si une nouvelle livraison a démarré
-                // NE PAS arrêter sur RUNNING_PAUSED ou FLOWING — c'est une erreur
-                // Le poll ne doit pas interférer avec un cycle actif
-                DeliveryState st = controller.getState();
-                if (st == DeliveryState.RUNNING_FLOWING
-                        || st == DeliveryState.RUNNING_PAUSED
-                        || st == DeliveryState.PRESTART
-                        || st == DeliveryState.ENDING) {
-                    postDeliveryPollActive = false;
-                    LogBus.api(node, "[POST-LIVRAISON] Arrêt — nouvelle livraison active");
-                    return;
-                }
-
-                // ✅ Forcer une lecture active des compteurs du registre
-                // En état CONNECTED, liveTickFuture est arrêté dans DeliveryController.
-                // requestLiveSample() force une lecture LCP des compteurs net/gross
-                // pour détecter toute augmentation même longtemps après la livraison.
-                // Compatible Android 9-15 : appel depuis le thread UI via bg.execute
-                bg.execute(() -> {
-                    try {
-                        if (controller != null) controller.requestLiveSample();
-                    } catch (Exception ignored) {}
-                });
-
-                // Attendre que requestLiveSample() ait mis à jour lastTick (200ms)
-                // puis lire le net courant
-                ui.postDelayed(() -> {
-                    if (!postDeliveryPollActive || !isAdded() || getView() == null) return;
-
-                    double netCourant = -1.0;
-                    double grossCourant = -1.0;
-                    try {
-                        netCourant   = controller.getLastNet();
-                        grossCourant = controller.getLastGross();
-                    } catch (Exception ignored) {}
-
-                    if (netCourant < 0) {
-                        // Pas de tick disponible — replanifier
-                        ui.postDelayed(this, POST_DELIVERY_POLL_INTERVAL_MS);
-                        return;
-                    }
-
-                    double delta = netCourant - netRef;
-                    LogBus.api(node, "[POST-LIVRAISON] net=" + netCourant
-                        + "L ref=" + netRef + "L delta=" + String.format(java.util.Locale.ROOT, "%.3f", delta) + "L");
-
-                    if (delta >= POST_DELIVERY_LEAK_THRESHOLD_L) {
-                        // ⚠ Fuite détectée — arrêt poll + alerte
-                        postDeliveryPollActive = false;
-                        afficherAlerteVanneOuverte(netRef, netCourant, grossRef, grossCourant,
-                            ticketNo, delta);
-                        return;
-                    }
-
-                    // Pas de fuite — replanifier (pas de durée max)
-                    ui.postDelayed(this, POST_DELIVERY_POLL_INTERVAL_MS);
-                }, 200);
-            }
-        };
-
-        ui.postDelayed(pollRunnable, POST_DELIVERY_POLL_INTERVAL_MS);
-    }
-
-    private void arreterPollPostLivraison() {
-        postDeliveryPollActive = false;
-    }
-
-    private void afficherAlerteVanneOuverte(double netRef, double netCourant,
-            double grossRef, double grossCourant, String ticketNo, double delta) {
-        if (!isAdded() || getView() == null) return;
-
-        // ✅ Message adapté selon le type de registre via polymorphisme LcpLink/Lc3Link
-        // LCR-II (LcpLink) : solénoïde défaillant — vérifier circuit hydraulique
-        // LC3   (Lc3Link)  : fermeture manuelle requise par le chauffeur
-        String msg;
-        try {
-            com.pa.lcr.lcp.LcpLink link = null;
-            if (controller != null) {
-                try { link = (com.pa.lcr.lcp.LcpLink) controller.getLink(); }
-                catch (Exception ignored) {}
-            }
-            if (link != null) {
-                msg = link.getLeakAlertMessage(ticketNo, netRef, netCourant, delta);
-            } else {
-                msg = "\u26a0 Volume d\u00e9tect\u00e9 apr\u00e8s arr\u00eat \u2014 ticket " + ticketNo
-                    + " \u2014 delta " + String.format(Locale.ROOT, "%.3f", delta) + " L";
-            }
-        } catch (Exception e) {
-            msg = "\u26a0 Volume d\u00e9tect\u00e9 apr\u00e8s arr\u00eat \u2014 ticket " + ticketNo
-                + " \u2014 delta " + String.format(Locale.ROOT, "%.3f", delta) + " L";
-        }
-
-        LogBus.api(node, "[ALERTE-FUITE] ticket=" + ticketNo
-            + " delta=" + delta + "L net=" + netCourant + "L");
-
-        new android.app.AlertDialog.Builder(requireContext())
-            .setTitle("⚠ Vanne encore ouverte ?")
-            .setMessage(msg)
-            .setCancelable(false)
-            .setPositiveButton("Terminer avec volumes réels", (d, w) -> {
-                // Terminer la livraison avec le net/gross final et imprimer nouveau ticket
-                terminerPostLivraisonAvecVolumesReels(netCourant, grossCourant, ticketNo);
-            })
-            .setNegativeButton("J'ai avisé le répartiteur", (d, w) -> {
-                // Rester dans l'APK — log Dataverse de l'incident
-                logFuiteVanneDataverse(netRef, netCourant, grossRef, grossCourant,
-                    ticketNo, delta);
-            })
-            .show();
-    }
-
-    private void terminerPostLivraisonAvecVolumesReels(double netFinal, double grossFinal,
-            String ticketNoOriginal) {
-        if (controller == null) return;
-        bg.execute(() -> {
-            try {
-                // ✅ Impression custom avec les volumes réels courants
-                // N'utilise PAS api_ticketReprintCurrent() qui imprime l'ancien ticket du registre
-                // Utilise le même mécanisme que lancerImpressionCustom() — ligne par ligne via opPrintText
-                // Compatible Android 9-15 : appel depuis bg.execute, pas depuis le thread UI
-                double netRef = controller.netAtDeliveryEnd;
-                double grossRef = controller.grossAtDeliveryEnd;
-                double delta = netFinal - netRef;
-
-                // Récupérer les infos du lastResultJson pour le ticket
-                String woNum = "", saleNo = "", serialId = "";
-                try {
-                    String last = com.pa.lcrdemo.DeepLinkHandler.lastResultJson;
-                    if (last != null) {
-                        org.json.JSONObject j = new org.json.JSONObject(last);
-                        woNum = j.optString("wonum", "");
-                        org.json.JSONObject payload = j.optJSONObject("payload");
-                        if (payload != null) {
-                            org.json.JSONObject result = payload.optJSONObject("result");
-                            if (result != null) {
-                                saleNo   = result.optString("sale_no",   "");
-                                serialId = result.optString("serial_id", "");
-                            }
-                        }
-                    }
-                } catch (Exception ignored) {}
-
-                // Construire le ticket incident fuite — 30 colonnes max (limite imprimante LCR-II)
-                int cols = 30;
-                String sep   = "=".repeat(cols);
-                String dashs = "-".repeat(cols);
-                java.util.List<String> lignes = new java.util.ArrayList<>();
-                lignes.add(sep);
-                lignes.add(center("INCIDENT VANNE", cols));
-                lignes.add(sep);
-                lignes.add("WO:" + woNum);
-                lignes.add("Tkt:" + ticketNoOriginal);
-                lignes.add("Ser:" + serialId);
-                lignes.add(dashs);
-                lignes.add(String.format(java.util.Locale.ROOT, "NET ref:%.3fL", netRef));
-                lignes.add(String.format(java.util.Locale.ROOT, "NET fin:%.3fL", netFinal));
-                lignes.add(String.format(java.util.Locale.ROOT, "GROSS: %.3fL", grossFinal));
-                lignes.add(String.format(java.util.Locale.ROOT, "DELTA:+%.3fL", delta));
-                lignes.add(dashs);
-                lignes.add("FUITE POST-PRESET");
-                lignes.add(new java.text.SimpleDateFormat("dd/MM HH:mm:ss",
-                    java.util.Locale.ROOT).format(new java.util.Date()));
-                lignes.add(sep);
-                lignes.add("");
-
-                // Envoyer ligne par ligne via opPrintText
-                if (tabTransportKey != null) {
-                    MediaTransportManager.get(requireContext())
-                        .activateExclusive(tabTransportKey, "POST_LIVRAISON_PRINT");
-                }
-                for (String ligne : lignes) {
-                    try {
-                        controller.api_printTextLine(ligne);
-                        Thread.sleep(150);
-                    } catch (Exception e) {
-                        LogBus.api(node, "[POST-LIVRAISON] ERR ligne impression: " + safeMsg(e));
-                    }
-                }
-
-                LogBus.api(node, "[POST-LIVRAISON] Ticket incident imprimé — net=" + netFinal
-                    + "L ref=" + netRef + "L delta=" + delta + "L");
-
-                // ✅ Enregistrer dans LcrDeliveryStatusDb (filgo_lcr_delivery_status)
-                // TYPE_REPRINT réutilisé — ajouter TYPE_FUITE_VANNE si la colonne est créée
-                try {
-                    android.content.ContentValues cv = new android.content.ContentValues();
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,        woNum);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO,     ticketNoOriginal);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO_REF, ticketNoOriginal);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,         netFinal);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L,       grossFinal);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_DELTA_NET_L,   delta);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_DELTA_GROSS_L, grossFinal - grossRef);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
-                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_FUITE_VANNE);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,        "FUITE_VANNE");
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE,     "INCIDENT");
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
-                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
-                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
-                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
-                    lcrDb.insertDelivery(cv);
-                    LogBus.api(node, "[POST-LIVRAISON] Incident enregistré dans LcrDeliveryStatusDb PENDING");
-                } catch (Exception e) {
-                    LogBus.api(node, "[POST-LIVRAISON] ERR DB: " + safeMsg(e));
-                }
-
-                // Toast confirmation sur thread UI
-                ui.post(() -> {
-                    if (!isAdded() || getView() == null) return;
-                    android.widget.Toast.makeText(requireContext(),
-                        "Incident enregistré et ticket imprimé",
-                        android.widget.Toast.LENGTH_SHORT).show();
-                });
-
-            } catch (Exception e) {
-                LogBus.api(node, "[POST-LIVRAISON] ERR: " + e.getMessage());
-                ui.post(() -> {
-                    if (!isAdded() || getView() == null) return;
-                    android.widget.Toast.makeText(requireContext(),
-                        "Erreur impression incident: " + safeMsg(e),
-                        android.widget.Toast.LENGTH_SHORT).show();
-                });
-            }
-        });
-    }
-
-    private void logFuiteVanneDataverse(double netRef, double netFinal,
-            double grossRef, double grossFinal, String ticketNo, double delta) {
-        // Log SQLite pour sync Dataverse future
-        LogBus.api(node, "[FUITE-VANNE] ticket=" + ticketNo
-            + " netRef=" + netRef + "L netFinal=" + netFinal
-            + "L grossRef=" + grossRef + "L grossFinal=" + grossFinal
-            + "L delta=" + delta + "L — INCIDENT ENREGISTRÉ");
-        // TODO: colonne Dataverse lcr_post_delivery_leak_l + lcr_post_delivery_ticket_no
-        // à ajouter quand les colonnes seront créées dans la solution FilgoSonic
     }
 
     private void attachUiListenerIfNeeded() {
@@ -1769,24 +1554,24 @@ public class RegisterTabFragment extends Fragment {
                     }
                 } catch (Exception ignored) {}
 
-                // Construire les lignes du ticket — 30 colonnes max (limite imprimante LCR-II: 25-30)
-                int cols = 30;
+                // Construire les lignes du ticket
+                int cols = 40;
                 String sep = "=".repeat(cols);
                 String dashs = "-".repeat(cols);
                 java.util.List<String> lines = new java.util.ArrayList<>();
                 lines.add(sep);
                 lines.add(center("TICKET DE LIVRAISON", cols));
                 lines.add(sep);
-                lines.add("WO    : " + woNum);
-                lines.add("Tkt # : " + ticketNo);
-                lines.add("Vente : " + saleNo);
-                lines.add("Serie : " + serialId);
+                lines.add("WO       : " + woNum);
+                lines.add("Ticket # : " + ticketNo);
+                lines.add("Vente #  : " + saleNo);
+                lines.add("Serie    : " + serialId);
                 lines.add(dashs);
-                lines.add(String.format(java.util.Locale.ROOT, "NET   : %.3f L", netL));
-                lines.add(String.format(java.util.Locale.ROOT, "GROSS : %.3f L", grossL));
+                lines.add(String.format("NET      : %.1f L", netL));
+                lines.add(String.format("GROSS    : %.1f L", grossL));
                 lines.add(dashs);
-                lines.add("Debut : " + formatUtc(startUtc));
-                lines.add("Fin   : " + formatUtc(endUtc));
+                lines.add("Debut    : " + formatUtc(startUtc));
+                lines.add("Fin      : " + formatUtc(endUtc));
                 lines.add(sep);
                 lines.add("");
 
