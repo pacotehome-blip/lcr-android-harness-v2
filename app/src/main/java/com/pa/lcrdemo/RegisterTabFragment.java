@@ -589,11 +589,21 @@ public class RegisterTabFragment extends Fragment {
     @Override
     public void onResume() {
         super.onResume();
+        // ✅ Toujours réattacher le uiListener si nécessaire au retour du tab
+        // onStop() détache le listener — onResume() doit le réattacher
+        // Android 9-15 : même comportement — le listener est un callback direct,
+        //                pas un broadcast, il doit être réattaché à chaque onResume()
         if (!attemptedAutoAttachOnce) {
             attemptedAutoAttachOnce = true;
             ui.post(() -> attemptAttachIfPossible(true));
         } else {
-            ui.post(() -> attemptAttachIfPossible(false));
+            // Deuxième visite ou retour d'arrière-plan — réattacher si listener absent
+            ui.post(() -> {
+                if (!uiListenerAttached && controller != null) {
+                    attachUiListenerIfNeeded();
+                }
+                attemptAttachIfPossible(false);
+            });
         }
         // ✅ Toujours vérifier si livraison PENDING à afficher quand le tab devient visible
         ui.postDelayed(() -> checkPendingDeliveryForThisRegister(), 800);
@@ -1200,6 +1210,19 @@ public class RegisterTabFragment extends Fragment {
         ui.postDelayed(() -> runStatusBLikeButton("AUTO_AFTER_TAB_CREATE"), 250);
         if (userInitiated) LogBus.api(node, "Connect TAB: 1 - UI attached");
         scheduleLogRefresh();
+    }
+
+    private void attachUiListenerIfNeeded() {
+        if (uiListenerAttached) return;
+        try {
+            RegisterSessionManager sm = RegisterSessionManager.get(requireContext());
+            if (tabTransportKey != null) sm.attachUiListener(tabTransportKey, node, uiListener);
+            else sm.attachUiListener(node, uiListener);
+            uiListenerAttached = true;
+            // Sync immédiat de l'état actuel pour rattraper RUNNING_FLOWING manqué
+            syncUiFromController();
+            LogBus.api(node, "uiListener réattaché au retour du tab");
+        } catch (Exception ignored) {}
     }
 
     private void detachUiListenerSafe() {
