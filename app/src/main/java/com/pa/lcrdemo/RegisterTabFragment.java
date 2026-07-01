@@ -733,6 +733,8 @@ public class RegisterTabFragment extends Fragment {
             spnProduct.setText(produit, false);
         if (txtDeliveryUid != null && woNum != null && !woNum.isEmpty())
             txtDeliveryUid.setText("Delivery UID : " + woNum);
+        // ✅ Rafraîchir le cumul WO dès que le WO est connu
+        ui.postDelayed(() -> rafraichirCumulWo(), 300);
     }
 
     private void notifyDeliveryEndedToMainActivity() {
