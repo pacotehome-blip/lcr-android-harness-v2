@@ -273,6 +273,8 @@ public class RegisterTabFragment extends Fragment {
     private android.widget.AutoCompleteTextView spnProduct;
     private EditText edtPreset;
     private Button btnConnect, btnA, btnB, btnC, btnContinue, btnFinish;
+    private android.view.View panelWoCumul;
+    private android.widget.TextView txtWoCumulNet, txtWoCumulGross, txtWoCumulCount;
     private Button btnReprintTicket;
     private Button btnRetourWO;
     private Button btnCustomPrint;
@@ -450,6 +452,7 @@ public class RegisterTabFragment extends Fragment {
                         if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : —");
                     } else {
                         notifyDeliveryEndedToMainActivity();
+                        rafraichirCumulWo();
                     }
                 }
 
@@ -617,6 +620,8 @@ public class RegisterTabFragment extends Fragment {
         }
         // ✅ Toujours vérifier si livraison PENDING à afficher quand le tab devient visible
         ui.postDelayed(() -> checkPendingDeliveryForThisRegister(), 800);
+        // ✅ Rafraîchir le cumul WO au retour dans le tab
+        ui.postDelayed(() -> rafraichirCumulWo(), 600);
 
         // ✅ Si controller existe et io mort → diagnostic au moment où on arrive dans le tab
         ui.postDelayed(() -> {
@@ -675,6 +680,10 @@ public class RegisterTabFragment extends Fragment {
         txtDeliveryUid = v.findViewById(R.id.txtDeliveryUid);
         btnReprintTicket = v.findViewById(R.id.btnReprintTicket);
         btnRetourWO      = v.findViewById(R.id.btnRetourWO);
+        panelWoCumul     = v.findViewById(R.id.panelWoCumul);
+        txtWoCumulNet    = v.findViewById(R.id.txtWoCumulNet);
+        txtWoCumulGross  = v.findViewById(R.id.txtWoCumulGross);
+        txtWoCumulCount  = v.findViewById(R.id.txtWoCumulCount);
         btnCustomPrint   = v.findViewById(R.id.btnCustomPrint);
         btnAnnuler       = v.findViewById(R.id.btnAnnuler);
         btnScanProducts  = v.findViewById(R.id.btnScanProducts);
@@ -2016,10 +2025,16 @@ public class RegisterTabFragment extends Fragment {
             // ✅ Après resolve ticket pending — si WO actif et CONNECTED propre
             // déclencher notifyDeliveryEndedToMainActivity() pour afficher bouton retour
             // Le poll DeepLinkHandler a quitté sur ticket pending sans appeler onDeliveryEnded
+            // Effacer aussi ActiveDeliveryStore — sinon la prochaine livraison sur le même WO
+            // serait considérée comme une reprise et ne démarrerait pas le registre
             ui.postDelayed(() -> {
                 if (!isAdded() || getView() == null || controller == null) return;
                 if (controller.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED
                         && currentWoNum != null && !currentWoNum.isEmpty()) {
+                    // Effacer ActiveDeliveryStore avant de notifier
+                    try {
+                        new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext()).clear();
+                    } catch (Exception ignored) {}
                     notifyDeliveryEndedToMainActivity();
                 }
             }, 1500);
@@ -2462,6 +2477,51 @@ public class RegisterTabFragment extends Fragment {
         LogBus.api(node, "[FUITE-VANNE] ticket=" + ticketNo + " delta=" + delta + "L INCIDENT");
     }
 
+
+
+    // ✅ Afficher le cumul WO à droite du live — lecture depuis LcrDeliveryStatusDb
+    private void rafraichirCumulWo() {
+        if (currentWoNum == null || currentWoNum.isEmpty()) {
+            if (panelWoCumul != null) ui.post(() -> panelWoCumul.setVisibility(android.view.View.GONE));
+            return;
+        }
+        final String wo = currentWoNum;
+        bg.execute(() -> {
+            double totalNet = 0, totalGross = 0;
+            int count = 0;
+            try {
+                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db =
+                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> rows =
+                    db.getAllForWo(wo);
+                for (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow r : rows) {
+                    if (!"ANNULATION".equals(r.type)) {
+                        totalNet   += r.netL;
+                        totalGross += r.grossL;
+                        count++;
+                    }
+                }
+            } catch (Exception ignored) {}
+            final double fNet = totalNet, fGross = totalGross;
+            final int fCount = count;
+            ui.post(() -> {
+                if (!isAdded() || getView() == null || panelWoCumul == null) return;
+                if (fCount > 0) {
+                    panelWoCumul.setVisibility(android.view.View.VISIBLE);
+                    if (txtWoCumulNet != null)
+                        txtWoCumulNet.setText(String.format(java.util.Locale.ROOT,
+                            "Total NET: %.1f L", fNet));
+                    if (txtWoCumulGross != null)
+                        txtWoCumulGross.setText(String.format(java.util.Locale.ROOT,
+                            "Total GROSS: %.1f L", fGross));
+                    if (txtWoCumulCount != null)
+                        txtWoCumulCount.setText(fCount + " livraison" + (fCount > 1 ? "s" : ""));
+                } else {
+                    panelWoCumul.setVisibility(android.view.View.GONE);
+                }
+            });
+        });
+    }
 
 
 }
