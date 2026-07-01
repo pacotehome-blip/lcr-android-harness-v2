@@ -1874,6 +1874,36 @@ public class RegisterTabFragment extends Fragment {
                         com.pa.lcrdemo.dataverse.LcrDeliverySync.pushPending(
                             requireContext(), tokenHolder[0]);
                         android.util.Log.i("RetourWO", "Push Dataverse OK");
+
+                        // ✅ PATCH final consolidé — toutes les livraisons du WO
+                        // pushPending() envoie chaque row individuellement
+                        // Ce PATCH final garantit que msdyn_workordersummary a le payload complet
+                        try {
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrFinal =
+                                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                            java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> allRows =
+                                lcrFinal.getAllForWo(woNum);
+                            org.json.JSONArray livraisons = new org.json.JSONArray();
+                            for (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow r : allRows) {
+                                if (r.netL > 0 || "ANNULATION".equals(r.type)) {
+                                    org.json.JSONObject entry = new org.json.JSONObject();
+                                    entry.put("ticket_no", r.ticketNo != null ? r.ticketNo : "");
+                                    entry.put("net_l",     r.netL);
+                                    entry.put("gross_l",   r.grossL);
+                                    entry.put("type",      r.type != null ? r.type : "");
+                                    entry.put("end_utc",   r.endUtc != null ? r.endUtc : "");
+                                    livraisons.put(entry);
+                                }
+                            }
+                            if (livraisons.length() > 0 && !woIdGuid.isEmpty()) {
+                                com.pa.lcrdemo.dataverse.WorkOrderUpdater.patchSummaryConsolidated(
+                                    tokenHolder[0], woIdGuid, woNum, livraisons);
+                                android.util.Log.i("RetourWO", "Patch final consolidé OK — "
+                                    + livraisons.length() + " livraisons");
+                            }
+                        } catch (Exception ePatch) {
+                            android.util.Log.w("RetourWO", "Patch final ERR: " + ePatch.getMessage());
+                        }
                     } else {
                         android.util.Log.w("RetourWO", "Pas de token — données en PENDING local");
                     }
