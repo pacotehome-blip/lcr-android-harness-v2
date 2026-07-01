@@ -338,29 +338,86 @@
                     android:id="@+id/liveQtyPanel"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:orientation="vertical"
+                    android:orientation="horizontal"
                     android:layout_marginTop="10dp"
-                    android:padding="10dp"
                     android:background="#0F000000">
 
-                    <TextView
-                        android:id="@+id/txtQtyNet"
-                        android:layout_width="match_parent"
+                    <!-- Gauche : valeurs courantes de la livraison -->
+                    <LinearLayout
+                        android:layout_width="0dp"
                         android:layout_height="wrap_content"
-                        android:text="NET: 0.0"
-                        android:textStyle="bold"
-                        android:textSize="24sp"
-                        android:textColor="#000000" />
+                        android:layout_weight="1"
+                        android:orientation="vertical"
+                        android:padding="10dp">
 
-                    <TextView
-                        android:id="@+id/txtQtyGross"
-                        android:layout_width="match_parent"
+                        <TextView
+                            android:id="@+id/txtQtyNet"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="NET: 0.0"
+                            android:textStyle="bold"
+                            android:textSize="24sp"
+                            android:textColor="#000000" />
+
+                        <TextView
+                            android:id="@+id/txtQtyGross"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="GROSS: 0.0"
+                            android:textStyle="bold"
+                            android:textSize="18sp"
+                            android:textColor="#222222"
+                            android:layout_marginTop="4dp" />
+                    </LinearLayout>
+
+                    <!-- Droite : cumul WO — visible si WO déjà complété -->
+                    <LinearLayout
+                        android:id="@+id/panelWoCumul"
+                        android:layout_width="0dp"
                         android:layout_height="wrap_content"
-                        android:text="GROSS: 0.0"
-                        android:textStyle="bold"
-                        android:textSize="18sp"
-                        android:textColor="#222222"
-                        android:layout_marginTop="4dp" />
+                        android:layout_weight="1"
+                        android:orientation="vertical"
+                        android:padding="10dp"
+                        android:background="#1A185FA5"
+                        android:visibility="gone">
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="WO complété"
+                            android:textSize="11sp"
+                            android:textColor="#185FA5"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/txtWoCumulNet"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Total NET: —"
+                            android:textSize="16sp"
+                            android:textStyle="bold"
+                            android:textColor="#185FA5"
+                            android:layout_marginTop="2dp" />
+
+                        <TextView
+                            android:id="@+id/txtWoCumulGross"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Total GROSS: —"
+                            android:textSize="13sp"
+                            android:textColor="#185FA5"
+                            android:layout_marginTop="2dp" />
+
+                        <TextView
+                            android:id="@+id/txtWoCumulCount"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text=""
+                            android:textSize="11sp"
+                            android:textColor="#888888"
+                            android:layout_marginTop="2dp" />
+                    </LinearLayout>
+
                 </LinearLayout>
 
             </LinearLayout>
