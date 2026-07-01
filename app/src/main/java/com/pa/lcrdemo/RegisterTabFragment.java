@@ -318,6 +318,7 @@ public class RegisterTabFragment extends Fragment {
     // jamais effacé par les flux concurrents (ActiveDeliveryStore peut être
     // écrasé/vidé par annulation, autre poll, etc. — ces champs ne le sont pas)
     private volatile String currentWoNum    = "";
+    private volatile boolean deliveryNotified = false; // guard anti-doublon notification
     private volatile String currentWoIdGuid = "";
     private static final int TAB_LOG_MAX_LINES = 400;
     private static final long LOG_REFRESH_MIN_MS = 800;
@@ -725,6 +726,7 @@ public class RegisterTabFragment extends Fragment {
     }
 
     public void prefillFromDeepLink(String woNum, String woIdGuid, String produit, String preset) {
+        deliveryNotified = false; // reset pour la nouvelle livraison
         if (woNum != null && !woNum.isEmpty()) currentWoNum = woNum;
         if (woIdGuid != null && !woIdGuid.isEmpty()) currentWoIdGuid = woIdGuid;
         if (edtPreset != null && preset != null && !preset.isEmpty())
@@ -764,6 +766,9 @@ public class RegisterTabFragment extends Fragment {
      * temps si un autre bouton C a été cliqué pendant le poll (plusieurs minutes).
      */
     private void notifyDeliveryEndedToMainActivity(String woNumIn, String woIdGuidIn) {
+        // ✅ Guard anti-doublon — une seule notification par livraison
+        if (deliveryNotified) return;
+        deliveryNotified = true;
         try {
             if (!(getActivity() instanceof MainActivity)) return;
             MainActivity main = (MainActivity) getActivity();
@@ -2047,6 +2052,7 @@ public class RegisterTabFragment extends Fragment {
         // lancerLivraison() de DeepLinkHandler: stabilisation BT, oneshot/start,
         // poll de fin, patchDataverse automatique — exactement le chemin testé
         // et fonctionnel du flux FSM normal.
+        deliveryNotified = false; // reset pour la nouvelle livraison
         // ✅ Si ActiveDeliveryStore contient encore une livraison non terminée
         // (ex: ticket pending résolu via bouton B sans passer par doResolve)
         // → notifier + effacer avant de démarrer la nouvelle livraison
