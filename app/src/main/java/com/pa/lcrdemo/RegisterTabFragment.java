@@ -1895,8 +1895,18 @@ public class RegisterTabFragment extends Fragment {
                                     livraisons.put(entry);
                                 }
                             }
-                            // Fallback woIdGuid depuis LcrDeliveryStatusDb si vide
+                            // Fallback woIdGuid — priorité : lastResultJson > LcrDeliveryStatusDb
                             String patchGuid = woIdGuid;
+                            if (patchGuid.isEmpty()) {
+                                try {
+                                    String lastJson = com.pa.lcrdemo.DeepLinkHandler.lastResultJson;
+                                    if (lastJson != null) {
+                                        org.json.JSONObject lj = new org.json.JSONObject(lastJson);
+                                        String g = lj.optString("woid", "");
+                                        if (!g.isEmpty()) patchGuid = g;
+                                    }
+                                } catch (Exception ignored) {}
+                            }
                             if (patchGuid.isEmpty()) {
                                 try {
                                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrGuid =
@@ -1908,6 +1918,7 @@ public class RegisterTabFragment extends Fragment {
                                         patchGuid = rowGuid.woIdGuid;
                                 } catch (Exception ignored) {}
                             }
+                            android.util.Log.i("RetourWO", "patchGuid=" + patchGuid + " woIdGuid=" + woIdGuid);
                             if (livraisons.length() > 0 && !patchGuid.isEmpty()) {
                                 com.pa.lcrdemo.dataverse.WorkOrderUpdater.patchSummaryConsolidated(
                                     tokenHolder[0], patchGuid, woNum, livraisons);
