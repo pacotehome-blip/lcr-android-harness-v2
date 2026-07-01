@@ -454,6 +454,12 @@ public class RegisterTabFragment extends Fragment {
                     } else {
                         notifyDeliveryEndedToMainActivity();
                         rafraichirCumulWo();
+                        // ✅ Forcer updateButtons même si notifyDeliveryEndedToMainActivity
+                        // a été bloqué par deliveryNotified — le bouton retour doit toujours apparaître
+                        ui.postDelayed(() -> {
+                            if (!isAdded() || getView() == null || controller == null) return;
+                            updateButtons(controller.getState());
+                        }, 500);
                     }
                 }
 
@@ -1880,16 +1886,51 @@ public class RegisterTabFragment extends Fragment {
                     new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext()).clear();
                 } catch (Exception ignored) {}
 
-                // 5. Retour FSM via finish() — taskAffinity ramène FSM au premier plan
-                final String fWoIdGuid = woIdGuid;
+                // 4b. Vérifier si des livraisons sont encore PENDING après le push
+                int pendingCount = 0;
+                try {
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrCheck =
+                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                    java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> pendingRows =
+                        lcrCheck.getPendingDeliveries();
+                    // Filtrer seulement les PENDING pour ce WO
+                    for (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow r : pendingRows) {
+                        if (woNum != null && woNum.equals(r.woNum)) pendingCount++;
+                    }
+                } catch (Exception ignored) {}
+
+                // 5. Retour FSM
+                final String fWoIdGuid  = woIdGuid;
+                final int    fPending   = pendingCount;
                 ui.post(() -> {
-                    try {
-                        android.util.Log.i("RetourWO", "finish() → FSM via taskAffinity woId=" + fWoIdGuid);
-                        if (getActivity() != null) getActivity().finish();
-                    } catch (Exception e) {
-                        android.util.Log.e("RetourWO", "finish() ERR: " + e.getMessage());
-                    } finally {
-                        if (btnRetourWO != null) btnRetourWO.setEnabled(true);
+                    if (!isAdded() || getView() == null) return;
+                    if (fPending > 0) {
+                        // Livraisons non synchronisées — avertir sans bloquer
+                        new android.app.AlertDialog.Builder(requireContext())
+                            .setTitle("Données en attente de sync")
+                            .setMessage(fPending + " livraison(s) pas encore envoyée(s) à Dataverse."
+                                + " Elles seront envoyées automatiquement dès que le réseau revient."
+                                + "
+
+Voulez-vous retourner quand même ?")
+                            .setCancelable(false)
+                            .setPositiveButton("Retourner quand même", (d, w) -> {
+                                try { if (getActivity() != null) getActivity().finish(); }
+                                catch (Exception ignored) {}
+                            })
+                            .setNegativeButton("Attendre la sync", (d, w) -> {
+                                if (btnRetourWO != null) btnRetourWO.setEnabled(true);
+                            })
+                            .show();
+                    } else {
+                        try {
+                            android.util.Log.i("RetourWO", "finish() → FSM woId=" + fWoIdGuid);
+                            if (getActivity() != null) getActivity().finish();
+                        } catch (Exception e) {
+                            android.util.Log.e("RetourWO", "finish() ERR: " + e.getMessage());
+                        } finally {
+                            if (btnRetourWO != null) btnRetourWO.setEnabled(true);
+                        }
                     }
                 });
 
