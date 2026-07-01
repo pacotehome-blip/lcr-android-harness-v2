@@ -1907,12 +1907,10 @@ public class RegisterTabFragment extends Fragment {
                     if (fPending > 0) {
                         // Livraisons non synchronisées — avertir sans bloquer
                         new android.app.AlertDialog.Builder(requireContext())
-                            .setTitle("Données en attente de sync")
-                            .setMessage(fPending + " livraison(s) pas encore envoyée(s) à Dataverse."
-                                + " Elles seront envoyées automatiquement dès que le réseau revient."
-                                + "
-
-Voulez-vous retourner quand même ?")
+                            .setTitle("Donnees en attente de sync")
+                            .setMessage(fPending + " livraison(s) pas encore envoyee(s) a Dataverse."
+                                + " Elles seront envoyees des que le reseau revient."
+                                + "\n\nVoulez-vous retourner quand meme ?")
                             .setCancelable(false)
                             .setPositiveButton("Retourner quand même", (d, w) -> {
                                 try { if (getActivity() != null) getActivity().finish(); }
