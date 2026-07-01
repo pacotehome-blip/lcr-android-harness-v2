@@ -1820,8 +1820,19 @@ public class RegisterTabFragment extends Fragment {
                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow existing =
                     lcrDb.getLatestForWo(woNum);
                 if (existing != null && !ticketNo.isEmpty() && ticketNo.equals(existing.ticketNo)) {
-                    android.util.Log.i("RetourWO", "Ticket " + ticketNo
-                        + " déjà enregistré (id=" + existing.id + ") — skip INSERT");
+                    // Ticket déjà enregistré — mettre à jour si netL = 0
+                    if (existing.netL == 0 && netL > 0) {
+                        android.content.ContentValues cvUpdate = new android.content.ContentValues();
+                        cvUpdate.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,   netL);
+                        cvUpdate.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L, grossL);
+                        cvUpdate.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID, woIdGuid);
+                        lcrDb.updateDelivery(existing.id, cvUpdate);
+                        android.util.Log.i("RetourWO", "Ticket " + ticketNo
+                            + " mis a jour — net=" + netL + " gross=" + grossL);
+                    } else {
+                        android.util.Log.i("RetourWO", "Ticket " + ticketNo
+                            + " deja enregistre (id=" + existing.id + ") — skip INSERT");
+                    }
                 } else {
                     android.content.ContentValues cv = new android.content.ContentValues();
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,      woNum);
@@ -1895,30 +1906,23 @@ public class RegisterTabFragment extends Fragment {
                                     livraisons.put(entry);
                                 }
                             }
-                            // Fallback woIdGuid — priorité : lastResultJson > LcrDeliveryStatusDb
-                            String patchGuid = woIdGuid;
-                            if (patchGuid.isEmpty()) {
-                                try {
-                                    String lastJson = com.pa.lcrdemo.DeepLinkHandler.lastResultJson;
-                                    if (lastJson != null) {
-                                        org.json.JSONObject lj = new org.json.JSONObject(lastJson);
-                                        String g = lj.optString("woid", "");
-                                        if (!g.isEmpty()) patchGuid = g;
+                            // ✅ Lire woIdGuid depuis LcrDeliveryStatusDb — source de vérité
+                            // La première livraison du WO a le GUID sauvegardé depuis le deep link
+                            // Toutes les livraisons du même WO partagent le même GUID
+                            String patchGuid = "";
+                            try {
+                                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrGuid =
+                                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                                java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> allForGuid =
+                                    lcrGuid.getAllForWo(woNum);
+                                for (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow r : allForGuid) {
+                                    if (r.woIdGuid != null && !r.woIdGuid.isEmpty()) {
+                                        patchGuid = r.woIdGuid;
+                                        break;
                                     }
-                                } catch (Exception ignored) {}
-                            }
-                            if (patchGuid.isEmpty()) {
-                                try {
-                                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrGuid =
-                                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
-                                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow rowGuid =
-                                        lcrGuid.getLatestForWo(woNum);
-                                    if (rowGuid != null && rowGuid.woIdGuid != null
-                                            && !rowGuid.woIdGuid.isEmpty())
-                                        patchGuid = rowGuid.woIdGuid;
-                                } catch (Exception ignored) {}
-                            }
-                            android.util.Log.i("RetourWO", "patchGuid=" + patchGuid + " woIdGuid=" + woIdGuid);
+                                }
+                            } catch (Exception ignored) {}
+                            android.util.Log.i("RetourWO", "patchGuid=" + patchGuid + " rows=" + livraisons.length());
                             if (livraisons.length() > 0 && !patchGuid.isEmpty()) {
                                 com.pa.lcrdemo.dataverse.WorkOrderUpdater.patchSummaryConsolidated(
                                     tokenHolder[0], patchGuid, woNum, livraisons);
