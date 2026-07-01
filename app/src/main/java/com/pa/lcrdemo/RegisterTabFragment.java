@@ -452,15 +452,7 @@ public class RegisterTabFragment extends Fragment {
                         notifyDeliveryEndedToMainActivity();
                     }
                 }
-                if (state == DeliveryState.CONNECTED && controller != null
-                        && controller.netAtDeliveryEnd > 0
-                        && controller.ticketNoAtEnd != null
-                        && !controller.ticketNoAtEnd.isEmpty()) {
-                    demarrerPollPostLivraison(
-                        controller.netAtDeliveryEnd,
-                        controller.grossAtDeliveryEnd,
-                        controller.ticketNoAtEnd);
-                }
+
             });
         }
 
@@ -598,7 +590,6 @@ public class RegisterTabFragment extends Fragment {
 
     @Override
     public void onStop() {
-        arreterPollPostLivraison();
         detachUiListenerSafe();
         LogBus.removeListener(logListener);
         try { requireContext().unregisterReceiver(usbStateReceiver); } catch (Exception ignored) {}
@@ -1021,6 +1012,8 @@ public class RegisterTabFragment extends Fragment {
                         double netRegistre   = -1.0;
                         double grossRegistre = -1.0;
                         try {
+                            // Field #2 GrossQty_NE + Field #3 NetQty_NE
+                            // Quantites facturables selon SDK LCR-II
                             double[] hw = c.readNetGrossFromHardware();
                             netRegistre   = hw[0];
                             grossRegistre = hw[1];
@@ -2326,9 +2319,11 @@ public class RegisterTabFragment extends Fragment {
                 bg.execute(() -> {
                     double netCourant = -1.0, grossCourant = -1.0;
                     try {
-                        double[] hw = controller.readNetGrossFromHardware();
-                        netCourant   = hw[0];
-                        grossCourant = hw[1];
+                        if (controller != null) {
+                            double[] hw = controller.readNetGrossFromHardware();
+                            netCourant   = hw[0];
+                            grossCourant = hw[1];
+                        }
                     } catch (Exception ignored) {}
                     final double fNet = netCourant, fGross = grossCourant;
                     ui.post(() -> {
