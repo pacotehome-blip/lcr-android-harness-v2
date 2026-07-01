@@ -1895,9 +1895,22 @@ public class RegisterTabFragment extends Fragment {
                                     livraisons.put(entry);
                                 }
                             }
-                            if (livraisons.length() > 0 && !woIdGuid.isEmpty()) {
+                            // Fallback woIdGuid depuis LcrDeliveryStatusDb si vide
+                            String patchGuid = woIdGuid;
+                            if (patchGuid.isEmpty()) {
+                                try {
+                                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrGuid =
+                                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow rowGuid =
+                                        lcrGuid.getLatestForWo(woNum);
+                                    if (rowGuid != null && rowGuid.woIdGuid != null
+                                            && !rowGuid.woIdGuid.isEmpty())
+                                        patchGuid = rowGuid.woIdGuid;
+                                } catch (Exception ignored) {}
+                            }
+                            if (livraisons.length() > 0 && !patchGuid.isEmpty()) {
                                 com.pa.lcrdemo.dataverse.WorkOrderUpdater.patchSummaryConsolidated(
-                                    tokenHolder[0], woIdGuid, woNum, livraisons);
+                                    tokenHolder[0], patchGuid, woNum, livraisons);
                                 android.util.Log.i("RetourWO", "Patch final consolidé OK — "
                                     + livraisons.length() + " livraisons");
                             }
