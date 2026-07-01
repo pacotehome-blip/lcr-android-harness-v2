@@ -1592,11 +1592,37 @@ public class DeepLinkHandler {
                     public void onSuccess(String accessToken) {
                         btExec.execute(() -> {
                             try {
-                                WorkOrderUpdater.patchSummary(
-                                    accessToken, woGuid,
-                                    net, gross, ticket,
-                                    woNum, fDeliveryUid);
-                                android.util.Log.i(TAG, "patchDataverse MSAL: OK — wonum=" + woNum);
+                                // ✅ Construire le payload consolidé avec toutes les livraisons du WO
+                                org.json.JSONArray livraisons = new org.json.JSONArray();
+                                try {
+                                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
+                                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
+                                    java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> rows =
+                                        lcrDb.getAllForWo(woNum);
+                                    for (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow r : rows) {
+                                        if (r.netL > 0 || "ANNULATION".equals(r.type)) {
+                                            org.json.JSONObject entry = new org.json.JSONObject();
+                                            entry.put("ticket_no", r.ticketNo != null ? r.ticketNo : "");
+                                            entry.put("net_l",     r.netL);
+                                            entry.put("gross_l",   r.grossL);
+                                            entry.put("type",      r.type != null ? r.type : "");
+                                            entry.put("end_utc",   r.endUtc != null ? r.endUtc : "");
+                                            livraisons.put(entry);
+                                        }
+                                    }
+                                } catch (Exception ignored) {}
+
+                                if (livraisons.length() > 0) {
+                                    WorkOrderUpdater.patchSummaryConsolidated(
+                                        accessToken, woGuid, woNum, livraisons);
+                                } else {
+                                    WorkOrderUpdater.patchSummary(
+                                        accessToken, woGuid,
+                                        net, gross, ticket,
+                                        woNum, fDeliveryUid);
+                                }
+                                android.util.Log.i(TAG, "patchDataverse MSAL: OK — wonum=" + woNum
+                                    + " livraisons=" + livraisons.length());
                                 try {
                                     DeliveryResultQueueDb qdb = new DeliveryResultQueueDb(activity);
                                     java.util.List<DeliveryResultQueueDb.QueueItem> items =
