@@ -806,6 +806,41 @@ public class RegisterTabFragment extends Fragment {
 
             main.onDeliveryEnded(woNum, woIdGuid, extra.toString());
 
+            // ✅ Insérer dans LcrDeliveryStatusDb si pas déjà fait par DeepLinkHandler
+            // Cas ticket pending — le poll a quitté sans appeler onDeliveryEnded dans DeepLinkHandler
+            final String fWoNum    = woNum;
+            final String fTicketNo = ticketNo;
+            final double fNet      = net;
+            final double fGross    = gross;
+            bg.execute(() -> {
+                try {
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
+                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                    // Vérifier si déjà inséré par DeepLinkHandler
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow existing =
+                        lcrDb.getLatestForWo(fWoNum);
+                    boolean alreadyHasData = (existing != null
+                        && existing.ticketNo != null
+                        && !existing.ticketNo.isEmpty()
+                        && existing.netL > 0);
+                    if (!alreadyHasData && fNet > 0) {
+                        android.content.ContentValues cv = new android.content.ContentValues();
+                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,    fWoNum);
+                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO, fTicketNo);
+                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,     fNet);
+                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L,   fGross);
+                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
+                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,    "TAB");
+                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
+                        lcrDb.insertDelivery(cv);
+                    }
+                    // Rafraîchir le cumul WO après insertion
+                    ui.post(() -> rafraichirCumulWo());
+                } catch (Exception ignored) {}
+            });
+
         } catch (Exception ignored) {}
     }
 
@@ -2024,21 +2059,24 @@ public class RegisterTabFragment extends Fragment {
             refreshDelCodeFromTickSnapshotThrottled();
             updateButtons(controller != null ? controller.getState() : null);
 
-            // ✅ Après resolve ticket pending — si WO actif et CONNECTED propre
-            // déclencher notifyDeliveryEndedToMainActivity() pour afficher bouton retour
-            // Le poll DeepLinkHandler a quitté sur ticket pending sans appeler onDeliveryEnded
-            // Effacer aussi ActiveDeliveryStore — sinon la prochaine livraison sur le même WO
-            // serait considérée comme une reprise et ne démarrerait pas le registre
+            // ✅ Après resolve ticket pending — notifier seulement si ActiveDeliveryStore
+            // contient encore une livraison (= DeepLinkHandler n'a pas encore appelé onDeliveryEnded)
+            // Si ActiveDeliveryStore est vide = DeepLinkHandler a déjà notifié → ne pas doubler
             ui.postDelayed(() -> {
                 if (!isAdded() || getView() == null || controller == null) return;
-                if (controller.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED
-                        && currentWoNum != null && !currentWoNum.isEmpty()) {
-                    // Effacer ActiveDeliveryStore avant de notifier
-                    try {
-                        new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext()).clear();
-                    } catch (Exception ignored) {}
-                    notifyDeliveryEndedToMainActivity();
-                }
+                if (controller.getState() != com.pa.lcr.lcp.DeliveryState.CONNECTED) return;
+                if (currentWoNum == null || currentWoNum.isEmpty()) return;
+                try {
+                    com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
+                        new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
+                    com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery active = ads.load();
+                    if (active != null && active.jobId != null && !active.jobId.isEmpty()) {
+                        // ActiveDeliveryStore non vide = ticket pending non résolu par DeepLinkHandler
+                        ads.clear();
+                        notifyDeliveryEndedToMainActivity();
+                    }
+                    // Si ActiveDeliveryStore vide = DeepLinkHandler a déjà notifié → rien à faire
+                } catch (Exception ignored) {}
             }, 1500);
         }, 900);
     }
@@ -2497,7 +2535,7 @@ public class RegisterTabFragment extends Fragment {
                 java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> rows =
                     db.getAllForWo(wo);
                 for (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow r : rows) {
-                    if (!"ANNULATION".equals(r.type)) {
+                    if (!"ANNULATION".equals(r.type) && r.netL > 0) {
                         totalNet   += r.netL;
                         totalGross += r.grossL;
                         count++;
