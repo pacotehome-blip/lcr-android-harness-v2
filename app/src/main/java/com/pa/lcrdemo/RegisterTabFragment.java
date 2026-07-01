@@ -2038,6 +2038,20 @@ public class RegisterTabFragment extends Fragment {
         // lancerLivraison() de DeepLinkHandler: stabilisation BT, oneshot/start,
         // poll de fin, patchDataverse automatique — exactement le chemin testé
         // et fonctionnel du flux FSM normal.
+        // ✅ Si ActiveDeliveryStore contient encore une livraison non terminée
+        // (ex: ticket pending résolu via bouton B sans passer par doResolve)
+        // → notifier + effacer avant de démarrer la nouvelle livraison
+        try {
+            com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
+                new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
+            com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery active = ads.load();
+            if (active != null && active.jobId != null && !active.jobId.isEmpty()) {
+                ads.clear();
+                // Notifier la livraison précédente comme terminée
+                notifyDeliveryEndedToMainActivity();
+            }
+        } catch (Exception ignored) {}
+
         String tk = (tabTransportKey != null) ? tabTransportKey.trim() : "";
         main.lancerLivraisonDepuisTab(tk, node, serialFromArgs,
             currentWoNum, currentWoIdGuid, String.valueOf(prod), presetStr, "");
