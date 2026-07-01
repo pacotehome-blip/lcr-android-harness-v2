@@ -2012,6 +2012,17 @@ public class RegisterTabFragment extends Fragment {
             try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
             refreshDelCodeFromTickSnapshotThrottled();
             updateButtons(controller != null ? controller.getState() : null);
+
+            // ✅ Après resolve ticket pending — si WO actif et CONNECTED propre
+            // déclencher notifyDeliveryEndedToMainActivity() pour afficher bouton retour
+            // Le poll DeepLinkHandler a quitté sur ticket pending sans appeler onDeliveryEnded
+            ui.postDelayed(() -> {
+                if (!isAdded() || getView() == null || controller == null) return;
+                if (controller.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED
+                        && currentWoNum != null && !currentWoNum.isEmpty()) {
+                    notifyDeliveryEndedToMainActivity();
+                }
+            }, 1500);
         }, 900);
     }
 
