@@ -798,10 +798,19 @@ public class RegisterTabFragment extends Fragment {
                 }
             } catch (Exception ignored) {}
 
+            // ✅ Construire la structure que DeepLinkHandler.onDeliveryEnded() attend
+            // Il lit result.fs_net_l / result.fs_gross_l / result.ticket_no
             try {
-                extra.put("ticketNo", ticketNo);
-                extra.put("netL",     net);
-                extra.put("grossL",   gross);
+                org.json.JSONObject result = new org.json.JSONObject();
+                result.put("fs_net_l",   net);
+                result.put("fs_gross_l", gross);
+                result.put("ticket_no",  ticketNo);
+                result.put("net",        net);
+                result.put("gross",      gross);
+                extra.put("result",    result);
+                extra.put("ticketNo",  ticketNo);
+                extra.put("netL",      net);
+                extra.put("grossL",    gross);
             } catch (Exception ignored) {}
 
             main.onDeliveryEnded(woNum, woIdGuid, extra.toString());
