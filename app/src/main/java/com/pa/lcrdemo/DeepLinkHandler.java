@@ -263,14 +263,23 @@ public class DeepLinkHandler {
                             android.util.Log.w(TAG, "Registre introuvable — node=" + fNode);
 
                             // ✅ Fallback — si un tab registre existe déjà pour ce node
-                            // utiliser son transportKey directement sans passer par RSM
-                            String existingKey = activity.getTransportKeyForNode(fNode);
-                            if (existingKey != null && !existingKey.isEmpty()) {
-                                android.util.Log.i(TAG, "Fallback tab existant — transportKey=" + existingKey);
-                                lancerLivraison(existingKey, fNode, fSerialId, woNum, woIdGuid,
-                                    fProduit, fPresetStr, fBtMac);
-                                return;
-                            }
+                            // lancer directement via le fragment (même chemin que bouton C)
+                            // évite la re-vérification du transport dans lancerLivraison()
+                            final String fWoNumFb  = woNum;
+                            final String fWoIdFb   = woIdGuid;
+                            final String fProdFb   = fProduit;
+                            final String fPresetFb = fPresetStr;
+                            final int    fNodeFb   = fNode;
+                            activity.runOnUiThread(() -> {
+                                boolean launched = activity.lancerLivraisonViaTabExistant(
+                                    fNodeFb, fWoNumFb, fWoIdFb, fProdFb, fPresetFb);
+                                if (launched) {
+                                    android.util.Log.i(TAG, "Fallback tab existant OK — node=" + fNodeFb);
+                                } else {
+                                    android.util.Log.w(TAG, "Fallback tab existant: aucun tab trouvé");
+                                }
+                            });
+                            if (activity.getTransportKeyForNode(fNode) != null) return;
 
                             // ✅ Rester dans l'APK — pas de finish() pour éviter bounce FSM
                             // Le chauffeur va dans Configure pour connecter le registre

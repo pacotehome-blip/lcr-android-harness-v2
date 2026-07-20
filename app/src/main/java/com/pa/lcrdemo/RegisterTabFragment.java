@@ -2143,6 +2143,18 @@ public class RegisterTabFragment extends Fragment {
 
     // ── Resolve (btnA) ───────────────────────────────────────────────────────────────
     // ── Bouton C — nouvelle livraison ─────────────────────────────────
+    /** Appelé par DeepLinkHandler via MainActivity quand le tab existe déjà
+     *  Même comportement que le bouton C mais avec préfill du WO */
+    public void startNewDeliveryCFromDeepLink(String woNum, String woIdGuid,
+            String produit, String presetStr) {
+        // Préfiller
+        if (woNum != null && !woNum.isEmpty()) currentWoNum = woNum;
+        if (woIdGuid != null && !woIdGuid.isEmpty()) currentWoIdGuid = woIdGuid;
+        deliveryNotified = false;
+        // Lancer comme bouton C
+        startNewDeliveryC();
+    }
+
     private void startNewDeliveryC() {
         if (controller == null) return;
         refreshDelCodeFromTickSnapshotThrottled();

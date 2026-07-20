@@ -666,14 +666,32 @@ public class MainActivity extends AppCompatActivity {
      * patchDataverse automatique. Seul le ticket number du registre change
      * à chaque appel — woNum/woIdGuid/produit/preset restent ceux du WO en cours.
      */
-    /** Retourne le transportKey du tab actif pour un node donné — utilisé par DeepLinkHandler
-     *  comme fallback si resolveOrCreateForNode() retourne null mais qu'un tab existe déjà */
+    /** Retourne le transportKey du tab actif pour un node donné */
     public String getTransportKeyForNode(int node) {
         for (TabSpec t : tabsByKey.values()) {
             if (t.node == node && t.transportKey != null && !t.transportKey.isEmpty())
                 return t.transportKey;
         }
         return null;
+    }
+
+    /** Lance la livraison directement via le fragment du tab existant — même chemin que bouton C
+     *  Utilisé par DeepLinkHandler quand resolveOrCreateForNode() échoue mais tab existe */
+    public boolean lancerLivraisonViaTabExistant(int node, String woNum, String woIdGuid,
+            String produit, String presetStr) {
+        for (TabSpec t : tabsByKey.values()) {
+            if (t.node != node) continue;
+            String tabKey = t.tabKey;
+            Fragment f = getSupportFragmentManager().findFragmentByTag("regtab_" + tabKey);
+            if (!(f instanceof RegisterTabFragment)) continue;
+            RegisterTabFragment tab = (RegisterTabFragment) f;
+            // Préfiller le WO et lancer comme le bouton C
+            tab.prefillFromDeepLink(woNum, woIdGuid, produit, presetStr);
+            runOnUiThread(() -> tab.startNewDeliveryCFromDeepLink(woNum, woIdGuid, produit, presetStr));
+            android.util.Log.i("MainActivity", "lancerLivraisonViaTabExistant — node=" + node + " wo=" + woNum);
+            return true;
+        }
+        return false;
     }
 
     public void lancerLivraisonDepuisTab(String transportKey, int node, String serialId,
