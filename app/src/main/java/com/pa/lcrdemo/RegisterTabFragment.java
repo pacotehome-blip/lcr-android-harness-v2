@@ -2667,7 +2667,7 @@ public class RegisterTabFragment extends Fragment {
     // ✅ Afficher le cumul WO à droite du live — lecture depuis LcrDeliveryStatusDb
     private void rafraichirCumulWo() {
         if (currentWoNum == null || currentWoNum.isEmpty()) {
-            if (panelWoCumul != null) ui.post(() -> panelWoCumul.setVisibility(android.view.View.GONE));
+            // Ne pas cacher le panel — il doit toujours etre visible
             return;
         }
         final String wo = currentWoNum;
