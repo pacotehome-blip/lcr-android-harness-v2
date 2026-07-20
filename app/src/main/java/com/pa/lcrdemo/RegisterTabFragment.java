@@ -439,6 +439,11 @@ public class RegisterTabFragment extends Fragment {
                         updateButtons(controller.getState());
                     }, 2000);
                 }
+                // Lire le vrai état ticket pending depuis le registre
+                if (state == DeliveryState.CONNECTED) {
+                    ui.postDelayed(() -> refreshDelCodeFromTickSnapshotThrottled(), 500);
+                }
+
 
                 // ✅ Si pas de WO préfillé — chercher via ticket_no du registre
                 if (state == DeliveryState.CONNECTED
