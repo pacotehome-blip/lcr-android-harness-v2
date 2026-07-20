@@ -392,6 +392,20 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     /**
      * Met à jour une transaction existante (par ID local).
      */
+    /** Chercher une livraison par ticket_no — pour retrouver le WO depuis le registre */
+    public DeliveryRow getByTicketNo(String ticketNo) {
+        if (ticketNo == null || ticketNo.isEmpty()) return null;
+        try {
+            SQLiteDatabase db = dbHelper.getReadableDatabase();
+            try (Cursor c = db.query(TABLE, null,
+                    COL_TICKET_NO + "=?", new String[]{ticketNo},
+                    null, null, COL_TS_STARTED_MS + " DESC", "1")) {
+                if (c.moveToFirst()) return rowFromCursor(c);
+            }
+        } catch (Exception e) { Log.e(TAG, "getByTicketNo ERR: " + e.getMessage()); }
+        return null;
+    }
+
     public int updateDelivery(long id, ContentValues cv) {
         cv.put(COL_TS_UPDATED_MS, System.currentTimeMillis());
         try {

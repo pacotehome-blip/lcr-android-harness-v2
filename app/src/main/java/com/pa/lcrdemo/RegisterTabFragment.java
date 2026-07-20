@@ -629,6 +629,12 @@ public class RegisterTabFragment extends Fragment {
         ui.postDelayed(() -> checkPendingDeliveryForThisRegister(), 800);
         // ✅ Rafraîchir le cumul WO au retour dans le tab
         ui.postDelayed(() -> rafraichirCumulWo(), 600);
+        // Si pas de WO préfillé par deep link — chercher via ticket_no du registre
+        ui.postDelayed(() -> {
+            if (currentWoNum == null || currentWoNum.isEmpty()) {
+                rechercherWoDepuisRegistre();
+            }
+        }, 1200);
 
         // ✅ Si controller existe et io mort → diagnostic au moment où on arrive dans le tab
         ui.postDelayed(() -> {
@@ -691,6 +697,9 @@ public class RegisterTabFragment extends Fragment {
         txtWoCumulNet    = v.findViewById(R.id.txtWoCumulNet);
         txtWoCumulGross  = v.findViewById(R.id.txtWoCumulGross);
         txtWoCumulCount  = v.findViewById(R.id.txtWoCumulCount);
+        if (panelWoCumul != null) {
+            panelWoCumul.setOnClickListener(vv -> afficherDetailLivraisonsWo());
+        }
         btnCustomPrint   = v.findViewById(R.id.btnCustomPrint);
         btnAnnuler       = v.findViewById(R.id.btnAnnuler);
         btnScanProducts  = v.findViewById(R.id.btnScanProducts);
@@ -2686,6 +2695,88 @@ public class RegisterTabFragment extends Fragment {
                     panelWoCumul.setVisibility(android.view.View.GONE);
                 }
             });
+        });
+    }
+
+
+    // ✅ Chercher le WO depuis le ticket_no courant du registre
+    // Utilisé quand on arrive dans l'APK sans deep link FSM
+    // Le deep link a toujours précédence — appelé seulement si currentWoNum est vide
+    private void rechercherWoDepuisRegistre() {
+        if (controller == null) return;
+        if (currentWoNum != null && !currentWoNum.isEmpty()) return; // deep link déjà préfillé
+        bg.execute(() -> {
+            try {
+                // Lire ticket_no courant depuis le registre (Field #23)
+                String ticketNo = controller.api_tickSnapshot() != null
+                    && controller.api_tickSnapshot().data != null
+                    ? controller.api_tickSnapshot().data.optString("ticket_no", "") : "";
+                if (ticketNo.isEmpty()) return;
+
+                // Chercher ce ticket dans LcrDeliveryStatusDb
+                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db =
+                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow row =
+                    db.getByTicketNo(ticketNo);
+                if (row == null || row.woNum == null || row.woNum.isEmpty()) return;
+
+                // WO trouvé — préfiller et rafraîchir
+                final String woNum = row.woNum;
+                final String woIdGuid = row.woIdGuid != null ? row.woIdGuid : "";
+                ui.post(() -> {
+                    currentWoNum    = woNum;
+                    currentWoIdGuid = woIdGuid;
+                    LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " → woNum=" + woNum);
+                    rafraichirCumulWo();
+                });
+            } catch (Exception e) {
+                LogBus.api(node, "[WO-DETECT] ERR: " + safeMsg(e));
+            }
+        });
+    }
+
+    // ✅ Dialog liste de toutes les livraisons du WO
+    private void afficherDetailLivraisonsWo() {
+        if (currentWoNum == null || currentWoNum.isEmpty()) return;
+        bg.execute(() -> {
+            try {
+                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db =
+                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> rows =
+                    db.getAllForWo(currentWoNum);
+
+                StringBuilder sb = new StringBuilder();
+                sb.append("WO : ").append(currentWoNum).append("\n");
+                sb.append("─────────────────────────\n");
+                double totalNet = 0, totalGross = 0;
+                for (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow r : rows) {
+                    if (r.netL > 0) {
+                        sb.append("Ticket : ").append(r.ticketNo).append("\n");
+                        sb.append(String.format(java.util.Locale.ROOT,
+                            "  NET: %.3f L  GROSS: %.3f L\n", r.netL, r.grossL));
+                        totalNet   += r.netL;
+                        totalGross += r.grossL;
+                    }
+                }
+                sb.append("─────────────────────────\n");
+                sb.append(String.format(java.util.Locale.ROOT,
+                    "TOTAL NET  : %.3f L\n", totalNet));
+                sb.append(String.format(java.util.Locale.ROOT,
+                    "TOTAL GROSS: %.3f L\n", totalGross));
+                sb.append(rows.size() + " livraison(s)");
+
+                final String msg = sb.toString();
+                ui.post(() -> {
+                    if (!isAdded() || getView() == null) return;
+                    new android.app.AlertDialog.Builder(requireContext())
+                        .setTitle("Livraisons — WO " + currentWoNum)
+                        .setMessage(msg)
+                        .setPositiveButton("Retour", null)
+                        .show();
+                });
+            } catch (Exception e) {
+                LogBus.api(node, "[WO-DETAIL] ERR: " + safeMsg(e));
+            }
         });
     }
 
