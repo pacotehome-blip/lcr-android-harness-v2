@@ -2710,29 +2710,32 @@ public class RegisterTabFragment extends Fragment {
     // Le deep link a toujours précédence — appelé seulement si currentWoNum est vide
     private void rechercherWoDepuisRegistre() {
         if (controller == null) return;
-        if (currentWoNum != null && !currentWoNum.isEmpty()) return; // deep link déjà préfillé
+        if (currentWoNum != null && !currentWoNum.isEmpty()) return;
         bg.execute(() -> {
             try {
-                // Lire ticket_no courant depuis le registre (Field #23)
-                String ticketNo = controller.api_tickSnapshot() != null
-                    && controller.api_tickSnapshot().data != null
-                    ? controller.api_tickSnapshot().data.optString("ticket_no", "") : "";
+                // Lire ticket_no courant — un seul appel
+                ApiResult snap = controller.api_tickSnapshot();
+                if (snap == null || snap.data == null) return;
+                String ticketNo = snap.data.optString("ticket_no", "");
                 if (ticketNo.isEmpty()) return;
+                LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — recherche dans DB");
 
                 // Chercher ce ticket dans LcrDeliveryStatusDb
                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db =
                     new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow row =
                     db.getByTicketNo(ticketNo);
-                if (row == null || row.woNum == null || row.woNum.isEmpty()) return;
+                if (row == null || row.woNum == null || row.woNum.isEmpty()) {
+                    LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — pas dans DB");
+                    return;
+                }
 
-                // WO trouvé — préfiller et rafraîchir
-                final String woNum = row.woNum;
-                final String woIdGuid = row.woIdGuid != null ? row.woIdGuid : "";
+                final String fWoNum    = row.woNum;
+                final String fWoIdGuid = row.woIdGuid != null ? row.woIdGuid : "";
                 ui.post(() -> {
-                    currentWoNum    = woNum;
-                    currentWoIdGuid = woIdGuid;
-                    LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " → woNum=" + woNum);
+                    currentWoNum    = fWoNum;
+                    currentWoIdGuid = fWoIdGuid;
+                    LogBus.api(node, "[WO-DETECT] WO trouvé=" + fWoNum);
                     rafraichirCumulWo();
                 });
             } catch (Exception e) {
