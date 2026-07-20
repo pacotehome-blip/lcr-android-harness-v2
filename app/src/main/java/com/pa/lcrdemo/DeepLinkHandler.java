@@ -262,25 +262,6 @@ public class DeepLinkHandler {
                         } else {
                             android.util.Log.w(TAG, "Registre introuvable — node=" + fNode);
 
-                            // ✅ Fallback — si un tab registre existe déjà pour ce node
-                            // lancer directement via le fragment (même chemin que bouton C)
-                            // évite la re-vérification du transport dans lancerLivraison()
-                            final String fWoNumFb  = woNum;
-                            final String fWoIdFb   = woIdGuid;
-                            final String fProdFb   = fProduit;
-                            final String fPresetFb = fPresetStr;
-                            final int    fNodeFb   = fNode;
-                            activity.runOnUiThread(() -> {
-                                boolean launched = activity.lancerLivraisonViaTabExistant(
-                                    fNodeFb, fWoNumFb, fWoIdFb, fProdFb, fPresetFb);
-                                if (launched) {
-                                    android.util.Log.i(TAG, "Fallback tab existant OK — node=" + fNodeFb);
-                                } else {
-                                    android.util.Log.w(TAG, "Fallback tab existant: aucun tab trouvé");
-                                }
-                            });
-                            if (activity.getTransportKeyForNode(fNode) != null) return;
-
                             // ✅ Rester dans l'APK — pas de finish() pour éviter bounce FSM
                             // Le chauffeur va dans Configure pour connecter le registre
                             final String fWoNumR = woNum;
@@ -895,6 +876,8 @@ public class DeepLinkHandler {
                             } catch (Exception ignored) {}
                             android.util.Log.i(TAG, "pollJob: ticket pending — sortie poll, opérateur gère via bouton A");
                             // Sortir du poll — l'opérateur gère via bouton A
+                            // ✅ Libérer activePolls pour permettre une nouvelle livraison
+                            activePolls.remove(jobId);
                             return;
                         } else {
                             // CONNECTED sans ticket pending — envoyer continue avec retry
