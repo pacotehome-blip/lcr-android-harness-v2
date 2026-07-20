@@ -379,7 +379,7 @@
                         android:orientation="vertical"
                         android:padding="10dp"
                         android:background="#1A185FA5"
-                        android:visibility="gone">
+                        android:visibility="visible">
 
                         <TextView
                             android:layout_width="match_parent"

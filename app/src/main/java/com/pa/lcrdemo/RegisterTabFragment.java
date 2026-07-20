@@ -2687,19 +2687,18 @@ public class RegisterTabFragment extends Fragment {
             final int fCount = count;
             ui.post(() -> {
                 if (!isAdded() || getView() == null || panelWoCumul == null) return;
-                if (fCount > 0) {
-                    panelWoCumul.setVisibility(android.view.View.VISIBLE);
-                    if (txtWoCumulNet != null)
-                        txtWoCumulNet.setText(String.format(java.util.Locale.ROOT,
-                            "Total NET: %.1f L", fNet));
-                    if (txtWoCumulGross != null)
-                        txtWoCumulGross.setText(String.format(java.util.Locale.ROOT,
-                            "Total GROSS: %.1f L", fGross));
-                    if (txtWoCumulCount != null)
-                        txtWoCumulCount.setText(fCount + " livraison" + (fCount > 1 ? "s" : ""));
-                } else {
-                    panelWoCumul.setVisibility(android.view.View.GONE);
-                }
+                // Toujours afficher panelWoCumul — même si 0 livraisons
+                panelWoCumul.setVisibility(android.view.View.VISIBLE);
+                if (txtWoCumulNet != null)
+                    txtWoCumulNet.setText(String.format(java.util.Locale.ROOT,
+                        "Total NET: %.1f L", fNet));
+                if (txtWoCumulGross != null)
+                    txtWoCumulGross.setText(String.format(java.util.Locale.ROOT,
+                        "Total GROSS: %.1f L", fGross));
+                if (txtWoCumulCount != null)
+                    txtWoCumulCount.setText(fCount > 0
+                        ? fCount + " livraison" + (fCount > 1 ? "s" : "")
+                        : "Aucune livraison");
             });
         });
     }
