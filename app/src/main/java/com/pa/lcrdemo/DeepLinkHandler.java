@@ -418,6 +418,17 @@ public class DeepLinkHandler {
                 node, 255, woNum, fProduct, fPresetD, null,
                 mediaType, btMacForFacade);
 
+            // ✅ Retry si timeout LCP — socket BT momentanément occupé
+            if (r != null && r.code == 0 && r.msg != null
+                    && r.msg.toLowerCase().contains("timeout")) {
+                android.util.Log.w(TAG, "oneshot/start: timeout LCP — retry dans 1.5s");
+                try { Thread.sleep(1500); } catch (Exception ignored) {}
+                r = facade.api_deliveryOneShotStart(
+                    node, 255, woNum, fProduct, fPresetD, null,
+                    mediaType, btMacForFacade);
+                android.util.Log.i(TAG, "oneshot/start retry: code=" + r.code + " msg=" + r.msg);
+            }
+
             android.util.Log.i(TAG, "oneshot/start: code=" + r.code + " msg=" + r.msg);
 
             if (r.code == 1) {
@@ -876,8 +887,6 @@ public class DeepLinkHandler {
                             } catch (Exception ignored) {}
                             android.util.Log.i(TAG, "pollJob: ticket pending — sortie poll, opérateur gère via bouton A");
                             // Sortir du poll — l'opérateur gère via bouton A
-                            // ✅ Libérer activePolls pour permettre une nouvelle livraison
-                            activePolls.remove(jobId);
                             return;
                         } else {
                             // CONNECTED sans ticket pending — envoyer continue avec retry
