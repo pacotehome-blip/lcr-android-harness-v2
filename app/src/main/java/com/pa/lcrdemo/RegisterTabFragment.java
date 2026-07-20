@@ -1004,17 +1004,32 @@ public class RegisterTabFragment extends Fragment {
                             statusDb.getLatestForWo(curWoNum);
                         if (existing != null && existing.type != null
                                 && !"ANNULATION".equals(existing.type)) {
-                            new android.app.AlertDialog.Builder(requireContext())
-                                .setTitle("⚠️ Bon déjà complété")
-                                .setMessage("Le bon " + curWoNum + " a déjà été livré"
-                                    + " (ticket #" + existing.ticketNo
-                                    + ", " + existing.netL + "L net).\n\n"
-                                    + "Voulez-vous créer une nouvelle livraison sur ce même bon ?")
-                                .setPositiveButton("Continuer", (d, w) -> startNewDeliveryC())
-                                .setNegativeButton("Annuler", null)
-                                .show();
-                            return;
+                            // Lire le preset actuel pour comparer avec ce qui a été livré
+                            double presetVal = 0;
+                            try {
+                                String presetTxt = edtPreset != null
+                                    ? edtPreset.getText().toString().trim() : "";
+                                if (!presetTxt.isEmpty()) presetVal = Double.parseDouble(presetTxt);
+                            } catch (Exception ignored) {}
+
+                            // Si livraison partielle (net < preset) → pas de dialog, démarrer directement
+                            // Si livraison complète ou over (net >= preset) → demander confirmation
+                            boolean livraisonComplete = (presetVal <= 0 || existing.netL >= presetVal);
+                            if (livraisonComplete && !bypassDeliveryDialog) {
+                                new android.app.AlertDialog.Builder(requireContext())
+                                    .setTitle("Bon déjà complété")
+                                    .setMessage("Le bon " + curWoNum + " a déjà été livré"
+                                        + " (ticket #" + existing.ticketNo
+                                        + ", " + existing.netL + "L net).\n\n"
+                                        + "Voulez-vous créer une nouvelle livraison sur ce même bon ?")
+                                    .setPositiveButton("Continuer", (d, w) -> startNewDeliveryC())
+                                    .setNegativeButton("Annuler", null)
+                                    .show();
+                                return;
+                            }
+                            // Livraison partielle — continuer sans dialog
                         }
+                        bypassDeliveryDialog = false;
                     }
                 } catch (Exception ignored) {}
 
@@ -2150,8 +2165,18 @@ public class RegisterTabFragment extends Fragment {
         // Préfiller
         if (woNum != null && !woNum.isEmpty()) currentWoNum = woNum;
         if (woIdGuid != null && !woIdGuid.isEmpty()) currentWoIdGuid = woIdGuid;
+        if (produit != null && !produit.isEmpty() && spnProduct != null)
+            spnProduct.setText(produit, false);
+        if (presetStr != null && !presetStr.isEmpty() && edtPreset != null)
+            edtPreset.setText(presetStr);
         deliveryNotified = false;
-        // Lancer comme bouton C
+        // Bypasser le dialog "Bon déjà complété" — FSM a déjà validé la livraison
+        // Appeler startNewDeliveryC() qui lance la livraison sans le guard du dialog
+        if (controller == null) return;
+        try {
+            new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext()).clear();
+        } catch (Exception ignored) {}
+        bypassDeliveryDialog = true;
         startNewDeliveryC();
     }
 
@@ -2529,6 +2554,7 @@ public class RegisterTabFragment extends Fragment {
     private static final double POST_DELIVERY_LEAK_THRESHOLD_L = 0.5;
     private static final long   POST_DELIVERY_POLL_INTERVAL_MS = 5_000;
     private volatile boolean    postDeliveryPollActive = false;
+    private volatile boolean    bypassDeliveryDialog   = false; // true quand lancé depuis FSM
 
     private void demarrerPollPostLivraison(double netRef, double grossRef, String ticketNo) {
         if (postDeliveryPollActive) return;
