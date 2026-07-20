@@ -222,8 +222,18 @@ public class DeepLinkHandler {
                         String foundKey = rsm.findTransportKeyForController(dc);
                         android.util.Log.i(TAG, "Transport trouvé pour node=" + fNode
                             + " transportKey=" + foundKey);
-                        lancerLivraison(foundKey != null ? foundKey : "", fNode,
-                            fSerialId, woNum, woIdGuid, fProduit, fPresetStr, fBtMac);
+                        // ✅ DC CONNECTED — simuler bouton C via tab existant
+                        // Le bouton C vérifie le preset, affiche dialog si atteint, démarre si non
+                        final String fFoundKey = foundKey != null ? foundKey : "";
+                        activity.runOnUiThread(() -> {
+                            boolean launched = activity.lancerLivraisonViaTabExistant(
+                                fNode, woNum, woIdGuid, fProduit, fPresetStr);
+                            if (!launched) {
+                                // Pas de tab existant — chemin normal
+                                btExec.execute(() -> lancerLivraison(fFoundKey, fNode,
+                                    fSerialId, woNum, woIdGuid, fProduit, fPresetStr, fBtMac));
+                            }
+                        });
                     } else {
                         // Aucun transport actif — tenter auto-connect (USB / BT / TCP)
                         android.util.Log.i(TAG, "Aucun transport actif — tentative auto-connect node="
