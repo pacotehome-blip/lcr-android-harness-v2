@@ -1,8 +1,8 @@
 package com.pa.lcrdemo;
 
 // ═══════════════════════════════════════════════════════════════
-// COMPATIBILITÉ ANDROID : API 28 (Android 9) → API 35 (Android 15) 
-// Tester sur Android 9 (192.168.134.105) ET Android 15 (R52X508K2DR) 
+// COMPATIBILITÉ ANDROID : API 28 (Android 9) → API 35 (Android 15)
+// Tester sur Android 9 (192.168.134.105) ET Android 15 (R52X508K2DR)
 // ═══════════════════════════════════════════════════════════════
 
 import com.pa.lcr.lcp.transport.TransportIo;
@@ -438,6 +438,12 @@ public class RegisterTabFragment extends Fragment {
                         if (!isAdded() || getView() == null || controller == null) return;
                         updateButtons(controller.getState());
                     }, 2000);
+                }
+
+                // ✅ Si pas de WO préfillé — chercher via ticket_no du registre
+                if (state == DeliveryState.CONNECTED
+                        && (currentWoNum == null || currentWoNum.isEmpty())) {
+                    ui.postDelayed(() -> rechercherWoDepuisRegistre(), 800);
                 }
 
                 // ✅ Retour Field Service quand livraison terminée
