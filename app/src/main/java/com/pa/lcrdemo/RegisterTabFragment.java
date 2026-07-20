@@ -705,7 +705,11 @@ public class RegisterTabFragment extends Fragment {
         txtWoCumulCount  = v.findViewById(R.id.txtWoCumulCount);
         if (panelWoCumul != null) {
             panelWoCumul.setOnClickListener(vv -> afficherDetailLivraisonsWo());
+            panelWoCumul.setVisibility(android.view.View.VISIBLE);
         }
+        if (txtWoCumulNet   != null) txtWoCumulNet.setText("Total NET: 0.0 L");
+        if (txtWoCumulGross != null) txtWoCumulGross.setText("Total GROSS: 0.0 L");
+        if (txtWoCumulCount != null) txtWoCumulCount.setText("Aucune livraison");
         btnCustomPrint   = v.findViewById(R.id.btnCustomPrint);
         btnAnnuler       = v.findViewById(R.id.btnAnnuler);
         btnScanProducts  = v.findViewById(R.id.btnScanProducts);
