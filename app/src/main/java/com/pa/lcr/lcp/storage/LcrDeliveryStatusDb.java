@@ -395,13 +395,12 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     /** Chercher une livraison par ticket_no — pour retrouver le WO depuis le registre */
     public DeliveryRow getByTicketNo(String ticketNo) {
         if (ticketNo == null || ticketNo.isEmpty()) return null;
-        try {
-            SQLiteDatabase db = dbHelper.getReadableDatabase();
-            try (Cursor c = db.query(TABLE, null,
-                    COL_TICKET_NO + "=?", new String[]{ticketNo},
-                    null, null, COL_TS_STARTED_MS + " DESC", "1")) {
-                if (c.moveToFirst()) return rowFromCursor(c);
-            }
+        try (Cursor c = getReadableDatabase().query(
+                TABLE_DELIVERY, null,
+                COL_TICKET_NO + "=?", new String[]{ticketNo},
+                null, null,
+                COL_TRANSACTION_NO + " DESC", "1")) {
+            if (c.moveToFirst()) return DeliveryRow.fromCursor(c);
         } catch (Exception e) { Log.e(TAG, "getByTicketNo ERR: " + e.getMessage()); }
         return null;
     }
