@@ -262,6 +262,16 @@ public class DeepLinkHandler {
                         } else {
                             android.util.Log.w(TAG, "Registre introuvable — node=" + fNode);
 
+                            // ✅ Fallback — si un tab registre existe déjà pour ce node
+                            // utiliser son transportKey directement sans passer par RSM
+                            String existingKey = activity.getTransportKeyForNode(fNode);
+                            if (existingKey != null && !existingKey.isEmpty()) {
+                                android.util.Log.i(TAG, "Fallback tab existant — transportKey=" + existingKey);
+                                lancerLivraison(existingKey, fNode, fSerialId, woNum, woIdGuid,
+                                    fProduit, fPresetStr, fBtMac);
+                                return;
+                            }
+
                             // ✅ Rester dans l'APK — pas de finish() pour éviter bounce FSM
                             // Le chauffeur va dans Configure pour connecter le registre
                             final String fWoNumR = woNum;

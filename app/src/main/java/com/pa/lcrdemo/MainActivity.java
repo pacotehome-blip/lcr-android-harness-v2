@@ -1,28 +1,4 @@
 package com.pa.lcrdemo;
-
-// ═══════════════════════════════════════════════════════════════════════════
-// COMPATIBILITÉ ANDROID : API 28 (Android 9) → API 35 (Android 15)
-// ───────────────────────────────────────────────────────────────────────────
-// Toute modification de ce fichier doit être testée sur :
-//   · Android 9  (API 28) — Samsung SM-T397U         · ADB 192.168.134.105:5555
-//   · Android 15 (API 35) — Samsung R52X508K2DR     · ADB 192.168.134.126:5555
-//
-// Règles obligatoires :
-//   1. Détecter la version à l'exécution via Build.VERSION.SDK_INT
-//   2. Appliquer le comportement EXPLICITEMENT par version — pas de spéculation
-//   3. Ne jamais utiliser d'API introduite après API 28 sans guard de version
-//   4. registerReceiver()  : RECEIVER_NOT_EXPORTED ou RECEIVER_EXPORTED sur API 34+
-//   5. PendingIntent       : FLAG_IMMUTABLE sur API 31+ · FLAG_MUTABLE + guard sur API 34+
-//   6. startForeground()   : type obligatoire sur API 34+ — doit matcher le manifest
-//
-// Constantes utiles :
-//   Build.VERSION_CODES.P                 = 28  (Android 9)
-//   Build.VERSION_CODES.Q                 = 29  (Android 10)
-//   Build.VERSION_CODES.S                 = 31  (Android 12)
-//   Build.VERSION_CODES.TIRAMISU          = 33  (Android 13)
-//   Build.VERSION_CODES.UPSIDE_DOWN_CAKE  = 34  (Android 14)
-//   Build.VERSION_CODES.VANILLA_ICE_CREAM = 35  (Android 15)
-// ═══════════════════════════════════════════════════════════════════════════
  
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.documentfile.provider.DocumentFile;
@@ -690,6 +666,16 @@ public class MainActivity extends AppCompatActivity {
      * patchDataverse automatique. Seul le ticket number du registre change
      * à chaque appel — woNum/woIdGuid/produit/preset restent ceux du WO en cours.
      */
+    /** Retourne le transportKey du tab actif pour un node donné — utilisé par DeepLinkHandler
+     *  comme fallback si resolveOrCreateForNode() retourne null mais qu'un tab existe déjà */
+    public String getTransportKeyForNode(int node) {
+        for (TabSpec t : tabsByKey.values()) {
+            if (t.node == node && t.transportKey != null && !t.transportKey.isEmpty())
+                return t.transportKey;
+        }
+        return null;
+    }
+
     public void lancerLivraisonDepuisTab(String transportKey, int node, String serialId,
                                           String woNum, String woIdGuid,
                                           String produit, String presetStr, String mac) {
@@ -1913,20 +1899,11 @@ private void scanUsb() {
         }
 
         if (!usbManager.hasPermission(dev)) {
-            // Android 9-13 : FLAG_MUTABLE suffit pour requestPermission USB
-            // Android 14+  : intent doit être explicite OU FLAG_ALLOW_UNSAFE_IMPLICIT_INTENT
-            Intent permIntent = new Intent(ACTION_USB_PERMISSION);
-            permIntent.setPackage(getPackageName()); // explicit intent
-            int piFlags;
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                piFlags = PendingIntent.FLAG_UPDATE_CURRENT
-                        | PendingIntent.FLAG_MUTABLE
-                        | PendingIntent.FLAG_ALLOW_UNSAFE_IMPLICIT_INTENT;
-            } else {
-                piFlags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE;
-            }
-            PendingIntent pi = PendingIntent.getBroadcast(this, 0, permIntent, piFlags);
-            usbManager.requestPermission(dev, pi);
+            PendingIntent pi = PendingIntent.getBroadcast(
+                    this, 0, new Intent(ACTION_USB_PERMISSION),
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE
+            );
+                        usbManager.requestPermission(dev, pi);
             logUi(null, "Permission USB demandée");
             logMedia1("USB Open/Ping: permission requise");
             return;
