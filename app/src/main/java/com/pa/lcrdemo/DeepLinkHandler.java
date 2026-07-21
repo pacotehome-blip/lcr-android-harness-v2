@@ -328,6 +328,16 @@ public class DeepLinkHandler {
     public void lancerLivraison(String transportKey, int node, String serialId,
                                   String woNum, String woIdGuid,
                                   String produit, String presetStr, String mac) {
+        // ✅ FIX : vérifier AVANT de toucher au tab — l'ancien code rafraîchissait
+        // l'UI (upsertRegisterTabFromScan / showPage) même quand un poll était
+        // déjà actif, ce qui faisait apparaître le tab en "CONNECTED — prêt"
+        // pendant qu'une livraison tournait toujours dessous (désync live/toast).
+        if (!activePolls.isEmpty()) {
+            android.util.Log.w(TAG, "lancerLivraison: poll déjà actif — ignoré (avant UI)");
+            activity.runOnUiThread(() -> activity.toast("↩️ Livraison déjà en cours"));
+            return;
+        }
+
         // Ouvrir/activer le tab
         final String fSerialId = serialId != null ? serialId : "";
         final String fWoNum = woNum;
@@ -366,12 +376,6 @@ public class DeepLinkHandler {
         });
 
         // ✅ Attendre que le média soit READY (max 10s) avant oneshot/start
-        // ✅ Bloquer si un poll est déjà actif — évite double job
-        if (!activePolls.isEmpty()) {
-            android.util.Log.w(TAG, "lancerLivraison: poll déjà actif — ignoré");
-            activity.runOnUiThread(() -> activity.toast("↩️ Livraison déjà en cours"));
-            return;
-        }
         boolean ready = false;
         for (int i = 0; i < 20; i++) {
             try { Thread.sleep(500); } catch (Exception ignored) {}
