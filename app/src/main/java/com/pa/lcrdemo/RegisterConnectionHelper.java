@@ -314,6 +314,11 @@ public class RegisterConnectionHelper {
         // 2. Si trouvé → upsertRegisterTabFromScan → tab rafraîchi avec état registre
         boolean btConnecte = false;
         com.pa.lcr.lcp.DeliveryController dcFinal = null;
+        // ✅ FIX : capturer la transportKey trouvée à l'étape 3 pour la relance finale —
+        // l'ancien code passait toujours "" à lancerLivraison(), qui ne peut alors
+        // jamais matcher le transport dans sa boucle d'attente READY (10s pour rien,
+        // puis MEDIA_NOT_READY sans jamais tenter le oneshot).
+        final String[] transportKeyFinal = {""};
 
         com.pa.lcr.lcp.MultiRegisterApiFacadeImpl facade =
             new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(activity);
@@ -364,6 +369,7 @@ public class RegisterConnectionHelper {
                 Log.i(TAG, "étape 3: TROUVÉ ✓ transport=" + foundKey + " serial=" + foundSerial);
                 final String fKey    = foundKey;
                 final String fSerial = foundSerial;
+                transportKeyFinal[0] = foundKey;
                 activity.runOnUiThread(() -> {
                     if (!fKey.isEmpty())
                         activity.upsertRegisterTabFromScan(fKey, fNodeFinal, 255, fSerial, true);
@@ -470,9 +476,10 @@ public class RegisterConnectionHelper {
                 // ✅ Relancer la livraison automatiquement si paramètres deep link disponibles
                 // Compatible Android 9-15 — btExec sur thread dédié
                 if (deepLinkHandler != null && woNum != null && !woNum.isEmpty()) {
-                    Log.i(TAG, "diagnostic succès — relance livraison auto woNum=" + woNum);
+                    Log.i(TAG, "diagnostic succès — relance livraison auto woNum=" + woNum
+                        + " transportKey=" + transportKeyFinal[0]);
                     new Thread(() -> deepLinkHandler.lancerLivraison(
-                        "",
+                        transportKeyFinal[0],
                         fNodeFinal,
                         fSerialIdFinal,
                         woNum,
