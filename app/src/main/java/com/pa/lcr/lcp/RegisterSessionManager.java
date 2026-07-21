@@ -284,17 +284,15 @@ public final class RegisterSessionManager {
             if (existing.generationId == io.getGenerationId()) {
                 return existing.dc;
             }
-            // Vérifier si le link est encore utilisable avant de détruire
-            try {
-                if (existing.dc.getState() != null) {
-                    // Mettre à jour generationId sans recréer — remplacer par nouvelle NodeSession légère
-                    NodeSession updated = new NodeSession(existing.dc, existing.mux,
-                        existing.scheduler, existing.transportKey,
-                        io.getGenerationId(), existing.serialId);
-                    sessions.put(k, updated);
-                    return existing.dc;
-                }
-            } catch (Exception ignored) {}
+            // ✅ FIX : l'ancien test "existing.dc.getState() != null" était toujours vrai
+            // (DeliveryController.state est initialisé à DISCONNECTED et n'est jamais null,
+            // du début à la fin du cycle de vie — voir DeliveryController.getState()).
+            // Ce "garde-fou" réutilisait donc systématiquement l'ancien DeliveryController
+            // sur un changement de génération de transport (ex: reconnexion BT après coupure),
+            // alors que son executor "io" (final, non remplaçable) était déjà shutdownNow()
+            // depuis la fermeture précédente — d'où les "Task rejected from ThreadPoolExecutor
+            // [Terminated]" en boucle après reconnexion, et le diagnostic qui restait bloqué
+            // en DISCONNECTED. Sur changement de génération, on recrée toujours.
             try { existing.scheduler.shutdown(); } catch (Exception ignored) {}
             try { existing.dc.shutdown(false); } catch (Exception ignored) {}
             sessions.remove(k);
