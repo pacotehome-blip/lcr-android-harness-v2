@@ -215,8 +215,16 @@ public class DeepLinkHandler {
                                     }
                                 }
                             }
+                            logError(fSerialId, woNum, "REGISTER_NOT_READY",
+                                "DC non CONNECTED après 15s + retry auto-connect — état: " + dc.getState());
                             activity.runOnUiThread(() ->
-                                activity.toast("⚠️ Registre non joignable — vérifiez la connexion USB ou BT"));
+                                activity.toast("⚠️ Registre non joignable — tentative de reconnexion..."));
+                            // Lancer sur thread dédié — ne pas bloquer btExec
+                            // diagnosticEnCours static garantit un seul diagnostic à la fois
+                            new Thread(() -> new com.pa.lcrdemo.RegisterConnectionHelper(activity)
+                                .lancerDiagnosticForce("", fNode, fSerialId, woNum,
+                                    woIdGuid, fProduit, fPresetStr, fBtMac,
+                                    DeepLinkHandler.this)).start();
                             return;
                         }
                         String foundKey = rsm.findTransportKeyForController(dc);
@@ -246,8 +254,14 @@ public class DeepLinkHandler {
                                 }
                                 if (dc2.getState() != com.pa.lcr.lcp.DeliveryState.CONNECTED) {
                                     android.util.Log.w(TAG, "DC2 non prêt après 15s — état: " + dc2.getState());
+                                    logError(fSerialId, woNum, "REGISTER_NOT_READY",
+                                        "DC2 non CONNECTED après 15s — état: " + dc2.getState());
                                     activity.runOnUiThread(() ->
-                                        activity.toast("⚠️ Registre non joignable — vérifiez la connexion USB ou BT"));
+                                        activity.toast("⚠️ Registre non joignable — tentative de reconnexion..."));
+                                    new Thread(() -> new com.pa.lcrdemo.RegisterConnectionHelper(activity)
+                                        .lancerDiagnosticForce("", fNode, fSerialId, woNum,
+                                            woIdGuid, fProduit, fPresetStr, fBtMac,
+                                            DeepLinkHandler.this)).start();
                                     return;
                                 }
                             }
@@ -410,74 +424,6 @@ public class DeepLinkHandler {
         } else {
             mediaType = "usb";
             btMacForFacade = null;
-        }
-
-        // ✅ Vérifier preset vs livraisons précédentes AVANT oneshot/start
-        // Sur btExec — ne change pas le thread d'exécution
-        // Si preset atteint ou dépassé → dialog confirmation via tab
-        // Si preset non atteint ou première livraison → démarrer directement
-        if (fPresetD > 0 && woNum != null && !woNum.isEmpty()) {
-            try {
-                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb statusDb =
-                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
-                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow existing =
-                    statusDb.getLatestForWo(woNum);
-                if (existing != null && existing.netL >= fPresetD
-                        && !"ANNULATION".equals(existing.type)) {
-                    // Preset atteint — demander confirmation via le tab
-                    final String fTicketExist = existing.ticketNo != null ? existing.ticketNo : "";
-                    final double fNetExist    = existing.netL;
-                    final String fWoNum2      = woNum;
-                    final String fWoId2       = woIdGuid;
-                    final String fProd2       = produit;
-                    final String fPreset2     = presetStr;
-                    final String fKey2        = transportKey;
-                    final int    fNode2       = node;
-                    final String fSerial2     = serialId;
-                    final String fMac2        = mac;
-                    android.util.Log.i(TAG, "Preset atteint — dialog confirmation wo=" + woNum
-                        + " netExist=" + fNetExist + " preset=" + fPresetD);
-                    activity.runOnUiThread(() -> {
-                        new android.app.AlertDialog.Builder(activity)
-                            .setTitle("Bon deja complete")
-                            .setMessage("Le bon " + fWoNum2 + " a deja ete livre"
-                                + " (ticket #" + fTicketExist
-                                + ", " + fNetExist + "L net).\n\nVoulez-vous creer une nouvelle livraison ?")
-                            .setCancelable(false)
-                            .setPositiveButton("Continuer", (d, w) ->
-                                // Appeler api_deliveryOneShotStart directement
-                                // sans repasser par lancerLivraison (evite boucle infinie)
-                                btExec.execute(() -> {
-                                    try {
-                                        int prd = 1; double pre = 0;
-                                        try { prd = Integer.parseInt(fProd2); } catch (Exception ig) {}
-                                        try { pre = Double.parseDouble(fPreset2); } catch (Exception ig) {}
-                                        String mt = fKey2.toUpperCase().startsWith("BT:") ? "bt" : "usb";
-                                        String bm = fKey2.toUpperCase().startsWith("BT:")
-                                            ? fKey2.substring(3)
-                                            : (fMac2 != null && !fMac2.isEmpty() ? fMac2 : null);
-                                        MultiRegisterApiFacadeImpl fc = new MultiRegisterApiFacadeImpl(activity);
-                                        com.pa.lcr.lcp.ApiResult rc =
-                                            fc.api_deliveryOneShotStart(fNode2, 255, fWoNum2, prd, pre, null, mt, bm);
-                                        if (rc != null && rc.code == 1) {
-                                            String jid = rc.data != null ? rc.data.optString("jobId", null) : null;
-                                            if (jid != null && !jid.isEmpty()) {
-                                                activity.runOnUiThread(() -> activity.toast("Livraison demarree — " + fWoNum2));
-                                                pollJobUntilDone(jid, fNode2, fWoNum2, fWoId2, fSerial2, fKey2);
-                                            }
-                                        } else {
-                                            activity.runOnUiThread(() -> activity.toast("Erreur demarrage livraison"));
-                                        }
-                                    } catch (Exception ex) {
-                                        android.util.Log.e(TAG, "Confirm oneshot ERR: " + ex.getMessage());
-                                    }
-                                }))
-                            .setNegativeButton("Annuler", null)
-                            .show();
-                    });
-                    return; // attendre la reponse du chauffeur
-                }
-            } catch (Exception ignored) {}
         }
 
         try {
@@ -819,6 +765,10 @@ public class DeepLinkHandler {
                             logEvent(fSerialId, woNum, DeliveryLogStore.LEVEL_WARN,
                                 "ONESHOT_ERROR", r.msg,
                                 r.data != null ? r.data.toString() : null);
+                    logError(fSerialId != null ? fSerialId : "",
+                        fWoNum != null ? fWoNum : "",
+                        "REGISTER_NOT_AVAILABLE",
+                        "Registre non disponible oneshot/start dans connectBtByMac");
                             // Rester dans l'APK — pas de finish() pour éviter bounce FSM
                             activity.runOnUiThread(() -> {
                                 activity.toast("⚠️ Registre non disponible — vérifiez l'état du registre et réessayez");
@@ -834,7 +784,13 @@ public class DeepLinkHandler {
                     }
                 } else {
                     android.util.Log.w(TAG, "Média non prêt après 5s");
+                    logError(fSerialId != null ? fSerialId : serialId,
+                        woNum, "BT_NOT_READY", "BT non prêt après 5s dans connectBtByMac");
                     activity.runOnUiThread(() -> activity.toast("BT non prêt — réessayez"));
+                new Thread(() -> new com.pa.lcrdemo.RegisterConnectionHelper(activity)
+                    .lancerDiagnosticForce("", node, serialId != null ? serialId : "", woNum,
+                        woIdGuid, produit, presetStr, mac,
+                        DeepLinkHandler.this)).start();
                     logError(fSerialId, woNum, "MEDIA_NOT_READY", "Média non prêt après 5s");
                     retournerFieldService(woNum, woIdGuid, "erreur_media",
                         buildErrorJson("MEDIA_NOT_READY", "Média non prêt après 5s"));

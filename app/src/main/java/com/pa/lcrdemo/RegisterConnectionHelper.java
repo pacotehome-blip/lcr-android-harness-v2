@@ -1,5 +1,10 @@
 package com.pa.lcrdemo;
 
+// ═══════════════════════════════════════════════════════════════
+// COMPATIBILITÉ ANDROID : API 28 (Android 9) → API 35 (Android 15)
+// Tester sur Android 9 (192.168.134.105) ET Android 15 (R52X508K2DR)
+// ═══════════════════════════════════════════════════════════════
+
 import android.content.Intent;
 import android.util.Log;
 import android.widget.TextView;
@@ -171,19 +176,37 @@ public class RegisterConnectionHelper {
      * même si BT est connecté (câble série débranché par exemple).
      */
     public void lancerDiagnosticForce(String transportKey, int node, String serialId, String woNum) {
+        lancerDiagnosticForce(transportKey, node, serialId, woNum, null, null, null, null, null);
+    }
+
+    /**
+     * Surcharge avec paramètres complets du deep link.
+     * Après succès du diagnostic, relance automatiquement la livraison.
+     * Compatible Android 9-15 — pas d'API version-spécifique.
+     */
+    public void lancerDiagnosticForce(String transportKey, int node, String serialId,
+            String woNum, String woIdGuid, String produit, String presetStr,
+            String mac, com.pa.lcrdemo.DeepLinkHandler deepLinkHandler) {
         if (diagnosticEnCours) {
             Log.w(TAG, "lancerDiagnosticForce: reset guard et relance");
             diagnosticEnCours = false;
         }
         diagnosticEnCours = true;
         try {
-            diagnostic(transportKey, node, serialId, woNum);
+            diagnostic(transportKey, node, serialId, woNum,
+                woIdGuid, produit, presetStr, mac, deepLinkHandler);
         } finally {
             diagnosticEnCours = false;
         }
     }
 
     private void diagnostic(String transportKey, int node, String serialId, String woNum) {
+        diagnostic(transportKey, node, serialId, woNum, null, null, null, null, null);
+    }
+
+    private void diagnostic(String transportKey, int node, String serialId, String woNum,
+            String woIdGuid, String produit, String presetStr,
+            String mac, com.pa.lcrdemo.DeepLinkHandler deepLinkHandler) {
         // Lire contexte depuis LcrDeliveryStatusDb
         String ticketNo = "";
         String fSerialId = (serialId != null && !serialId.isEmpty()) ? serialId : "";
@@ -270,8 +293,16 @@ public class RegisterConnectionHelper {
             try {
                 android.bluetooth.BluetoothAdapter bt = android.bluetooth.BluetoothAdapter.getDefaultAdapter();
                 if (bt != null && bt.isEnabled()) {
-                    bt.disable(); Thread.sleep(1500);
-                    bt.enable();  Thread.sleep(2000);
+                    // bt.disable()/enable() déprécié Android 13, bloqué Android 14+
+                    // Android 9-12 (API 28-32) : reset BT via disable/enable
+                    // Android 13+  (API 33+)   : skip — l'OS gère le BT différemment
+                    if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU) {
+                        bt.disable(); Thread.sleep(1500);
+                        bt.enable();  Thread.sleep(2000);
+                    } else {
+                        // Android 13+ — juste attendre que le stack BT se stabilise
+                        Thread.sleep(1000);
+                    }
                 }
             } catch (Exception ignored) {}
         }
@@ -425,8 +456,6 @@ public class RegisterConnectionHelper {
             if (dlg[0] != null) dlg[0].dismiss();
             try { activity.showPage(0); } catch (Exception ignored) {}
 
-            // ✅ Juste rafraîchir le status du registre — pas de relance auto
-            // Le chauffeur cliquera le bouton vert "Lancer la livraison" dans le tab
             activity.getUiHandler().postDelayed(() -> {
                 try {
                     com.pa.lcr.lcp.DeliveryController dc2 =
@@ -437,7 +466,23 @@ public class RegisterConnectionHelper {
                         dc2.requestLiveSample();
                     }
                 } catch (Exception ignored) {}
-            }, 1000);
+
+                // ✅ Relancer la livraison automatiquement si paramètres deep link disponibles
+                // Compatible Android 9-15 — btExec sur thread dédié
+                if (deepLinkHandler != null && woNum != null && !woNum.isEmpty()) {
+                    Log.i(TAG, "diagnostic succès — relance livraison auto woNum=" + woNum);
+                    new Thread(() -> deepLinkHandler.lancerLivraison(
+                        "",
+                        fNodeFinal,
+                        fSerialIdFinal,
+                        woNum,
+                        woIdGuid != null ? woIdGuid : "",
+                        produit != null ? produit : "",
+                        presetStr != null ? presetStr : "",
+                        mac != null ? mac : ""
+                    )).start();
+                }
+            }, 1500);
         });
     }
 
