@@ -334,8 +334,8 @@ public class RegisterConnectionHelper {
                             try { ioClose.close(); } catch (Exception ignored) {}
                             Log.i(TAG, "étape 3: socket fermé " + s.key);
                         }
-                        String mac = s.key.substring(3);
-                        try { mtmClose.onBtDisconnected(mac, "diag cleanup"); } catch (Exception ignored) {}
+                        String btMacLocal = s.key.substring(3);
+                        try { mtmClose.onBtDisconnected(btMacLocal, "diag cleanup"); } catch (Exception ignored) {}
                     }
                     activity.btDisconnect();
                     Thread.sleep(2000);
