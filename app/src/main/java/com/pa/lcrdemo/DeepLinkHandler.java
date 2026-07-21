@@ -508,10 +508,36 @@ public class DeepLinkHandler {
                 } else {
                     // Erreur orchestration — rester dans l'APK (pas de finish() pour éviter bounce FSM)
                     android.util.Log.w(TAG, "oneshot/start: orchestration error — rester dans APK");
-                    activity.runOnUiThread(() -> {
-                        activity.toast("⚠️ Registre non disponible — vérifiez l'état du registre et réessayez");
-                        activity.showPage(0);
-                    });
+
+                    // ✅ FIX : sur une vraie erreur TRANSPORT (BT/USB coupé), lancer le
+                    // diagnostic avec le contexte complet du deep link (lancerDiagnosticForce)
+                    // au lieu de juste toaster. Sans ça, seule la vérification périodique
+                    // du tab (STATUS_B) détecte la coupure et relance un diagnostic — mais
+                    // SANS connaître woNum/produit/preset/mac, donc SANS jamais relancer
+                    // la livraison une fois le registre reconnecté (voir diagnostic()
+                    // à 4 arguments dans RegisterConnectionHelper, qui passe null partout).
+                    boolean errTransport = false;
+                    if (r.data != null) {
+                        String classErr = r.data.optString("class", "");
+                        String levelErr = r.data.optString("level", "");
+                        errTransport = "TRANSPORT".equalsIgnoreCase(classErr)
+                            || "TRANSPORT".equalsIgnoreCase(levelErr);
+                    }
+
+                    if (errTransport) {
+                        android.util.Log.w(TAG, "oneshot/start: erreur TRANSPORT — diagnostic + relance auto");
+                        activity.runOnUiThread(() ->
+                            activity.toast("⚠️ Registre déconnecté — reconnexion en cours..."));
+                        new Thread(() -> new com.pa.lcrdemo.RegisterConnectionHelper(activity)
+                            .lancerDiagnosticForce(transportKey, node, fSerialId, woNum,
+                                woIdGuid, produit, presetStr, mac,
+                                DeepLinkHandler.this)).start();
+                    } else {
+                        activity.runOnUiThread(() -> {
+                            activity.toast("⚠️ Registre non disponible — vérifiez l'état du registre et réessayez");
+                            activity.showPage(0);
+                        });
+                    }
                 }
             }
         } catch (Exception e) {
