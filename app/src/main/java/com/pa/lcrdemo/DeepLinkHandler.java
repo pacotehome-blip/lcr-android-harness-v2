@@ -431,12 +431,34 @@ public class DeepLinkHandler {
                 return;
             }
 
+            // ✅ FIX #2 : activer le transport en exclusivité avant l'oneshot.
+            // getState()==CONNECTED n'est qu'un état FSM en cache — sans
+            // activateExclusive(), le transport n'est pas garanti armé pour
+            // l'écriture, ce qui produisait un échec quasi instantané
+            // (~1s, pas un vrai timeout LCP) déguisé en "Timeout waiting LCP response".
+            // Même pattern que RegisterTabFragment.lancerDepuisStore().
+            try {
+                activity.getMediaTransportManager()
+                    .activateExclusive(transportKey, "DEEPLINK_ONESHOT");
+            } catch (Exception ignored) {}
+
             com.pa.lcr.lcp.ApiResult r = controllerOneshot.api_deliveryOneShotStart(
                 woNum, fProduct, fPresetD, null);
 
-            // ✅ Retry si timeout LCP — sur le même controller, pas une nouvelle façade
-            if (r != null && r.code == 0 && r.msg != null
-                    && r.msg.toLowerCase().contains("timeout")) {
+            // ✅ FIX #3 : la détection de timeout ne regardait que r.msg, qui vaut
+            // toujours "Delivery OneShot: 0 - orchestration error" — le mot
+            // "timeout" est dans r.data.detail (JSON imbriqué). Le retry ne se
+            // déclenchait donc jamais, avant comme après le fix #1.
+            boolean isTimeout = false;
+            if (r != null && r.code == 0) {
+                if (r.msg != null && r.msg.toLowerCase().contains("timeout")) isTimeout = true;
+                if (!isTimeout && r.data != null) {
+                    String detail = r.data.optString("detail", "");
+                    if (detail.toLowerCase().contains("timeout")) isTimeout = true;
+                }
+            }
+
+            if (isTimeout) {
                 android.util.Log.w(TAG, "oneshot/start: timeout LCP — retry dans 1.5s");
                 try { Thread.sleep(1500); } catch (Exception ignored) {}
                 r = controllerOneshot.api_deliveryOneShotStart(
