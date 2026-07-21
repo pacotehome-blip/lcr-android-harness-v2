@@ -410,36 +410,37 @@ public class DeepLinkHandler {
         final double fPresetD = preset;
         final String fMac = mac != null ? mac : "";
 
-        // ✅ Déduire le type de transport depuis transportKey
-        // transportKey = "BT:XX:XX:XX" ou "USB" ou autre
-        // Ne pas se fier à fMac — il peut être vide même si BT est actif
-        String mediaType;
-        String btMacForFacade;
-        if (transportKey.toUpperCase().startsWith("BT:")) {
-            mediaType = "bt";
-            btMacForFacade = transportKey.substring(3); // extraire le MAC du transportKey
-        } else if (!fMac.isEmpty()) {
-            mediaType = "bt";
-            btMacForFacade = fMac;
-        } else {
-            mediaType = "usb";
-            btMacForFacade = null;
-        }
-
         try {
-            MultiRegisterApiFacadeImpl facade = new MultiRegisterApiFacadeImpl(activity);
-            com.pa.lcr.lcp.ApiResult r = facade.api_deliveryOneShotStart(
-                node, 255, woNum, fProduct, fPresetD, null,
-                mediaType, btMacForFacade);
+            // ✅ FIX régression session 9 : réutiliser le DeliveryController déjà résolu
+            // (CONNECTED, socket ouvert) au lieu de créer une nouvelle
+            // MultiRegisterApiFacadeImpl — celle-ci ouvrait un second accès au transport
+            // et entrait en conflit avec le socket déjà détenu, causant le
+            // "Timeout waiting LCP response" même si le DC affichait CONNECTED.
+            com.pa.lcr.lcp.RegisterSessionManager rsmOneshot =
+                com.pa.lcr.lcp.RegisterSessionManager.get(activity);
+            com.pa.lcr.lcp.DeliveryController controllerOneshot =
+                rsmOneshot.getController(transportKey, node);
 
-            // ✅ Retry si timeout LCP — socket BT momentanément occupé
+            if (controllerOneshot == null) {
+                android.util.Log.w(TAG, "oneshot/start: controller introuvable pour transportKey="
+                    + transportKey + " node=" + node);
+                logError(fSerialId, woNum, "REGISTER_NOT_READY",
+                    "Controller introuvable au moment du oneshot/start");
+                retournerFieldService(woNum, woIdGuid, "erreur",
+                    buildErrorJson("REGISTER_NOT_READY", "Controller introuvable au moment du oneshot/start"));
+                return;
+            }
+
+            com.pa.lcr.lcp.ApiResult r = controllerOneshot.api_deliveryOneShotStart(
+                woNum, fProduct, fPresetD, null);
+
+            // ✅ Retry si timeout LCP — sur le même controller, pas une nouvelle façade
             if (r != null && r.code == 0 && r.msg != null
                     && r.msg.toLowerCase().contains("timeout")) {
                 android.util.Log.w(TAG, "oneshot/start: timeout LCP — retry dans 1.5s");
                 try { Thread.sleep(1500); } catch (Exception ignored) {}
-                r = facade.api_deliveryOneShotStart(
-                    node, 255, woNum, fProduct, fPresetD, null,
-                    mediaType, btMacForFacade);
+                r = controllerOneshot.api_deliveryOneShotStart(
+                    woNum, fProduct, fPresetD, null);
                 android.util.Log.i(TAG, "oneshot/start retry: code=" + r.code + " msg=" + r.msg);
             }
 
