@@ -67,10 +67,20 @@ public class RegisterTabFragment extends Fragment {
      * Vérifie si ActiveDeliveryStore a une livraison PENDING pour ce registre.
      * Si serial + node correspondent → valider + afficher infos + bouton Lancer.
      */
+    private volatile long lastCheckPendingMs = 0;
+
     private void checkPendingDeliveryForThisRegister() {
         try {
             android.content.Context ctx = getContext();
             if (ctx == null) return;
+
+            // ✅ FIX lag : cette méthode est appelée 3 fois en rafale (600/800/1500ms)
+            // à chaque retour dans le tab (onTabActivated + onResume x2), chacune
+            // refaisant ActiveDeliveryStore.load() sur le thread UI. Anti-rebond pour
+            // n'exécuter le travail réel qu'une fois par courte fenêtre.
+            long now = System.currentTimeMillis();
+            if (now - lastCheckPendingMs < 1500) return;
+            lastCheckPendingMs = now;
 
             com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
                 new com.pa.lcr.lcp.storage.ActiveDeliveryStore(ctx);
@@ -327,6 +337,11 @@ public class RegisterTabFragment extends Fragment {
     // jamais effacé par les flux concurrents (ActiveDeliveryStore peut être
     // écrasé/vidé par annulation, autre poll, etc. — ces champs ne le sont pas)
     private volatile String currentWoNum    = "";
+    // ✅ Suivre le dernier ticket_no traité pour permettre une re-détection quand
+    // le registre passe à un nouveau ticket/WO — sans ça, currentWoNum restait figé
+    // sur la première valeur trouvée (deep link, bouton C annulé, ActiveDeliveryStore)
+    // pour toute la durée de vie du tab, bloquant la détection de tout ticket suivant.
+    private volatile String lastTicketDetected = "";
     private volatile boolean deliveryNotified = false; // guard anti-doublon notification
     private volatile String currentWoIdGuid = "";
     private static final int TAB_LOG_MAX_LINES = 400;
@@ -2793,7 +2808,6 @@ public class RegisterTabFragment extends Fragment {
     // en attente de confirmation du besoin exact avec Paul.
     private void rechercherWoDepuisRegistre() {
         if (controller == null) return;
-        if (currentWoNum != null && !currentWoNum.isEmpty()) return;
         bg.execute(() -> {
             try {
                 // Lire ticket_no courant — un seul appel
@@ -2801,6 +2815,13 @@ public class RegisterTabFragment extends Fragment {
                 if (snap == null || snap.data == null) return;
                 String ticketNo = snap.data.optString("ticket_no", "");
                 if (ticketNo.isEmpty()) return;
+
+                // ✅ FIX : ne plus sortir juste parce que currentWoNum est déjà connu —
+                // vérifier plutôt si CE ticket précis a déjà été traité. Si le registre
+                // est passé à un nouveau ticket depuis, on doit re-détecter le nouveau WO.
+                if (ticketNo.equals(lastTicketDetected)) return;
+                lastTicketDetected = ticketNo;
+
                 LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — recherche dans DB");
 
                 // Chercher ce ticket dans LcrDeliveryStatusDb
