@@ -410,7 +410,8 @@ public class RegisterConnectionHelper {
             afficherEchec(dlg[0], etapes, etapesOk,
                 "Registre non trouvé\n"
                 + "⚡ Assurez-vous que :\n• Le Bluetooth est activé\n• Le registre est sous tension\n• Le registre est en mode communication BT",
-                woNum, fTicketNo, fNodeFinal, fSerialIdFinal);
+                woNum, fTicketNo, fNodeFinal, fSerialIdFinal,
+                woIdGuid, produit, presetStr, mac, deepLinkHandler);
             return;
         }
 
@@ -452,7 +453,8 @@ public class RegisterConnectionHelper {
             afficherEchec(dlg[0], etapes, etapesOk,
                 "BT connecté mais registre LCR ne répond pas\n" + erreurDetail[0] + "\n\n"
                 + "⚡ Assurez-vous que :\n• L'alimentation du registre est branchée\n• Le registre est en mode communication\n• Aucun autre appareil n'est connecté",
-                woNum, fTicketNo, fNodeFinal, fSerialIdFinal);
+                woNum, fTicketNo, fNodeFinal, fSerialIdFinal,
+                woIdGuid, produit, presetStr, mac, deepLinkHandler);
             return;
         }
 
@@ -515,7 +517,9 @@ public class RegisterConnectionHelper {
             android.app.AlertDialog dlgPrev,
             String[] etapes, boolean[] etapesOk,
             String erreur, String woNum, String ticketNo,
-            int node, String serialId) {
+            int node, String serialId,
+            String woIdGuid, String produit, String presetStr, String mac,
+            com.pa.lcrdemo.DeepLinkHandler deepLinkHandler) {
 
         activity.runOnUiThread(() -> {
             if (dlgPrev != null && dlgPrev.isShowing()) dlgPrev.dismiss();
@@ -547,7 +551,15 @@ public class RegisterConnectionHelper {
                 .setCancelable(true)
                 .setPositiveButton("🔄 Réessayer", (d, w) -> {
                     d.dismiss();
-                    lancerDiagnostic("", node, serialId, woNum);
+                    // ✅ FIX : l'ancien code appelait lancerDiagnostic("", node, serialId, woNum)
+                    // — la version à 4 arguments, qui perd woIdGuid/produit/presetStr/mac ET
+                    // surtout deepLinkHandler. Résultat : même si ce nouveau diagnostic réussit,
+                    // le bloc de relance finale ne se déclenche jamais (deepLinkHandler == null),
+                    // donc le tab devient Connected-Ready (communication réellement confirmée,
+                    // ticket_no lu) mais la livraison ne redémarre jamais. On garde le contexte
+                    // complet ici pour que la relance auto fonctionne aussi depuis ce bouton.
+                    lancerDiagnosticForce("", node, serialId, woNum,
+                        woIdGuid, produit, presetStr, mac, deepLinkHandler);
                 })
                 .setNeutralButton("🔁 Redémarrer APK", (d, w) -> {
                     try {
