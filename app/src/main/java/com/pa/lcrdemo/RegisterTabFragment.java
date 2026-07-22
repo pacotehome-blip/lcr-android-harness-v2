@@ -89,6 +89,13 @@ public class RegisterTabFragment extends Fragment {
             if (ad != null && ad.woNum != null && !ad.woNum.isEmpty()) {
                 currentWoNum = ad.woNum;
                 if (ad.woIdGuid != null && !ad.woIdGuid.isEmpty()) currentWoIdGuid = ad.woIdGuid;
+                // ✅ FIX : rafraichirCumulWo() n'était appelée que depuis
+                // rechercherWoDepuisRegistre() — qui sort immédiatement si currentWoNum
+                // est déjà connu (ce qui est justement le cas ici). Résultat : le panneau
+                // "WO complété" ne se rafraîchissait jamais quand le WO était déjà connu
+                // via ActiveDeliveryStore (ex: reconnexion après fermeture de Field
+                // Service), seulement quand fraîchement détecté par recherche de ticket.
+                rafraichirCumulWo();
             }
 
             if (ad == null || (!"PENDING".equals(ad.status) && !"CANCELLED".equals(ad.status) && !"STARTED".equals(ad.status))) return;
