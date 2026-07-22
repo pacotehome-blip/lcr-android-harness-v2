@@ -1015,49 +1015,65 @@ public class RegisterTabFragment extends Fragment {
             btnC.setOnClickListener(v -> {
                 if (controller == null) return;
 
-                // ✅ Vérifier si ce WO a déjà une livraison complétée (hors annulation)
-                try {
-                    com.pa.lcr.lcp.storage.ActiveDeliveryStore ads4 =
-                        new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
-                    com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad4 = ads4.load();
-                    String curWoNum = (ad4 != null && ad4.woNum != null) ? ad4.woNum : "";
-                    if (!curWoNum.isEmpty()) {
-                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb statusDb =
-                            new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
-                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow existing =
-                            statusDb.getLatestForWo(curWoNum);
-                        if (existing != null && existing.type != null
-                                && !"ANNULATION".equals(existing.type)) {
-                            // Lire le preset actuel pour comparer avec ce qui a été livré
-                            double presetVal = 0;
+                // ✅ FIX : cette vérification faisait des requêtes SQLite synchrones
+                // DIRECTEMENT sur le thread UI (ActiveDeliveryStore.load() +
+                // LcrDeliveryStatusDb.getLatestForWo()). En cas de contention avec
+                // d'autres accès DB en cours (plusieurs mécanismes de reconnexion
+                // tournent en parallèle dans cette app), ce clic restait bloqué en
+                // silence — bouton visuellement enfoncé, aucune réaction, comme un gel.
+                bg.execute(() -> {
+                    boolean showDialog = false;
+                    String curWoNumBg = "";
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow existingBg = null;
+                    double presetValBg = 0;
+                    try {
+                        com.pa.lcr.lcp.storage.ActiveDeliveryStore ads4 =
+                            new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
+                        com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad4 = ads4.load();
+                        curWoNumBg = (ad4 != null && ad4.woNum != null) ? ad4.woNum : "";
+                        if (!curWoNumBg.isEmpty()) {
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb statusDb =
+                                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
                             try {
-                                String presetTxt = edtPreset != null
-                                    ? edtPreset.getText().toString().trim() : "";
-                                if (!presetTxt.isEmpty()) presetVal = Double.parseDouble(presetTxt);
-                            } catch (Exception ignored) {}
-
-                            // Si livraison partielle (net < preset) → pas de dialog, démarrer directement
-                            // Si livraison complète ou over (net >= preset) → demander confirmation
-                            boolean livraisonComplete = (presetVal <= 0 || existing.netL >= presetVal);
-                            if (livraisonComplete && !bypassDeliveryDialog) {
-                                new android.app.AlertDialog.Builder(requireContext())
-                                    .setTitle("Bon déjà complété")
-                                    .setMessage("Le bon " + curWoNum + " a déjà été livré"
-                                        + " (ticket #" + existing.ticketNo
-                                        + ", " + existing.netL + "L net).\n\n"
-                                        + "Voulez-vous créer une nouvelle livraison sur ce même bon ?")
-                                    .setPositiveButton("Continuer", (d, w) -> startNewDeliveryC())
-                                    .setNegativeButton("Annuler", null)
-                                    .show();
-                                return;
+                                existingBg = statusDb.getLatestForWo(curWoNumBg);
+                            } finally {
+                                try { statusDb.close(); } catch (Exception ignored) {}
                             }
-                            // Livraison partielle — continuer sans dialog
+                            if (existingBg != null && existingBg.type != null
+                                    && !"ANNULATION".equals(existingBg.type)) {
+                                try {
+                                    String presetTxt = edtPreset != null
+                                        ? edtPreset.getText().toString().trim() : "";
+                                    if (!presetTxt.isEmpty()) presetValBg = Double.parseDouble(presetTxt);
+                                } catch (Exception ignored) {}
+                                boolean livraisonComplete = (presetValBg <= 0 || existingBg.netL >= presetValBg);
+                                showDialog = livraisonComplete && !bypassDeliveryDialog;
+                            }
+                        }
+                    } catch (Exception ignored) {}
+
+                    final boolean fShowDialog = showDialog;
+                    final String fCurWoNum = curWoNumBg;
+                    final com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow fExisting = existingBg;
+
+                    ui.post(() -> {
+                        if (!isAdded()) return;
+                        if (fShowDialog && fExisting != null) {
+                            new android.app.AlertDialog.Builder(requireContext())
+                                .setTitle("Bon déjà complété")
+                                .setMessage("Le bon " + fCurWoNum + " a déjà été livré"
+                                    + " (ticket #" + fExisting.ticketNo
+                                    + ", " + fExisting.netL + "L net).\n\n"
+                                    + "Voulez-vous créer une nouvelle livraison sur ce même bon ?")
+                                .setPositiveButton("Continuer", (d, w) -> startNewDeliveryC())
+                                .setNegativeButton("Annuler", null)
+                                .show();
+                            return;
                         }
                         bypassDeliveryDialog = false;
-                    }
-                } catch (Exception ignored) {}
-
-                startNewDeliveryC();
+                        startNewDeliveryC();
+                    });
+                });
             });
         }
         if (btnContinue != null) btnContinue.setOnClickListener(v -> {
