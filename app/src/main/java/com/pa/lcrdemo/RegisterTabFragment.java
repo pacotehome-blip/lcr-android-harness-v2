@@ -1329,13 +1329,7 @@ public class RegisterTabFragment extends Fragment {
             syncUiFromController();
             validateHeaderAsync();
             ui.postDelayed(() -> runStatusBLikeButton("TAB_REACTIVATED"), 250);
-            // ✅ FIX : déclencher la détection ici — au moment RÉEL où la connexion
-            // est confirmée prête, plutôt que de compter uniquement sur des délais
-            // fixes (600-1500ms) depuis onResume()/onTabActivated() qui peuvent
-            // s'exécuter avant que la connexion ne soit établie et ne jamais être
-            // relancés ensuite.
-            rechercherWoDepuisRegistre();
-            rafraichirCumulWo();
+            triggerWoDetectionThrottled();
             return;
         }
         RegisterSessionManager sm = RegisterSessionManager.get(requireContext());
@@ -1410,9 +1404,24 @@ public class RegisterTabFragment extends Fragment {
         ui.postDelayed(() -> runStatusBLikeButton("AUTO_AFTER_TAB_CREATE"), 250);
         if (userInitiated) LogBus.api(node, "Connect TAB: 1 - UI attached");
         scheduleLogRefresh();
-        // ✅ FIX : même raison que ci-dessus — déclencher au moment réel où le
-        // controller vient d'être créé/attaché, pas seulement via des délais fixes
-        // décorrélés du vrai temps de connexion BT (souvent plusieurs secondes).
+        triggerWoDetectionThrottled();
+    }
+
+    private volatile long lastWoDetectTriggerMs = 0;
+
+    /**
+     * ✅ FIX : rechercherWoDepuisRegistre()/rafraichirCumulWo() doivent tourner au
+     * moment réel où la connexion est confirmée (pas seulement sur des délais fixes
+     * décorrélés du temps de connexion BT) — mais connectThisRegister() peut être
+     * appelée bien plus souvent qu'un vrai événement de connexion (boucles de
+     * vérification périodiques existantes). Sans ce anti-rebond dédié, chaque appel
+     * ouvrait une nouvelle connexion LcrDeliveryStatusDb — d'où la rafale de
+     * "SQLiteConnection leaked" observée en rafale dans les logs.
+     */
+    private void triggerWoDetectionThrottled() {
+        long now = System.currentTimeMillis();
+        if (now - lastWoDetectTriggerMs < 2000) return;
+        lastWoDetectTriggerMs = now;
         rechercherWoDepuisRegistre();
         rafraichirCumulWo();
     }
