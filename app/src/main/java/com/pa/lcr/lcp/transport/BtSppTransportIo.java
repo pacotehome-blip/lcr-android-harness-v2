@@ -18,6 +18,12 @@ public final class BtSppTransportIo implements TransportIo {
 
     private volatile boolean closed = false;
 
+    // ✅ FIX : OutputStream.write() sur un BluetoothSocket n'a AUCUN timeout natif —
+    // un socket zombie peut bloquer write() indéfiniment, peu importe le timeoutMs
+    // demandé. Ce thread dédié permet de borner réellement l'appel via Future.get().
+    private final java.util.concurrent.ExecutorService writeExec =
+        java.util.concurrent.Executors.newSingleThreadExecutor();
+
     // =========================================================
     // ✅ Compteurs IO pour qualité signal indirecte
     // =========================================================
@@ -125,20 +131,42 @@ public final class BtSppTransportIo implements TransportIo {
     // write — avec mesure latence + compteurs
     // =========================================================
     @Override
-    public int write(byte[] data, int timeoutMs) throws Exception {
+    public int write(final byte[] data, int timeoutMs) throws Exception {
         if (closed || out == null) return -1;
         if (data == null || data.length == 0) return 0;
+
+        // ✅ Un write vraiment illimité n'est jamais sûr sur un socket physique —
+        // même timeoutMs<=0 obtient une borne de sécurité raisonnable.
+        final long boundMs = (timeoutMs > 0) ? timeoutMs : 5000L;
+
         long t0 = System.currentTimeMillis();
-        try {
+        java.util.concurrent.Future<Integer> fut = writeExec.submit(() -> {
             out.write(data);
             out.flush();
+            return data.length;
+        });
+
+        try {
+            int n = fut.get(boundMs, java.util.concurrent.TimeUnit.MILLISECONDS);
             long lat = System.currentTimeMillis() - t0;
             ioSamples.incrementAndGet();
             ioLatencySum.addAndGet(lat);
-            return data.length;
-        } catch (Exception e) {
+            return n;
+        } catch (java.util.concurrent.TimeoutException te) {
+            // ✅ Le write n'a pas abouti dans le délai — le socket est probablement
+            // mort. On annule la tâche (le thread reste bloqué dans write() côté OS,
+            // mais on ne laisse plus l'appelant geler indéfiniment) et on ferme le
+            // transport pour forcer une reconnexion propre au prochain essai.
+            ioTimeouts.incrementAndGet();
             ioErrors.incrementAndGet();
-            throw e;
+            fut.cancel(true);
+            try { close(); } catch (Exception ignored) {}
+            throw new java.io.IOException("Write timeout after " + boundMs + "ms — socket probablement mort");
+        } catch (java.util.concurrent.ExecutionException ee) {
+            ioErrors.incrementAndGet();
+            Throwable cause = ee.getCause();
+            if (cause instanceof Exception) throw (Exception) cause;
+            throw new Exception(cause);
         }
     }
 
@@ -209,5 +237,6 @@ public final class BtSppTransportIo implements TransportIo {
         try { if (in != null) in.close(); } catch (Exception ignored) {}
         try { if (out != null) out.close(); } catch (Exception ignored) {}
         try { if (socket != null) socket.close(); } catch (Exception ignored) {}
+        try { writeExec.shutdownNow(); } catch (Exception ignored) {}
     }
 }
