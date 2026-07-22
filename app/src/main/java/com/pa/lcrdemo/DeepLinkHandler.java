@@ -338,6 +338,45 @@ public class DeepLinkHandler {
             return;
         }
 
+        // ✅ FIX : confirmer la connexion RÉELLE au registre avant tout — pas un flag
+        // getState()/snapshot en cache (qui peut mentir sur un socket zombie). Si la
+        // vérification échoue, on relance le diagnostic complet (même média d'abord,
+        // sinon recherche du registre sur tous les médias) AVANT de toucher au tab,
+        // avant le check "Bon déjà complété", avant tout. Le diagnostic, une fois
+        // réussi, rappelle lancerLivraison() lui-même avec une connexion confirmée.
+        if (!transportKey.isEmpty()) {
+            boolean connexionOk = false;
+            try {
+                com.pa.lcr.lcp.DeliveryController dcCheck =
+                    com.pa.lcr.lcp.RegisterSessionManager.get(activity).getController(transportKey, node);
+                if (dcCheck != null) {
+                    com.pa.lcr.lcp.ApiResult vr = dcCheck.api_registerValidate(
+                        woNum, node, serialId, null, null);
+                    // ✅ code==1 = validé sans blocage métier. Mais un code==0 peut aussi
+                    // vouloir dire "ticket pending"/"delivery active"/mismatch — des cas
+                    // où la communication LCP a RÉUSSI, ce n'est pas une panne transport.
+                    // Seul un vrai échec de communication (pas de "ticket_no" dans data,
+                    // signe que readFullStatus()/readTicketNo23() n'ont jamais abouti)
+                    // doit déclencher le diagnostic de reconnexion.
+                    connexionOk = (vr != null)
+                        && (vr.code == 1 || (vr.data != null && vr.data.has("ticket_no")));
+                }
+            } catch (Exception e) {
+                android.util.Log.w(TAG, "lancerLivraison: vérif connexion ERR: " + e.getMessage());
+            }
+
+            if (!connexionOk) {
+                android.util.Log.w(TAG, "lancerLivraison: connexion registre non confirmée"
+                    + " — diagnostic + reconnexion avant tout autre traitement");
+                new Thread(() -> new com.pa.lcrdemo.RegisterConnectionHelper(activity)
+                    .lancerDiagnosticForce(transportKey, node, serialId, woNum,
+                        woIdGuid, produit, presetStr, mac,
+                        DeepLinkHandler.this)).start();
+                return;
+            }
+            android.util.Log.i(TAG, "lancerLivraison: connexion registre confirmée — poursuite");
+        }
+
         // Ouvrir/activer le tab
         final String fSerialId = serialId != null ? serialId : "";
         final String fWoNum = woNum;
