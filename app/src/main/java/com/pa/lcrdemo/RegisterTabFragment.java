@@ -2710,10 +2710,12 @@ public class RegisterTabFragment extends Fragment {
     // ✅ Afficher le cumul WO à droite du live — lecture depuis LcrDeliveryStatusDb
     private void rafraichirCumulWo() {
         if (currentWoNum == null || currentWoNum.isEmpty()) {
+            LogBus.api(node, "[CUMUL-WO] appelée mais currentWoNum vide — skip");
             // Ne pas cacher le panel — il doit toujours etre visible
             return;
         }
         final String wo = currentWoNum;
+        LogBus.api(node, "[CUMUL-WO] recherche pour wo=" + wo);
         bg.execute(() -> {
             double totalNet = 0, totalGross = 0;
             int count = 0;
@@ -2722,6 +2724,7 @@ public class RegisterTabFragment extends Fragment {
                     new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
                 java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> rows =
                     db.getAllForWo(wo);
+                LogBus.api(node, "[CUMUL-WO] getAllForWo(" + wo + ") a retourné " + rows.size() + " ligne(s)");
                 for (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow r : rows) {
                     if (!"ANNULATION".equals(r.type) && r.netL > 0) {
                         totalNet   += r.netL;
@@ -2729,11 +2732,16 @@ public class RegisterTabFragment extends Fragment {
                         count++;
                     }
                 }
-            } catch (Exception ignored) {}
+            } catch (Exception e) {
+                LogBus.api(node, "[CUMUL-WO] ERR: " + safeMsg(e));
+            }
             final double fNet = totalNet, fGross = totalGross;
             final int fCount = count;
             ui.post(() -> {
-                if (!isAdded() || getView() == null || panelWoCumul == null) return;
+                if (!isAdded() || getView() == null || panelWoCumul == null) {
+                    LogBus.api(node, "[CUMUL-WO] UI non prête (isAdded/getView/panelWoCumul) — mise à jour ignorée");
+                    return;
+                }
                 // Toujours afficher panelWoCumul — même si 0 livraisons
                 panelWoCumul.setVisibility(android.view.View.VISIBLE);
                 if (txtWoCumulNet != null)
@@ -2799,6 +2807,30 @@ public class RegisterTabFragment extends Fragment {
                 // (numero_livraison + "-" + ticketNo). Permet de valider Field Service
                 // Mobile vs l'APK pour ce même WO si une synchronisation a été manquée.
                 final String fDeliveryUid = fWoNum + "-" + ticketNo;
+
+                // ✅ FIX : le preset doit venir en priorité de la ligne trouvée dans
+                // filgo_delivery_status (row.presetL/row.produitNo — la vraie valeur de
+                // CETTE livraison complétée). ActiveDeliveryStore ne sert que pour une
+                // livraison EN COURS (deep link pas encore complété) — il est vidé
+                // (clear()) une fois la livraison terminée, donc il est vide pour une
+                // livraison historique déjà complétée comme ici, et edtPreset restait
+                // sur sa valeur par défaut ("50") au lieu de la vraie valeur (ex: 10).
+                String fPresetStr  = (row.presetL > 0) ? String.valueOf(row.presetL) : null;
+                String fProduitStr = (row.produitNo > 0) ? String.valueOf(row.produitNo) : null;
+                if (fPresetStr == null || fProduitStr == null) {
+                    try {
+                        com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
+                            new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
+                        com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery active = ads.load();
+                        if (active != null && fWoNum.equals(active.woNum)) {
+                            if (fPresetStr == null)  fPresetStr  = String.valueOf(active.preset);
+                            if (fProduitStr == null) fProduitStr = String.valueOf(active.produit);
+                        }
+                    } catch (Exception ignored) {}
+                }
+                final String ffPresetStr  = fPresetStr;
+                final String ffProduitStr = fProduitStr;
+
                 ui.post(() -> {
                     currentWoNum    = fWoNum;
                     currentWoIdGuid = fWoIdGuid;
@@ -2807,6 +2839,10 @@ public class RegisterTabFragment extends Fragment {
                         txtTicketNo.setText("Ticket Number : " + ticketNo);
                     if (txtDeliveryUid != null)
                         txtDeliveryUid.setText("Delivery UID : " + fDeliveryUid);
+                    if (ffPresetStr != null && edtPreset != null)
+                        edtPreset.setText(ffPresetStr);
+                    if (ffProduitStr != null && spnProduct != null)
+                        spnProduct.setText(ffProduitStr, false);
                     rafraichirCumulWo();
                 });
             } catch (Exception e) {
