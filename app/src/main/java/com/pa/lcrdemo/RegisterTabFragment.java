@@ -72,30 +72,32 @@ public class RegisterTabFragment extends Fragment {
             android.content.Context ctx = getContext();
             if (ctx == null) return;
 
-            // ✅ Si le controller est déjà en livraison ou connecté et actif — ne pas interférer
-            if (controller != null) {
-                com.pa.lcr.lcp.DeliveryState st = controller.getState();
-                if (st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
-                        || st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED
-                        || st == com.pa.lcr.lcp.DeliveryState.ENDING
-                        || st == com.pa.lcr.lcp.DeliveryState.CONNECTED) return;
-            }
-
             com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
                 new com.pa.lcr.lcp.storage.ActiveDeliveryStore(ctx);
             com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad = ads.load();
 
-            // ✅ Filet de sécurité — capturer le contexte WO stable dès qu'on le voit
+            // ✅ Filet de sécurité — capturer le contexte WO stable dès qu'on le voit,
+            // et rafraîchir le panneau cumulatif. Ceci doit tourner MÊME si le
+            // controller est CONNECTED (l'état normal une fois le registre lié) —
+            // c'est une opération de lecture seule, elle n'interfère avec rien.
+            // ✅ FIX : ce bloc tournait avant APRÈS le garde d'état plus bas, qui
+            // incluait CONNECTED dans sa liste d'états à ignorer — bloquant donc
+            // systématiquement ce rafraîchissement dès que le registre était bien
+            // connecté, exactement le moment où on en a besoin.
             if (ad != null && ad.woNum != null && !ad.woNum.isEmpty()) {
                 currentWoNum = ad.woNum;
                 if (ad.woIdGuid != null && !ad.woIdGuid.isEmpty()) currentWoIdGuid = ad.woIdGuid;
-                // ✅ FIX : rafraichirCumulWo() n'était appelée que depuis
-                // rechercherWoDepuisRegistre() — qui sort immédiatement si currentWoNum
-                // est déjà connu (ce qui est justement le cas ici). Résultat : le panneau
-                // "WO complété" ne se rafraîchissait jamais quand le WO était déjà connu
-                // via ActiveDeliveryStore (ex: reconnexion après fermeture de Field
-                // Service), seulement quand fraîchement détecté par recherche de ticket.
                 rafraichirCumulWo();
+            }
+
+            // ✅ Si le controller est déjà en livraison active — ne pas interférer
+            // avec la suite de cette méthode (proposer de reprendre une livraison
+            // PENDING). CONNECTED retiré de cette liste — voir commentaire ci-dessus.
+            if (controller != null) {
+                com.pa.lcr.lcp.DeliveryState st = controller.getState();
+                if (st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
+                        || st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED
+                        || st == com.pa.lcr.lcp.DeliveryState.ENDING) return;
             }
 
             if (ad == null || (!"PENDING".equals(ad.status) && !"CANCELLED".equals(ad.status) && !"STARTED".equals(ad.status))) return;
@@ -2729,8 +2731,12 @@ public class RegisterTabFragment extends Fragment {
             try {
                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db =
                     new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
-                java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> rows =
-                    db.getAllForWo(wo);
+                java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> rows;
+                try {
+                    rows = db.getAllForWo(wo);
+                } finally {
+                    try { db.close(); } catch (Exception ignored) {}
+                }
                 LogBus.api(node, "[CUMUL-WO] getAllForWo(" + wo + ") a retourné " + rows.size() + " ligne(s)");
                 for (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow r : rows) {
                     if (!"ANNULATION".equals(r.type) && r.netL > 0) {
@@ -2800,8 +2806,12 @@ public class RegisterTabFragment extends Fragment {
                 // Chercher ce ticket dans LcrDeliveryStatusDb
                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db =
                     new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
-                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow row =
-                    db.getByTicketNo(ticketNo);
+                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow row;
+                try {
+                    row = db.getByTicketNo(ticketNo);
+                } finally {
+                    try { db.close(); } catch (Exception ignored) {}
+                }
                 if (row == null || row.woNum == null || row.woNum.isEmpty()) {
                     LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — pas dans DB");
                     return;
