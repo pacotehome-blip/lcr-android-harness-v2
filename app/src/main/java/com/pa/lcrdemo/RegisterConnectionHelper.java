@@ -461,36 +461,42 @@ public class RegisterConnectionHelper {
         activity.runOnUiThread(() -> {
             if (dlg[0] != null) dlg[0].dismiss();
             try { activity.showPage(0); } catch (Exception ignored) {}
-
-            activity.getUiHandler().postDelayed(() -> {
-                try {
-                    com.pa.lcr.lcp.DeliveryController dc2 =
-                        com.pa.lcr.lcp.RegisterSessionManager.get(activity)
-                            .resolveOrCreateForNode(fNodeFinal, 255);
-                    if (dc2 != null) {
-                        dc2.requestStatus();
-                        dc2.requestLiveSample();
-                    }
-                } catch (Exception ignored) {}
-
-                // ✅ Relancer la livraison automatiquement si paramètres deep link disponibles
-                // Compatible Android 9-15 — btExec sur thread dédié
-                if (deepLinkHandler != null && woNum != null && !woNum.isEmpty()) {
-                    Log.i(TAG, "diagnostic succès — relance livraison auto woNum=" + woNum
-                        + " transportKey=" + transportKeyFinal[0]);
-                    new Thread(() -> deepLinkHandler.lancerLivraison(
-                        transportKeyFinal[0],
-                        fNodeFinal,
-                        fSerialIdFinal,
-                        woNum,
-                        woIdGuid != null ? woIdGuid : "",
-                        produit != null ? produit : "",
-                        presetStr != null ? presetStr : "",
-                        mac != null ? mac : ""
-                    )).start();
-                }
-            }, 1500);
         });
+
+        // ✅ FIX : ne PAS appeler resolveOrCreateForNode()/getOrCreate() (synchronized,
+        // même moniteur pour toute la classe) depuis le thread UI. Si un autre thread
+        // (check périodique STATUS_B du tab, réattachement étape 3) est en train de
+        // faire un probe LCP bloquant (opGetField jusqu'à 3000ms) en tenant ce verrou,
+        // le thread UI se gelait en silence — sans exception, sans log — et la relance
+        // de la livraison n'avait jamais lieu.
+        new Thread(() -> {
+            try { Thread.sleep(1500); } catch (Exception ignored) {}
+            try {
+                com.pa.lcr.lcp.DeliveryController dc2 =
+                    com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                        .resolveOrCreateForNode(fNodeFinal, 255);
+                if (dc2 != null) {
+                    dc2.requestStatus();
+                    dc2.requestLiveSample();
+                }
+            } catch (Exception ignored) {}
+
+            // ✅ Relancer la livraison automatiquement si paramètres deep link disponibles
+            if (deepLinkHandler != null && woNum != null && !woNum.isEmpty()) {
+                Log.i(TAG, "diagnostic succès — relance livraison auto woNum=" + woNum
+                    + " transportKey=" + transportKeyFinal[0]);
+                deepLinkHandler.lancerLivraison(
+                    transportKeyFinal[0],
+                    fNodeFinal,
+                    fSerialIdFinal,
+                    woNum,
+                    woIdGuid != null ? woIdGuid : "",
+                    produit != null ? produit : "",
+                    presetStr != null ? presetStr : "",
+                    mac != null ? mac : ""
+                );
+            }
+        }).start();
     }
 
     // =========================================================
