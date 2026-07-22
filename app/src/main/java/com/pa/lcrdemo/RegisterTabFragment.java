@@ -1329,6 +1329,13 @@ public class RegisterTabFragment extends Fragment {
             syncUiFromController();
             validateHeaderAsync();
             ui.postDelayed(() -> runStatusBLikeButton("TAB_REACTIVATED"), 250);
+            // ✅ FIX : déclencher la détection ici — au moment RÉEL où la connexion
+            // est confirmée prête, plutôt que de compter uniquement sur des délais
+            // fixes (600-1500ms) depuis onResume()/onTabActivated() qui peuvent
+            // s'exécuter avant que la connexion ne soit établie et ne jamais être
+            // relancés ensuite.
+            rechercherWoDepuisRegistre();
+            rafraichirCumulWo();
             return;
         }
         RegisterSessionManager sm = RegisterSessionManager.get(requireContext());
@@ -1403,6 +1410,11 @@ public class RegisterTabFragment extends Fragment {
         ui.postDelayed(() -> runStatusBLikeButton("AUTO_AFTER_TAB_CREATE"), 250);
         if (userInitiated) LogBus.api(node, "Connect TAB: 1 - UI attached");
         scheduleLogRefresh();
+        // ✅ FIX : même raison que ci-dessus — déclencher au moment réel où le
+        // controller vient d'être créé/attaché, pas seulement via des délais fixes
+        // décorrélés du vrai temps de connexion BT (souvent plusieurs secondes).
+        rechercherWoDepuisRegistre();
+        rafraichirCumulWo();
     }
 
     private void attachUiListenerIfNeeded() {
