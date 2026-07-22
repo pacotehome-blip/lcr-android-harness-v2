@@ -55,6 +55,7 @@ import com.pa.lcr.lcp.MultiRegisterApiFacadeImpl;
 import com.pa.lcr.lcp.RegisterSessionManager;
 import com.pa.lcr.lcp.log.LogBus;
 import com.pa.lcr.lcp.storage.DeliveryDb;
+import com.pa.lcr.lcp.storage.LcrDeliveryStatusDb;
 import com.pa.lcr.lcp.storage.DeliveryLogStore;
 import com.pa.lcrdemo.dataverse.DeliverySyncScheduler;
 import com.pa.lcrdemo.auth.MsalTokenProvider;
@@ -2204,6 +2205,11 @@ private void scanUsb() {
                 if (ok) toast("Backup OK (Downloads): " + fileName);
                 else toast("Backup FAIL: " + fileName + " " + detail);
             });
+            String statusName = "filgo_delivery_status_" + utcStamp() + ".db";
+            backupRawDbToDownloadsQ(LcrDeliveryStatusDb.DB_NAME, statusName, (ok, fileName, detail) -> {
+                if (ok) toast("Backup OK (Downloads): " + fileName);
+                else android.util.Log.w("MainActivity", "Backup filgo_delivery_status.db FAIL: " + detail);
+            });
         } else {
 		// Android 9 et - : tenter Downloads si permission accordée, sinon demander permission puis fallback dossier
 		if (ensureLegacyStoragePermissionForDownloads(true)) {
@@ -2212,10 +2218,90 @@ private void scanUsb() {
 				if (ok) toast("Backup OK (Downloads): " + fileName);
 				else toast("Backup FAIL: " + fileName + " " + detail);
 			});
+			String statusName = "filgo_delivery_status_" + utcStamp() + ".db";
+			backupRawDbToDownloadsLegacy(LcrDeliveryStatusDb.DB_NAME, statusName, (ok, fileName, detail) -> {
+				if (ok) toast("Backup OK (Downloads): " + fileName);
+				else android.util.Log.w("MainActivity", "Backup filgo_delivery_status.db FAIL: " + detail);
+			});
 		} else {
 			requestBackupDir();
 		}
 	}
+    }
+
+    private interface RawBackupCallback {
+        void onDone(boolean ok, String fileName, String detail);
+    }
+
+    /**
+     * Copie brute d'un fichier SQLite quelconque vers Downloads via MediaStore (Android Q+).
+     * Ajouté pour que filgo_delivery_status.db (LcrDeliveryStatusDb) soit exporté au même
+     * titre que la base de DeliveryLogStore — jusqu'ici seule cette dernière l'était.
+     */
+    private void backupRawDbToDownloadsQ(String dbName, String destName, RawBackupCallback cb) {
+        new Thread(() -> {
+            try {
+                java.io.File src = getDatabasePath(dbName);
+                if (src == null || !src.exists()) {
+                    cb.onDone(false, destName, "DB introuvable (" + dbName + ")");
+                    return;
+                }
+                android.content.ContentValues cv = new android.content.ContentValues();
+                cv.put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, destName);
+                cv.put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "application/x-sqlite3");
+                cv.put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS);
+
+                Uri outUri = getContentResolver().insert(
+                    android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv);
+                if (outUri == null) {
+                    cb.onDone(false, destName, "insert MediaStore a échoué");
+                    return;
+                }
+                try (java.io.InputStream in = new java.io.FileInputStream(src);
+                     java.io.OutputStream out = getContentResolver().openOutputStream(outUri)) {
+                    if (out == null) {
+                        cb.onDone(false, destName, "output stream null");
+                        return;
+                    }
+                    byte[] buf = new byte[64 * 1024];
+                    int r;
+                    while ((r = in.read(buf)) > 0) out.write(buf, 0, r);
+                    out.flush();
+                }
+                cb.onDone(true, destName, null);
+            } catch (Exception e) {
+                cb.onDone(false, destName, e.getMessage());
+            }
+        }).start();
+    }
+
+    /**
+     * Copie brute vers Downloads pour Android 9-10 (permission legacy déjà accordée
+     * par ensureLegacyStoragePermissionForDownloads avant cet appel).
+     */
+    private void backupRawDbToDownloadsLegacy(String dbName, String destName, RawBackupCallback cb) {
+        new Thread(() -> {
+            try {
+                java.io.File src = getDatabasePath(dbName);
+                if (src == null || !src.exists()) {
+                    cb.onDone(false, destName, "DB introuvable (" + dbName + ")");
+                    return;
+                }
+                java.io.File downloads = android.os.Environment.getExternalStoragePublicDirectory(
+                    android.os.Environment.DIRECTORY_DOWNLOADS);
+                java.io.File dest = new java.io.File(downloads, destName);
+                try (java.io.InputStream in = new java.io.FileInputStream(src);
+                     java.io.OutputStream out = new java.io.FileOutputStream(dest)) {
+                    byte[] buf = new byte[64 * 1024];
+                    int r;
+                    while ((r = in.read(buf)) > 0) out.write(buf, 0, r);
+                    out.flush();
+                }
+                cb.onDone(true, destName, null);
+            } catch (Exception e) {
+                cb.onDone(false, destName, e.getMessage());
+            }
+        }).start();
     }
 
     private void requestBackupDir() {
@@ -2306,10 +2392,49 @@ private void scanUsb() {
                 out.flush();
             }
 
-            toast("Backup OK (dossier choisi): " + name);
+            // ✅ Étendre le backup pour ramasser aussi filgo_delivery_status.db
+            // (LcrDeliveryStatusDb) — jusqu'ici seul DeliveryDb était exporté ici,
+            // donc les tables de LcrDeliveryStatusDb (totaux NET/GROSS par WO)
+            // n'apparaissaient jamais dans le backup.
+            String statusName = "filgo_delivery_status_" + utcStamp() + ".db";
+            boolean statusOk = copyRawDbToDir(dir, LcrDeliveryStatusDb.DB_NAME, statusName);
+
+            toast("Backup OK (dossier choisi): " + name
+                + (statusOk ? " + " + statusName : " (filgo_delivery_status.db absent)"));
 
         } catch (Exception e) {
             toast("Backup FAIL: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
+        }
+    }
+
+    /**
+     * Copie brute d'un fichier SQLite quelconque vers un dossier SAF déjà ouvert.
+     * Utilisé pour ajouter filgo_delivery_status.db au backup existant sans dupliquer
+     * toute la logique de copie déjà en place pour DeliveryDb.
+     */
+    private boolean copyRawDbToDir(DocumentFile dir, String dbName, String destName) {
+        try {
+            java.io.File src = getDatabasePath(dbName);
+            if (src == null || !src.exists()) return false;
+
+            DocumentFile existing = dir.findFile(destName);
+            if (existing != null) { try { existing.delete(); } catch (Exception ignore) {} }
+
+            DocumentFile target = dir.createFile("application/x-sqlite3", destName);
+            if (target == null || target.getUri() == null) return false;
+
+            try (java.io.InputStream in = new java.io.FileInputStream(src);
+                 java.io.OutputStream out = getContentResolver().openOutputStream(target.getUri())) {
+                if (out == null) return false;
+                byte[] buf = new byte[64 * 1024];
+                int r;
+                while ((r = in.read(buf)) > 0) out.write(buf, 0, r);
+                out.flush();
+            }
+            return true;
+        } catch (Exception e) {
+            android.util.Log.w("MainActivity", "copyRawDbToDir(" + dbName + ") ERR: " + e.getMessage());
+            return false;
         }
     }
 
