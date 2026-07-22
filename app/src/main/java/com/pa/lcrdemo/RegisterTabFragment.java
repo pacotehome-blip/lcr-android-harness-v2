@@ -2754,6 +2754,22 @@ public class RegisterTabFragment extends Fragment {
     // ✅ Chercher le WO depuis le ticket_no courant du registre
     // Utilisé quand on arrive dans l'APK sans deep link FSM
     // Le deep link a toujours précédence — appelé seulement si currentWoNum est vide
+    // ✅ delivery_uid n'est pas stocké tel quel dans LcrDeliveryStatusDb —
+    // il se reconstruit toujours de la même façon que dans DeliveryController
+    // (numero_livraison + "-" + ticketNo). Permet de valider Field Service
+    // Mobile vs l'APK pour ce même WO si une synchronisation a été manquée.
+    //
+    // TODO AMÉLIORATION FUTURE (discuté le 22 juillet 2026) :
+    // Actuellement, la validation Field Service Mobile vs APK est VISUELLE
+    // uniquement — le chauffeur compare les delivery_uid affichés ici avec ce
+    // qu'il voit dans Field Service Mobile, à l'œil. Amélioration envisagée :
+    // interroger Dataverse directement (via MSAL, même mécanisme que
+    // patchDataverse) pour comparer automatiquement les enregistrements
+    // filgo_lcr_delivery_statuses (ou table équivalente) côté serveur avec
+    // LcrDeliveryStatusDb côté local, et signaler explicitement les écarts
+    // (livraison locale non synchronisée, ticket manquant côté Dataverse, etc.)
+    // au lieu de compter sur une comparaison manuelle. Pas encore implémenté —
+    // en attente de confirmation du besoin exact avec Paul.
     private void rechercherWoDepuisRegistre() {
         if (controller == null) return;
         if (currentWoNum != null && !currentWoNum.isEmpty()) return;
@@ -2778,10 +2794,19 @@ public class RegisterTabFragment extends Fragment {
 
                 final String fWoNum    = row.woNum;
                 final String fWoIdGuid = row.woIdGuid != null ? row.woIdGuid : "";
+                // ✅ delivery_uid n'est pas stocké tel quel dans LcrDeliveryStatusDb —
+                // il se reconstruit toujours de la même façon que dans DeliveryController
+                // (numero_livraison + "-" + ticketNo). Permet de valider Field Service
+                // Mobile vs l'APK pour ce même WO si une synchronisation a été manquée.
+                final String fDeliveryUid = fWoNum + "-" + ticketNo;
                 ui.post(() -> {
                     currentWoNum    = fWoNum;
                     currentWoIdGuid = fWoIdGuid;
-                    LogBus.api(node, "[WO-DETECT] WO trouvé=" + fWoNum);
+                    LogBus.api(node, "[WO-DETECT] WO trouvé=" + fWoNum + " deliveryUid=" + fDeliveryUid);
+                    if (txtTicketNo != null)
+                        txtTicketNo.setText("Ticket Number : " + ticketNo);
+                    if (txtDeliveryUid != null)
+                        txtDeliveryUid.setText("Delivery UID : " + fDeliveryUid);
                     rafraichirCumulWo();
                 });
             } catch (Exception e) {
@@ -2806,7 +2831,9 @@ public class RegisterTabFragment extends Fragment {
                 double totalNet = 0, totalGross = 0;
                 for (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow r : rows) {
                     if (r.netL > 0) {
-                        sb.append("Ticket : ").append(r.ticketNo).append("\n");
+                        String uid = currentWoNum + "-" + r.ticketNo;
+                        sb.append("Ticket : ").append(r.ticketNo)
+                          .append("  (UID: ").append(uid).append(")\n");
                         sb.append(String.format(java.util.Locale.ROOT,
                             "  NET: %.3f L  GROSS: %.3f L\n", r.netL, r.grossL));
                         totalNet   += r.netL;
