@@ -2499,6 +2499,17 @@ try {
             String serialId = decodeAzString(lcpGetField(FIELD_SERIAL_ID));
             String deliveryUid = (numero_livraison == null ? "" : numero_livraison) + "-" + ticketNo;
 
+            // ✅ FIX : pousser immédiatement ticket_no/delivery_uid à l'UI du tab.
+            // Avant ce fix, seul requestStatus() (poll périodique) appelait
+            // listener.onTicketInfo(...) — donc après un redémarrage suite à
+            // reconnexion (DeliveryController recréé, lastNumeroLivraison vide),
+            // le tab affichait le ticket_no du registre mais delivery_uid restait
+            // "—" jusqu'au prochain poll naturel, au lieu d'être mis à jour tout
+            // de suite quand le oneshot calcule sa propre valeur ici.
+            try {
+                if (listener != null) listener.onTicketInfo(ticketNo, deliveryUid);
+            } catch (Exception ignored) {}
+
             // TickBus publish ds/dc change (net/gross unchanged)
             try {
                 LastTick prev = lastTick;

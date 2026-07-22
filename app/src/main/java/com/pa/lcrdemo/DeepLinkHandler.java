@@ -414,6 +414,74 @@ public class DeepLinkHandler {
         final double fPresetD = preset;
         final String fMac = mac != null ? mac : "";
 
+        // ✅ Même vérification que le bouton C dans RegisterTabFragment (onClick btnC) :
+        // comparer au DERNIER enregistrement du WO (getLatestForWo), pas une somme —
+        // si ce dernier net >= preset (ou preset non fourni), demander confirmation
+        // avant de démarrer une nouvelle livraison sur le même bon.
+        try {
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb statusDb =
+                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow existing =
+                statusDb.getLatestForWo(woNum);
+
+            if (existing != null && existing.type != null && !"ANNULATION".equals(existing.type)) {
+                boolean livraisonComplete = (fPresetD <= 0 || existing.netL >= fPresetD);
+                if (livraisonComplete) {
+                    android.util.Log.w(TAG, "lancerLivraison: bon " + woNum
+                        + " déjà complété (ticket #" + existing.ticketNo
+                        + ", " + existing.netL + "L net, preset=" + fPresetD + "L) — confirmation requise");
+
+                    final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+                    final boolean[] continuer = {false};
+                    final com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow fExisting = existing;
+
+                    activity.runOnUiThread(() -> {
+                        new android.app.AlertDialog.Builder(activity)
+                            .setTitle("Bon déjà complété")
+                            .setMessage("Le bon " + woNum + " a déjà été livré"
+                                + " (ticket #" + fExisting.ticketNo
+                                + ", " + fExisting.netL + "L net).\n\n"
+                                + "Voulez-vous créer une nouvelle livraison sur ce même bon ?")
+                            .setPositiveButton("Continuer", (d, w) -> {
+                                continuer[0] = true;
+                                latch.countDown();
+                            })
+                            .setNegativeButton("Annuler", (d, w) -> {
+                                continuer[0] = false;
+                                latch.countDown();
+                            })
+                            .setCancelable(false)
+                            .show();
+                    });
+
+                    try { latch.await(); } catch (InterruptedException ignored) {}
+
+                    // ✅ Traçabilité: enregistrer le choix du chauffeur dans la table event,
+                    // que ce soit Continuer ou Annuler — action explicite requise (accountability).
+                    logEvent(fSerialId, woNum,
+                        continuer[0] ? DeliveryLogStore.LEVEL_INFO : DeliveryLogStore.LEVEL_WARN,
+                        continuer[0] ? "BON_DEJA_COMPLETE_CONTINUE" : "BON_DEJA_COMPLETE_ANNULE",
+                        "ticket=" + fExisting.ticketNo + " net=" + fExisting.netL
+                            + "L preset=" + fPresetD + "L — chauffeur a choisi "
+                            + (continuer[0] ? "CONTINUER" : "ANNULER"),
+                        null);
+
+                    if (!continuer[0]) {
+                        // ✅ Annuler = retour simple au tab, sans toast ni retour Field Service.
+                        // Le chauffeur reste libre d'utiliser le tab (imprimer, custom print,
+                        // voir le total, etc.) — s'il relance le bouton C, le même dialogue
+                        // reviendra puisque rien n'a changé dans l'historique.
+                        android.util.Log.i(TAG, "lancerLivraison: annulé par le chauffeur (bon déjà complété)");
+                        activity.runOnUiThread(() -> activity.showPage(0));
+                        return;
+                    }
+                    android.util.Log.i(TAG, "lancerLivraison: chauffeur confirme — nouvelle livraison sur bon déjà complété");
+                }
+            }
+        } catch (Exception e) {
+            android.util.Log.w(TAG, "lancerLivraison: erreur vérif bon complété — " + e.getMessage());
+        }
+
         try {
             // ✅ FIX régression session 9 : réutiliser le DeliveryController déjà résolu
             // (CONNECTED, socket ouvert) au lieu de créer une nouvelle
