@@ -328,6 +328,20 @@ public class DeepLinkHandler {
     public void lancerLivraison(String transportKey, int node, String serialId,
                                   String woNum, String woIdGuid,
                                   String produit, String presetStr, String mac) {
+        lancerLivraison(transportKey, node, serialId, woNum, woIdGuid,
+            produit, presetStr, mac, false);
+    }
+
+    // ✅ skipConnexionCheck=true : utilisé uniquement par la relance automatique de
+    // RegisterConnectionHelper juste après un diagnostic réussi (étape 4: lcpOk=true).
+    // Refaire une vraie vérification LCP (api_registerValidate) immédiatement après
+    // reconnexion, sur un socket BT qui vient tout juste d'être rétabli, est redondant
+    // et risque d'ajouter un délai voire un blocage — le diagnostic vient déjà de
+    // confirmer la connexion à l'instant.
+    public void lancerLivraison(String transportKey, int node, String serialId,
+                                  String woNum, String woIdGuid,
+                                  String produit, String presetStr, String mac,
+                                  boolean skipConnexionCheck) {
         // ✅ FIX : vérifier AVANT de toucher au tab — l'ancien code rafraîchissait
         // l'UI (upsertRegisterTabFromScan / showPage) même quand un poll était
         // déjà actif, ce qui faisait apparaître le tab en "CONNECTED — prêt"
@@ -344,7 +358,7 @@ public class DeepLinkHandler {
         // sinon recherche du registre sur tous les médias) AVANT de toucher au tab,
         // avant le check "Bon déjà complété", avant tout. Le diagnostic, une fois
         // réussi, rappelle lancerLivraison() lui-même avec une connexion confirmée.
-        if (!transportKey.isEmpty()) {
+        if (!skipConnexionCheck && !transportKey.isEmpty()) {
             boolean connexionOk = false;
             try {
                 com.pa.lcr.lcp.DeliveryController dcCheck =

@@ -493,7 +493,8 @@ public class RegisterConnectionHelper {
                     woIdGuid != null ? woIdGuid : "",
                     produit != null ? produit : "",
                     presetStr != null ? presetStr : "",
-                    mac != null ? mac : ""
+                    mac != null ? mac : "",
+                    true // skipConnexionCheck — diagnostic étape 4 vient de confirmer lcpOk=true
                 );
             }
         }).start();
