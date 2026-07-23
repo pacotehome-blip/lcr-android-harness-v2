@@ -96,6 +96,7 @@ public class RegisterTabFragment extends Fragment {
             // connecté, exactement le moment où on en a besoin.
             if (ad != null && ad.woNum != null && !ad.woNum.isEmpty()) {
                 currentWoNum = ad.woNum;
+                woNumFromDirectSource = true;
                 if (ad.woIdGuid != null && !ad.woIdGuid.isEmpty()) currentWoIdGuid = ad.woIdGuid;
                 rafraichirCumulWo();
             }
@@ -337,16 +338,21 @@ public class RegisterTabFragment extends Fragment {
     // jamais effacé par les flux concurrents (ActiveDeliveryStore peut être
     // écrasé/vidé par annulation, autre poll, etc. — ces champs ne le sont pas)
     private volatile String currentWoNum    = "";
+    // ✅ FIX condition de course : quand currentWoNum vient d'une source DIRECTE
+    // (deep link Field Service via prefillFromDeepLink/startNewDeliveryCFromDeepLink,
+    // ou ActiveDeliveryStore qui contient elle-même le woNum du deep link), le
+    // ticket_no lu sur le registre peut encore pointer vers l'ancienne livraison
+    // physique (le registre n'a pas encore émis son nouveau ticket) — sans garde,
+    // lookupWoForTicket() écrasait alors currentWoNum avec le WO de CE ticket,
+    // remplaçant le bon WO par l'ancien. Ce drapeau protège currentWoNum tant que
+    // le ticket trouvé ne confirme pas le même WO (auquel cas la garde se lève
+    // d'elle-même — les deux sources sont d'accord, plus besoin de protéger).
+    private volatile boolean woNumFromDirectSource = false;
     // ✅ Suivre le dernier ticket_no traité pour permettre une re-détection quand
     // le registre passe à un nouveau ticket/WO — sans ça, currentWoNum restait figé
     // sur la première valeur trouvée (deep link, bouton C annulé, ActiveDeliveryStore)
     // pour toute la durée de vie du tab, bloquant la détection de tout ticket suivant.
     private volatile String lastTicketDetected = "";
-    // ✅ true quand currentWoNum vient d'être fixé DIRECTEMENT (deep link / bouton C
-    // avec contexte Field Service) — dans ce cas, la recherche par ticket_number
-    // (lookupWoForTicket) ne doit PAS l'écraser, même si le registre affiche encore
-    // le ticket de la livraison précédente au moment où onTicketInfo() se déclenche.
-    private volatile boolean woNumFromDirectSource = false;
     private volatile boolean deliveryNotified = false; // guard anti-doublon notification
     private volatile String currentWoIdGuid = "";
     private static final int TAB_LOG_MAX_LINES = 400;
@@ -797,11 +803,7 @@ public class RegisterTabFragment extends Fragment {
         deliveryNotified = false; // reset pour la nouvelle livraison
         if (woNum != null && !woNum.isEmpty()) {
             currentWoNum = woNum;
-            // ✅ Ce WO vient directement du deep link — priorité sur toute recherche
-            // par ticket_number qui pourrait se déclencher ensuite (onTicketInfo peut
-            // encore rapporter le ticket de la livraison PRÉCÉDENTE un court instant).
             woNumFromDirectSource = true;
-            lastTicketDetected = ""; // permettre une future recherche si ce WO change de source
         }
         if (woIdGuid != null && !woIdGuid.isEmpty()) currentWoIdGuid = woIdGuid;
         if (edtPreset != null && preset != null && !preset.isEmpty())
@@ -2252,7 +2254,6 @@ public class RegisterTabFragment extends Fragment {
         if (woNum != null && !woNum.isEmpty()) {
             currentWoNum = woNum;
             woNumFromDirectSource = true;
-            lastTicketDetected = "";
         }
         if (woIdGuid != null && !woIdGuid.isEmpty()) currentWoIdGuid = woIdGuid;
         if (produit != null && !produit.isEmpty() && spnProduct != null)
@@ -2929,22 +2930,6 @@ public class RegisterTabFragment extends Fragment {
         }
 
         final String fWoNum    = row.woNum;
-
-        // ✅ Un WO connu directement (deep link) a priorité — ne pas l'écraser avec
-        // le résultat d'une recherche par ticket_number qui pointerait vers un WO
-        // différent (probablement encore le ticket de la livraison PRÉCÉDENTE, le
-        // registre n'ayant pas encore émis de nouveau ticket pour la nouvelle
-        // livraison). Si le ticket confirme le MÊME WO, on peut lever la priorité
-        // en toute sécurité — les deux sources sont maintenant d'accord.
-        if (woNumFromDirectSource) {
-            if (!fWoNum.equals(currentWoNum)) {
-                LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " → WO=" + fWoNum
-                    + " ignoré, WO direct prioritaire=" + currentWoNum);
-                return;
-            }
-            woNumFromDirectSource = false; // les deux sources concordent désormais
-        }
-
         final String fWoIdGuid = row.woIdGuid != null ? row.woIdGuid : "";
         // ✅ delivery_uid n'est pas stocké tel quel dans LcrDeliveryStatusDb —
         // il se reconstruit toujours de la même façon que dans DeliveryController
@@ -2974,8 +2959,30 @@ public class RegisterTabFragment extends Fragment {
         final String ffProduitStr = fProduitStr;
 
         ui.post(() -> {
+            boolean sameWo = fWoNum.equals(currentWoNum);
+            boolean guardActive = woNumFromDirectSource && !sameWo
+                && currentWoNum != null && !currentWoNum.isEmpty();
+
+            if (guardActive) {
+                // ✅ Un WO direct (deep link) est actif et ce ticket pointe vers un WO
+                // différent — probablement l'ancienne livraison physique, le registre
+                // n'a pas encore émis son nouveau ticket. On ignore ce WO pour ne pas
+                // écraser le cumul déjà correct, mais on affiche quand même le
+                // ticket_no lu (info neutre, sans lien avec le cumul WO affiché).
+                LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " → WO=" + fWoNum
+                    + " ignoré (WO direct actif=" + currentWoNum + ")");
+                if (txtTicketNo != null)
+                    txtTicketNo.setText("Ticket Number : " + ticketNo);
+                return;
+            }
+
             currentWoNum    = fWoNum;
             currentWoIdGuid = fWoIdGuid;
+            // ✅ Les deux sources sont maintenant d'accord (ticket confirme le WO
+            // direct) — plus besoin de protéger, la recherche par ticket redevient
+            // libre pour les prochains tickets de ce même tab.
+            if (sameWo) woNumFromDirectSource = false;
+
             LogBus.api(node, "[WO-DETECT] WO trouvé=" + fWoNum + " deliveryUid=" + fDeliveryUid);
             if (txtTicketNo != null)
                 txtTicketNo.setText("Ticket Number : " + ticketNo);
