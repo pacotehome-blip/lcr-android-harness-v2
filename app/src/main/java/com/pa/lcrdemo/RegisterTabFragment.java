@@ -550,6 +550,15 @@ public class RegisterTabFragment extends Fragment {
                 refreshDelCodeFromTickSnapshotThrottled();
                 updateButtons(controller != null ? controller.getState() : null);
             });
+            // ✅ onTicketInfo est un push déjà fiable (via requestStatus()) — brancher
+            // la recherche WO/cumul ici aussi, en plus du polling explicite de
+            // rechercherWoDepuisRegistre(), pour une détection plus robuste.
+            if (ticketNo != null && !ticketNo.isEmpty()) {
+                bg.execute(() -> {
+                    try { lookupWoForTicket(ticketNo); }
+                    catch (Exception e) { LogBus.api(node, "[WO-DETECT] ERR (onTicketInfo): " + safeMsg(e)); }
+                });
+            }
         }
     };
 
@@ -1015,6 +1024,12 @@ public class RegisterTabFragment extends Fragment {
             btnC.setOnClickListener(v -> {
                 if (controller == null) return;
 
+                // ✅ FIX : lire edtPreset sur le thread UI AVANT de passer en
+                // arrière-plan — accéder à une vue depuis bg.execute() n'est pas
+                // garanti sécuritaire, peu importe si ça semblait fonctionner.
+                final String presetTxtUi = edtPreset != null
+                    ? edtPreset.getText().toString().trim() : "";
+
                 // ✅ FIX : cette vérification faisait des requêtes SQLite synchrones
                 // DIRECTEMENT sur le thread UI (ActiveDeliveryStore.load() +
                 // LcrDeliveryStatusDb.getLatestForWo()). En cas de contention avec
@@ -1042,9 +1057,7 @@ public class RegisterTabFragment extends Fragment {
                             if (existingBg != null && existingBg.type != null
                                     && !"ANNULATION".equals(existingBg.type)) {
                                 try {
-                                    String presetTxt = edtPreset != null
-                                        ? edtPreset.getText().toString().trim() : "";
-                                    if (!presetTxt.isEmpty()) presetValBg = Double.parseDouble(presetTxt);
+                                    if (!presetTxtUi.isEmpty()) presetValBg = Double.parseDouble(presetTxtUi);
                                 } catch (Exception ignored) {}
                                 boolean livraisonComplete = (presetValBg <= 0 || existingBg.netL >= presetValBg);
                                 showDialog = livraisonComplete && !bypassDeliveryDialog;
@@ -2847,82 +2860,100 @@ public class RegisterTabFragment extends Fragment {
         if (controller == null) return;
         bg.execute(() -> {
             try {
-                // Lire ticket_no courant — un seul appel
-                ApiResult snap = controller.api_tickSnapshot();
+                // ✅ FIX MAJEUR : api_tickSnapshot() ne contient JAMAIS de champ
+                // "ticket_no" (buildTickJsonSnapshot() expose seulement seq/net/gross/
+                // devStatus/prnStatus/delStatus/delCode/state/jobId — jamais ticket_no).
+                // optString("ticket_no", "") retournait donc TOUJOURS "" et cette
+                // méthode sortait silencieusement ici à chaque appel, depuis le tout
+                // début — c'est pour ça que [WO-DETECT] n'est jamais apparu dans aucun
+                // log de toute la session. api_registerValidate() est la bonne méthode :
+                // elle met toujours ticket_no dans son JSON, peu importe le résultat.
+                ApiResult snap = controller.api_registerValidate(null, null, null, null, null);
                 if (snap == null || snap.data == null) return;
                 String ticketNo = snap.data.optString("ticket_no", "");
                 if (ticketNo.isEmpty()) return;
-
-                // ✅ FIX : ne plus sortir juste parce que currentWoNum est déjà connu —
-                // vérifier plutôt si CE ticket précis a déjà été traité. Si le registre
-                // est passé à un nouveau ticket depuis, on doit re-détecter le nouveau WO.
-                if (ticketNo.equals(lastTicketDetected)) return;
-                lastTicketDetected = ticketNo;
-
-                LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — recherche dans DB");
-
-                // Chercher ce ticket dans LcrDeliveryStatusDb
-                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db =
-                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
-                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow row;
-                try {
-                    row = db.getByTicketNo(ticketNo);
-                } finally {
-                    try { db.close(); } catch (Exception ignored) {}
-                }
-                if (row == null || row.woNum == null || row.woNum.isEmpty()) {
-                    LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — pas dans DB");
-                    return;
-                }
-
-                final String fWoNum    = row.woNum;
-                final String fWoIdGuid = row.woIdGuid != null ? row.woIdGuid : "";
-                // ✅ delivery_uid n'est pas stocké tel quel dans LcrDeliveryStatusDb —
-                // il se reconstruit toujours de la même façon que dans DeliveryController
-                // (numero_livraison + "-" + ticketNo). Permet de valider Field Service
-                // Mobile vs l'APK pour ce même WO si une synchronisation a été manquée.
-                final String fDeliveryUid = fWoNum + "-" + ticketNo;
-
-                // ✅ FIX : le preset doit venir en priorité de la ligne trouvée dans
-                // filgo_delivery_status (row.presetL/row.produitNo — la vraie valeur de
-                // CETTE livraison complétée). ActiveDeliveryStore ne sert que pour une
-                // livraison EN COURS (deep link pas encore complété) — il est vidé
-                // (clear()) une fois la livraison terminée, donc il est vide pour une
-                // livraison historique déjà complétée comme ici, et edtPreset restait
-                // sur sa valeur par défaut ("50") au lieu de la vraie valeur (ex: 10).
-                String fPresetStr  = (row.presetL > 0) ? String.valueOf(row.presetL) : null;
-                String fProduitStr = (row.produitNo > 0) ? String.valueOf(row.produitNo) : null;
-                if (fPresetStr == null || fProduitStr == null) {
-                    try {
-                        com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
-                            new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
-                        com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery active = ads.load();
-                        if (active != null && fWoNum.equals(active.woNum)) {
-                            if (fPresetStr == null)  fPresetStr  = String.valueOf(active.preset);
-                            if (fProduitStr == null) fProduitStr = String.valueOf(active.produit);
-                        }
-                    } catch (Exception ignored) {}
-                }
-                final String ffPresetStr  = fPresetStr;
-                final String ffProduitStr = fProduitStr;
-
-                ui.post(() -> {
-                    currentWoNum    = fWoNum;
-                    currentWoIdGuid = fWoIdGuid;
-                    LogBus.api(node, "[WO-DETECT] WO trouvé=" + fWoNum + " deliveryUid=" + fDeliveryUid);
-                    if (txtTicketNo != null)
-                        txtTicketNo.setText("Ticket Number : " + ticketNo);
-                    if (txtDeliveryUid != null)
-                        txtDeliveryUid.setText("Delivery UID : " + fDeliveryUid);
-                    if (ffPresetStr != null && edtPreset != null)
-                        edtPreset.setText(ffPresetStr);
-                    if (ffProduitStr != null && spnProduct != null)
-                        spnProduct.setText(ffProduitStr, false);
-                    rafraichirCumulWo();
-                });
+                lookupWoForTicket(ticketNo);
             } catch (Exception e) {
                 LogBus.api(node, "[WO-DETECT] ERR: " + safeMsg(e));
             }
+        });
+    }
+
+    /**
+     * ✅ Recherche du WO + rafraîchissement du cumul à partir d'un ticket_no déjà
+     * connu — appelée à la fois par rechercherWoDepuisRegistre() (poll explicite via
+     * api_registerValidate) ET par onTicketInfo() (push déjà fiable du contrôleur via
+     * requestStatus()). onTicketInfo étant le mécanisme qui affiche déjà le ticket
+     * avec succès dans le tab, la brancher ici aussi rend la détection du WO/cumul
+     * beaucoup plus robuste, sans dépendre uniquement du polling explicite.
+     * Doit être appelée depuis un thread d'arrière-plan (fait des requêtes SQLite).
+     */
+    private void lookupWoForTicket(String ticketNo) {
+        if (ticketNo == null || ticketNo.isEmpty()) return;
+        // ✅ Ne pas sortir juste parce que currentWoNum est déjà connu — vérifier
+        // plutôt si CE ticket précis a déjà été traité. Si le registre est passé à
+        // un nouveau ticket depuis, on doit re-détecter le nouveau WO.
+        if (ticketNo.equals(lastTicketDetected)) return;
+        lastTicketDetected = ticketNo;
+
+        LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — recherche dans DB");
+
+        // Chercher ce ticket dans LcrDeliveryStatusDb
+        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db =
+            new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow row;
+        try {
+            row = db.getByTicketNo(ticketNo);
+        } finally {
+            try { db.close(); } catch (Exception ignored) {}
+        }
+        if (row == null || row.woNum == null || row.woNum.isEmpty()) {
+            LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — pas dans DB");
+            return;
+        }
+
+        final String fWoNum    = row.woNum;
+        final String fWoIdGuid = row.woIdGuid != null ? row.woIdGuid : "";
+        // ✅ delivery_uid n'est pas stocké tel quel dans LcrDeliveryStatusDb —
+        // il se reconstruit toujours de la même façon que dans DeliveryController
+        // (numero_livraison + "-" + ticketNo). Permet de valider Field Service
+        // Mobile vs l'APK pour ce même WO si une synchronisation a été manquée.
+        final String fDeliveryUid = fWoNum + "-" + ticketNo;
+
+        // ✅ Le preset doit venir en priorité de la ligne trouvée dans
+        // filgo_delivery_status (row.presetL/row.produitNo — la vraie valeur de
+        // CETTE livraison complétée). ActiveDeliveryStore ne sert que pour une
+        // livraison EN COURS (deep link pas encore complété) — il est vidé
+        // (clear()) une fois la livraison terminée.
+        String fPresetStr  = (row.presetL > 0) ? String.valueOf(row.presetL) : null;
+        String fProduitStr = (row.produitNo > 0) ? String.valueOf(row.produitNo) : null;
+        if (fPresetStr == null || fProduitStr == null) {
+            try {
+                com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
+                    new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
+                com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery active = ads.load();
+                if (active != null && fWoNum.equals(active.woNum)) {
+                    if (fPresetStr == null)  fPresetStr  = String.valueOf(active.preset);
+                    if (fProduitStr == null) fProduitStr = String.valueOf(active.produit);
+                }
+            } catch (Exception ignored) {}
+        }
+        final String ffPresetStr  = fPresetStr;
+        final String ffProduitStr = fProduitStr;
+
+        ui.post(() -> {
+            currentWoNum    = fWoNum;
+            currentWoIdGuid = fWoIdGuid;
+            LogBus.api(node, "[WO-DETECT] WO trouvé=" + fWoNum + " deliveryUid=" + fDeliveryUid);
+            if (txtTicketNo != null)
+                txtTicketNo.setText("Ticket Number : " + ticketNo);
+            if (txtDeliveryUid != null)
+                txtDeliveryUid.setText("Delivery UID : " + fDeliveryUid);
+            if (ffPresetStr != null && edtPreset != null)
+                edtPreset.setText(ffPresetStr);
+            if (ffProduitStr != null && spnProduct != null)
+                spnProduct.setText(ffProduitStr, false);
+            rafraichirCumulWo();
         });
     }
 
