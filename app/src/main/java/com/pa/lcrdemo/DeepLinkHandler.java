@@ -477,12 +477,20 @@ public class DeepLinkHandler {
                         + " déjà complété (ticket #" + existing.ticketNo
                         + ", " + existing.netL + "L net, preset=" + fPresetD + "L) — confirmation requise");
 
+                    // ✅ Timeout de sécurité : sans ça, un CountDownLatch.await() sans borne
+                    // peut geler ce thread (pool btExec) indéfiniment si le chauffeur ignore,
+                    // quitte l'app, ou verrouille la tablette sans répondre. 5 minutes laisse
+                    // largement le temps de répondre normalement, tout en garantissant que le
+                    // thread finit par se libérer. Le dialogue reste setCancelable(false) —
+                    // seul un vrai choix explicite (ou ce timeout) referme la boîte.
+                    final long DIALOGUE_TIMEOUT_MS = 5 * 60_000L;
+                    final android.app.AlertDialog[] dlgRef = {null};
                     final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
                     final boolean[] continuer = {false};
                     final com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow fExisting = existing;
 
                     activity.runOnUiThread(() -> {
-                        new android.app.AlertDialog.Builder(activity)
+                        dlgRef[0] = new android.app.AlertDialog.Builder(activity)
                             .setTitle("Bon déjà complété")
                             .setMessage("Le bon " + woNum + " a déjà été livré"
                                 + " (ticket #" + fExisting.ticketNo
@@ -500,7 +508,31 @@ public class DeepLinkHandler {
                             .show();
                     });
 
-                    try { latch.await(); } catch (InterruptedException ignored) {}
+                    boolean repondu = false;
+                    try {
+                        repondu = latch.await(DIALOGUE_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
+                    } catch (InterruptedException ignored) {}
+
+                    if (!repondu) {
+                        // ✅ Aucune réponse après 5 min — traité comme Annuler (le plus sûr :
+                        // on ne crée jamais de nouvelle livraison sans confirmation explicite),
+                        // mais loggé distinctement (TIMEOUT ≠ ANNULE) pour ne pas laisser croire
+                        // que le chauffeur a fait un choix actif.
+                        android.util.Log.w(TAG, "lancerLivraison: dialogue bon déjà complété — "
+                            + "timeout 5min sans réponse, annulation automatique");
+                        logEvent(fSerialId, woNum, DeliveryLogStore.LEVEL_WARN,
+                            "BON_DEJA_COMPLETE_TIMEOUT",
+                            "ticket=" + fExisting.ticketNo + " net=" + fExisting.netL
+                                + "L preset=" + fPresetD + "L — aucune réponse après 5min",
+                            null);
+                        activity.runOnUiThread(() -> {
+                            try {
+                                if (dlgRef[0] != null && dlgRef[0].isShowing()) dlgRef[0].dismiss();
+                            } catch (Exception ignored) {}
+                            activity.showPage(0);
+                        });
+                        return;
+                    }
 
                     // ✅ Traçabilité: enregistrer le choix du chauffeur dans la table event,
                     // que ce soit Continuer ou Annuler — action explicite requise (accountability).
