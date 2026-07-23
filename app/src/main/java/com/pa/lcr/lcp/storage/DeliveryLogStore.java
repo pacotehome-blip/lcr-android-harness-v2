@@ -350,7 +350,18 @@ public class DeliveryLogStore {
     public void checkpointWalBestEffort() {
         try {
             SQLiteDatabase db = helper.getWritableDatabase();
-            db.execSQL("PRAGMA wal_checkpoint(FULL);");
+            // ✅ FIX : PRAGMA wal_checkpoint(FULL) retourne un résultat (busy/log/
+            // checkpointed) — execSQL() refuse d'exécuter toute instruction qui
+            // produit un résultat ("Queries can be performed using SQLiteDatabase
+            // query or rawQuery methods only"). Il faut rawQuery() ici, à l'inverse
+            // de la convention habituelle pour un PRAGMA.
+            try (android.database.Cursor c = db.rawQuery("PRAGMA wal_checkpoint(FULL);", null)) {
+                if (c != null && c.moveToFirst()) {
+                    android.util.Log.i("DeliveryLogStore",
+                        "WAL checkpoint: busy=" + c.getInt(0)
+                        + " log=" + c.getInt(1) + " checkpointed=" + c.getInt(2));
+                }
+            }
         } catch (Throwable t) {
             android.util.Log.w("DeliveryLogStore", "WAL checkpoint failed (backup may be incomplete)", t);
         }
