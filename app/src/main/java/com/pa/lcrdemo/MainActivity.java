@@ -699,8 +699,17 @@ public class MainActivity extends AppCompatActivity {
                                           String woNum, String woIdGuid,
                                           String produit, String presetStr, String mac) {
         if (deepLinkHandler != null) {
-            deepLinkHandler.lancerLivraison(transportKey, node, serialId,
-                woNum, woIdGuid, produit, presetStr, mac);
+            // ✅ FIX : cet appel se faisait DIRECTEMENT sur le thread appelant (le
+            // thread UI, puisque déclenché depuis le clic du bouton C). Or
+            // lancerLivraison() contient le dialogue "Bon déjà complété", qui affiche
+            // via activity.runOnUiThread() PUIS bloque le thread appelant avec
+            // latch.await() en attendant le clic. Si le thread appelant EST le thread
+            // UI, le dialogue ne peut jamais s'afficher (sa propre file de messages
+            // est bloquée) et le clic ne peut jamais arriver — auto-blocage garanti.
+            // Partout ailleurs dans le code, cet appel est fait via new Thread(...) —
+            // ce point d'entrée était le seul oublié.
+            new Thread(() -> deepLinkHandler.lancerLivraison(transportKey, node, serialId,
+                woNum, woIdGuid, produit, presetStr, mac)).start();
         }
     }
     /**
