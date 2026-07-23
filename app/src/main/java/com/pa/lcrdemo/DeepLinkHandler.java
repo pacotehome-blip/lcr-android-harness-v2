@@ -184,54 +184,43 @@ public class DeepLinkHandler {
                         rsm.resolveOrCreateForNode(fNode, 255);
 
                     if (dc != null) {
-                        // ✅ Attendre que le DC soit CONNECTED (probeAndIdentify terminé)
-                        // max 15s, 200ms par itération
                         activity.runOnUiThread(() -> activity.toast("🔌 Connexion au registre..."));
-                        for (int w = 0; w < 75; w++) {
-                            if (dc.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
-                            try { Thread.sleep(200); } catch (Exception ignored) {}
-                        }
-                        android.util.Log.i(TAG, "DC state avant lancerLivraison: " + dc.getState());
-                        if (dc.getState() != com.pa.lcr.lcp.DeliveryState.CONNECTED) {
-                            android.util.Log.w(TAG, "DC non prêt après 15s — état: " + dc.getState()
-                                + " — tentative auto-connect");
-                            // ✅ Tenter auto-connect (USB ou BT) avant d'abandonner
-                            MultiRegisterApiFacadeImpl facadeRetry = new MultiRegisterApiFacadeImpl(activity);
-                            com.pa.lcr.lcp.ApiResult ra2 = facadeRetry.api_registerConnectAuto(
-                                fSerialId.isEmpty() ? null : fSerialId, fNode);
-                            if (ra2 != null && ra2.code == 1) {
-                                com.pa.lcr.lcp.DeliveryController dc3 =
-                                    rsm.resolveOrCreateForNode(fNode, 255);
-                                if (dc3 != null) {
-                                    for (int w = 0; w < 75; w++) {
-                                        if (dc3.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
-                                        try { Thread.sleep(200); } catch (Exception ignored) {}
-                                    }
-                                    if (dc3.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) {
-                                        String foundKey3 = rsm.findTransportKeyForController(dc3);
-                                        lancerLivraison(foundKey3 != null ? foundKey3 : "", fNode,
-                                            fSerialId, woNum, woIdGuid, fProduit, fPresetStr, fBtMac);
-                                        return;
-                                    }
-                                }
-                            }
-                            logError(fSerialId, woNum, "REGISTER_NOT_READY",
-                                "DC non CONNECTED après 15s + retry auto-connect — état: " + dc.getState());
-                            activity.runOnUiThread(() ->
-                                activity.toast("⚠️ Registre non joignable — tentative de reconnexion..."));
-                            // Lancer sur thread dédié — ne pas bloquer btExec
-                            // diagnosticEnCours static garantit un seul diagnostic à la fois
-                            new Thread(() -> new com.pa.lcrdemo.RegisterConnectionHelper(activity)
-                                .lancerDiagnosticForce("", fNode, fSerialId, woNum,
-                                    woIdGuid, fProduit, fPresetStr, fBtMac,
-                                    DeepLinkHandler.this)).start();
+                        // ✅ OPTIMISATION (couches 1+3 fusionnées) : une seule vérification RÉELLE
+                        // de connexion (api_registerValidate — vraie requête LCP) au lieu de poller
+                        // getState() en cache (couche 1) puis re-valider une seconde fois plus tard
+                        // dans lancerLivraison (couche 3). getState()==CONNECTED ne garantissait de
+                        // toute façon pas une connexion vivante (socket zombie possible) — seule
+                        // api_registerValidate() envoie réellement une trame et confirme une réponse.
+                        // skipConnexionCheck=true est passé à lancerLivraison pour éviter la 3e
+                        // vérification redondante qu'elle faisait auparavant en interne.
+                        com.pa.lcr.lcp.ApiResult vr = dc.api_registerValidate(
+                            woNum, fNode, fSerialId.isEmpty() ? null : fSerialId, null, null);
+                        boolean connexionOk = (vr != null)
+                            && (vr.code == 1 || (vr.data != null && vr.data.has("ticket_no")));
+
+                        if (connexionOk) {
+                            String foundKey = rsm.findTransportKeyForController(dc);
+                            android.util.Log.i(TAG, "Transport trouvé pour node=" + fNode
+                                + " transportKey=" + foundKey);
+                            lancerLivraison(foundKey != null ? foundKey : "", fNode,
+                                fSerialId, woNum, woIdGuid, fProduit, fPresetStr, fBtMac, true);
                             return;
                         }
-                        String foundKey = rsm.findTransportKeyForController(dc);
-                        android.util.Log.i(TAG, "Transport trouvé pour node=" + fNode
-                            + " transportKey=" + foundKey);
-                        lancerLivraison(foundKey != null ? foundKey : "", fNode,
-                            fSerialId, woNum, woIdGuid, fProduit, fPresetStr, fBtMac);
+
+                        android.util.Log.w(TAG, "api_registerValidate a échoué — msg="
+                            + (vr != null ? vr.msg : "null") + " — diagnostic + reconnexion");
+                        logError(fSerialId, woNum, "REGISTER_NOT_READY",
+                            "api_registerValidate a échoué au premier essai — msg="
+                                + (vr != null ? vr.msg : "null"));
+                        activity.runOnUiThread(() ->
+                            activity.toast("⚠️ Registre non joignable — tentative de reconnexion..."));
+                        // Lancer sur thread dédié — ne pas bloquer btExec
+                        // diagnosticEnCours static garantit un seul diagnostic à la fois
+                        new Thread(() -> new com.pa.lcrdemo.RegisterConnectionHelper(activity)
+                            .lancerDiagnosticForce("", fNode, fSerialId, woNum,
+                                woIdGuid, fProduit, fPresetStr, fBtMac,
+                                DeepLinkHandler.this)).start();
+                        return;
                     } else {
                         // Aucun transport actif — tenter auto-connect (USB / BT / TCP)
                         android.util.Log.i(TAG, "Aucun transport actif — tentative auto-connect node="
@@ -243,19 +232,23 @@ public class DeepLinkHandler {
                             + " msg=" + (ra != null ? ra.msg : "null"));
 
                         if (ra != null && ra.code == 1) {
-                            // Auto-connect réussi — attendre DC CONNECTED
+                            // Auto-connect réussi — même vérification fusionnée que ci-dessus
+                            // (une seule requête LCP réelle, pas de poll d'état en cache)
                             com.pa.lcr.lcp.DeliveryController dc2 =
                                 rsm.resolveOrCreateForNode(fNode, 255);
                             if (dc2 != null) {
                                 activity.runOnUiThread(() -> activity.toast("🔌 Connexion au registre..."));
-                                for (int w = 0; w < 75; w++) {
-                                    if (dc2.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
-                                    try { Thread.sleep(200); } catch (Exception ignored) {}
-                                }
-                                if (dc2.getState() != com.pa.lcr.lcp.DeliveryState.CONNECTED) {
-                                    android.util.Log.w(TAG, "DC2 non prêt après 15s — état: " + dc2.getState());
+                                com.pa.lcr.lcp.ApiResult vr2 = dc2.api_registerValidate(
+                                    woNum, fNode, fSerialId.isEmpty() ? null : fSerialId, null, null);
+                                boolean connexionOk2 = (vr2 != null)
+                                    && (vr2.code == 1 || (vr2.data != null && vr2.data.has("ticket_no")));
+
+                                if (!connexionOk2) {
+                                    android.util.Log.w(TAG, "DC2 api_registerValidate échoué — msg="
+                                        + (vr2 != null ? vr2.msg : "null"));
                                     logError(fSerialId, woNum, "REGISTER_NOT_READY",
-                                        "DC2 non CONNECTED après 15s — état: " + dc2.getState());
+                                        "DC2 api_registerValidate échoué — msg="
+                                            + (vr2 != null ? vr2.msg : "null"));
                                     activity.runOnUiThread(() ->
                                         activity.toast("⚠️ Registre non joignable — tentative de reconnexion..."));
                                     new Thread(() -> new com.pa.lcrdemo.RegisterConnectionHelper(activity)
@@ -267,7 +260,7 @@ public class DeepLinkHandler {
                             }
                             String foundKey2 = dc2 != null ? rsm.findTransportKeyForController(dc2) : null;
                             lancerLivraison(foundKey2 != null ? foundKey2 : "", fNode,
-                                fSerialId, woNum, woIdGuid, fProduit, fPresetStr, fBtMac);
+                                fSerialId, woNum, woIdGuid, fProduit, fPresetStr, fBtMac, true);
                         } else if (fBtMac != null && !fBtMac.trim().isEmpty()) {
                             // Fallback BT explicite
                             android.util.Log.i(TAG, "Auto-connect échoué — connexion BT: " + fBtMac);
