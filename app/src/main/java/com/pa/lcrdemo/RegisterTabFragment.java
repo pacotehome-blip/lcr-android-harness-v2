@@ -342,6 +342,11 @@ public class RegisterTabFragment extends Fragment {
     // sur la première valeur trouvée (deep link, bouton C annulé, ActiveDeliveryStore)
     // pour toute la durée de vie du tab, bloquant la détection de tout ticket suivant.
     private volatile String lastTicketDetected = "";
+    // ✅ true quand currentWoNum vient d'être fixé DIRECTEMENT (deep link / bouton C
+    // avec contexte Field Service) — dans ce cas, la recherche par ticket_number
+    // (lookupWoForTicket) ne doit PAS l'écraser, même si le registre affiche encore
+    // le ticket de la livraison précédente au moment où onTicketInfo() se déclenche.
+    private volatile boolean woNumFromDirectSource = false;
     private volatile boolean deliveryNotified = false; // guard anti-doublon notification
     private volatile String currentWoIdGuid = "";
     private static final int TAB_LOG_MAX_LINES = 400;
@@ -790,7 +795,14 @@ public class RegisterTabFragment extends Fragment {
 
     public void prefillFromDeepLink(String woNum, String woIdGuid, String produit, String preset) {
         deliveryNotified = false; // reset pour la nouvelle livraison
-        if (woNum != null && !woNum.isEmpty()) currentWoNum = woNum;
+        if (woNum != null && !woNum.isEmpty()) {
+            currentWoNum = woNum;
+            // ✅ Ce WO vient directement du deep link — priorité sur toute recherche
+            // par ticket_number qui pourrait se déclencher ensuite (onTicketInfo peut
+            // encore rapporter le ticket de la livraison PRÉCÉDENTE un court instant).
+            woNumFromDirectSource = true;
+            lastTicketDetected = ""; // permettre une future recherche si ce WO change de source
+        }
         if (woIdGuid != null && !woIdGuid.isEmpty()) currentWoIdGuid = woIdGuid;
         if (edtPreset != null && preset != null && !preset.isEmpty())
             edtPreset.setText(preset);
@@ -2237,7 +2249,11 @@ public class RegisterTabFragment extends Fragment {
     public void startNewDeliveryCFromDeepLink(String woNum, String woIdGuid,
             String produit, String presetStr) {
         // Préfiller
-        if (woNum != null && !woNum.isEmpty()) currentWoNum = woNum;
+        if (woNum != null && !woNum.isEmpty()) {
+            currentWoNum = woNum;
+            woNumFromDirectSource = true;
+            lastTicketDetected = "";
+        }
         if (woIdGuid != null && !woIdGuid.isEmpty()) currentWoIdGuid = woIdGuid;
         if (produit != null && !produit.isEmpty() && spnProduct != null)
             spnProduct.setText(produit, false);
@@ -2913,6 +2929,22 @@ public class RegisterTabFragment extends Fragment {
         }
 
         final String fWoNum    = row.woNum;
+
+        // ✅ Un WO connu directement (deep link) a priorité — ne pas l'écraser avec
+        // le résultat d'une recherche par ticket_number qui pointerait vers un WO
+        // différent (probablement encore le ticket de la livraison PRÉCÉDENTE, le
+        // registre n'ayant pas encore émis de nouveau ticket pour la nouvelle
+        // livraison). Si le ticket confirme le MÊME WO, on peut lever la priorité
+        // en toute sécurité — les deux sources sont maintenant d'accord.
+        if (woNumFromDirectSource) {
+            if (!fWoNum.equals(currentWoNum)) {
+                LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " → WO=" + fWoNum
+                    + " ignoré, WO direct prioritaire=" + currentWoNum);
+                return;
+            }
+            woNumFromDirectSource = false; // les deux sources concordent désormais
+        }
+
         final String fWoIdGuid = row.woIdGuid != null ? row.woIdGuid : "";
         // ✅ delivery_uid n'est pas stocké tel quel dans LcrDeliveryStatusDb —
         // il se reconstruit toujours de la même façon que dans DeliveryController
