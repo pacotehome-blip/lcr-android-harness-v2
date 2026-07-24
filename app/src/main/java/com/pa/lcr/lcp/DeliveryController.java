@@ -730,8 +730,8 @@ private void reproEvent(String level, String type, String message, JSONObject da
             double scale = Math.pow(10, digits);
             int g = beI32(withLcpLock(() -> link.opGetField(FIELD_GROSS_COUNT)));
             int n = beI32(withLcpLock(() -> link.opGetField(FIELD_NET_COUNT)));
-            double netL   = (n & 0xFFFFFFFFL) / scale;
-            double grossL = (g & 0xFFFFFFFFL) / scale;
+            double netL   = n / scale;
+            double grossL = g / scale;
             return new double[]{netL, grossL};
         } catch (Exception e) {
             return new double[]{-1.0, -1.0};
@@ -1025,8 +1025,8 @@ FullStatus fs = readFullStatus("status/full");
                 int gRaw = beI32(lcpGetField(FIELD_GROSS_COUNT));
                 int nRaw = beI32(lcpGetField(FIELD_NET_COUNT));
 
-                double net = (nRaw & 0xFFFFFFFFL) / scale;
-                double gross = (gRaw & 0xFFFFFFFFL) / scale;
+                double net = nRaw / scale;
+                double gross = gRaw / scale;
 
                 if (listener != null) listener.onLiveQty(net, gross);
 
@@ -1383,8 +1383,8 @@ try {
                 } catch (Exception e) {
                     return;
                 }
-                double gross = (g & 0xFFFFFFFFL) / scale;
-                double net   = (n & 0xFFFFFFFFL) / scale;
+                double gross = g / scale;
+                double net   = n / scale;
                 if (listener != null) listener.onLiveQty(net, gross);
                 publishTickIfChanged(net, gross,
                     lastDevStatusKnown, lastPrnStatusKnown,
@@ -2727,6 +2727,21 @@ job.presetNetL_requested = presetNetL;
 
             setState(DeliveryState.CONNECTED);
 
+            // ✅ VÉRIFICATION EMPIRIQUE — lire net/gross juste après l'armement
+            // (writePresetNet), avant tout CMD_RUN, pour savoir si le compteur est
+            // déjà à 0 à ce moment précis. Répond à la question : est-ce que
+            // Auxiliary+Print (opDiagnosticReset) remet vraiment le compteur à zéro,
+            // ou est-ce l'armement d'une nouvelle livraison qui le fait tout seul,
+            // ou ni l'un ni l'autre (livraison démarrerait encore avec un résidu) ?
+            try {
+                double[] postArmNg = readNetGrossL();
+                emitLog("[VERIF-ARMED] net/gross après armement (avant CMD_RUN): net="
+                    + postArmNg[0] + " gross=" + postArmNg[1]
+                    + " (0 attendu si le reset a fonctionné ou si l'armement le fait naturellement)");
+            } catch (Exception e) {
+                emitLog("[VERIF-ARMED] lecture ERR (non bloquant): " + e.getMessage());
+            }
+
             JSONObject data = new JSONObject();
             safeJsonPut(data, "jobId", jobId);
  safeJsonPut(data, "media", (job.media == null ? resolveActiveMedia() : job.media));
@@ -2912,12 +2927,20 @@ job.presetNetL_requested = presetNetL;
             int g = beI32(lcpGetField(FIELD_GROSS_COUNT));
             int n = beI32(lcpGetField(FIELD_NET_COUNT));
 
-            // ✅ Sanity check — overflow protection (unsigned 32-bit → signé Java)
-            long nLong = (n & 0xFFFFFFFFL);
-            long gLong = (g & 0xFFFFFFFFL);
-            // Si valeur > 1 million de litres → probablement overflow/corruption
-            double netL   = (nLong / scale > 1_000_000.0) ? -1.0 : nLong / scale;
-            double grossL = (gLong / scale > 1_000_000.0) ? -1.0 : gLong / scale;
+            // ✅ FIX CRITIQUE : l'ancien "& 0xFFFFFFFFL" forçait une interprétation
+            // NON SIGNÉE — un retour d'air légitime (n=-18 par exemple) devenait
+            // 4294967278 au lieu de -18, et ce faux "sanity check" ne faisait que
+            // masquer le symptôme (en clampant à -1.0) sans jamais préserver la
+            // vraie valeur négative dont checkPulserReversalAndCorrect() a besoin.
+            // beI32() retourne déjà un int correctement signé — diviser directement
+            // préserve le signe. Un vrai sanity check reste utile pour détecter une
+            // corruption réelle (valeur absurdement grande dans un sens ou l'autre),
+            // mais un retour d'air modeste (quelques litres négatifs) est légitime
+            // et ne doit jamais être clampé.
+            double netL   = n / scale;
+            double grossL = g / scale;
+            if (Math.abs(netL) > 1_000_000.0)   netL   = -1.0;
+            if (Math.abs(grossL) > 1_000_000.0) grossL = -1.0;
 
             // Mettre à jour lastDev/PrnStatus depuis un readFullStatus non-intrusif
             try {
@@ -3115,6 +3138,17 @@ job.presetNetL_requested = presetNetL;
             boolean flowActive = (delCode & DC_FLOW_ACTIVE) != 0;
             boolean ticketPending = (delCode & DC_TICKET_PENDING) != 0;
 
+            // ✅ FIX CRITIQUE : détection du retour d'air (pulser reversal) — c'est
+            // ICI, dans api_deliveryJobGet(), que le suivi réel pendant RUNNING_FLOWING/
+            // RUNNING_PAUSED se fait (via DeepLinkHandler.pollJobUntilDone()), PAS dans
+            // requestStatus() où la détection avait été ajoutée initialement. Sans ce
+            // check ici, une livraison pouvait se terminer avec un retour d'air jamais
+            // corrigé, comme observé (net affiché à 4294967278 au lieu de -18 — voir
+            // le second fix juste en dessous).
+            if (link.isPulserReversalTerminated(ds[0])) {
+                checkPulserReversalAndCorrect();
+            }
+
             if (deliveryActive) job.sawDeliveryActiveOnce = true;
 
             ensureDigits();
@@ -3124,8 +3158,13 @@ job.presetNetL_requested = presetNetL;
             int g = beI32(lcpGetField(FIELD_GROSS_COUNT));
             int n = beI32(lcpGetField(FIELD_NET_COUNT));
 
-            double netL = (n & 0xFFFFFFFFL) / scale;
-            double grossL = (g & 0xFFFFFFFFL) / scale;
+            // ✅ FIX CRITIQUE : "& 0xFFFFFFFFL" force une interprétation NON SIGNÉE —
+            // un retour d'air légitime (n=-18 par exemple) devenait 4294967278 au lieu
+            // de -18. beI32() retourne déjà un int correctement signé — diviser
+            // directement préserve le signe, ce qui est nécessaire pour que la
+            // détection de négatif (et donc la correction) fonctionne correctement.
+            double netL = n / scale;
+            double grossL = g / scale;
 
             
 if (deliveryActive && !job.baselineCaptured) {
@@ -3405,8 +3444,8 @@ safeJsonPut(result, "net_delta_l", netDeltaU / scale);
                 // =========================
                 safeJsonPut(result, "display_tick_ms",  job.displayTickMs);
                 safeJsonPut(result, "display_tick_seq", job.displayTickSeq);
-                safeJsonPut(result, "display_gross_end_raw", (job.displayGrossRaw & 0xFFFFFFFFL));
-                safeJsonPut(result, "display_net_end_raw",   (job.displayNetRaw & 0xFFFFFFFFL));
+                safeJsonPut(result, "display_gross_end_raw", job.displayGrossRaw);
+                safeJsonPut(result, "display_net_end_raw",   job.displayNetRaw);
                 safeJsonPut(result, "display_gross_end_l", job.displayGrossL);
                 safeJsonPut(result, "display_net_end_l",   job.displayNetL);
 
