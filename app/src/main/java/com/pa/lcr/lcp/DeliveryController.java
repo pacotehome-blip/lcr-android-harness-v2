@@ -2477,11 +2477,25 @@ public ApiResult api_registerValidate(
         byte[] grossRaw = lcpGetField(44); // FIELD_GROSS_COUNT
         int netRaw32    = toInt32(netRaw);
         int grossRaw32  = toInt32(grossRaw);
-        byte[] decRaw = lcpGetField(39);
-        int decimals  = decRaw != null && decRaw.length > 0
-            ? new int[]{2,1,0,3}[decRaw[0] & 0x03] : 1;
-        double scale  = Math.pow(10, decimals);
-        return new double[]{ netRaw32 / scale, grossRaw32 / scale };
+        // ✅ FIX : utiliser le MÊME cachedDigits/ensureDigits() que tout le reste
+        // du fichier (writePresetNet, api_deliveryOneShotStart, api_deliveryJobGet,
+        // etc.) au lieu d'une lecture indépendante de Field #39 ici. Deux lectures
+        // séparées pouvaient diverger (timing différent) et produire une échelle
+        // différente d'un endroit à l'autre — exactement le genre d'écart qui
+        // donnait 15.5 au registre vs 1.55 dans l'app (facteur 10, une décimale
+        // en trop).
+        ensureDigits();
+        double scale = Math.pow(10, cachedDigits);
+        double netL   = netRaw32 / scale;
+        double grossL = grossRaw32 / scale;
+        // ✅ Garde-fou : une valeur absurde (lecture corrompue, glitch de
+        // communication) ne doit jamais s'accumuler dans le cumul logiciel ni
+        // déclencher une correction. Un vrai retour d'air reste modeste
+        // (quelques litres) — au-delà d'un seuil très large, c'est une donnée
+        // à ignorer, pas une valeur réelle.
+        if (Math.abs(netL) > 100_000.0)   netL   = 0.0;
+        if (Math.abs(grossL) > 100_000.0) grossL = 0.0;
+        return new double[]{ netL, grossL };
     }
 
     public ApiResult api_diagnosticReset() {
