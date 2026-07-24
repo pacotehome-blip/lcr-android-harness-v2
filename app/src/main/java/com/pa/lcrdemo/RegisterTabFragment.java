@@ -96,7 +96,6 @@ public class RegisterTabFragment extends Fragment {
             // connecté, exactement le moment où on en a besoin.
             if (ad != null && ad.woNum != null && !ad.woNum.isEmpty()) {
                 currentWoNum = ad.woNum;
-                woNumFromDirectSource = true;
                 if (ad.woIdGuid != null && !ad.woIdGuid.isEmpty()) currentWoIdGuid = ad.woIdGuid;
                 rafraichirCumulWo();
             }
@@ -338,21 +337,16 @@ public class RegisterTabFragment extends Fragment {
     // jamais effacé par les flux concurrents (ActiveDeliveryStore peut être
     // écrasé/vidé par annulation, autre poll, etc. — ces champs ne le sont pas)
     private volatile String currentWoNum    = "";
-    // ✅ FIX condition de course : quand currentWoNum vient d'une source DIRECTE
-    // (deep link Field Service via prefillFromDeepLink/startNewDeliveryCFromDeepLink,
-    // ou ActiveDeliveryStore qui contient elle-même le woNum du deep link), le
-    // ticket_no lu sur le registre peut encore pointer vers l'ancienne livraison
-    // physique (le registre n'a pas encore émis son nouveau ticket) — sans garde,
-    // lookupWoForTicket() écrasait alors currentWoNum avec le WO de CE ticket,
-    // remplaçant le bon WO par l'ancien. Ce drapeau protège currentWoNum tant que
-    // le ticket trouvé ne confirme pas le même WO (auquel cas la garde se lève
-    // d'elle-même — les deux sources sont d'accord, plus besoin de protéger).
-    private volatile boolean woNumFromDirectSource = false;
     // ✅ Suivre le dernier ticket_no traité pour permettre une re-détection quand
     // le registre passe à un nouveau ticket/WO — sans ça, currentWoNum restait figé
     // sur la première valeur trouvée (deep link, bouton C annulé, ActiveDeliveryStore)
     // pour toute la durée de vie du tab, bloquant la détection de tout ticket suivant.
     private volatile String lastTicketDetected = "";
+    // ✅ true quand currentWoNum vient d'être fixé DIRECTEMENT (deep link / bouton C
+    // avec contexte Field Service) — dans ce cas, la recherche par ticket_number
+    // (lookupWoForTicket) ne doit PAS l'écraser, même si le registre affiche encore
+    // le ticket de la livraison précédente au moment où onTicketInfo() se déclenche.
+    private volatile boolean woNumFromDirectSource = false;
     private volatile boolean deliveryNotified = false; // guard anti-doublon notification
     private volatile String currentWoIdGuid = "";
     private static final int TAB_LOG_MAX_LINES = 400;
@@ -570,6 +564,66 @@ public class RegisterTabFragment extends Fragment {
                     catch (Exception e) { LogBus.api(node, "[WO-DETECT] ERR (onTicketInfo): " + safeMsg(e)); }
                 });
             }
+        }
+
+        @Override
+        public void onDiagnosticReset(String woNum, double netBeforeL, double grossBeforeL) {
+            // ✅ Persister un enregistrement d'audit + mettre en file pour Dataverse.
+            // net_l/gross_l = 0 volontairement (aucune livraison réelle n'a eu lieu —
+            // ne doit JAMAIS s'additionner au total cumulé du WO dans
+            // rafraichirCumulWo()). Les vraies valeurs résiduelles vont dans
+            // delta_net_l/delta_gross_l, à des fins d'audit uniquement.
+            bg.execute(() -> {
+                try {
+                    android.content.Context ctx = getContext();
+                    if (ctx == null) return;
+                    String fWoNum = (woNum != null && !woNum.isEmpty()) ? woNum : "MAINTENANCE";
+                    String ticketNoForUid = lastTicketDetected != null ? lastTicketDetected : "";
+                    String deliveryUid = fWoNum + "-RESET-" + System.currentTimeMillis();
+
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db =
+                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(ctx);
+                    try {
+                        android.content.ContentValues cv = new android.content.ContentValues();
+                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM, fWoNum);
+                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID,
+                            serialId != null ? serialId : "");
+                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_LCRNODE, node);
+                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO, ticketNoForUid);
+                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE, "DIAGNOSTIC_RESET");
+                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE, "REGISTRE");
+                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,   0.0);
+                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L, 0.0);
+                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_DELTA_NET_L,   netBeforeL);
+                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_DELTA_GROSS_L, grossBeforeL);
+                        long id = db.insertDelivery(cv);
+                        LogBus.api(node, "[DIAGNOSTIC-RESET] persisté id=" + id
+                            + " wo=" + fWoNum + " netAvant=" + netBeforeL + " grossAvant=" + grossBeforeL);
+                    } finally {
+                        try { db.close(); } catch (Exception ignored) {}
+                    }
+
+                    // ✅ Mettre en file pour Dataverse — même mécanisme que les
+                    // livraisons normales (DeliverySyncWorker/WorkOrderUpdater).
+                    org.json.JSONObject payload = new org.json.JSONObject();
+                    payload.put("workOrderId", currentWoIdGuid != null ? currentWoIdGuid : "");
+                    payload.put("netTotal", 0.0);
+                    payload.put("grossTotal", 0.0);
+                    payload.put("ticketNo", ticketNoForUid);
+                    payload.put("woNum", fWoNum);
+                    payload.put("deliveryUid", deliveryUid);
+                    payload.put("diagnosticReset", true);
+                    payload.put("preDeliveryNet", netBeforeL);
+                    payload.put("preDeliveryGross", grossBeforeL);
+
+                    com.pa.lcrdemo.dataverse.DeliveryResultQueueDb queueDb =
+                        new com.pa.lcrdemo.dataverse.DeliveryResultQueueDb(ctx);
+                    queueDb.upsertPending(deliveryUid, payload.toString());
+                    com.pa.lcrdemo.dataverse.DeliverySyncScheduler.triggerNow(ctx);
+                } catch (Exception e) {
+                    LogBus.api(node, "[DIAGNOSTIC-RESET] ERR: " + safeMsg(e));
+                }
+            });
         }
     };
 
@@ -803,7 +857,11 @@ public class RegisterTabFragment extends Fragment {
         deliveryNotified = false; // reset pour la nouvelle livraison
         if (woNum != null && !woNum.isEmpty()) {
             currentWoNum = woNum;
+            // ✅ Ce WO vient directement du deep link — priorité sur toute recherche
+            // par ticket_number qui pourrait se déclencher ensuite (onTicketInfo peut
+            // encore rapporter le ticket de la livraison PRÉCÉDENTE un court instant).
             woNumFromDirectSource = true;
+            lastTicketDetected = ""; // permettre une future recherche si ce WO change de source
         }
         if (woIdGuid != null && !woIdGuid.isEmpty()) currentWoIdGuid = woIdGuid;
         if (edtPreset != null && preset != null && !preset.isEmpty())
@@ -904,9 +962,9 @@ public class RegisterTabFragment extends Fragment {
             final double fNet      = net;
             final double fGross    = gross;
             bg.execute(() -> {
+                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb = null;
                 try {
-                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
-                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                    lcrDb = new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
                     // Vérifier si déjà inséré par DeepLinkHandler
                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow existing =
                         lcrDb.getLatestForWo(fWoNum);
@@ -929,7 +987,10 @@ public class RegisterTabFragment extends Fragment {
                     }
                     // Rafraîchir le cumul WO après insertion
                     ui.post(() -> rafraichirCumulWo());
-                } catch (Exception ignored) {}
+                } catch (Exception ignored) {
+                } finally {
+                    if (lcrDb != null) { try { lcrDb.close(); } catch (Exception ignored) {} }
+                }
             });
 
         } catch (Exception ignored) {}
@@ -1264,7 +1325,11 @@ public class RegisterTabFragment extends Fragment {
                                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
                             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
                                 new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
-                            lcrDb.insertDelivery(cv);
+                            try {
+                                lcrDb.insertDelivery(cv);
+                            } finally {
+                                try { lcrDb.close(); } catch (Exception ignored) {}
+                            }
                         }
 
                     } catch (Exception e) {
@@ -1663,13 +1728,16 @@ public class RegisterTabFragment extends Fragment {
                 final String woCheck = currentWoNum;
                 bg.execute(() -> {
                     boolean hasData = false;
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db = null;
                     try {
-                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db =
-                            new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                        db = new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
                         com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow row =
                             db.getLatestForWo(woCheck);
                         hasData = (row != null && row.ticketNo != null && !row.ticketNo.isEmpty());
-                    } catch (Exception ignored) {}
+                    } catch (Exception ignored) {
+                    } finally {
+                        if (db != null) { try { db.close(); } catch (Exception ignored) {} }
+                    }
                     final boolean show = connectedFinal && hasData;
                     ui.post(() -> {
                         if (!isAdded() || getView() == null || btnRetourWO == null) return;
@@ -1980,6 +2048,7 @@ public class RegisterTabFragment extends Fragment {
                     android.util.Log.i("RetourWO", "Delivery sauvegardée localId=" + localId
                         + " wo=" + woNum + " net=" + netL + " gross=" + grossL);
                 }
+                try { lcrDb.close(); } catch (Exception ignored) {}
 
                 // 3. Tenter push MSAL vers Dataverse
                 try {
@@ -2019,8 +2088,12 @@ public class RegisterTabFragment extends Fragment {
                         try {
                             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrFinal =
                                 new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
-                            java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> allRows =
-                                lcrFinal.getAllForWo(woNum);
+                            java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> allRows;
+                            try {
+                                allRows = lcrFinal.getAllForWo(woNum);
+                            } finally {
+                                try { lcrFinal.close(); } catch (Exception ignored) {}
+                            }
                             org.json.JSONArray livraisons = new org.json.JSONArray();
                             for (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow r : allRows) {
                                 if (r.netL > 0 || "ANNULATION".equals(r.type)) {
@@ -2037,9 +2110,9 @@ public class RegisterTabFragment extends Fragment {
                             // La première livraison du WO a le GUID sauvegardé depuis le deep link
                             // Toutes les livraisons du même WO partagent le même GUID
                             String patchGuid = "";
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrGuid = null;
                             try {
-                                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrGuid =
-                                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                                lcrGuid = new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
                                 java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> allForGuid =
                                     lcrGuid.getAllForWo(woNum);
                                 for (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow r : allForGuid) {
@@ -2048,7 +2121,10 @@ public class RegisterTabFragment extends Fragment {
                                         break;
                                     }
                                 }
-                            } catch (Exception ignored) {}
+                            } catch (Exception ignored) {
+                            } finally {
+                                if (lcrGuid != null) { try { lcrGuid.close(); } catch (Exception ignored) {} }
+                            }
                             android.util.Log.i("RetourWO", "patchGuid=" + patchGuid + " rows=" + livraisons.length());
                             if (livraisons.length() > 0 && !patchGuid.isEmpty()) {
                                 com.pa.lcrdemo.dataverse.WorkOrderUpdater.patchSummaryConsolidated(
@@ -2073,16 +2149,19 @@ public class RegisterTabFragment extends Fragment {
 
                 // 4b. Vérifier si des livraisons sont encore PENDING après le push
                 int pendingCount = 0;
+                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrCheck = null;
                 try {
-                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrCheck =
-                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                    lcrCheck = new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
                     java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> pendingRows =
                         lcrCheck.getPendingDeliveries();
                     // Filtrer seulement les PENDING pour ce WO
                     for (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow r : pendingRows) {
                         if (woNum != null && woNum.equals(r.woNum)) pendingCount++;
                     }
-                } catch (Exception ignored) {}
+                } catch (Exception ignored) {
+                } finally {
+                    if (lcrCheck != null) { try { lcrCheck.close(); } catch (Exception ignored) {} }
+                }
 
                 // 5. Retour FSM
                 final String fWoIdGuid  = woIdGuid;
@@ -2254,6 +2333,7 @@ public class RegisterTabFragment extends Fragment {
         if (woNum != null && !woNum.isEmpty()) {
             currentWoNum = woNum;
             woNumFromDirectSource = true;
+            lastTicketDetected = "";
         }
         if (woIdGuid != null && !woIdGuid.isEmpty()) currentWoIdGuid = woIdGuid;
         if (produit != null && !produit.isEmpty() && spnProduct != null)
@@ -2453,7 +2533,13 @@ public class RegisterTabFragment extends Fragment {
                     payload.put("cancel_ts",       System.currentTimeMillis());
                     payload.put("ticket_no",       ticketNo);
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PAYLOAD_JSON, payload.toString());
-                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext()).insertDelivery(cv);
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbAnnuler =
+                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                    try {
+                        dbAnnuler.insertDelivery(cv);
+                    } finally {
+                        try { dbAnnuler.close(); } catch (Exception ignored) {}
+                    }
                     android.util.Log.i("Annuler", "Annulation loggée wo=" + woNum + " ticket=" + ticketNo);
                 } catch (Exception e) {
                     android.util.Log.w("Annuler", "Insert ERR: " + e.getMessage());
@@ -2780,7 +2866,13 @@ public class RegisterTabFragment extends Fragment {
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE,     "INCIDENT");
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
                         com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
-                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext()).insertDelivery(cv);
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbFuite =
+                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                    try {
+                        dbFuite.insertDelivery(cv);
+                    } finally {
+                        try { dbFuite.close(); } catch (Exception ignored) {}
+                    }
                 } catch (Exception e) { LogBus.api(node, "[POST-LIVRAISON] ERR DB: " + safeMsg(e)); }
                 ui.post(() -> {
                     if (!isAdded() || getView() == null) return;
@@ -2930,6 +3022,22 @@ public class RegisterTabFragment extends Fragment {
         }
 
         final String fWoNum    = row.woNum;
+
+        // ✅ Un WO connu directement (deep link) a priorité — ne pas l'écraser avec
+        // le résultat d'une recherche par ticket_number qui pointerait vers un WO
+        // différent (probablement encore le ticket de la livraison PRÉCÉDENTE, le
+        // registre n'ayant pas encore émis de nouveau ticket pour la nouvelle
+        // livraison). Si le ticket confirme le MÊME WO, on peut lever la priorité
+        // en toute sécurité — les deux sources sont maintenant d'accord.
+        if (woNumFromDirectSource) {
+            if (!fWoNum.equals(currentWoNum)) {
+                LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " → WO=" + fWoNum
+                    + " ignoré, WO direct prioritaire=" + currentWoNum);
+                return;
+            }
+            woNumFromDirectSource = false; // les deux sources concordent désormais
+        }
+
         final String fWoIdGuid = row.woIdGuid != null ? row.woIdGuid : "";
         // ✅ delivery_uid n'est pas stocké tel quel dans LcrDeliveryStatusDb —
         // il se reconstruit toujours de la même façon que dans DeliveryController
@@ -2959,30 +3067,8 @@ public class RegisterTabFragment extends Fragment {
         final String ffProduitStr = fProduitStr;
 
         ui.post(() -> {
-            boolean sameWo = fWoNum.equals(currentWoNum);
-            boolean guardActive = woNumFromDirectSource && !sameWo
-                && currentWoNum != null && !currentWoNum.isEmpty();
-
-            if (guardActive) {
-                // ✅ Un WO direct (deep link) est actif et ce ticket pointe vers un WO
-                // différent — probablement l'ancienne livraison physique, le registre
-                // n'a pas encore émis son nouveau ticket. On ignore ce WO pour ne pas
-                // écraser le cumul déjà correct, mais on affiche quand même le
-                // ticket_no lu (info neutre, sans lien avec le cumul WO affiché).
-                LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " → WO=" + fWoNum
-                    + " ignoré (WO direct actif=" + currentWoNum + ")");
-                if (txtTicketNo != null)
-                    txtTicketNo.setText("Ticket Number : " + ticketNo);
-                return;
-            }
-
             currentWoNum    = fWoNum;
             currentWoIdGuid = fWoIdGuid;
-            // ✅ Les deux sources sont maintenant d'accord (ticket confirme le WO
-            // direct) — plus besoin de protéger, la recherche par ticket redevient
-            // libre pour les prochains tickets de ce même tab.
-            if (sameWo) woNumFromDirectSource = false;
-
             LogBus.api(node, "[WO-DETECT] WO trouvé=" + fWoNum + " deliveryUid=" + fDeliveryUid);
             if (txtTicketNo != null)
                 txtTicketNo.setText("Ticket Number : " + ticketNo);
@@ -3003,8 +3089,12 @@ public class RegisterTabFragment extends Fragment {
             try {
                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db =
                     new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
-                java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> rows =
-                    db.getAllForWo(currentWoNum);
+                java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> rows;
+                try {
+                    rows = db.getAllForWo(currentWoNum);
+                } finally {
+                    try { db.close(); } catch (Exception ignored) {}
+                }
 
                 StringBuilder sb = new StringBuilder();
                 sb.append("WO : ").append(currentWoNum).append("\n");
