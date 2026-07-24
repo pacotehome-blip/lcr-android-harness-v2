@@ -184,43 +184,54 @@ public class DeepLinkHandler {
                         rsm.resolveOrCreateForNode(fNode, 255);
 
                     if (dc != null) {
+                        // ✅ Attendre que le DC soit CONNECTED (probeAndIdentify terminé)
+                        // max 15s, 200ms par itération
                         activity.runOnUiThread(() -> activity.toast("🔌 Connexion au registre..."));
-                        // ✅ OPTIMISATION (couches 1+3 fusionnées) : une seule vérification RÉELLE
-                        // de connexion (api_registerValidate — vraie requête LCP) au lieu de poller
-                        // getState() en cache (couche 1) puis re-valider une seconde fois plus tard
-                        // dans lancerLivraison (couche 3). getState()==CONNECTED ne garantissait de
-                        // toute façon pas une connexion vivante (socket zombie possible) — seule
-                        // api_registerValidate() envoie réellement une trame et confirme une réponse.
-                        // skipConnexionCheck=true est passé à lancerLivraison pour éviter la 3e
-                        // vérification redondante qu'elle faisait auparavant en interne.
-                        com.pa.lcr.lcp.ApiResult vr = dc.api_registerValidate(
-                            woNum, fNode, fSerialId.isEmpty() ? null : fSerialId, null, null);
-                        boolean connexionOk = (vr != null)
-                            && (vr.code == 1 || (vr.data != null && vr.data.has("ticket_no")));
-
-                        if (connexionOk) {
-                            String foundKey = rsm.findTransportKeyForController(dc);
-                            android.util.Log.i(TAG, "Transport trouvé pour node=" + fNode
-                                + " transportKey=" + foundKey);
-                            lancerLivraison(foundKey != null ? foundKey : "", fNode,
-                                fSerialId, woNum, woIdGuid, fProduit, fPresetStr, fBtMac, true);
+                        for (int w = 0; w < 75; w++) {
+                            if (dc.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
+                            try { Thread.sleep(200); } catch (Exception ignored) {}
+                        }
+                        android.util.Log.i(TAG, "DC state avant lancerLivraison: " + dc.getState());
+                        if (dc.getState() != com.pa.lcr.lcp.DeliveryState.CONNECTED) {
+                            android.util.Log.w(TAG, "DC non prêt après 15s — état: " + dc.getState()
+                                + " — tentative auto-connect");
+                            // ✅ Tenter auto-connect (USB ou BT) avant d'abandonner
+                            MultiRegisterApiFacadeImpl facadeRetry = new MultiRegisterApiFacadeImpl(activity);
+                            com.pa.lcr.lcp.ApiResult ra2 = facadeRetry.api_registerConnectAuto(
+                                fSerialId.isEmpty() ? null : fSerialId, fNode);
+                            if (ra2 != null && ra2.code == 1) {
+                                com.pa.lcr.lcp.DeliveryController dc3 =
+                                    rsm.resolveOrCreateForNode(fNode, 255);
+                                if (dc3 != null) {
+                                    for (int w = 0; w < 75; w++) {
+                                        if (dc3.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
+                                        try { Thread.sleep(200); } catch (Exception ignored) {}
+                                    }
+                                    if (dc3.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) {
+                                        String foundKey3 = rsm.findTransportKeyForController(dc3);
+                                        lancerLivraison(foundKey3 != null ? foundKey3 : "", fNode,
+                                            fSerialId, woNum, woIdGuid, fProduit, fPresetStr, fBtMac);
+                                        return;
+                                    }
+                                }
+                            }
+                            logError(fSerialId, woNum, "REGISTER_NOT_READY",
+                                "DC non CONNECTED après 15s + retry auto-connect — état: " + dc.getState());
+                            activity.runOnUiThread(() ->
+                                activity.toast("⚠️ Registre non joignable — tentative de reconnexion..."));
+                            // Lancer sur thread dédié — ne pas bloquer btExec
+                            // diagnosticEnCours static garantit un seul diagnostic à la fois
+                            new Thread(() -> new com.pa.lcrdemo.RegisterConnectionHelper(activity)
+                                .lancerDiagnosticForce("", fNode, fSerialId, woNum,
+                                    woIdGuid, fProduit, fPresetStr, fBtMac,
+                                    DeepLinkHandler.this)).start();
                             return;
                         }
-
-                        android.util.Log.w(TAG, "api_registerValidate a échoué — msg="
-                            + (vr != null ? vr.msg : "null") + " — diagnostic + reconnexion");
-                        logError(fSerialId, woNum, "REGISTER_NOT_READY",
-                            "api_registerValidate a échoué au premier essai — msg="
-                                + (vr != null ? vr.msg : "null"));
-                        activity.runOnUiThread(() ->
-                            activity.toast("⚠️ Registre non joignable — tentative de reconnexion..."));
-                        // Lancer sur thread dédié — ne pas bloquer btExec
-                        // diagnosticEnCours static garantit un seul diagnostic à la fois
-                        new Thread(() -> new com.pa.lcrdemo.RegisterConnectionHelper(activity)
-                            .lancerDiagnosticForce("", fNode, fSerialId, woNum,
-                                woIdGuid, fProduit, fPresetStr, fBtMac,
-                                DeepLinkHandler.this)).start();
-                        return;
+                        String foundKey = rsm.findTransportKeyForController(dc);
+                        android.util.Log.i(TAG, "Transport trouvé pour node=" + fNode
+                            + " transportKey=" + foundKey);
+                        lancerLivraison(foundKey != null ? foundKey : "", fNode,
+                            fSerialId, woNum, woIdGuid, fProduit, fPresetStr, fBtMac);
                     } else {
                         // Aucun transport actif — tenter auto-connect (USB / BT / TCP)
                         android.util.Log.i(TAG, "Aucun transport actif — tentative auto-connect node="
@@ -232,23 +243,19 @@ public class DeepLinkHandler {
                             + " msg=" + (ra != null ? ra.msg : "null"));
 
                         if (ra != null && ra.code == 1) {
-                            // Auto-connect réussi — même vérification fusionnée que ci-dessus
-                            // (une seule requête LCP réelle, pas de poll d'état en cache)
+                            // Auto-connect réussi — attendre DC CONNECTED
                             com.pa.lcr.lcp.DeliveryController dc2 =
                                 rsm.resolveOrCreateForNode(fNode, 255);
                             if (dc2 != null) {
                                 activity.runOnUiThread(() -> activity.toast("🔌 Connexion au registre..."));
-                                com.pa.lcr.lcp.ApiResult vr2 = dc2.api_registerValidate(
-                                    woNum, fNode, fSerialId.isEmpty() ? null : fSerialId, null, null);
-                                boolean connexionOk2 = (vr2 != null)
-                                    && (vr2.code == 1 || (vr2.data != null && vr2.data.has("ticket_no")));
-
-                                if (!connexionOk2) {
-                                    android.util.Log.w(TAG, "DC2 api_registerValidate échoué — msg="
-                                        + (vr2 != null ? vr2.msg : "null"));
+                                for (int w = 0; w < 75; w++) {
+                                    if (dc2.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
+                                    try { Thread.sleep(200); } catch (Exception ignored) {}
+                                }
+                                if (dc2.getState() != com.pa.lcr.lcp.DeliveryState.CONNECTED) {
+                                    android.util.Log.w(TAG, "DC2 non prêt après 15s — état: " + dc2.getState());
                                     logError(fSerialId, woNum, "REGISTER_NOT_READY",
-                                        "DC2 api_registerValidate échoué — msg="
-                                            + (vr2 != null ? vr2.msg : "null"));
+                                        "DC2 non CONNECTED après 15s — état: " + dc2.getState());
                                     activity.runOnUiThread(() ->
                                         activity.toast("⚠️ Registre non joignable — tentative de reconnexion..."));
                                     new Thread(() -> new com.pa.lcrdemo.RegisterConnectionHelper(activity)
@@ -260,7 +267,7 @@ public class DeepLinkHandler {
                             }
                             String foundKey2 = dc2 != null ? rsm.findTransportKeyForController(dc2) : null;
                             lancerLivraison(foundKey2 != null ? foundKey2 : "", fNode,
-                                fSerialId, woNum, woIdGuid, fProduit, fPresetStr, fBtMac, true);
+                                fSerialId, woNum, woIdGuid, fProduit, fPresetStr, fBtMac);
                         } else if (fBtMac != null && !fBtMac.trim().isEmpty()) {
                             // Fallback BT explicite
                             android.util.Log.i(TAG, "Auto-connect échoué — connexion BT: " + fBtMac);
@@ -467,8 +474,12 @@ public class DeepLinkHandler {
         try {
             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb statusDb =
                 new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
-            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow existing =
-                statusDb.getLatestForWo(woNum);
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow existing;
+            try {
+                existing = statusDb.getLatestForWo(woNum);
+            } finally {
+                try { statusDb.close(); } catch (Exception ignored) {}
+            }
 
             if (existing != null && existing.type != null && !"ANNULATION".equals(existing.type)) {
                 boolean livraisonComplete = (fPresetD <= 0 || existing.netL >= fPresetD);
@@ -477,20 +488,12 @@ public class DeepLinkHandler {
                         + " déjà complété (ticket #" + existing.ticketNo
                         + ", " + existing.netL + "L net, preset=" + fPresetD + "L) — confirmation requise");
 
-                    // ✅ Timeout de sécurité : sans ça, un CountDownLatch.await() sans borne
-                    // peut geler ce thread (pool btExec) indéfiniment si le chauffeur ignore,
-                    // quitte l'app, ou verrouille la tablette sans répondre. 5 minutes laisse
-                    // largement le temps de répondre normalement, tout en garantissant que le
-                    // thread finit par se libérer. Le dialogue reste setCancelable(false) —
-                    // seul un vrai choix explicite (ou ce timeout) referme la boîte.
-                    final long DIALOGUE_TIMEOUT_MS = 5 * 60_000L;
-                    final android.app.AlertDialog[] dlgRef = {null};
                     final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
                     final boolean[] continuer = {false};
                     final com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow fExisting = existing;
 
                     activity.runOnUiThread(() -> {
-                        dlgRef[0] = new android.app.AlertDialog.Builder(activity)
+                        new android.app.AlertDialog.Builder(activity)
                             .setTitle("Bon déjà complété")
                             .setMessage("Le bon " + woNum + " a déjà été livré"
                                 + " (ticket #" + fExisting.ticketNo
@@ -508,31 +511,7 @@ public class DeepLinkHandler {
                             .show();
                     });
 
-                    boolean repondu = false;
-                    try {
-                        repondu = latch.await(DIALOGUE_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
-                    } catch (InterruptedException ignored) {}
-
-                    if (!repondu) {
-                        // ✅ Aucune réponse après 5 min — traité comme Annuler (le plus sûr :
-                        // on ne crée jamais de nouvelle livraison sans confirmation explicite),
-                        // mais loggé distinctement (TIMEOUT ≠ ANNULE) pour ne pas laisser croire
-                        // que le chauffeur a fait un choix actif.
-                        android.util.Log.w(TAG, "lancerLivraison: dialogue bon déjà complété — "
-                            + "timeout 5min sans réponse, annulation automatique");
-                        logEvent(fSerialId, woNum, DeliveryLogStore.LEVEL_WARN,
-                            "BON_DEJA_COMPLETE_TIMEOUT",
-                            "ticket=" + fExisting.ticketNo + " net=" + fExisting.netL
-                                + "L preset=" + fPresetD + "L — aucune réponse après 5min",
-                            null);
-                        activity.runOnUiThread(() -> {
-                            try {
-                                if (dlgRef[0] != null && dlgRef[0].isShowing()) dlgRef[0].dismiss();
-                            } catch (Exception ignored) {}
-                            activity.showPage(0);
-                        });
-                        return;
-                    }
+                    try { latch.await(); } catch (InterruptedException ignored) {}
 
                     // ✅ Traçabilité: enregistrer le choix du chauffeur dans la table event,
                     // que ce soit Continuer ou Annuler — action explicite requise (accountability).
@@ -1014,94 +993,6 @@ public class DeepLinkHandler {
     // Poll état livraison
     // =========================================================
 
-    // ✅ Envoie job/continue avec retry (5x, backoff croissant 600+400×n ms). En cas
-    // d'échec après 5 tentatives, gère la sortie complète du poll (toast, insertion
-    // SQLite, log événement) et retourne false pour signaler à l'appelant de sortir
-    // du poll. Factorisé — ce bloc était dupliqué à l'identique dans deux branches
-    // de pollJobUntilDone (CONNECTED sans ticket pending, et l'état générique).
-    private boolean tryContinueWithRetry(String jobId, int node, String serialId,
-                                          String woNum, String woIdGuid,
-                                          String ticketNoAtStart) {
-        boolean continueOk = false;
-        for (int retry = 0; retry < 5; retry++) {
-            if (retry > 0) {
-                try { Thread.sleep(600 + retry * 400L); } catch (Exception ignored) {}
-            }
-            MultiRegisterApiFacadeImpl facadeCont = new MultiRegisterApiFacadeImpl(activity);
-            com.pa.lcr.lcp.ApiResult rc = facadeCont.api_deliveryContinue(jobId, node);
-            android.util.Log.i(TAG,
-                "job/continue [" + (retry + 1) + "/5]: code="
-                + (rc != null ? rc.code : "null")
-                + " msg=" + (rc != null ? rc.msg : "null"));
-            logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
-                "JOB_CONTINUE",
-                "retry=" + retry + " code=" + (rc != null ? rc.code : "null") +
-                " msg=" + (rc != null ? rc.msg : "null"), null);
-            if (rc != null && rc.code == 1) {
-                continueOk = true;
-                break;
-            }
-        }
-        if (continueOk) return true;
-
-        android.util.Log.w(TAG, "job/continue: échec après 5 tentatives — chauffeur prend charge");
-
-        // ✅ Détecter changement de ticket (impression entre-temps)
-        String ticketNow = "";
-        try {
-            MultiRegisterApiFacadeImpl facadeT2 = new MultiRegisterApiFacadeImpl(activity);
-            com.pa.lcr.lcp.ApiResult snap2 = facadeT2.api_deliveryJobGet(jobId);
-            if (snap2 != null && snap2.data != null)
-                ticketNow = snap2.data.optString("ticket_no", "");
-        } catch (Exception ignored) {}
-
-        final boolean ticketChanged = !ticketNoAtStart.isEmpty()
-            && !ticketNow.isEmpty()
-            && !ticketNoAtStart.equals(ticketNow);
-        final String fTicketNow = ticketNow;
-        final String fWoNum2 = woNum;
-        final String fWoId2  = woIdGuid;
-
-        activity.runOnUiThread(() -> {
-            activity.toast(ticketChanged
-                ? "⚠️ Connexion perdue — ticket changé (" + ticketNoAtStart
-                    + "→" + fTicketNow + "). Reconnectez et relancez manuellement."
-                : "⚠️ Registre non joignable — reconnectez via Configure et relancez manuellement.");
-            activity.showPage(0);
-        });
-
-        // Logger dans SQLite + Dataverse
-        btExec.execute(() -> {
-            try {
-                android.content.ContentValues cv = new android.content.ContentValues();
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,    fWoNum2);
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID, fWoId2);
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO, fTicketNow);
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
-                    ticketChanged ? "TICKET_CHANGE" : "ERROR");
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_ERROR_CODE,
-                    "CONTINUE_FAILED");
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_ERROR_MSG,
-                    ticketChanged
-                        ? "Ticket changé pendant perte connexion: "
-                            + ticketNoAtStart + "→" + fTicketNow
-                        : "job/continue échec après 5 tentatives");
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,    "SYSTEM");
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE, "LIVRAISON");
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
-                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
-                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity).insertDelivery(cv);
-            } catch (Exception ignored) {}
-        });
-
-        logEvent(serialId, woNum, DeliveryLogStore.LEVEL_WARN,
-            ticketChanged ? "TICKET_CHANGE" : "CONTINUE_FAILED",
-            ticketChanged
-                ? "Ticket " + ticketNoAtStart + "→" + fTicketNow
-                : "job/continue échec après 5 tentatives", null);
-        return false;
-    }
-
     private void pollJobUntilDone(String jobId, int node, String woNum,
                                    String woIdGuid, String serialId, String mac) {
         // ✅ Anti-double poll — si ce jobId est déjà en cours de poll, ignorer
@@ -1201,16 +1092,184 @@ public class DeepLinkHandler {
                             return;
                         } else {
                             // CONNECTED sans ticket pending — envoyer continue avec retry
-                            // ✅ Arrêter le poll si échec — chauffeur prend charge.
-                            // ActiveDeliveryStore conserve woNum/woIdGuid/jobId pour reprise.
-                            if (!tryContinueWithRetry(jobId, node, serialId, woNum, woIdGuid, ticketNoAtStart)) {
+                            boolean continueOk = false;
+                            for (int retry = 0; retry < 5; retry++) {
+                                if (retry > 0) {
+                                    try { Thread.sleep(600 + retry * 400L); } catch (Exception ignored) {}
+                                }
+                                MultiRegisterApiFacadeImpl facadeCont =
+                                    new MultiRegisterApiFacadeImpl(activity);
+                                com.pa.lcr.lcp.ApiResult rc =
+                                    facadeCont.api_deliveryContinue(jobId, node);
+                                android.util.Log.i(TAG,
+                                    "job/continue [" + (retry+1) + "/5]: code="
+                                    + (rc != null ? rc.code : "null")
+                                    + " msg=" + (rc != null ? rc.msg : "null"));
+                                logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
+                                    "JOB_CONTINUE",
+                                    "retry=" + retry + " code=" + (rc != null ? rc.code : "null") +
+                                    " msg=" + (rc != null ? rc.msg : "null"), null);
+                                if (rc != null && rc.code == 1) {
+                                    continueOk = true;
+                                    break;
+                                }
+                            }
+                            if (!continueOk) {
+                                android.util.Log.w(TAG, "job/continue: échec après 5 tentatives — chauffeur prend charge");
+
+                                // ✅ Détecter changement de ticket (impression entre-temps)
+                                String ticketNow = "";
+                                try {
+                                    MultiRegisterApiFacadeImpl facadeT2 =
+                                        new MultiRegisterApiFacadeImpl(activity);
+                                    com.pa.lcr.lcp.ApiResult snap2 = facadeT2.api_deliveryJobGet(jobId);
+                                    if (snap2 != null && snap2.data != null)
+                                        ticketNow = snap2.data.optString("ticket_no", "");
+                                } catch (Exception ignored) {}
+
+                                final boolean ticketChanged = !ticketNoAtStart.isEmpty()
+                                    && !ticketNow.isEmpty()
+                                    && !ticketNoAtStart.equals(ticketNow);
+                                final String fTicketNow = ticketNow;
+
+                                // ✅ Logger événement dans LcrDeliveryStatusDb + Dataverse
+                                final String fWoNum2 = woNum;
+                                final String fWoId2  = woIdGuid;
+                                activity.runOnUiThread(() -> {
+                                    activity.toast(ticketChanged
+                                        ? "⚠️ Connexion perdue — ticket changé (" + ticketNoAtStart
+                                            + "→" + fTicketNow + "). Reconnectez et relancez manuellement."
+                                        : "⚠️ Registre non joignable — reconnectez via Configure et relancez manuellement.");
+                                    activity.showPage(0);
+                                });
+
+                                // Logger dans SQLite + Dataverse
+                                btExec.execute(() -> {
+                                    try {
+                                        android.content.ContentValues cv =
+                                            new android.content.ContentValues();
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,    fWoNum2);
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID, fWoId2);
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO, fTicketNow);
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
+                                            ticketChanged ? "TICKET_CHANGE" : "ERROR");
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_ERROR_CODE,
+                                            "CONTINUE_FAILED");
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_ERROR_MSG,
+                                            ticketChanged
+                                                ? "Ticket changé pendant perte connexion: "
+                                                    + ticketNoAtStart + "→" + fTicketNow
+                                                : "job/continue échec après 5 tentatives");
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,    "SYSTEM");
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE, "LIVRAISON");
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
+                                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
+                                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbTc1 =
+                                            new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
+                                        try {
+                                            dbTc1.insertDelivery(cv);
+                                        } finally {
+                                            try { dbTc1.close(); } catch (Exception ignored) {}
+                                        }
+                                    } catch (Exception ignored) {}
+                                });
+
+                                // ✅ Arrêter le poll — chauffeur prend charge
+                                // ActiveDeliveryStore conserve woNum/woIdGuid/jobId pour reprise
+                                logEvent(serialId, woNum, DeliveryLogStore.LEVEL_WARN,
+                                    ticketChanged ? "TICKET_CHANGE" : "CONTINUE_FAILED",
+                                    ticketChanged
+                                        ? "Ticket " + ticketNoAtStart + "→" + fTicketNow
+                                        : "job/continue échec après 5 tentatives", null);
                                 return; // Sortir du poll
                             }
                         }
                     } else {
-                        // État générique (ex: reprise après redémarrage) — même retry factorisé
-                        if (!tryContinueWithRetry(jobId, node, serialId, woNum, woIdGuid, ticketNoAtStart)) {
-                            return; // Sortir du poll — chauffeur prend charge
+                        boolean continueOk2 = false;
+                        for (int retry = 0; retry < 5; retry++) {
+                            if (retry > 0) {
+                                try { Thread.sleep(600 + retry * 400L); } catch (Exception ignored) {}
+                            }
+                            MultiRegisterApiFacadeImpl facadeCont =
+                                new MultiRegisterApiFacadeImpl(activity);
+                            com.pa.lcr.lcp.ApiResult rc =
+                                facadeCont.api_deliveryContinue(jobId, node);
+                            android.util.Log.i(TAG,
+                                "job/continue [" + (retry+1) + "/5]: code="
+                                + (rc != null ? rc.code : "null")
+                                + " msg=" + (rc != null ? rc.msg : "null"));
+                            logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
+                                "JOB_CONTINUE",
+                                "retry=" + retry + " code=" + (rc != null ? rc.code : "null") +
+                                " msg=" + (rc != null ? rc.msg : "null"), null);
+                            if (rc != null && rc.code == 1) {
+                                continueOk2 = true;
+                                break;
+                            }
+                        }
+                        if (!continueOk2) {
+                            android.util.Log.w(TAG, "job/continue: échec après 5 tentatives — chauffeur prend charge");
+
+                            // ✅ Détecter changement de ticket
+                            String ticketNow2 = "";
+                            try {
+                                MultiRegisterApiFacadeImpl facadeT3 =
+                                    new MultiRegisterApiFacadeImpl(activity);
+                                com.pa.lcr.lcp.ApiResult snap3 = facadeT3.api_deliveryJobGet(jobId);
+                                if (snap3 != null && snap3.data != null)
+                                    ticketNow2 = snap3.data.optString("ticket_no", "");
+                            } catch (Exception ignored) {}
+
+                            final boolean ticketChanged2 = !ticketNoAtStart.isEmpty()
+                                && !ticketNow2.isEmpty()
+                                && !ticketNoAtStart.equals(ticketNow2);
+                            final String fTicketNow2 = ticketNow2;
+                            final String fWoNum3 = woNum;
+                            final String fWoId3  = woIdGuid;
+
+                            activity.runOnUiThread(() -> {
+                                activity.toast(ticketChanged2
+                                    ? "⚠️ Connexion perdue — ticket changé (" + ticketNoAtStart
+                                        + "→" + fTicketNow2 + "). Reconnectez et relancez manuellement."
+                                    : "⚠️ Registre non joignable — reconnectez via Configure et relancez manuellement.");
+                                activity.showPage(0);
+                            });
+
+                            btExec.execute(() -> {
+                                try {
+                                    android.content.ContentValues cv =
+                                        new android.content.ContentValues();
+                                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,    fWoNum3);
+                                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID, fWoId3);
+                                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO, fTicketNow2);
+                                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
+                                        ticketChanged2 ? "TICKET_CHANGE" : "ERROR");
+                                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_ERROR_CODE,
+                                        "CONTINUE_FAILED");
+                                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_ERROR_MSG,
+                                        ticketChanged2
+                                            ? "Ticket changé: " + ticketNoAtStart + "→" + fTicketNow2
+                                            : "job/continue échec après 5 tentatives");
+                                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,    "SYSTEM");
+                                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE, "LIVRAISON");
+                                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
+                                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
+                                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbTc2 =
+                                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
+                                    try {
+                                        dbTc2.insertDelivery(cv);
+                                    } finally {
+                                        try { dbTc2.close(); } catch (Exception ignored) {}
+                                    }
+                                } catch (Exception ignored) {}
+                            });
+
+                            logEvent(serialId, woNum, DeliveryLogStore.LEVEL_WARN,
+                                ticketChanged2 ? "TICKET_CHANGE" : "CONTINUE_FAILED",
+                                ticketChanged2
+                                    ? "Ticket " + ticketNoAtStart + "→" + fTicketNow2
+                                    : "job/continue échec après 5 tentatives", null);
+                            return; // Sortir du poll
                         }
                     }
                 } catch (Exception e) {
@@ -1411,7 +1470,12 @@ public class DeepLinkHandler {
 
                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
                     new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
-                long localId = lcrDb.insertDelivery(cv);
+                long localId;
+                try {
+                    localId = lcrDb.insertDelivery(cv);
+                } finally {
+                    try { lcrDb.close(); } catch (Exception ignored) {}
+                }
                 android.util.Log.i(TAG, "LcrDeliveryStatusDb: id=" + localId
                     + " wo=" + woNum + " net=" + netL + " gross=" + grossL
                     + " ticket=" + ticketNo + " duration=" + durationS);
@@ -1731,16 +1795,20 @@ public class DeepLinkHandler {
 
         try {
             DeliveryResultQueueDb queueDb = new DeliveryResultQueueDb(activity);
+            // ✅ FIX : ce PATCH s'exécute automatiquement à la FIN DE CHAQUE
+            // LIVRAISON (pas seulement via le bouton Retour WO) — c'était la
+            // vraie cause de l'effacement de l'historique dans Field Service :
+            // il appelait patchSummary() (écrase tout) au lieu de la version
+            // consolidée (fusion+ETag) qu'on vient de construire pour
+            // retournerAuWorkOrder(). Marqué "consolidated" pour que
+            // DeliverySyncWorker utilise aussi la bonne méthode en cas de retry.
             JSONObject queuePayload = new JSONObject();
-            queuePayload.put("deliveryUid", fDeliveryUid);
+            queuePayload.put("consolidated", true);
             queuePayload.put("workOrderId", woGuid.replace("{", "").replace("}", ""));
             queuePayload.put("woNum",       woNum   != null ? woNum   : "");
-            queuePayload.put("netTotal",    net     != null ? Double.parseDouble(net)   : 0);
-            queuePayload.put("grossTotal",  gross   != null ? Double.parseDouble(gross) : 0);
-            queuePayload.put("ticketNo",    ticket  != null ? ticket  : "");
-            queuePayload.put("status",      status  != null ? status  : "DONE");
+            queuePayload.put("deliveryUid", fDeliveryUid);
             queueDb.upsertPending(fDeliveryUid, queuePayload.toString());
-            android.util.Log.i(TAG, "patchDataverse: ajouté à la queue offline");
+            android.util.Log.i(TAG, "patchDataverse: ajouté à la queue offline (consolidated)");
             com.pa.lcrdemo.dataverse.DeliverySyncScheduler.triggerNow(activity);
         } catch (Exception e) {
             android.util.Log.e(TAG, "Queue ERR: " + e.getMessage());
@@ -1755,11 +1823,44 @@ public class DeepLinkHandler {
                     public void onSuccess(String accessToken) {
                         btExec.execute(() -> {
                             try {
-                                WorkOrderUpdater.patchSummary(
-                                    accessToken, woGuid,
-                                    net, gross, ticket,
-                                    woNum, fDeliveryUid);
-                                android.util.Log.i(TAG, "patchDataverse MSAL: OK — wonum=" + woNum);
+                                // ✅ FIX : patchSummaryConsolidated() au lieu de patchSummary()
+                                // — lit d'abord les livraisons locales fraîches (pas juste
+                                // cette livraison-ci), pour que le PATCH fusionne avec
+                                // l'historique existant côté Dataverse au lieu de l'écraser.
+                                String guidClean = woGuid.replace("{", "").replace("}", "");
+                                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
+                                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
+                                org.json.JSONArray livraisons = new org.json.JSONArray();
+                                try {
+                                    java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> rows =
+                                        lcrDb.getAllForWo(woNum);
+                                    for (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow r : rows) {
+                                        if (r.netL > 0 || "ANNULATION".equals(r.type)) {
+                                            org.json.JSONObject entry = new org.json.JSONObject();
+                                            entry.put("ticket_no", r.ticketNo != null ? r.ticketNo : "");
+                                            entry.put("net_l",     r.netL);
+                                            entry.put("gross_l",   r.grossL);
+                                            entry.put("type",      r.type != null ? r.type : "");
+                                            entry.put("end_utc",   r.endUtc != null ? r.endUtc : "");
+                                            livraisons.put(entry);
+                                        }
+                                    }
+                                } finally {
+                                    try { lcrDb.close(); } catch (Exception ignored) {}
+                                }
+                                if (livraisons.length() == 0) {
+                                    // Filet de sécurité — au moins CETTE livraison si la BD locale
+                                    // n'en connaît aucune pour une raison quelconque
+                                    org.json.JSONObject entry = new org.json.JSONObject();
+                                    entry.put("ticket_no", ticket != null ? ticket : "");
+                                    entry.put("net_l",     net    != null ? Double.parseDouble(net)   : 0);
+                                    entry.put("gross_l",   gross  != null ? Double.parseDouble(gross) : 0);
+                                    entry.put("type",      "ORIGINAL");
+                                    livraisons.put(entry);
+                                }
+                                WorkOrderUpdater.patchSummaryConsolidated(
+                                    accessToken, guidClean, woNum, livraisons);
+                                android.util.Log.i(TAG, "patchDataverse MSAL: OK (consolidated) — wonum=" + woNum);
                                 try {
                                     DeliveryResultQueueDb qdb = new DeliveryResultQueueDb(activity);
                                     java.util.List<DeliveryResultQueueDb.QueueItem> items =

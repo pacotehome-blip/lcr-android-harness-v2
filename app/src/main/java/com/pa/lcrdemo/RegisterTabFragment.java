@@ -607,11 +607,14 @@ public class RegisterTabFragment extends Fragment {
 
                     // ✅ Mettre en file pour Dataverse — même mécanisme que les
                     // livraisons normales (DeliverySyncWorker/WorkOrderUpdater).
+                    // ✅ FIX : marqué "consolidated" — sinon DeliverySyncWorker
+                    // traiterait cet item avec patchSummary() (écrase tout le champ
+                    // avec net=0/gross=0, puisque ceci n'est qu'un enregistrement de
+                    // reset, pas une vraie livraison), effaçant l'historique complet
+                    // du WO au lieu de le préserver.
                     org.json.JSONObject payload = new org.json.JSONObject();
+                    payload.put("consolidated", true);
                     payload.put("workOrderId", currentWoIdGuid != null ? currentWoIdGuid : "");
-                    payload.put("netTotal", 0.0);
-                    payload.put("grossTotal", 0.0);
-                    payload.put("ticketNo", ticketNoForUid);
                     payload.put("woNum", fWoNum);
                     payload.put("deliveryUid", deliveryUid);
                     payload.put("diagnosticReset", true);

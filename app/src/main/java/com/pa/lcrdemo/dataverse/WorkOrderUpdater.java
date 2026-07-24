@@ -19,6 +19,23 @@ import java.nio.charset.StandardCharsets;
  */
 public class WorkOrderUpdater {
 
+    /**
+     * ✅ Lecture compatible API 28+ (Android 9) — InputStream.readAllBytes()
+     * n'existe qu'à partir de l'API 33 (Android 13) et provoque un crash
+     * NoSuchMethodError sur les tablettes plus anciennes du parc (~500 camions
+     * sur Android 9-15). Ne jamais utiliser is.readAllBytes() directement dans
+     * ce projet.
+     */
+    private static byte[] readAllBytesCompat(java.io.InputStream is) throws java.io.IOException {
+        java.io.ByteArrayOutputStream buffer = new java.io.ByteArrayOutputStream();
+        byte[] chunk = new byte[4096];
+        int n;
+        while ((n = is.read(chunk)) != -1) {
+            buffer.write(chunk, 0, n);
+        }
+        return buffer.toByteArray();
+    }
+
     private static final String TAG     = "WorkOrderUpdater";
     private static final String ORG_URL = "https://dev-filgo-sonic.crm3.dynamics.com";
 
@@ -213,7 +230,7 @@ public class WorkOrderUpdater {
             }
 
             java.io.InputStream is = conn.getInputStream();
-            byte[] respBytes = is.readAllBytes();
+            byte[] respBytes = readAllBytesCompat(is);
             String respStr = new String(respBytes, StandardCharsets.UTF_8);
             JSONObject resp = new JSONObject(respStr);
 
@@ -311,7 +328,7 @@ public class WorkOrderUpdater {
             } else {
                 String err = "";
                 try {
-                    byte[] errBytes = conn.getErrorStream().readAllBytes();
+                    byte[] errBytes = readAllBytesCompat(conn.getErrorStream());
                     err = new String(errBytes, StandardCharsets.UTF_8);
                 } catch (Exception ignored) {}
                 throw new RuntimeException("PATCH HTTP " + code + ": " + err.substring(0, Math.min(200, err.length())));
