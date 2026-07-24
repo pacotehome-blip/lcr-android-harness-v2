@@ -1,4 +1,3 @@
-
 package com.pa.lcr.lcp;
 
 import java.util.List;
@@ -69,5 +68,14 @@ public interface DeliveryControllerPort {
          * UI: afficher même si null (ex: "-"), sans bloquer.
          */
         default void onTicketInfo(String ticketNo, String deliveryUid) { /* no-op */ }
+
+        /**
+         * ✅ NEW : notifie qu'un reset diagnostic (net/gross négatifs remis à zéro
+         * sur le registre physique) vient d'avoir lieu — pour que l'UI persiste un
+         * enregistrement d'audit (type=DIAGNOSTIC_RESET) et le mette en file pour
+         * synchronisation Dataverse. woNum peut être vide si aucune livraison en
+         * contexte (reset fait depuis le menu entretien/admin).
+         */
+        default void onDiagnosticReset(String woNum, double netBeforeL, double grossBeforeL) { /* no-op */ }
     }
 }

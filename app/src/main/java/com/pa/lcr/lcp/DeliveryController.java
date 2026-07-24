@@ -337,6 +337,20 @@ private void reproEvent(String level, String type, String message, JSONObject da
  // ✅ Cache du dernier NUM reçu via API (numero_livraison) pour reconstruire delivery_uid côté UI
  private volatile String lastNumeroLivraison = null;
 
+    // ✅ Cumul logiciel — survit à travers plusieurs resets diagnostic dans la
+    // MÊME livraison. Chaque reset remet le compteur du REGISTRE à zéro, mais on
+    // ne doit jamais perdre le volume déjà livré dans les segments précédents
+    // (avant chaque retour d'air). Remis à zéro uniquement au démarrage d'une
+    // NOUVELLE livraison (api_deliveryOneShotStart), pas à chaque reset.
+    private volatile double cumulativeCorrectedNetL = 0.0;
+    private volatile double cumulativeCorrectedGrossL = 0.0;
+    private volatile int pulserResetCount = 0;
+
+    public double getCumulativeCorrectedNetL()   { return cumulativeCorrectedNetL; }
+    public double getCumulativeCorrectedGrossL() { return cumulativeCorrectedGrossL; }
+    public int    getPulserResetCount()          { return pulserResetCount; }
+
+
  /**
   * Permet aux flux manuels (ex: bouton C) de renseigner le numero_livraison
   * pour que onTicketInfo() puisse reconstruire delivery_uid correctement.
@@ -979,6 +993,23 @@ try {
 } catch (Exception ignored) {}
 
 FullStatus fs = readFullStatus("status/full");
+
+                // ✅ Delivery Status bit 0x0040 : "delivery terminated due to too many
+                // pulser reversals" (retour d'air) — signal OFFICIEL du protocole LCR-II,
+                // détecté ici en priorité (avant tout simple test de signe négatif).
+                // Correction automatique : diagnosticReset (valide/confirme le retour
+                // net/gross) → CMD_RUN (reprise à 0), puis notification pour
+                // persistance/sync Dataverse. Pas de CMD_END — le registre a déjà
+                // terminé la livraison lui-même ("was terminated"), donc CMD_END
+                // risquerait d'imprimer un ticket dupliqué inutile.
+                // ✅ Délégué à link.isPulserReversalTerminated() — DeliveryController
+                // reste générique. Sur LCR-II (LcpLink), c'est le bit 0x0040. Un futur
+                // Lc3Link pourra redéfinir sa propre logique (ou toujours retourner
+                // false si le concept n'existe pas sur ce type de registre) sans
+                // jamais toucher à ce fichier.
+                if (link.isPulserReversalTerminated(fs.delStatus)) {
+                    checkPulserReversalAndCorrect();
+                }
 
 
                 // keep last known dev/prn for B+ tick bus
@@ -2383,28 +2414,88 @@ public ApiResult api_registerValidate(
      * Colonnes Dataverse à ajouter (TODO):
      *   lcr_pre_delivery_net, lcr_pre_delivery_gross, lcr_diagnostic_reset
      */
+    /** Lecture brute net/gross (L) — réutilisée par api_diagnosticReset() et le
+     *  check post-activation RUNNING_FLOWING. Ne fait aucune action, lecture seule. */
+    // ✅ Cooldown pour éviter de redéclencher la correction à chaque poll tant que
+    // le bit 0x0040 reste actif le temps que la correction se termine.
+    private volatile long lastPulserReversalCorrectionMs = 0;
+    private static final long PULSER_REVERSAL_COOLDOWN_MS = 15_000;
+
+    /**
+     * Delivery Status bit 0x0040 détecté ("current delivery WAS TERMINATED due to
+     * too many pulser reversals" — retour d'air). Le mot-clé est "was terminated" :
+     * le registre a DÉJÀ arrêté la livraison lui-même, automatiquement — on ne
+     * force plus rien (pas de forceEndSync/CMD_END, qui risquerait d'imprimer un
+     * ticket dupliqué pour une livraison déjà terminée côté registre). On se
+     * contente de valider le retour (api_diagnosticReset confirme/remet net/gross
+     * à zéro) puis de repartir la livraison sur le même job/ticket via CMD_RUN.
+     */
+    private void checkPulserReversalAndCorrect() {
+        long now = System.currentTimeMillis();
+        if (now - lastPulserReversalCorrectionMs < PULSER_REVERSAL_COOLDOWN_MS) return;
+        lastPulserReversalCorrectionMs = now;
+
+        emitLog("[PULSER-REVERSAL] bit 0x0040 détecté (livraison déjà terminée par le registre)"
+            + " — validation du retour et reprise en cours");
+
+        try {
+            // ✅ Capturer le volume de CE segment AVANT le reset — seulement s'il
+            // est positif (une lecture négative ne représente jamais du volume
+            // réellement livré, c'est précisément la valeur cassée qu'on corrige).
+            // Additionné au cumul logiciel pour ne jamais perdre ce qui a été
+            // livré dans les segments précédents, peu importe combien de fois
+            // le gun est réactivé pendant cette même livraison.
+            try {
+                double[] segment = readNetGrossL();
+                if (segment[0] > 0) cumulativeCorrectedNetL   += segment[0];
+                if (segment[1] > 0) cumulativeCorrectedGrossL += segment[1];
+                emitLog("[PULSER-REVERSAL] segment capturé net=" + segment[0] + " gross=" + segment[1]
+                    + " — cumul total net=" + cumulativeCorrectedNetL + " gross=" + cumulativeCorrectedGrossL);
+            } catch (Exception e) {
+                emitLog("[PULSER-REVERSAL] lecture segment ERR (non bloquant): " + e.getMessage());
+            }
+            pulserResetCount++;
+
+            ApiResult reset = api_diagnosticReset();
+            boolean resetOk = reset != null && reset.data != null
+                && reset.data.optBoolean("reset_done", false);
+            emitLog("[PULSER-REVERSAL] validation retour " + (resetOk ? "OK (net/gross confirmés)" : "pas nécessaire/échec")
+                + " — renvoi CMD_RUN pour reprise à 0 (activation #" + pulserResetCount + ")");
+
+            lcpIssueCommand(CMD_RUN);
+            continueGraceUntilMs = System.currentTimeMillis() + CONTINUE_GRACE_MS;
+            setState(DeliveryState.RUNNING_FLOWING);
+
+            emitLog("[PULSER-REVERSAL] reprise à 0 effectuée");
+        } catch (Exception e) {
+            emitLog("[PULSER-REVERSAL] correction ERR: " + e.getMessage());
+        }
+    }
+
+    private double[] readNetGrossL() throws Exception {
+        byte[] netRaw   = lcpGetField(45); // FIELD_NET_COUNT
+        byte[] grossRaw = lcpGetField(44); // FIELD_GROSS_COUNT
+        int netRaw32    = toInt32(netRaw);
+        int grossRaw32  = toInt32(grossRaw);
+        byte[] decRaw = lcpGetField(39);
+        int decimals  = decRaw != null && decRaw.length > 0
+            ? new int[]{2,1,0,3}[decRaw[0] & 0x03] : 1;
+        double scale  = Math.pow(10, decimals);
+        return new double[]{ netRaw32 / scale, grossRaw32 / scale };
+    }
+
     public ApiResult api_diagnosticReset() {
         JSONObject d = new JSONObject();
         try {
-            // Lire net/gross actuels
-            byte[] netRaw   = lcpGetField(45); // FIELD_NET_COUNT
-            byte[] grossRaw = lcpGetField(44); // FIELD_GROSS_COUNT
-            int netRaw32    = toInt32(netRaw);
-            int grossRaw32  = toInt32(grossRaw);
-
-            // Lire décimales pour affichage
-            byte[] decRaw = lcpGetField(39);
-            int decimals  = decRaw != null && decRaw.length > 0
-                ? new int[]{2,1,0,3}[decRaw[0] & 0x03] : 1;
-            double scale  = Math.pow(10, decimals);
-            double netL   = netRaw32   / scale;
-            double grossL = grossRaw32 / scale;
+            double[] ng = readNetGrossL();
+            double netL = ng[0], grossL = ng[1];
+            boolean negative = netL < 0 || grossL < 0;
 
             safeJsonPut(d, "net_before_l",   netL);
             safeJsonPut(d, "gross_before_l", grossL);
             safeJsonPut(d, "reset_done",     false);
 
-            if (netRaw32 >= 0 && grossRaw32 >= 0) {
+            if (!negative) {
                 // Pas de reset nécessaire
                 safeJsonPut(d, "msg", "net/gross OK — pas de reset nécessaire");
                 return ApiResult.ok("Diagnostic: pas de reset nécessaire", d);
@@ -2422,6 +2513,17 @@ public ApiResult api_registerValidate(
             safeJsonPut(d, "reset_done", true);
             safeJsonPut(d, "msg", "Reset effectué — net_avant=" + netL + " gross_avant=" + grossL);
             emitLog("[DIAGNOSTIC] Reset OK");
+
+            // ✅ Notifier la couche UI (qui a accès au Context) pour persister un
+            // enregistrement d'audit et le mettre en file pour sync Dataverse.
+            try {
+                if (listener != null) {
+                    listener.onDiagnosticReset(
+                        lastNumeroLivraison != null ? lastNumeroLivraison : "",
+                        netL, grossL);
+                }
+            } catch (Exception ignored) {}
+
             return ApiResult.ok("Diagnostic reset OK", d);
 
         } catch (Exception e) {
@@ -2443,49 +2545,34 @@ public ApiResult api_registerValidate(
             return ApiResult.fail("Delivery OneShot: 0 - USB not ready.", "USB_NOT_READY");
         }
 
-        // =====================================================================
-        // TODO: DIAGNOSTIC RESET — à implémenter (LCR-II + LC3)
-        // ---------------------------------------------------------------------
-        // Avant de démarrer la livraison, vérifier si net/gross sont négatifs
-        // (retour d'air après livraison précédente — ex: -0.1L).
-        //
-        // Si négatif → appeler api_diagnosticReset() — méthode STANDALONE:
-        //
-        //   public ApiResult api_diagnosticReset()
-        //     → utilisable depuis: démarrage livraison, entretien, UI admin
-        //     → LCR-II : opDiagnosticReset() dans LcpLink
-        //                  issue_command(0x03 Auxiliary)
-        //                  issue_command(0x06 Print)
-        //                  poll net/gross jusqu'à == 0 (max 10s)
-        //     → LC3    : opDiagnosticReset() dans Lc3Link — NO-OP
-        //                  (comportement à définir avec spec LC3)
-        //
-        // Logger dans lcr_delivery_status:
-        //   lcr_pre_delivery_net   = valeur net avant reset
-        //   lcr_pre_delivery_gross = valeur gross avant reset
-        //   lcr_diagnostic_reset   = true (bit Dataverse)
-        //
-        // Colonnes Dataverse à ajouter via pac CLI:
-        //   lcr_pre_delivery_net   (decimal)
-        //   lcr_pre_delivery_gross (decimal)
-        //   lcr_diagnostic_reset   (bit)
-        //
-        // Référence Python: lcp_bypass3_test.py + lcp_print_and_bypass.py
-        //
-        // NOTE: vérifier si oneshot/start remet lui-même les compteurs à zéro
-        // auquel cas le reset manuel n'est peut-être pas nécessaire — juste logger.
-        // =====================================================================
-
-        // ✅ Vérifier net/gross avant démarrage — diagnostic reset si négatif
-        // NOTE: api_diagnosticReset() est disponible comme commande standalone
-        // depuis l'entretien ou l'UI admin. Ne pas l'appeler automatiquement ici
-        // pour éviter de saturer le transport si le média n'est pas encore stabilisé.
-        // TODO: réactiver quand le flux média est déterminé AVANT cet appel.
+        // ✅ Vérifier net/gross avant démarrage — diagnostic reset automatique si négatif
+        // (retour d'air après livraison précédente, ex: -0.1L). Attribué à
+        // lastNumeroLivraison (le WO de la livraison PRÉCÉDENTE, pas celui-ci) car
+        // c'est le résidu de cette livraison-là qui est nettoyé. Le flux média est
+        // maintenant déterminé avant cet appel (probeSerial confirmé en amont via
+        // resolveOrCreateForNode), donc plus de risque de saturer un transport
+        // instable comme c'était le cas quand cet appel était différé.
+        try {
+            ApiResult resetCheck = api_diagnosticReset();
+            if (resetCheck != null && resetCheck.data != null
+                    && resetCheck.data.optBoolean("reset_done", false)) {
+                emitLog("[ONESHOT] diagnostic reset effectué avant démarrage — "
+                    + resetCheck.data.optString("msg", ""));
+            }
+        } catch (Exception e) {
+            emitLog("[ONESHOT] diagnostic reset check ERR (non bloquant): " + e.getMessage());
+        }
         
  // ✅ Mémoriser le NUM (WorkOrder) pour l’UI: delivery_uid = NUM-ticketNo
  if (numero_livraison != null && !numero_livraison.trim().isEmpty()) {
      lastNumeroLivraison = numero_livraison.trim();
  }
+ // ✅ Nouvelle livraison — remettre le cumul logiciel à zéro. Tout ce qui a été
+ // accumulé par le reset diagnostic ci-dessus appartenait à la livraison
+ // PRÉCÉDENTE (résidu nettoyé avant de démarrer celle-ci) — pas à celle-ci.
+ cumulativeCorrectedNetL = 0.0;
+ cumulativeCorrectedGrossL = 0.0;
+ pulserResetCount = 0;
 try {
             int[] ds0 = lcpDeliveryStatus();
             int delStatus0 = ds0[0];
@@ -2679,6 +2766,13 @@ job.presetNetL_requested = presetNetL;
             continueGraceUntilMs = now + CONTINUE_GRACE_MS;
             job.continueGraceUntilMs = now + CONTINUE_GRACE_MS;
             setState(DeliveryState.RUNNING_FLOWING);
+
+            // ✅ La détection négatif ad-hoc qui était ici a été retirée — remplacée
+            // par la détection officielle du Delivery Status bit 0x0040 dans
+            // requestStatus() (checkPulserReversalAndCorrect()), qui se base sur le
+            // signal natif du protocole LCR-II plutôt qu'un simple test de signe,
+            // et qui s'applique peu importe le moment où le retour d'air survient
+            // (pas seulement au clic du bouton Continue).
 
             try { job.ticketNo = readTicketNo23(); } catch (Exception ignored) {}
             try { job.saleNo = readSaleNo22(); } catch (Exception ignored) {}
@@ -3276,8 +3370,22 @@ safeJsonPut(result, "ticket_ready_to_print", true); // ✅ signal pour FieldServ
 
 // ✅ FieldService printing info
 safeJsonPut(result, "fs_action_required", "PRINT_TICKET");
-safeJsonPut(result, "fs_net_l",   netDeltaU / scale);
-safeJsonPut(result, "fs_gross_l", grossDeltaU / scale);
+// ✅ Additionner le cumul logiciel (segments livrés avant chaque reset diagnostic
+// suite à un retour d'air/bit 0x0040) au delta du dernier segment — sinon
+// chaque reset ferait perdre le volume déjà livré dans les segments précédents.
+double fsNetL   = (netDeltaU / scale) + cumulativeCorrectedNetL;
+double fsGrossL = (grossDeltaU / scale) + cumulativeCorrectedGrossL;
+safeJsonPut(result, "fs_net_l",   fsNetL);
+safeJsonPut(result, "fs_gross_l", fsGrossL);
+if (pulserResetCount > 0) {
+    safeJsonPut(result, "pulser_reset_count", pulserResetCount);
+    safeJsonPut(result, "cumulative_corrected_net_l", cumulativeCorrectedNetL);
+    safeJsonPut(result, "cumulative_corrected_gross_l", cumulativeCorrectedGrossL);
+    emitLog("[TICKET-FINAL] " + pulserResetCount + " activation(s) gun — cumul corrigé net="
+        + cumulativeCorrectedNetL + " gross=" + cumulativeCorrectedGrossL
+        + " + dernier segment net=" + (netDeltaU / scale) + " gross=" + (grossDeltaU / scale)
+        + " = total net=" + fsNetL + " gross=" + fsGrossL);
+}
 
 // ✅ Litres
 safeJsonPut(result, "gross_total_start_l", grossStartU / scale);

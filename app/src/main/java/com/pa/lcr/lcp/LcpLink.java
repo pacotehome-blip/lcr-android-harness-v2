@@ -409,6 +409,19 @@ public class LcpLink {
         };
     }
 
+    /**
+     * ✅ Interprétation du bit "trop de retours de pulseur" dans le Delivery
+     * Status Word — spécifique au protocole LCR-II (bit 0x0040). Méthode
+     * surchargeable pour que Lc3Link (ou tout autre registre futur) puisse
+     * redéfinir sa propre logique — ou retourner toujours false si ce concept
+     * n'existe pas sur ce type de registre — sans jamais toucher à
+     * DeliveryController, qui reste générique et appelle seulement cette
+     * méthode via son link (LcpLink ou sous-classe).
+     */
+    public boolean isPulserReversalTerminated(int delStatus) {
+        return (delStatus & 0x0040) != 0;
+    }
+
     // ===================== SEND / RECV =====================
     private synchronized Response sendRecv(byte[] payload, int timeoutMs) throws IOException {
         if (closed) throw new TransportException("Transport closed");

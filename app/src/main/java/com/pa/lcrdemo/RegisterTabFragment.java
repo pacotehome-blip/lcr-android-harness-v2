@@ -565,6 +565,72 @@ public class RegisterTabFragment extends Fragment {
                 });
             }
         }
+
+        @Override
+        public void onDiagnosticReset(String woNum, double netBeforeL, double grossBeforeL) {
+            // ✅ Réintégré (24 juillet 2026) — confirmé par Paul : correction
+            // automatique sur détection du bit 0x0040 (retours de pulseur) doit
+            // être persistée localement ET synchronisée vers Dataverse.
+            // net_l/gross_l = 0 volontairement (aucune livraison réelle n'a eu lieu
+            // — ne doit JAMAIS s'additionner au total cumulé du WO dans
+            // rafraichirCumulWo()). Les vraies valeurs résiduelles vont dans
+            // delta_net_l/delta_gross_l, à des fins d'audit uniquement.
+            bg.execute(() -> {
+                try {
+                    android.content.Context ctx = getContext();
+                    if (ctx == null) return;
+                    String fWoNum = (woNum != null && !woNum.isEmpty()) ? woNum : "MAINTENANCE";
+                    String ticketNoForUid = lastTicketDetected != null ? lastTicketDetected : "";
+                    String deliveryUid = fWoNum + "-RESET-" + System.currentTimeMillis();
+
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db =
+                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(ctx);
+                    try {
+                        android.content.ContentValues cv = new android.content.ContentValues();
+                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM, fWoNum);
+                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID,
+                            serialFromArgs != null ? serialFromArgs : "");
+                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_LCRNODE, node);
+                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO, ticketNoForUid);
+                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE, "DIAGNOSTIC_RESET");
+                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE, "REGISTRE");
+                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,   0.0);
+                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L, 0.0);
+                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_DELTA_NET_L,   netBeforeL);
+                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_DELTA_GROSS_L, grossBeforeL);
+                        long id = db.insertDelivery(cv);
+                        LogBus.api(node, "[DIAGNOSTIC-RESET] persisté id=" + id
+                            + " wo=" + fWoNum + " netAvant=" + netBeforeL + " grossAvant=" + grossBeforeL);
+                    } finally {
+                        try { db.close(); } catch (Exception ignored) {}
+                    }
+
+                    // ✅ Mettre en file pour Dataverse — même mécanisme que les
+                    // livraisons normales (DeliverySyncWorker/WorkOrderUpdater).
+                    org.json.JSONObject payload = new org.json.JSONObject();
+                    payload.put("workOrderId", currentWoIdGuid != null ? currentWoIdGuid : "");
+                    payload.put("netTotal", 0.0);
+                    payload.put("grossTotal", 0.0);
+                    payload.put("ticketNo", ticketNoForUid);
+                    payload.put("woNum", fWoNum);
+                    payload.put("deliveryUid", deliveryUid);
+                    payload.put("diagnosticReset", true);
+                    payload.put("preDeliveryNet", netBeforeL);
+                    payload.put("preDeliveryGross", grossBeforeL);
+
+                    com.pa.lcrdemo.dataverse.DeliveryResultQueueDb queueDb =
+                        new com.pa.lcrdemo.dataverse.DeliveryResultQueueDb(ctx);
+                    try {
+                        queueDb.upsertPending(deliveryUid, payload.toString());
+                    } finally {
+                        try { queueDb.close(); } catch (Exception ignored) {}
+                    }
+                    com.pa.lcrdemo.dataverse.DeliverySyncScheduler.triggerNow(ctx);
+                } catch (Exception e) {
+                    LogBus.api(node, "[DIAGNOSTIC-RESET] ERR: " + safeMsg(e));
+                }
+            });
+        }
     };
 
     private final LogBus.Listener logListener = e -> {
