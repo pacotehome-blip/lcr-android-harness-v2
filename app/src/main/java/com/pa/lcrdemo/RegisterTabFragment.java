@@ -2139,7 +2139,35 @@ public class RegisterTabFragment extends Fragment {
                                     + livraisons.length() + " livraisons");
                             }
                         } catch (Exception ePatch) {
-                            android.util.Log.w("RetourWO", "Patch final ERR: " + ePatch.getMessage());
+                            android.util.Log.w("RetourWO", "Patch final ERR (probablement hors ligne) — "
+                                + "mise en file pour retry automatique: " + ePatch.getMessage());
+                            // ✅ FIX : avant, cette erreur était juste loguée — rien n'était
+                            // mis en file, donc le dialogue qui promet "sera envoyé dès que
+                            // le réseau revient" mentait. On met maintenant en file via
+                            // DeliveryResultQueueDb (même mécanisme que DeliverySyncWorker),
+                            // marqué "consolidated" pour que le retry utilise bien
+                            // patchSummaryConsolidated() (avec fusion+ETag) et pas la version
+                            // simple qui écraserait l'historique.
+                            try {
+                                org.json.JSONObject queuePayload = new org.json.JSONObject();
+                                queuePayload.put("consolidated", true);
+                                queuePayload.put("workOrderId", woIdGuid != null ? woIdGuid : "");
+                                queuePayload.put("woNum", woNum != null ? woNum : "");
+                                String queueUid = (woNum != null ? woNum : "wo") + "-consolidated-"
+                                    + System.currentTimeMillis();
+                                queuePayload.put("deliveryUid", queueUid);
+                                com.pa.lcrdemo.dataverse.DeliveryResultQueueDb queueDbRetry =
+                                    new com.pa.lcrdemo.dataverse.DeliveryResultQueueDb(requireContext());
+                                try {
+                                    queueDbRetry.upsertPending(queueUid, queuePayload.toString());
+                                } finally {
+                                    try { queueDbRetry.close(); } catch (Exception ignored) {}
+                                }
+                                com.pa.lcrdemo.dataverse.DeliverySyncScheduler.triggerNow(requireContext());
+                                android.util.Log.i("RetourWO", "Mise en file OK — retry via DeliverySyncWorker dès réseau dispo");
+                            } catch (Exception eQueue) {
+                                android.util.Log.w("RetourWO", "Mise en file ERR: " + eQueue.getMessage());
+                            }
                         }
                     } else {
                         android.util.Log.w("RetourWO", "Pas de token — données en PENDING local");
