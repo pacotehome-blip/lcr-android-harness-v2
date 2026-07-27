@@ -1596,10 +1596,60 @@ private void setupTabsTop() {
                     TransportIo io = mediaTransportManager.getByKey(key);
                     if (io != null && io.isOpen()) {
                         scanRegistersWithIo(io, key, txtWifiRegsFound);
+                        finalizeTcpRegisterTab(io, key);
                     }
                 } catch (Exception ignored) {}
             }
         });
+    }
+
+    // ✅ FIX (remplace l'ancien appel à onConfigureMediaActivated, qui devinait
+    // le node à 250 par défaut — faux pour un LC3 réel trouvé au node 245).
+    //
+    // scanRegistersWithIo() détecte volontairement SANS créer de session
+    // complète (voir son commentaire "sans créer de session complète") — pour
+    // BT/USB, c'est le chauffeur qui confirme ensuite manuellement via le
+    // bouton "Node X + Connect" (connectManualWithIo, qui lit le VRAI node,
+    // jamais deviné). Pour TCP, la connexion elle-même EST déjà l'action
+    // déliberée équivalente — donc on refait ici la même détection
+    // (LC3 d'abord, LCR-II en fallback, exactement comme scanRegistersWithIo)
+    // puis on finalise directement avec le node réel trouvé, sans deviner.
+    private void finalizeTcpRegisterTab(TransportIo io, String transportKey) {
+        if (io == null || !io.isOpen()) return;
+        try {
+            Lc3Link.RegisterIdentity identity = null;
+            try { identity = Lc3Link.probeAndIdentify(io); } catch (Exception ignored) {}
+
+            if (identity != null && identity.isLc3) {
+                final int node = identity.nodeId > 0 ? identity.nodeId : 250;
+                final String serial = identity.serialId;
+                if (serial != null && !serial.trim().isEmpty()) {
+                    ui.post(() -> {
+                        upsertRegisterTabFromScan(transportKey, node, 255, serial.trim(), true);
+                        refreshAllTabsMediaStatus();
+                    });
+                }
+                return;
+            }
+
+            // LCR-II — même boucle que scanRegistersWithIo, mais on s'arrête
+            // au premier node valide trouvé pour finaliser l'onglet.
+            for (int node = 1; node <= 250; node++) {
+                try {
+                    LcpLink tmp = new LcpLink(io, node, 255, true);
+                    String serial = decodeAz(tmp.opGetField(80, 300));
+                    if (serial != null && !serial.trim().isEmpty()) {
+                        final int nodeFinal = node;
+                        final String serialFinal = serial.trim();
+                        ui.post(() -> {
+                            upsertRegisterTabFromScan(transportKey, nodeFinal, 255, serialFinal, true);
+                            refreshAllTabsMediaStatus();
+                        });
+                        return;
+                    }
+                } catch (Exception ignored) {}
+            }
+        } catch (Exception ignored) {}
     }
 
     // ✅ Scan réseau (subnet /24) à la recherche du port raw N-Port (4001 défaut).
@@ -1650,6 +1700,9 @@ private void setupTabsTop() {
                         TransportIo io = mediaTransportManager.getByKey(s.key);
                         if (io == null || !io.isOpen()) continue;
                         scanRegistersWithIo(io, s.key, txtWifiRegsFound);
+                        // ✅ FIX : même correctif que connectTcpTo() — finalise avec
+                        // le VRAI node détecté (LC3 ou LCR-II), jamais deviné.
+                        finalizeTcpRegisterTab(io, s.key);
                     }
                 } catch (Exception ignored) {}
             }
