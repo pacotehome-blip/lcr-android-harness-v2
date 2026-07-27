@@ -634,7 +634,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:enabled="true"
-                    android:text="Scan registres Wi‑Fi (1..254, port 4001)"/>
+                    android:text="Scan registres Wi‑Fi (1..254, port ci-dessous)"/>
 
                 <ScrollView
                     android:id="@+id/scrollWifiRegsFound"
@@ -708,7 +708,7 @@
                             android:layout_weight="1"
                             android:layout_marginStart="6dp"
                             android:hint="Port"
-                            android:text="4001"
+                            android:text="5002"
                             android:inputType="number"
                             android:textColor="#FFFFFF"
                             android:textColorHint="#CCFFFFFF"/>
