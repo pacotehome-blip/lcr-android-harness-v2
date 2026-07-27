@@ -432,7 +432,20 @@ public class DeepLinkHandler {
             try {
                 if (!transportKey.isEmpty()) {
                     activity.onConfigureMediaActivated(transportKey, "DEEPLINK");
-                    activity.upsertRegisterTabFromScan(transportKey, node, 255, fSerialId, true);
+                    // ✅ FIX : la version à 5 arguments devine isLc3 en regardant si un
+                    // onglet existe déjà — pour un NOUVEL onglet (deep link à froid,
+                    // cas normal), elle suppose systématiquement false, affichant à
+                    // tort "[LCR-II]" pour un LC3 confirmé. On interroge directement
+                    // le vrai type de Link du DeliveryController (source de vérité).
+                    boolean isLc3Real = false;
+                    try {
+                        com.pa.lcr.lcp.DeliveryController dcCheck =
+                            com.pa.lcr.lcp.RegisterSessionManager.get(activity).getController(transportKey, node);
+                        if (dcCheck != null && dcCheck.getLink() instanceof com.pa.lcr.lcp.Lc3Link) {
+                            isLc3Real = true;
+                        }
+                    } catch (Exception ignored) {}
+                    activity.upsertRegisterTabFromScan(transportKey, node, 255, fSerialId, true, isLc3Real);
 
                     // ✅ Retry prefill — le tab peut prendre du temps à être créé après auto-connect
                     Runnable prefill = new Runnable() {
@@ -898,7 +911,17 @@ public class DeepLinkHandler {
                 activity.runOnUiThread(() -> {
                     try {
                         activity.onConfigureMediaActivated(fTransportKey, "DEEPLINK");
-                        activity.upsertRegisterTabFromScan(fTransportKey, node, 255, fSerialId, true);
+                        // ✅ FIX : même correctif que plus haut — isLc3 réel via
+                        // DeliveryController.getLink(), jamais deviné.
+                        boolean isLc3Real2 = false;
+                        try {
+                            com.pa.lcr.lcp.DeliveryController dcCheck2 =
+                                com.pa.lcr.lcp.RegisterSessionManager.get(activity).getController(fTransportKey, node);
+                            if (dcCheck2 != null && dcCheck2.getLink() instanceof com.pa.lcr.lcp.Lc3Link) {
+                                isLc3Real2 = true;
+                            }
+                        } catch (Exception ignored) {}
+                        activity.upsertRegisterTabFromScan(fTransportKey, node, 255, fSerialId, true, isLc3Real2);
                         activity.getUiHandler().postDelayed(() -> {
                             try {
                                 String   mediaShort = activity.mediaShortFromTransportKey(fTransportKey);

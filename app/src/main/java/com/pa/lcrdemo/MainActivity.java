@@ -1197,7 +1197,12 @@ private void setupTabsTop() {
         boolean isLc3 = (existing != null) && existing.isLc3;
         upsertRegisterTabFromScan(transportKey, node, from, serialId, focus, isLc3);
     }
-    private void upsertRegisterTabFromScan(String transportKey, int node, int from, String serialId, boolean focus, boolean isLc3) {
+    // ✅ Rendu public : DeepLinkHandler et RegisterConnectionHelper doivent
+    // pouvoir passer isLc3 explicitement (vrai type de Link connu via
+    // DeliveryController.getLink()), plutôt que de passer par la version à
+    // 5 arguments qui devine isLc3 depuis un onglet existant — toujours
+    // faux pour un premier onglet créé sur un registre LC3.
+    public void upsertRegisterTabFromScan(String transportKey, int node, int from, String serialId, boolean focus, boolean isLc3) {
         if (node < 1 || (!isLc3 && node > 250)) return;
         if (from < 0 || from > 255) from = 255;
         String mediaShort = mediaShortFromTransportKey(transportKey);

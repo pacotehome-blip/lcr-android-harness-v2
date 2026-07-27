@@ -371,8 +371,19 @@ public class RegisterConnectionHelper {
                 final String fSerial = foundSerial;
                 transportKeyFinal[0] = foundKey;
                 activity.runOnUiThread(() -> {
-                    if (!fKey.isEmpty())
-                        activity.upsertRegisterTabFromScan(fKey, fNodeFinal, 255, fSerial, true);
+                    if (!fKey.isEmpty()) {
+                        // ✅ FIX : isLc3 réel via DeliveryController.getLink(), jamais deviné
+                        // (la version à 5 arguments suppose false pour un nouvel onglet).
+                        boolean isLc3Real = false;
+                        try {
+                            com.pa.lcr.lcp.DeliveryController dcCheck =
+                                com.pa.lcr.lcp.RegisterSessionManager.get(activity).getController(fKey, fNodeFinal);
+                            if (dcCheck != null && dcCheck.getLink() instanceof com.pa.lcr.lcp.Lc3Link) {
+                                isLc3Real = true;
+                            }
+                        } catch (Exception ignored) {}
+                        activity.upsertRegisterTabFromScan(fKey, fNodeFinal, 255, fSerial, true, isLc3Real);
+                    }
                     activity.refreshAllTabsMediaStatus();
                 });
                 try { Thread.sleep(500); } catch (Exception ignored) {}
