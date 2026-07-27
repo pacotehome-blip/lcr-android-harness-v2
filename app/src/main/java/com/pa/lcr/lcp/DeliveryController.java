@@ -1837,11 +1837,22 @@ softResync("retry/" + step);
     // =========================
     // Protocol helpers
     // =========================
+    // ✅ FIX architecture : la précision décimale est désormais une
+    // responsabilité du Link (LcpLink lit FIELD_DECIMALS à chaque appel,
+    // Lc3Link retourne une valeur fixe connue — voir getDecimalDigits()
+    // dans chaque classe). DeliveryController ne fait plus AUCUNE
+    // supposition générique sur le protocole — il délègue entièrement et
+    // se contente de mettre le résultat en cache pour éviter des lectures
+    // répétées inutiles sur LCR-II. Chaque sous-classe garantit un résultat
+    // correct par elle-même, peu importe son mécanisme interne.
     private void ensureDigits() throws Exception {
-        if (cachedDigits >= 0) return;
-        byte[] dec = lcpGetField(FIELD_DECIMALS);
-        int idx = (dec.length >= 1) ? (dec[0] & 0xFF) : 0;
-        cachedDigits = decimalsDigits(idx);
+        if (cachedDigits >= 0) {
+            android.util.Log.d("DeliveryController", "ensureDigits: déjà en cache = " + cachedDigits + " (scale=" + Math.pow(10, cachedDigits) + ")");
+            return;
+        }
+        cachedDigits = link.getDecimalDigits();
+        android.util.Log.i("DeliveryController", "ensureDigits: link.getDecimalDigits() (" + link.getClass().getSimpleName()
+                + ") → cachedDigits=" + cachedDigits + " (scale=" + Math.pow(10, cachedDigits) + ")");
     }
 
     private void writePresetNet_WithCacheOrFallback(double preset) throws Exception {

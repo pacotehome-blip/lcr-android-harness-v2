@@ -77,6 +77,18 @@ public class Lc3Link extends LcpLink {
     private static final int FIELD_TEMPERATURE    = 46;
     private static final int FIELD_SERIAL_ID      = 80;
 
+    // ✅ Précision décimale — responsabilité du protocole (voir LcpLink).
+    // Le LC3 encode toujours NET/GROSS avec 1 décimale (voir opGetField
+    // ci-dessous : FIELD_NET_COUNT/FIELD_GROSS_COUNT multiplient la valeur
+    // lue à l'écran par 10 avant de l'encoder). Valeur FIXE et directe —
+    // aucune lecture réseau, aucun cache partagé avec un autre type de
+    // registre : élimine le risque de précision figée par erreur sur une
+    // valeur héritée d'une session LCR-II antérieure.
+    @Override
+    public int getDecimalDigits() {
+        return 1;
+    }
+
     // ── Commandes DC ──────────────────────────────────────────────────────
     private static final int CMD_RUN               = 0x00;
     private static final int CMD_END               = 0x02;

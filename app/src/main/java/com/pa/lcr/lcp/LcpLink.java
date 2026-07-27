@@ -348,6 +348,41 @@ public class LcpLink {
         return out;
     }
 
+    // =========================================================
+    // ✅ Précision décimale NET/GROSS — responsabilité du protocole,
+    // PAS de l'UI ni d'un cache générique partagé dans DeliveryController.
+    //
+    // Chaque sous-classe de Link connaît sa propre façon de représenter
+    // NET/GROSS (registre à registre, protocole à protocole) et doit
+    // garantir que le résultat final (valeur physique réelle en litres)
+    // est correct — peu importe le mécanisme interne utilisé pour y
+    // arriver. LcpLink (LCR-II) lit le champ FIELD_DECIMALS (#39) du
+    // registre à chaque appel — pas de cache ici, l'appelant (via
+    // DeliveryController) est responsable de mettre en cache s'il le
+    // souhaite pour éviter des lectures répétées inutiles.
+    private static final int FIELD_DECIMALS = 39;
+
+    public int getDecimalDigits() {
+        try {
+            byte[] dec = opGetField(FIELD_DECIMALS, 3000);
+            int idx = (dec != null && dec.length >= 1) ? (dec[0] & 0xFF) : 0;
+            return decimalsDigitsFromIdx(idx);
+        } catch (Exception e) {
+            return 2; // valeur de repli historique LCR-II si la lecture échoue
+        }
+    }
+
+    /** Mapping idx registre → nombre de décimales (LCR-II, protocole LCP standard). */
+    protected static int decimalsDigitsFromIdx(int idx) {
+        switch (idx) {
+            case 0: return 2;
+            case 1: return 1;
+            case 2: return 0;
+            case 3: return 3;
+            default: return 2;
+        }
+    }
+
     /** Timeout 30s pour SET_FIELD queueable */
     public void opSetField(int field, byte[] value) throws IOException {
         byte[] pl = new byte[2 + (value == null ? 0 : value.length)];
