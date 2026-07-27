@@ -666,7 +666,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                     DeliveryController dc = sessions.getOrCreate(activeKey, node, from, io);
                     if (dc != null) {
                         JSONObject d = new JSONObject();
-                        d.put("media", activeKey.startsWith("BT:") ? "bt" : "usb");
+                        d.put("media", mediaLabelFromKey(activeKey));
                         d.put("transportKey", activeKey);
                         return ApiResult.ok("Media auto-connect: 1 - OK (already connected)", d);
                     }
@@ -835,14 +835,14 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             safePut(d, "serialId",     serial);
             safePut(d, "transportKey", transportKey);
             safePut(d, "activeKey",    MediaTransportManager.getActiveKeyStatic());
-            safePut(d, "media",        transportKey.toUpperCase(Locale.ROOT).startsWith("BT:") ? "bt" : "usb");
+            safePut(d, "media",        mediaLabelFromKey(transportKey));
             safePut(d, "status",       statusText);
             safePut(d, "statut",       statusText);
             safePut(d, "delCode",      delCode);
             safePut(d, "net",          net);
             safePut(d, "gross",        gross);
             safePut(d, "ui",           "UPSERT_TAB");
-            return ApiResult.ok("Registre trouvé sur " + (transportKey.toUpperCase(Locale.ROOT).startsWith("BT:") ? "BT" : "USB"), d);
+            return ApiResult.ok("Registre trouvé sur " + mediaLabelFromKey(transportKey).toUpperCase(Locale.ROOT), d);
         }
 
         // ✅ Dernier essai — retourner ce qui est connecté même si serial ne correspond pas
@@ -862,13 +862,13 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                         safePut(d2, "serialId",        foundSerial.trim());
                         safePut(d2, "transportKey",    activeKey);
                         safePut(d2, "activeKey",       activeKey);
-                        safePut(d2, "media",           activeKey.toUpperCase(Locale.ROOT).startsWith("BT:") ? "bt" : "usb");
+                        safePut(d2, "media",           mediaLabelFromKey(activeKey));
                         safePut(d2, "serial_mismatch", hasSerial && !serialId.trim().equalsIgnoreCase(foundSerial.trim()) ? 1 : 0);
                         safePut(d2, "expected_serial", hasSerial ? serialId.trim() : null);
                         safePut(d2, "ui",              "UPSERT_TAB");
                         String msg2 = (hasSerial && !serialId.trim().equalsIgnoreCase(foundSerial.trim()))
                                 ? "Registre trouvé mais serial différent — attendu=" + serialId + " réel=" + foundSerial
-                                : "Registre trouvé sur " + (activeKey.startsWith("BT:") ? "BT" : "USB");
+                                : "Registre trouvé sur " + mediaLabelFromKey(activeKey).toUpperCase(Locale.ROOT);
                         return (hasSerial && !serialId.trim().equalsIgnoreCase(foundSerial.trim()))
                                 ? ApiResult.fail(msg2, "ERR_SERIAL_MISMATCH", d2)
                                 : ApiResult.ok(msg2, d2);
@@ -909,6 +909,21 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             }
             if (!anyBtOpen) { try { api_btActivate(); } catch (Exception ignored2) {} }
         } catch (Exception ignored) {}
+        // ✅ TCP (N-Port) — même principe que BT/USB : si aucun TCP n'est déjà
+        // ouvert, tenter une auto-connexion avant de construire la liste finale.
+        // Stratégie : IP(s) connue(s) d'abord (rapide, ~1-3s), scan complet du
+        // sous-réseau seulement en filet de sécurité (~5-6s) si ça échoue.
+        try {
+            boolean anyTcpOpen = false;
+            if (mediaMgr != null) {
+                for (TransportSnapshot s : mediaMgr.listSnapshots()) {
+                    if (s == null || s.key == null || !s.key.toUpperCase(Locale.ROOT).startsWith("TCP:")) continue;
+                    TransportIo io = mediaMgr.getByKey(s.key);
+                    if (io != null && safeIsOpen(io)) { anyTcpOpen = true; break; }
+                }
+            }
+            if (!anyTcpOpen) { try { autoConnectTcp(); } catch (Exception ignored2) {} }
+        } catch (Exception ignored) {}
         try {
             if (mediaMgr != null) {
                 for (TransportSnapshot s : mediaMgr.listSnapshots()) {
@@ -935,6 +950,51 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
 
     private static boolean safeIsOpen(TransportIo io) {
         try { return (io != null && io.isOpen()); } catch (Exception ignored) { return false; }
+    }
+
+    // ✅ Label média pour les réponses JSON — reconnaît maintenant TCP (N-Port)
+    // en plus de BT/USB. Avant ce correctif, un registre TCP était étiqueté
+    // "usb" par erreur (fallback par défaut de l'ancien code).
+    private static String mediaLabelFromKey(String transportKey) {
+        if (transportKey == null) return "usb";
+        String k = transportKey.toUpperCase(Locale.ROOT);
+        if (k.startsWith("BT:")) return "bt";
+        if (k.startsWith("TCP:")) return "tcp";
+        return "usb";
+    }
+
+    // ✅ Auto-connexion TCP (N-Port) — appelée uniquement si aucun TCP n'est
+    // déjà ouvert. Deux phases :
+    //   1) IP(s) déjà connues (KnownTcpDeviceStore, triées plus-récent-d'abord,
+    //      max 3 essais) — rapide, couvre le cas normal (IP stable).
+    //   2) Scan complet du sous-réseau (filet de sécurité) — seulement si la
+    //      phase 1 échoue (IP changée, nouveau N-Port jamais vu, etc.).
+    private void autoConnectTcp() {
+        if (appCtx == null || mediaMgr == null) return;
+        try {
+            com.pa.lcr.lcp.api.WifiRegisterScanController ctl =
+                    new com.pa.lcr.lcp.api.WifiRegisterScanController(appCtx, mediaMgr);
+
+            org.json.JSONArray known = null;
+            try { known = ctl.getKnownStore().listKnown(); } catch (Exception ignored) {}
+
+            if (known != null) {
+                int tried = 0;
+                for (int i = 0; i < known.length() && tried < 3; i++) {
+                    try {
+                        org.json.JSONObject o = known.getJSONObject(i);
+                        String ip = o.getString("ip");
+                        int port = o.getInt("port");
+                        tried++;
+                        ApiResult r = ctl.connectManual(ip, port);
+                        if (r != null && r.code == 1) return; // succès — pas besoin du scan complet
+                    } catch (Exception ignored) {}
+                }
+            }
+
+            // Filet de sécurité : scan complet (~5-6s), seulement si aucune IP connue n'a répondu
+            try { ctl.scanSubnet(com.pa.lcr.lcp.api.WifiRegisterScanController.DEFAULT_RAW_PORT); } catch (Exception ignored) {}
+        } catch (Exception ignored) {}
     }
 
     private static void safePut(JSONObject o, String k, Object v) {
@@ -1167,7 +1227,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             snap.put("serialId", serialId);
             snap.put("lcrnode", node);
             snap.put("transportKey", transportKey);
-            snap.put("media", transportKey != null && transportKey.startsWith("BT:") ? "bt" : "usb");
+            snap.put("media", mediaLabelFromKey(transportKey));
             snap.put("alreadyConnected", alreadyConnected);
         } catch (Exception ignored) {}
     }

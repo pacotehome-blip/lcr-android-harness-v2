@@ -90,6 +90,11 @@ public class DeepLinkHandler {
             String presetStr  = data.getQueryParameter("preset");
             String lcrnodeStr = data.getQueryParameter("lcrnode");
             String orgUrl     = data.getQueryParameter("orgurl"); // ✅ env auto-detect
+            // ✅ N-Port TCP — Field Service peut fournir directement l'IP:port du
+            // N-Port, exactement comme "btmac" pour le Bluetooth. Si fourni,
+            // connexion directe déterministe (pas de scan réseau nécessaire).
+            String nportIp     = data.getQueryParameter("nportip");
+            String nportPortStr = data.getQueryParameter("nportport");
 
             // ✅ Configurer l'environnement selon l'URL Dataverse reçue de FSM
             // Un seul APK pour DEV / QA / STAGING / PROD
@@ -103,9 +108,14 @@ public class DeepLinkHandler {
             try { if (lcrnodeStr != null) lcrnode = Integer.parseInt(lcrnodeStr); }
             catch (Exception ignored) {}
 
+            Integer nportPort = null;
+            try { if (nportPortStr != null) nportPort = Integer.parseInt(nportPortStr); }
+            catch (Exception ignored) {}
+
             android.util.Log.i(TAG,
                 "Livraison — WO=" + woNum + " BT=" + btMac +
                 " serial=" + serialId + " node=" + lcrnode +
+                " nportIp=" + nportIp + " nportPort=" + nportPort +
                 " produit=" + produit + " preset=" + presetStr);
 
             final String fWoNum    = woNum;
@@ -167,6 +177,8 @@ public class DeepLinkHandler {
             final String fBtMac = btMac;
             final String fProduit = produit;
             final String fPresetStr = presetStr;
+            final String fNportIp = nportIp;
+            final int fNportPort = (nportPort != null ? nportPort : com.pa.lcr.lcp.api.WifiRegisterScanController.DEFAULT_RAW_PORT);
 
             // ✅ Résolution transport universel: USB / BT / TCP
             // Chercher d'abord un transport actif pour ce node/serial via RSM.
@@ -178,6 +190,26 @@ public class DeepLinkHandler {
 
                     if (fSerialId != null && !fSerialId.isEmpty()) {
                         rsm.bindExpectedSerial(fNode, fSerialId);
+                    }
+
+                    // ✅ N-Port fourni directement par Field Service (nportip/nportport)
+                    // → connexion TCP déterministe AVANT toute résolution/scan.
+                    // Node + #série restent liés dans tous les cas via bindExpectedSerial
+                    // ci-dessus, peu importe si cette connexion directe réussit ou non
+                    // (le fallback USB/BT/scan-auto plus bas prend le relais sinon).
+                    if (fNportIp != null && !fNportIp.trim().isEmpty()) {
+                        try {
+                            android.util.Log.i(TAG, "Deep link: N-Port fourni directement — "
+                                + fNportIp + ":" + fNportPort + " node=" + fNode + " serial=" + fSerialId);
+                            com.pa.lcr.lcp.api.WifiRegisterScanController tcpCtl =
+                                new com.pa.lcr.lcp.api.WifiRegisterScanController(
+                                    activity, activity.getMediaTransportManager());
+                            com.pa.lcr.lcp.ApiResult rtcp = tcpCtl.connectManual(fNportIp.trim(), fNportPort);
+                            android.util.Log.i(TAG, "Deep link: connexion N-Port directe → "
+                                + (rtcp != null ? rtcp.msg : "null"));
+                        } catch (Exception e) {
+                            android.util.Log.w(TAG, "Deep link: connexion N-Port directe échouée: " + e.getMessage());
+                        }
                     }
 
                     com.pa.lcr.lcp.DeliveryController dc =
