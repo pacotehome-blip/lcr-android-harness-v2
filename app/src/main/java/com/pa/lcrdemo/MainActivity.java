@@ -1208,13 +1208,29 @@ private void setupTabsTop() {
         removeAllUnknownSerialTabsBestEffort();
 
         // 2) clear ciblé si migration (même node+serial+type, média différent)
+        // ✅ FIX : migration réelle UNIQUEMENT si l'ancien transport n'est plus
+        // joignable. Avant ce correctif, deux registres INDÉPENDANTS partageant
+        // par coïncidence le même (node, serial, type) sur deux médias
+        // différents pouvaient s'écraser l'un l'autre — alors qu'ils doivent
+        // pouvoir coexister connectés simultanément (voir onConfigureMediaActivated).
         String regKey = regKeyOf(node, serial) + (isLc3 ? ":lc3" : ":lcr");
         String newTabKey = tabKeyOf(mediaShort, node, serial);
         String oldTabKey = regKeyToTabKey.get(regKey);
         if (oldTabKey != null && !oldTabKey.equals(newTabKey)) {
             TabSpec oldSpec = tabsByKey.get(oldTabKey);
             if (oldSpec != null && oldSpec.isLc3 == isLc3) {
-                removeTabAndFragment(oldTabKey, "migrated to " + newTabKey);
+                boolean oldTransportGone = true;
+                try {
+                    TransportIo oldIo = (mediaTransportManager != null && oldSpec.transportKey != null)
+                            ? mediaTransportManager.getByKey(oldSpec.transportKey) : null;
+                    oldTransportGone = (oldIo == null || !oldIo.isOpen());
+                } catch (Exception ignored) {}
+                if (oldTransportGone) {
+                    removeTabAndFragment(oldTabKey, "migrated to " + newTabKey);
+                } else {
+                    logUi(null, "Migration ignorée: " + oldTabKey + " toujours connecté (registre indépendant sur "
+                            + newTabKey + ")");
+                }
             }
         }
         regKeyToTabKey.put(regKey, newTabKey);
@@ -3546,33 +3562,33 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
         // 1) activer exclusif immédiatement
         ensureActiveTransport(tk, "CONFIGURE_MEDIA_SWITCH");
 
-        // 2) déterminer node/serial "courants" pour créer/activer le bon tab
-        int node = (currentRegNode > 0 ? currentRegNode : 250);
+        // ✅ FIX : ne JAMAIS présumer que l'onglet actuellement affiché
+        // (currentTabKey) appartient au transport qu'on vient d'activer.
+        // Avant ce correctif, le node+serial de l'onglet courant étaient
+        // réutilisés aveuglément pour N'IMPORTE QUEL nouveau transport
+        // activé (ex: scan BT alors qu'un LC3 était affiché en TCP) — la
+        // logique de "migration" d'upsertRegisterTabFromScan supprimait
+        // alors l'onglet existant en le croyant "déplacé" vers le nouveau
+        // média, alors qu'il s'agit de deux registres réellement
+        // indépendants pouvant coexister connectés simultanément.
+        //
+        // Seule une VRAIE sonde sur CE transport peut justifier de créer
+        // ou migrer un onglet — jamais une simple supposition basée sur
+        // "quel onglet est affiché à l'écran".
+        int node = 250; // valeur neutre, uniquement pour tenter la sonde ci-dessous
         String serial = null;
         try {
-            if (currentTabKey != null) {
-                TabSpec cur = tabsByKey.get(currentTabKey);
-                if (cur != null && isPlausibleSerial(cur.serialId)) {
-                    serial = safeSerial(cur.serialId);
-                    node = (cur.node > 0 ? cur.node : node);
+            TransportIo ioT = (mediaTransportManager != null) ? mediaTransportManager.getByKey(tk) : null;
+            if (ioT != null && ioT.isOpen()) {
+                ProbeResult pr = probeRegisterReadable(ioT, node, 255, null);
+                if (pr != null && pr.ok && pr.serial != null && isPlausibleSerial(pr.serial)) {
+                    serial = safeSerial(pr.serial);
                 }
             }
         } catch (Exception ignored) {}
 
-        // 3) si on n'a pas un serial plausible, tenter un probe rapide sur le nouveau transport
-        if (serial == null || serial.trim().isEmpty()) {
-            try {
-                TransportIo ioT = (mediaTransportManager != null) ? mediaTransportManager.getByKey(tk) : null;
-                if (ioT != null && ioT.isOpen()) {
-                    ProbeResult pr = probeRegisterReadable(ioT, node, 255, null);
-                    if (pr != null && pr.ok && pr.serial != null && isPlausibleSerial(pr.serial)) {
-                        serial = safeSerial(pr.serial);
-                    }
-                }
-            } catch (Exception ignored) {}
-        }
-
         if (serial == null || serial.trim().isEmpty() || !isPlausibleSerial(serial)) {
+            // Rien de réel trouvé sur ce transport — ne touche à AUCUN onglet existant.
             ui.post(this::refreshAllTabsMediaStatus);
             return;
         }
@@ -3580,7 +3596,7 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
         final int fNode = node;
         final String fSerial = serial;
 
-        // 4) créer/activer un tab pour ce transport (même registre) + focus
+        // 2) créer/activer un tab pour ce transport (registre réellement sondé) + focus
         ui.post(() -> {
             try {
                 upsertRegisterTabFromScan(tk, fNode, 255, fSerial, true);
