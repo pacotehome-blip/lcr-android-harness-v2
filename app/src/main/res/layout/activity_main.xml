@@ -685,11 +685,39 @@
                     android:padding="6dp"
                     android:background="#0B6623">
 
+                    <!-- Node (optionnel : si rempli, connexion directe à ce node, pas de détection auto) -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Node :"
+                            android:textSize="14sp"
+                            android:textColor="#FFFFFF"
+                            android:layout_marginEnd="6dp"/>
+
+                        <EditText
+                            android:id="@+id/edtTcpNode"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:inputType="number"
+                            android:hint="Node (1..250)"
+                            android:textSize="14sp"
+                            android:textColor="#FFFFFF"
+                            android:textColorHint="#CCFFFFFF"/>
+                    </LinearLayout>
+
                     <!-- Adresse IP : 4 cases par octet, comme un champ IP classique -->
                     <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:orientation="horizontal"
+                        android:layout_marginTop="6dp"
                         android:gravity="center_vertical">
 
                         <EditText
@@ -701,6 +729,7 @@
                             android:gravity="center"
                             android:inputType="number"
                             android:hint="xxx"
+                            android:textSize="14sp"
                             android:textColor="#FFFFFF"
                             android:textColorHint="#CCFFFFFF"/>
 
@@ -722,6 +751,7 @@
                             android:gravity="center"
                             android:inputType="number"
                             android:hint="xxx"
+                            android:textSize="14sp"
                             android:textColor="#FFFFFF"
                             android:textColorHint="#CCFFFFFF"/>
 
@@ -743,6 +773,7 @@
                             android:gravity="center"
                             android:inputType="number"
                             android:hint="xxx"
+                            android:textSize="14sp"
                             android:textColor="#FFFFFF"
                             android:textColorHint="#CCFFFFFF"/>
 
@@ -764,6 +795,7 @@
                             android:gravity="center"
                             android:inputType="number"
                             android:hint="xxx"
+                            android:textSize="14sp"
                             android:textColor="#FFFFFF"
                             android:textColorHint="#CCFFFFFF"/>
                     </LinearLayout>
@@ -791,6 +823,7 @@
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:text="Port :"
+                            android:textSize="14sp"
                             android:textColor="#FFFFFF"
                             android:layout_marginEnd="6dp"/>
 
@@ -802,6 +835,7 @@
                             android:hint="Port"
                             android:text="5002"
                             android:inputType="number"
+                            android:textSize="14sp"
                             android:textColor="#FFFFFF"
                             android:textColorHint="#CCFFFFFF"/>
 
