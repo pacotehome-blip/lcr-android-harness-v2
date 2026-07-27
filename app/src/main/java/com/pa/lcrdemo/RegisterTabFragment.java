@@ -651,7 +651,8 @@ public class RegisterTabFragment extends Fragment {
                 attemptAttachIfPossible(false);
             } else if (UsbReceiver.ACTION_USB_DETACHED.equals(a)) {
                 try {
-                    if (tabTransportKey != null && tabTransportKey.toUpperCase(Locale.ROOT).startsWith("BT:")) {
+                    if (tabTransportKey != null && (tabTransportKey.toUpperCase(Locale.ROOT).startsWith("BT:")
+                            || tabTransportKey.toUpperCase(Locale.ROOT).startsWith("TCP:"))) {
                         LogBus.api(node, "USB detached ignored (TAB sur " + tabTransportKey + ")");
                         return;
                     }
@@ -687,7 +688,7 @@ public class RegisterTabFragment extends Fragment {
             if (transportFromArgs != null && !transportFromArgs.trim().isEmpty()) {
                 tabTransportKey = transportFromArgs.trim();
                 String up = tabTransportKey.toUpperCase(Locale.ROOT);
-                tabMediaShort = up.startsWith("BT:") ? "BT" : (up.startsWith("USB") ? "USB" : tabMediaShort);
+                tabMediaShort = up.startsWith("BT:") ? "BT" : (up.startsWith("USB") ? "USB" : (up.startsWith("TCP:") ? "TCP" : tabMediaShort));
             }
         }
         usbManager = (UsbManager) context.getSystemService(Context.USB_SERVICE);

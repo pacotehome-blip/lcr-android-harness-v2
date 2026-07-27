@@ -308,11 +308,15 @@ public final class RegisterSessionManager {
                 android.util.Log.w("RSM", "probeAndIdentify exception: " + probeEx.getMessage());
             }
         } else {
-            // Sur UI thread — vérifier si le transport est BT (LC3 probable)
-            // Si oui, forcer isLc3=true si le key contient "BT:" et qu'on a un serial LC3 connu
+            // Sur UI thread — vérifier si le transport est BT ou TCP (LC3 probable)
+            // Si oui, forcer isLc3=true si le key contient "BT:"/"TCP:" et qu'on a
+            // un serial LC3 connu (pré-enregistré via markAsLc3Transport).
+            // ✅ FIX : "tcp:" ajouté — sans ça, un registre LC3 branché en TCP
+            // (N-Port raw) était toujours traité comme LCR-II générique sur le
+            // thread UI, faussant la lecture NET/GROSS (mauvaise sous-classe Link).
             String tkLower = tk.toLowerCase(java.util.Locale.ROOT);
-            if (tkLower.startsWith("bt:") && knownLc3TransportKeys.containsKey(tk)) {
-                android.util.Log.i("RSM", "UI thread: transport BT LC3 connu → assumé LC3");
+            if ((tkLower.startsWith("bt:") || tkLower.startsWith("tcp:")) && knownLc3TransportKeys.containsKey(tk)) {
+                android.util.Log.i("RSM", "UI thread: transport BT/TCP LC3 connu → assumé LC3");
 
                 // Chercher serial dans expectedSerialByNode ou pinnedTransportByRegKey
                 // Chercher serial dans la map LC3 d'abord, puis expectedSerialByNode
