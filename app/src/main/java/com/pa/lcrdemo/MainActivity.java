@@ -233,6 +233,7 @@ public class MainActivity extends AppCompatActivity {
     private Spinner spnUsbDevices;
     private Button btnScanUsb;
     private Button btnPingUsb;
+    private Button btnQuit;
     private TextView txtActiveNode;
     // ===================== Scan registres (exec) =====================
     private final ExecutorService scanExec = Executors.newSingleThreadExecutor();
@@ -730,6 +731,7 @@ public class MainActivity extends AppCompatActivity {
 
         btnScanUsb = findViewById(R.id.btnScanUsb);
         btnPingUsb = findViewById(R.id.btnPingUsb);
+        btnQuit = findViewById(R.id.btnQuit);
         spnUsbDevices = findViewById(R.id.spnUsbDevices);
 txtActiveNode = findViewById(R.id.txtActiveNode);
 tabRegisters = findViewById(R.id.tabRegisters);
@@ -815,6 +817,7 @@ ensureRegisterTab(250, 255, true);
     private void wireUi() {
         if (btnScanUsb != null) btnScanUsb.setOnClickListener(v -> scanUsb());
         if (btnPingUsb != null) btnPingUsb.setOnClickListener(v -> openSelectedUsb());
+        if (btnQuit != null) btnQuit.setOnClickListener(v -> confirmQuit());
 
         // Tabs registres
         if (tabRegisters != null) {
@@ -2070,6 +2073,34 @@ private void scanUsb() {
             refreshApiStatus();
             toast("API start error: " + safeMsg(e));
         }
+    }
+
+    // ✅ Quit — bouton header (haut droit). Confirme avant de fermer car
+    // l'APK tourne normalement en continu sur les tablettes camion
+    // (LcrBootReceiver la relance au boot) : une fermeture accidentelle
+    // interromprait le service HTTP local utilisé par Field Service Mobile.
+    private void confirmQuit() {
+        new androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Quitter l'application")
+            .setMessage("Fermer Filgo Registre ? Le service local (API/Field Service) sera arrêté.")
+            .setPositiveButton("Quitter", (dialog, which) -> quitApp())
+            .setNegativeButton("Annuler", null)
+            .show();
+    }
+
+    private void quitApp() {
+        try { stopApiServer("Quit button"); } catch (Exception ignored) {}
+        try {
+            android.content.Intent svcIntent = new android.content.Intent(this, LcrHttpService.class);
+            stopService(svcIntent);
+        } catch (Exception ignored) {}
+        try { UsbSession.clear(); } catch (Exception ignored) {}
+        try {
+            if (mediaTransportManager != null) mediaTransportManager.clearActiveIfMatches(
+                mediaTransportManager.getActiveKey());
+        } catch (Exception ignored) {}
+        finishAffinity();
+        android.os.Process.killProcess(android.os.Process.myPid());
     }
 
     private void stopApiServer(String reason) {

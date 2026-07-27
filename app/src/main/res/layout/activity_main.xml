@@ -24,12 +24,26 @@
 
         <TextView
             android:id="@+id/txtHeaderLivraison"
-            android:layout_width="wrap_content"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
+            android:layout_weight="1"
             android:layout_marginStart="10dp"
             android:text="Livraison"
             android:textStyle="bold"
             android:textSize="20sp" />
+
+        <Button
+            android:id="@+id/btnQuit"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="8dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            android:text="Quit"
+            android:textColor="#FFFFFF"
+            android:backgroundTint="#CC2222" />
     </LinearLayout>
 
     <com.google.android.material.tabs.TabLayout
