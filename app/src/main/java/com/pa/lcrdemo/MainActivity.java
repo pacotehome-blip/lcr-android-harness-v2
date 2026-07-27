@@ -125,6 +125,7 @@ public class MainActivity extends AppCompatActivity {
     private TextView txtBtRegsFound;
     private Button btnScanWifiRegs;
     private TextView txtWifiRegsFound;
+    private android.widget.LinearLayout containerKnownTcp;
     private android.widget.EditText edtTcpIp;
     private android.widget.EditText edtTcpPort;
     private Button btnTcpConnect;
@@ -467,6 +468,7 @@ public class MainActivity extends AppCompatActivity {
 
         bindUi();
         wireUi();
+        refreshKnownTcpList();
         initUiDefaults();
         setupTabsTop();
 
@@ -777,6 +779,7 @@ tabRegisters = findViewById(R.id.tabRegisters);
         txtBtRegsFound = findViewById(R.id.txtBtRegsFound);
         btnScanWifiRegs = findViewById(R.id.btnScanWifiRegs);
         txtWifiRegsFound = findViewById(R.id.txtWifiRegsFound);
+        containerKnownTcp = findViewById(R.id.containerKnownTcp);
         edtTcpIp = findViewById(R.id.edtTcpIp);
         edtTcpPort = findViewById(R.id.edtTcpPort);
         btnTcpConnect = findViewById(R.id.btnTcpConnect);
@@ -1570,20 +1573,26 @@ private void setupTabsTop() {
             toast("TCP: port invalide");
             return;
         }
-        if (txtTcpStatus != null) txtTcpStatus.setText("Statut : connexion en cours...");
+        connectTcpTo(ip, port);
+    }
 
-        final int portFinal = port;
+    // ✅ Connexion TCP réutilisable — appelée par la saisie manuelle ET par
+    // le bouton Connect de chaque ligne de la liste des N-Port connus.
+    private void connectTcpTo(final String ip, final int port) {
+        if (txtTcpStatus != null) txtTcpStatus.setText("Statut : connexion en cours vers " + ip + ":" + port + "...");
+
         scanExec.execute(() -> {
             com.pa.lcr.lcp.api.WifiRegisterScanController ctl =
                     new com.pa.lcr.lcp.api.WifiRegisterScanController(this, mediaTransportManager);
-            com.pa.lcr.lcp.ApiResult r = ctl.connectManual(ip, portFinal);
+            com.pa.lcr.lcp.ApiResult r = ctl.connectManual(ip, port);
             runOnUiThread(() -> {
                 if (txtTcpStatus != null) txtTcpStatus.setText("Statut : " + r.msg);
                 toast(r.msg);
+                refreshKnownTcpList();
             });
             if (r.code == 1) {
                 try {
-                    String key = MediaTransportManager.tcpKey(ip, portFinal);
+                    String key = MediaTransportManager.tcpKey(ip, port);
                     TransportIo io = mediaTransportManager.getByKey(key);
                     if (io != null && io.isOpen()) {
                         scanRegistersWithIo(io, key, txtWifiRegsFound);
@@ -1609,6 +1618,7 @@ private void setupTabsTop() {
                 if (txtWifiRegsFound != null) txtWifiRegsFound.setText(r.msg);
                 if (btnScanWifiRegs != null) btnScanWifiRegs.setEnabled(true);
                 toast(r.msg);
+                refreshKnownTcpList();
             });
 
             // Identification des nodes sur chaque transport TCP découvert
@@ -1625,6 +1635,76 @@ private void setupTabsTop() {
                 } catch (Exception ignored) {}
             }
         });
+    }
+
+    // ✅ Reconstruit la liste des N-Port connus (containerKnownTcp) — même
+    // principe que les "appareils appairés" BT : une ligne par appareil déjà
+    // vu, avec son propre bouton Connect, pour éviter de retaper l'IP.
+    private void refreshKnownTcpList() {
+        if (containerKnownTcp == null) return;
+        scanExec.execute(() -> {
+            org.json.JSONArray known;
+            try {
+                com.pa.lcr.lcp.storage.KnownTcpDeviceStore store =
+                        new com.pa.lcr.lcp.storage.KnownTcpDeviceStore(this);
+                known = store.listKnown();
+            } catch (Exception e) {
+                known = new org.json.JSONArray();
+            }
+            final org.json.JSONArray knownFinal = known;
+            runOnUiThread(() -> buildKnownTcpRows(knownFinal));
+        });
+    }
+
+    private void buildKnownTcpRows(org.json.JSONArray known) {
+        if (containerKnownTcp == null) return;
+        containerKnownTcp.removeAllViews();
+
+        if (known == null || known.length() == 0) {
+            TextView empty = new TextView(this);
+            empty.setText("(aucun N-Port mémorisé pour l'instant)");
+            empty.setTextSize(11f);
+            empty.setTextColor(0xFF888888);
+            containerKnownTcp.addView(empty);
+            return;
+        }
+
+        for (int i = 0; i < known.length(); i++) {
+            try {
+                org.json.JSONObject o = known.getJSONObject(i);
+                final String ip = o.getString("ip");
+                final int port = o.getInt("port");
+                String serialId = o.isNull("serial_id") ? null : o.optString("serial_id", null);
+
+                android.widget.LinearLayout row = new android.widget.LinearLayout(this);
+                row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+                row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+                int padPx = (int) (6 * getResources().getDisplayMetrics().density);
+                row.setPadding(padPx, padPx, padPx, padPx);
+                row.setBackgroundColor(0xFF0B3D2E); // même vert foncé que les boutons remplis
+
+                TextView label = new TextView(this);
+                String txt = ip + ":" + port + (serialId != null ? "  (#" + serialId + ")" : "");
+                label.setText(txt);
+                label.setTextColor(0xFFFFFFFF);
+                label.setTextSize(12f);
+                android.widget.LinearLayout.LayoutParams lp = new android.widget.LinearLayout.LayoutParams(
+                        0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+                row.addView(label, lp);
+
+                Button btn = new Button(this);
+                btn.setText("Connect");
+                btn.setTextColor(0xFFFFFFFF);
+                btn.setOnClickListener(v -> connectTcpTo(ip, port));
+                row.addView(btn);
+
+                android.widget.LinearLayout.LayoutParams rowLp = new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
+                rowLp.setMargins(0, 0, 0, (int) (4 * getResources().getDisplayMetrics().density));
+                containerKnownTcp.addView(row, rowLp);
+            } catch (Exception ignored) {}
+        }
     }
 
     private void scanRegistersBtOnlyLegacy() {

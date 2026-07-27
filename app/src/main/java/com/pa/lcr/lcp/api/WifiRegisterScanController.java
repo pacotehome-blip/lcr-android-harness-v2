@@ -4,6 +4,7 @@ import android.content.Context;
 import android.net.wifi.WifiManager;
 
 import com.pa.lcr.lcp.ApiResult;
+import com.pa.lcr.lcp.storage.KnownTcpDeviceStore;
 import com.pa.lcr.lcp.transport.MediaTransportManager;
 
 import org.json.JSONArray;
@@ -33,8 +34,7 @@ import java.util.concurrent.TimeUnit;
  * ensuite le bouton "Scan registres" existant (RegisterScanController.scan(),
  * déjà générique à tous les transports READY) qui identifie les vrais nodes
  * LCR-II/LC3 dessus. Ce fichier ne fait QUE l'ouverture réseau, jamais de LCP.
- */
-/**
+ *
  * ✅ Compatibilité Android 9-15 (API 28-35) :
  * Détection à l'exécution via Build.VERSION.SDK_INT — voir getLocalWifiIp() qui
  * bascule entre WifiManager (API<31) et ConnectivityManager (API>=31, chemin
@@ -46,17 +46,25 @@ public final class WifiRegisterScanController {
     /** Port raw TCP par défaut d'un Moxa N-Port en mode "TCP Server / raw data". */
     public static final int DEFAULT_RAW_PORT = 4001;
 
-    private static final int CONNECT_TIMEOUT_MS = 250;   // par hôte, pendant le scan subnet
+    // ✅ 250ms était trop agressif en conditions réelles (Wi-Fi camion, hôtes
+    // qui ne répondent pas par un RST immédiat mais un silence — nécessite
+    // d'attendre le plein timeout pour conclure "fermé"). Porté à 600ms/hôte.
+    private static final int CONNECT_TIMEOUT_MS = 600;    // par hôte, pendant le scan subnet
     private static final int MANUAL_CONNECT_TIMEOUT_MS = 3000;
     private static final int SCAN_THREAD_POOL = 32;
+    private static final int SCAN_TOTAL_BUDGET_SEC = 45;  // marge large (254 hôtes / 32 threads / 600ms ≈ 5-6s réel)
 
     private final Context appCtx;
     private final MediaTransportManager mediaMgr;
+    private final KnownTcpDeviceStore knownStore;
 
     public WifiRegisterScanController(Context ctx, MediaTransportManager mediaMgr) {
         this.appCtx = ctx.getApplicationContext();
         this.mediaMgr = mediaMgr;
+        this.knownStore = new KnownTcpDeviceStore(this.appCtx);
     }
+
+    public KnownTcpDeviceStore getKnownStore() { return knownStore; }
 
     // =========================================================
     // 1) Connexion manuelle
@@ -82,6 +90,9 @@ public final class WifiRegisterScanController {
                     "TCP manuel " + ip + ":" + port
             );
 
+            // ✅ Mémorisation — équivalent "appairage" BT pour un N-Port
+            try { knownStore.upsertSeen(ip, port, "N-Port " + ip, null, null); } catch (Exception ignored) {}
+
             JSONObject data = new JSONObject();
             data.put("ip", ip);
             data.put("port", port);
@@ -105,14 +116,14 @@ public final class WifiRegisterScanController {
         String localIp = getLocalWifiIp();
         if (localIp == null) {
             return ApiResult.fail(
-                    "TCP_SCAN: 0 - IP Wi-Fi locale introuvable (Wi-Fi désactivé ?).",
+                    "TCP_SCAN: 0 - IP Wi-Fi locale introuvable (Wi-Fi désactivé ? ou tablette hors Wi-Fi).",
                     "ERR_TCP_NO_WIFI"
             );
         }
 
         String subnetBase = subnetBase24(localIp);
         if (subnetBase == null) {
-            return ApiResult.fail("TCP_SCAN: 0 - sous-réseau introuvable.", "ERR_TCP_NO_SUBNET");
+            return ApiResult.fail("TCP_SCAN: 0 - sous-réseau introuvable (IP locale: " + localIp + ").", "ERR_TCP_NO_SUBNET");
         }
 
         final List<String> found = new ArrayList<>();
@@ -134,6 +145,8 @@ public final class WifiRegisterScanController {
                             ip, port,
                             "TCP scan " + ip + ":" + port
                     );
+                    // ✅ Mémorisation automatique de tout hôte trouvé par le scan
+                    try { knownStore.upsertSeen(ip, port, "N-Port " + ip, null, null); } catch (Exception ignored) {}
                 } catch (Exception ignored) {
                     // hôte absent / port fermé / timeout — normal pour la grande majorité des 254 IP
                 } finally {
@@ -142,14 +155,16 @@ public final class WifiRegisterScanController {
             });
         }
 
-        try { latch.await(30, TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
+        try { latch.await(SCAN_TOTAL_BUDGET_SEC, TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
         pool.shutdownNow();
+
 
         JSONArray arr = new JSONArray();
         for (String ip : found) arr.put(ip);
 
         JSONObject data = new JSONObject();
         try {
+            data.put("localIp", localIp);
             data.put("subnet", subnetBase + ".0/24");
             data.put("port", port);
             data.put("found", arr);
@@ -157,7 +172,7 @@ public final class WifiRegisterScanController {
         } catch (Exception ignored) {}
 
         return ApiResult.ok(
-                "TCP_SCAN_DONE: " + found.size() + " hôte(s) avec le port " + port + " ouvert sur " + subnetBase + ".0/24",
+                "TCP_SCAN_DONE (tablette=" + localIp + "): " + found.size() + " hôte(s) avec le port " + port + " ouvert sur " + subnetBase + ".0/24",
                 data
         );
     }

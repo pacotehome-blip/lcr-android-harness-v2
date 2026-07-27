@@ -26,7 +26,8 @@ public class DeliveryDb extends SQLiteOpenHelper {
     // v9: add register_products table
     // v10: add is_propane, lcr_node to register_products
     // v11: add missing columns to bt_signal (mac, rssi_quality, source, io_errors, io_timeouts, io_latency_avg_ms)
-    public static final int DB_VERSION = 11;
+    // v12: add known_tcp_device table (N-Port TCP mémorisés, équivalent BT paired pour raw TCP)
+    public static final int DB_VERSION = 12;
 
     private static final String TAG = "DeliveryDb";
 
@@ -58,6 +59,7 @@ public class DeliveryDb extends SQLiteOpenHelper {
         createActiveDeliveryTable(db);
         createBtSignalTable(db);
         createRegisterProductsTable(db);
+        createKnownTcpDeviceTable(db);
     }
 
     @Override
@@ -118,6 +120,9 @@ public class DeliveryDb extends SQLiteOpenHelper {
             addColumnIfMissing(db, "bt_signal", "io_timeouts",       "INTEGER");
             addColumnIfMissing(db, "bt_signal", "io_latency_avg_ms", "INTEGER");
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_bt_signal_mac ON bt_signal(mac, ts_ms);");
+        }
+        if (oldVersion < 12) {
+            createKnownTcpDeviceTable(db);
         }
     }
 
@@ -340,6 +345,29 @@ public class DeliveryDb extends SQLiteOpenHelper {
         );
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_rp_sync ON register_products(sync_status);");
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_rp_serial_desc ON register_products(serial_id, description);");
+    }
+
+    /**
+     * ✅ known_tcp_device — équivalent "appareils appairés" pour raw TCP (N-Port).
+     * Contrairement au Bluetooth, il n'existe aucun appairage niveau OS pour un
+     * N-Port : cette table est la mémoire locale de l'APK, alimentée à chaque
+     * connexion TCP réussie (manuelle ou via scan subnet), pour éviter de
+     * retaper l'IP à chaque livraison.
+     */
+    private static void createKnownTcpDeviceTable(SQLiteDatabase db) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS known_tcp_device (" +
+            "ip           TEXT    NOT NULL," +
+            "port         INTEGER NOT NULL," +
+            "label        TEXT    NOT NULL DEFAULT ''," +
+            "serial_id    TEXT," +
+            "lcr_node     INTEGER," +
+            "last_ok_ms   INTEGER NOT NULL DEFAULT 0," +
+            "created_ms   INTEGER NOT NULL DEFAULT 0," +
+            "PRIMARY KEY (ip, port)" +
+            ");"
+        );
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_ktd_last_ok ON known_tcp_device(last_ok_ms DESC);");
     }
 
     // =========================================================

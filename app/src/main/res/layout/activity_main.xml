@@ -11,7 +11,750 @@
         android:layout_height="wrap_content"
         android:orientation="horizontal"
         android:gravity="center_vertical"
+        android:paddingTop="6dp"<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/rootTabs"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+    <LinearLayout
+        android:id="@+id/headerFilgo"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
         android:paddingTop="6dp"
+        android:paddingBottom="6dp">
+
+        <ImageView
+            android:id="@+id/imgFilgo"
+            android:layout_width="28dp"
+            android:layout_height="28dp"
+            android:src="@mipmap/logoenergie1"
+            android:contentDescription="Filgo"
+            android:scaleType="fitCenter" />
+
+        <TextView
+            android:id="@+id/txtHeaderLivraison"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="10dp"
+            android:text="Livraison"
+            android:textStyle="bold"
+            android:textSize="20sp" />
+
+        <Button
+            android:id="@+id/btnQuit"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="8dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            android:text="Quit"
+            android:textColor="#FFFFFF"
+            android:backgroundTint="#CC2222" />
+    </LinearLayout>
+
+    <com.google.android.material.tabs.TabLayout
+        android:id="@+id/tabLayout"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        app:tabMode="fixed"
+        app:tabGravity="fill" />
+
+    <!-- PAGE MAIN -->
+    <LinearLayout
+        android:id="@+id/pageMain"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="vertical">
+
+        <LinearLayout
+            android:id="@+id/root"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:padding="6dp">
+
+            <TextView
+                android:id="@+id/txtActiveNode"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Node actif : —"
+                android:textStyle="bold"
+                android:layout_marginTop="6dp" />
+
+            <com.google.android.material.tabs.TabLayout
+                android:id="@+id/tabRegisters"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                app:tabMode="scrollable"
+                app:tabGravity="fill" />
+
+            <FrameLayout
+                android:id="@+id/registerContainer"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:layout_marginTop="6dp" />
+
+            <CheckBox
+                android:id="@+id/cbShowLog"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Afficher log global"
+                android:checked="false"
+                android:minHeight="0dp"
+                android:paddingTop="0dp"
+                android:paddingBottom="0dp" />
+
+            <LinearLayout
+                android:id="@+id/logPanel"
+                android:layout_width="match_parent"
+                android:layout_height="180dp"
+                android:orientation="vertical"
+                android:layout_marginTop="4dp"
+                android:visibility="gone">
+
+                <ScrollView
+                    android:id="@+id/logScroll"
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1"
+                    android:fillViewport="true"
+                    android:background="#111111">
+
+                    <TextView
+                        android:id="@+id/txtLog"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:typeface="monospace"
+                        android:textIsSelectable="true"
+                        android:textSize="12sp"
+                        android:textColor="#00FF00"
+                        android:padding="6dp" />
+                </ScrollView>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="end">
+
+                    <Button
+                        android:id="@+id/btnClearLog"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Clear log" />
+
+                    <Button
+                        android:id="@+id/btnCopyLog"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:text="Copy log" />
+
+                    <Button
+                        android:id="@+id/btnScrollDown"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:text="Scroll down" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:layout_marginTop="2dp">
+
+                    <CheckBox
+                        android:id="@+id/cbTxRx"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Afficher TX / RX"
+                        android:checked="false"
+                        android:minHeight="0dp"
+                        android:paddingTop="0dp"
+                        android:paddingBottom="0dp" />
+
+                    <CheckBox
+                        android:id="@+id/cbLogTs"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="12dp"
+                        android:text="Timestamps UI + IO + API"
+                        android:checked="false"
+                        android:minHeight="0dp"
+                        android:paddingTop="0dp"
+                        android:paddingBottom="0dp" />
+                </LinearLayout>
+
+            </LinearLayout>
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- PAGE API -->
+    <LinearLayout
+        android:id="@+id/pageApiFace"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <Button
+            android:id="@+id/btnDbBackup"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Backup DB (Downloads)"
+            android:layout_margin="8dp" />
+
+        <include
+            layout="@layout/fragment_api_face"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+    </LinearLayout>
+
+    <!-- PAGE CONFIGURE -->
+    <LinearLayout
+        android:id="@+id/pageConfigure"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <ScrollView
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:fillViewport="true">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="10dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Configure"
+                        android:textStyle="bold"
+                        android:textSize="18sp"/>
+
+                    <LinearLayout
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:gravity="end">
+
+                        <TextView
+                            android:id="@+id/txtMediaActive"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Média : —"
+                            android:textSize="12sp"
+                            android:textStyle="bold"/>
+
+                        <TextView
+                            android:id="@+id/txtNodesActive"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Nodes : —"
+                            android:textSize="12sp"/>
+                    </LinearLayout>
+                </LinearLayout>
+
+                <!-- USB -->
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="USB"
+                    android:textStyle="bold"/>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:layout_marginTop="4dp">
+
+                    <Button
+                        android:id="@+id/btnScanUsb"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Scan USB (devices)"/>
+
+                    <Button
+                        android:id="@+id/btnPingUsb"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:layout_marginStart="8dp"
+                        android:text="Ouvrir/Ping USB"/>
+                </LinearLayout>
+
+                <Spinner
+                    android:id="@+id/spnUsbDevices"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"/>
+
+                <Button
+                    android:id="@+id/btnScanUsbRegs"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="Scan registres USB (1..250)"/>
+
+                <ScrollView
+                    android:id="@+id/scrollUsbRegsFound"
+                    android:layout_width="match_parent"
+                    android:layout_height="140dp"
+                    android:layout_marginTop="4dp"
+                    android:fillViewport="true"
+                    android:background="#111111">
+
+                    <TextView
+                        android:id="@+id/txtUsbRegsFound"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:padding="6dp"
+                        android:typeface="monospace"
+                        android:textColor="#00FF00"
+                        android:textSize="12sp"
+                        android:text="—"/>
+                </ScrollView>
+
+                <!-- USB: Ajout manuel (max 2 registres) -->
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="USB — Ajout manuel (max 2 registres)"
+                    android:textColor="#FFFFFF"
+                    android:textStyle="bold"
+                    android:textSize="13sp"/>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:layout_marginTop="4dp"
+                    android:padding="6dp"
+                    android:background="#0B6623">
+
+                    <!-- Slot 1 -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical">
+
+                        <EditText
+                            android:id="@+id/edtUsbNode1"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:inputType="number"
+                            android:hint="Node (1..250)"
+                            android:textSize="14sp"
+                            android:textColor="#FFFFFF"
+                            android:textColorHint="#CCFFFFFF"/>
+
+                        <Button
+                            android:id="@+id/btnUsbConnect1"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="8dp"
+                            android:text="Connect"
+                            android:textColor="#FFFFFF"/>
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/txtUsbSerial1"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:typeface="monospace"
+                        android:textColor="#FFFFFF"
+                        android:textSize="12sp"
+                        android:text="#Série : —"/>
+
+                    <View
+                        android:layout_width="match_parent"
+                        android:layout_height="6dp"/>
+
+                    <!-- Slot 2 -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical">
+
+                        <EditText
+                            android:id="@+id/edtUsbNode2"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:inputType="number"
+                            android:hint="Node (1..250)"
+                            android:textSize="14sp"
+                            android:textColor="#FFFFFF"
+                            android:textColorHint="#CCFFFFFF"/>
+
+                        <Button
+                            android:id="@+id/btnUsbConnect2"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="8dp"
+                            android:text="Connect"
+                            android:textColor="#FFFFFF"/>
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/txtUsbSerial2"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:typeface="monospace"
+                        android:textColor="#FFFFFF"
+                        android:textSize="12sp"
+                        android:text="#Série : —"/>
+
+                </LinearLayout>
+
+                <!-- BT -->
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="14dp"
+                    android:text="Bluetooth (appareils appairés)"
+                    android:textStyle="bold"/>
+
+                <Spinner
+                    android:id="@+id/spnBtBonded"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"/>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:layout_marginTop="6dp">
+
+                    <Button
+                        android:id="@+id/btnBtRefresh"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Refresh"/>
+
+                    <Button
+                        android:id="@+id/btnBtConnect"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:layout_marginStart="8dp"
+                        android:text="Connect"/>
+
+                    <Button
+                        android:id="@+id/btnBtDisconnect"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:layout_marginStart="8dp"
+                        android:text="Disconnect"/>
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/txtBtStatus"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="BT : —"
+                    android:textSize="12sp"/>
+
+                <!-- ✅ BT Signal RSSI -->
+                <Button
+                    android:id="@+id/btnBtSignalScan"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="Scan Signal RSSI BT"/>
+
+                <TextView
+                    android:id="@+id/txtBtSignalResult"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:typeface="monospace"
+                    android:textSize="12sp"
+                    android:text="—"/>
+
+                <Button
+                    android:id="@+id/btnScanBtRegs"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="Scan registres BT (1..250)"/>
+
+                <ScrollView
+                    android:id="@+id/scrollBtRegsFound"
+                    android:layout_width="match_parent"
+                    android:layout_height="140dp"
+                    android:layout_marginTop="4dp"
+                    android:fillViewport="true"
+                    android:background="#111111">
+
+                    <TextView
+                        android:id="@+id/txtBtRegsFound"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:padding="6dp"
+                        android:typeface="monospace"
+                        android:textColor="#00FF00"
+                        android:textSize="12sp"
+                        android:text="—"/>
+                </ScrollView>
+
+                <!-- BT: Ajout manuel (max 2 registres) -->
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="BT — Ajout manuel (max 2 registres)"
+                    android:textColor="#FFFFFF"
+                    android:textStyle="bold"
+                    android:textSize="13sp"/>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:layout_marginTop="4dp"
+                    android:padding="6dp"
+                    android:background="#0B6623">
+
+                    <!-- Slot 1 -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical">
+
+                        <EditText
+                            android:id="@+id/edtBtNode1"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:inputType="number"
+                            android:hint="Node (1..250)"
+                            android:textSize="14sp"
+                            android:textColor="#FFFFFF"
+                            android:textColorHint="#CCFFFFFF"/>
+
+                        <Button
+                            android:id="@+id/btnBtConnect1"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="8dp"
+                            android:text="Connect"
+                            android:textColor="#FFFFFF"/>
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/txtBtSerial1"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:typeface="monospace"
+                        android:textColor="#FFFFFF"
+                        android:textSize="12sp"
+                        android:text="#Série : —"/>
+
+                    <View
+                        android:layout_width="match_parent"
+                        android:layout_height="6dp"/>
+
+                    <!-- Slot 2 -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical">
+
+                        <EditText
+                            android:id="@+id/edtBtNode2"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:inputType="number"
+                            android:hint="Node (1..250)"
+                            android:textSize="14sp"
+                            android:textColor="#FFFFFF"
+                            android:textColorHint="#CCFFFFFF"/>
+
+                        <Button
+                            android:id="@+id/btnBtConnect2"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="8dp"
+                            android:text="Connect"
+                            android:textColor="#FFFFFF"/>
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/txtBtSerial2"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:typeface="monospace"
+                        android:textColor="#FFFFFF"
+                        android:textSize="12sp"
+                        android:text="#Série : —"/>
+
+                </LinearLayout>
+
+                <!-- Wi-Fi -->
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="14dp"
+                    android:text="Wi‑Fi"
+                    android:textStyle="bold"/>
+
+                <Button
+                    android:id="@+id/btnScanWifiRegs"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:enabled="true"
+                    android:text="Scan registres Wi‑Fi (1..254, port 4001)"/>
+
+                <ScrollView
+                    android:id="@+id/scrollWifiRegsFound"
+                    android:layout_width="match_parent"
+                    android:layout_height="120dp"
+                    android:layout_marginTop="4dp"
+                    android:fillViewport="true"
+                    android:background="#111111">
+
+                    <TextView
+                        android:id="@+id/txtWifiRegsFound"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:padding="6dp"
+                        android:typeface="monospace"
+                        android:textColor="#00FF00"
+                        android:textSize="12sp"
+                        android:text="(aucun scan effectué)"/>
+                </ScrollView>
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="TCP — N-Port connus (mémorisés)"
+                    android:textStyle="bold"
+                    android:textSize="12sp"/>
+
+                <LinearLayout
+                    android:id="@+id/containerKnownTcp"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"/>
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="TCP — Ajouter un N-Port (raw passthrough)"
+                    android:textStyle="bold"
+                    android:textSize="12sp"/>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:background="@drawable/bg_panel_filgo_energie"
+                    android:padding="8dp"
+                    android:layout_marginTop="4dp">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical">
+
+                        <EditText
+                            android:id="@+id/edtTcpIp"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="2"
+                            android:hint="IP (ex: 192.168.1.50)"
+                            android:inputType="text"
+                            android:textColor="#FFFFFF"
+                            android:textColorHint="#CCFFFFFF"/>
+
+                        <EditText
+                            android:id="@+id/edtTcpPort"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:layout_marginStart="6dp"
+                            android:hint="Port"
+                            android:text="4001"
+                            android:inputType="number"
+                            android:textColor="#FFFFFF"
+                            android:textColorHint="#CCFFFFFF"/>
+
+                        <Button
+                            android:id="@+id/btnTcpConnect"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="8dp"
+                            android:text="Connect"
+                            android:textColor="#FFFFFF"/>
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/txtTcpStatus"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:typeface="monospace"
+                        android:textColor="#FFFFFF"
+                        android:textSize="12sp"
+                        android:text="Statut : —"/>
+
+                </LinearLayout>
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="16dp"/>
+            </LinearLayout>
+        </ScrollView>
+    </LinearLayout>
+
+</LinearLayout>
         android:paddingBottom="6dp">
 
         <ImageView
