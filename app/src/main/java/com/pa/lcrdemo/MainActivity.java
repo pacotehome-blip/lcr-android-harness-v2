@@ -126,7 +126,8 @@ public class MainActivity extends AppCompatActivity {
     private Button btnScanWifiRegs;
     private TextView txtWifiRegsFound;
     private android.widget.LinearLayout containerKnownTcp;
-    private android.widget.EditText edtTcpIp;
+    private android.widget.EditText edtTcpOctet1, edtTcpOctet2, edtTcpOctet3, edtTcpOctet4;
+    private TextView txtTcpSubnetDetected;
     private android.widget.EditText edtTcpPort;
     private Button btnTcpConnect;
     private TextView txtTcpStatus;
@@ -469,6 +470,7 @@ public class MainActivity extends AppCompatActivity {
         bindUi();
         wireUi();
         refreshKnownTcpList();
+        refreshDetectedSubnet();
         initUiDefaults();
         setupTabsTop();
 
@@ -780,7 +782,11 @@ tabRegisters = findViewById(R.id.tabRegisters);
         btnScanWifiRegs = findViewById(R.id.btnScanWifiRegs);
         txtWifiRegsFound = findViewById(R.id.txtWifiRegsFound);
         containerKnownTcp = findViewById(R.id.containerKnownTcp);
-        edtTcpIp = findViewById(R.id.edtTcpIp);
+        edtTcpOctet1 = findViewById(R.id.edtTcpOctet1);
+        edtTcpOctet2 = findViewById(R.id.edtTcpOctet2);
+        edtTcpOctet3 = findViewById(R.id.edtTcpOctet3);
+        edtTcpOctet4 = findViewById(R.id.edtTcpOctet4);
+        txtTcpSubnetDetected = findViewById(R.id.txtTcpSubnetDetected);
         edtTcpPort = findViewById(R.id.edtTcpPort);
         btnTcpConnect = findViewById(R.id.btnTcpConnect);
         txtTcpStatus = findViewById(R.id.txtTcpStatus);
@@ -1555,15 +1561,21 @@ private void setupTabsTop() {
         }
     }
 
-    // ✅ TCP (N-Port raw passthrough) — connexion manuelle IP:port
-    // saisie par le chauffeur/technicien, puis identification des nodes
-    // avec le même scanRegistersWithIo(...) que USB/BT (réutilisé tel quel).
+    // ✅ TCP (N-Port raw passthrough) — connexion manuelle via 4 cases d'octets
+    // IP (xxx.xxx.xxx.xxx), même style visuel vert que BT/USB.
     private void connectTcpManual() {
-        String ip = (edtTcpIp != null && edtTcpIp.getText() != null)
-                ? edtTcpIp.getText().toString().trim() : "";
+        String o1 = readOctet(edtTcpOctet1);
+        String o2 = readOctet(edtTcpOctet2);
+        String o3 = readOctet(edtTcpOctet3);
+        String o4 = readOctet(edtTcpOctet4);
+        if (o1 == null || o2 == null || o3 == null || o4 == null) {
+            toast("TCP: adresse IP incomplète (4 cases requises)");
+            return;
+        }
+        String ip = o1 + "." + o2 + "." + o3 + "." + o4;
+
         String portStr = (edtTcpPort != null && edtTcpPort.getText() != null)
                 ? edtTcpPort.getText().toString().trim() : "";
-        if (ip.isEmpty()) { toast("TCP: IP requise"); return; }
         int port;
         try {
             port = portStr.isEmpty()
@@ -1574,6 +1586,20 @@ private void setupTabsTop() {
             return;
         }
         connectTcpTo(ip, port);
+    }
+
+    // ✅ Lit un octet IP (0-255) depuis une case, ou null si vide/invalide.
+    private String readOctet(android.widget.EditText edt) {
+        if (edt == null || edt.getText() == null) return null;
+        String s = edt.getText().toString().trim();
+        if (s.isEmpty()) return null;
+        try {
+            int v = Integer.parseInt(s);
+            if (v < 0 || v > 255) return null;
+            return String.valueOf(v);
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     // ✅ Connexion TCP réutilisable — appelée par la saisie manuelle ET par
@@ -1595,8 +1621,15 @@ private void setupTabsTop() {
                     String key = MediaTransportManager.tcpKey(ip, port);
                     TransportIo io = mediaTransportManager.getByKey(key);
                     if (io != null && io.isOpen()) {
-                        scanRegistersWithIo(io, key, txtWifiRegsFound);
-                        finalizeTcpRegisterTab(io, key);
+                        // ✅ FIX : un seul sondage LCP (plus d'appel séparé à
+                        // scanRegistersWithIo en plus) — les deux faisaient chacun
+                        // leur propre probeAndIdentify sur le MÊME socket, mis en
+                        // file sur scanExec (single-thread) : le 1er sondage
+                        // (finalize, synchrone dans cette tâche) s'exécutait avant
+                        // le 2e (scanRegistersWithIo, tâche mise en file séparément)
+                        // — redondant, et le 1er semblait s'interrompre avant la
+                        // lecture du serial. Un seul sondage suffit et finalise.
+                        finalizeTcpRegisterTab(io, key, txtWifiRegsFound);
                     }
                 } catch (Exception ignored) {}
             }
@@ -1614,24 +1647,46 @@ private void setupTabsTop() {
     // déliberée équivalente — donc on refait ici la même détection
     // (LC3 d'abord, LCR-II en fallback, exactement comme scanRegistersWithIo)
     // puis on finalise directement avec le node réel trouvé, sans deviner.
-    private void finalizeTcpRegisterTab(TransportIo io, String transportKey) {
-        if (io == null || !io.isOpen()) return;
+    //
+    // ✅ UN SEUL sondage LCP par appel (plus de scanRegistersWithIo() en double
+    // sur le même socket) — logs explicites à chaque étape pour diagnostic.
+    private void finalizeTcpRegisterTab(TransportIo io, String transportKey, TextView consoleTarget) {
+        final String TAG = "MainActivity";
+        android.util.Log.i(TAG, "finalizeTcpRegisterTab: début, transportKey=" + transportKey);
+
+        if (io == null || !io.isOpen()) {
+            android.util.Log.w(TAG, "finalizeTcpRegisterTab: transport fermé/null, abandon");
+            return;
+        }
         try {
             Lc3Link.RegisterIdentity identity = null;
-            try { identity = Lc3Link.probeAndIdentify(io); } catch (Exception ignored) {}
+            try { identity = Lc3Link.probeAndIdentify(io); } catch (Exception e) {
+                android.util.Log.w(TAG, "finalizeTcpRegisterTab: probeAndIdentify (LC3) exception: " + safeMsg(e));
+            }
 
             if (identity != null && identity.isLc3) {
                 final int node = identity.nodeId > 0 ? identity.nodeId : 250;
                 final String serial = identity.serialId;
+                android.util.Log.i(TAG, "finalizeTcpRegisterTab: LC3 détecté node=" + node + " serial=" + serial);
                 if (serial != null && !serial.trim().isEmpty()) {
+                    final String serialFinal = serial.trim();
                     ui.post(() -> {
-                        upsertRegisterTabFromScan(transportKey, node, 255, serial.trim(), true);
+                        if (consoleTarget != null) {
+                            consoleTarget.setText("LC3 trouvé — node=" + node + " serial=" + serialFinal + " (onglet créé)");
+                        }
+                        android.util.Log.i(TAG, "finalizeTcpRegisterTab: appel upsertRegisterTabFromScan(node=" + node + ", serial=" + serialFinal + ")");
+                        upsertRegisterTabFromScan(transportKey, node, 255, serialFinal, true);
                         refreshAllTabsMediaStatus();
+                        android.util.Log.i(TAG, "finalizeTcpRegisterTab: upsertRegisterTabFromScan terminé");
                     });
+                } else {
+                    android.util.Log.w(TAG, "finalizeTcpRegisterTab: LC3 identifié mais serial vide, aucun onglet créé");
+                    if (consoleTarget != null) ui.post(() -> consoleTarget.setText("LC3 détecté mais serial vide — aucun onglet créé"));
                 }
                 return;
             }
 
+            android.util.Log.i(TAG, "finalizeTcpRegisterTab: pas de LC3, boucle LCR-II (node 1..250)");
             // LCR-II — même boucle que scanRegistersWithIo, mais on s'arrête
             // au premier node valide trouvé pour finaliser l'onglet.
             for (int node = 1; node <= 250; node++) {
@@ -1641,7 +1696,11 @@ private void setupTabsTop() {
                     if (serial != null && !serial.trim().isEmpty()) {
                         final int nodeFinal = node;
                         final String serialFinal = serial.trim();
+                        android.util.Log.i(TAG, "finalizeTcpRegisterTab: LCR-II trouvé node=" + nodeFinal + " serial=" + serialFinal);
                         ui.post(() -> {
+                            if (consoleTarget != null) {
+                                consoleTarget.setText("LCR-II trouvé — node=" + nodeFinal + " serial=" + serialFinal + " (onglet créé)");
+                            }
                             upsertRegisterTabFromScan(transportKey, nodeFinal, 255, serialFinal, true);
                             refreshAllTabsMediaStatus();
                         });
@@ -1649,7 +1708,11 @@ private void setupTabsTop() {
                     }
                 } catch (Exception ignored) {}
             }
-        } catch (Exception ignored) {}
+            android.util.Log.w(TAG, "finalizeTcpRegisterTab: aucun registre LCR-II trouvé (1..250), aucun onglet créé");
+            if (consoleTarget != null) ui.post(() -> consoleTarget.setText("Aucun registre trouvé sur ce transport (1..250)"));
+        } catch (Exception e) {
+            android.util.Log.e(TAG, "finalizeTcpRegisterTab: exception globale: " + safeMsg(e));
+        }
     }
 
     // ✅ Scan réseau (subnet /24) à la recherche du port raw N-Port (4001 défaut).
@@ -1685,12 +1748,13 @@ private void setupTabsTop() {
                 if (btnScanWifiRegs != null) btnScanWifiRegs.setEnabled(true);
                 toast(r.msg);
                 refreshKnownTcpList();
+                refreshDetectedSubnet();
             });
 
             // Identification des nodes sur chaque transport TCP découvert
             // — un même socket (un même port) peut révéler PLUSIEURS registres
-            // (bus RS-485 multi-point), scanRegistersWithIo boucle déjà les
-            // nodes 1..250 sur CE transport, comme pour USB/BT.
+            // (bus RS-485 multi-point). Un seul sondage par transport
+            // (finalizeTcpRegisterTab), plus de scanRegistersWithIo() en double.
             if (mediaTransportManager != null) {
                 try {
                     for (TransportSnapshot s : mediaTransportManager.listSnapshots()) {
@@ -1699,10 +1763,7 @@ private void setupTabsTop() {
                         if (s.status == TransportStatus.DISCONNECTED || s.status == TransportStatus.ERROR) continue;
                         TransportIo io = mediaTransportManager.getByKey(s.key);
                         if (io == null || !io.isOpen()) continue;
-                        scanRegistersWithIo(io, s.key, txtWifiRegsFound);
-                        // ✅ FIX : même correctif que connectTcpTo() — finalise avec
-                        // le VRAI node détecté (LC3 ou LCR-II), jamais deviné.
-                        finalizeTcpRegisterTab(io, s.key);
+                        finalizeTcpRegisterTab(io, s.key, txtWifiRegsFound);
                     }
                 } catch (Exception ignored) {}
             }
@@ -1725,6 +1786,28 @@ private void setupTabsTop() {
             }
             final org.json.JSONArray knownFinal = known;
             runOnUiThread(() -> buildKnownTcpRows(knownFinal));
+        });
+    }
+
+    // ✅ Peuple txtTcpSubnetDetected avec le sous-réseau Wi-Fi réel de la
+    // tablette (format xxx.xxx.xxx.xxx), demandé pour la case verte TCP.
+    private void refreshDetectedSubnet() {
+        if (txtTcpSubnetDetected == null) return;
+        scanExec.execute(() -> {
+            String subnet;
+            try {
+                com.pa.lcr.lcp.api.WifiRegisterScanController ctl =
+                        new com.pa.lcr.lcp.api.WifiRegisterScanController(this, mediaTransportManager);
+                subnet = ctl.detectSubnet();
+            } catch (Exception e) {
+                subnet = null;
+            }
+            final String subnetFinal = subnet;
+            runOnUiThread(() -> {
+                if (txtTcpSubnetDetected != null) {
+                    txtTcpSubnetDetected.setText("Sous-réseau : " + (subnetFinal != null ? subnetFinal : "indisponible (Wi-Fi désactivé ?)"));
+                }
+            });
         });
     }
 
@@ -1753,7 +1836,7 @@ private void setupTabsTop() {
                 row.setGravity(android.view.Gravity.CENTER_VERTICAL);
                 int padPx = (int) (6 * getResources().getDisplayMetrics().density);
                 row.setPadding(padPx, padPx, padPx, padPx);
-                row.setBackgroundColor(0xFF0B3D2E); // même vert foncé que les boutons remplis
+                row.setBackgroundColor(0xFF0B6623); // même vert que les cases manuelles BT/USB
 
                 TextView label = new TextView(this);
                 String txt = ip + ":" + port + (serialId != null ? "  (#" + serialId + ")" : "");

@@ -66,6 +66,14 @@ public final class WifiRegisterScanController {
 
     public KnownTcpDeviceStore getKnownStore() { return knownStore; }
 
+    /** Sous-réseau Wi-Fi détecté, format "xxx.xxx.xxx.0" — ou null si indisponible. */
+    public String detectSubnet() {
+        String localIp = getLocalWifiIp();
+        if (localIp == null) return null;
+        String base = subnetBase24(localIp);
+        return (base != null) ? (base + ".0") : null;
+    }
+
     // =========================================================
     // 1) Connexion manuelle
     // =========================================================
