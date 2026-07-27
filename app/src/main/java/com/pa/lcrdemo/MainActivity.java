@@ -125,6 +125,10 @@ public class MainActivity extends AppCompatActivity {
     private TextView txtBtRegsFound;
     private Button btnScanWifiRegs;
     private TextView txtWifiRegsFound;
+    private android.widget.EditText edtTcpIp;
+    private android.widget.EditText edtTcpPort;
+    private Button btnTcpConnect;
+    private TextView txtTcpStatus;
 
     // ===== CONFIGURE: Ajout manuel (2 registres par média) =====
     private EditText edtUsbNode1, edtUsbNode2;
@@ -773,6 +777,10 @@ tabRegisters = findViewById(R.id.tabRegisters);
         txtBtRegsFound = findViewById(R.id.txtBtRegsFound);
         btnScanWifiRegs = findViewById(R.id.btnScanWifiRegs);
         txtWifiRegsFound = findViewById(R.id.txtWifiRegsFound);
+        edtTcpIp = findViewById(R.id.edtTcpIp);
+        edtTcpPort = findViewById(R.id.edtTcpPort);
+        btnTcpConnect = findViewById(R.id.btnTcpConnect);
+        txtTcpStatus = findViewById(R.id.txtTcpStatus);
 
         // CONFIGURE: Ajout manuel (2 registres / média)
         edtUsbNode1 = findViewById(R.id.edtUsbNode1);
@@ -979,7 +987,8 @@ ensureRegisterTab(250, 255, true);
         // CONFIGURE: scan registres par média
         if (btnScanUsbRegs != null) btnScanUsbRegs.setOnClickListener(v -> scanRegistersUsbOnly());
         if (btnScanBtRegs != null) btnScanBtRegs.setOnClickListener(v -> scanRegistersBtOnly());
-        if (btnScanWifiRegs != null) btnScanWifiRegs.setOnClickListener(v -> toast("Wi‑Fi: bientôt"));
+        if (btnScanWifiRegs != null) btnScanWifiRegs.setOnClickListener(v -> scanWifiRegisters());
+        if (btnTcpConnect != null) btnTcpConnect.setOnClickListener(v -> connectTcpManual());
 
         // CONFIGURE: ajout manuel (2 slots / média)
         if (btnUsbConnect1 != null) btnUsbConnect1.setOnClickListener(v -> connectManualUsbSlot(1));
@@ -1543,6 +1552,81 @@ private void setupTabsTop() {
         }
     }
 
+    // ✅ TCP (N-Port raw passthrough) — connexion manuelle IP:port
+    // saisie par le chauffeur/technicien, puis identification des nodes
+    // avec le même scanRegistersWithIo(...) que USB/BT (réutilisé tel quel).
+    private void connectTcpManual() {
+        String ip = (edtTcpIp != null && edtTcpIp.getText() != null)
+                ? edtTcpIp.getText().toString().trim() : "";
+        String portStr = (edtTcpPort != null && edtTcpPort.getText() != null)
+                ? edtTcpPort.getText().toString().trim() : "";
+        if (ip.isEmpty()) { toast("TCP: IP requise"); return; }
+        int port;
+        try {
+            port = portStr.isEmpty()
+                    ? com.pa.lcr.lcp.api.WifiRegisterScanController.DEFAULT_RAW_PORT
+                    : Integer.parseInt(portStr);
+        } catch (NumberFormatException e) {
+            toast("TCP: port invalide");
+            return;
+        }
+        if (txtTcpStatus != null) txtTcpStatus.setText("Statut : connexion en cours...");
+
+        final int portFinal = port;
+        scanExec.execute(() -> {
+            com.pa.lcr.lcp.api.WifiRegisterScanController ctl =
+                    new com.pa.lcr.lcp.api.WifiRegisterScanController(this, mediaTransportManager);
+            com.pa.lcr.lcp.ApiResult r = ctl.connectManual(ip, portFinal);
+            runOnUiThread(() -> {
+                if (txtTcpStatus != null) txtTcpStatus.setText("Statut : " + r.msg);
+                toast(r.msg);
+            });
+            if (r.code == 1) {
+                try {
+                    String key = MediaTransportManager.tcpKey(ip, portFinal);
+                    TransportIo io = mediaTransportManager.getByKey(key);
+                    if (io != null && io.isOpen()) {
+                        scanRegistersWithIo(io, key, txtWifiRegsFound);
+                    }
+                } catch (Exception ignored) {}
+            }
+        });
+    }
+
+    // ✅ Scan réseau (subnet /24) à la recherche du port raw N-Port (4001 défaut).
+    // Chaque socket ouvert est enregistré comme transport puis identifié
+    // avec la même mécanique que le scan USB/BT.
+    private void scanWifiRegisters() {
+        if (btnScanWifiRegs != null) btnScanWifiRegs.setEnabled(false);
+        if (txtWifiRegsFound != null) txtWifiRegsFound.setText("Scan réseau en cours (1..254)...");
+
+        scanExec.execute(() -> {
+            com.pa.lcr.lcp.api.WifiRegisterScanController ctl =
+                    new com.pa.lcr.lcp.api.WifiRegisterScanController(this, mediaTransportManager);
+            com.pa.lcr.lcp.ApiResult r = ctl.scanSubnet(com.pa.lcr.lcp.api.WifiRegisterScanController.DEFAULT_RAW_PORT);
+
+            runOnUiThread(() -> {
+                if (txtWifiRegsFound != null) txtWifiRegsFound.setText(r.msg);
+                if (btnScanWifiRegs != null) btnScanWifiRegs.setEnabled(true);
+                toast(r.msg);
+            });
+
+            // Identification des nodes sur chaque transport TCP découvert
+            if (mediaTransportManager != null) {
+                try {
+                    for (TransportSnapshot s : mediaTransportManager.listSnapshots()) {
+                        if (s == null || s.key == null) continue;
+                        if (!s.key.toUpperCase().startsWith("TCP:")) continue;
+                        if (s.status == TransportStatus.DISCONNECTED || s.status == TransportStatus.ERROR) continue;
+                        TransportIo io = mediaTransportManager.getByKey(s.key);
+                        if (io == null || !io.isOpen()) continue;
+                        scanRegistersWithIo(io, s.key, txtWifiRegsFound);
+                    }
+                } catch (Exception ignored) {}
+            }
+        });
+    }
+
     private void scanRegistersBtOnlyLegacy() {
         if (lastBtMac == null || lastBtMac.trim().isEmpty()) {
             logUi(null, "Scan BT registres: aucun BT connecté.");
@@ -2079,6 +2163,9 @@ private void scanUsb() {
     // l'APK tourne normalement en continu sur les tablettes camion
     // (LcrBootReceiver la relance au boot) : une fermeture accidentelle
     // interromprait le service HTTP local utilisé par Field Service Mobile.
+    // ✅ Compatibilité Android 9-15 (API 28-35) : finishAffinity() et
+    // Process.killProcess() sont des API stables depuis l'API 16 — aucune
+    // branche SDK_INT nécessaire ici.
     private void confirmQuit() {
         new androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("Quitter l'application")

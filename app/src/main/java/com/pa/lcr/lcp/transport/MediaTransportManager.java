@@ -151,6 +151,55 @@ public final class MediaTransportManager {
     }
 
     // ---------------------------------------------------------
+    // TCP (raw passthrough, ex: Moxa N-Port) — manuel ou scan réseau
+    // ---------------------------------------------------------
+
+    public static String tcpKey(String ip, int port) {
+        return TcpTransportIo.tcpKey(ip, port);
+    }
+
+    public synchronized void onTcpConnected(
+            java.net.Socket socket,
+            InputStream in,
+            OutputStream out,
+            String ip,
+            int port,
+            String description
+    ) {
+        String key = tcpKey(ip, port);
+
+        TransportHandle h = handles.get(key);
+        if (h == null) {
+            h = new TransportHandle(key);
+            handles.put(key, h);
+        }
+
+        long nextGen = h.getGenerationId() + 1;
+        String desc = (description != null) ? description : ("TCP " + ip + ":" + port);
+
+        TransportIo io = new TcpTransportIo(key, socket, in, out, desc, nextGen);
+        h.setConnected(io, io.describe());
+    }
+
+    public synchronized void onTcpDisconnected(String ip, int port, String reason) {
+        String key = tcpKey(ip, port);
+        TransportHandle h = handles.get(key);
+        if (h == null) return;
+        h.setDisconnected(reason != null ? reason : "TCP disconnected");
+        clearActiveIfMatches(key);
+    }
+
+    public synchronized void onTcpError(String ip, int port, String err) {
+        String key = tcpKey(ip, port);
+        TransportHandle h = handles.get(key);
+        if (h == null) {
+            h = new TransportHandle(key);
+            handles.put(key, h);
+        }
+        h.setError(h.getDescription(), err);
+    }
+
+    // ---------------------------------------------------------
     // Activation exclusive
     // ---------------------------------------------------------
 

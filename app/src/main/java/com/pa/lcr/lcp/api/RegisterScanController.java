@@ -1,4 +1,3 @@
-
 package com.pa.lcr.lcp.api;
 
 import com.pa.lcr.lcp.ApiResult;
@@ -49,7 +48,9 @@ public final class RegisterScanController {
             String media =
                     snap.key != null && snap.key.startsWith("BT:")
                             ? "bt"
-                            : "usb";
+                            : (snap.key != null && snap.key.startsWith("TCP:")
+                                    ? "tcp"
+                                    : "usb");
 
             for (int node = 1; node <= 250; node++) {
 

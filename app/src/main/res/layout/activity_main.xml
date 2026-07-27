@@ -633,8 +633,8 @@
                     android:id="@+id/btnScanWifiRegs"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:enabled="false"
-                    android:text="Scan registres Wi‑Fi (bientôt)"/>
+                    android:enabled="true"
+                    android:text="Scan registres Wi‑Fi (1..254, port 4001)"/>
 
                 <ScrollView
                     android:id="@+id/scrollWifiRegsFound"
@@ -652,8 +652,73 @@
                         android:typeface="monospace"
                         android:textColor="#00FF00"
                         android:textSize="12sp"
-                        android:text="(Wi‑Fi bientôt)"/>
+                        android:text="(aucun scan effectué)"/>
                 </ScrollView>
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="TCP — Connexion manuelle (N-Port / raw passthrough)"
+                    android:textStyle="bold"
+                    android:textSize="12sp"/>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:background="@drawable/bg_panel_filgo_energie"
+                    android:padding="8dp"
+                    android:layout_marginTop="4dp">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical">
+
+                        <EditText
+                            android:id="@+id/edtTcpIp"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="2"
+                            android:hint="IP (ex: 192.168.1.50)"
+                            android:inputType="text"
+                            android:textColor="#FFFFFF"
+                            android:textColorHint="#CCFFFFFF"/>
+
+                        <EditText
+                            android:id="@+id/edtTcpPort"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:layout_marginStart="6dp"
+                            android:hint="Port"
+                            android:text="4001"
+                            android:inputType="number"
+                            android:textColor="#FFFFFF"
+                            android:textColorHint="#CCFFFFFF"/>
+
+                        <Button
+                            android:id="@+id/btnTcpConnect"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="8dp"
+                            android:text="Connect"
+                            android:textColor="#FFFFFF"/>
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/txtTcpStatus"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:typeface="monospace"
+                        android:textColor="#FFFFFF"
+                        android:textSize="12sp"
+                        android:text="Statut : —"/>
+
+                </LinearLayout>
 
                 <View
                     android:layout_width="match_parent"
