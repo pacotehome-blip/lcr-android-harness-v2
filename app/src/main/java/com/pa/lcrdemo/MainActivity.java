@@ -1606,13 +1606,29 @@ private void setupTabsTop() {
     // Chaque socket ouvert est enregistré comme transport puis identifié
     // avec la même mécanique que le scan USB/BT.
     private void scanWifiRegisters() {
+        // ✅ Le port n'est plus figé à 4001 — on lit le champ port déjà présent
+        // dans l'UI (edtTcpPort), qui sert maintenant à la fois à la connexion
+        // manuelle ET au scan réseau. Un N-Port peut être configuré sur
+        // n'importe quel port TCP (ex: 5002) selon l'installation.
+        String portStr = (edtTcpPort != null && edtTcpPort.getText() != null)
+                ? edtTcpPort.getText().toString().trim() : "";
+        final int scanPort;
+        if (portStr.isEmpty()) {
+            scanPort = com.pa.lcr.lcp.api.WifiRegisterScanController.DEFAULT_RAW_PORT;
+        } else {
+            int parsed;
+            try { parsed = Integer.parseInt(portStr); }
+            catch (NumberFormatException e) { toast("TCP: port invalide"); return; }
+            scanPort = parsed;
+        }
+
         if (btnScanWifiRegs != null) btnScanWifiRegs.setEnabled(false);
-        if (txtWifiRegsFound != null) txtWifiRegsFound.setText("Scan réseau en cours (1..254)...");
+        if (txtWifiRegsFound != null) txtWifiRegsFound.setText("Scan réseau en cours (1..254, port " + scanPort + ")...");
 
         scanExec.execute(() -> {
             com.pa.lcr.lcp.api.WifiRegisterScanController ctl =
                     new com.pa.lcr.lcp.api.WifiRegisterScanController(this, mediaTransportManager);
-            com.pa.lcr.lcp.ApiResult r = ctl.scanSubnet(com.pa.lcr.lcp.api.WifiRegisterScanController.DEFAULT_RAW_PORT);
+            com.pa.lcr.lcp.ApiResult r = ctl.scanSubnet(scanPort);
 
             runOnUiThread(() -> {
                 if (txtWifiRegsFound != null) txtWifiRegsFound.setText(r.msg);
@@ -1622,6 +1638,9 @@ private void setupTabsTop() {
             });
 
             // Identification des nodes sur chaque transport TCP découvert
+            // — un même socket (un même port) peut révéler PLUSIEURS registres
+            // (bus RS-485 multi-point), scanRegistersWithIo boucle déjà les
+            // nodes 1..250 sur CE transport, comme pour USB/BT.
             if (mediaTransportManager != null) {
                 try {
                     for (TransportSnapshot s : mediaTransportManager.listSnapshots()) {
