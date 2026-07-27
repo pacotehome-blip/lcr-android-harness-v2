@@ -1745,10 +1745,31 @@ private void setupTabsTop() {
 
             if (identity != null && identity.isLc3) {
                 final int node = identity.nodeId > 0 ? identity.nodeId : 250;
-                final String serial = identity.serialId;
-                android.util.Log.i(TAG, "finalizeTcpRegisterTab: LC3 détecté node=" + node + " serial=" + serial);
-                if (serial != null && !serial.trim().isEmpty()) {
-                    final String serialFinal = serial.trim();
+                String serial = identity.serialId;
+
+                // ✅ FIX : "LC3" (sans suffixe) est un placeholder INTERNE de
+                // Lc3Link.probeAndIdentify — pas un vrai #série. Il apparaît quand
+                // la navigation à l'écran du registre (6 itérations, 150ms chacune)
+                // n'a pas eu le temps de trouver la ligne "SERIAL NUMBER" — cause
+                // fréquente : latence réseau TCP plus longue qu'en BT direct.
+                // On ne doit JAMAIS l'exposer tel quel (ni à l'onglet, ni à CONFIGURE) —
+                // une nouvelle tentative est faite avant d'abandonner.
+                if (serial != null && serial.trim().equals("LC3")) {
+                    android.util.Log.w(TAG, "finalizeTcpRegisterTab: #série = placeholder LC3 (lecture incomplète) — nouvelle tentative");
+                    try {
+                        Lc3Link.RegisterIdentity retry = Lc3Link.probeAndIdentify(io);
+                        if (retry != null) serial = retry.serialId;
+                    } catch (Exception ignored) {}
+                }
+
+                final String serialFixed = serial;
+                android.util.Log.i(TAG, "finalizeTcpRegisterTab: LC3 détecté node=" + node + " serial=" + serialFixed);
+
+                boolean serialValid = serialFixed != null && !serialFixed.trim().isEmpty()
+                        && !serialFixed.trim().equals("LC3");
+
+                if (serialValid) {
+                    final String serialFinal = serialFixed.trim();
                     // ✅ FIX : sans cet appel, RegisterSessionManager.getOrCreate()
                     // (appelé depuis le thread UI par RegisterTabFragment) ne sait
                     // JAMAIS que ce transport TCP est un LC3 — il retombe sur un
@@ -1766,13 +1787,18 @@ private void setupTabsTop() {
                             consoleTarget.setText("LC3 trouvé — node=" + node + " serial=" + serialFinal + " (onglet créé)");
                         }
                         android.util.Log.i(TAG, "finalizeTcpRegisterTab: appel upsertRegisterTabFromScan(node=" + node + ", serial=" + serialFinal + ")");
-                        upsertRegisterTabFromScan(transportKey, node, 255, serialFinal, true);
+                        // ✅ FIX : la version à 5 arguments devine isLc3 en regardant
+                        // si un onglet existe déjà — pour un NOUVEL onglet (cas normal
+                        // ici), elle suppose systématiquement false, affichant à tort
+                        // "[LCR-II]" même quand le registre est un LC3 confirmé.
+                        // On passe maintenant isLc3=true explicitement (6 arguments).
+                        upsertRegisterTabFromScan(transportKey, node, 255, serialFinal, true, true);
                         refreshAllTabsMediaStatus();
                         android.util.Log.i(TAG, "finalizeTcpRegisterTab: upsertRegisterTabFromScan terminé");
                     });
                 } else {
-                    android.util.Log.w(TAG, "finalizeTcpRegisterTab: LC3 identifié mais serial vide, aucun onglet créé");
-                    if (consoleTarget != null) ui.post(() -> consoleTarget.setText("LC3 détecté mais serial vide — aucun onglet créé"));
+                    android.util.Log.w(TAG, "finalizeTcpRegisterTab: LC3 identifié mais #série illisible (placeholder LC3 persistant après retry), aucun onglet créé");
+                    if (consoleTarget != null) ui.post(() -> consoleTarget.setText("LC3 détecté mais #série illisible — relance le scan"));
                 }
                 return;
             }
@@ -1792,7 +1818,7 @@ private void setupTabsTop() {
                             if (consoleTarget != null) {
                                 consoleTarget.setText("LCR-II trouvé — node=" + nodeFinal + " serial=" + serialFinal + " (onglet créé)");
                             }
-                            upsertRegisterTabFromScan(transportKey, nodeFinal, 255, serialFinal, true);
+                            upsertRegisterTabFromScan(transportKey, nodeFinal, 255, serialFinal, true, false);
                             refreshAllTabsMediaStatus();
                         });
                         return;
@@ -2003,6 +2029,17 @@ private void setupTabsTop() {
                 // LC3 détecté — pas de boucle node
                 int    lc3Node  = identity.nodeId > 0 ? identity.nodeId : 250;
                 String serialId = identity.serialId;
+                // ✅ FIX : "LC3" (sans suffixe) est un placeholder interne de
+                // Lc3Link.probeAndIdentify quand la lecture réelle du #série a
+                // échoué (latence/timing) — ne jamais l'exposer tel quel dans
+                // le scan CONFIGURE ("serial=LC3"). Une nouvelle tentative est
+                // faite avant d'accepter le résultat.
+                if (serialId != null && serialId.trim().equals("LC3")) {
+                    try {
+                        Lc3Link.RegisterIdentity retry = Lc3Link.probeAndIdentify(ioFinal);
+                        if (retry != null) serialId = retry.serialId;
+                    } catch (Exception ignored) {}
+                }
                 String ticketNo = "";
                 try {
                     Lc3Link lc3tmp = new Lc3Link(ioFinal);
