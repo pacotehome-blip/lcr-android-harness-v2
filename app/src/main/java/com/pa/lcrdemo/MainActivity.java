@@ -300,6 +300,14 @@ public class MainActivity extends AppCompatActivity {
     private boolean logTsEnabled = false;
     private long mainLogViewSinceMs = 0L;
     private final Handler ui = new Handler(Looper.getMainLooper());
+    // ✅ FIX : garde-fou anti-concurrence — empêche finalizeTcpRegisterTab()
+    // de tourner deux fois EN MÊME TEMPS pour le même transport. Sans ça, un
+    // 2e appel (ex: connexion manuelle + auto-connect presque simultanés)
+    // pouvait interférer avec la sonde LC3 du 1er, la faire échouer à tort,
+    // et tomber dans la boucle LCR-II 1..250 (lente, ~plusieurs secondes,
+    // pour rien) — voire créer un onglet erroné selon ce que la boucle lit.
+    private final java.util.Set<String> tcpFinalizeInProgress =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
     private static final long MAIN_LOG_REFRESH_MIN_MS = 250;
     private long lastMainLogRefreshMs = 0L;
     private boolean mainLogRefreshPending = false;
@@ -827,7 +835,15 @@ tabRegisters = findViewById(R.id.tabRegisters);
         if (cbLogTs != null) cbLogTs.setChecked(ts);
         LogBus.SHOW_TS = ts;
     nodeItems.clear();
-ensureRegisterTab(250, 255, true);
+        // ✅ FIX : retiré. Ce placeholder créait INCONDITIONNELLEMENT un onglet
+        // "node 250, média inconnu" à chaque démarrage — vestige de l'ancienne
+        // architecture mono-registre. Avec la détection multi-registre réelle
+        // (upsertRegisterTabFromScan), ce placeholder n'est plus jamais rempli
+        // par un vrai registre s'il n'y en a pas au node 250 — il traînait
+        // simplement à l'écran comme "un tab inutile" jusqu'à ce qu'un autre
+        // événement (BT détecté, etc.) déclenche le nettoyage automatique des
+        // onglets à serial vide (removeAllUnknownSerialTabsBestEffort()).
+        // ensureRegisterTab(250, 255, true);
 
         mainLogViewSinceMs = 0L;
         refreshGlobalLogView();
@@ -1730,6 +1746,24 @@ private void setupTabsTop() {
     // aucune détection, aucune boucle — même principe que connectManualWithIo
     // pour BT/USB (le node est fourni, jamais deviné).
     private void finalizeTcpRegisterTab(TransportIo io, String transportKey, TextView consoleTarget, int expectedNode) {
+        final String TAG = "MainActivity";
+
+        // ✅ FIX : si un appel est déjà en cours pour CE transport, on l'ignore
+        // plutôt que de laisser deux sondes LC3 se dérouler en même temps
+        // sur le même registre (interférence → faux négatif → boucle LCR-II
+        // 1..250 inutile, voire onglet erroné).
+        if (!tcpFinalizeInProgress.add(transportKey)) {
+            android.util.Log.w(TAG, "finalizeTcpRegisterTab: déjà en cours pour " + transportKey + " — appel ignoré");
+            return;
+        }
+        try {
+            finalizeTcpRegisterTabLocked(io, transportKey, consoleTarget, expectedNode);
+        } finally {
+            tcpFinalizeInProgress.remove(transportKey);
+        }
+    }
+
+    private void finalizeTcpRegisterTabLocked(TransportIo io, String transportKey, TextView consoleTarget, int expectedNode) {
         final String TAG = "MainActivity";
         android.util.Log.i(TAG, "finalizeTcpRegisterTab: début, transportKey=" + transportKey + " expectedNode=" + expectedNode);
 
