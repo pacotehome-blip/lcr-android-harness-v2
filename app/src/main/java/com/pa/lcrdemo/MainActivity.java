@@ -1310,14 +1310,28 @@ private void setupTabsTop() {
         if (oldTabKey != null && !oldTabKey.equals(newTabKey)) {
             TabSpec oldSpec = tabsByKey.get(oldTabKey);
             if (oldSpec != null && oldSpec.isLc3 == isLc3) {
+                // ✅ FIX : même MÉDIA (ex: TCP vs TCP, juste une IP/port différente
+                // après reconnexion) → toujours un doublon du même registre, jamais
+                // deux registres indépendants. On nettoie l'ancien systématiquement,
+                // peu importe si son transport rapporte encore "ouvert" (un socket
+                // périmé mais pas encore fermé proprement ne doit pas produire 2 tabs
+                // pour le même registre physique).
+                //
+                // Média DIFFÉRENT (ex: BT vs TCP) → peut être deux registres
+                // réellement indépendants (coïncidence node+serial) → on garde la
+                // vérification "transport encore ouvert" comme filet de sécurité.
+                boolean sameMedia = mediaShort.equalsIgnoreCase(oldSpec.mediaShort);
                 boolean oldTransportGone = true;
-                try {
-                    TransportIo oldIo = (mediaTransportManager != null && oldSpec.transportKey != null)
-                            ? mediaTransportManager.getByKey(oldSpec.transportKey) : null;
-                    oldTransportGone = (oldIo == null || !oldIo.isOpen());
-                } catch (Exception ignored) {}
-                if (oldTransportGone) {
-                    removeTabAndFragment(oldTabKey, "migrated to " + newTabKey);
+                if (!sameMedia) {
+                    try {
+                        TransportIo oldIo = (mediaTransportManager != null && oldSpec.transportKey != null)
+                                ? mediaTransportManager.getByKey(oldSpec.transportKey) : null;
+                        oldTransportGone = (oldIo == null || !oldIo.isOpen());
+                    } catch (Exception ignored) {}
+                }
+                if (sameMedia || oldTransportGone) {
+                    removeTabAndFragment(oldTabKey, "migrated to " + newTabKey
+                            + (sameMedia ? " (doublon même média, ancien nettoyé)" : ""));
                 } else {
                     logUi(null, "Migration ignorée: " + oldTabKey + " toujours connecté (registre indépendant sur "
                             + newTabKey + ")");

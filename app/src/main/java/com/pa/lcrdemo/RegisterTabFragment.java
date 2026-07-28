@@ -1743,7 +1743,15 @@ public class RegisterTabFragment extends Fragment {
                         db = new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
                         com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow row =
                             db.getLatestForWo(woCheck);
-                        hasData = (row != null && row.ticketNo != null && !row.ticketNo.isEmpty());
+                        // ✅ FIX : n'exiger un ticket non vide QUE pour une livraison
+                        // normale. Une ANNULATION (cas confirmé par logcat : ticket
+                        // vide + net négatif après plusieurs pressions rapides sur C)
+                        // est un enregistrement légitime — sans ce correctif, le
+                        // chauffeur restait bloqué sans AUCUN moyen de retourner au
+                        // bon de travail après une annulation.
+                        boolean isAnnulation = row != null && "ANNULATION".equalsIgnoreCase(row.type);
+                        boolean hasTicket = row != null && row.ticketNo != null && !row.ticketNo.isEmpty();
+                        hasData = row != null && (hasTicket || isAnnulation);
                     } catch (Exception ignored) {
                     } finally {
                         if (db != null) { try { db.close(); } catch (Exception ignored) {} }
@@ -2493,8 +2501,68 @@ public class RegisterTabFragment extends Fragment {
         if (btnContinue != null) btnContinue.setEnabled(false);
         if (btnFinish   != null) btnFinish.setEnabled(false);
         if (btnRetourWO != null) btnRetourWO.setEnabled(false);
-        double netAtCancel   = parseDisplayNet();
-        double grossAtCancel = parseDisplayGross();
+        double netAtCancelRaw   = parseDisplayNet();
+        double grossAtCancelRaw = parseDisplayGross();
+
+        // ✅ FIX (1/2) : utiliser la valeur CORRIGÉE (retour de gaz) si le
+        // mécanisme de correction a accumulé quelque chose — sinon, retomber
+        // sur la valeur brute affichée. Avant ce correctif, l'annulation
+        // sauvegardait toujours la valeur brute, même quand la correction
+        // retour-de-gaz avait des données plus fiables.
+        double corrNet = 0.0, corrGross = 0.0;
+        try { corrNet = c.getCumulativeCorrectedNetL(); } catch (Exception ignored) {}
+        try { corrGross = c.getCumulativeCorrectedGrossL(); } catch (Exception ignored) {}
+        final double netAtCancel   = (corrNet   != 0.0) ? corrNet   : netAtCancelRaw;
+        final double grossAtCancel = (corrGross != 0.0) ? corrGross : grossAtCancelRaw;
+
+        // ✅ FIX (2/2) : bloquer/confirmer si le NET reste négatif (retour de
+        // gaz probable — pression du gun inférieure à celle du réservoir de
+        // destination). Ne jamais sauvegarder silencieusement une annulation
+        // avec NET négatif sans que le chauffeur en soit conscient.
+        if (netAtCancel < 0) {
+            if (btnAnnuler != null) {
+                btnAnnuler.setEnabled(true);
+                btnAnnuler.setText("⛔ Annuler la livraison");
+            }
+            if (btnConnect  != null) btnConnect.setEnabled(true);
+            if (btnA        != null) btnA.setEnabled(true);
+            if (btnB        != null) btnB.setEnabled(true);
+            if (btnC        != null) btnC.setEnabled(true);
+            if (btnContinue != null) btnContinue.setEnabled(true);
+            if (btnFinish   != null) btnFinish.setEnabled(true);
+            if (btnRetourWO != null) btnRetourWO.setEnabled(true);
+            final double fNetAtCancel = netAtCancel;
+            final double fGrossAtCancel = grossAtCancel;
+            new androidx.appcompat.app.AlertDialog.Builder(requireContext())
+                .setTitle("⚠️ NET négatif détecté")
+                .setMessage("NET = " + String.format(Locale.ROOT, "%.2f", fNetAtCancel) + " L — probable retour de gaz "
+                    + "(pression du gun inférieure à celle du réservoir de destination).\n\n"
+                    + "Confirmer l'annulation quand même avec cette valeur ?")
+                .setPositiveButton("Confirmer l'annulation", (d, w) ->
+                    proceedWithAnnulation(c, fNetAtCancel, fGrossAtCancel))
+                .setNegativeButton("Annuler (revenir en arrière)", null)
+                .setCancelable(true)
+                .show();
+            return;
+        }
+
+        proceedWithAnnulation(c, netAtCancel, grossAtCancel);
+    }
+
+    // ✅ Extrait de la logique d'annulation existante — inchangée, juste
+    // déplacée pour permettre le blocage/confirmation ci-dessus sur NET négatif.
+    private void proceedWithAnnulation(DeliveryController c, double netAtCancel, double grossAtCancel) {
+        if (btnAnnuler != null) {
+            btnAnnuler.setEnabled(false);
+            btnAnnuler.setText("⏳ Annulation en cours — veuillez patienter");
+        }
+        if (btnConnect  != null) btnConnect.setEnabled(false);
+        if (btnA        != null) btnA.setEnabled(false);
+        if (btnB        != null) btnB.setEnabled(false);
+        if (btnC        != null) btnC.setEnabled(false);
+        if (btnContinue != null) btnContinue.setEnabled(false);
+        if (btnFinish   != null) btnFinish.setEnabled(false);
+        if (btnRetourWO != null) btnRetourWO.setEnabled(false);
         // ✅ Poser le flag AVANT bg.execute — évite race avec onStateChanged(ENDED)
         cancelInProgress = true;
         bg.execute(() -> {
