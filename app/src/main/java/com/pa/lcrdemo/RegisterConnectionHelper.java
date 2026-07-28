@@ -96,7 +96,14 @@ public class RegisterConnectionHelper {
 
         if (!ioOk) {
             Log.w(TAG, "validerConnexion: io mort — transport=" + tkFinal);
-            lancerDiagnostic(tkFinal, node, serialId, woNum);
+            // ✅ FIX : lancerDiagnostic() s'auto-ignore silencieusement si
+            // diagnosticEnCours est resté bloqué à true (ex: tentative
+            // antérieure qui n'a pas remis le drapeau à false proprement) —
+            // le chauffeur cliquait Status/Continuer et ne voyait RIEN se
+            // passer, sans erreur, sans log visible côté UI. lancerDiagnosticForce()
+            // existe justement pour ce cas ("le registre ne répond pas même si
+            // BT est connecté, câble débranché") — on l'utilise ici aussi.
+            new Thread(() -> lancerDiagnosticForce(tkFinal, node, serialId, woNum)).start();
             return false;
         }
 
@@ -372,17 +379,10 @@ public class RegisterConnectionHelper {
                 transportKeyFinal[0] = foundKey;
                 activity.runOnUiThread(() -> {
                     if (!fKey.isEmpty()) {
-                        // ✅ FIX : isLc3 réel via DeliveryController.getLink(), jamais deviné
-                        // (la version à 5 arguments suppose false pour un nouvel onglet).
-                        boolean isLc3Real = false;
-                        try {
-                            com.pa.lcr.lcp.DeliveryController dcCheck =
-                                com.pa.lcr.lcp.RegisterSessionManager.get(activity).getController(fKey, fNodeFinal);
-                            if (dcCheck != null && dcCheck.getLink() instanceof com.pa.lcr.lcp.Lc3Link) {
-                                isLc3Real = true;
-                            }
-                        } catch (Exception ignored) {}
-                        activity.upsertRegisterTabFromScan(fKey, fNodeFinal, 255, fSerial, true, isLc3Real);
+                        // ✅ Détection isLc3 centralisée — même mécanisme partagé
+                        // (voir MainActivity.resolveIsLc3), plus de logique dupliquée.
+                        activity.upsertRegisterTabFromScan(fKey, fNodeFinal, 255, fSerial, true,
+                                activity.resolveIsLc3(fKey, fNodeFinal));
                     }
                     activity.refreshAllTabsMediaStatus();
                 });
