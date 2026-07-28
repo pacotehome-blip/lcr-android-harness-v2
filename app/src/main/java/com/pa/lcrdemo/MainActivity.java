@@ -2541,7 +2541,7 @@ private void scanUsb() {
     // l'APK tourne normalement en continu sur les tablettes camion
     // (LcrBootReceiver la relance au boot) : une fermeture accidentelle
     // interromprait le service HTTP local utilisé par Field Service Mobile.
-    // ✅ Compatibilité Android 9-15 (API 28-35) : finishAffinity() et
+    // ✅ Compatibilité Android 9-15 (API 28-35) : finish() et
     // Process.killProcess() sont des API stables depuis l'API 16 — aucune
     // branche SDK_INT nécessaire ici.
     private void confirmQuit() {
@@ -2564,8 +2564,15 @@ private void scanUsb() {
             if (mediaTransportManager != null) mediaTransportManager.clearActiveIfMatches(
                 mediaTransportManager.getActiveKey());
         } catch (Exception ignored) {}
-        finishAffinity();
-        android.os.Process.killProcess(android.os.Process.myPid());
+        // ✅ FIX : finishAffinity() fermait TOUTE la tâche Android — y compris
+        // Field Service Mobile, puisque MainActivity partage délibérément sa
+        // tâche via android:taskAffinity="com.microsoft.crm.crmphone.fieldServices"
+        // (transition fluide voulue pour le deep link). finish() ne ferme QUE
+        // notre propre Activity — Field Service Mobile reste ouvert en dessous.
+        finish();
+        // ✅ Léger délai avant killProcess() pour laisser la transition visuelle
+        // de finish() se terminer proprement (évite un flash noir à l'écran).
+        ui.postDelayed(() -> android.os.Process.killProcess(android.os.Process.myPid()), 300);
     }
 
     private void stopApiServer(String reason) {
