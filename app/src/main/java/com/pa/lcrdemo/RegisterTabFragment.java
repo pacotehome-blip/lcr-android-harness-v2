@@ -1114,6 +1114,11 @@ public class RegisterTabFragment extends Fragment {
         if (btnC != null) {
             btnC.setOnClickListener(v -> {
                 if (controller == null) return;
+                // ✅ FIX (audit complet) : btnC (New) n'avait AUCUNE vérification
+                // IO avant d'agir — seul bouton d'action à ne pas passer par le
+                // diagnostic de reconnexion. Ajouté pour cohérence avec tous les
+                // autres boutons (Resolve/Status/Continuer/Terminer/Annuler).
+                if (!verifierIoAvantAction("NEW_C")) return;
 
                 // ✅ FIX : lire edtPreset sur le thread UI AVANT de passer en
                 // arrière-plan — accéder à une vue depuis bg.execute() n'est pas
@@ -1218,6 +1223,9 @@ public class RegisterTabFragment extends Fragment {
             btnReprintTicket.setOnClickListener(v -> {
                 DeliveryController c = controller;
                 if (c == null) return;
+                // ✅ FIX (audit complet) : Reprint n'avait AUCUNE vérification IO
+                // avant d'agir. Ajouté pour cohérence.
+                if (!verifierIoAvantAction("REPRINT")) return;
                 bg.execute(() -> {
                     try {
                         if (tabTransportKey != null) {
@@ -1799,6 +1807,9 @@ public class RegisterTabFragment extends Fragment {
     private void lancerImpressionCustom() {
         DeliveryController c = controller;
         if (c == null) return;
+        // ✅ FIX (audit complet) : Print Custom n'avait AUCUNE vérification IO
+        // avant d'agir. Ajouté pour cohérence.
+        if (!verifierIoAvantAction("CUSTOM_PRINT")) return;
 
         if (btnCustomPrint != null) btnCustomPrint.setEnabled(false);
 
