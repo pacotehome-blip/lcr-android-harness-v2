@@ -188,6 +188,14 @@ public class DeepLinkHandler {
                     com.pa.lcr.lcp.RegisterSessionManager rsm =
                         com.pa.lcr.lcp.RegisterSessionManager.get(activity);
 
+                    // ✅ FIX (UX) : retour visuel IMMÉDIAT dès l'entrée dans la
+                    // résolution — avant, le seul "🔌 Connexion au registre..."
+                    // n'apparaissait qu'APRÈS resolveOrCreateForNode() (qui peut
+                    // sonder plusieurs transports en silence, ex: tentatives TCP
+                    // qui échouent avant de basculer sur BT). Le chauffeur voyait
+                    // "📦 Livraison" puis rien pendant un moment avant "connexion".
+                    activity.runOnUiThread(() -> activity.toast("🔍 Recherche du registre..."));
+
                     if (fSerialId != null && !fSerialId.isEmpty()) {
                         rsm.bindExpectedSerial(fNode, fSerialId);
                     }
@@ -305,6 +313,7 @@ public class DeepLinkHandler {
                         // Aucun transport actif — tenter auto-connect (USB / BT / TCP)
                         android.util.Log.i(TAG, "Aucun transport actif — tentative auto-connect node="
                             + fNode + " serial=" + fSerialId);
+                        activity.runOnUiThread(() -> activity.toast("📡 Connexion au registre en cours..."));
                         MultiRegisterApiFacadeImpl facadeAuto = new MultiRegisterApiFacadeImpl(activity);
                         com.pa.lcr.lcp.ApiResult ra = facadeAuto.api_registerConnectAuto(
                             fSerialId.isEmpty() ? null : fSerialId, fNode);
