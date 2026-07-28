@@ -603,10 +603,21 @@ public class MainActivity extends AppCompatActivity {
 
                 if (!isPlausibleSerial(serial)) continue;
 
-                // Si pas de transport pinné, prendre le transport actif
+                // ✅ FIX (la vraie source du tab TCP fantôme) : avant, si aucun
+                // transport n'était encore CONFIRMÉ (pinné) pour ce couple précis
+                // (node, serial), le code se repliait sur "le transport actif du
+                // moment" — SANS AUCUNE VÉRIFICATION que ce transport ait
+                // réellement CE registre. Ça associait à tort un registre
+                // "attendu" (ex: le LCR-II du deep link, lié tôt via
+                // bindExpectedSerial) au transport actif du moment (ex: le TCP-LC3
+                // déjà connecté), créant un onglet fantôme visible ~400ms après
+                // chaque retour au premier plan (ex: retour de Field Service).
+                // Sans transport CONFIRMÉ, on ne devine plus — on saute cette
+                // entrée, la vraie détection (deep link / scan) s'en chargera.
                 if (transportKey == null || transportKey.trim().isEmpty()) {
-                    transportKey = MediaTransportManager.getActiveKeyStatic();
-                    if (transportKey == null) transportKey = "";
+                    logUi(null, "syncTabs: node=" + node + " serial=" + serial
+                            + " — aucun transport confirmé, ignoré (pas de devinette)");
+                    continue;
                 }
 
                 String mediaShort = mediaShortFromTransportKey(transportKey);
