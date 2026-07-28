@@ -80,6 +80,14 @@ public final class RegisterSessionManager {
     // transportKey → serialId connu
     private final java.util.concurrent.ConcurrentHashMap<String, String> knownLc3TransportKeys =
         new java.util.concurrent.ConcurrentHashMap<>();
+    // ✅ FIX : transportKey → node CONFIRMÉ pour ce serial LC3. Sans cette
+    // vérification, knownLc3TransportKeys (indexé par transport SEUL) faisait
+    // réutiliser aveuglément le serial connu pour N'IMPORTE QUEL node demandé
+    // sur ce même transport — créant un onglet fantôme si un appel arrivait
+    // avec un node différent du vrai (ex: node=250 demandé par erreur alors
+    // que le LC3 réel est au node=245 sur ce même transport TCP).
+    private final java.util.concurrent.ConcurrentHashMap<String, Integer> knownLc3NodeByTransportKey =
+        new java.util.concurrent.ConcurrentHashMap<>();
     private RegisterSessionManager(Context appCtx) {
         this.appCtx = appCtx;
         this.store = new DeliveryLogStore(appCtx);
@@ -351,8 +359,11 @@ public final class RegisterSessionManager {
             // (N-Port raw) était toujours traité comme LCR-II générique sur le
             // thread UI, faussant la lecture NET/GROSS (mauvaise sous-classe Link).
             String tkLower = tk.toLowerCase(java.util.Locale.ROOT);
-            if ((tkLower.startsWith("bt:") || tkLower.startsWith("tcp:")) && knownLc3TransportKeys.containsKey(tk)) {
-                android.util.Log.i("RSM", "UI thread: transport BT/TCP LC3 connu → assumé LC3");
+            Integer confirmedNode = knownLc3NodeByTransportKey.get(tk);
+            boolean nodeMatchesConfirmed = (confirmedNode != null && confirmedNode == node);
+            if ((tkLower.startsWith("bt:") || tkLower.startsWith("tcp:")) && knownLc3TransportKeys.containsKey(tk)
+                    && nodeMatchesConfirmed) {
+                android.util.Log.i("RSM", "UI thread: transport BT/TCP LC3 connu → assumé LC3 (node confirmé=" + confirmedNode + ")");
 
                 // Chercher serial dans expectedSerialByNode ou pinnedTransportByRegKey
                 // Chercher serial dans la map LC3 d'abord, puis expectedSerialByNode
@@ -757,12 +768,23 @@ public final class RegisterSessionManager {
     }
 
     public synchronized void markAsLc3Transport(String transportKey, String serialId) {
+        markAsLc3Transport(transportKey, serialId, -1);
+    }
+
+    // ✅ FIX : nouvelle surcharge avec node CONFIRMÉ — utilisée par
+    // finalizeTcpRegisterTab/scanRegistersWithIo qui connaissent déjà le vrai
+    // node au moment de la détection LC3. node=-1 (surcharges historiques)
+    // signifie "node inconnu" — dans ce cas, le raccourci UI-thread de
+    // getOrCreate n'assume PLUS jamais LC3 automatiquement (voir plus bas),
+    // pour éviter de réutiliser un serial connu sur un node non confirmé.
+    public synchronized void markAsLc3Transport(String transportKey, String serialId, int node) {
         if (transportKey != null && !transportKey.trim().isEmpty()) {
             String existing = knownLc3TransportKeys.get(transportKey.trim());
             String serial = (serialId != null && !serialId.isEmpty()) ? serialId :
                             (existing != null ? existing : "");
             knownLc3TransportKeys.put(transportKey.trim(), serial);
-            android.util.Log.i("RSM", "markAsLc3Transport: " + transportKey + " serial=" + serial);
+            if (node > 0) knownLc3NodeByTransportKey.put(transportKey.trim(), node);
+            android.util.Log.i("RSM", "markAsLc3Transport: " + transportKey + " serial=" + serial + " node=" + node);
              // Persister dans SharedPreferences
             try {
                 appCtx.getSharedPreferences("lc3_known_transports", 0)

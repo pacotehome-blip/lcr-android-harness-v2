@@ -1799,7 +1799,7 @@ private void setupTabsTop() {
                     // correctement (mauvaise sous-classe de protocole).
                     try {
                         RegisterSessionManager.get(getApplicationContext())
-                                .markAsLc3Transport(transportKey, serialFinal);
+                                .markAsLc3Transport(transportKey, serialFinal, node);
                         android.util.Log.i(TAG, "finalizeTcpRegisterTab: markAsLc3Transport(" + transportKey + ") appelé");
                     } catch (Exception e) {
                         android.util.Log.w(TAG, "finalizeTcpRegisterTab: markAsLc3Transport exception: " + safeMsg(e));
@@ -2071,7 +2071,7 @@ private void setupTabsTop() {
                 try {
                     RegisterSessionManager sm = RegisterSessionManager.get(getApplicationContext());
                     sm.bindExpectedSerial(lc3Node, serialId);
-                    sm.markAsLc3Transport(tk, serialId);
+                    sm.markAsLc3Transport(tk, serialId, lc3Node);
                 } catch (Exception ignored) {}
 
             } else {
@@ -3621,6 +3621,33 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
         // 1) activer exclusif immédiatement
         ensureActiveTransport(tk, "CONFIGURE_MEDIA_SWITCH");
 
+        // ✅ FIX (perf) : si un onglet valide existe DÉJÀ pour ce transport
+        // précis, on réutilise directement son node/serial/isLc3 connus —
+        // aucune sonde réseau nécessaire. Avant ce correctif, CHAQUE arrivée
+        // de deep link relançait une sonde réelle (jusqu'à ~600ms+ sur TCP)
+        // au node=250 codé en dur, alors que le vrai node peut être différent
+        // (ex: LC3 au node 245) — la sonde échouait donc systématiquement
+        // pour rien, ajoutant un délai perceptible sans aucun bénéfice.
+        try {
+            for (TabSpec spec : tabsByKey.values()) {
+                if (spec != null && tk.equalsIgnoreCase(spec.transportKey)
+                        && spec.serialId != null && !spec.serialId.trim().isEmpty()) {
+                    final int knownNode = spec.node;
+                    final String knownSerial = spec.serialId;
+                    final boolean knownIsLc3 = spec.isLc3;
+                    android.util.Log.i("MainActivity", "onConfigureMediaActivated: onglet déjà connu pour " + tk
+                            + " (node=" + knownNode + " serial=" + knownSerial + ") — sonde ignorée");
+                    ui.post(() -> {
+                        try {
+                            upsertRegisterTabFromScan(tk, knownNode, 255, knownSerial, true, knownIsLc3);
+                            refreshAllTabsMediaStatus();
+                        } catch (Exception ignored) {}
+                    });
+                    return;
+                }
+            }
+        } catch (Exception ignored) {}
+
         // ✅ FIX : ne JAMAIS présumer que l'onglet actuellement affiché
         // (currentTabKey) appartient au transport qu'on vient d'activer.
         // Avant ce correctif, le node+serial de l'onglet courant étaient
@@ -3633,7 +3660,9 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
         //
         // Seule une VRAIE sonde sur CE transport peut justifier de créer
         // ou migrer un onglet — jamais une simple supposition basée sur
-        // "quel onglet est affiché à l'écran".
+        // "quel onglet est affiché à l'écran". Ce chemin ne s'exécute
+        // maintenant que pour un transport VRAIMENT nouveau (aucun onglet
+        // existant trouvé ci-dessus).
         int node = 250; // valeur neutre, uniquement pour tenter la sonde ci-dessous
         String serial = null;
         try {
