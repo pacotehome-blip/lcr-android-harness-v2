@@ -1103,6 +1103,12 @@ public class RegisterTabFragment extends Fragment {
         }
         if (btnB != null) btnB.setOnClickListener(v -> {
             if (controller == null) { reconnectThisRegister(true); return; }
+            // ✅ FIX : btnB (Status) ne vérifiait jamais si l'IO était encore
+            // ouvert (contrairement à btnContinue/btnFinish qui appellent déjà
+            // verifierIoAvantAction) — si l'USB/BT se déconnectait pendant que
+            // le controller Java existait toujours, Status ne déclenchait aucune
+            // reconnexion automatique, contrairement au comportement attendu.
+            if (!verifierIoAvantAction("STATUS_B")) return;
             runStatusBLikeButton("STATUS_B");
         });
         if (btnC != null) {
@@ -1403,8 +1409,19 @@ public class RegisterTabFragment extends Fragment {
     private void reconnectThisRegister(boolean userInitiated) {
         if (!tabMediaReady) {
             pendingReconnect = true;
+            // ✅ FIX (bétonnage) : avant, quand le média était OFF, ce chemin ne
+            // faisait RIEN d'actif — juste un drapeau posé + toast passif, en
+            // attendant qu'un événement externe (onTabMediaStatusChanged) se
+            // déclenche tout seul. Sur une vraie déconnexion USB/BT, cet
+            // événement n'arrive pas forcément — d'où "reconnect ne change
+            // rien". On déclenche maintenant activement le diagnostic (même
+            // mécanisme que Status/Continuer), au lieu d'attendre passivement.
             if (userInitiated) {
-                try { Toast.makeText(requireContext(), tabMediaShort + "(OFF) — en attente…", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
+                try { Toast.makeText(requireContext(), tabMediaShort + "(OFF) — reconnexion en cours…", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
+                android.util.Log.w("RegisterTabFragment", "reconnectThisRegister: média OFF — diagnostic actif déclenché (userInitiated)");
+                surErreurConnexion(
+                    new java.io.IOException("Média OFF — reconnexion demandée par l'utilisateur"),
+                    "RECONNECT_LONGPRESS");
             }
             return;
         }
@@ -2309,17 +2326,31 @@ public class RegisterTabFragment extends Fragment {
      */
     private boolean verifierIoAvantAction(String contexte) {
         try {
-            if (tabTransportKey != null) {
-                com.pa.lcr.lcp.transport.TransportIo io =
-                    MediaTransportManager.get(requireContext()).getByKey(tabTransportKey);
-                if (io == null || !io.isOpen()) {
-                    surErreurConnexion(
-                        new java.io.IOException("Transport fermé — BT/USB débranché"),
-                        contexte);
-                    return false;
-                }
+            // ✅ FIX (bétonnage) : si tabTransportKey est null/vide, l'ancien code
+            // sautait la vérification ENTIÈREMENT et retournait true par défaut —
+            // laissant croire que tout va bien alors qu'on ne sait même pas à quel
+            // transport se fier. Plus aucun cas ne passe sans vérification réelle.
+            if (tabTransportKey == null || tabTransportKey.trim().isEmpty()) {
+                android.util.Log.w("RegisterTabFragment", "verifierIoAvantAction [" + contexte
+                        + "]: tabTransportKey vide/null — transport inconnu, diagnostic forcé");
+                surErreurConnexion(
+                    new java.io.IOException("Transport inconnu (tabTransportKey vide) — BT/USB débranché"),
+                    contexte);
+                return false;
+            }
+            com.pa.lcr.lcp.transport.TransportIo io =
+                MediaTransportManager.get(requireContext()).getByKey(tabTransportKey);
+            if (io == null || !io.isOpen()) {
+                android.util.Log.w("RegisterTabFragment", "verifierIoAvantAction [" + contexte
+                        + "]: io=" + (io == null ? "null" : "fermé") + " pour transport=" + tabTransportKey);
+                surErreurConnexion(
+                    new java.io.IOException("Transport fermé — BT/USB débranché"),
+                    contexte);
+                return false;
             }
         } catch (Exception e) {
+            android.util.Log.w("RegisterTabFragment", "verifierIoAvantAction [" + contexte
+                    + "]: exception " + e.getMessage());
             surErreurConnexion(e, contexte);
             return false;
         }

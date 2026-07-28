@@ -369,10 +369,12 @@ public class DeepLinkHandler {
                                 dlg.setTitle("⚠️ Registre non connecté");
                                 dlg.setMessage(
                                     "Le registre (node " + fNodeR + " · serial " + fSerialId + ") "
-                                    + "n'est pas détecté sur USB ou Bluetooth.\n\n"
+                                    + "n'est pas détecté sur USB-C, Bluetooth, ni réseau TCP (N-Port).\n\n"
                                     + "1. Branchez le câble USB-C du registre\n"
                                     + "   — ou —\n"
-                                    + "2. Activez le Bluetooth et connectez le registre\n\n"
+                                    + "2. Activez le Bluetooth et connectez le registre\n"
+                                    + "   — ou —\n"
+                                    + "3. Vérifiez la connexion réseau Wi-Fi vers le N-Port (TCP)\n\n"
                                     + "Ensuite, allez dans l'onglet Configure pour établir\n"
                                     + "la connexion, puis relancez depuis Field Service.");
                                 dlg.setPositiveButton("Aller à Configure", (d, w) -> {
