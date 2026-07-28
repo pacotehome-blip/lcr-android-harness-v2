@@ -1236,6 +1236,53 @@ private void setupTabsTop() {
         } catch (Exception ignored) {}
         return false;
     }
+
+    // ✅ Nouvelle étape de résolution (demandée) : AVANT de sonder quoi que ce
+    // soit (transport/onglet/registre), valider si le node+#série demandés
+    // sont déjà ce qui tourne sur le MÉDIA ACTUELLEMENT ACTIF. Si oui →
+    // réutilisation immédiate, aucun scan/sondage d'un autre média nécessaire.
+    // Si non → retourne null, laissant le flux normal (resolveOrCreateForNode
+    // / auto-connect) chercher ailleurs.
+    //
+    // C'est ce qui évite de sonder un TCP-LC3 déjà connecté quand la
+    // livraison en cours cible en réalité un tout autre registre BT.
+    public String resolveIfActiveMatches(int node, String serialId) {
+        if (serialId == null || serialId.trim().isEmpty()) return null;
+        try {
+            String activeKey = (mediaTransportManager != null) ? mediaTransportManager.getActiveKey() : null;
+            if (activeKey == null || activeKey.trim().isEmpty()) return null;
+
+            for (TabSpec spec : tabsByKey.values()) {
+                if (spec == null) continue;
+                if (!activeKey.equalsIgnoreCase(spec.transportKey)) continue;
+                if (spec.node != node) continue;
+                if (spec.serialId == null) continue;
+                if (!serialId.trim().equalsIgnoreCase(spec.serialId.trim())) continue;
+
+                // Confirmer qu'une session vivante existe bien pour ce couple
+                com.pa.lcr.lcp.DeliveryController dc =
+                        com.pa.lcr.lcp.RegisterSessionManager.get(this).getController(activeKey, node);
+                if (dc == null) {
+                    android.util.Log.i("MainActivity", "resolveIfActiveMatches: onglet trouvé mais aucune session vivante — abandon, laisser chercher un autre média");
+                    return null;
+                }
+                // ✅ FIX : ne pas se contenter que la session EXISTE — vérifier
+                // qu'elle est réellement CONNECTED. Sinon, laisser le flux normal
+                // (resolveOrCreateForNode / auto-connect) chercher un autre média,
+                // au lieu de lancer la livraison sur un registre pas prêt.
+                if (dc.getState() != com.pa.lcr.lcp.DeliveryState.CONNECTED) {
+                    android.util.Log.i("MainActivity", "resolveIfActiveMatches: média actif " + activeKey
+                            + " trouvé mais état=" + dc.getState() + " (pas CONNECTED) — chercher un autre média");
+                    return null;
+                }
+                android.util.Log.i("MainActivity", "resolveIfActiveMatches: média actif " + activeKey
+                        + " correspond ET CONNECTED (node=" + node + " serial=" + serialId + ") — réutilisation directe");
+                return activeKey;
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
     // ✅ Rendu public : DeepLinkHandler et RegisterConnectionHelper doivent
     // pouvoir passer isLc3 explicitement (vrai type de Link connu via
     // DeliveryController.getLink()), plutôt que de passer par la version à
