@@ -53,13 +53,30 @@ public final class RegisterSessionManager {
     private final DeliveryLogStore store;
 
     // ✅ Option B: key = transportKey + ":" + node
-    private final Map<String, NodeSession> sessions = new LinkedHashMap<>();
+    private final Map<String, NodeSession> sessions = new java.util.concurrent.ConcurrentHashMap<>();
+
+    // ✅ Verrou PAR CLÉ (transport+node) — remplace le verrou global partagé
+    // (synchronized sur toute l'instance) qui bloquait TOUS les registres
+    // entre eux, même sur des transports totalement indépendants (ex: un
+    // deep link pour ouvrir un nouveau registre BT devait attendre qu'une
+    // sonde LC3 sur TCP se termine, ~1-2s, avant de pouvoir démarrer).
+    private final java.util.concurrent.ConcurrentHashMap<String, Object> creationLocks =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    private Object lockFor(String key) {
+        return creationLocks.computeIfAbsent(key, k -> new Object());
+    }
 
     // ✅ v7: identité registre (node + serial) et pin du média
     // - expectedSerialByNode: serial attendu (scan / validate) pour un node
     // - pinnedTransportByRegKey: (node#serial) -> transportKey choisi
-    private final Map<Integer, String> expectedSerialByNode = new LinkedHashMap<>();
-    private final Map<String, String> pinnedTransportByRegKey = new LinkedHashMap<>();
+    // ✅ FIX (perf/concurrence) : ConcurrentHashMap au lieu de LinkedHashMap —
+    // permet un accès concurrent sûr sans verrou global partagé entre
+    // transports indépendants (voir getOrCreate/resolveOrCreateForNode
+    // ci-dessous, qui n'utilisent plus qu'un verrou PAR CLÉ transport+node).
+    // Aucun code existant ne dépendait de l'ordre d'insertion de ces maps.
+    private final Map<Integer, String> expectedSerialByNode = new java.util.concurrent.ConcurrentHashMap<>();
+    private final Map<String, String> pinnedTransportByRegKey = new java.util.concurrent.ConcurrentHashMap<>();
     // transportKey → serialId connu
     private final java.util.concurrent.ConcurrentHashMap<String, String> knownLc3TransportKeys =
         new java.util.concurrent.ConcurrentHashMap<>();
@@ -135,7 +152,15 @@ public final class RegisterSessionManager {
     // - Si serial attendu connu: choisir le transport READY dont #80 match
     // - Sinon: réutiliser une session existante unique pour ce node
     // =========================================================
-    public synchronized DeliveryController resolveOrCreateForNode(int nodeDec, int fromDec) {
+    // ✅ FIX (perf) : plus de synchronized sur toute l'instance — les maps
+    // partagées sont maintenant des ConcurrentHashMap (thread-safe sans
+    // verrou externe), et la création réelle de session passe par
+    // getOrCreate() qui protège désormais par verrou PAR CLÉ transport+node.
+    // Avant ce correctif, la boucle de sonde (étape 2 ci-dessous, qui peut
+    // interroger plusieurs transports READY) bloquait TOUT appel concurrent
+    // à n'importe quelle méthode synchronized de cette classe — y compris
+    // pour un registre totalement indépendant sur un autre transport.
+    public DeliveryController resolveOrCreateForNode(int nodeDec, int fromDec) {
         int node = nodeDec;
         int from = fromDec & 0xFF;
 
@@ -263,19 +288,30 @@ public final class RegisterSessionManager {
         return null;
     }
 
-    public synchronized DeliveryController getOrCreate(String transportKey, int nodeDec, int fromDec, TransportIo io) {
+    public DeliveryController getOrCreate(String transportKey, int nodeDec, int fromDec, TransportIo io) {
         int node = nodeDec;
         int from = fromDec & 0xFF;
         if (io == null || !io.isOpen()) return null;
 
         String tk = (transportKey == null || transportKey.trim().isEmpty()) ? io.getKey() : transportKey.trim();
+        String k = key(tk, node);
+
+        // ✅ FIX (perf) : verrou PAR CLÉ, jamais un verrou global partagé.
+        // La sonde LC3/LCR-II ci-dessous peut prendre jusqu'à ~1-2s (réseau
+        // TCP) — elle ne bloque maintenant QUE les appels concurrents pour
+        // CE MÊME transport+node, jamais un registre totalement indépendant
+        // (ex: un nouveau BT pendant qu'un TCP-LC3 existant est sondé).
+        synchronized (lockFor(k)) {
+            return getOrCreateLocked(tk, k, node, from, io);
+        }
+    }
+
+    private DeliveryController getOrCreateLocked(String tk, String k, int node, int from, TransportIo io) {
         // ✅ B1 FSM: activer exclusivement ce transport avant IO (évite USB/BT zombies)
         // try { MediaTransportManager.get(appCtx).activateExclusive(tk, "RSM.getOrCreate"); } catch (Exception ignored) {}
 
         // Multi-registre: pas d'activateExclusive ici — le tab actif gère l'activation
         android.util.Log.d("RSM", "getOrCreate transport=" + tk + " node=" + node);
-
-        String k = key(tk, node);
 
         NodeSession existing = sessions.get(k);
 
