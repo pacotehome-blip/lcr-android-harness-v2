@@ -431,6 +431,20 @@ public final class RegisterSessionManager {
         // ✅ LCR-II sans serial — registre pas prêt, abandonner sans créer de session
         if (!isLc3 && (serialId0 == null || serialId0.isEmpty())) {
             android.util.Log.w("RSM", "getOrCreate LCR-II sans serial — abandon transport=" + tk + " node=" + node);
+            // ✅ FIX : si un pin (node,serial) pointait vers CE transport, l'effacer.
+            // Sans ça, resolveOrCreateForNode() retente indéfiniment ce même
+            // transport erroné à chaque appel (pin jamais invalidé), créant un
+            // tab TCP visible à chaque tentative avant que le vrai transport
+            // (ex: BT) ne soit enfin trouvé et migré.
+            try {
+                for (String rk : new java.util.ArrayList<>(pinnedTransportByRegKey.keySet())) {
+                    String pinnedTk = pinnedTransportByRegKey.get(rk);
+                    if (tk.equalsIgnoreCase(pinnedTk) && rk.startsWith(node + "#")) {
+                        pinnedTransportByRegKey.remove(rk);
+                        android.util.Log.i("RSM", "Pin périmé retiré: " + rk + " -> " + tk);
+                    }
+                }
+            } catch (Exception ignored) {}
             try { dc.shutdown(false); } catch (Exception ignored) {}
             return null;
         }
