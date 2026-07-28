@@ -192,12 +192,34 @@ public class DeepLinkHandler {
                         rsm.bindExpectedSerial(fNode, fSerialId);
                     }
 
+                    // ✅ Étape 0 (demandée) : AVANT de sonder quoi que ce soit,
+                    // valider si le node+#série demandés sont déjà ce qui tourne
+                    // sur le média ACTUELLEMENT ACTIF. Si oui → réutilisation
+                    // immédiate, on saute complètement nportip/resolveOrCreateForNode
+                    // /auto-connect — aucun autre transport n'est touché du tout.
+                    String activeMatch = activity.resolveIfActiveMatches(fNode, fSerialId);
+                    if (activeMatch != null) {
+                        android.util.Log.i(TAG, "Deep link: média actif correspond déjà (" + activeMatch
+                                + ") — aucune résolution/scan nécessaire");
+                        lancerLivraison(activeMatch, fNode, fSerialId, woNum, woIdGuid, fProduit, fPresetStr, fBtMac);
+                        return;
+                    }
+
                     // ✅ N-Port fourni directement par Field Service (nportip/nportport)
                     // → connexion TCP déterministe AVANT toute résolution/scan.
                     // Node + #série restent liés dans tous les cas via bindExpectedSerial
                     // ci-dessus, peu importe si cette connexion directe réussit ou non
                     // (le fallback USB/BT/scan-auto plus bas prend le relais sinon).
-                    if (fNportIp != null && !fNportIp.trim().isEmpty()) {
+                    //
+                    // ✅ FIX : ne tenter le TCP QUE si cette livraison ne cible pas
+                    // déjà explicitement du BT (fBtMac présent). Avant ce correctif,
+                    // si Field Service incluait nportip par défaut/résiduel dans
+                    // CHAQUE deep link (même pour des livraisons BT), un onglet TCP
+                    // se créait systématiquement, peu importe le vrai média visé —
+                    // un onglet ne doit exister QUE si un vrai registre est trouvé
+                    // ET que ce registre est réellement celui visé par CETTE livraison.
+                    boolean btIsTarget = fBtMac != null && !fBtMac.trim().isEmpty();
+                    if (!btIsTarget && fNportIp != null && !fNportIp.trim().isEmpty()) {
                         try {
                             android.util.Log.i(TAG, "Deep link: N-Port fourni directement — "
                                 + fNportIp + ":" + fNportPort + " node=" + fNode + " serial=" + fSerialId);
@@ -210,6 +232,9 @@ public class DeepLinkHandler {
                         } catch (Exception e) {
                             android.util.Log.w(TAG, "Deep link: connexion N-Port directe échouée: " + e.getMessage());
                         }
+                    } else if (btIsTarget && fNportIp != null && !fNportIp.trim().isEmpty()) {
+                        android.util.Log.i(TAG, "Deep link: nportip fourni mais btmac aussi présent — "
+                            + "cette livraison cible BT, connexion TCP ignorée");
                     }
 
                     com.pa.lcr.lcp.DeliveryController dc =
@@ -221,6 +246,14 @@ public class DeepLinkHandler {
                         activity.runOnUiThread(() -> activity.toast("🔌 Connexion au registre..."));
                         for (int w = 0; w < 75; w++) {
                             if (dc.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
+                            // ✅ FIX (UX) : avant, silence total pendant jusqu'à 15s après
+                            // le seul toast initial — "temps mort" perçu par le chauffeur,
+                            // sans savoir si l'app est bloquée ou travaille encore.
+                            // Retour visuel toutes les ~3s (15 x 200ms) pendant l'attente.
+                            if (w > 0 && w % 15 == 0) {
+                                final int fSec = (w * 200) / 1000;
+                                activity.runOnUiThread(() -> activity.toast("🔌 Connexion au registre... (" + fSec + "s)"));
+                            }
                             try { Thread.sleep(200); } catch (Exception ignored) {}
                         }
                         android.util.Log.i(TAG, "DC state avant lancerLivraison: " + dc.getState());
@@ -237,6 +270,10 @@ public class DeepLinkHandler {
                                 if (dc3 != null) {
                                     for (int w = 0; w < 75; w++) {
                                         if (dc3.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
+                                        if (w > 0 && w % 15 == 0) {
+                                            final int fSec2 = (w * 200) / 1000;
+                                            activity.runOnUiThread(() -> activity.toast("🔌 Registre trouvé, connexion... (" + fSec2 + "s)"));
+                                        }
                                         try { Thread.sleep(200); } catch (Exception ignored) {}
                                     }
                                     if (dc3.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) {
@@ -282,6 +319,10 @@ public class DeepLinkHandler {
                                 activity.runOnUiThread(() -> activity.toast("🔌 Connexion au registre..."));
                                 for (int w = 0; w < 75; w++) {
                                     if (dc2.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
+                                    if (w > 0 && w % 15 == 0) {
+                                        final int fSec3 = (w * 200) / 1000;
+                                        activity.runOnUiThread(() -> activity.toast("🔌 Connexion au registre... (" + fSec3 + "s)"));
+                                    }
                                     try { Thread.sleep(200); } catch (Exception ignored) {}
                                 }
                                 if (dc2.getState() != com.pa.lcr.lcp.DeliveryState.CONNECTED) {
