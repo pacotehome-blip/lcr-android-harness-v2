@@ -835,15 +835,10 @@ tabRegisters = findViewById(R.id.tabRegisters);
         if (cbLogTs != null) cbLogTs.setChecked(ts);
         LogBus.SHOW_TS = ts;
     nodeItems.clear();
-        // ✅ FIX : retiré. Ce placeholder créait INCONDITIONNELLEMENT un onglet
-        // "node 250, média inconnu" à chaque démarrage — vestige de l'ancienne
-        // architecture mono-registre. Avec la détection multi-registre réelle
-        // (upsertRegisterTabFromScan), ce placeholder n'est plus jamais rempli
-        // par un vrai registre s'il n'y en a pas au node 250 — il traînait
-        // simplement à l'écran comme "un tab inutile" jusqu'à ce qu'un autre
-        // événement (BT détecté, etc.) déclenche le nettoyage automatique des
-        // onglets à serial vide (removeAllUnknownSerialTabsBestEffort()).
-        // ensureRegisterTab(250, 255, true);
+        // ⚠️ RETOUR EN ARRIÈRE : le retrait de cet appel a cassé la création
+        // de TOUS les onglets (pas seulement le placeholder). Remis en place
+        // le temps de comprendre la vraie dépendance avant de retoucher.
+        ensureRegisterTab(250, 255, true);
 
         mainLogViewSinceMs = 0L;
         refreshGlobalLogView();
