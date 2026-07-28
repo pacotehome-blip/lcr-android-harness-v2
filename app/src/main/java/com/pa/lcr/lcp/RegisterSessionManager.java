@@ -324,8 +324,29 @@ public final class RegisterSessionManager {
         NodeSession existing = sessions.get(k);
 
         if (existing != null) {
-            // ✅ Anti-mix: regen si génération transport différente
-            if (existing.generationId == io.getGenerationId()) {
+            // ✅ FIX (le vrai bug) : avant de réutiliser aveuglément une session
+            // mise en cache (même génération de transport), vérifier que son
+            // #série enregistré correspond bien au #série ATTENDU pour ce node
+            // (via bindExpectedSerial/expectedSerialByNode). Sans cette
+            // vérification, une session créée UNE FOIS par erreur (ex: un LC3
+            // mal identifié, node défauté à 250 par coïncidence avec le vrai
+            // node du LCR-II) restait en cache indéfiniment et se faisait
+            // réutiliser pour TOUTE demande future sur ce (transport,node) —
+            // même quand la demande concernait en réalité un tout autre
+            // registre. C'est exactement ce qui créait le tab TCP fantôme
+            // avant que le deep link ne trouve enfin le vrai BT.
+            String expected = expectedSerialByNode.get(node);
+            boolean serialMismatch = expected != null && !expected.trim().isEmpty()
+                    && existing.serialId != null && !existing.serialId.trim().isEmpty()
+                    && !expected.trim().equalsIgnoreCase(existing.serialId.trim());
+            if (serialMismatch) {
+                android.util.Log.w("RSM", "getOrCreate: session en cache INVALIDÉE pour " + k
+                        + " — serial attendu=" + expected + " mais session cachée avait serial=" + existing.serialId);
+                try { existing.scheduler.shutdown(); } catch (Exception ignored) {}
+                try { existing.dc.shutdown(false); } catch (Exception ignored) {}
+                sessions.remove(k);
+                // ne PAS return — continue plus bas pour tenter une vraie (re)identification
+            } else if (existing.generationId == io.getGenerationId()) {
                 return existing.dc;
             }
             // ✅ FIX : l'ancien test "existing.dc.getState() != null" était toujours vrai
