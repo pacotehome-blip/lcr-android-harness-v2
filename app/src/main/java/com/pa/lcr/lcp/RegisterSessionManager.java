@@ -407,6 +407,22 @@ public final class RegisterSessionManager {
 
         LcpLink link;
         if (isLc3) {
+            // ✅ FIX (la vraie source du tab TCP fantôme) : "LC3" est le placeholder
+            // interne de Lc3Link.probeAndIdentify quand la lecture réelle échoue —
+            // il n'est PAS vide, donc il passait le test "!isEmpty()" ci-dessous et
+            // polluait expectedSerialByNode/pinnedTransportByRegKey avec "LC3"
+            // comme si c'était un vrai #série. Contrairement à la branche LCR-II
+            // (qui abandonne proprement si le serial est vide), cette branche LC3
+            // n'avait AUCUN garde-fou équivalent — elle créait une session
+            // "CONNECTED" à partir d'une identité invalide (node=0, serial=LC3),
+            // que resolveOrCreateForNode() réutilisait ensuite pour n'importe quel
+            // autre node demandé sur ce même transport.
+            boolean identityValid = identity.serialId != null && !identity.serialId.trim().isEmpty()
+                    && !identity.serialId.trim().equals("LC3") && identity.nodeId > 0;
+            if (!identityValid) {
+                android.util.Log.w("RSM", "getOrCreate LC3 identité invalide (placeholder/node=0) — abandon transport=" + tk + " node=" + node);
+                return null;
+            }
             knownLc3TransportKeys.put(tk, identity.serialId != null ? identity.serialId : "");
             int lc3Node = (identity.nodeId > 0) ? identity.nodeId : node;
             link = new Lc3Link(io, identity.serialId.isEmpty() ? null : identity.serialId);
