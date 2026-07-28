@@ -662,7 +662,22 @@ public class Lc3Link extends LcpLink {
     }
 
     // ── probeAndIdentify ──────────────────────────────────────────────────
+    // ✅ Un SEUL point d'entrée pour toute identification LC3 — utilisé par
+    // RegisterSessionManager, MainActivity (finalizeTcpRegisterTab,
+    // scanRegistersWithIo), etc. Le retry sur échec de lecture (placeholder
+    // "LC3" persistant faute d'avoir trouvé "SERIAL NUMBER" à l'écran, cause
+    // fréquente : latence TCP plus longue qu'en BT direct) vit ICI, une
+    // seule fois — jamais à dupliquer dans chaque appelant.
     public static RegisterIdentity probeAndIdentify(TransportIo io) {
+        RegisterIdentity id = probeAndIdentifyOnce(io);
+        if (id != null && id.isLc3 && "LC3".equals(id.serialId) && id.nodeId == 0) {
+            android.util.Log.w("Lc3Link", "probeAndIdentify: échec complet (placeholder LC3, node=0) — nouvelle tentative");
+            id = probeAndIdentifyOnce(io);
+        }
+        return id;
+    }
+
+    private static RegisterIdentity probeAndIdentifyOnce(TransportIo io) {
         if (!probe(io)) return new RegisterIdentity(false, null, 0, 0, "");
         Lc3Link lc3 = new Lc3Link(io);
         String serialId = "LC3";

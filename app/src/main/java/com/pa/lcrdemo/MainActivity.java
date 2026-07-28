@@ -1190,12 +1190,40 @@ private void setupTabsTop() {
      * Règle: clear ciblé A1 si même (node,serial) apparaît sur un autre média.
      */
     public void upsertRegisterTabFromScan(String transportKey, int node, int from, String serialId, boolean focus) {
-        // Préserver isLc3 du tab existant si connu
-        String mediaShort = mediaShortFromTransportKey(transportKey);
-        String tabKey = tabKeyOf(mediaShort, node, safeSerial(serialId));
-        TabSpec existing = tabsByKey.get(tabKey);
-        boolean isLc3 = (existing != null) && existing.isLc3;
-        upsertRegisterTabFromScan(transportKey, node, from, serialId, focus, isLc3);
+        upsertRegisterTabFromScan(transportKey, node, from, serialId, focus, resolveIsLc3(transportKey, node));
+    }
+
+    // ✅ Point d'entrée UNIQUE pour déterminer si un registre est LC3, avant
+    // de créer/mettre à jour un onglet. Remplace les vérifications dupliquées
+    // qui existaient séparément dans DeepLinkHandler, RegisterConnectionHelper
+    // et l'ancienne version de cette méthode (qui devinait via un onglet
+    // existant — toujours faux pour un premier onglet créé sur un LC3).
+    //
+    // Ordre de résolution :
+    //   1) DeliveryController.getLink() — source de vérité si une session
+    //      est déjà active pour ce (transportKey, node).
+    //   2) Onglet existant (repli) — utile si un onglet a déjà été créé
+    //      correctement avant qu'une session ne soit (re)créée.
+    public boolean resolveIsLc3(String transportKey, int node) {
+        try {
+            com.pa.lcr.lcp.DeliveryController dc =
+                    com.pa.lcr.lcp.RegisterSessionManager.get(this).getController(transportKey, node);
+            if (dc != null && dc.getLink() instanceof com.pa.lcr.lcp.Lc3Link) return true;
+            if (dc != null) return false; // session existe et n'est PAS Lc3Link → LCR-II confirmé
+        } catch (Exception ignored) {}
+
+        try {
+            String mediaShort = mediaShortFromTransportKey(transportKey);
+            // on ne connaît pas encore le serial ici pour un tabKey exact —
+            // on cherche par (média, node) parmi les onglets existants.
+            for (TabSpec spec : tabsByKey.values()) {
+                if (spec != null && spec.node == node
+                        && transportKey.equalsIgnoreCase(spec.transportKey)) {
+                    return spec.isLc3;
+                }
+            }
+        } catch (Exception ignored) {}
+        return false;
     }
     // ✅ Rendu public : DeepLinkHandler et RegisterConnectionHelper doivent
     // pouvoir passer isLc3 explicitement (vrai type de Link connu via
@@ -1750,24 +1778,13 @@ private void setupTabsTop() {
 
             if (identity != null && identity.isLc3) {
                 final int node = identity.nodeId > 0 ? identity.nodeId : 250;
-                String serial = identity.serialId;
+                final String serialFixed = identity.serialId;
 
-                // ✅ FIX : "LC3" (sans suffixe) est un placeholder INTERNE de
-                // Lc3Link.probeAndIdentify — pas un vrai #série. Il apparaît quand
-                // la navigation à l'écran du registre (6 itérations, 150ms chacune)
-                // n'a pas eu le temps de trouver la ligne "SERIAL NUMBER" — cause
-                // fréquente : latence réseau TCP plus longue qu'en BT direct.
-                // On ne doit JAMAIS l'exposer tel quel (ni à l'onglet, ni à CONFIGURE) —
-                // une nouvelle tentative est faite avant d'abandonner.
-                if (serial != null && serial.trim().equals("LC3")) {
-                    android.util.Log.w(TAG, "finalizeTcpRegisterTab: #série = placeholder LC3 (lecture incomplète) — nouvelle tentative");
-                    try {
-                        Lc3Link.RegisterIdentity retry = Lc3Link.probeAndIdentify(io);
-                        if (retry != null) serial = retry.serialId;
-                    } catch (Exception ignored) {}
-                }
-
-                final String serialFixed = serial;
+                // ✅ Le retry sur le placeholder "LC3" vit maintenant DANS
+                // Lc3Link.probeAndIdentify() lui-même (mécanisme unique,
+                // partagé par tous les appelants) — plus besoin de le refaire
+                // ici. Si serialFixed vaut encore "LC3" à ce stade, les deux
+                // tentatives internes ont échoué — on rejette proprement.
                 android.util.Log.i(TAG, "finalizeTcpRegisterTab: LC3 détecté node=" + node + " serial=" + serialFixed);
 
                 boolean serialValid = serialFixed != null && !serialFixed.trim().isEmpty()
@@ -2034,17 +2051,10 @@ private void setupTabsTop() {
                 // LC3 détecté — pas de boucle node
                 int    lc3Node  = identity.nodeId > 0 ? identity.nodeId : 250;
                 String serialId = identity.serialId;
-                // ✅ FIX : "LC3" (sans suffixe) est un placeholder interne de
-                // Lc3Link.probeAndIdentify quand la lecture réelle du #série a
-                // échoué (latence/timing) — ne jamais l'exposer tel quel dans
-                // le scan CONFIGURE ("serial=LC3"). Une nouvelle tentative est
-                // faite avant d'accepter le résultat.
-                if (serialId != null && serialId.trim().equals("LC3")) {
-                    try {
-                        Lc3Link.RegisterIdentity retry = Lc3Link.probeAndIdentify(ioFinal);
-                        if (retry != null) serialId = retry.serialId;
-                    } catch (Exception ignored) {}
-                }
+                // ✅ Le retry sur le placeholder "LC3" vit maintenant DANS
+                // Lc3Link.probeAndIdentify() lui-même — mécanisme unique
+                // partagé par tous les appelants (RegisterSessionManager,
+                // finalizeTcpRegisterTab, ici). Plus besoin de le refaire.
                 String ticketNo = "";
                 try {
                     Lc3Link lc3tmp = new Lc3Link(ioFinal);
