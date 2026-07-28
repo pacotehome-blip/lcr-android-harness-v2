@@ -1289,6 +1289,14 @@ private void setupTabsTop() {
     // 5 arguments qui devine isLc3 depuis un onglet existant — toujours
     // faux pour un premier onglet créé sur un registre LC3.
     public void upsertRegisterTabFromScan(String transportKey, int node, int from, String serialId, boolean focus, boolean isLc3) {
+        // ✅ Log d'entrée AVEC pile d'appel — pour identifier, une fois pour
+        // toutes, QUI appelle cette méthode avec quelles données. Le log de
+        // migration seul ne suffisait pas : il ne se déclenche que la 2e fois
+        // (quand un ancien tab existe déjà) — jamais lors de la toute première
+        // création, qui est justement le moment qu'on n'arrivait pas à tracer.
+        android.util.Log.i("MainActivity", "upsertRegisterTabFromScan: APPEL transportKey=" + transportKey
+                + " node=" + node + " serial=" + serialId + " isLc3=" + isLc3 + " focus=" + focus
+                + "\n" + android.util.Log.getStackTraceString(new Exception("stacktrace-only")));
         if (node < 1 || (!isLc3 && node > 250)) return;
         if (from < 0 || from > 255) from = 255;
         String mediaShort = mediaShortFromTransportKey(transportKey);
