@@ -1304,38 +1304,31 @@ private void setupTabsTop() {
         // par coïncidence le même (node, serial, type) sur deux médias
         // différents pouvaient s'écraser l'un l'autre — alors qu'ils doivent
         // pouvoir coexister connectés simultanément (voir onConfigureMediaActivated).
-        String regKey = regKeyOf(node, serial) + (isLc3 ? ":lc3" : ":lcr");
+        // ✅ FIX : plus de suffixe ":lc3"/":lcr" dans regKey — même #série + même
+        // node = MÊME registre physique, peu importe le type détecté (correct
+        // ou mal détecté) lors d'une tentative précédente. Avant ce correctif,
+        // un ancien tab mal typé (ex: isLc3=true par erreur) utilisait un regKey
+        // différent ("...:lc3" vs "...:lcr"), donc n'était JAMAIS trouvé lors de
+        // la recherche du "vieux tab à migrer" — les deux persistaient.
+        String regKey = regKeyOf(node, serial);
         String newTabKey = tabKeyOf(mediaShort, node, serial);
         String oldTabKey = regKeyToTabKey.get(regKey);
         if (oldTabKey != null && !oldTabKey.equals(newTabKey)) {
             TabSpec oldSpec = tabsByKey.get(oldTabKey);
-            if (oldSpec != null && oldSpec.isLc3 == isLc3) {
-                // ✅ FIX : même MÉDIA (ex: TCP vs TCP, juste une IP/port différente
-                // après reconnexion) → toujours un doublon du même registre, jamais
-                // deux registres indépendants. On nettoie l'ancien systématiquement,
-                // peu importe si son transport rapporte encore "ouvert" (un socket
-                // périmé mais pas encore fermé proprement ne doit pas produire 2 tabs
-                // pour le même registre physique).
-                //
-                // Média DIFFÉRENT (ex: BT vs TCP) → peut être deux registres
-                // réellement indépendants (coïncidence node+serial) → on garde la
-                // vérification "transport encore ouvert" comme filet de sécurité.
-                boolean sameMedia = mediaShort.equalsIgnoreCase(oldSpec.mediaShort);
-                boolean oldTransportGone = true;
-                if (!sameMedia) {
-                    try {
-                        TransportIo oldIo = (mediaTransportManager != null && oldSpec.transportKey != null)
-                                ? mediaTransportManager.getByKey(oldSpec.transportKey) : null;
-                        oldTransportGone = (oldIo == null || !oldIo.isOpen());
-                    } catch (Exception ignored) {}
-                }
-                if (sameMedia || oldTransportGone) {
-                    removeTabAndFragment(oldTabKey, "migrated to " + newTabKey
-                            + (sameMedia ? " (doublon même média, ancien nettoyé)" : ""));
-                } else {
-                    logUi(null, "Migration ignorée: " + oldTabKey + " toujours connecté (registre indépendant sur "
-                            + newTabKey + ")");
-                }
+            android.util.Log.i("MainActivity", "upsertRegisterTabFromScan: regKey=" + regKey
+                    + " oldTabKey=" + oldTabKey + " newTabKey=" + newTabKey
+                    + " oldSpec.isLc3=" + (oldSpec != null ? oldSpec.isLc3 : "null") + " isLc3=" + isLc3);
+            if (oldSpec != null) {
+                // ✅ RÈGLE SIMPLE (demandée) : même #série + même node = on
+                // reprend, on supprime l'ancien onglet et on applique le nouveau
+                // média — sans AUCUNE condition, ni sur le transport ni sur
+                // isLc3. Avant ce correctif, si un ancien tab avait été créé
+                // avec un isLc3 incorrect (ex: faux-positif LC3 sur un LCR-II
+                // réel), la migration ne se déclenchait JAMAIS puisqu'elle
+                // exigeait oldSpec.isLc3 == isLc3 — les deux onglets
+                // persistaient indéfiniment côte à côte pour LE MÊME registre.
+                android.util.Log.i("MainActivity", "upsertRegisterTabFromScan: MIGRATION — suppression de " + oldTabKey);
+                removeTabAndFragment(oldTabKey, "migrated to " + newTabKey);
             }
         }
         regKeyToTabKey.put(regKey, newTabKey);
