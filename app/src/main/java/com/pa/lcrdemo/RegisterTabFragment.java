@@ -349,6 +349,13 @@ public class RegisterTabFragment extends Fragment {
     private volatile boolean woNumFromDirectSource = false;
     private volatile boolean deliveryNotified = false; // guard anti-doublon notification
     private volatile String currentWoIdGuid = "";
+
+    // ✅ FIX (2026-07-29) : produit et preset du deep link mémorisés ici, et non
+    // seulement poussés dans spnProduct/edtPreset. Le diagnostic de reconnexion
+    // tourne en thread de fond et doit relayer ces valeurs à lancerLivraison()
+    // sans lire de widget hors du thread UI.
+    private volatile String currentProduit  = "";
+    private volatile String currentPreset   = "";
     private static final int TAB_LOG_MAX_LINES = 400;
     private static final long LOG_REFRESH_MIN_MS = 800;
     private long lastLogRefreshMs = 0L;
@@ -890,6 +897,8 @@ public class RegisterTabFragment extends Fragment {
             lastTicketDetected = ""; // permettre une future recherche si ce WO change de source
         }
         if (woIdGuid != null && !woIdGuid.isEmpty()) currentWoIdGuid = woIdGuid;
+        if (produit != null && !produit.isEmpty()) currentProduit = produit;
+        if (preset  != null && !preset.isEmpty())  currentPreset  = preset;
         if (edtPreset != null && preset != null && !preset.isEmpty())
             edtPreset.setText(preset);
         if (spnProduct != null && produit != null && !produit.isEmpty())
@@ -2557,6 +2566,16 @@ public class RegisterTabFragment extends Fragment {
         return true;
     }
 
+    /** Extrait la MAC depuis tabTransportKey ("BT:AA:BB:.."), ou "" si le
+     *  transport n'est pas Bluetooth (USB / TCP). */
+    private String macDepuisTransportKey() {
+        try {
+            String k = tabTransportKey;
+            if (k != null && k.toUpperCase().startsWith("BT:")) return k.substring(3).trim();
+        } catch (Exception ignored) {}
+        return "";
+    }
+
     private void surErreurConnexion(Exception e, String contexte) {
         android.util.Log.w("RegisterTabFragment", "surErreurConnexion [" + contexte + "]: "
             + (e != null ? e.getMessage() : "null"));
@@ -2584,7 +2603,17 @@ public class RegisterTabFragment extends Fragment {
                                 tabTransportKey != null ? tabTransportKey : "",
                                 node,
                                 serialFromArgs != null ? serialFromArgs : "",
-                                currentWoNum != null ? currentWoNum : "");
+                                currentWoNum != null ? currentWoNum : "",
+                                // ✅ FIX : contexte deep link relayé jusqu'au diagnostic,
+                                // sans quoi la relance automatique de la livraison ne peut
+                                // pas se déclencher après une reconnexion réussie.
+                                currentWoIdGuid != null ? currentWoIdGuid : "",
+                                currentProduit  != null ? currentProduit  : "",
+                                currentPreset   != null ? currentPreset   : "",
+                                macDepuisTransportKey(),
+                                (getActivity() instanceof com.pa.lcrdemo.MainActivity)
+                                    ? ((com.pa.lcrdemo.MainActivity) getActivity()).getDeepLinkHandler()
+                                    : null);
                     } else {
                         android.util.Log.w("RegisterTabFragment", "surErreurConnexion [" + fContexte
                                 + "]: activité indisponible — diagnostic annulé");

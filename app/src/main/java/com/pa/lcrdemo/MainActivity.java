@@ -182,6 +182,22 @@ public class MainActivity extends AppCompatActivity {
     // ✅ Getters publics pour DeepLinkHandler
     public BluetoothAdapter getBtAdapter() { return btAdapter; }
 
+    /**
+     * ✅ FIX (2026-07-29) : expose le DeepLinkHandler pour que le diagnostic de
+     * reconnexion puisse relancer la livraison après succès.
+     *
+     * Sans cet accès, le chemin RegisterTabFragment.surErreurConnexion →
+     * validerConnexion → lancerDiagnosticForce utilisait la surcharge à 4
+     * arguments, qui passe deepLinkHandler=null. Le diagnostic réussissait, le
+     * tab passait Connected-Ready, mais lancerLivraison() n'était jamais appelé
+     * — donc aucune reprise de la livraison et aucun dialog Continuer/Annuler
+     * (ce dialog vit dans DeepLinkHandler.lancerLivraison()).
+     *
+     * Peut retourner null si appelé avant onCreate/initialisation — les
+     * appelants doivent le tolérer.
+     */
+    public DeepLinkHandler getDeepLinkHandler() { return deepLinkHandler; }
+
     // ✅ WebView Field Service — pour écrire dans localStorage avant finish()
     public android.webkit.WebView getFieldServiceWebView() {
         try {

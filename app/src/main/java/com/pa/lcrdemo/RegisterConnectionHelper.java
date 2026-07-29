@@ -93,6 +93,32 @@ public class RegisterConnectionHelper {
      * @return true si le registre répond, false si diagnostic lancé
      */
     public boolean validerConnexion(String transportKey, int node, String serialId, String woNum) {
+        return validerConnexion(transportKey, node, serialId, woNum,
+                null, null, null, null, null);
+    }
+
+    /**
+     * Surcharge portant le contexte complet du deep link.
+     *
+     * ✅ FIX (2026-07-29, preuve logcat 00:38) : la version à 4 arguments ne
+     * pouvait STRUCTURELLEMENT pas transporter deepLinkHandler/woIdGuid/produit/
+     * preset jusqu'à lancerDiagnosticForce(). Tout diagnostic parti de ce chemin
+     * (surErreurConnexion → validerConnexion) arrivait donc au bloc de relance
+     * finale avec deepLinkHandler == null :
+     *
+     *     if (deepLinkHandler != null && woNum != null && !woNum.isEmpty())
+     *
+     * … condition fausse, donc lancerLivraison() jamais appelé. Le diagnostic
+     * réussissait, le tab passait Connected-Ready, et la livraison ne repartait
+     * pas — sans dialog Continuer/Annuler, puisque ce dialog vit dans
+     * DeepLinkHandler.lancerLivraison().
+     *
+     * Tous les paramètres de contexte sont facultatifs (null accepté) : quand ils
+     * sont absents, le comportement est identique à l'ancienne version.
+     */
+    public boolean validerConnexion(String transportKey, int node, String serialId, String woNum,
+            String woIdGuid, String produit, String presetStr, String mac,
+            com.pa.lcrdemo.DeepLinkHandler deepLinkHandler) {
         // ✅ Si transportKey vide — chercher le transport BT actif automatiquement
         String tkResolu = transportKey;
         if (tkResolu == null || tkResolu.isEmpty()) {
@@ -131,7 +157,8 @@ public class RegisterConnectionHelper {
             // passer, sans erreur, sans log visible côté UI. lancerDiagnosticForce()
             // existe justement pour ce cas ("le registre ne répond pas même si
             // BT est connecté, câble débranché") — on l'utilise ici aussi.
-            new Thread(() -> lancerDiagnosticForce(tkFinal, node, serialId, woNum)).start();
+            new Thread(() -> lancerDiagnosticForce(tkFinal, node, serialId, woNum,
+                    woIdGuid, produit, presetStr, mac, deepLinkHandler)).start();
             return false;
         }
 
@@ -206,7 +233,8 @@ public class RegisterConnectionHelper {
             // chauffeur cliquait Status et ne voyait rien. On force, en thread
             // dédié (jamais sur le thread UI : diagnostic() fait des sleep et
             // des probes LCP bloquants).
-            new Thread(() -> lancerDiagnosticForce(tkFinal, node, serialId, woNum)).start();
+            new Thread(() -> lancerDiagnosticForce(tkFinal, node, serialId, woNum,
+                    woIdGuid, produit, presetStr, mac, deepLinkHandler)).start();
             return false;
         }
 
