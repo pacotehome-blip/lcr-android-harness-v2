@@ -924,19 +924,45 @@ public class RegisterTabFragment extends Fragment {
             String woNum    = (woNumIn    != null) ? woNumIn    : "";
             String woIdGuid = (woIdGuidIn != null) ? woIdGuidIn : "";
 
+            // ✅ FIX (la vraie cause du bouton "Retour au WO" manquant) : net/gross
+            // étaient lus en parsant le TEXTE affiché à l'écran (txtQtyNet/txtQtyGross)
+            // — fragile, silencieusement à 0.0 si le format ne correspondait pas
+            // exactement (locale, arrondi, etc.). Comme l'insertion en base plus
+            // bas exige "fNet > 0" pour s'exécuter, un simple échec de parsing
+            // faisait sauter l'écriture du ticket ENTIÈREMENT, empêchant à jamais
+            // "Retour au WO" d'apparaître — même pour une livraison parfaitement
+            // valide. On lit maintenant les valeurs RÉELLES depuis l'API du
+            // contrôleur (net_l/gross_l), le parsing texte ne sert plus que de
+            // filet de secours si l'API échoue.
+            org.json.JSONObject snapDataEarly = null;
             try {
-                if (txtTicketNo != null)
-                    ticketNo = txtTicketNo.getText().toString()
-                                   .replace("Ticket Number : ", "").trim();
-                if (txtQtyNet != null)
+                if (controller != null) {
+                    com.pa.lcr.lcp.ApiResult snapEarly = controller.api_tickSnapshot();
+                    if (snapEarly != null && snapEarly.data != null) snapDataEarly = snapEarly.data;
+                }
+            } catch (Exception ignored) {}
+
+            if (snapDataEarly != null) {
+                net   = snapDataEarly.optDouble("net_l", -1);
+                gross = snapDataEarly.optDouble("gross_l", -1);
+                ticketNo = snapDataEarly.optString("ticket_no", "");
+            }
+
+            try {
+                if ((net < 0) && txtQtyNet != null)
                     net = Double.parseDouble(
                         txtQtyNet.getText().toString()
                                  .replace("NET: ", "").trim());
-                if (txtQtyGross != null)
+                if ((gross < 0) && txtQtyGross != null)
                     gross = Double.parseDouble(
                         txtQtyGross.getText().toString()
                                    .replace("GROSS: ", "").trim());
+                if (ticketNo.isEmpty() && txtTicketNo != null)
+                    ticketNo = txtTicketNo.getText().toString()
+                                   .replace("Ticket Number : ", "").trim();
             } catch (Exception ignored) {}
+            if (net < 0) net = 0.0;
+            if (gross < 0) gross = 0.0;
 
             org.json.JSONObject extra = new org.json.JSONObject();
             try {
@@ -982,7 +1008,12 @@ public class RegisterTabFragment extends Fragment {
                         && existing.ticketNo != null
                         && !existing.ticketNo.isEmpty()
                         && existing.netL > 0);
-                    if (!alreadyHasData && fNet > 0) {
+                    // ✅ FIX : exiger fNet > 0 pour insérer faisait qu'une livraison
+                    // avec un ticket VALIDE mais un net à 0 (ou légitimement bas)
+                    // n'était JAMAIS enregistrée — bloquant "Retour au WO" pour rien.
+                    // Un ticket non vide suffit à justifier l'enregistrement.
+                    boolean hasTicketOrVolume = (fTicketNo != null && !fTicketNo.trim().isEmpty()) || fNet > 0;
+                    if (!alreadyHasData && hasTicketOrVolume) {
                         android.content.ContentValues cv = new android.content.ContentValues();
                         cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,    fWoNum);
                         cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO, fTicketNo);
@@ -1784,10 +1815,45 @@ public class RegisterTabFragment extends Fragment {
             // ✅ Source de vérité: LcrDeliveryStatusDb — indépendant du timing UI
             // Lecture en background pour ne pas bloquer le UI thread
             final boolean connectedFinal = connected;
-            if (currentWoNum != null && !currentWoNum.isEmpty()) {
-                final String woCheck = currentWoNum;
-                bg.execute(() -> {
-                    boolean hasData = false;
+            final String woForCheck = currentWoNum;
+            final String serialForFallback = serialFromArgs;
+            // ✅ FIX (la vraie cause du bouton manquant après reconnexion) :
+            // ActiveDeliveryStore est VIDÉ une fois la livraison terminée — donc
+            // si l'onglet est recréé/reconnecté APRÈS la fin d'une livraison
+            // (ex: coupure USB juste après Terminer, puis reconnexion via le
+            // diagnostic), currentWoNum ne peut plus se restaurer via ce chemin
+            // et reste vide indéfiniment, cachant le bouton pour toujours même
+            // si un ticket parfaitement valide existe déjà dans la DB locale.
+            // Filet de secours : si currentWoNum est vide, retrouver le dernier
+            // WO livré pour CE #série précis (pas tous registres confondus).
+            bg.execute(() -> {
+                String woCheck = woForCheck;
+                if ((woCheck == null || woCheck.isEmpty()) && serialForFallback != null && !serialForFallback.isEmpty()) {
+                    try {
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbFallback =
+                                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                        try {
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow lastRow =
+                                    dbFallback.getLastDeliveryForSerial(serialForFallback);
+                            if (lastRow != null && lastRow.woNum != null && !lastRow.woNum.isEmpty()) {
+                                woCheck = lastRow.woNum;
+                                final String fWoRecovered = woCheck;
+                                final String fWoIdRecovered = lastRow.woIdGuid;
+                                android.util.Log.i("RegisterTabFragment", "btnRetourWO: currentWoNum vide — WO récupéré depuis dernière livraison serial="
+                                        + serialForFallback + " -> wo=" + fWoRecovered);
+                                ui.post(() -> {
+                                    currentWoNum = fWoRecovered;
+                                    if (fWoIdRecovered != null && !fWoIdRecovered.isEmpty()) currentWoIdGuid = fWoIdRecovered;
+                                });
+                            }
+                        } finally {
+                            try { dbFallback.close(); } catch (Exception ignored) {}
+                        }
+                    } catch (Exception ignored) {}
+                }
+
+                boolean hasData = false;
+                if (woCheck != null && !woCheck.isEmpty()) {
                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db = null;
                     try {
                         db = new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
@@ -1806,23 +1872,21 @@ public class RegisterTabFragment extends Fragment {
                     } finally {
                         if (db != null) { try { db.close(); } catch (Exception ignored) {} }
                     }
-                    final boolean show = connectedFinal && hasData;
-                    ui.post(() -> {
-                        if (!isAdded() || getView() == null || btnRetourWO == null) return;
-                        if (show) {
-                            btnRetourWO.setVisibility(android.view.View.VISIBLE);
-                            btnRetourWO.setEnabled(true);
-                            btnRetourWO.setText("Retour au Bon de livraison");
-                            btnRetourWO.setBackgroundColor(android.graphics.Color.parseColor("#185FA5"));
-                            btnRetourWO.setOnClickListener(v -> retournerAuWorkOrder());
-                        } else {
-                            btnRetourWO.setVisibility(android.view.View.GONE);
-                        }
-                    });
+                }
+                final boolean show = connectedFinal && hasData;
+                ui.post(() -> {
+                    if (!isAdded() || getView() == null || btnRetourWO == null) return;
+                    if (show) {
+                        btnRetourWO.setVisibility(android.view.View.VISIBLE);
+                        btnRetourWO.setEnabled(true);
+                        btnRetourWO.setText("Retour au Bon de livraison");
+                        btnRetourWO.setBackgroundColor(android.graphics.Color.parseColor("#185FA5"));
+                        btnRetourWO.setOnClickListener(v -> retournerAuWorkOrder());
+                    } else {
+                        btnRetourWO.setVisibility(android.view.View.GONE);
+                    }
                 });
-            } else {
-                btnRetourWO.setVisibility(android.view.View.GONE);
-            }
+            });
         }
     }
 

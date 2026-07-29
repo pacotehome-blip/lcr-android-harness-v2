@@ -535,6 +535,28 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     }
 
     /**
+     * ✅ FIX : nécessaire pour retrouver le WO après une reconnexion (diagnostic)
+     * suite à une livraison DÉJÀ TERMINÉE — ActiveDeliveryStore est vidé une fois
+     * la livraison finie, donc currentWoNum ne peut plus se restaurer via ce
+     * chemin. Sans filtre par #série, getLastDelivery() risquait de retourner
+     * la livraison d'un AUTRE registre si plusieurs sont connectés en même
+     * temps (ex: TCP-LC3 + BT-LCR-II simultanément).
+     */
+    public DeliveryRow getLastDeliveryForSerial(String serialId) {
+        if (serialId == null || serialId.trim().isEmpty()) return null;
+        try (Cursor c = getReadableDatabase().query(
+                TABLE_DELIVERY, null,
+                COL_SERIAL_ID + "=?", new String[]{serialId.trim()},
+                null, null,
+                COL_TRANSACTION_NO + " DESC", "1")) {
+            if (c.moveToFirst()) return DeliveryRow.fromCursor(c);
+        } catch (Exception e) {
+            Log.e(TAG, "getLastDeliveryForSerial ERR: " + e.getMessage());
+        }
+        return null;
+    }
+
+    /**
      * Retourne toutes les livraisons/annulations pour un WO donné,
      * triées par transaction_no ASC. Utilisé pour le payload consolidé Dataverse.
      */
