@@ -2372,17 +2372,42 @@ public class RegisterTabFragment extends Fragment {
         android.util.Log.w("RegisterTabFragment", "surErreurConnexion [" + contexte + "]: "
             + (e != null ? e.getMessage() : "null"));
         if (com.pa.lcrdemo.RegisterConnectionHelper.estErreurConnexion(e)) {
-            try {
-                if (requireActivity() instanceof com.pa.lcrdemo.MainActivity) {
-                    new com.pa.lcrdemo.RegisterConnectionHelper(
-                        (com.pa.lcrdemo.MainActivity) requireActivity())
-                        .validerConnexion(
-                            tabTransportKey != null ? tabTransportKey : "",
-                            node,
-                            serialFromArgs != null ? serialFromArgs : "",
-                            currentWoNum != null ? currentWoNum : "");
+            // ✅ FIX (bétonnage définitif) : validerConnexion() était appelée
+            // SYNCHRONE sur le thread UI (puisque surErreurConnexion est
+            // déclenchée directement depuis les clics de boutons). Si
+            // validerConnexion() levait n'importe quelle exception AVANT
+            // d'atteindre son propre new Thread(...) interne, elle était
+            // avalée SILENCIEUSEMENT ici — "aucune réaction" à l'écran, sans
+            // même une ligne dans le logcat. Toute cette étape passe
+            // maintenant par son propre thread, avec logging explicite de
+            // toute exception, pour qu'un échec ne soit plus jamais invisible.
+            final String fContexte = contexte;
+            new Thread(() -> {
+                try {
+                    if (getActivity() instanceof com.pa.lcrdemo.MainActivity
+                            && requireActivity() instanceof com.pa.lcrdemo.MainActivity) {
+                        android.util.Log.i("RegisterTabFragment", "surErreurConnexion [" + fContexte
+                                + "]: appel validerConnexion — transportKey=" + tabTransportKey
+                                + " node=" + node + " serial=" + serialFromArgs + " wo=" + currentWoNum);
+                        new com.pa.lcrdemo.RegisterConnectionHelper(
+                            (com.pa.lcrdemo.MainActivity) requireActivity())
+                            .validerConnexion(
+                                tabTransportKey != null ? tabTransportKey : "",
+                                node,
+                                serialFromArgs != null ? serialFromArgs : "",
+                                currentWoNum != null ? currentWoNum : "");
+                    } else {
+                        android.util.Log.w("RegisterTabFragment", "surErreurConnexion [" + fContexte
+                                + "]: activité indisponible — diagnostic annulé");
+                    }
+                } catch (Exception ex) {
+                    android.util.Log.e("RegisterTabFragment", "surErreurConnexion [" + fContexte
+                            + "]: EXCEPTION pendant validerConnexion — " + ex, ex);
                 }
-            } catch (Exception ignored) {}
+            }).start();
+        } else {
+            android.util.Log.w("RegisterTabFragment", "surErreurConnexion [" + contexte
+                    + "]: estErreurConnexion() a retourné false — diagnostic NON déclenché pour " + e);
         }
     }
 
