@@ -460,6 +460,22 @@ public class RegisterTabFragment extends Fragment {
                 updateButtons(state);
                 scheduleLogRefresh();
 
+                // ✅ FIX (LE chaînon manquant) : DeliveryState.DISCONNECTED n'était
+                // JAMAIS traité spécifiquement ici — même après l'escalade
+                // automatique (timeouts LCP répétés → shutdown(true) →
+                // DISCONNECTED), rien ne réagissait pour lancer le diagnostic.
+                // Le chauffeur devait deviner qu'il fallait cliquer un bouton,
+                // alors que ça devrait se déclencher tout seul. Maintenant :
+                // dès que le controller déclare DISCONNECTED, le diagnostic se
+                // lance automatiquement, sans attendre un clic.
+                if (state == DeliveryState.DISCONNECTED) {
+                    tabMediaReady = false;
+                    android.util.Log.w("RegisterTabFragment", "onStateChanged: DISCONNECTED reçu — déclenchement automatique du diagnostic");
+                    surErreurConnexion(
+                        new java.io.IOException("Controller a déclaré DISCONNECTED (timeouts LCP répétés)"),
+                        "AUTO_DISCONNECTED");
+                }
+
                 // ✅ CONNECTED post-livraison — forcer un refresh après 2s
                 // pour laisser le temps à bg.execute (DB read pour btnRetourWO) de retourner
                 if (state == DeliveryState.CONNECTED) {

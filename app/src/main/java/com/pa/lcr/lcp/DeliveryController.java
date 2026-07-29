@@ -383,6 +383,15 @@ private void reproEvent(String level, String type, String message, JSONObject da
     private volatile boolean txRxEnabled = false;
     private volatile boolean logTsEnabled = false;
     private volatile long lastResyncMs = 0L;
+    // ✅ FIX (la vraie cause du "aucune réaction du diagnostic") : rien ne
+    // comptait les timeouts "Timeout waiting LCP response" consécutifs — le
+    // code faisait juste softResync() à l'infini, sans JAMAIS escalader vers
+    // shutdown(true) (le seul chemin qui notifie l'UI d'une vraie
+    // déconnexion). Une vraie déconnexion physique produit ce timeout en
+    // boucle indéfiniment — sans compteur, l'app ne pouvait jamais s'en
+    // rendre compte elle-même.
+    private volatile int consecutiveRetryishTimeouts = 0;
+    private static final int MAX_CONSECUTIVE_RETRYISH_TIMEOUTS = 5;
 
     // Pas de chevauchement LIVE
     private final AtomicBoolean liveInFlight = new AtomicBoolean(false);
@@ -397,6 +406,15 @@ private void reproEvent(String level, String type, String message, JSONObject da
     private volatile long liveBackoffMs = LIVE_BASE_MS;
     private volatile long liveNextAllowedMs = 0L;
     private volatile long liveLastSkipLogMs = 0L;
+    // ✅ FIX (2e chemin trouvé, même défaut que handleIoFailure) : le tick live
+    // principal (GET_DELIVERY_STATUS, ~300ms) utilise SON PROPRE mécanisme de
+    // récupération douce (liveSoftSkip/liveBackoffStep), complètement séparé
+    // de handleIoFailure — et lui non plus n'escaladait JAMAIS vers une vraie
+    // déconnexion. Sur une coupure physique réelle, ce tick continue de
+    // "soft-skip" indéfiniment (backoff exponentiel plafonné, mais jamais
+    // d'abandon), donc l'UI ne reçoit jamais de notification de déconnexion.
+    private volatile int consecutiveLiveSoftSkips = 0;
+    private static final int MAX_CONSECUTIVE_LIVE_SOFT_SKIPS = 8;
 
     // Grâce 30s après Continuer
     private volatile long continueGraceUntilMs = 0L;
@@ -1560,6 +1578,7 @@ try {
     private void liveResetBackoff() {
         liveBackoffMs = LIVE_BASE_MS;
         liveNextAllowedMs = 0L;
+        consecutiveLiveSoftSkips = 0;
     }
 
     private void liveBackoffStep(String reason) {
@@ -1574,6 +1593,21 @@ try {
 
     private void liveSoftSkip(String opName, Exception e) {
         String m = (e.getMessage() != null) ? e.getMessage() : "";
+        consecutiveLiveSoftSkips++;
+        android.util.Log.w("DeliveryController", "liveSoftSkip [" + opName + "]: \"" + m
+                + "\" — consécutifs=" + consecutiveLiveSoftSkips + "/" + MAX_CONSECUTIVE_LIVE_SOFT_SKIPS);
+        // ✅ FIX : émis aussi dans le log DU TAB (emitLog → listener.onLog),
+        // pas seulement logcat — sans ça, invisible pour qui regarde le
+        // panneau de log intégré à l'app plutôt qu'un logcat externe.
+        emitLog("[LIVE] soft-skip #" + consecutiveLiveSoftSkips + "/" + MAX_CONSECUTIVE_LIVE_SOFT_SKIPS
+                + " (" + opName + "): " + m);
+        if (consecutiveLiveSoftSkips >= MAX_CONSECUTIVE_LIVE_SOFT_SKIPS) {
+            android.util.Log.w("DeliveryController", "liveSoftSkip: seuil atteint — escalade vers shutdown(true) (vraie déconnexion)");
+            emitLog("[LIVE] ⚠️ Seuil atteint (" + MAX_CONSECUTIVE_LIVE_SOFT_SKIPS + " échecs consécutifs) — déconnexion déclarée, reconnexion nécessaire");
+            consecutiveLiveSoftSkips = 0;
+            shutdown(true);
+            return;
+        }
         liveBackoffStep("[LIVE] soft-skip " + opName + ": " + m);
     }
 
@@ -1947,7 +1981,23 @@ try {
         if ("requestLiveSample".equals(ctx)) return;
 
         if (hardFatal) { shutdown(true); return; }
-        if (retryish) softResync("timeout/" + ctx);
+        if (retryish) {
+            // ✅ FIX : escalade vers une vraie déconnexion après trop
+            // d'échecs consécutifs — sinon softResync() se répète à l'infini
+            // sur une déconnexion physique réelle, sans jamais notifier l'UI.
+            consecutiveRetryishTimeouts++;
+            android.util.Log.w("DeliveryController", "handleIoException [" + ctx + "]: retryish (\"" + msg
+                    + "\"), consécutifs=" + consecutiveRetryishTimeouts + "/" + MAX_CONSECUTIVE_RETRYISH_TIMEOUTS);
+            if (consecutiveRetryishTimeouts >= MAX_CONSECUTIVE_RETRYISH_TIMEOUTS) {
+                android.util.Log.w("DeliveryController", "handleIoException: seuil atteint — escalade vers shutdown(true) (vraie déconnexion)");
+                consecutiveRetryishTimeouts = 0;
+                shutdown(true);
+                return;
+            }
+            softResync("timeout/" + ctx);
+        } else {
+            consecutiveRetryishTimeouts = 0;
+        }
     }
 
     private void softResync(String reason) {
