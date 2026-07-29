@@ -1121,7 +1121,19 @@ public class RegisterTabFragment extends Fragment {
                 scheduleLogRefresh();
             });
         }
-        if (btnConnect != null) btnConnect.setOnClickListener(v -> reconnectThisRegister(true));
+        if (btnConnect != null) btnConnect.setOnClickListener(v -> {
+            // ✅ FIX (demandé) : Connect LCP valide le transport ET le registre
+            // précis avant de conclure quoi que ce soit. Si aucune session
+            // n'existe encore, on reconnecte directement (rien à valider).
+            // Si une session existe, on l'éprouve avec une vraie commande
+            // Status — si ça réussit, déjà connecté pour de vrai ; si ça
+            // échoue, reconnexion via le diagnostic (déclenché automatiquement
+            // par validerTransportEtRegistrePuis en cas d'échec).
+            if (controller == null) { reconnectThisRegister(true); return; }
+            validerTransportEtRegistrePuis("CONNECT_LCP", () -> {
+                try { Toast.makeText(requireContext(), "✅ Déjà connecté (validé)", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
+            });
+        });
         if (btnA != null) btnA.setOnClickListener(v -> {
             if (controller == null) return;
             // ✅ Confirmation si RUNNING_FLOWING
@@ -1150,13 +1162,12 @@ public class RegisterTabFragment extends Fragment {
         }
         if (btnB != null) btnB.setOnClickListener(v -> {
             if (controller == null) { reconnectThisRegister(true); return; }
-            // ✅ FIX : btnB (Status) ne vérifiait jamais si l'IO était encore
-            // ouvert (contrairement à btnContinue/btnFinish qui appellent déjà
-            // verifierIoAvantAction) — si l'USB/BT se déconnectait pendant que
-            // le controller Java existait toujours, Status ne déclenchait aucune
-            // reconnexion automatique, contrairement au comportement attendu.
-            if (!verifierIoAvantAction("STATUS_B")) return;
-            runStatusBLikeButton("STATUS_B");
+            // ✅ FIX (demandé) : Status(B) valide maintenant le transport ET le
+            // registre précis (node+serial) en envoyant une VRAIE commande
+            // Status comme test définitif — pas juste io.isOpen() qui peut
+            // mentir. Si la validation réussit, Status s'exécute normalement.
+            // Si elle échoue, le diagnostic se déclenche automatiquement.
+            validerTransportEtRegistrePuis("STATUS_B", () -> runStatusBLikeButton("STATUS_B"));
         });
         if (btnC != null) {
             btnC.setOnClickListener(v -> {
@@ -1458,7 +1469,18 @@ public class RegisterTabFragment extends Fragment {
 
     /** Appelé depuis MainActivity dialog long press. */
     public void reconnectFromDialog() {
-        ui.post(() -> reconnectThisRegister(true));
+        // ✅ DIRECTIVE CLAIRE : Reconnect (long-press) = lance le diagnostique.
+        // Point final. Aucune condition sur tabMediaReady, aucun passage par
+        // reconnectThisRegister()/connectThisRegister() et leurs multiples
+        // branches — ce bouton force directement le même diagnostic que
+        // Status/Continuer utilisent, sans détour.
+        ui.post(() -> {
+            try { Toast.makeText(requireContext(), "🔄 Reconnexion — diagnostic en cours...", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
+            android.util.Log.i("RegisterTabFragment", "reconnectFromDialog: appel direct du diagnostic (sans condition)");
+            surErreurConnexion(
+                new java.io.IOException("Reconnect demandé manuellement (long-press)"),
+                "RECONNECT_LONGPRESS_DIRECT");
+        });
     }
 
     private void reconnectThisRegister(boolean userInitiated) {
@@ -2440,6 +2462,68 @@ public class RegisterTabFragment extends Fragment {
      * Si fermé → déclenche immédiatement l'écran de diagnostic.
      * @return true si io est ouvert, false si diagnostic lancé
      */
+    // ✅ POINT D'ENTRÉE UNIFIÉ (demandé) : Status(B), Connect LCP et Reconnect
+    // valident maintenant le TRANSPORT ET LE REGISTRE PRÉCIS (node+serial) —
+    // pas juste un flag passif (io.isOpen()) qui peut mentir. On envoie une
+    // VRAIE commande Status (api_tickSnapshot) comme test définitif. Si CETTE
+    // commande échoue aussi, la déconnexion est confirmée à 100% — pas une
+    // supposition basée sur un compteur de timeouts passifs.
+    // Tourne TOUJOURS en arrière-plan (jamais sur le thread UI).
+    private void validerTransportEtRegistrePuis(String contexte, Runnable onSuccess) {
+        bg.execute(() -> {
+            boolean ok = false;
+            String raison = "";
+            try {
+                if (tabTransportKey == null || tabTransportKey.trim().isEmpty()) {
+                    raison = "transport inconnu";
+                } else {
+                    com.pa.lcr.lcp.transport.TransportIo io =
+                        MediaTransportManager.get(requireContext()).getByKey(tabTransportKey);
+                    if (io == null || !io.isOpen()) {
+                        raison = "transport fermé (" + tabTransportKey + ")";
+                    } else if (controller == null) {
+                        raison = "controller null";
+                    } else {
+                        // ✅ FIX (l'erreur signalée) : api_tickSnapshot() ne fait
+                        // AUCUNE IO réelle — c'est une lecture de CACHE qui
+                        // retourne TOUJOURS ok=1, peu importe l'état réel de la
+                        // connexion. Ça ne validait absolument rien. La vraie
+                        // commande synchrone qui fait de l'IO réelle et peut
+                        // réellement échouer est api_registerValidate() — elle
+                        // lit le VRAI statut du registre (readFullStatus) et
+                        // retourne fail() sur une vraie exception LCP.
+                        com.pa.lcr.lcp.ApiResult r = controller.api_registerValidate(
+                                null, node, serialFromArgs, null, null);
+                        // ✅ IMPORTANT : api_registerValidate() peut aussi échouer
+                        // pour des raisons LÉGITIMES (ticket en attente, livraison
+                        // active, mauvais serial) — ce ne sont PAS des signes de
+                        // déconnexion. Seul err="ERR_LCP_CONNECT_FAILED" indique
+                        // une vraie panne de communication. Les autres échecs sont
+                        // des états métier normaux, pas une raison de diagnostiquer.
+                        boolean vraieDeconnexion = r != null && r.code != 1
+                                && com.pa.lcr.lcp.RegisterValidator.Codes.ERR_LCP_CONNECT_FAILED.equals(r.err);
+                        ok = (r != null && r.code == 1) || (r != null && !vraieDeconnexion);
+                        raison = (r != null) ? ("err=" + r.err + " msg=" + r.msg) : "r=null";
+                    }
+                }
+            } catch (Exception e) {
+                raison = "exception: " + e.getMessage();
+            }
+            android.util.Log.i("RegisterTabFragment", "validerTransportEtRegistrePuis [" + contexte
+                    + "]: node=" + node + " serial=" + serialFromArgs + " transport=" + tabTransportKey
+                    + " -> " + (ok ? "OK" : "ÉCHEC (" + raison + ")"));
+            if (ok) {
+                if (onSuccess != null) ui.post(onSuccess);
+            } else {
+                final String fRaison = raison;
+                surErreurConnexion(
+                    new java.io.IOException("Validation transport+registre échouée (node=" + node
+                        + " serial=" + serialFromArgs + "): " + fRaison),
+                    contexte);
+            }
+        });
+    }
+
     private boolean verifierIoAvantAction(String contexte) {
         try {
             // ✅ FIX (bétonnage) : si tabTransportKey est null/vide, l'ancien code
