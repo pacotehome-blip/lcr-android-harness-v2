@@ -346,6 +346,37 @@ public final class RegisterSessionManager {
                 try { existing.dc.shutdown(false); } catch (Exception ignored) {}
                 sessions.remove(k);
                 // ne PAS return — continue plus bas pour tenter une vraie (re)identification
+            } else if (existing.dc.isStopped()) {
+                // ✅ FIX (2026-07-28, preuve logcat) : un DeliveryController sur
+                // lequel shutdown() a été appelé est MORT DÉFINITIVEMENT —
+                // shutdown() fait io.shutdownNow() et liveTickScheduler.shutdownNow()
+                // sur des ExecutorService déclarés final, donc non remplaçables, et
+                // met stopped=true de façon irréversible.
+                //
+                // Le cache le rendait quand même, parce que la seule condition de
+                // réutilisation était generationId — or la génération ne change QUE
+                // si le socket est réellement rouvert. Sur un shutdown logique
+                // (softClose, escalade, invalidation) le socket BT reste le même,
+                // donc même génération, donc réutilisation d'un cadavre.
+                //
+                // Symptôme observé (logcat 2026-07-28 23:49) : toute méthode
+                // ASYNCHRONE (requestStatus, requestLiveSample — tout ce qui passe
+                // par io.execute) échouait avec
+                //   "rejected from ThreadPoolExecutor[Terminated, pool size = 0,
+                //    completed tasks = 39]"
+                // tandis que les méthodes SYNCHRONES (api_registerValidate)
+                // réussissaient, puisqu'elles ne passent pas par l'executor.
+                // Résultat : validerTransportEtRegistrePuis annonçait "-> OK" et
+                // validerConnexion() concluait "OK" à son tour (io.isOpen() vrai,
+                // getState() lisible en mémoire), donc AUCUN diagnostic n'était
+                // déclenché et le bouton Status ne produisait strictement aucune
+                // réaction à l'écran.
+                android.util.Log.w("RSM", "getOrCreate: session en cache INVALIDÉE pour " + k
+                        + " — DeliveryController stopped (executor Terminated), recréation forcée");
+                try { existing.scheduler.shutdown(); } catch (Exception ignored) {}
+                sessions.remove(k);
+                // ne PAS return — on continue plus bas pour recréer une vraie session.
+                // Pas d'appel à existing.dc.shutdown() ici : il est déjà arrêté.
             } else if (existing.generationId == io.getGenerationId()) {
                 return existing.dc;
             }
