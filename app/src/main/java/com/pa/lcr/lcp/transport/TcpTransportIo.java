@@ -43,6 +43,16 @@ public final class TcpTransportIo implements TransportIo {
     private final AtomicInteger ioTimeouts = new AtomicInteger(0);
     private final AtomicInteger ioSamples  = new AtomicInteger(0);
 
+    // ✅ FIX (même correctif que BtSppTransportIo) : socket.isConnected() +
+    // !isClosed() pour un java.net.Socket est AUSSI connu pour mentir sur une
+    // vraie perte de connexion distante (ex: Wi-Fi hors de portée sans
+    // FIN/RST TCP propre reçu) — le socket local reste "connecté" tant que
+    // close() n'est pas appelé explicitement. Un read() qui timeout de façon
+    // répétée (le cas exact de "Timeout waiting LCP response") ne fermait
+    // jamais le transport, rendant isOpen() menteur indéfiniment.
+    private final AtomicInteger consecutiveReadTimeouts = new AtomicInteger(0);
+    private static final int MAX_CONSECUTIVE_READ_TIMEOUTS = 4;
+
     public TcpTransportIo(String key,
                            Socket socket,
                            InputStream in,
@@ -104,6 +114,7 @@ public final class TcpTransportIo implements TransportIo {
         try {
             int n = fut.get(boundMs, TimeUnit.MILLISECONDS);
             ioSamples.incrementAndGet();
+            consecutiveReadTimeouts.set(0);
             return n;
         } catch (java.util.concurrent.TimeoutException te) {
             ioTimeouts.incrementAndGet();
@@ -146,6 +157,7 @@ public final class TcpTransportIo implements TransportIo {
                     int toRead = Math.min(avail, buffer.length);
                     int n = in.read(buffer, 0, toRead);
                     ioSamples.incrementAndGet();
+                    consecutiveReadTimeouts.set(0);
                     return n;
                 } catch (Exception e) {
                     ioErrors.incrementAndGet();
@@ -156,7 +168,15 @@ public final class TcpTransportIo implements TransportIo {
             if (timeoutMs == 0) return 0;
 
             if (System.currentTimeMillis() >= deadline) {
-                if (timeoutMs > 50) ioTimeouts.incrementAndGet();
+                if (timeoutMs > 50) {
+                    ioTimeouts.incrementAndGet();
+                    int consec = consecutiveReadTimeouts.incrementAndGet();
+                    android.util.Log.w("TcpTransportIo", "read timeout consécutif #" + consec + "/" + MAX_CONSECUTIVE_READ_TIMEOUTS + " sur " + key);
+                    if (consec >= MAX_CONSECUTIVE_READ_TIMEOUTS) {
+                        android.util.Log.w("TcpTransportIo", "read: seuil atteint sur " + key + " — fermeture réelle du transport");
+                        try { close(); } catch (Exception ignored) {}
+                    }
+                }
                 return 0;
             }
 
