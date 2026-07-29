@@ -34,16 +34,31 @@ public final class BtSppTransportIo implements TransportIo {
     // Timestamp de début de session (pour calcul durée)
     private final long sessionStartMs = System.currentTimeMillis();
 
-    // ✅ FIX (LA vraie cause racine) : un write() qui timeout appelle déjà
-    // close() — mais un read() qui timeout (le cas exact de "Timeout waiting
-    // LCP response" : le write réussit, mais aucune réponse ne revient
-    // jamais) ne fermait JAMAIS le transport. socket.isConnected() (Android)
-    // reste "true" indéfiniment tant que close() n'a pas été appelé — donc
-    // isOpen() mentait en permanence sur une vraie déconnexion physique,
-    // rendant TOUTE la détection en amont (verifierIoAvantAction, etc.)
-    // inopérante, peu importe combien de fois on la corrige plus haut.
-    private final AtomicInteger consecutiveReadTimeouts = new AtomicInteger(0);
-    private static final int MAX_CONSECUTIVE_READ_TIMEOUTS = 4;
+    // ❌ RETIRÉ (2026-07-28) : consecutiveReadTimeouts + fermeture du
+    // transport après 4 read() vides consécutifs.
+    //
+    // Raison 1 — le code ne s'exécutait jamais : LcpLink.readFrameUntil()
+    // appelle rxReadSome(50) → read(tmp, 50), et la garde était
+    // "if (timeoutMs > 50)". 50 n'est pas > 50.
+    //
+    // Raison 2 — même corrigée, la garde serait fausse : un read() vide est
+    // le fonctionnement NOMINAL du frame reader, qui boucle par tranches de
+    // 50ms en attendant une trame. Le registre a le droit d'être silencieux
+    // (RC_REQUEST_QUEUED, calcul en cours, W&M). 4 lectures vides = 200ms de
+    // silence — ce qui arrive en permanence pendant une livraison normale.
+    //
+    // Raison 3 — le compteur était de toute façon remis à zéro par write(),
+    // et chaque requête LCP commence par un write (qui réussit toujours sur
+    // un socket zombie).
+    //
+    // La détection de déconnexion appartient à la couche PROTOCOLE, seule à
+    // connaître la notion de "requête envoyée sans réponse" :
+    // DeliveryController.liveSoftSkip() / handleIoFailure(). Le transport ne
+    // ferme que sur exception réelle (write timeout), comme le fait déjà
+    // correctement UsbTransportIo.
+    //
+    // ioTimeouts reste incrémenté — statistique de qualité de signal, pas
+    // un déclencheur de fermeture.
 
     public BtSppTransportIo(String key,
                             BluetoothSocket socket,
@@ -162,7 +177,6 @@ public final class BtSppTransportIo implements TransportIo {
             long lat = System.currentTimeMillis() - t0;
             ioSamples.incrementAndGet();
             ioLatencySum.addAndGet(lat);
-            consecutiveReadTimeouts.set(0);
             return n;
         } catch (java.util.concurrent.TimeoutException te) {
             // ✅ Le write n'a pas abouti dans le délai — le socket est probablement
@@ -219,7 +233,6 @@ public final class BtSppTransportIo implements TransportIo {
                     long lat = System.currentTimeMillis() - t0;
                     ioSamples.incrementAndGet();
                     ioLatencySum.addAndGet(lat);
-                    consecutiveReadTimeouts.set(0);
                     return n;
                 } catch (Exception e) {
                     ioErrors.incrementAndGet();
@@ -233,13 +246,9 @@ public final class BtSppTransportIo implements TransportIo {
                 // timeout non-bloquant: on ne compte pas comme erreur
                 // sauf si on avait demandé des données (timeoutMs > 0)
                 if (timeoutMs > 50) {
+                    // Statistique seulement — AUCUNE fermeture.
+                    // Un read vide est normal. Voir note en haut du fichier.
                     ioTimeouts.incrementAndGet();
-                    int consec = consecutiveReadTimeouts.incrementAndGet();
-                    android.util.Log.w("BtSppTransportIo", "read timeout consécutif #" + consec + "/" + MAX_CONSECUTIVE_READ_TIMEOUTS + " sur " + key);
-                    if (consec >= MAX_CONSECUTIVE_READ_TIMEOUTS) {
-                        android.util.Log.w("BtSppTransportIo", "read: seuil atteint sur " + key + " — fermeture réelle du transport (isOpen() va enfin refléter la vraie déconnexion)");
-                        try { close(); } catch (Exception ignored) {}
-                    }
                 }
                 return 0;
             }

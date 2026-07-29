@@ -43,15 +43,31 @@ public final class TcpTransportIo implements TransportIo {
     private final AtomicInteger ioTimeouts = new AtomicInteger(0);
     private final AtomicInteger ioSamples  = new AtomicInteger(0);
 
-    // ✅ FIX (même correctif que BtSppTransportIo) : socket.isConnected() +
-    // !isClosed() pour un java.net.Socket est AUSSI connu pour mentir sur une
-    // vraie perte de connexion distante (ex: Wi-Fi hors de portée sans
-    // FIN/RST TCP propre reçu) — le socket local reste "connecté" tant que
-    // close() n'est pas appelé explicitement. Un read() qui timeout de façon
-    // répétée (le cas exact de "Timeout waiting LCP response") ne fermait
-    // jamais le transport, rendant isOpen() menteur indéfiniment.
-    private final AtomicInteger consecutiveReadTimeouts = new AtomicInteger(0);
-    private static final int MAX_CONSECUTIVE_READ_TIMEOUTS = 4;
+    // ❌ RETIRÉ (2026-07-28) : consecutiveReadTimeouts + fermeture du
+    // transport après 4 read() vides consécutifs.
+    //
+    // Raison 1 — le code ne s'exécutait jamais : LcpLink.readFrameUntil()
+    // appelle rxReadSome(50) → read(tmp, 50), et la garde était
+    // "if (timeoutMs > 50)". 50 n'est pas > 50.
+    //
+    // Raison 2 — même corrigée, la garde serait fausse : un read() vide est
+    // le fonctionnement NOMINAL du frame reader, qui boucle par tranches de
+    // 50ms en attendant une trame. Le registre a le droit d'être silencieux
+    // (RC_REQUEST_QUEUED, calcul en cours, W&M). 4 lectures vides = 200ms de
+    // silence — ce qui arrive en permanence pendant une livraison normale.
+    //
+    // Raison 3 — le compteur était de toute façon remis à zéro par write(),
+    // et chaque requête LCP commence par un write (qui réussit toujours sur
+    // un socket zombie).
+    //
+    // La détection de déconnexion appartient à la couche PROTOCOLE, seule à
+    // connaître la notion de "requête envoyée sans réponse" :
+    // DeliveryController.liveSoftSkip() / handleIoFailure(). Le transport ne
+    // ferme que sur exception réelle (write timeout), comme le fait déjà
+    // correctement UsbTransportIo.
+    //
+    // ioTimeouts reste incrémenté — statistique de qualité de signal, pas
+    // un déclencheur de fermeture.
 
     public TcpTransportIo(String key,
                            Socket socket,
@@ -114,7 +130,6 @@ public final class TcpTransportIo implements TransportIo {
         try {
             int n = fut.get(boundMs, TimeUnit.MILLISECONDS);
             ioSamples.incrementAndGet();
-            consecutiveReadTimeouts.set(0);
             return n;
         } catch (java.util.concurrent.TimeoutException te) {
             ioTimeouts.incrementAndGet();
@@ -157,7 +172,6 @@ public final class TcpTransportIo implements TransportIo {
                     int toRead = Math.min(avail, buffer.length);
                     int n = in.read(buffer, 0, toRead);
                     ioSamples.incrementAndGet();
-                    consecutiveReadTimeouts.set(0);
                     return n;
                 } catch (Exception e) {
                     ioErrors.incrementAndGet();
@@ -169,13 +183,9 @@ public final class TcpTransportIo implements TransportIo {
 
             if (System.currentTimeMillis() >= deadline) {
                 if (timeoutMs > 50) {
+                    // Statistique seulement — AUCUNE fermeture.
+                    // Un read vide est normal. Voir note en haut du fichier.
                     ioTimeouts.incrementAndGet();
-                    int consec = consecutiveReadTimeouts.incrementAndGet();
-                    android.util.Log.w("TcpTransportIo", "read timeout consécutif #" + consec + "/" + MAX_CONSECUTIVE_READ_TIMEOUTS + " sur " + key);
-                    if (consec >= MAX_CONSECUTIVE_READ_TIMEOUTS) {
-                        android.util.Log.w("TcpTransportIo", "read: seuil atteint sur " + key + " — fermeture réelle du transport");
-                        try { close(); } catch (Exception ignored) {}
-                    }
                 }
                 return 0;
             }
