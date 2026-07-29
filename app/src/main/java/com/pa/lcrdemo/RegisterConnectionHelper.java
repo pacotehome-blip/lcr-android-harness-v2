@@ -107,50 +107,78 @@ public class RegisterConnectionHelper {
             return false;
         }
 
-        // 2. Vérifier état controller
+        // 2. ÉPREUVE RÉELLE du registre — pas un flag en mémoire
+        //
+        // ✅ FIX (2026-07-29, preuve logcat 00:04) : cette étape ne faisait
+        // AUCUNE IO hors livraison. Elle lisait dc.getState() (une valeur en
+        // mémoire, qui reste à CONNECTED indéfiniment sur un socket BT zombie)
+        // et api_tickSnapshot() (lecture de CACHE, qui retourne toujours ok=1).
+        // Le contrôle d'âge par tick_age_ms ne s'exécutait que pendant
+        // RUNNING_FLOWING/RUNNING_PAUSED.
+        //
+        // Conséquence observée : validerTransportEtRegistrePuis détectait
+        // correctement la déconnexion avec une VRAIE commande
+        //   "-> ÉCHEC (err=ERR_LCP_CONNECT_FAILED msg=Validate: 0 - LCP error.)"
+        // puis appelait surErreurConnexion → validerConnexion, qui répondait
+        //   "validerConnexion: OK"
+        // et annulait le verdict. Aucun diagnostic n'était lancé, le bouton
+        // Status ne produisait aucune réaction. Un point de décision fort
+        // était écrasé par un point de décision faible en aval.
+        //
+        // On envoie maintenant la MÊME commande réelle que
+        // validerTransportEtRegistrePuis — api_registerValidate() — liée au
+        // node et au serial précis. Les deux points de décision utilisent
+        // désormais le même critère et ne peuvent plus se contredire.
         boolean tickOk = false;
         try {
             com.pa.lcr.lcp.DeliveryController dc =
                 RegisterSessionManager.get(activity).getController(tkFinal, node);
-            if (dc != null) {
-                com.pa.lcr.lcp.DeliveryState st = dc.getState();
-                tickOk = (st == com.pa.lcr.lcp.DeliveryState.CONNECTED
-                    || st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
-                    || st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED
-                    || st == com.pa.lcr.lcp.DeliveryState.ENDING);
-
-                // ✅ Vérifier l'âge du dernier tick — si > 10s = zombi BT
-                boolean zombiDetected = false;
-                if (tickOk && (st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
-                        || st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED)) {
-                    try {
-                        com.pa.lcr.lcp.ApiResult snap = dc.api_tickSnapshot();
-                        long tickAge = snap != null && snap.data != null
-                            ? snap.data.optLong("tick_age_ms", Long.MAX_VALUE) : Long.MAX_VALUE;
-                        if (tickAge > 10000) {
-                            Log.w(TAG, "validerConnexion: tick_age=" + tickAge + "ms — zombi BT détecté");
-                            tickOk = false;
-                            zombiDetected = true;
-                        }
-                    } catch (Exception ignored) {}
-                }
-
-                // ✅ Re-tester seulement si pas un zombi
-                if (!tickOk && !zombiDetected) {
-                    com.pa.lcr.lcp.ApiResult ping = dc.api_tickSnapshot();
-                    tickOk = (ping != null && ping.code == 1);
-                    if (!tickOk) Log.w(TAG, "tickSnapshot fail: " + (ping != null ? ping.msg : "null"));
-                }
-            } else {
+            if (dc == null) {
                 Log.w(TAG, "validerConnexion: controller null pour transport=" + tkFinal);
+            } else if (dc.isStopped()) {
+                // Controller arrêté = executor Terminated = incapable d'exécuter
+                // quoi que ce soit d'asynchrone. Inutile de le sonder.
+                Log.w(TAG, "validerConnexion: controller STOPPED (executor Terminated) — transport=" + tkFinal);
+            } else {
+                com.pa.lcr.lcp.ApiResult r = dc.api_registerValidate(
+                        null,
+                        node > 0 ? Integer.valueOf(node) : null,
+                        (serialId != null && !serialId.isEmpty()) ? serialId : null,
+                        null, null, false);
+
+                // Seul ERR_LCP_CONNECT_FAILED indique une vraie panne de
+                // communication. Les autres échecs (ticket en attente, livraison
+                // active, mauvais serial) sont des états MÉTIER normaux — le
+                // registre a répondu, donc la connexion est bonne. Même critère
+                // que validerTransportEtRegistrePuis, volontairement.
+                boolean vraieDeconnexion = (r != null) && (r.code != 1)
+                        && com.pa.lcr.lcp.RegisterValidator.Codes.ERR_LCP_CONNECT_FAILED.equals(r.err);
+                tickOk = (r != null) && !vraieDeconnexion;
+
+                Log.i(TAG, "validerConnexion: registerValidate code="
+                        + (r != null ? String.valueOf(r.code) : "null")
+                        + " err=" + (r != null ? r.err : "-")
+                        + " msg=" + (r != null ? r.msg : "-")
+                        + " -> tickOk=" + tickOk);
             }
         } catch (Exception e) {
-            Log.w(TAG, "tickSnapshot ERR: " + e.getMessage());
+            // Une exception ici est elle-même un signal de panne — on ne
+            // l'avale pas en concluant OK.
+            Log.w(TAG, "validerConnexion: registerValidate EXCEPTION: " + e.getMessage());
+            tickOk = false;
         }
 
         if (!tickOk) {
             Log.w(TAG, "validerConnexion: registre ne répond pas — transport=" + tkFinal);
-            lancerDiagnostic(tkFinal, node, serialId, woNum);
+            // ✅ FIX : même traitement que la branche "io mort" ci-dessus.
+            // lancerDiagnostic() (non-force) retourne SILENCIEUSEMENT si
+            // diagnosticEnCours est resté bloqué à true — et resetDiagnostic()
+            // n'est appelé nulle part ailleurs qu'au démarrage de MainActivity,
+            // donc le drapeau reste coincé jusqu'au redémarrage de l'APK. Le
+            // chauffeur cliquait Status et ne voyait rien. On force, en thread
+            // dédié (jamais sur le thread UI : diagnostic() fait des sleep et
+            // des probes LCP bloquants).
+            new Thread(() -> lancerDiagnosticForce(tkFinal, node, serialId, woNum)).start();
             return false;
         }
 
