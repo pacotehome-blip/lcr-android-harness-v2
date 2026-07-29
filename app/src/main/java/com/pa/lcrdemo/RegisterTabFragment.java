@@ -1488,12 +1488,24 @@ public class RegisterTabFragment extends Fragment {
                 pendingReconnect = true;
                 String msg = tabMediaShort + "(OFF) — reconnect requis";
                 LogBus.api(node, msg);
+                android.util.Log.w("RegisterTabFragment", "connectThisRegister: io=" + (io == null ? "null" : "fermé")
+                        + " pour transport=" + tkPinned + " — déclenchement diagnostic");
                 reportMediaOffToApi("CONNECT_CLICK", msg);
                 ui.post(() -> {
                     if (!isAdded() || getView() == null) return;
-                    if (txtLive != null) txtLive.setText("LIVE: " + tabMediaShort + "(OFF) — reconnect requis");
+                    if (txtLive != null) txtLive.setText("LIVE: " + tabMediaShort + "(OFF) — reconnexion en cours...");
                     updateButtons(null);
                 });
+                // ✅ FIX (LA vraie cause, même bug que plus bas) : ce chemin ne
+                // faisait que mettre à jour un texte puis s'arrêtait — JAMAIS
+                // d'appel à surErreurConnexion(), donc jamais de diagnostic
+                // déclenché. C'est le chemin le PLUS fréquemment emprunté
+                // (tabTransportKey est presque toujours déjà défini pour un
+                // onglet existant), donc probablement la cause principale du
+                // "aucune réaction" sur long-press Reconnect / Status.
+                surErreurConnexion(
+                    new java.io.IOException("connectThisRegister: transport pinné fermé — " + tkPinned),
+                    "CONNECT_THIS_REGISTER_PINNED");
                 return;
             }
             // ✅ Si le controller du session manager est aussi mort — le retirer avant getOrCreate
@@ -1510,9 +1522,22 @@ public class RegisterTabFragment extends Fragment {
         }
         if (dc == null) {
             LogBus.api(node, "Aucun média prêt / registre introuvable pour ce node");
+            android.util.Log.w("RegisterTabFragment", "connectThisRegister: dc=null pour node=" + node
+                    + " tabTransportKey=" + tabTransportKey + " userInitiated=" + userInitiated
+                    + " — déclenchement diagnostic");
+            // ✅ FIX (LA vraie cause du "aucune réaction" sur long-press Reconnect
+            // et Status) : ce chemin se contentait d'un toast discret puis
+            // s'arrêtait — JAMAIS d'appel à surErreurConnexion(), donc JAMAIS
+            // de diagnostic déclenché, peu importe combien de fois le chauffeur
+            // cliquait. C'est une fonction séparée de verifierIoAvantAction/
+            // Status(B), avec sa propre logique d'abandon silencieux jamais
+            // corrigée jusqu'ici.
             if (userInitiated) {
-                try { Toast.makeText(requireContext(), "Aucun média prêt (USB/BT)", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
+                try { Toast.makeText(requireContext(), "Aucun média prêt (USB/BT) — diagnostic en cours...", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
             }
+            surErreurConnexion(
+                new java.io.IOException("connectThisRegister: aucun média prêt/registre introuvable"),
+                "CONNECT_THIS_REGISTER");
             return;
         }
 
