@@ -34,6 +34,17 @@ public final class BtSppTransportIo implements TransportIo {
     // Timestamp de début de session (pour calcul durée)
     private final long sessionStartMs = System.currentTimeMillis();
 
+    // ✅ FIX (LA vraie cause racine) : un write() qui timeout appelle déjà
+    // close() — mais un read() qui timeout (le cas exact de "Timeout waiting
+    // LCP response" : le write réussit, mais aucune réponse ne revient
+    // jamais) ne fermait JAMAIS le transport. socket.isConnected() (Android)
+    // reste "true" indéfiniment tant que close() n'a pas été appelé — donc
+    // isOpen() mentait en permanence sur une vraie déconnexion physique,
+    // rendant TOUTE la détection en amont (verifierIoAvantAction, etc.)
+    // inopérante, peu importe combien de fois on la corrige plus haut.
+    private final AtomicInteger consecutiveReadTimeouts = new AtomicInteger(0);
+    private static final int MAX_CONSECUTIVE_READ_TIMEOUTS = 4;
+
     public BtSppTransportIo(String key,
                             BluetoothSocket socket,
                             InputStream in,
@@ -151,6 +162,7 @@ public final class BtSppTransportIo implements TransportIo {
             long lat = System.currentTimeMillis() - t0;
             ioSamples.incrementAndGet();
             ioLatencySum.addAndGet(lat);
+            consecutiveReadTimeouts.set(0);
             return n;
         } catch (java.util.concurrent.TimeoutException te) {
             // ✅ Le write n'a pas abouti dans le délai — le socket est probablement
@@ -207,6 +219,7 @@ public final class BtSppTransportIo implements TransportIo {
                     long lat = System.currentTimeMillis() - t0;
                     ioSamples.incrementAndGet();
                     ioLatencySum.addAndGet(lat);
+                    consecutiveReadTimeouts.set(0);
                     return n;
                 } catch (Exception e) {
                     ioErrors.incrementAndGet();
@@ -219,7 +232,15 @@ public final class BtSppTransportIo implements TransportIo {
             if (System.currentTimeMillis() >= deadline) {
                 // timeout non-bloquant: on ne compte pas comme erreur
                 // sauf si on avait demandé des données (timeoutMs > 0)
-                if (timeoutMs > 50) ioTimeouts.incrementAndGet();
+                if (timeoutMs > 50) {
+                    ioTimeouts.incrementAndGet();
+                    int consec = consecutiveReadTimeouts.incrementAndGet();
+                    android.util.Log.w("BtSppTransportIo", "read timeout consécutif #" + consec + "/" + MAX_CONSECUTIVE_READ_TIMEOUTS + " sur " + key);
+                    if (consec >= MAX_CONSECUTIVE_READ_TIMEOUTS) {
+                        android.util.Log.w("BtSppTransportIo", "read: seuil atteint sur " + key + " — fermeture réelle du transport (isOpen() va enfin refléter la vraie déconnexion)");
+                        try { close(); } catch (Exception ignored) {}
+                    }
+                }
                 return 0;
             }
 
