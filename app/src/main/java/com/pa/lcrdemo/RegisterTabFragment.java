@@ -585,6 +585,64 @@ public class RegisterTabFragment extends Fragment {
                 bg.execute(() -> {
                     try { lookupWoForTicket(ticketNo); }
                     catch (Exception e) { LogBus.api(node, "[WO-DETECT] ERR (onTicketInfo): " + safeMsg(e)); }
+                    // ✅ FIX (2026-07-29) : repli sur la BD locale quand delivery_uid
+                    // arrive null.
+                    //
+                    // delivery_uid n'est PAS lu du registre ni stocké en colonne : il est
+                    // calculé par DeliveryController comme
+                    //     lastNumeroLivraison + "-" + ticketNo
+                    // où lastNumeroLivraison (= le numéro de WO) est un champ volatile
+                    // en mémoire, assigné uniquement dans api_deliveryOneShotStart().
+                    // Dès que le controller est recréé — ce que fait toute reconnexion
+                    // BT/USB après diagnostic — ce champ repart à null et l'UI affichait
+                    // "Delivery UID : —" alors que le ticket_no, lui, survivait
+                    // (il vient du registre via readTicketNo23()).
+                    //
+                    // La donnée est pourtant entièrement reconstructible : la BD locale
+                    // associe déjà ticket_no → wo_num. On refait donc le même calcul.
+                    if (deliveryUid != null && !deliveryUid.trim().isEmpty()) return;
+                    String uidRecupere = null;
+                    String origine = "";
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbUid = null;
+                    try {
+                        dbUid = new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow row =
+                            dbUid.getByTicketNo(ticketNo);
+                        if (row != null && row.woNum != null && !row.woNum.trim().isEmpty()) {
+                            uidRecupere = row.woNum.trim() + "-" + ticketNo.trim();
+                            origine = "BD locale";
+                        }
+                    } catch (Exception e) {
+                        LogBus.api(node, "[UID] repli BD ERR: " + safeMsg(e));
+                    } finally {
+                        // ✅ Toute connexion SQLite fermée en finally (règle projet —
+                        // voir les fuites corrigées le 24 juillet dans ce fichier).
+                        if (dbUid != null) { try { dbUid.close(); } catch (Exception ignored) {} }
+                    }
+                    // Dernier recours : le WO courant en mémoire. Moins fiable que la
+                    // BD (aucune garantie que currentWoNum corresponde à CE ticket —
+                    // il peut encore pointer la livraison précédente), donc utilisé
+                    // seulement si la BD n'a rien, et journalisé distinctement.
+                    if (uidRecupere == null) {
+                        String wo = currentWoNum;
+                        if (wo != null && !wo.trim().isEmpty()) {
+                            uidRecupere = wo.trim() + "-" + ticketNo.trim();
+                            origine = "WO courant (mémoire)";
+                        }
+                    }
+                    if (uidRecupere == null) {
+                        LogBus.api(node, "[UID] aucun WO trouvé pour ticket=" + ticketNo
+                                + " — delivery_uid reste vide");
+                        return;
+                    }
+                    final String fUid = uidRecupere;
+                    final String fOrigine = origine;
+                    LogBus.api(node, "[UID] delivery_uid reconstruit=" + fUid + " (" + fOrigine + ")");
+                    ui.post(() -> {
+                        if (!isAdded() || getView() == null) return;
+                        if (txtDeliveryUid != null)
+                            txtDeliveryUid.setText("Delivery UID : " + fUid);
+                    });
                 });
             }
         }
