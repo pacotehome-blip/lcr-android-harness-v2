@@ -43,9 +43,37 @@ public class RegisterConnectionHelper {
     // ✅ Guard anti-double diagnostic
     private static volatile boolean diagnosticEnCours = false;
 
+    // ✅ FIX (2026-07-29, preuve logcat 00:38) : horodatage du diagnostic en
+    // cours. lancerDiagnosticForce() faisait "reset guard et relance" de façon
+    // INCONDITIONNELLE — n'importe quel appelant pouvait donc démarrer un 2e
+    // diagnostic par-dessus un 1er encore actif.
+    //
+    // Observé : diagnostic #1 lancé par DeepLinkHandler (contexte deep link
+    // complet), puis #2 lancé par connectThisRegister → validerConnexion
+    // (surcharge 4 args, deepLinkHandler=null) qui écrase le guard. Les deux
+    // boucles d'étape 3 tournent en parallèle et se ferment mutuellement les
+    // sockets — d'où "tentative 1/2/3" en double dans le log, "api_btActivate
+    // (already open)" répété, et "Registre non trouvé sur BT ou USB" alors que
+    // le matériel était rebranché. En prime, celui qui termine en dernier est
+    // celui SANS contexte deep link, donc la relance automatique de la
+    // livraison ne se déclenche jamais et le dialog Continuer/Annuler
+    // n'apparaît pas.
+    //
+    // On refuse désormais un diagnostic concurrent, SAUF si le précédent est
+    // plus vieux que DIAGNOSTIC_STALE_MS — auquel cas on considère le drapeau
+    // comme coincé (c'est le scénario pour lequel la variante "Force" avait
+    // été créée) et on reprend la main.
+    private static volatile long diagnosticStartMs = 0L;
+
+    /** Au-delà de ce délai, un diagnostic "en cours" est considéré comme coincé.
+     *  Marge large : 3 tentatives × (btActivate + connectAuto + attentes) peut
+     *  dépasser 60s sur Android 9. */
+    private static final long DIAGNOSTIC_STALE_MS = 90_000L;
+
     /** Réinitialise le guard — appeler au démarrage APK ou si bloqué */
     public static void resetDiagnostic() {
         diagnosticEnCours = false;
+        diagnosticStartMs = 0L;
     }
 
     private final MainActivity activity;
@@ -190,23 +218,60 @@ public class RegisterConnectionHelper {
     // Diagnostic en background — 4 étapes avec dialog progressif
     // =========================================================
 
-    private void lancerDiagnostic(String transportKey, int node, String serialId, String woNum) {
+    /**
+     * Prend le verrou de diagnostic, ou refuse si un diagnostic est déjà actif.
+     *
+     * Un seul diagnostic à la fois : ses étapes 1 à 3 ferment des sockets et
+     * réinitialisent le BT, donc deux instances concurrentes se sabotent
+     * mutuellement (voir la note en haut du fichier).
+     *
+     * @return true si le verrou est pris (l'appelant DOIT appeler
+     *         libererLeVerrouDiagnostic() dans un finally), false si refusé.
+     */
+    private static synchronized boolean prendreLeVerrouDiagnostic(String origine) {
+        long now = System.currentTimeMillis();
         if (diagnosticEnCours) {
-            Log.w(TAG, "lancerDiagnostic: diagnostic déjà en cours — ignoré");
-            return;
+            long age = now - diagnosticStartMs;
+            if (age < DIAGNOSTIC_STALE_MS) {
+                Log.w(TAG, origine + ": diagnostic déjà en cours depuis " + age
+                        + "ms — REFUSÉ (on laisse le premier terminer)");
+                return false;
+            }
+            Log.w(TAG, origine + ": diagnostic précédent bloqué depuis " + age
+                    + "ms (> " + DIAGNOSTIC_STALE_MS + "ms) — reprise du verrou");
         }
         diagnosticEnCours = true;
+        diagnosticStartMs = now;
+        Log.i(TAG, origine + ": verrou diagnostic pris");
+        return true;
+    }
+
+    private static synchronized void libererLeVerrouDiagnostic() {
+        diagnosticEnCours = false;
+        diagnosticStartMs = 0L;
+        Log.i(TAG, "verrou diagnostic libéré");
+    }
+
+    private void lancerDiagnostic(String transportKey, int node, String serialId, String woNum) {
+        if (!prendreLeVerrouDiagnostic("lancerDiagnostic")) return;
         new Thread(() -> {
             try {
                 diagnostic(transportKey, node, serialId, woNum);
             } finally {
-                diagnosticEnCours = false;
+                libererLeVerrouDiagnostic();
             }
         }).start();
     }
 
     /**
-     * ✅ Force le diagnostic même si diagnosticEnCours=true.
+     * Lance le diagnostic avec reprise d'un verrou COINCÉ uniquement.
+     *
+     * ⚠️ Le nom "Force" est historique : depuis 2026-07-29, cette méthode ne
+     * force PLUS par-dessus un diagnostic réellement actif — elle ne reprend le
+     * verrou que si le précédent dépasse DIAGNOSTIC_STALE_MS. Deux diagnostics
+     * simultanés se ferment mutuellement les sockets (voir note en haut du
+     * fichier).
+     *
      * Utilisé après oneshot/start orchestration error — le registre ne répond pas
      * même si BT est connecté (câble série débranché par exemple).
      */
@@ -222,16 +287,12 @@ public class RegisterConnectionHelper {
     public void lancerDiagnosticForce(String transportKey, int node, String serialId,
             String woNum, String woIdGuid, String produit, String presetStr,
             String mac, com.pa.lcrdemo.DeepLinkHandler deepLinkHandler) {
-        if (diagnosticEnCours) {
-            Log.w(TAG, "lancerDiagnosticForce: reset guard et relance");
-            diagnosticEnCours = false;
-        }
-        diagnosticEnCours = true;
+        if (!prendreLeVerrouDiagnostic("lancerDiagnosticForce")) return;
         try {
             diagnostic(transportKey, node, serialId, woNum,
                 woIdGuid, produit, presetStr, mac, deepLinkHandler);
         } finally {
-            diagnosticEnCours = false;
+            libererLeVerrouDiagnostic();
         }
     }
 
