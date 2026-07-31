@@ -33,7 +33,9 @@ public class DeliveryDb extends SQLiteOpenHelper {
     //      pas y vivre; v_diagnostic_events étendue en UNION ALL avec api_trace)
     // v15: add diagnostic_rules table (moteur de règles, Phase 2 — plan diagnostic intelligent),
     //      seedée avec les 4 premières règles les plus fiables du plan (#1, #4, #5, #7)
-    public static final int DB_VERSION = 15;
+    // v16: add incident_history table (boucle de rétroaction, Phase 3 — plan diagnostic intelligent).
+    //      FK vers diagnostic_rules(rule_id) nullable (diagnostic manuel possible, rule_id=null)
+    public static final int DB_VERSION = 16;
 
     private static final String TAG = "DeliveryDb";
 
@@ -70,6 +72,7 @@ public class DeliveryDb extends SQLiteOpenHelper {
         createDiagnosticEventsView(db);
         createDiagnosticRulesTable(db);
         seedDiagnosticRules(db);
+        createIncidentHistoryTable(db);
     }
 
     @Override
@@ -147,6 +150,10 @@ public class DeliveryDb extends SQLiteOpenHelper {
         if (oldVersion < 15) {
             createDiagnosticRulesTable(db);
             seedDiagnosticRules(db);
+        }
+        // v16: incident_history (boucle de rétroaction Phase 3)
+        if (oldVersion < 16) {
+            createIncidentHistoryTable(db);
         }
     }
 
@@ -253,6 +260,31 @@ public class DeliveryDb extends SQLiteOpenHelper {
         cv.put("support_level", supportLevel);
         cv.put("recommended_action", recommendedAction);
         db.insert("diagnostic_rules", null, cv);
+    }
+
+    // =========================================================
+    // Incident history (Phase 3 — plan diagnostic intelligent, 27 juillet 2026)
+    // rule_id nullable ET FK non contraignante en pratique (nullable != NOT NULL, donc
+    // aucun conflit avec foreign_keys=ON — contrairement au cas delivery_event.attempt_id) :
+    // un diagnostic manuel (sans règle automatique) peut donc être enregistré avec rule_id=NULL.
+    // =========================================================
+    private static void createIncidentHistoryTable(SQLiteDatabase db) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS incident_history (" +
+            "incident_id        INTEGER PRIMARY KEY AUTOINCREMENT," +
+            "rule_id            INTEGER," +           // nullable — quelle règle a détecté ça (null si diagnostic manuel)
+            "serial_id          TEXT," +
+            "ticket_no          TEXT," +
+            "symptom            TEXT NOT NULL," +
+            "root_cause         TEXT," +
+            "resolution         TEXT," +
+            "resolution_time_ms INTEGER," +
+            "validated_by       TEXT," +              // qui a confirmé (nom du dev/support)
+            "occurrence_count   INTEGER DEFAULT 1," +
+            "created_ts         INTEGER NOT NULL," +
+            "FOREIGN KEY (rule_id) REFERENCES diagnostic_rules(rule_id)" +
+            ");"
+        );
     }
 
 

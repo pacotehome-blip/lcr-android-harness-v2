@@ -142,7 +142,7 @@ public final class DiagnosticRuleEngine {
 
         try (Cursor c = db.rawQuery(sql.toString(), args.toArray(new String[0]))) {
             while (c.moveToNext()) {
-                out.add(new DiagnosticMatch(r.name, c.getLong(0), c.getLong(1),
+                out.add(new DiagnosticMatch(r.ruleId, r.name, c.getLong(0), c.getLong(1),
                         r.diagnostic, r.confidence, r.supportLevel, r.recommendedAction));
             }
         } catch (Exception ignored) {

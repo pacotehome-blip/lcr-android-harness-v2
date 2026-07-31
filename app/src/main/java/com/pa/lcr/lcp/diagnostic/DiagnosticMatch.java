@@ -5,6 +5,7 @@ package com.pa.lcr.lcp.diagnostic;
  * Phase 2 — plan diagnostic intelligent (27 juillet 2026).
  */
 public final class DiagnosticMatch {
+    public final long ruleId;
     public final String ruleName;
     public final long eventId;
     public final long ts;
@@ -13,8 +14,9 @@ public final class DiagnosticMatch {
     public final String supportLevel;
     public final String recommendedAction;
 
-    public DiagnosticMatch(String ruleName, long eventId, long ts, String diagnostic,
+    public DiagnosticMatch(long ruleId, String ruleName, long eventId, long ts, String diagnostic,
                             int confidence, String supportLevel, String recommendedAction) {
+        this.ruleId = ruleId;
         this.ruleName = ruleName;
         this.eventId = eventId;
         this.ts = ts;

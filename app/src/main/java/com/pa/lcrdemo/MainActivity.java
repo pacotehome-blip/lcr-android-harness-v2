@@ -110,6 +110,10 @@ public class MainActivity extends AppCompatActivity {
     private TextView txtSupportCount;
     private TextView txtSupportDiagnosis;
     private ListView listSupportEvents;
+    private EditText edtSupportValidatedBy;
+    private View rowSupportIncident;
+    private java.util.List<com.pa.lcr.lcp.diagnostic.DiagnosticMatch> lastSupportMatches
+            = new java.util.ArrayList<>();
 
     // ===== CONFIGURE UI (status + BT) =====
     private TextView txtMediaActive;
@@ -792,6 +796,12 @@ public class MainActivity extends AppCompatActivity {
         if (btnSupportDiagnose != null) {
             btnSupportDiagnose.setOnClickListener(v -> runSupportDiagnosis());
         }
+        edtSupportValidatedBy = findViewById(R.id.edtSupportValidatedBy);
+        rowSupportIncident = findViewById(R.id.rowSupportIncident);
+        Button btnSupportRecordIncident = findViewById(R.id.btnSupportRecordIncident);
+        if (btnSupportRecordIncident != null) {
+            btnSupportRecordIncident.setOnClickListener(v -> recordSupportIncidents());
+        }
 
         btnScanUsb = findViewById(R.id.btnScanUsb);
         btnPingUsb = findViewById(R.id.btnPingUsb);
@@ -1200,6 +1210,7 @@ private void setupTabsTop() {
                 matches = new java.util.ArrayList<>();
             }
 
+            final java.util.List<com.pa.lcr.lcp.diagnostic.DiagnosticMatch> finalMatches = matches;
             final StringBuilder sb = new StringBuilder();
             if (matches.isEmpty()) {
                 sb.append("Aucun diagnostic ne matche pour ce ticket.");
@@ -1215,12 +1226,48 @@ private void setupTabsTop() {
             }
 
             runOnUiThread(() -> {
+                lastSupportMatches = finalMatches;
                 if (txtSupportDiagnosis != null) {
                     txtSupportDiagnosis.setVisibility(View.VISIBLE);
                     txtSupportDiagnosis.setText(sb.toString().trim());
                 }
+                if (rowSupportIncident != null) {
+                    rowSupportIncident.setVisibility(finalMatches.isEmpty() ? View.GONE : View.VISIBLE);
+                }
             });
         }, "SupportDiagnosisLoader").start();
+    }
+
+    // =========================================================
+    // Boucle de rétroaction (Phase 3 — 27 juillet 2026)
+    // Enregistre chaque diagnostic actuellement affiché dans incident_history.
+    // Upsert géré par IncidentHistoryStore (incrémente occurrence_count si déjà vu).
+    // =========================================================
+    private void recordSupportIncidents() {
+        final java.util.List<com.pa.lcr.lcp.diagnostic.DiagnosticMatch> matches = lastSupportMatches;
+        if (matches == null || matches.isEmpty()) return;
+
+        final String ticketFilter = (edtSupportTicketFilter != null)
+                ? edtSupportTicketFilter.getText().toString().trim() : "";
+        final String serialFilter = (edtSupportSerialFilter != null)
+                ? edtSupportSerialFilter.getText().toString().trim() : "";
+        final String validatedBy = (edtSupportValidatedBy != null)
+                ? edtSupportValidatedBy.getText().toString().trim() : "";
+
+        new Thread(() -> {
+            try {
+                com.pa.lcr.lcp.storage.IncidentHistoryStore store =
+                        new com.pa.lcr.lcp.storage.IncidentHistoryStore(getApplicationContext());
+                for (com.pa.lcr.lcp.diagnostic.DiagnosticMatch m : matches) {
+                    store.recordIncident(m.ruleId, serialFilter.isEmpty() ? null : serialFilter,
+                            ticketFilter.isEmpty() ? null : ticketFilter, m.diagnostic, null, null, null,
+                            validatedBy.isEmpty() ? null : validatedBy);
+                }
+            } catch (Exception ignored) {
+                // Best-effort — un incident non enregistré ne doit jamais bloquer l'utilisateur.
+            }
+            runOnUiThread(() -> toast("Incident(s) enregistré(s) dans l'historique."));
+        }, "IncidentHistoryWriter").start();
     }
 
     /**
