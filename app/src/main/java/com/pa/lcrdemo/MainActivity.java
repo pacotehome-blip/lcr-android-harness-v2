@@ -1111,6 +1111,116 @@ private void setupTabsTop() {
     // Support tab: lecture de v_diagnostic_events (Phase 1b — 27 juillet 2026)
     // Lecture seule, thread background, curseur/DB toujours fermés en finally.
     // =========================================================
+    /**
+     * (Demandé 31 juillet 2026) Écran diagnostic (Support) : si le ticket filtré n'a pas
+     * de détail de livraison local (BD vide pour ce ticket, ou #delivery-uid/#wo manquant),
+     * avertit l'utilisateur ET tente automatiquement un pull Dataverse. Le lcrnode n'est pas
+     * connu depuis cet écran (pas de contexte registre) — filtre Dataverse sur serial_id +
+     * ticket_no seulement. Doit être appelée depuis un thread d'arrière-plan.
+     */
+    private void checkAndPullSupportMissingDetail(String ticketFilter, String serialFilter, int eventCount) {
+        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow row = null;
+        try {
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
+                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(getApplicationContext());
+            try {
+                row = lcrDb.getByTicketNo(ticketFilter);
+            } finally {
+                try { lcrDb.close(); } catch (Exception ignored) {}
+            }
+        } catch (Exception ignored) {}
+
+        boolean missing = (row == null)
+                || row.woNum == null || row.woNum.isEmpty()
+                || row.woIdGuid == null || row.woIdGuid.isEmpty();
+        if (!missing) return; // détail déjà présent localement — rien à faire
+
+        if (serialFilter.isEmpty()) {
+            // Sans serial_id, impossible d'interroger Dataverse de façon fiable — informer seulement.
+            runOnUiThread(() -> {
+                if (txtSupportDiagnosis != null) {
+                    txtSupportDiagnosis.setVisibility(View.VISIBLE);
+                    txtSupportDiagnosis.setText((eventCount == 0
+                            ? "Aucune donnée locale pour ce ticket. "
+                            : "Ticket sans #delivery-uid/#wo local. ")
+                            + "Entrez un serial_id pour tenter une recherche Dataverse.");
+                }
+            });
+            return;
+        }
+
+        runOnUiThread(() -> {
+            if (txtSupportDiagnosis != null) {
+                txtSupportDiagnosis.setVisibility(View.VISIBLE);
+                txtSupportDiagnosis.setText((eventCount == 0
+                        ? "Aucune donnée locale pour ce ticket. "
+                        : "Ticket sans #delivery-uid/#wo local. ") + "Tentative Dataverse...");
+            }
+        });
+
+        try {
+            MsalTokenProvider msal = new MsalTokenProvider(getApplicationContext());
+            final String[] tokenHolder = {null};
+            final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+            msal.init(new MsalTokenProvider.InitCallback() {
+                @Override public void onReady() {
+                    msal.acquireTokenSilentFromWorker(new MsalTokenProvider.TokenCallback() {
+                        @Override public void onSuccess(String token) { tokenHolder[0] = token; latch.countDown(); }
+                        @Override public void onError(Exception e) { latch.countDown(); }
+                    });
+                }
+                @Override public void onError(Exception e) { latch.countDown(); }
+            });
+            latch.await(8, java.util.concurrent.TimeUnit.SECONDS);
+
+            if (tokenHolder[0] == null) {
+                runOnUiThread(() -> {
+                    if (txtSupportDiagnosis != null) {
+                        txtSupportDiagnosis.setText("Pas de token Dataverse disponible (offline ou non connecté).");
+                    }
+                });
+                return;
+            }
+
+            boolean found = com.pa.lcrdemo.dataverse.LcrDeliverySync.pullDeliveryByTicket(
+                    getApplicationContext(), tokenHolder[0], serialFilter, null, ticketFilter);
+
+            if (!found) {
+                runOnUiThread(() -> {
+                    if (txtSupportDiagnosis != null) {
+                        txtSupportDiagnosis.setText("Aucune donnée trouvée (local + Dataverse) pour ce ticket.");
+                    }
+                });
+                return;
+            }
+
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb2 =
+                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(getApplicationContext());
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow pulled;
+            try {
+                pulled = lcrDb2.getByTicketNo(ticketFilter);
+            } finally {
+                try { lcrDb2.close(); } catch (Exception ignored) {}
+            }
+
+            final com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow fPulled = pulled;
+            runOnUiThread(() -> {
+                if (txtSupportDiagnosis != null && fPulled != null) {
+                    txtSupportDiagnosis.setText("Récupéré depuis Dataverse — WO=" + fPulled.woNum
+                            + "  delivery-uid=" + fPulled.woNum + "-" + ticketFilter
+                            + "  produit=" + fPulled.produitNo
+                            + "  preset=" + fPulled.presetL);
+                }
+            });
+        } catch (Exception e) {
+            runOnUiThread(() -> {
+                if (txtSupportDiagnosis != null) {
+                    txtSupportDiagnosis.setText("Erreur pull Dataverse: " + e.getMessage());
+                }
+            });
+        }
+    }
+
     private void refreshSupportEvents() {
         final String ticketFilter = (edtSupportTicketFilter != null)
                 ? edtSupportTicketFilter.getText().toString().trim() : "";
@@ -1169,6 +1279,13 @@ private void setupTabsTop() {
                 if (c != null) try { c.close(); } catch (Exception ignored) {}
                 if (db != null) try { db.close(); } catch (Exception ignored) {}
                 if (dbHelper != null) try { dbHelper.close(); } catch (Exception ignored) {}
+            }
+
+            // ✅ (demandé 31 juillet 2026) : si un ticket est filtré et que la BD locale
+            // est vide pour lui, OU qu'il n'a pas de #delivery-uid/#wo, avertir et tenter
+            // automatiquement un pull Dataverse.
+            if (!ticketFilter.isEmpty()) {
+                checkAndPullSupportMissingDetail(ticketFilter, serialFilter, count);
             }
 
             final int finalCount = count;

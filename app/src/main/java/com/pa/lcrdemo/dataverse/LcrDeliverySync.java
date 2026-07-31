@@ -355,14 +355,14 @@ public class LcrDeliverySync {
     // @return true si une livraison a été trouvée et upsertée localement, false sinon.
     // =========================================================
     public static boolean pullDeliveryByTicket(Context ctx, String accessToken,
-                                                String serialId, int lcrnode, String ticketNo) {
+                                                String serialId, Integer lcrnode, String ticketNo) {
         if (serialId == null || serialId.trim().isEmpty() || ticketNo == null || ticketNo.trim().isEmpty()) {
             return false;
         }
         try {
             String orgUrl = LcrConfig.getDataverseUrl(ctx);
             String filter = "filgo_serial_id eq '" + odataEscape(serialId) + "'"
-                + " and filgo_lcrnode eq " + lcrnode
+                + (lcrnode != null ? " and filgo_lcrnode eq " + lcrnode : "")
                 + " and filgo_ticket_no eq '" + odataEscape(ticketNo) + "'";
             String urlStr = orgUrl + "/api/data/v9.2/" + TABLE_DELIVERY
                 + "?$filter=" + java.net.URLEncoder.encode(filter, "UTF-8").replace("+", "%20")
@@ -400,7 +400,7 @@ public class LcrDeliverySync {
                 cv.put(LcrDeliveryStatusDb.COL_WO_NUM,      d.optString("filgo_wo_num", ""));
                 cv.put(LcrDeliveryStatusDb.COL_WO_ID_GUID,  d.optString("filgo_wo_id_guid", ""));
                 cv.put(LcrDeliveryStatusDb.COL_SERIAL_ID,   d.optString("filgo_serial_id", serialId));
-                cv.put(LcrDeliveryStatusDb.COL_LCRNODE,     d.optInt("filgo_lcrnode", lcrnode));
+                cv.put(LcrDeliveryStatusDb.COL_LCRNODE,     d.optInt("filgo_lcrnode", lcrnode != null ? lcrnode : 0));
                 cv.put(LcrDeliveryStatusDb.COL_TICKET_NO,   d.optString("filgo_ticket_no", ticketNo));
                 cv.put(LcrDeliveryStatusDb.COL_PRODUIT_NO,  d.optInt("filgo_produit_no", 0));
                 cv.put(LcrDeliveryStatusDb.COL_PRESET_L,    d.optDouble("filgo_preset_l", 0.0));

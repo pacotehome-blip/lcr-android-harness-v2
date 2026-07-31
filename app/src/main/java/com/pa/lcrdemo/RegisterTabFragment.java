@@ -1234,7 +1234,13 @@ public class RegisterTabFragment extends Fragment {
             // Status comme test définitif — pas juste io.isOpen() qui peut
             // mentir. Si la validation réussit, Status s'exécute normalement.
             // Si elle échoue, le diagnostic se déclenche automatiquement.
-            validerTransportEtRegistrePuis("STATUS_B", () -> runStatusBLikeButton("STATUS_B"));
+            validerTransportEtRegistrePuis("STATUS_B", () -> {
+                runStatusBLikeButton("STATUS_B");
+                // ✅ (demandé 31 juillet 2026) : si le ticket actuel n'a pas de détail
+                // de livraison local (BD vide ou #delivery-uid manquant), avertir et
+                // tenter automatiquement un pull Dataverse — pas d'attente du polling.
+                bg.execute(() -> checkAndPullMissingDeliveryDetail("STATUS_B"));
+            });
         });
         if (btnC != null) {
             btnC.setOnClickListener(v -> {
@@ -3453,6 +3459,77 @@ public class RegisterTabFragment extends Fragment {
      * échoue (offline, pas de compte, etc.), retourne simplement null sans bloquer le flux.
      * Doit être appelée depuis un thread d'arrière-plan (bloquant réseau + SQLite).
      */
+    /**
+     * (Demandé 31 juillet 2026) Après Status(B) ou sur demande explicite : si le ticket
+     * actuellement affiché par le registre n'a PAS de détail de livraison local (BD vide
+     * pour ce ticket, ou #delivery-uid/#wo manquant), avertit l'utilisateur ET tente
+     * automatiquement un pull Dataverse — sans attendre le prochain poll de
+     * rechercherWoDepuisRegistre() (qui peut prendre jusqu'à 800ms, et surtout qui
+     * n'agit que si le ticket n'a jamais encore été "verrouillé" via lastTicketDetected).
+     * Doit être appelée depuis un thread d'arrière-plan.
+     */
+    private void checkAndPullMissingDeliveryDetail(String reason) {
+        if (controller == null) return;
+        try {
+            ApiResult snap = controller.api_registerValidate(null, null, null, null, null);
+            if (snap == null || snap.data == null) return;
+            String ticketNo = snap.data.optString("ticket_no", "");
+            if (ticketNo.isEmpty()) return; // rien à vérifier — aucun ticket actif
+
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db =
+                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow row;
+            try {
+                row = db.getByTicketNo(ticketNo);
+            } finally {
+                try { db.close(); } catch (Exception ignored) {}
+            }
+
+            boolean missing = (row == null)
+                    || row.woNum == null || row.woNum.isEmpty()
+                    || row.woIdGuid == null || row.woIdGuid.isEmpty();
+            if (!missing) return; // détail déjà présent localement — rien à faire
+
+            LogBus.api(node, "[" + reason + "] ticket=" + ticketNo
+                    + " — BD vide/incomplète (pas de #delivery-uid), tentative Dataverse");
+            ui.post(() -> {
+                try {
+                    Toast.makeText(requireContext(),
+                        "Aucune donnée locale pour ce ticket — tentative Dataverse...",
+                        Toast.LENGTH_SHORT).show();
+                } catch (Exception ignored) {}
+            });
+
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow pulled =
+                    tryPullDeliveryFromDataverse(ticketNo);
+
+            if (pulled != null && pulled.woNum != null && !pulled.woNum.isEmpty()) {
+                // Permet à lookupWoForTicket() normal de reprendre la main proprement
+                // (rafraîchit currentWoNum/currentWoIdGuid/UI comme d'habitude).
+                lastTicketDetected = "";
+                final String fWo = pulled.woNum;
+                ui.post(() -> {
+                    try {
+                        Toast.makeText(requireContext(),
+                            "Livraison récupérée depuis Dataverse (WO " + fWo + ")",
+                            Toast.LENGTH_SHORT).show();
+                    } catch (Exception ignored) {}
+                });
+                lookupWoForTicket(ticketNo);
+            } else {
+                ui.post(() -> {
+                    try {
+                        Toast.makeText(requireContext(),
+                            "Aucune donnée trouvée (local + Dataverse) pour ce ticket.",
+                            Toast.LENGTH_SHORT).show();
+                    } catch (Exception ignored) {}
+                });
+            }
+        } catch (Exception e) {
+            LogBus.api(node, "[" + reason + "] checkAndPullMissingDeliveryDetail ERR: " + safeMsg(e));
+        }
+    }
+
     private com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow tryPullDeliveryFromDataverse(String ticketNo) {
         final String serialId = (serialFromArgs != null && !serialFromArgs.trim().isEmpty())
                 ? serialFromArgs.trim() : null;
