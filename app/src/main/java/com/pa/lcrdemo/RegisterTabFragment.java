@@ -3446,6 +3446,71 @@ public class RegisterTabFragment extends Fragment {
      * beaucoup plus robuste, sans dépendre uniquement du polling explicite.
      * Doit être appelée depuis un thread d'arrière-plan (fait des requêtes SQLite).
      */
+    /**
+     * Tentative de récupération d'une livraison sur Dataverse par ticket_no + serial_id + lcrnode,
+     * quand elle n'existe pas (encore) localement. Best-effort : MSAL silent avec timeout 8s
+     * (même pattern que le push Dataverse existant plus bas dans ce fichier) — si le token
+     * échoue (offline, pas de compte, etc.), retourne simplement null sans bloquer le flux.
+     * Doit être appelée depuis un thread d'arrière-plan (bloquant réseau + SQLite).
+     */
+    private com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow tryPullDeliveryFromDataverse(String ticketNo) {
+        final String serialId = (serialFromArgs != null && !serialFromArgs.trim().isEmpty())
+                ? serialFromArgs.trim() : null;
+        if (serialId == null) {
+            LogBus.api(node, "[WO-DETECT] pull Dataverse annulé — serial_id inconnu pour ce fragment");
+            return null;
+        }
+
+        try {
+            com.pa.lcrdemo.auth.MsalTokenProvider msal =
+                new com.pa.lcrdemo.auth.MsalTokenProvider(requireContext());
+            final String[] tokenHolder = {null};
+            final java.util.concurrent.CountDownLatch latch =
+                new java.util.concurrent.CountDownLatch(1);
+            msal.init(new com.pa.lcrdemo.auth.MsalTokenProvider.InitCallback() {
+                @Override public void onReady() {
+                    msal.acquireTokenSilentFromWorker(
+                        new com.pa.lcrdemo.auth.MsalTokenProvider.TokenCallback() {
+                            @Override public void onSuccess(String token) {
+                                tokenHolder[0] = token;
+                                latch.countDown();
+                            }
+                            @Override public void onError(Exception e) {
+                                LogBus.api(node, "[WO-DETECT] pull Dataverse — token silent ERR: " + safeMsg(e));
+                                latch.countDown();
+                            }
+                        });
+                }
+                @Override public void onError(Exception e) {
+                    LogBus.api(node, "[WO-DETECT] pull Dataverse — MSAL init ERR: " + safeMsg(e));
+                    latch.countDown();
+                }
+            });
+            latch.await(8, java.util.concurrent.TimeUnit.SECONDS);
+
+            if (tokenHolder[0] == null) {
+                LogBus.api(node, "[WO-DETECT] pull Dataverse annulé — pas de token (offline ou non connecté)");
+                return null;
+            }
+
+            boolean found = com.pa.lcrdemo.dataverse.LcrDeliverySync.pullDeliveryByTicket(
+                    requireContext(), tokenHolder[0], serialId, node, ticketNo);
+            if (!found) return null;
+
+            // Relit la ligne locale (maintenant upsertée) pour retourner un DeliveryRow cohérent
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db2 =
+                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+            try {
+                return db2.getByTicketNo(ticketNo);
+            } finally {
+                try { db2.close(); } catch (Exception ignored) {}
+            }
+        } catch (Exception e) {
+            LogBus.api(node, "[WO-DETECT] pull Dataverse ERR: " + safeMsg(e));
+            return null;
+        }
+    }
+
     private void lookupWoForTicket(String ticketNo) {
         if (ticketNo == null || ticketNo.isEmpty()) return;
         // ✅ Ne pas sortir juste parce que currentWoNum est déjà connu — vérifier
@@ -3466,8 +3531,13 @@ public class RegisterTabFragment extends Fragment {
             try { db.close(); } catch (Exception ignored) {}
         }
         if (row == null || row.woNum == null || row.woNum.isEmpty()) {
-            LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — pas dans DB");
-            return;
+            LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — pas dans DB, tentative Dataverse (online)");
+            row = tryPullDeliveryFromDataverse(ticketNo);
+            if (row == null || row.woNum == null || row.woNum.isEmpty()) {
+                LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — introuvable (local + Dataverse)");
+                return;
+            }
+            LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — trouvé sur Dataverse, wo=" + row.woNum);
         }
 
         final String fWoNum    = row.woNum;
