@@ -31,7 +31,9 @@ public class DeliveryDb extends SQLiteOpenHelper {
     // v14: add api_trace table (REQ/RESP HTTP, attempt_id nullable/best-effort, PAS de FK stricte —
     //      delivery_event.attempt_id est NOT NULL + FK ON, donc les traces API orphelines ne peuvent
     //      pas y vivre; v_diagnostic_events étendue en UNION ALL avec api_trace)
-    public static final int DB_VERSION = 14;
+    // v15: add diagnostic_rules table (moteur de règles, Phase 2 — plan diagnostic intelligent),
+    //      seedée avec les 4 premières règles les plus fiables du plan (#1, #4, #5, #7)
+    public static final int DB_VERSION = 15;
 
     private static final String TAG = "DeliveryDb";
 
@@ -66,6 +68,8 @@ public class DeliveryDb extends SQLiteOpenHelper {
         createKnownTcpDeviceTable(db);
         createApiTraceTable(db);
         createDiagnosticEventsView(db);
+        createDiagnosticRulesTable(db);
+        seedDiagnosticRules(db);
     }
 
     @Override
@@ -139,6 +143,11 @@ public class DeliveryDb extends SQLiteOpenHelper {
             createApiTraceTable(db);
             createDiagnosticEventsView(db);
         }
+        // v15: diagnostic_rules (moteur de règles Phase 2) + seed des 4 premières règles
+        if (oldVersion < 15) {
+            createDiagnosticRulesTable(db);
+            seedDiagnosticRules(db);
+        }
     }
 
     // =========================================================
@@ -165,9 +174,88 @@ public class DeliveryDb extends SQLiteOpenHelper {
     }
 
     // =========================================================
-    // Diagnostic view (Phase 1 — plan diagnostic intelligent, 27 juillet 2026)
-    // v14: étendue en UNION ALL avec api_trace (traces API, souvent orphelines d'attempt_id)
+    // Diagnostic rules engine (Phase 2 — plan diagnostic intelligent, 27 juillet 2026)
+    //
+    // ÉCART ASSUMÉ vs le schéma du plan original : deux colonnes ajoutées
+    // (detail_like, data_json_like) qui n'étaient pas dans la proposition initiale.
+    // Raison : les règles #4 (Queued timeout) et #7 (level=TRANSPORT) filtrent sur du
+    // texte libre dans detail_short/data_json, pas sur event_code/event_type. Sans ces
+    // colonnes, ces deux règles auraient dû être codées en dur dans DiagnosticRuleEngine
+    // au lieu de vivre dans la table — ce qui aurait cassé l'objectif même d'avoir une
+    // table de règles configurable (impossible d'ajouter une règle similaire plus tard
+    // sans redéployer du code). À valider avec Paul si ce n'est pas le comportement voulu.
     // =========================================================
+    private static void createDiagnosticRulesTable(SQLiteDatabase db) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS diagnostic_rules (" +
+            "rule_id            INTEGER PRIMARY KEY AUTOINCREMENT," +
+            "name                TEXT NOT NULL," +
+            "event_code          TEXT," +            // filtre principal (ex: 'ERR_MEDIA_NOT_READY')
+            "event_type          TEXT," +             // filtre secondaire (ex: 'ALIGN_FAIL')
+            "detail_like         TEXT," +             // pattern LIKE optionnel sur detail_short
+            "data_json_like      TEXT," +             // pattern LIKE optionnel sur data_json
+            "window_seconds      INTEGER DEFAULT 5," + // fenêtre de corrélation avec l'événement précédent
+            "precondition_code   TEXT," +             // format 'TYPE=SOUS-CHAINE' (EXISTS) ou '!TYPE=SOUS-CHAINE' (NOT EXISTS)
+            "diagnostic          TEXT NOT NULL," +
+            "confidence          INTEGER NOT NULL," +  // 0-100, point de départ — à recalibrer via incident_history (Phase 3)
+            "support_level       TEXT NOT NULL," +     // N1/N2/N3/N4
+            "recommended_action  TEXT" +
+            ");"
+        );
+    }
+
+    private static void seedDiagnosticRules(SQLiteDatabase db) {
+        // Ne seed que si la table est vide (idempotent — évite les doublons sur upgrade répété)
+        try (Cursor c = db.rawQuery("SELECT COUNT(*) FROM diagnostic_rules", null)) {
+            if (c.moveToFirst() && c.getInt(0) > 0) return;
+        } catch (Exception e) {
+            Log.w(TAG, "seedDiagnosticRules: count check failed", e);
+        }
+
+        // Règle #1 — ALIGN_FAIL précédé (5s) d'un TAB_MEDIA_STATUS=OFF
+        insertRule(db, "ALIGN_FAIL_MEDIA_OFF", null, "ALIGN_FAIL", null, null, 5,
+                "TAB_MEDIA_STATUS=OFF",
+                "Bluetooth/USB déconnecté pendant l'alignement",
+                85, "N1", "Vérifier la connexion physique/appairage avant de relancer l'alignement");
+
+        // Règle #4 — CONTINUE_RUN_FAIL avec 'Queued timeout' dans detail_short
+        insertRule(db, "CONTINUE_RUN_FAIL_QUEUED_TIMEOUT", null, "CONTINUE_RUN_FAIL",
+                "%Queued timeout%", null, 0, null,
+                "Registre ne répond plus après CMD_RUN — perte de communication post-RUN",
+                88, "N2", "Vérifier l'état du registre et relancer la livraison; escalader si récurrent");
+
+        // Règle #5 — ERR_REGISTER_NOT_FOUND sans TAB_MEDIA_STATUS=READY dans les 30s précédentes
+        insertRule(db, "REGISTER_NOT_FOUND_NO_READY", "ERR_REGISTER_NOT_FOUND", null, null, null, 30,
+                "!TAB_MEDIA_STATUS=READY",
+                "Registre jamais détecté sur ce transport — vérifier appairage/branchement physique",
+                82, "N1", "Vérifier le branchement physique et l'appairage Bluetooth/USB");
+
+        // Règle #7 — data_json contient level=TRANSPORT (tagErrorLevel(), déjà catégorisé dans le code)
+        insertRule(db, "TRANSPORT_LEVEL_CONFIRMED", null, null, null, "%\"level\":\"TRANSPORT\"%", 0, null,
+                "Exception de transport confirmée — pas une erreur logique applicative",
+                90, "N1", "Vérifier la couche transport (BT/USB/TCP) plutôt que la logique métier");
+    }
+
+    private static void insertRule(SQLiteDatabase db, String name, String eventCode, String eventType,
+                                    String detailLike, String dataJsonLike, int windowSeconds,
+                                    String preconditionCode, String diagnostic, int confidence,
+                                    String supportLevel, String recommendedAction) {
+        android.content.ContentValues cv = new android.content.ContentValues();
+        cv.put("name", name);
+        cv.put("event_code", eventCode);
+        cv.put("event_type", eventType);
+        cv.put("detail_like", detailLike);
+        cv.put("data_json_like", dataJsonLike);
+        cv.put("window_seconds", windowSeconds);
+        cv.put("precondition_code", preconditionCode);
+        cv.put("diagnostic", diagnostic);
+        cv.put("confidence", confidence);
+        cv.put("support_level", supportLevel);
+        cv.put("recommended_action", recommendedAction);
+        db.insert("diagnostic_rules", null, cv);
+    }
+
+
     private static void createDiagnosticEventsView(SQLiteDatabase db) {
         // DROP puis CREATE : une VIEW n'a pas d'état propre, donc pas de perte de données
         // possible en la recréant à chaque upgrade/onCreate. Garde onUpgrade idempotent.

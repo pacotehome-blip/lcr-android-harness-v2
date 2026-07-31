@@ -108,6 +108,7 @@ public class MainActivity extends AppCompatActivity {
     private EditText edtSupportTicketFilter;
     private EditText edtSupportSerialFilter;
     private TextView txtSupportCount;
+    private TextView txtSupportDiagnosis;
     private ListView listSupportEvents;
 
     // ===== CONFIGURE UI (status + BT) =====
@@ -781,10 +782,15 @@ public class MainActivity extends AppCompatActivity {
         edtSupportTicketFilter = findViewById(R.id.edtSupportTicketFilter);
         edtSupportSerialFilter = findViewById(R.id.edtSupportSerialFilter);
         txtSupportCount = findViewById(R.id.txtSupportCount);
+        txtSupportDiagnosis = findViewById(R.id.txtSupportDiagnosis);
         listSupportEvents = findViewById(R.id.listSupportEvents);
         Button btnSupportRefresh = findViewById(R.id.btnSupportRefresh);
         if (btnSupportRefresh != null) {
             btnSupportRefresh.setOnClickListener(v -> refreshSupportEvents());
+        }
+        Button btnSupportDiagnose = findViewById(R.id.btnSupportDiagnose);
+        if (btnSupportDiagnose != null) {
+            btnSupportDiagnose.setOnClickListener(v -> runSupportDiagnosis());
         }
 
         btnScanUsb = findViewById(R.id.btnScanUsb);
@@ -1166,6 +1172,55 @@ private void setupTabsTop() {
                 }
             });
         }, "SupportEventsLoader").start();
+    }
+
+    // =========================================================
+    // Diagnostic rules engine (Phase 2 — 27 juillet 2026)
+    // Exige un ticket_no dans le filtre : les règles corrèlent une chronologie par ticket.
+    // =========================================================
+    private void runSupportDiagnosis() {
+        final String ticketFilter = (edtSupportTicketFilter != null)
+                ? edtSupportTicketFilter.getText().toString().trim() : "";
+
+        if (ticketFilter.isEmpty()) {
+            if (txtSupportDiagnosis != null) {
+                txtSupportDiagnosis.setVisibility(View.VISIBLE);
+                txtSupportDiagnosis.setText("Entrez un ticket_no dans le filtre avant de diagnostiquer.");
+            }
+            return;
+        }
+
+        new Thread(() -> {
+            java.util.List<com.pa.lcr.lcp.diagnostic.DiagnosticMatch> matches;
+            try {
+                com.pa.lcr.lcp.diagnostic.DiagnosticRuleEngine engine =
+                        new com.pa.lcr.lcp.diagnostic.DiagnosticRuleEngine(getApplicationContext());
+                matches = engine.evaluateForTicket(ticketFilter);
+            } catch (Exception e) {
+                matches = new java.util.ArrayList<>();
+            }
+
+            final StringBuilder sb = new StringBuilder();
+            if (matches.isEmpty()) {
+                sb.append("Aucun diagnostic ne matche pour ce ticket.");
+            } else {
+                for (com.pa.lcr.lcp.diagnostic.DiagnosticMatch m : matches) {
+                    sb.append("• [").append(m.supportLevel).append(" — ").append(m.confidence).append("%] ")
+                      .append(m.diagnostic);
+                    if (m.recommendedAction != null && !m.recommendedAction.isEmpty()) {
+                        sb.append("\n  → ").append(m.recommendedAction);
+                    }
+                    sb.append("\n");
+                }
+            }
+
+            runOnUiThread(() -> {
+                if (txtSupportDiagnosis != null) {
+                    txtSupportDiagnosis.setVisibility(View.VISIBLE);
+                    txtSupportDiagnosis.setText(sb.toString().trim());
+                }
+            });
+        }, "SupportDiagnosisLoader").start();
     }
 
     /**
