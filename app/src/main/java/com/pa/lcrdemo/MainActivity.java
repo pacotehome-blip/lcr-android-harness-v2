@@ -107,6 +107,7 @@ public class MainActivity extends AppCompatActivity {
     private View pageSupport;
     private EditText edtSupportTicketFilter;
     private EditText edtSupportSerialFilter;
+    private EditText edtSupportNodeFilter;
     private TextView txtSupportCount;
     private TextView txtSupportDiagnosis;
     private ListView listSupportEvents;
@@ -534,6 +535,15 @@ public class MainActivity extends AppCompatActivity {
         // ✅ WorkManager — vide la queue offline Dataverse quand réseau disponible
         DeliverySyncScheduler.schedulePeriodic(this);
 
+        // ✅ (demande Paul 31 juillet 2026 : "tout persister") — LogBus était jusqu'ici un
+        // buffer 100% en mémoire, jamais persisté, invisible pour le RCA après coup. Ce
+        // listener écrit chaque événement (UI/API/IO_TX/IO_RX) dans log_bus_event de façon
+        // async, sans jamais ralentir l'émission LogBus elle-même.
+        final com.pa.lcr.lcp.storage.LogBusStore logBusStore =
+                new com.pa.lcr.lcp.storage.LogBusStore(getApplicationContext());
+        LogBus.addListener(event -> logBusStore.addEventAsync(
+                event.node, event.src != null ? event.src.name() : "", event.msg));
+
         // ✅ MSAL — init + login au premier démarrage de l'APK
         // Après ce premier login le token est en cache → silent pour toutes les livraisons
         MsalTokenProvider msal = new MsalTokenProvider(this);
@@ -785,6 +795,7 @@ public class MainActivity extends AppCompatActivity {
         pageSupport = findViewById(R.id.pageSupport);
         edtSupportTicketFilter = findViewById(R.id.edtSupportTicketFilter);
         edtSupportSerialFilter = findViewById(R.id.edtSupportSerialFilter);
+        edtSupportNodeFilter = findViewById(R.id.edtSupportNodeFilter);
         txtSupportCount = findViewById(R.id.txtSupportCount);
         txtSupportDiagnosis = findViewById(R.id.txtSupportDiagnosis);
         listSupportEvents = findViewById(R.id.listSupportEvents);
@@ -1261,11 +1272,12 @@ private void setupTabsTop() {
                 ? edtSupportTicketFilter.getText().toString().trim() : "";
         final String serialFilter = (edtSupportSerialFilter != null)
                 ? edtSupportSerialFilter.getText().toString().trim() : "";
+        final String nodeFilter = (edtSupportNodeFilter != null)
+                ? edtSupportNodeFilter.getText().toString().trim() : "";
 
         new Thread(() -> {
-            final java.util.List<String> headers = new java.util.ArrayList<>();
-            final java.util.List<String> details = new java.util.ArrayList<>();
-            int count = 0;
+            // Chaque entrée : {ts, header, detail} — fusionné ensuite avec log_bus_event et trié
+            final java.util.List<Object[]> rows = new java.util.ArrayList<>();
             com.pa.lcr.lcp.storage.DeliveryDb dbHelper = null;
             android.database.sqlite.SQLiteDatabase db = null;
             android.database.Cursor c = null;
@@ -1303,18 +1315,53 @@ private void setupTabsTop() {
                     String detail = (serialId != null ? "serial=" + serialId + "  " : "")
                             + (eventWhere != null ? "où=" + eventWhere + "  " : "")
                             + (detailShort != null ? detailShort : "");
-                    headers.add(header);
-                    details.add(detail);
-                    count++;
+                    rows.add(new Object[]{ts, header, detail});
+                }
+
+                // ✅ (demandé 31 juillet 2026 : "a-t-on pris en compte le log du tab") —
+                // fusionne les événements LogBus persistés (log_bus_event), filtrés par node
+                // si renseigné. LogBus n'a pas de notion de ticket_no/serial_id (scopé par
+                // registre, pas par livraison), donc pas de filtre ticket/serial ici — juste
+                // node + une fenêtre récente raisonnable pour rester lisible.
+                if (!nodeFilter.isEmpty()) {
+                    try {
+                        int node = Integer.parseInt(nodeFilter);
+                        try (android.database.Cursor c2 = db.rawQuery(
+                                "SELECT ts, src, msg FROM log_bus_event WHERE node = ? ORDER BY ts DESC LIMIT 300",
+                                new String[]{String.valueOf(node)})) {
+                            while (c2.moveToNext()) {
+                                long ts2 = c2.getLong(0);
+                                String src2 = c2.getString(1);
+                                String msg2 = c2.getString(2);
+                                String tsFmt2 = android.text.format.DateFormat.format("MM-dd HH:mm:ss", ts2).toString();
+                                String header2 = tsFmt2 + "  [LOG:" + src2 + "]  node=" + node;
+                                String detail2 = msg2 != null ? msg2 : "";
+                                rows.add(new Object[]{ts2, header2, detail2});
+                            }
+                        }
+                    } catch (NumberFormatException nfe) {
+                        rows.add(new Object[]{System.currentTimeMillis(), "Filtre node invalide", nodeFilter});
+                    }
                 }
             } catch (Exception e) {
-                headers.add("Erreur lecture v_diagnostic_events");
-                details.add(String.valueOf(e.getMessage()));
+                rows.add(new Object[]{System.currentTimeMillis(), "Erreur lecture v_diagnostic_events/log_bus_event",
+                        String.valueOf(e.getMessage())});
             } finally {
                 if (c != null) try { c.close(); } catch (Exception ignored) {}
                 if (db != null) try { db.close(); } catch (Exception ignored) {}
                 if (dbHelper != null) try { dbHelper.close(); } catch (Exception ignored) {}
             }
+
+            // Tri global décroissant par ts (le plus récent en premier), toutes sources confondues
+            rows.sort((a, b) -> Long.compare((Long) b[0], (Long) a[0]));
+
+            final java.util.List<String> headers = new java.util.ArrayList<>();
+            final java.util.List<String> details = new java.util.ArrayList<>();
+            for (Object[] r : rows) {
+                headers.add((String) r[1]);
+                details.add((String) r[2]);
+            }
+            int count = rows.size();
 
             // ✅ (demandé 31 juillet 2026) : si un ticket est filtré et que la BD locale
             // est vide pour lui, OU qu'il n'a pas de #delivery-uid/#wo, avertir et tenter

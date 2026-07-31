@@ -902,6 +902,15 @@
                 android:inputType="text"
                 android:textSize="14sp"/>
 
+            <EditText
+                android:id="@+id/edtSupportNodeFilter"
+                android:layout_width="70dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="6dp"
+                android:hint="node"
+                android:inputType="number"
+                android:textSize="14sp"/>
+
             <Button
                 android:id="@+id/btnSupportRefresh"
                 android:layout_width="wrap_content"
