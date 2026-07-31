@@ -3517,7 +3517,6 @@ public class RegisterTabFragment extends Fragment {
         // plutôt si CE ticket précis a déjà été traité. Si le registre est passé à
         // un nouveau ticket depuis, on doit re-détecter le nouveau WO.
         if (ticketNo.equals(lastTicketDetected)) return;
-        lastTicketDetected = ticketNo;
 
         LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — recherche dans DB");
 
@@ -3534,11 +3533,19 @@ public class RegisterTabFragment extends Fragment {
             LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — pas dans DB, tentative Dataverse (online)");
             row = tryPullDeliveryFromDataverse(ticketNo);
             if (row == null || row.woNum == null || row.woNum.isEmpty()) {
-                LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — introuvable (local + Dataverse)");
+                // ✅ FIX : ne PAS marquer lastTicketDetected ici — sinon un échec temporaire
+                // (token MSAL pas encore prêt, latence réseau, Dataverse pas encore à jour)
+                // bloque tout nouvel essai pour ce ticket, même si rechercherWoDepuisRegistre()
+                // repolle toutes les 800ms. On ne verrouille lastTicketDetected qu'après un
+                // SUCCÈS réel (voir plus bas), pour permettre les tentatives suivantes.
+                LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — introuvable (local + Dataverse), nouvel essai au prochain poll");
                 return;
             }
             LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — trouvé sur Dataverse, wo=" + row.woNum);
         }
+
+        // ✅ Recherche réussie (locale ou Dataverse) — on peut maintenant verrouiller ce ticket
+        lastTicketDetected = ticketNo;
 
         final String fWoNum    = row.woNum;
 
