@@ -865,6 +865,8 @@
                     android:layout_height="16dp"/>
             </LinearLayout>
         </ScrollView>
+    </LinearLayout>
+
     <!-- PAGE SUPPORT (diagnostic intelligent — v_diagnostic_events) -->
     <LinearLayout
         android:id="@+id/pageSupport"
