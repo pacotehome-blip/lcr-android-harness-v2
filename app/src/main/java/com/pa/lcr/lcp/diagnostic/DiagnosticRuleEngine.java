@@ -45,7 +45,10 @@ public final class DiagnosticRuleEngine {
 
     /**
      * Évalue toutes les règles actives contre la chronologie d'un ticket donné.
-     * Lecture seule — ne modifie jamais delivery_event/api_trace.
+     * Persiste aussi chaque résultat dans diagnostic_match_history (demande Paul, 31 juillet
+     * 2026 — préparation sync BD support centrale / futur agent IA), jusqu'ici calculé à la
+     * volée et jamais stocké. Lecture/écriture — ne modifie jamais delivery_event/api_trace,
+     * seulement diagnostic_match_history (nouvelle table dédiée).
      */
     public List<DiagnosticMatch> evaluateForTicket(String ticketNo) {
         List<DiagnosticMatch> matches = new ArrayList<>();
@@ -55,12 +58,14 @@ public final class DiagnosticRuleEngine {
         SQLiteDatabase db = null;
         try {
             dbHelper = new DeliveryDb(appCtx);
-            db = dbHelper.getReadableDatabase();
+            db = dbHelper.getWritableDatabase(); // writable : on persiste aussi les résultats
 
             List<Rule> rules = loadRules(db);
             for (Rule r : rules) {
                 matches.addAll(evaluateRule(db, r, ticketNo.trim()));
             }
+
+            persistMatches(db, ticketNo.trim(), matches);
         } catch (Exception ignored) {
             // Best-effort : un diagnostic manqué n'est jamais pire qu'aucun diagnostic.
         } finally {
@@ -68,6 +73,29 @@ public final class DiagnosticRuleEngine {
             if (dbHelper != null) try { dbHelper.close(); } catch (Exception ignored) {}
         }
         return matches;
+    }
+
+    private void persistMatches(SQLiteDatabase db, String ticketNo, List<DiagnosticMatch> matches) {
+        if (matches.isEmpty()) return;
+        long now = System.currentTimeMillis();
+        for (DiagnosticMatch m : matches) {
+            try {
+                android.content.ContentValues cv = new android.content.ContentValues();
+                cv.put("ts", now);
+                if (m.ruleId > 0) cv.put("rule_id", m.ruleId); else cv.putNull("rule_id");
+                cv.put("rule_name", m.ruleName);
+                cv.put("ticket_no", ticketNo);
+                cv.put("event_id", m.eventId);
+                cv.put("event_ts", m.ts);
+                cv.put("diagnostic", m.diagnostic);
+                cv.put("confidence", m.confidence);
+                cv.put("support_level", m.supportLevel);
+                cv.put("recommended_action", m.recommendedAction);
+                db.insert("diagnostic_match_history", null, cv);
+            } catch (Exception ignored) {
+                // Une ligne d'historique perdue ne doit jamais faire échouer l'évaluation elle-même.
+            }
+        }
     }
 
     private List<Rule> loadRules(SQLiteDatabase db) {
