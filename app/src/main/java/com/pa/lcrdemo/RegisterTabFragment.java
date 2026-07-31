@@ -342,6 +342,14 @@ public class RegisterTabFragment extends Fragment {
     // sur la première valeur trouvée (deep link, bouton C annulé, ActiveDeliveryStore)
     // pour toute la durée de vie du tab, bloquant la détection de tout ticket suivant.
     private volatile String lastTicketDetected = "";
+    // ✅ (fix 31 juillet 2026) Limite les appels MSAL — checkAndPullMissingDeliveryDetail()
+    // est maintenant appelée à chaque activation d'onglet (pas seulement Status(B)), ce qui
+    // pouvait spammer des demandes de token concurrentes et interférer avec d'autres flux
+    // MSAL (ex: le push existant). On ne retente le pull Dataverse pour un même ticket
+    // qu'après un délai de repos, pas à chaque activation d'onglet.
+    private volatile String lastMissingDetailAttemptTicket = "";
+    private volatile long lastMissingDetailAttemptTs = 0L;
+    private static final long MISSING_DETAIL_COOLDOWN_MS = 60_000L;
     // ✅ true quand currentWoNum vient d'être fixé DIRECTEMENT (deep link / bouton C
     // avec contexte Field Service) — dans ce cas, la recherche par ticket_number
     // (lookupWoForTicket) ne doit PAS l'écraser, même si le registre affiche encore
@@ -1143,11 +1151,16 @@ public class RegisterTabFragment extends Fragment {
                 try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
             }, 200);
 
-            // ✅ (demandé 31 juillet 2026) : couvre à la fois le clic Status(B) ET l'arrivée
-            // sur l'onglet (TAB_ACTIVATED/AUTO_AFTER_TAB_CREATE/TAB_REACTIVATED appellent
-            // tous cette même méthode) — toujours en arrière-plan, peu importe le thread
-            // d'appel (certains appelants sont sur le thread UI via ui.postDelayed).
-            bg.execute(() -> checkAndPullMissingDeliveryDetail(reason));
+            // ⏸️ (suspendu 31 juillet 2026, pending investigation régression push Dataverse) :
+            // limité au clic EXPLICITE Status(B) seulement — plus déclenché automatiquement
+            // à l'arrivée sur l'onglet (TAB_ACTIVATED/AUTO_AFTER_TAB_CREATE/TAB_REACTIVATED
+            // appellent aussi runStatusBLikeButton(), donc sans ce filtre sur "reason" ça
+            // spammait des demandes de token MSAL à chaque activation d'onglet — suspecté
+            // d'avoir interféré avec le push Dataverse existant. Réactiver une fois confirmé
+            // que ce n'était pas la cause (ou corrigé autrement).
+            if ("STATUS_B".equals(reason)) {
+                bg.execute(() -> checkAndPullMissingDeliveryDetail(reason));
+            }
         } catch (Exception ignored) {}
     }
 
@@ -2297,6 +2310,10 @@ public class RegisterTabFragment extends Fragment {
                 try { lcrDb.close(); } catch (Exception ignored) {}
 
                 // 3. Tenter push MSAL vers Dataverse
+                // ✅ (fix 31 juillet 2026, demande Paul : "il ne doit JAMAIS concurrencer
+                // aucun processus") — même verrou global que le pull Dataverse, pour garantir
+                // qu'aucune opération MSAL ne tourne jamais en parallèle d'une autre.
+                synchronized (com.pa.lcrdemo.auth.MsalTokenProvider.MSAL_SERIAL_LOCK) {
                 try {
                     com.pa.lcrdemo.auth.MsalTokenProvider msal =
                         new com.pa.lcrdemo.auth.MsalTokenProvider(requireContext());
@@ -2415,6 +2432,7 @@ public class RegisterTabFragment extends Fragment {
                 } catch (Exception e) {
                     android.util.Log.w("RetourWO", "Push Dataverse ERR: " + e.getMessage());
                 }
+                } // fin synchronized (MSAL_SERIAL_LOCK)
 
                 // 4. Effacer ActiveDeliveryStore
                 try {
@@ -3468,13 +3486,23 @@ public class RegisterTabFragment extends Fragment {
      * n'agit que si le ticket n'a jamais encore été "verrouillé" via lastTicketDetected).
      * Doit être appelée depuis un thread d'arrière-plan.
      */
+    private static final String LOGCAT_TAG = "WO-DETECT";
+
     private void checkAndPullMissingDeliveryDetail(String reason) {
+        android.util.Log.i(LOGCAT_TAG, "[" + reason + "] checkAndPullMissingDeliveryDetail: appelé, controller="
+                + (controller == null ? "null" : "OK"));
         if (controller == null) return;
         try {
             ApiResult snap = controller.api_registerValidate(null, null, null, null, null);
+            String snapTicket = (snap != null && snap.data != null) ? snap.data.optString("ticket_no", "") : null;
+            android.util.Log.i(LOGCAT_TAG, "[" + reason + "] api_registerValidate: snap="
+                    + (snap == null ? "null" : "OK") + " ticket_no=" + snapTicket);
             if (snap == null || snap.data == null) return;
             String ticketNo = snap.data.optString("ticket_no", "");
-            if (ticketNo.isEmpty()) return; // rien à vérifier — aucun ticket actif
+            if (ticketNo.isEmpty()) {
+                android.util.Log.i(LOGCAT_TAG, "[" + reason + "] aucun ticket actif sur le registre — rien à vérifier");
+                return;
+            }
 
             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db =
                 new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
@@ -3488,8 +3516,27 @@ public class RegisterTabFragment extends Fragment {
             boolean missing = (row == null)
                     || row.woNum == null || row.woNum.isEmpty()
                     || row.woIdGuid == null || row.woIdGuid.isEmpty();
+            android.util.Log.i(LOGCAT_TAG, "[" + reason + "] ticket=" + ticketNo + " — ligne locale="
+                    + (row == null ? "absente" : ("wo=" + row.woNum + " woIdGuid=" + row.woIdGuid))
+                    + " missing=" + missing);
             if (!missing) return; // détail déjà présent localement — rien à faire
 
+            // ✅ (fix 31 juillet 2026) : ne retente pas le pull Dataverse (donc pas de
+            // nouvelle demande MSAL) pour ce même ticket avant MISSING_DETAIL_COOLDOWN_MS —
+            // évite le spam de tokens à chaque activation/réactivation d'onglet.
+            long now = System.currentTimeMillis();
+            if (ticketNo.equals(lastMissingDetailAttemptTicket)
+                    && (now - lastMissingDetailAttemptTs) < MISSING_DETAIL_COOLDOWN_MS) {
+                android.util.Log.i(LOGCAT_TAG, "[" + reason + "] ticket=" + ticketNo
+                        + " — cooldown actif (" + (MISSING_DETAIL_COOLDOWN_MS - (now - lastMissingDetailAttemptTs)) / 1000
+                        + "s restantes), pas de nouvelle tentative");
+                return;
+            }
+            lastMissingDetailAttemptTicket = ticketNo;
+            lastMissingDetailAttemptTs = now;
+
+            android.util.Log.i(LOGCAT_TAG, "[" + reason + "] ticket=" + ticketNo
+                    + " — BD vide/incomplète, lancement tryPullDeliveryFromDataverse()");
             LogBus.api(node, "[" + reason + "] ticket=" + ticketNo
                     + " — BD vide/incomplète (pas de #delivery-uid), tentative Dataverse");
             ui.post(() -> {
@@ -3502,6 +3549,10 @@ public class RegisterTabFragment extends Fragment {
 
             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow pulled =
                     tryPullDeliveryFromDataverse(ticketNo);
+
+            android.util.Log.i(LOGCAT_TAG, "[" + reason + "] ticket=" + ticketNo
+                    + " — résultat tryPullDeliveryFromDataverse: "
+                    + (pulled == null ? "null (échec)" : ("wo=" + pulled.woNum)));
 
             if (pulled != null && pulled.woNum != null && !pulled.woNum.isEmpty()) {
                 // Permet à lookupWoForTicket() normal de reprendre la main proprement
@@ -3527,18 +3578,26 @@ public class RegisterTabFragment extends Fragment {
             }
         } catch (Exception e) {
             LogBus.api(node, "[" + reason + "] checkAndPullMissingDeliveryDetail ERR: " + safeMsg(e));
+            android.util.Log.e(LOGCAT_TAG, "[" + reason + "] checkAndPullMissingDeliveryDetail EXCEPTION", e);
         }
     }
 
     private com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow tryPullDeliveryFromDataverse(String ticketNo) {
         final String serialId = (serialFromArgs != null && !serialFromArgs.trim().isEmpty())
                 ? serialFromArgs.trim() : null;
+        android.util.Log.i(LOGCAT_TAG, "tryPullDeliveryFromDataverse: ticket=" + ticketNo
+                + " serialFromArgs=" + serialId + " node=" + node);
         if (serialId == null) {
             LogBus.api(node, "[WO-DETECT] pull Dataverse annulé — serial_id inconnu pour ce fragment");
+            android.util.Log.w(LOGCAT_TAG, "tryPullDeliveryFromDataverse: ANNULÉ — serialFromArgs est null pour ce fragment");
             return null;
         }
 
         try {
+            // ✅ (fix 31 juillet 2026, demande Paul) : verrou global — garantit qu'aucune
+            // opération MSAL (celle-ci ou toute autre dans l'app, ex: le push existant)
+            // ne tourne jamais en parallèle d'une autre, où que ce soit.
+            synchronized (com.pa.lcrdemo.auth.MsalTokenProvider.MSAL_SERIAL_LOCK) {
             com.pa.lcrdemo.auth.MsalTokenProvider msal =
                 new com.pa.lcrdemo.auth.MsalTokenProvider(requireContext());
             final String[] tokenHolder = {null};
@@ -3550,16 +3609,19 @@ public class RegisterTabFragment extends Fragment {
                         new com.pa.lcrdemo.auth.MsalTokenProvider.TokenCallback() {
                             @Override public void onSuccess(String token) {
                                 tokenHolder[0] = token;
+                                android.util.Log.i(LOGCAT_TAG, "tryPullDeliveryFromDataverse: token MSAL obtenu (silent)");
                                 latch.countDown();
                             }
                             @Override public void onError(Exception e) {
                                 LogBus.api(node, "[WO-DETECT] pull Dataverse — token silent ERR: " + safeMsg(e));
+                                android.util.Log.w(LOGCAT_TAG, "tryPullDeliveryFromDataverse: token silent ERR", e);
                                 latch.countDown();
                             }
                         });
                 }
                 @Override public void onError(Exception e) {
                     LogBus.api(node, "[WO-DETECT] pull Dataverse — MSAL init ERR: " + safeMsg(e));
+                    android.util.Log.w(LOGCAT_TAG, "tryPullDeliveryFromDataverse: MSAL init ERR", e);
                     latch.countDown();
                 }
             });
@@ -3567,11 +3629,14 @@ public class RegisterTabFragment extends Fragment {
 
             if (tokenHolder[0] == null) {
                 LogBus.api(node, "[WO-DETECT] pull Dataverse annulé — pas de token (offline ou non connecté)");
+                android.util.Log.w(LOGCAT_TAG, "tryPullDeliveryFromDataverse: ANNULÉ — aucun token après 8s (offline, pas de compte, ou init/silent en échec)");
                 return null;
             }
 
             boolean found = com.pa.lcrdemo.dataverse.LcrDeliverySync.pullDeliveryByTicket(
                     requireContext(), tokenHolder[0], serialId, node, ticketNo);
+            android.util.Log.i(LOGCAT_TAG, "tryPullDeliveryFromDataverse: pullDeliveryByTicket found=" + found
+                    + " (serial=" + serialId + " lcrnode=" + node + " ticket=" + ticketNo + ")");
             if (!found) return null;
 
             // Relit la ligne locale (maintenant upsertée) pour connaître le #wo résolu
@@ -3617,6 +3682,7 @@ public class RegisterTabFragment extends Fragment {
             }
 
             return resolved;
+            } // fin synchronized (MSAL_SERIAL_LOCK)
         } catch (Exception e) {
             LogBus.api(node, "[WO-DETECT] pull Dataverse ERR: " + safeMsg(e));
             return null;

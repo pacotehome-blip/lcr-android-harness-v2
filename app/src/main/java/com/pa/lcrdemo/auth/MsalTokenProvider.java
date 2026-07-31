@@ -30,6 +30,16 @@ public class MsalTokenProvider {
 
     private static final String TAG = "MsalTokenProvider";
 
+    // ✅ (fix 31 juillet 2026, demande Paul : "il ne doit JAMAIS concurrencer aucun
+    // processus") — verrou global partagé par TOUTE l'app. Chaque `new MsalTokenProvider(...)`
+    // crée une instance MSAL distincte (createSingleAccountPublicClientApplication), et en
+    // mode Single Account, plusieurs instances actives en même temps peuvent se disputer le
+    // même cache de compte/token sous-jacent. Tout appelant (push existant, pull Dataverse,
+    // ou futur code) DOIT envelopper son bloc init+acquireToken dans
+    // `synchronized (MsalTokenProvider.MSAL_SERIAL_LOCK) { ... }` pour garantir qu'aucune
+    // opération MSAL ne tourne jamais en parallèle d'une autre, où que ce soit dans l'app.
+    public static final Object MSAL_SERIAL_LOCK = new Object();
+
     // ✅ Scope Dataverse — accès via l'utilisateur connecté
     public static final String[] SCOPES = new String[]{
         "https://dev-filgo-sonic.crm3.dynamics.com/.default"

@@ -1159,6 +1159,9 @@ private void setupTabsTop() {
         });
 
         try {
+            // ✅ (fix 31 juillet 2026, demande Paul : "il ne doit JAMAIS concurrencer
+            // aucun processus") — même verrou global que le push et le pull côté registre.
+            synchronized (MsalTokenProvider.MSAL_SERIAL_LOCK) {
             MsalTokenProvider msal = new MsalTokenProvider(getApplicationContext());
             final String[] tokenHolder = {null};
             final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
@@ -1243,6 +1246,7 @@ private void setupTabsTop() {
             // (delivery_event/api_trace) n'est pas alimentée par ce pull Dataverse, qui
             // écrit uniquement dans LcrDeliveryStatusDb. Un second appel n'ajouterait
             // rien et risquerait une boucle si le mapping revenait incomplet.
+            } // fin synchronized (MSAL_SERIAL_LOCK)
         } catch (Exception e) {
             runOnUiThread(() -> {
                 if (txtSupportDiagnosis != null) {
