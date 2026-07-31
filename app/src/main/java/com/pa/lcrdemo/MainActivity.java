@@ -807,6 +807,10 @@ public class MainActivity extends AppCompatActivity {
         if (btnSupportDiagnose != null) {
             btnSupportDiagnose.setOnClickListener(v -> runSupportDiagnosis());
         }
+        Button btnSupportLexique = findViewById(R.id.btnSupportLexique);
+        if (btnSupportLexique != null) {
+            btnSupportLexique.setOnClickListener(v -> showSupportLexiqueDialog());
+        }
         edtSupportValidatedBy = findViewById(R.id.edtSupportValidatedBy);
         rowSupportIncident = findViewById(R.id.rowSupportIncident);
         Button btnSupportRecordIncident = findViewById(R.id.btnSupportRecordIncident);
@@ -1387,9 +1391,62 @@ private void setupTabsTop() {
     // Diagnostic rules engine (Phase 2 — 27 juillet 2026)
     // Exige un ticket_no dans le filtre : les règles corrèlent une chronologie par ticket.
     // =========================================================
+    /**
+     * Lexique des niveaux support et couches de diagnostic (demandé 31 juillet 2026) —
+     * explique ce que veulent dire les deux valeurs affichées par "Diagnostiquer", pour
+     * que support/utilisateur sache comment les interpréter sans avoir à demander.
+     */
+    private void showSupportLexiqueDialog() {
+        String texte =
+                "NIVEAUX SUPPORT\n\n" +
+                "N1 — Chauffeur\n" +
+                "  Résolution simple sur le terrain : rebrancher/reconnecter le BT ou USB, " +
+                "redémarrer l'app, vérifier l'appairage. Pas besoin d'appeler le support.\n\n" +
+                "N2 — Support technique\n" +
+                "  Nécessite une vérification par le support (état du registre, config " +
+                "Field Service, synchronisation Dataverse).\n\n" +
+                "N3 — Escalade développeur\n" +
+                "  Comportement anormal qui dépasse le dépannage standard — probable " +
+                "défaillance logicielle ou matérielle à investiguer.\n\n" +
+                "N4 — Critique / urgent développeur\n" +
+                "  Cas grave (perte de données, blocage complet) nécessitant une " +
+                "intervention immédiate.\n\n" +
+                "N/A — Aucune règle de diagnostic ne matche pour ce ticket. Ne veut pas " +
+                "dire qu'il n'y a pas de problème, juste qu'aucune des règles connues ne " +
+                "l'a détecté automatiquement.\n\n" +
+                "─────────────────────────────\n\n" +
+                "COUCHES PAR COMPLEXITÉ\n\n" +
+                "TRANSPORT (BT/USB/TCP/registre)\n" +
+                "  Le problème semble venir de la communication physique avec le registre " +
+                "(Bluetooth, USB, TCP) ou du protocole LCP lui-même — pas de la logique " +
+                "applicative. Signal : erreurs classées \"level\":\"TRANSPORT\", événements " +
+                "event_where=LCP, ou trafic IO_TX/IO_RX du log du registre.\n\n" +
+                "API\n" +
+                "  Le problème semble venir des échanges API (Field Service Mobile ↔ APK, " +
+                "ou appels REST internes) — pas du transport ni de l'interface.\n\n" +
+                "UI\n" +
+                "  Le problème semble venir d'une action ou d'un affichage côté interface " +
+                "utilisateur (boutons A/B/C, Continuer, Terminer, etc.).\n\n" +
+                "INDÉTERMINÉ\n" +
+                "  Pas assez de signal dans les logs disponibles pour trancher entre les " +
+                "trois couches ci-dessus.\n\n" +
+                "⚠️ La couche est déterminée par vote majoritaire sur les logs présents — " +
+                "c'est un point de départ pour aiguiller, pas un diagnostic définitif. Le " +
+                "détail des comptes (Transport=X API=Y UI=Z) est toujours affiché pour " +
+                "vérifier si le verdict est solide ou serré.";
+
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Lexique — Niveaux et couches de diagnostic")
+                .setMessage(texte)
+                .setPositiveButton("Fermer", null)
+                .show();
+    }
+
     private void runSupportDiagnosis() {
         final String ticketFilter = (edtSupportTicketFilter != null)
                 ? edtSupportTicketFilter.getText().toString().trim() : "";
+        final String nodeFilter = (edtSupportNodeFilter != null)
+                ? edtSupportNodeFilter.getText().toString().trim() : "";
 
         if (ticketFilter.isEmpty()) {
             if (txtSupportDiagnosis != null) {
@@ -1408,13 +1465,26 @@ private void setupTabsTop() {
             } catch (Exception e) {
                 matches = new java.util.ArrayList<>();
             }
-
             final java.util.List<com.pa.lcr.lcp.diagnostic.DiagnosticMatch> finalMatches = matches;
+
+            // ✅ (demandé 31 juillet 2026) : triage sur TOUS les logs présents (v_diagnostic_events
+            // + log_bus_event, pas seulement les règles qui matchent) — deux valeurs pour
+            // aiguiller support/utilisateur :
+            //   1. Niveau support : le pire (le plus élevé) parmi les règles qui matchent
+            //   2. Couche par complexité : où le problème semble se situer (Transport/API/UI)
+            String[] triage = computeSupportTriage(ticketFilter, nodeFilter, finalMatches);
+            final String triageSupportLevel = triage[0];
+            final String triageLayer = triage[1];
+            final String triageDetail = triage[2];
+
             final StringBuilder sb = new StringBuilder();
-            if (matches.isEmpty()) {
-                sb.append("Aucun diagnostic ne matche pour ce ticket.");
+            sb.append("▶ Niveau support suggéré : ").append(triageSupportLevel).append("\n");
+            sb.append("▶ Couche probable : ").append(triageLayer).append("  (").append(triageDetail).append(")\n\n");
+
+            if (finalMatches.isEmpty()) {
+                sb.append("Aucune règle de diagnostic ne matche pour ce ticket.");
             } else {
-                for (com.pa.lcr.lcp.diagnostic.DiagnosticMatch m : matches) {
+                for (com.pa.lcr.lcp.diagnostic.DiagnosticMatch m : finalMatches) {
                     sb.append("• [").append(m.supportLevel).append(" — ").append(m.confidence).append("%] ")
                       .append(m.diagnostic);
                     if (m.recommendedAction != null && !m.recommendedAction.isEmpty()) {
@@ -1435,6 +1505,112 @@ private void setupTabsTop() {
                 }
             });
         }, "SupportDiagnosisLoader").start();
+    }
+
+    /**
+     * Triage global (demandé 31 juillet 2026) : agrège TOUS les logs présents pour ce
+     * ticket/node — v_diagnostic_events (event_where, level, data_json) et log_bus_event
+     * (src) — et produit deux valeurs pour aiguiller support/utilisateur :
+     *   [0] niveau support suggéré : le pire (le plus élevé) parmi les règles qui matchent
+     *       (N1=chauffeur, N2=support, N3/N4=escalade dev). "N/A" si aucune règle ne matche.
+     *   [1] couche probable : TRANSPORT / API / UI / INDÉTERMINÉ — dérivée par vote majoritaire
+     *       sur les signaux disponibles (pas une science exacte, un point de départ pour aiguiller).
+     *   [2] détail des comptes par couche, pour transparence (pas juste un verdict opaque).
+     * Doit être appelée depuis un thread d'arrière-plan.
+     */
+    private String[] computeSupportTriage(String ticketFilter, String nodeFilter,
+                                           java.util.List<com.pa.lcr.lcp.diagnostic.DiagnosticMatch> matches) {
+        int cTransport = 0, cApi = 0, cUi = 0, cIndetermine = 0;
+
+        com.pa.lcr.lcp.storage.DeliveryDb dbHelper = null;
+        android.database.sqlite.SQLiteDatabase db = null;
+        try {
+            dbHelper = new com.pa.lcr.lcp.storage.DeliveryDb(getApplicationContext());
+            db = dbHelper.getReadableDatabase();
+
+            // 1. v_diagnostic_events pour ce ticket
+            try (android.database.Cursor c = db.rawQuery(
+                    "SELECT event_where, level, event_type, event_code, data_json " +
+                    "FROM v_diagnostic_events WHERE ticket_no = ?", new String[]{ticketFilter})) {
+                while (c.moveToNext()) {
+                    String eventWhere = c.getString(0);
+                    String level = c.getString(1);
+                    String eventType = c.getString(2);
+                    String eventCode = c.getString(3);
+                    String dataJson = c.getString(4);
+
+                    if (dataJson != null && dataJson.contains("\"level\":\"TRANSPORT\"")) {
+                        cTransport++;
+                    } else if ("LCP".equals(eventWhere)) {
+                        cTransport++;
+                    } else if ("API_TRACE".equals(eventType) || "ApiServer".equals(eventWhere)) {
+                        cApi++;
+                    } else if (eventType != null && eventType.startsWith("UI_")) {
+                        cUi++;
+                    } else {
+                        cIndetermine++;
+                    }
+                }
+            }
+
+            // 2. log_bus_event pour ce node (si renseigné) — signal transport brut TX/RX
+            if (nodeFilter != null && !nodeFilter.trim().isEmpty()) {
+                try {
+                    int node = Integer.parseInt(nodeFilter.trim());
+                    try (android.database.Cursor c2 = db.rawQuery(
+                            "SELECT src FROM log_bus_event WHERE node = ?", new String[]{String.valueOf(node)})) {
+                        while (c2.moveToNext()) {
+                            String src = c2.getString(0);
+                            if ("IO_TX".equals(src) || "IO_RX".equals(src)) cTransport++;
+                            else if ("API".equals(src)) cApi++;
+                            else if ("UI".equals(src)) cUi++;
+                            else cIndetermine++;
+                        }
+                    }
+                } catch (NumberFormatException ignored) {}
+            }
+        } catch (Exception ignored) {
+        } finally {
+            if (db != null) try { db.close(); } catch (Exception ignored) {}
+            if (dbHelper != null) try { dbHelper.close(); } catch (Exception ignored) {}
+        }
+
+        // Couche dominante par vote majoritaire (heuristique, pas une science exacte)
+        String layer;
+        int maxCount = Math.max(Math.max(cTransport, cApi), cUi);
+        if (maxCount == 0) {
+            layer = "INDÉTERMINÉ";
+        } else if (maxCount == cTransport) {
+            layer = "TRANSPORT (BT/USB/TCP/registre)";
+        } else if (maxCount == cApi) {
+            layer = "API";
+        } else {
+            layer = "UI";
+        }
+        String detail = "Transport=" + cTransport + " API=" + cApi + " UI=" + cUi + " Indéterminé=" + cIndetermine;
+
+        // Niveau support = le pire parmi les règles qui matchent (N4 > N3 > N2 > N1)
+        String supportLevel = "N/A (aucune règle ne matche)";
+        int worstSeverity = -1;
+        for (com.pa.lcr.lcp.diagnostic.DiagnosticMatch m : matches) {
+            int sev = severityOfSupportLevel(m.supportLevel);
+            if (sev > worstSeverity) {
+                worstSeverity = sev;
+                supportLevel = m.supportLevel;
+            }
+        }
+
+        return new String[]{supportLevel, layer, detail};
+    }
+
+    /** N1=1 (chauffeur) ... N4=4 (escalade dev max). Retourne 0 si format inconnu. */
+    private int severityOfSupportLevel(String supportLevel) {
+        if (supportLevel == null || supportLevel.length() < 2 || supportLevel.charAt(0) != 'N') return 0;
+        try {
+            return Integer.parseInt(supportLevel.substring(1).trim());
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
     // =========================================================
