@@ -37,6 +37,7 @@ public final class ApiServer {
     private final ApiLogSink trace;
     private final int port;
     private final android.content.Context appCtx;
+    private final com.pa.lcr.lcp.storage.ApiTraceStore apiTraceStore;
 
     private ServerSocket serverSocket;
     private ExecutorService acceptor;
@@ -56,6 +57,7 @@ public final class ApiServer {
         this.trace = trace;
         this.port = port;
         this.appCtx = ctx;
+        this.apiTraceStore = new com.pa.lcr.lcp.storage.ApiTraceStore(ctx);
     }
 
     public synchronized boolean isRunning() { return running; }
@@ -176,6 +178,19 @@ public synchronized void start() throws Exception {
             t("[API " + ts() + "] RESP #" + rid + " " + (t2 - t1) + "ms total=" + (t2 - t0) +
                     "ms -> " + shrink(json.toString()));
 
+            // Phase 1c — trace API best-effort (async, ne bloque jamais la réponse déjà envoyée)
+            try {
+                JSONObject reqBody = req.jsonBody();
+                String serialId = extractBestEffort(reqBody, req.query, "serialId", "serial_id");
+                String ticketNo = extractBestEffort(reqBody, req.query, "ticketNo", "ticket_no", "ticket");
+                Integer status = (result != null) ? result.code : null; // code métier ApiResult (1=OK/0=FAIL), pas le status HTTP (toujours 200 ici)
+                String detail = (result != null && result.code == 0) ? shrink(String.valueOf(result.err)) : null;
+                apiTraceStore.addTraceAsync(req.method, req.path, status, (t2 - t1),
+                        serialId, ticketNo, null, detail);
+            } catch (Exception ignored) {
+                // Best-effort seulement — ne doit jamais impacter la requête réelle.
+            }
+
         } catch (Exception e) {
             t("[API " + ts() + "] IO ERR #" + rid + ": " + safeMsg(e));
         } finally {
@@ -185,6 +200,28 @@ public synchronized void start() throws Exception {
 
     private static boolean isTickWait(HttpReq req) {
         return "GET".equals(req.method) && "/v1/tick/wait".equals(req.path);
+    }
+
+    /**
+     * Phase 1c — extraction best-effort de serial_id/ticket_no pour api_trace.
+     * Cherche d'abord dans le body JSON (plusieurs clés possibles, l'API utilisant
+     * des conventions inconsistantes selon l'endpoint), puis dans la query string.
+     * Retourne null si rien n'est trouvé — c'est un cas normal et attendu, pas une erreur.
+     */
+    private static String extractBestEffort(JSONObject body, Map<String, String> query, String... keys) {
+        for (String k : keys) {
+            if (body != null) {
+                String v = body.optString(k, "").trim();
+                if (!v.isEmpty()) return v;
+            }
+        }
+        if (query != null) {
+            for (String k : keys) {
+                String v = query.get(k);
+                if (v != null && !v.trim().isEmpty()) return v.trim();
+            }
+        }
+        return null;
     }
 
     private ApiResult pingLocal() {

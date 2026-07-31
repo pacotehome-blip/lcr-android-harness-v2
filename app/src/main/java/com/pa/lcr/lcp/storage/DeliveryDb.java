@@ -28,7 +28,10 @@ public class DeliveryDb extends SQLiteOpenHelper {
     // v11: add missing columns to bt_signal (mac, rssi_quality, source, io_errors, io_timeouts, io_latency_avg_ms)
     // v12: add known_tcp_device table (N-Port TCP mémorisés, équivalent BT paired pour raw TCP)
     // v13: add v_diagnostic_events view (chronologie unifiée pour le diagnostic intelligent — lecture seule, pas de migration de schéma)
-    public static final int DB_VERSION = 13;
+    // v14: add api_trace table (REQ/RESP HTTP, attempt_id nullable/best-effort, PAS de FK stricte —
+    //      delivery_event.attempt_id est NOT NULL + FK ON, donc les traces API orphelines ne peuvent
+    //      pas y vivre; v_diagnostic_events étendue en UNION ALL avec api_trace)
+    public static final int DB_VERSION = 14;
 
     private static final String TAG = "DeliveryDb";
 
@@ -61,6 +64,7 @@ public class DeliveryDb extends SQLiteOpenHelper {
         createBtSignalTable(db);
         createRegisterProductsTable(db);
         createKnownTcpDeviceTable(db);
+        createApiTraceTable(db);
         createDiagnosticEventsView(db);
     }
 
@@ -130,10 +134,39 @@ public class DeliveryDb extends SQLiteOpenHelper {
         if (oldVersion < 13) {
             createDiagnosticEventsView(db);
         }
+        // v14: api_trace (nouvelle table, attempt_id nullable, sans FK stricte) + vue étendue en UNION
+        if (oldVersion < 14) {
+            createApiTraceTable(db);
+            createDiagnosticEventsView(db);
+        }
+    }
+
+    // =========================================================
+    // API trace table (Phase 1c — plan diagnostic intelligent, 27 juillet 2026)
+    // attempt_id INTENTIONNELLEMENT nullable et SANS foreign key : delivery_event.attempt_id
+    // est NOT NULL + FK stricte (foreign_keys=ON), donc les traces API qui arrivent hors
+    // contexte d'une livraison (ex: avant qu'un delivery_attempt existe) ne peuvent pas y vivre.
+    // =========================================================
+    private static void createApiTraceTable(SQLiteDatabase db) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS api_trace (" +
+            "trace_id INTEGER PRIMARY KEY AUTOINCREMENT," +
+            "ts INTEGER NOT NULL," +
+            "method TEXT," +
+            "path TEXT," +
+            "status INTEGER," +
+            "duration_ms INTEGER," +
+            "serial_id TEXT," +      // best-effort, extrait du body JSON ou de la query string
+            "ticket_no TEXT," +      // best-effort
+            "attempt_id INTEGER," +  // nullable, pas de FK — best-effort seulement
+            "detail_short TEXT" +
+            ");"
+        );
     }
 
     // =========================================================
     // Diagnostic view (Phase 1 — plan diagnostic intelligent, 27 juillet 2026)
+    // v14: étendue en UNION ALL avec api_trace (traces API, souvent orphelines d'attempt_id)
     // =========================================================
     private static void createDiagnosticEventsView(SQLiteDatabase db) {
         // DROP puis CREATE : une VIEW n'a pas d'état propre, donc pas de perte de données
@@ -161,7 +194,27 @@ public class DeliveryDb extends SQLiteOpenHelper {
             "JOIN delivery_attempt a ON a.attempt_id = e.attempt_id " +
             "LEFT JOIN delivery_summary s " +
             "  ON s.serial_id = a.serial_id AND s.ticket_no = a.ticket_no " +
-            "ORDER BY e.ts;"
+            "UNION ALL " +
+            "SELECT " +
+            "  t.trace_id           AS event_id, " +
+            "  t.ts, " +
+            "  t.serial_id, " +
+            "  t.ticket_no, " +
+            "  NULL                 AS job_id, " +
+            "  'API_TRACE'           AS attempt_source, " +
+            "  'INFO'                AS level, " +
+            "  'API_TRACE'           AS event_type, " +
+            "  (t.method || ' ' || t.path) AS event_code, " +
+            "  'ApiServer'           AS event_where, " +
+            "  (COALESCE(t.detail_short, '') || " +
+            "   ' status=' || COALESCE(CAST(t.status AS TEXT), '?') || " +
+            "   ' dur=' || COALESCE(CAST(t.duration_ms AS TEXT), '?') || 'ms') AS detail_short, " +
+            "  NULL                 AS data_json, " +
+            "  NULL                 AS last_state, " +
+            "  NULL                 AS result_json, " +
+            "  NULL                 AS error_json " +
+            "FROM api_trace t " +
+            "ORDER BY ts;"
         );
     }
 
