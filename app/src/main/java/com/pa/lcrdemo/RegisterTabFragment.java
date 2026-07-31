@@ -1142,6 +1142,12 @@ public class RegisterTabFragment extends Fragment {
 
                 try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
             }, 200);
+
+            // ✅ (demandé 31 juillet 2026) : couvre à la fois le clic Status(B) ET l'arrivée
+            // sur l'onglet (TAB_ACTIVATED/AUTO_AFTER_TAB_CREATE/TAB_REACTIVATED appellent
+            // tous cette même méthode) — toujours en arrière-plan, peu importe le thread
+            // d'appel (certains appelants sont sur le thread UI via ui.postDelayed).
+            bg.execute(() -> checkAndPullMissingDeliveryDetail(reason));
         } catch (Exception ignored) {}
     }
 
@@ -1234,13 +1240,7 @@ public class RegisterTabFragment extends Fragment {
             // Status comme test définitif — pas juste io.isOpen() qui peut
             // mentir. Si la validation réussit, Status s'exécute normalement.
             // Si elle échoue, le diagnostic se déclenche automatiquement.
-            validerTransportEtRegistrePuis("STATUS_B", () -> {
-                runStatusBLikeButton("STATUS_B");
-                // ✅ (demandé 31 juillet 2026) : si le ticket actuel n'a pas de détail
-                // de livraison local (BD vide ou #delivery-uid manquant), avertir et
-                // tenter automatiquement un pull Dataverse — pas d'attente du polling.
-                bg.execute(() -> checkAndPullMissingDeliveryDetail("STATUS_B"));
-            });
+            validerTransportEtRegistrePuis("STATUS_B", () -> runStatusBLikeButton("STATUS_B"));
         });
         if (btnC != null) {
             btnC.setOnClickListener(v -> {
@@ -3574,14 +3574,49 @@ public class RegisterTabFragment extends Fragment {
                     requireContext(), tokenHolder[0], serialId, node, ticketNo);
             if (!found) return null;
 
-            // Relit la ligne locale (maintenant upsertée) pour retourner un DeliveryRow cohérent
+            // Relit la ligne locale (maintenant upsertée) pour connaître le #wo résolu
             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db2 =
                 new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow resolved;
             try {
-                return db2.getByTicketNo(ticketNo);
+                resolved = db2.getByTicketNo(ticketNo);
             } finally {
                 try { db2.close(); } catch (Exception ignored) {}
             }
+
+            // ✅ (demandé 31 juillet 2026) : un ticket ne donne qu'UNE transaction — mais
+            // plusieurs transactions peuvent partager le même #wo (chaque impression du
+            // registre génère un nouveau ticket_no). Rapatrie TOUTES les transactions de
+            // ce #wo pour ce #série, pas seulement celle du ticket demandé.
+            if (resolved != null && resolved.woNum != null && !resolved.woNum.isEmpty()) {
+                try {
+                    int n = com.pa.lcrdemo.dataverse.LcrDeliverySync.pullAllDeliveriesForWorkOrder(
+                            requireContext(), tokenHolder[0], resolved.woNum, serialId);
+                    LogBus.api(node, "[WO-DETECT] wo=" + resolved.woNum + " — " + n
+                            + " transaction(s) au total rapatriée(s) depuis Dataverse");
+                } catch (Exception e) {
+                    LogBus.api(node, "[WO-DETECT] pullAllDeliveriesForWorkOrder ERR: " + safeMsg(e));
+                }
+            }
+
+            // ✅ (demandé 31 juillet 2026) : au-delà d'un même #wo, rapatrie aussi les
+            // AUTRES arrêts de la même journée pour ce registre (#série) — utile quand la
+            // tournée du jour comporte plusieurs #wo différents sur le même registre.
+            // Ancre de date = start_utc de la livraison déjà résolue (jamais devinée).
+            if (resolved != null && resolved.startUtc != null && !resolved.startUtc.isEmpty()) {
+                try {
+                    int n = com.pa.lcrdemo.dataverse.LcrDeliverySync.pullAllDeliveriesForDay(
+                            requireContext(), tokenHolder[0], serialId, resolved.startUtc);
+                    LogBus.api(node, "[WO-DETECT] jour=" + resolved.startUtc.substring(0, Math.min(10, resolved.startUtc.length()))
+                            + " — " + n + " livraison(s) de la journée rapatriée(s) pour serial=" + serialId);
+                } catch (Exception e) {
+                    LogBus.api(node, "[WO-DETECT] pullAllDeliveriesForDay ERR: " + safeMsg(e));
+                }
+            } else {
+                LogBus.api(node, "[WO-DETECT] pull journée sauté — start_utc inconnu pour ce ticket");
+            }
+
+            return resolved;
         } catch (Exception e) {
             LogBus.api(node, "[WO-DETECT] pull Dataverse ERR: " + safeMsg(e));
             return null;

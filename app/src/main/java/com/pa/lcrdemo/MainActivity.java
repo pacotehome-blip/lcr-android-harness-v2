@@ -1204,14 +1204,45 @@ private void setupTabsTop() {
             }
 
             final com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow fPulled = pulled;
+
+            // ✅ (demandé 31 juillet 2026) : rapatrie aussi toutes les autres transactions
+            // de ce même #wo (pas seulement celle du ticket demandé).
+            int nTransactions = 1;
+            if (fPulled != null && fPulled.woNum != null && !fPulled.woNum.isEmpty()) {
+                try {
+                    nTransactions = com.pa.lcrdemo.dataverse.LcrDeliverySync.pullAllDeliveriesForWorkOrder(
+                            getApplicationContext(), tokenHolder[0], fPulled.woNum, serialFilter);
+                    if (nTransactions <= 0) nTransactions = 1;
+                } catch (Exception ignored) {}
+            }
+            final int fNTransactions = nTransactions;
+
+            // ✅ (demandé 31 juillet 2026) : rapatrie aussi les autres arrêts de la même
+            // journée pour ce registre (#série), au-delà du seul #wo. Ancre de date =
+            // start_utc de la livraison résolue (jamais devinée/aujourd'hui par défaut).
+            int nDay = 0;
+            if (fPulled != null && fPulled.startUtc != null && !fPulled.startUtc.isEmpty()) {
+                try {
+                    nDay = com.pa.lcrdemo.dataverse.LcrDeliverySync.pullAllDeliveriesForDay(
+                            getApplicationContext(), tokenHolder[0], serialFilter, fPulled.startUtc);
+                } catch (Exception ignored) {}
+            }
+            final int fNDay = nDay;
+
             runOnUiThread(() -> {
                 if (txtSupportDiagnosis != null && fPulled != null) {
                     txtSupportDiagnosis.setText("Récupéré depuis Dataverse — WO=" + fPulled.woNum
                             + "  delivery-uid=" + fPulled.woNum + "-" + ticketFilter
                             + "  produit=" + fPulled.produitNo
-                            + "  preset=" + fPulled.presetL);
+                            + "  preset=" + fPulled.presetL
+                            + "  (" + fNTransactions + " transaction(s) de ce WO, "
+                            + fNDay + " livraison(s) de la journée rapatriée(s))");
                 }
             });
+            // Note : pas de rappel à refreshSupportEvents() ici — v_diagnostic_events
+            // (delivery_event/api_trace) n'est pas alimentée par ce pull Dataverse, qui
+            // écrit uniquement dans LcrDeliveryStatusDb. Un second appel n'ajouterait
+            // rien et risquerait une boucle si le mapping revenait incomplet.
         } catch (Exception e) {
             runOnUiThread(() -> {
                 if (txtSupportDiagnosis != null) {

@@ -395,38 +395,7 @@ public class LcrDeliverySync {
                 }
 
                 JSONObject d = values.getJSONObject(0);
-
-                ContentValues cv = new ContentValues();
-                cv.put(LcrDeliveryStatusDb.COL_WO_NUM,      d.optString("filgo_wo_num", ""));
-                cv.put(LcrDeliveryStatusDb.COL_WO_ID_GUID,  d.optString("filgo_wo_id_guid", ""));
-                cv.put(LcrDeliveryStatusDb.COL_SERIAL_ID,   d.optString("filgo_serial_id", serialId));
-                cv.put(LcrDeliveryStatusDb.COL_LCRNODE,     d.optInt("filgo_lcrnode", lcrnode != null ? lcrnode : 0));
-                cv.put(LcrDeliveryStatusDb.COL_TICKET_NO,   d.optString("filgo_ticket_no", ticketNo));
-                cv.put(LcrDeliveryStatusDb.COL_PRODUIT_NO,  d.optInt("filgo_produit_no", 0));
-                cv.put(LcrDeliveryStatusDb.COL_PRESET_L,    d.optDouble("filgo_preset_l", 0.0));
-                cv.put(LcrDeliveryStatusDb.COL_TOURNEE_ID,  d.optString("filgo_tournee_id", ""));
-                cv.put(LcrDeliveryStatusDb.COL_TRANSACTION_NO, d.optInt("filgo_transaction_no", 1));
-                cv.put(LcrDeliveryStatusDb.COL_SOURCE,      "DATAVERSE_PULL");
-                cv.put(LcrDeliveryStatusDb.COL_SYNC_STATUS, LcrDeliveryStatusDb.SYNC_SYNCED);
-                cv.put(LcrDeliveryStatusDb.COL_DATAVERSE_ID,
-                        d.optString("filgo_lcr_delivery_statusid", ""));
-
-                LcrDeliveryStatusDb localDb = new LcrDeliveryStatusDb(ctx);
-                try {
-                    LcrDeliveryStatusDb.DeliveryRow existing = localDb.getByTicketNo(ticketNo);
-                    if (existing != null) {
-                        localDb.updateDelivery(existing.id, cv);
-                        Log.i(TAG, "pullDeliveryByTicket: ticket=" + ticketNo + " — ligne locale mise à jour (id="
-                                + existing.id + ")");
-                    } else {
-                        long newId = localDb.insertDelivery(cv);
-                        Log.i(TAG, "pullDeliveryByTicket: ticket=" + ticketNo + " — nouvelle ligne locale (id="
-                                + newId + ") wo=" + cv.getAsString(LcrDeliveryStatusDb.COL_WO_NUM));
-                    }
-                } finally {
-                    try { localDb.close(); } catch (Exception ignored) {}
-                }
-
+                upsertFromDataverseJson(ctx, d, serialId, lcrnode, ticketNo);
                 return true;
 
             } finally {
@@ -435,6 +404,196 @@ public class LcrDeliverySync {
         } catch (Exception e) {
             Log.w(TAG, "pullDeliveryByTicket ERR pour ticket=" + ticketNo + ": " + e.getMessage());
             return false;
+        }
+    }
+
+    // =========================================================
+    // Pull de TOUTES les livraisons d'un même #wo (demande Paul, 31 juillet 2026)
+    //
+    // Un ticket_no résout UN #wo (via pullDeliveryByTicket), mais plusieurs transactions
+    // peuvent partager ce même #wo avec des ticket_no différents (chaque impression du
+    // registre génère un nouveau ticket) — confirmé par la contrainte locale
+    // UNIQUE(wo_num, ticket_no) qui permet justement plusieurs lignes par wo_num.
+    // Cette méthode rapatrie TOUTES ces transactions pour un #wo + #série donnés,
+    // pas seulement la plus récente.
+    //
+    // @return nombre de lignes upsertées localement (0 si aucune ou en cas d'erreur)
+    // =========================================================
+    public static int pullAllDeliveriesForWorkOrder(Context ctx, String accessToken,
+                                                      String woNum, String serialId) {
+        if (woNum == null || woNum.trim().isEmpty()) return 0;
+        try {
+            String orgUrl = LcrConfig.getDataverseUrl(ctx);
+            String filter = "filgo_wo_num eq '" + odataEscape(woNum) + "'"
+                + (serialId != null && !serialId.trim().isEmpty()
+                    ? " and filgo_serial_id eq '" + odataEscape(serialId) + "'" : "");
+            String urlStr = orgUrl + "/api/data/v9.2/" + TABLE_DELIVERY
+                + "?$filter=" + java.net.URLEncoder.encode(filter, "UTF-8").replace("+", "%20")
+                + "&$orderby=filgo_transaction_no asc"
+                + "&$top=100"; // une tournée n'a jamais 100 transactions pour un même WO — garde-fou
+
+            URL url = new URL(urlStr);
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            try {
+                conn.setRequestMethod("GET");
+                conn.setConnectTimeout(10000);
+                conn.setReadTimeout(10000);
+                conn.setRequestProperty("Authorization",    "Bearer " + accessToken);
+                conn.setRequestProperty("Accept",           "application/json");
+                conn.setRequestProperty("OData-MaxVersion", "4.0");
+                conn.setRequestProperty("OData-Version",    "4.0");
+
+                int code = conn.getResponseCode();
+                if (code != 200) {
+                    Log.w(TAG, "pullAllDeliveriesForWorkOrder: HTTP " + code + " pour wo=" + woNum);
+                    return 0;
+                }
+
+                byte[] respBytes = readStream(conn.getInputStream());
+                JSONObject resp = new JSONObject(new String(respBytes, StandardCharsets.UTF_8));
+                JSONArray values = resp.optJSONArray("value");
+                if (values == null || values.length() == 0) {
+                    Log.i(TAG, "pullAllDeliveriesForWorkOrder: aucune livraison Dataverse pour wo=" + woNum);
+                    return 0;
+                }
+
+                int upserted = 0;
+                for (int i = 0; i < values.length(); i++) {
+                    JSONObject d = values.getJSONObject(i);
+                    String rowTicketNo = d.optString("filgo_ticket_no", null);
+                    if (rowTicketNo == null || rowTicketNo.isEmpty()) continue; // ligne inexploitable, on l'ignore
+                    String rowSerialId = d.optString("filgo_serial_id", serialId);
+                    int rowLcrnode = d.optInt("filgo_lcrnode", 0);
+                    upsertFromDataverseJson(ctx, d, rowSerialId, rowLcrnode, rowTicketNo);
+                    upserted++;
+                }
+                Log.i(TAG, "pullAllDeliveriesForWorkOrder: wo=" + woNum + " — " + upserted + " transaction(s) upsertée(s)");
+                return upserted;
+
+            } finally {
+                conn.disconnect();
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "pullAllDeliveriesForWorkOrder ERR pour wo=" + woNum + ": " + e.getMessage());
+            return 0;
+        }
+    }
+
+    // =========================================================
+    // Pull de TOUTES les livraisons d'une JOURNÉE pour un registre (demande Paul, 31 juillet 2026)
+    //
+    // Au-delà d'un même #wo, Paul veut aussi retrouver les AUTRES arrêts de la même
+    // journée pour ce registre (#série) — utile quand la tournée du jour comporte
+    // plusieurs #wo différents sur le même registre physique.
+    //
+    // @param dayUtc date au format "yyyy-MM-dd" (extraite de filgo_start_utc de la
+    //               livraison déjà résolue — jamais devinée/aujourd'hui par défaut)
+    // @return nombre de lignes upsertées localement (0 si aucune, date invalide, ou erreur)
+    // =========================================================
+    public static int pullAllDeliveriesForDay(Context ctx, String accessToken,
+                                                String serialId, String dayUtc) {
+        if (serialId == null || serialId.trim().isEmpty()
+                || dayUtc == null || dayUtc.length() < 10) {
+            return 0;
+        }
+        try {
+            String day = dayUtc.substring(0, 10); // garde seulement yyyy-MM-dd, au cas où un timestamp complet est passé
+            java.time.LocalDate d0 = java.time.LocalDate.parse(day);
+            String startIso = day + "T00:00:00Z";
+            String endIso   = d0.plusDays(1) + "T00:00:00Z";
+
+            String orgUrl = LcrConfig.getDataverseUrl(ctx);
+            // OData v4 : littéraux DateTime sans guillemets
+            String filter = "filgo_serial_id eq '" + odataEscape(serialId) + "'"
+                + " and filgo_start_utc ge " + startIso
+                + " and filgo_start_utc lt " + endIso;
+            String urlStr = orgUrl + "/api/data/v9.2/" + TABLE_DELIVERY
+                + "?$filter=" + java.net.URLEncoder.encode(filter, "UTF-8").replace("+", "%20")
+                + "&$orderby=filgo_start_utc asc"
+                + "&$top=200"; // garde-fou — une journée n'a jamais 200 arrêts sur un même registre
+
+            URL url = new URL(urlStr);
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            try {
+                conn.setRequestMethod("GET");
+                conn.setConnectTimeout(10000);
+                conn.setReadTimeout(10000);
+                conn.setRequestProperty("Authorization",    "Bearer " + accessToken);
+                conn.setRequestProperty("Accept",           "application/json");
+                conn.setRequestProperty("OData-MaxVersion", "4.0");
+                conn.setRequestProperty("OData-Version",    "4.0");
+
+                int code = conn.getResponseCode();
+                if (code != 200) {
+                    Log.w(TAG, "pullAllDeliveriesForDay: HTTP " + code + " pour serial=" + serialId + " jour=" + day);
+                    return 0;
+                }
+
+                byte[] respBytes = readStream(conn.getInputStream());
+                JSONObject resp = new JSONObject(new String(respBytes, StandardCharsets.UTF_8));
+                JSONArray values = resp.optJSONArray("value");
+                if (values == null || values.length() == 0) {
+                    Log.i(TAG, "pullAllDeliveriesForDay: aucune livraison pour serial=" + serialId + " jour=" + day);
+                    return 0;
+                }
+
+                int upserted = 0;
+                for (int i = 0; i < values.length(); i++) {
+                    JSONObject d = values.getJSONObject(i);
+                    String rowTicketNo = d.optString("filgo_ticket_no", null);
+                    if (rowTicketNo == null || rowTicketNo.isEmpty()) continue;
+                    int rowLcrnode = d.optInt("filgo_lcrnode", 0);
+                    upsertFromDataverseJson(ctx, d, serialId, rowLcrnode, rowTicketNo);
+                    upserted++;
+                }
+                Log.i(TAG, "pullAllDeliveriesForDay: serial=" + serialId + " jour=" + day
+                        + " — " + upserted + " livraison(s) upsertée(s)");
+                return upserted;
+
+            } finally {
+                conn.disconnect();
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "pullAllDeliveriesForDay ERR pour serial=" + serialId + " jour=" + dayUtc + ": " + e.getMessage());
+            return 0;
+        }
+    }
+
+
+    // vers ContentValues et l'upserte dans LcrDeliveryStatusDb (update si ticket déjà
+    // connu localement, insert sinon). Utilisé par pullDeliveryByTicket ET
+    // pullAllDeliveriesForWorkOrder pour ne pas dupliquer la logique de mapping.
+    // =========================================================
+    private static void upsertFromDataverseJson(Context ctx, JSONObject d,
+                                                 String fallbackSerialId, Integer fallbackLcrnode,
+                                                 String fallbackTicketNo) {
+        ContentValues cv = new ContentValues();
+        cv.put(LcrDeliveryStatusDb.COL_WO_NUM,      d.optString("filgo_wo_num", ""));
+        cv.put(LcrDeliveryStatusDb.COL_WO_ID_GUID,  d.optString("filgo_wo_id_guid", ""));
+        cv.put(LcrDeliveryStatusDb.COL_SERIAL_ID,   d.optString("filgo_serial_id", fallbackSerialId));
+        cv.put(LcrDeliveryStatusDb.COL_LCRNODE,     d.optInt("filgo_lcrnode", fallbackLcrnode != null ? fallbackLcrnode : 0));
+        cv.put(LcrDeliveryStatusDb.COL_TICKET_NO,   d.optString("filgo_ticket_no", fallbackTicketNo));
+        cv.put(LcrDeliveryStatusDb.COL_PRODUIT_NO,  d.optInt("filgo_produit_no", 0));
+        cv.put(LcrDeliveryStatusDb.COL_PRESET_L,    d.optDouble("filgo_preset_l", 0.0));
+        cv.put(LcrDeliveryStatusDb.COL_TOURNEE_ID,  d.optString("filgo_tournee_id", ""));
+        cv.put(LcrDeliveryStatusDb.COL_TRANSACTION_NO, d.optInt("filgo_transaction_no", 1));
+        cv.put(LcrDeliveryStatusDb.COL_SOURCE,      "DATAVERSE_PULL");
+        cv.put(LcrDeliveryStatusDb.COL_SYNC_STATUS, LcrDeliveryStatusDb.SYNC_SYNCED);
+        cv.put(LcrDeliveryStatusDb.COL_DATAVERSE_ID,
+                d.optString("filgo_lcr_delivery_statusid", ""));
+
+        String ticketNo = d.optString("filgo_ticket_no", fallbackTicketNo);
+
+        LcrDeliveryStatusDb localDb = new LcrDeliveryStatusDb(ctx);
+        try {
+            LcrDeliveryStatusDb.DeliveryRow existing = localDb.getByTicketNo(ticketNo);
+            if (existing != null) {
+                localDb.updateDelivery(existing.id, cv);
+            } else {
+                localDb.insertDelivery(cv);
+            }
+        } finally {
+            try { localDb.close(); } catch (Exception ignored) {}
         }
     }
 
