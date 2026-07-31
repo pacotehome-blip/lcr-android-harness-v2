@@ -104,6 +104,11 @@ public class MainActivity extends AppCompatActivity {
     private View pageMain;
     private View pageApiFace;
     private View pageConfigure;
+    private View pageSupport;
+    private EditText edtSupportTicketFilter;
+    private EditText edtSupportSerialFilter;
+    private TextView txtSupportCount;
+    private ListView listSupportEvents;
 
     // ===== CONFIGURE UI (status + BT) =====
     private TextView txtMediaActive;
@@ -772,6 +777,15 @@ public class MainActivity extends AppCompatActivity {
         pageMain = findViewById(R.id.pageMain);
         pageApiFace = findViewById(R.id.pageApiFace);
         pageConfigure = findViewById(R.id.pageConfigure);
+        pageSupport = findViewById(R.id.pageSupport);
+        edtSupportTicketFilter = findViewById(R.id.edtSupportTicketFilter);
+        edtSupportSerialFilter = findViewById(R.id.edtSupportSerialFilter);
+        txtSupportCount = findViewById(R.id.txtSupportCount);
+        listSupportEvents = findViewById(R.id.listSupportEvents);
+        Button btnSupportRefresh = findViewById(R.id.btnSupportRefresh);
+        if (btnSupportRefresh != null) {
+            btnSupportRefresh.setOnClickListener(v -> refreshSupportEvents());
+        }
 
         btnScanUsb = findViewById(R.id.btnScanUsb);
         btnPingUsb = findViewById(R.id.btnPingUsb);
@@ -1054,6 +1068,7 @@ private void setupTabsTop() {
         tabLayout.addTab(tabLayout.newTab().setText("MAIN"), true);
         tabLayout.addTab(tabLayout.newTab().setText("API-Face"), false);
         tabLayout.addTab(tabLayout.newTab().setText("CONFIGURE"), false);
+        tabLayout.addTab(tabLayout.newTab().setText("Support"), false);
         showPage(0);
         tabLayout.addOnTabSelectedListener(new TabLayout.OnTabSelectedListener() {
             @Override public void onTabSelected(TabLayout.Tab tab) { showPage(tab.getPosition()); }
@@ -1066,11 +1081,112 @@ private void setupTabsTop() {
         if (pageMain != null) pageMain.setVisibility(index == 0 ? View.VISIBLE : View.GONE);
         if (pageApiFace != null) pageApiFace.setVisibility(index == 1 ? View.VISIBLE : View.GONE);
         if (pageConfigure != null) pageConfigure.setVisibility(index == 2 ? View.VISIBLE : View.GONE);
+        if (pageSupport != null) pageSupport.setVisibility(index == 3 ? View.VISIBLE : View.GONE);
         if (index == 1) refreshApiStatus();
         if (index == 2) {
             updateMediaStatusUi();
             updateNodesStatusUi();
             refreshBondedBtList();
+        }
+        if (index == 3) refreshSupportEvents();
+    }
+
+    // =========================================================
+    // Support tab: lecture de v_diagnostic_events (Phase 1b — 27 juillet 2026)
+    // Lecture seule, thread background, curseur/DB toujours fermés en finally.
+    // =========================================================
+    private void refreshSupportEvents() {
+        final String ticketFilter = (edtSupportTicketFilter != null)
+                ? edtSupportTicketFilter.getText().toString().trim() : "";
+        final String serialFilter = (edtSupportSerialFilter != null)
+                ? edtSupportSerialFilter.getText().toString().trim() : "";
+
+        new Thread(() -> {
+            final java.util.List<String> headers = new java.util.ArrayList<>();
+            final java.util.List<String> details = new java.util.ArrayList<>();
+            int count = 0;
+            com.pa.lcr.lcp.storage.DeliveryDb dbHelper = null;
+            android.database.sqlite.SQLiteDatabase db = null;
+            android.database.Cursor c = null;
+            try {
+                dbHelper = new com.pa.lcr.lcp.storage.DeliveryDb(getApplicationContext());
+                db = dbHelper.getReadableDatabase();
+
+                StringBuilder sql = new StringBuilder(
+                        "SELECT ts, serial_id, ticket_no, event_type, event_code, event_where, detail_short " +
+                        "FROM v_diagnostic_events WHERE 1=1 ");
+                java.util.List<String> args = new java.util.ArrayList<>();
+                if (!ticketFilter.isEmpty()) {
+                    sql.append("AND ticket_no = ? ");
+                    args.add(ticketFilter);
+                }
+                if (!serialFilter.isEmpty()) {
+                    sql.append("AND serial_id = ? ");
+                    args.add(serialFilter);
+                }
+                sql.append("ORDER BY ts DESC LIMIT 300");
+
+                c = db.rawQuery(sql.toString(), args.toArray(new String[0]));
+                while (c.moveToNext()) {
+                    long ts = c.getLong(0);
+                    String serialId = c.getString(1);
+                    String ticketNo = c.getString(2);
+                    String eventType = c.getString(3);
+                    String eventCode = c.getString(4);
+                    String eventWhere = c.getString(5);
+                    String detailShort = c.getString(6);
+
+                    String tsFmt = android.text.format.DateFormat.format("MM-dd HH:mm:ss", ts).toString();
+                    String header = tsFmt + "  " + (eventCode != null ? eventCode : eventType)
+                            + "  [" + (ticketNo != null ? ticketNo : "—") + "]";
+                    String detail = (serialId != null ? "serial=" + serialId + "  " : "")
+                            + (eventWhere != null ? "où=" + eventWhere + "  " : "")
+                            + (detailShort != null ? detailShort : "");
+                    headers.add(header);
+                    details.add(detail);
+                    count++;
+                }
+            } catch (Exception e) {
+                headers.add("Erreur lecture v_diagnostic_events");
+                details.add(String.valueOf(e.getMessage()));
+            } finally {
+                if (c != null) try { c.close(); } catch (Exception ignored) {}
+                if (db != null) try { db.close(); } catch (Exception ignored) {}
+                if (dbHelper != null) try { dbHelper.close(); } catch (Exception ignored) {}
+            }
+
+            final int finalCount = count;
+            runOnUiThread(() -> {
+                if (txtSupportCount != null) {
+                    txtSupportCount.setText(finalCount + " événement" + (finalCount > 1 ? "s" : ""));
+                }
+                if (listSupportEvents != null) {
+                    SupportEventAdapter adapter = new SupportEventAdapter(this, headers, details);
+                    listSupportEvents.setAdapter(adapter);
+                }
+            });
+        }, "SupportEventsLoader").start();
+    }
+
+    /**
+     * Adapter simple 2 lignes (header + detail) pour la liste Support.
+     */
+    private static final class SupportEventAdapter extends ArrayAdapter<String> {
+        private final java.util.List<String> details;
+
+        SupportEventAdapter(android.content.Context ctx, java.util.List<String> headers, java.util.List<String> details) {
+            super(ctx, R.layout.row_support_event, R.id.txtRowHeader, headers);
+            this.details = details;
+        }
+
+        @Override
+        public View getView(int position, View convertView, android.view.ViewGroup parent) {
+            View row = super.getView(position, convertView, parent);
+            TextView txtDetail = row.findViewById(R.id.txtRowDetail);
+            if (txtDetail != null && position < details.size()) {
+                txtDetail.setText(details.get(position));
+            }
+            return row;
         }
     }
 

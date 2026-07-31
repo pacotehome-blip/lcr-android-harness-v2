@@ -865,6 +865,66 @@
                     android:layout_height="16dp"/>
             </LinearLayout>
         </ScrollView>
+    <!-- PAGE SUPPORT (diagnostic intelligent — v_diagnostic_events) -->
+    <LinearLayout
+        android:id="@+id/pageSupport"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:padding="8dp"
+            android:gravity="center_vertical">
+
+            <EditText
+                android:id="@+id/edtSupportTicketFilter"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:hint="ticket_no (ou vide = tous)"
+                android:inputType="text"
+                android:textSize="14sp"/>
+
+            <EditText
+                android:id="@+id/edtSupportSerialFilter"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="6dp"
+                android:hint="serial_id (optionnel)"
+                android:inputType="text"
+                android:textSize="14sp"/>
+
+            <Button
+                android:id="@+id/btnSupportRefresh"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="Rafraîchir"/>
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/txtSupportCount"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            android:textSize="12sp"
+            android:text="0 événement"/>
+
+        <ListView
+            android:id="@+id/listSupportEvents"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:divider="#22000000"
+            android:dividerHeight="1dp"/>
+
     </LinearLayout>
 
 </LinearLayout>

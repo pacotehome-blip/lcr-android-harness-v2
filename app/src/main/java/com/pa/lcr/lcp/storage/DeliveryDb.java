@@ -27,7 +27,8 @@ public class DeliveryDb extends SQLiteOpenHelper {
     // v10: add is_propane, lcr_node to register_products
     // v11: add missing columns to bt_signal (mac, rssi_quality, source, io_errors, io_timeouts, io_latency_avg_ms)
     // v12: add known_tcp_device table (N-Port TCP mémorisés, équivalent BT paired pour raw TCP)
-    public static final int DB_VERSION = 12;
+    // v13: add v_diagnostic_events view (chronologie unifiée pour le diagnostic intelligent — lecture seule, pas de migration de schéma)
+    public static final int DB_VERSION = 13;
 
     private static final String TAG = "DeliveryDb";
 
@@ -60,6 +61,7 @@ public class DeliveryDb extends SQLiteOpenHelper {
         createBtSignalTable(db);
         createRegisterProductsTable(db);
         createKnownTcpDeviceTable(db);
+        createDiagnosticEventsView(db);
     }
 
     @Override
@@ -124,6 +126,43 @@ public class DeliveryDb extends SQLiteOpenHelper {
         if (oldVersion < 12) {
             createKnownTcpDeviceTable(db);
         }
+        // v13: v_diagnostic_events (vue, aucune migration de données — DROP+CREATE est sans risque)
+        if (oldVersion < 13) {
+            createDiagnosticEventsView(db);
+        }
+    }
+
+    // =========================================================
+    // Diagnostic view (Phase 1 — plan diagnostic intelligent, 27 juillet 2026)
+    // =========================================================
+    private static void createDiagnosticEventsView(SQLiteDatabase db) {
+        // DROP puis CREATE : une VIEW n'a pas d'état propre, donc pas de perte de données
+        // possible en la recréant à chaque upgrade/onCreate. Garde onUpgrade idempotent.
+        db.execSQL("DROP VIEW IF EXISTS v_diagnostic_events;");
+        db.execSQL(
+            "CREATE VIEW v_diagnostic_events AS " +
+            "SELECT " +
+            "  e.event_id, " +
+            "  e.ts, " +
+            "  a.serial_id, " +
+            "  a.ticket_no, " +
+            "  a.job_id, " +
+            "  a.source            AS attempt_source, " +
+            "  e.level, " +
+            "  e.type               AS event_type, " +
+            "  e.event_code, " +
+            "  e.event_where, " +
+            "  e.detail_short, " +
+            "  e.data_json, " +
+            "  s.last_state, " +
+            "  s.result_json, " +
+            "  s.error_json " +
+            "FROM delivery_event e " +
+            "JOIN delivery_attempt a ON a.attempt_id = e.attempt_id " +
+            "LEFT JOIN delivery_summary s " +
+            "  ON s.serial_id = a.serial_id AND s.ticket_no = a.ticket_no " +
+            "ORDER BY e.ts;"
+        );
     }
 
     // =========================================================
