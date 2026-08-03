@@ -3726,6 +3726,17 @@ private String resolveActiveMedia() {
              } catch (Exception ignored) {}
          });
 
+         // ✅ (ajouté 3 août 2026) — déclenchement GARANTI du backup/push automatique,
+         // peu importe si btnRetourWO existe ou est cliqué. Voir Listener.onDeliveryFinished.
+         try {
+             final String fSerialId = serialId;
+             final String fTicketNo = ticketNo;
+             final String fSaleNo = saleNo;
+             final double fNetL = netAtDeliveryEnd;
+             final double fGrossL = grossAtDeliveryEnd;
+             if (listener != null) listener.onDeliveryFinished(fSerialId, fTicketNo, fSaleNo, fNetL, fGrossL);
+         } catch (Exception ignored) {}
+
      } catch (Exception ignored) {
      } finally {
          currentDeliveryAttemptId = null;
