@@ -3743,6 +3743,15 @@ public class RegisterTabFragment extends Fragment {
         } finally {
             try { db.close(); } catch (Exception ignored) {}
         }
+        // ✅ (ajouté 3 août 2026, fix boucle infinie signalé par Paul) — capturer si la
+        // restauration backup a DÉJÀ été tentée pour ce ticket, peu importe si elle a
+        // abouti à un woNum utilisable. Sans ce flag, chaque poll (toutes les 800ms)
+        // relançait findLatestByTicketNo() + insertDelivery() indéfiniment dès que
+        // row.woNum restait vide après restauration — dupliquant une nouvelle ligne
+        // PENDING à chaque cycle.
+        boolean backupDejaTente = row != null
+            && "RESTORE_BACKUP".equals(row.source);
+
         if (row == null || row.woNum == null || row.woNum.isEmpty()) {
             LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — pas dans DB, tentative Dataverse (online)");
             row = tryPullDeliveryFromDataverse(ticketNo);
@@ -3753,6 +3762,18 @@ public class RegisterTabFragment extends Fragment {
                 // plusieurs versions — on garde la plus récente par backup_ts), on le
                 // réinsère en PENDING et on déclenche le service de sync existant pour
                 // reconstruire l'enregistrement manquant dans Dataverse.
+                //
+                // ✅ SAUF si une restauration a déjà été tentée pour ce ticket (voir
+                // backupDejaTente) — dans ce cas on ne réinsère jamais une deuxième fois,
+                // qu'elle ait ou non produit un woNum valide. Le prochain push Dataverse
+                // (service de sync existant, déjà déclenché à la tentative précédente)
+                // reste seul responsable de compléter/corriger cette ligne.
+                if (backupDejaTente) {
+                    LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo
+                        + " — restauration backup déjà tentée, pas de nouvelle insertion, nouvel essai au prochain poll");
+                    return;
+                }
+
                 LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — introuvable (local + Dataverse), recherche backup local");
                 com.pa.lcr.lcp.storage.LocalDeliveryBackup.BackupMatch match =
                     com.pa.lcr.lcp.storage.LocalDeliveryBackup.findLatestByTicketNo(requireContext(), ticketNo);
