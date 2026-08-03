@@ -265,4 +265,88 @@ public class LocalDeliveryBackup {
         while ((n = in.read(chunk)) != -1) buffer.write(chunk, 0, n);
         return buffer.toByteArray();
     }
+
+    // =========================================================
+    // Recherche ciblée par ticket_no (demandé 3 août 2026) — utilisée quand un
+    // ticket_no donné par le registre est introuvable À LA FOIS en local
+    // (LcrDeliveryStatusDb) ET sur Dataverse (pullDeliveryByTicket). Contrairement
+    // à restoreAllAsync() qui restaure INCONDITIONNELLEMENT tous les backups
+    // manquants, cette méthode ne cherche qu'UN ticket précis, et s'il existe
+    // plusieurs fichiers backup pour ce même ticket (cas rare — plusieurs écritures
+    // avant qu'un push Dataverse ait pu réussir), elle garde celui dont "backup_ts"
+    // est le plus récent. Ne touche jamais la BD elle-même — l'appelant décide de
+    // l'insertion (voir RegisterTabFragment.lookupWoForTicket()).
+    // =========================================================
+
+    /** Résultat d'une recherche backup ciblée par ticket_no. */
+    public static class BackupMatch {
+        public final JSONObject json;
+        public final long backupTs;
+        BackupMatch(JSONObject json, long backupTs) {
+            this.json = json;
+            this.backupTs = backupTs;
+        }
+    }
+
+    /**
+     * Cherche, parmi tous les backups JSON de Téléchargements, ceux dont
+     * ticket_no == ticketNo, et retourne celui au backup_ts le plus élevé.
+     * Retourne null si aucun backup ne correspond à ce ticket.
+     */
+    public static BackupMatch findLatestByTicketNo(Context ctx, String ticketNo) {
+        if (ticketNo == null || ticketNo.trim().isEmpty()) return null;
+
+        List<String> messages = new ArrayList<>();
+        List<byte[]> files = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+                ? listBackupFilesMediaStore(ctx, messages)
+                : listBackupFilesLegacy(ctx, messages);
+
+        BackupMatch best = null;
+        for (byte[] raw : files) {
+            try {
+                JSONObject j = new JSONObject(new String(raw, StandardCharsets.UTF_8));
+                if (!ticketNo.equals(j.optString("ticket_no", ""))) continue;
+
+                long ts = j.optLong("backup_ts", 0L);
+                if (best == null || ts > best.backupTs) {
+                    best = new BackupMatch(j, ts);
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "findLatestByTicketNo: fichier ignoré (parsing) — " + e.getMessage());
+            }
+        }
+
+        if (best == null) {
+            Log.i(TAG, "findLatestByTicketNo: aucun backup trouvé pour ticket=" + ticketNo);
+        } else {
+            Log.i(TAG, "findLatestByTicketNo: match ticket=" + ticketNo
+                    + " backup_ts=" + best.backupTs);
+        }
+        return best;
+    }
+
+    /**
+     * Construit un ContentValues prêt pour LcrDeliveryStatusDb.insertDelivery(),
+     * à partir du JSON d'un BackupMatch. Marque toujours SYNC_PENDING et
+     * source=RESTORE_BACKUP — même convention que restoreAllAsync(), pour que
+     * le service de sync existant (DeliverySyncScheduler/DeliverySyncWorker)
+     * le pousse vers Dataverse au prochain triggerNow()/cycle périodique.
+     */
+    public static ContentValues toContentValues(JSONObject j) {
+        ContentValues cv = new ContentValues();
+        cv.put(LcrDeliveryStatusDb.COL_WO_NUM, j.optString("wo_num", ""));
+        cv.put(LcrDeliveryStatusDb.COL_WO_ID_GUID, j.optString("wo_id_guid", ""));
+        cv.put(LcrDeliveryStatusDb.COL_TICKET_NO, j.optString("ticket_no", ""));
+        cv.put(LcrDeliveryStatusDb.COL_SALE_NO, j.optString("sale_no", ""));
+        cv.put(LcrDeliveryStatusDb.COL_NET_L, j.optDouble("net_l", 0.0));
+        cv.put(LcrDeliveryStatusDb.COL_GROSS_L, j.optDouble("gross_l", 0.0));
+        cv.put(LcrDeliveryStatusDb.COL_SERIAL_ID, j.optString("serial_id", ""));
+        cv.put(LcrDeliveryStatusDb.COL_LCRNODE, j.optInt("lcrnode", 0));
+        cv.put(LcrDeliveryStatusDb.COL_TYPE, LcrDeliveryStatusDb.TYPE_ORIGINAL);
+        cv.put(LcrDeliveryStatusDb.COL_SOURCE, "RESTORE_BACKUP");
+        cv.put(LcrDeliveryStatusDb.COL_STOP_TYPE, "LIVRAISON");
+        cv.put(LcrDeliveryStatusDb.COL_SYNC_STATUS, LcrDeliveryStatusDb.SYNC_PENDING);
+        cv.put(LcrDeliveryStatusDb.COL_PAYLOAD_JSON, j.optString("payload_complet", ""));
+        return cv;
+    }
 }

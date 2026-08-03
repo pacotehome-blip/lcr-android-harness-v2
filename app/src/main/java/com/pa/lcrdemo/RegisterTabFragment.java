@@ -3747,15 +3747,49 @@ public class RegisterTabFragment extends Fragment {
             LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — pas dans DB, tentative Dataverse (online)");
             row = tryPullDeliveryFromDataverse(ticketNo);
             if (row == null || row.woNum == null || row.woNum.isEmpty()) {
-                // ✅ FIX : ne PAS marquer lastTicketDetected ici — sinon un échec temporaire
-                // (token MSAL pas encore prêt, latence réseau, Dataverse pas encore à jour)
-                // bloque tout nouvel essai pour ce ticket, même si rechercherWoDepuisRegistre()
-                // repolle toutes les 800ms. On ne verrouille lastTicketDetected qu'après un
-                // SUCCÈS réel (voir plus bas), pour permettre les tentatives suivantes.
-                LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — introuvable (local + Dataverse), nouvel essai au prochain poll");
-                return;
+                // ✅ (ajouté 3 août 2026, demande Paul) — étape 3 : ni local ni Dataverse
+                // n'ont ce ticket. Avant d'abandonner, chercher un backup JSON local
+                // (Téléchargements) pour ce ticket précis. S'il existe (potentiellement
+                // plusieurs versions — on garde la plus récente par backup_ts), on le
+                // réinsère en PENDING et on déclenche le service de sync existant pour
+                // reconstruire l'enregistrement manquant dans Dataverse.
+                LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — introuvable (local + Dataverse), recherche backup local");
+                com.pa.lcr.lcp.storage.LocalDeliveryBackup.BackupMatch match =
+                    com.pa.lcr.lcp.storage.LocalDeliveryBackup.findLatestByTicketNo(requireContext(), ticketNo);
+
+                if (match != null) {
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db2 =
+                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                    try {
+                        long localId = db2.insertDelivery(
+                            com.pa.lcr.lcp.storage.LocalDeliveryBackup.toContentValues(match.json));
+                        LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo
+                            + " — trouvé backup local (backup_ts=" + match.backupTs
+                            + "), réinséré en PENDING (id=" + localId + "), reconstruction Dataverse déclenchée");
+                        row = db2.getByTicketNo(ticketNo);
+                    } finally {
+                        try { db2.close(); } catch (Exception ignored) {}
+                    }
+                    try {
+                        com.pa.lcrdemo.dataverse.DeliverySyncScheduler.triggerNow(requireContext().getApplicationContext());
+                    } catch (Exception e) {
+                        LogBus.api(node, "[WO-DETECT] triggerNow ERR (non-bloquant): " + safeMsg(e));
+                    }
+                }
+
+                if (row == null || row.woNum == null || row.woNum.isEmpty()) {
+                    // ✅ FIX : ne PAS marquer lastTicketDetected ici — sinon un échec temporaire
+                    // (token MSAL pas encore prêt, latence réseau, Dataverse pas encore à jour)
+                    // bloque tout nouvel essai pour ce ticket, même si rechercherWoDepuisRegistre()
+                    // repolle toutes les 800ms. On ne verrouille lastTicketDetected qu'après un
+                    // SUCCÈS réel (voir plus bas), pour permettre les tentatives suivantes.
+                    LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — introuvable (local + Dataverse + backup), nouvel essai au prochain poll");
+                    return;
+                }
+                LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — reconstruit depuis backup local, wo=" + row.woNum);
+            } else {
+                LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — trouvé sur Dataverse, wo=" + row.woNum);
             }
-            LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — trouvé sur Dataverse, wo=" + row.woNum);
         }
 
         // ✅ Recherche réussie (locale ou Dataverse) — on peut maintenant verrouiller ce ticket
