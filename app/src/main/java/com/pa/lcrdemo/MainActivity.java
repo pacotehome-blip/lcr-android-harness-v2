@@ -1305,6 +1305,62 @@ private void setupTabsTop() {
         }
     }
 
+    // =========================================================
+    // "Voir le processus lié" (demandé 3 août 2026, suite écran ticket 10905) — un attempt_id
+    // regroupe déjà TOUS les événements d'une même tentative de livraison dans delivery_event
+    // (voir schéma delivery_attempt/delivery_event). Cette méthode affiche cette chronologie
+    // complète pour l'attempt_id de la ligne tapée, plutôt que l'événement isolé seul.
+    // =========================================================
+    private void showRelatedProcessDialog(long attemptId) {
+        new Thread(() -> {
+            StringBuilder sb = new StringBuilder();
+            com.pa.lcr.lcp.storage.DeliveryDb dbHelper = null;
+            android.database.sqlite.SQLiteDatabase db = null;
+            try {
+                dbHelper = new com.pa.lcr.lcp.storage.DeliveryDb(getApplicationContext());
+                db = dbHelper.getReadableDatabase();
+                try (android.database.Cursor c = db.rawQuery(
+                        "SELECT ts, event_type, event_code, event_where, detail_short " +
+                        "FROM v_diagnostic_events WHERE attempt_id = ? ORDER BY ts ASC",
+                        new String[]{String.valueOf(attemptId)})) {
+                    while (c.moveToNext()) {
+                        long ts = c.getLong(0);
+                        String type = c.getString(1);
+                        String code = c.getString(2);
+                        String where = c.getString(3);
+                        String detail = c.getString(4);
+                        String tsFmt = android.text.format.DateFormat.format("HH:mm:ss", ts).toString();
+                        sb.append(tsFmt).append("  ")
+                          .append(code != null ? code : type).append('\n');
+                        if (where != null && !where.isEmpty()) sb.append("    où=").append(where).append('\n');
+                        if (detail != null && !detail.isEmpty()) sb.append("    ").append(detail).append('\n');
+                        sb.append('\n');
+                    }
+                }
+            } catch (Exception e) {
+                sb.append("Erreur lecture processus lié: ").append(e.getMessage());
+            } finally {
+                if (db != null) try { db.close(); } catch (Exception ignored) {}
+                if (dbHelper != null) try { dbHelper.close(); } catch (Exception ignored) {}
+            }
+            final String text = sb.length() > 0 ? sb.toString() : "Aucun autre événement pour ce processus.";
+            runOnUiThread(() -> {
+                android.widget.TextView tv = new android.widget.TextView(this);
+                tv.setText(text);
+                tv.setTextIsSelectable(true);
+                int pad = (int) (16 * getResources().getDisplayMetrics().density);
+                tv.setPadding(pad, pad, pad, pad);
+                android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+                scroll.addView(tv);
+                new android.app.AlertDialog.Builder(this)
+                        .setTitle("Processus lié (attempt_id=" + attemptId + ")")
+                        .setView(scroll)
+                        .setPositiveButton("Fermer", null)
+                        .show();
+            });
+        }, "SupportRelatedProcess").start();
+    }
+
     private void refreshSupportEvents() {
         final String ticketFilter = (edtSupportTicketFilter != null)
                 ? edtSupportTicketFilter.getText().toString().trim() : "";
@@ -1324,7 +1380,7 @@ private void setupTabsTop() {
                 db = dbHelper.getReadableDatabase();
 
                 StringBuilder sql = new StringBuilder(
-                        "SELECT ts, serial_id, ticket_no, event_type, event_code, event_where, detail_short " +
+                        "SELECT ts, serial_id, ticket_no, event_type, event_code, event_where, detail_short, attempt_id " +
                         "FROM v_diagnostic_events WHERE 1=1 ");
                 java.util.List<String> args = new java.util.ArrayList<>();
                 if (!ticketFilter.isEmpty()) {
@@ -1346,6 +1402,7 @@ private void setupTabsTop() {
                     String eventCode = c.getString(4);
                     String eventWhere = c.getString(5);
                     String detailShort = c.getString(6);
+                    Long attemptId = c.isNull(7) ? null : c.getLong(7);
 
                     String tsFmt = android.text.format.DateFormat.format("MM-dd HH:mm:ss", ts).toString();
                     String header = tsFmt + "  " + (eventCode != null ? eventCode : eventType)
@@ -1353,7 +1410,11 @@ private void setupTabsTop() {
                     String detail = (serialId != null ? "serial=" + serialId + "  " : "")
                             + (eventWhere != null ? "où=" + eventWhere + "  " : "")
                             + (detailShort != null ? detailShort : "");
-                    rows.add(new Object[]{ts, header, detail});
+                    // ✅ (ajouté 3 août 2026, demande Paul : "voir tout le processus lié") —
+                    // attemptId nullable transporté jusqu'à la ligne, pour permettre au clic
+                    // sur une ligne de retrouver tous les événements de la MÊME tentative
+                    // (delivery_attempt), triés chronologiquement — pas juste cette ligne isolée.
+                    rows.add(new Object[]{ts, header, detail, attemptId});
                 }
 
                 // ✅ (demandé 31 juillet 2026 : "a-t-on pris en compte le log du tab") —
@@ -1374,16 +1435,16 @@ private void setupTabsTop() {
                                 String tsFmt2 = android.text.format.DateFormat.format("MM-dd HH:mm:ss", ts2).toString();
                                 String header2 = tsFmt2 + "  [LOG:" + src2 + "]  node=" + node;
                                 String detail2 = msg2 != null ? msg2 : "";
-                                rows.add(new Object[]{ts2, header2, detail2});
+                                rows.add(new Object[]{ts2, header2, detail2, null});
                             }
                         }
                     } catch (NumberFormatException nfe) {
-                        rows.add(new Object[]{System.currentTimeMillis(), "Filtre node invalide", nodeFilter});
+                        rows.add(new Object[]{System.currentTimeMillis(), "Filtre node invalide", nodeFilter, null});
                     }
                 }
             } catch (Exception e) {
                 rows.add(new Object[]{System.currentTimeMillis(), "Erreur lecture v_diagnostic_events/log_bus_event",
-                        String.valueOf(e.getMessage())});
+                        String.valueOf(e.getMessage()), null});
             } finally {
                 if (c != null) try { c.close(); } catch (Exception ignored) {}
                 if (db != null) try { db.close(); } catch (Exception ignored) {}
@@ -1395,9 +1456,11 @@ private void setupTabsTop() {
 
             final java.util.List<String> headers = new java.util.ArrayList<>();
             final java.util.List<String> details = new java.util.ArrayList<>();
+            final java.util.List<Long> attemptIds = new java.util.ArrayList<>();
             for (Object[] r : rows) {
                 headers.add((String) r[1]);
                 details.add((String) r[2]);
+                attemptIds.add(r.length > 3 ? (Long) r[3] : null);
             }
             int count = rows.size();
 
@@ -1416,6 +1479,19 @@ private void setupTabsTop() {
                 if (listSupportEvents != null) {
                     SupportEventAdapter adapter = new SupportEventAdapter(this, headers, details);
                     listSupportEvents.setAdapter(adapter);
+                    // ✅ (ajouté 3 août 2026, demande Paul : "voir tout le processus lié") —
+                    // taper une ligne dont l'attemptId est connu affiche la chronologie
+                    // complète de cette tentative (delivery_attempt), pas juste cette ligne.
+                    listSupportEvents.setOnItemClickListener((parent, view, position, id) -> {
+                        Long attemptId = (position < attemptIds.size()) ? attemptIds.get(position) : null;
+                        if (attemptId == null) {
+                            Toast.makeText(this,
+                                "Aucun processus lié pour cet événement (source LogBus ou API_TRACE)",
+                                Toast.LENGTH_SHORT).show();
+                            return;
+                        }
+                        showRelatedProcessDialog(attemptId);
+                    });
                 }
             });
         }, "SupportEventsLoader").start();

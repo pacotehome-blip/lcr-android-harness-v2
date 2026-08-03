@@ -43,7 +43,7 @@ public class DeliveryDb extends SQLiteOpenHelper {
     //      chaque soir) + diagnostic_match_history (persiste chaque résultat de
     //      DiagnosticRuleEngine, jusqu'ici calculé à la volée et jamais stocké — nécessaire
     //      pour calibrer les règles / futur agent IA, demande Paul 31 juillet 2026).
-    public static final int DB_VERSION = 19;
+    public static final int DB_VERSION = 20;
 
     private static final String TAG = "DeliveryDb";
 
@@ -180,6 +180,12 @@ public class DeliveryDb extends SQLiteOpenHelper {
         // (table non vide = skip, voir son garde en tête de méthode).
         if (oldVersion < 19) {
             seedDataversePushFailedRule(db);
+        }
+        // v20: v_diagnostic_events expose maintenant attempt_id (demande Paul, 3 août 2026 —
+        // "afficher le processus lié" à un événement). DROP+CREATE d'une vue est toujours
+        // sans risque de perte de données.
+        if (oldVersion < 20) {
+            createDiagnosticEventsView(db);
         }
     }
 
@@ -425,6 +431,7 @@ public class DeliveryDb extends SQLiteOpenHelper {
             "CREATE VIEW v_diagnostic_events AS " +
             "SELECT " +
             "  e.event_id, " +
+            "  a.attempt_id, " +
             "  e.ts, " +
             "  a.serial_id, " +
             "  a.ticket_no, " +
@@ -446,6 +453,7 @@ public class DeliveryDb extends SQLiteOpenHelper {
             "UNION ALL " +
             "SELECT " +
             "  t.trace_id           AS event_id, " +
+            "  NULL                 AS attempt_id, " +
             "  t.ts, " +
             "  t.serial_id, " +
             "  t.ticket_no, " +
