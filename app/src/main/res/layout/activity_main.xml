@@ -937,6 +937,31 @@
                 android:contentDescription="Lexique des niveaux et couches de diagnostic"/>
         </LinearLayout>
 
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            android:paddingBottom="4dp"
+            android:gravity="center_vertical">
+
+            <Button
+                android:id="@+id/btnSupportRestoreBackup"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Restaurer depuis backup"/>
+
+            <TextView
+                android:id="@+id/txtSupportRestoreStatus"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="8dp"
+                android:textSize="12sp"
+                android:textColor="#666666"/>
+        </LinearLayout>
+
         <TextView
             android:id="@+id/txtSupportDiagnosis"
             android:layout_width="match_parent"

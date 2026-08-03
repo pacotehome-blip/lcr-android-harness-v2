@@ -110,6 +110,7 @@ public class MainActivity extends AppCompatActivity {
     private EditText edtSupportNodeFilter;
     private TextView txtSupportCount;
     private TextView txtSupportDiagnosis;
+    private TextView txtSupportRestoreStatus;
     private ListView listSupportEvents;
     private EditText edtSupportValidatedBy;
     private View rowSupportIncident;
@@ -535,6 +536,31 @@ public class MainActivity extends AppCompatActivity {
         // ✅ WorkManager — vide la queue offline Dataverse quand réseau disponible
         DeliverySyncScheduler.schedulePeriodic(this);
 
+        // ✅ (demandé 31 juillet 2026, suite à la perte du ticket 10898) : le worker
+        // périodique attend jusqu'à 15 minutes (minimum imposé par Android pour
+        // PeriodicWorkRequest — pas un choix arbitraire du code). Ce callback réagit
+        // IMMÉDIATEMENT dès que le réseau redevient disponible, sans attendre le prochain
+        // cycle du minuteur — réduit la fenêtre de risque entre une livraison PENDING et
+        // sa synchronisation réelle.
+        try {
+            android.net.ConnectivityManager cm =
+                    (android.net.ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm != null) {
+                android.net.NetworkRequest req = new android.net.NetworkRequest.Builder()
+                        .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                        .build();
+                cm.registerNetworkCallback(req, new android.net.ConnectivityManager.NetworkCallback() {
+                    @Override
+                    public void onAvailable(android.net.Network network) {
+                        android.util.Log.i("NetworkSync", "Réseau disponible — déclenchement sync immédiat");
+                        DeliverySyncScheduler.triggerNow(getApplicationContext());
+                    }
+                });
+            }
+        } catch (Exception e) {
+            android.util.Log.w("NetworkSync", "registerNetworkCallback ERR (non-bloquant): " + e.getMessage());
+        }
+
         // ✅ (demande Paul 31 juillet 2026 : "tout persister") — LogBus était jusqu'ici un
         // buffer 100% en mémoire, jamais persisté, invisible pour le RCA après coup. Ce
         // listener écrit chaque événement (UI/API/IO_TX/IO_RX) dans log_bus_event de façon
@@ -810,6 +836,11 @@ public class MainActivity extends AppCompatActivity {
         Button btnSupportLexique = findViewById(R.id.btnSupportLexique);
         if (btnSupportLexique != null) {
             btnSupportLexique.setOnClickListener(v -> showSupportLexiqueDialog());
+        }
+        txtSupportRestoreStatus = findViewById(R.id.txtSupportRestoreStatus);
+        Button btnSupportRestoreBackup = findViewById(R.id.btnSupportRestoreBackup);
+        if (btnSupportRestoreBackup != null) {
+            btnSupportRestoreBackup.setOnClickListener(v -> confirmAndRunRestoreBackup());
         }
         edtSupportValidatedBy = findViewById(R.id.edtSupportValidatedBy);
         rowSupportIncident = findViewById(R.id.rowSupportIncident);
@@ -1396,6 +1427,51 @@ private void setupTabsTop() {
      * explique ce que veulent dire les deux valeurs affichées par "Diagnostiquer", pour
      * que support/utilisateur sache comment les interpréter sans avoir à demander.
      */
+    /**
+     * (Demandé 31 juillet 2026, suite à la perte du ticket 10898) — Restaure les livraisons
+     * depuis les backups JSON dans Téléchargements (écrits par LocalDeliveryBackup à chaque
+     * livraison, survivent à une désinstallation). Confirmation demandée avant d'agir —
+     * ça modifie la BD locale (insertions).
+     */
+    private void confirmAndRunRestoreBackup() {
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Restaurer depuis backup")
+                .setMessage("Ceci va chercher les livraisons sauvegardées dans Téléchargements " +
+                        "et réinsérer localement celles qui manquent (en attente de synchronisation " +
+                        "vers Dataverse). Les livraisons déjà présentes localement ne seront jamais " +
+                        "écrasées.\n\nContinuer ?")
+                .setPositiveButton("Restaurer", (d, w) -> runRestoreBackup())
+                .setNegativeButton("Annuler", null)
+                .show();
+    }
+
+    private void runRestoreBackup() {
+        if (txtSupportRestoreStatus != null) {
+            txtSupportRestoreStatus.setText("Restauration en cours...");
+        }
+        com.pa.lcr.lcp.storage.LocalDeliveryBackup.restoreAllAsync(getApplicationContext(),
+                (restored, skipped, failed, messages) -> runOnUiThread(() -> {
+                    if (txtSupportRestoreStatus != null) {
+                        txtSupportRestoreStatus.setText(restored + " restaurée(s), "
+                                + skipped + " déjà présente(s), " + failed + " erreur(s)");
+                    }
+                    if (restored > 0) {
+                        // Les lignes restaurées sont en PENDING — déclenche une tentative
+                        // de push immédiate plutôt que d'attendre le prochain cycle.
+                        try {
+                            com.pa.lcrdemo.dataverse.DeliverySyncScheduler.triggerNow(getApplicationContext());
+                        } catch (Exception ignored) {}
+                        Toast.makeText(this, restored + " livraison(s) restaurée(s) — synchronisation lancée",
+                                Toast.LENGTH_LONG).show();
+                    } else if (failed > 0) {
+                        Toast.makeText(this, "Restauration terminée avec des erreurs — voir détails",
+                                Toast.LENGTH_LONG).show();
+                    } else {
+                        Toast.makeText(this, "Aucune livraison à restaurer trouvée", Toast.LENGTH_SHORT).show();
+                    }
+                }));
+    }
+
     private void showSupportLexiqueDialog() {
         String texte =
                 "NIVEAUX SUPPORT\n\n" +
