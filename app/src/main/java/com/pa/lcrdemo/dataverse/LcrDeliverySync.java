@@ -8,6 +8,7 @@ import com.pa.lcr.lcp.storage.LcrDeliveryStatusDb;
 import com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow;
 import com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.NoteRow;
 import com.pa.lcrdemo.config.LcrConfig;
+import com.pa.lcr.lcp.log.LogBus;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -79,19 +80,45 @@ public class LcrDeliverySync {
         }
 
         Log.i(TAG, "pushPending: " + pending.size() + " transaction(s) à pousser");
+        // ✅ (ajouté 3 août 2026, suite au ticket 10899/10900 introuvable dans Dataverse
+        // mais absent de tout diagnostic) — ce fichier n'appelait jamais LogBus, seulement
+        // android.util.Log (logcat) : invisible dans l'onglet Support/v_diagnostic_events,
+        // peu importe le nombre d'événements affichés. Instrumentation ajoutée pour rendre
+        // ce pipeline enfin visible sans dépendre d'une capture logcat bien synchronisée.
+        LogBus.api(0, "[DATAVERSE-PUSH] " + pending.size() + " transaction(s) PENDING à pousser");
 
         String orgUrl = LcrConfig.getDataverseUrl(ctx);
+        com.pa.lcr.lcp.storage.ApiTraceStore apiTraceStore =
+            new com.pa.lcr.lcp.storage.ApiTraceStore(ctx);
 
         for (DeliveryRow row : pending) {
+            long startMs = System.currentTimeMillis();
             try {
                 String dataverseId = pushDeliveryRow(row, orgUrl, accessToken);
+                long durationMs = System.currentTimeMillis() - startMs;
                 db.markSynced(row.id, dataverseId);
                 Log.i(TAG, "pushPending: OK id=" + row.id + " wo=" + row.woNum
                     + " dataverseId=" + dataverseId);
+                LogBus.api(row.lcrnode, "[DATAVERSE-PUSH] OK ticket=" + row.ticketNo
+                    + " wo=" + row.woNum + " dataverseId=" + dataverseId);
+                // ✅ (ajouté 3 août 2026) — visible dans v_diagnostic_events (UNION api_trace),
+                // donc réellement diagnosticable par DiagnosticRuleEngine, contrairement à
+                // LogBus/log_bus_event (jamais inclus dans cette vue).
+                apiTraceStore.addTraceAsync("POST", TABLE_DELIVERY, 201, durationMs,
+                    row.serialId, row.ticketNo, null,
+                    "push OK wo=" + row.woNum + " dataverseId=" + dataverseId);
             } catch (Exception e) {
+                long durationMs = System.currentTimeMillis() - startMs;
                 db.markError(row.id, e.getMessage());
                 Log.e(TAG, "pushPending: ERREUR id=" + row.id + " wo=" + row.woNum
                     + " err=" + e.getMessage());
+                LogBus.api(row.lcrnode, "[DATAVERSE-PUSH] ERR ticket=" + row.ticketNo
+                    + " wo=" + row.woNum + " — " + e.getMessage()
+                    + " — statut passé à ERROR, ne sera PLUS retenté par le service de sync"
+                    + " (getPendingDeliveries() ne relit que PENDING)");
+                apiTraceStore.addTraceAsync("POST", TABLE_DELIVERY, null, durationMs,
+                    row.serialId, row.ticketNo, null,
+                    "push ERR wo=" + row.woNum + " — " + e.getMessage());
             }
         }
     }
@@ -308,7 +335,7 @@ public class LcrDeliverySync {
         try {
             String urlStr = orgUrl + "/api/data/v9.2/" + TABLE_DELIVERY
                 + "?$select=filgo_lcr_delivery_statusid"
-                + "&$filter=lcr_wo_num eq '" + woNum + "'"
+                + "&$filter=filgo_wo_num eq '" + woNum + "'"
                 + "&$top=1";
             URL url = new URL(urlStr);
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();

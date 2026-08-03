@@ -43,7 +43,7 @@ public class DeliveryDb extends SQLiteOpenHelper {
     //      chaque soir) + diagnostic_match_history (persiste chaque résultat de
     //      DiagnosticRuleEngine, jusqu'ici calculé à la volée et jamais stocké — nécessaire
     //      pour calibrer les règles / futur agent IA, demande Paul 31 juillet 2026).
-    public static final int DB_VERSION = 18;
+    public static final int DB_VERSION = 19;
 
     private static final String TAG = "DeliveryDb";
 
@@ -174,6 +174,12 @@ public class DeliveryDb extends SQLiteOpenHelper {
         if (oldVersion < 18) {
             createSyncWatermarkTable(db);
             createDiagnosticMatchHistoryTable(db);
+        }
+        // v19: 5e règle diagnostic (push Dataverse échoué) — appelée explicitement ici
+        // car seedDiagnosticRules() ne se relance jamais sur une BD déjà seedée
+        // (table non vide = skip, voir son garde en tête de méthode).
+        if (oldVersion < 19) {
+            seedDataversePushFailedRule(db);
         }
     }
 
@@ -332,6 +338,38 @@ public class DeliveryDb extends SQLiteOpenHelper {
         insertRule(db, "TRANSPORT_LEVEL_CONFIRMED", null, null, null, "%\"level\":\"TRANSPORT\"%", 0, null,
                 "Exception de transport confirmée — pas une erreur logique applicative",
                 90, "N1", "Vérifier la couche transport (BT/USB/TCP) plutôt que la logique métier");
+
+        seedDataversePushFailedRule(db);
+    }
+
+    // =========================================================
+    // Règle #8 — Push Dataverse échoué (ajouté 3 août 2026, suite ticket 10899/10900
+    // introuvables dans filgo_lcr_delivery_statuses malgré résumé WO à jour). Matche sur
+    // api_trace (via ApiTraceStore.addTraceAsync() dans LcrDeliverySync.pushPending()),
+    // donc visible dans v_diagnostic_events (UNION api_trace) — contrairement à un simple
+    // LogBus.api(), invisible au moteur de règles (log_bus_event n'est PAS dans la vue).
+    // Extrait dans sa propre méthode (plutôt que seedDiagnosticRules()) pour pouvoir aussi
+    // l'appeler depuis onUpgrade() sur les BD existantes déjà seedées (v18 et antérieures),
+    // où seedDiagnosticRules() ne se relance jamais (table non vide = skip).
+    // =========================================================
+    private static void seedDataversePushFailedRule(SQLiteDatabase db) {
+        try (Cursor c = db.rawQuery(
+                "SELECT COUNT(*) FROM diagnostic_rules WHERE name = ?",
+                new String[]{"DATAVERSE_PUSH_FAILED"})) {
+            if (c.moveToFirst() && c.getInt(0) > 0) return; // déjà présente — idempotent
+        } catch (Exception e) {
+            Log.w(TAG, "seedDataversePushFailedRule: count check failed", e);
+            return;
+        }
+
+        insertRule(db, "DATAVERSE_PUSH_FAILED", "POST " + "filgo_lcr_delivery_statuses",
+                "API_TRACE", "%push ERR%", null, 0, null,
+                "Push Dataverse échoué — livraison restée en ERROR, ne sera PLUS retentée "
+                    + "automatiquement (getPendingDeliveries() ne relit que les lignes PENDING)",
+                90, "N3",
+                "Vérifier le message d'erreur (réseau/MSAL/HTTP) dans le detail_short, "
+                    + "puis relancer manuellement le push ou corriger getPendingDeliveries() "
+                    + "pour inclure aussi les lignes ERROR");
     }
 
     private static void insertRule(SQLiteDatabase db, String name, String eventCode, String eventType,
