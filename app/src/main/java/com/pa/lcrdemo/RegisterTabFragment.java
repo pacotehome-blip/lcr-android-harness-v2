@@ -590,8 +590,14 @@ public class RegisterTabFragment extends Fragment {
             // la recherche WO/cumul ici aussi, en plus du polling explicite de
             // rechercherWoDepuisRegistre(), pour une détection plus robuste.
             if (ticketNo != null && !ticketNo.isEmpty()) {
+                // ✅ (ajouté 3 août 2026) — consommer le flag une seule fois : si ce
+                // onTicketInfo() suit un requestStatus() explicite (tab-entry/Status(B)),
+                // autoriser la recherche complète pour CET appel seulement; sinon (push
+                // ambiant du polling live), rester local-only.
+                final boolean allowFull = fullTicketSearchArmed;
+                fullTicketSearchArmed = false;
                 bg.execute(() -> {
-                    try { lookupWoForTicket(ticketNo); }
+                    try { lookupWoForTicket(ticketNo, allowFull); }
                     catch (Exception e) { LogBus.api(node, "[WO-DETECT] ERR (onTicketInfo): " + safeMsg(e)); }
                     // ✅ FIX (2026-07-29) : repli sur la BD locale quand delivery_uid
                     // arrive null.
@@ -1138,6 +1144,12 @@ public class RegisterTabFragment extends Fragment {
                         .activateExclusive(tabTransportKey, reason != null ? reason : "STATUS_B");
             } catch (Exception ignored) {}
             try {
+                // ✅ (ajouté 3 août 2026, demande Paul) — armer la recherche complète
+                // (Dataverse + backup) pour le PROCHAIN onTicketInfo() déclenché par ce
+                // requestStatus() explicite. Couvre à la fois l'entrée sur le tab
+                // (TAB_ACTIVATED/AUTO_AFTER_TAB_CREATE/TAB_REACTIVATED) et le clic Status(B),
+                // puisque tous passent par cette méthode.
+                fullTicketSearchArmed = true;
                 controller.requestStatus();
             } catch (Exception e) {
                 LogBus.api(node, "Status(B) ERR: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
@@ -1731,6 +1743,10 @@ public class RegisterTabFragment extends Fragment {
     }
 
     private volatile long lastWoDetectTriggerMs = 0;
+    // ✅ (ajouté 3 août 2026) — armé juste avant un déclenchement explicite (entrée tab
+    // ou clic Status(B)), consommé une seule fois par onTicketInfo() pour autoriser la
+    // recherche complète (Dataverse + backup). Voir lookupWoForTicket(ticketNo, allowFullSearch).
+    private volatile boolean fullTicketSearchArmed = false;
 
     /**
      * ✅ FIX : rechercherWoDepuisRegistre()/rafraichirCumulWo() doivent tourner au
@@ -3726,6 +3742,26 @@ public class RegisterTabFragment extends Fragment {
     }
 
     private void lookupWoForTicket(String ticketNo) {
+        lookupWoForTicket(ticketNo, true);
+    }
+
+    /**
+     * @param allowFullSearch si false, s'arrête après la recherche locale (étape 1) —
+     *                        n'exécute JAMAIS les étapes 2 (Dataverse) et 3 (backup local).
+     *                        (ajouté 3 août 2026, demande Paul suite aux ratés de démarrage
+     *                        de livraison / RUNNING_FLOWING qui n'affichait pas) — onTicketInfo()
+     *                        est déclenché en continu par le polling live du registre (toutes
+     *                        les ~100-800ms pendant une livraison active). Avant ce fix, CHAQUE
+     *                        déclenchement relançait la cascade complète (appel réseau Dataverse
+     *                        + scan de fichiers backup) dès qu'un ticket restait "introuvable"
+     *                        ne serait-ce que quelques secondes — martelant le thread unique
+     *                        partagé (bg) avec des opérations réseau/IO répétées, au détriment
+     *                        des autres tâches en file sur ce même thread (dont l'affichage de
+     *                        RUNNING_FLOWING et la visibilité de btnRetourWO). La recherche
+     *                        complète est désormais réservée à l'entrée sur le tab et au clic
+     *                        explicite Status(B) — voir fullTicketSearchArmed.
+     */
+    private void lookupWoForTicket(String ticketNo, boolean allowFullSearch) {
         if (ticketNo == null || ticketNo.isEmpty()) return;
         // ✅ Ne pas sortir juste parce que currentWoNum est déjà connu — vérifier
         // plutôt si CE ticket précis a déjà été traité. Si le registre est passé à
@@ -3753,6 +3789,15 @@ public class RegisterTabFragment extends Fragment {
             && "RESTORE_BACKUP".equals(row.source);
 
         if (row == null || row.woNum == null || row.woNum.isEmpty()) {
+            if (!allowFullSearch) {
+                // ✅ Déclenchement passif (onTicketInfo via polling live du registre) —
+                // pas de recherche Dataverse/backup ici, seulement en local. Sinon chaque
+                // cycle de poll relancerait un appel réseau + un scan de fichiers sur le
+                // thread unique partagé (bg), au détriment de l'affichage RUNNING_FLOWING
+                // et de btnRetourWO. La recherche complète se fera au prochain Status(B)
+                // ou à la prochaine entrée sur le tab (voir fullTicketSearchArmed).
+                return;
+            }
             LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — pas dans DB, tentative Dataverse (online)");
             row = tryPullDeliveryFromDataverse(ticketNo);
             if (row == null || row.woNum == null || row.woNum.isEmpty()) {
