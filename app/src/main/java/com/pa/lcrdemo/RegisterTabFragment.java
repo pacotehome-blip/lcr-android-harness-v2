@@ -370,6 +370,16 @@ public class RegisterTabFragment extends Fragment {
     private boolean logRefreshPending = false;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService bg = Executors.newSingleThreadExecutor();
+    // ✅ (ajouté 3 août 2026, suite ratés démarrage livraison / RUNNING_FLOWING absent sur
+    // BD vierge) — thread dédié SÉPARÉ de bg pour la cascade complète de recherche de ticket
+    // (Dataverse + scan backup). Le fix précédent (fullTicketSearchArmed) limite la FRÉQUENCE
+    // de cette cascade, mais pas sa DURÉE : sur une BD vierge, la première livraison échoue
+    // garantie à l'étape 1 (rien n'existe encore) et déclenche donc systématiquement la
+    // cascade complète — réseau + lecture de fichiers — qui bloquerait bg (partagé par 23
+    // autres usages dans ce fragment, dont l'affichage RUNNING_FLOWING et btnRetourWO) pendant
+    // toute sa durée si elle y restait. Isolée ici, elle ne peut plus jamais les retarder,
+    // peu importe combien de temps elle prend.
+    private final ExecutorService remoteSearchExecutor = Executors.newSingleThreadExecutor();
 
     private void scheduleLogRefresh() {
         if (txtLog == null) return;
@@ -596,7 +606,12 @@ public class RegisterTabFragment extends Fragment {
                 // ambiant du polling live), rester local-only.
                 final boolean allowFull = fullTicketSearchArmed;
                 fullTicketSearchArmed = false;
-                bg.execute(() -> {
+                // ✅ La cascade complète (allowFull=true) tourne sur remoteSearchExecutor,
+                // JAMAIS sur bg — voir commentaire sur le champ remoteSearchExecutor.
+                // Le cas local-only (allowFull=false, largement plus fréquent) reste sur
+                // bg, rapide et sans risque de blocage.
+                java.util.concurrent.ExecutorService target = allowFull ? remoteSearchExecutor : bg;
+                target.execute(() -> {
                     try { lookupWoForTicket(ticketNo, allowFull); }
                     catch (Exception e) { LogBus.api(node, "[WO-DETECT] ERR (onTicketInfo): " + safeMsg(e)); }
                     // ✅ FIX (2026-07-29) : repli sur la BD locale quand delivery_uid
@@ -3503,7 +3518,10 @@ public class RegisterTabFragment extends Fragment {
                 if (snap == null || snap.data == null) return;
                 String ticketNo = snap.data.optString("ticket_no", "");
                 if (ticketNo.isEmpty()) return;
-                lookupWoForTicket(ticketNo);
+                // ✅ (ajouté 3 août 2026) — cascade complète toujours autorisée ici
+                // (appel explicite/throttlé à 2s), mais isolée sur remoteSearchExecutor,
+                // jamais sur bg (voir commentaire sur le champ remoteSearchExecutor).
+                remoteSearchExecutor.execute(() -> lookupWoForTicket(ticketNo, true));
             } catch (Exception e) {
                 LogBus.api(node, "[WO-DETECT] ERR: " + safeMsg(e));
             }
