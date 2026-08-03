@@ -1422,9 +1422,33 @@ private void setupTabsTop() {
                 // si renseigné. LogBus n'a pas de notion de ticket_no/serial_id (scopé par
                 // registre, pas par livraison), donc pas de filtre ticket/serial ici — juste
                 // node + une fenêtre récente raisonnable pour rester lisible.
-                if (!nodeFilter.isEmpty()) {
+                // ✅ (ajouté 3 août 2026, demande Paul : "je ne vois pas les erreurs du
+                // log du tab ni les communications du tab selon le node") — log_bus_event
+                // n'a pas de notion de ticket_no (scopé par node uniquement), donc jusqu'ici
+                // ces logs n'apparaissaient QUE si le champ "node" était rempli séparément —
+                // un filtre distinct que personne ne pense à remplir en plus du ticket.
+                // Dérivation automatique : si un ticket est filtré mais pas de node, retrouver
+                // le node de CE ticket via LcrDeliveryStatusDb (COL_LCRNODE) pour merger les
+                // logs BT/comms automatiquement, sans action manuelle supplémentaire.
+                String effectiveNodeFilter = nodeFilter;
+                if (effectiveNodeFilter.isEmpty() && !ticketFilter.isEmpty()) {
                     try {
-                        int node = Integer.parseInt(nodeFilter);
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDbNode =
+                            new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(getApplicationContext());
+                        try {
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow rowNode =
+                                lcrDbNode.getByTicketNo(ticketFilter);
+                            if (rowNode != null && rowNode.lcrnode > 0) {
+                                effectiveNodeFilter = String.valueOf(rowNode.lcrnode);
+                            }
+                        } finally {
+                            try { lcrDbNode.close(); } catch (Exception ignored) {}
+                        }
+                    } catch (Exception ignored) {}
+                }
+                if (!effectiveNodeFilter.isEmpty()) {
+                    try {
+                        int node = Integer.parseInt(effectiveNodeFilter);
                         try (android.database.Cursor c2 = db.rawQuery(
                                 "SELECT ts, src, msg FROM log_bus_event WHERE node = ? ORDER BY ts DESC LIMIT 300",
                                 new String[]{String.valueOf(node)})) {
@@ -1439,7 +1463,7 @@ private void setupTabsTop() {
                             }
                         }
                     } catch (NumberFormatException nfe) {
-                        rows.add(new Object[]{System.currentTimeMillis(), "Filtre node invalide", nodeFilter, null});
+                        rows.add(new Object[]{System.currentTimeMillis(), "Filtre node invalide", effectiveNodeFilter, null});
                     }
                 }
             } catch (Exception e) {

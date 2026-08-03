@@ -688,6 +688,17 @@ public class DeepLinkHandler {
                 String jobId = (r.data != null) ? r.data.optString("jobId", null) : null;
                 logEvent(fSerialId, woNum, DeliveryLogStore.LEVEL_INFO,
                     "ONESHOT_START", "ARMED jobId=" + jobId, null);
+                // ✅ (ajouté 3 août 2026, demande Paul : "RUNNING_FLOWING pas supposé
+                // ne pas s'afficher") — forcer le rafraîchissement immédiat du tab sur
+                // LE MÊME controller qui vient d'armer la livraison, au lieu d'attendre
+                // passivement pollJobUntilDone() (qui interroge via une facade séparée
+                // et ne pousse jamais à travers le listener UI du tab). Même appel que
+                // runStatusBLikeButton() dans RegisterTabFragment pour Status(B).
+                try {
+                    controllerOneshot.requestStatus();
+                    Thread.sleep(200);
+                    controllerOneshot.requestLiveSample();
+                } catch (Exception ignored) {}
                 if (jobId != null && !jobId.isEmpty()) {
                     activity.runOnUiThread(() ->
                         activity.toast("📦 Livraison démarrée — " + woNum));

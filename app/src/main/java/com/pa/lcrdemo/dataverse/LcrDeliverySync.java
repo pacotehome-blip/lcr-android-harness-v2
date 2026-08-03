@@ -70,6 +70,28 @@ public class LcrDeliverySync {
      * Pousse toutes les transactions PENDING vers Dataverse.
      * Marque SYNCED si succès, ERROR si échec.
      */
+    // ✅ FIX (3 août 2026, leak introduit le même jour) : ApiTraceStore possède son propre
+    // thread dédié interne par instance, jamais fermable de l'extérieur (pas de shutdown()
+    // exposé). En créer une nouvelle à CHAQUE appel de pushPending() (toutes les 15 min via
+    // DeliverySyncWorker + chaque retournerAuWorkOrder()/triggerNow()) fuyait un thread de
+    // plus à chaque cycle, indéfiniment. Une seule instance partagée pour toute la durée
+    // de l'app — même principe que ApiServer, qui n'en crée qu'une seule aussi.
+    private static volatile com.pa.lcr.lcp.storage.ApiTraceStore sharedApiTraceStore;
+
+    private static com.pa.lcr.lcp.storage.ApiTraceStore apiTraceStore(Context ctx) {
+        com.pa.lcr.lcp.storage.ApiTraceStore local = sharedApiTraceStore;
+        if (local == null) {
+            synchronized (LcrDeliverySync.class) {
+                local = sharedApiTraceStore;
+                if (local == null) {
+                    local = new com.pa.lcr.lcp.storage.ApiTraceStore(ctx.getApplicationContext());
+                    sharedApiTraceStore = local;
+                }
+            }
+        }
+        return local;
+    }
+
     public static void pushPending(Context ctx, String accessToken) throws Exception {
         LcrDeliveryStatusDb db = new LcrDeliveryStatusDb(ctx);
         List<DeliveryRow> pending = db.getPendingDeliveries();
@@ -88,8 +110,7 @@ public class LcrDeliverySync {
         LogBus.api(0, "[DATAVERSE-PUSH] " + pending.size() + " transaction(s) PENDING à pousser");
 
         String orgUrl = LcrConfig.getDataverseUrl(ctx);
-        com.pa.lcr.lcp.storage.ApiTraceStore apiTraceStore =
-            new com.pa.lcr.lcp.storage.ApiTraceStore(ctx);
+        com.pa.lcr.lcp.storage.ApiTraceStore apiTraceStore = apiTraceStore(ctx);
 
         for (DeliveryRow row : pending) {
             long startMs = System.currentTimeMillis();

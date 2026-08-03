@@ -1,4 +1,3 @@
-
 package com.pa.lcr.lcp.transport;
 
 import java.util.concurrent.atomic.AtomicLong;
@@ -22,6 +21,16 @@ public final class TransportHandle {
     public String getKey() { return key; }
 
     public synchronized void setConnected(TransportIo io, String description) {
+        // ✅ FIX (3 août 2026, confirmé — cause des déconnexions BT nécessitant un
+        // redémarrage du service) : cette méthode remplaçait l'ancien TransportIo
+        // (ancien BluetoothSocket) par le nouveau SANS jamais fermer l'ancien —
+        // contrairement à setDisconnected() qui ferme correctement. Chaque reconnexion
+        // pendant qu'un ancien socket zombie traînait encore laissait ce socket ouvert
+        // indéfiniment côté pile Bluetooth Android, jamais libéré.
+        TransportIo previous = this.io;
+        if (previous != null && previous != io) {
+            try { previous.close(); } catch (Exception ignored) {}
+        }
         this.io = io;
         this.description = description;
         long g = 0;
@@ -98,3 +107,4 @@ public TransportSnapshot snapshot() {
         );
     }
 }
+

@@ -185,6 +185,23 @@ public class DeliverySyncWorker extends Worker {
             }
         }
 
+        // ✅ FIX MAJEUR (3 août 2026, confirmé sur tickets 10899/10900/10905) : jusqu'ici,
+        // LcrDeliverySync.pushPending() — le SEUL point d'appel qui pousse réellement vers
+        // la table Dataverse filgo_lcr_delivery_status — n'était JAMAIS appelé depuis ce
+        // Worker périodique. Il n'était appelé qu'une fois, en ligne, à l'intérieur de
+        // retournerAuWorkOrder() (donc uniquement au clic explicite du bouton "Retour au
+        // Bon de travail"). Résultat : même avec getPendingDeliveries() corrigé pour inclure
+        // les lignes ERROR, RIEN ne les relisait jamais après le premier échec — le cycle de
+        // 15 minutes ne traitait QUE la queue séparée DeliveryResultQueueDb (résumé WO), pas
+        // la table de livraisons elle-même. Ajouté ici pour un vrai retry automatique, avec
+        // le même token déjà acquis pour ce cycle.
+        try {
+            com.pa.lcrdemo.dataverse.LcrDeliverySync.pushPending(ctx, token);
+        } catch (Exception e) {
+            Log.e(TAG, "pushPending (retry périodique) ERR: " + e.getMessage());
+            hadFailure = true;
+        }
+
         return (hadFailure || timeBudgetExceeded) ? Result.retry() : Result.success();
     }
 }

@@ -587,6 +587,23 @@ public class RegisterTabFragment extends Fragment {
         }
 
         @Override
+        public void onDeliveryFinished(String serialId, String ticketNo, String saleNo,
+                                         double netL, double grossL) {
+            // ✅ (ajouté 3 août 2026, demande Paul : "on est supposé avoir un backup
+            // automatique!!") — déclenchement GARANTI à la vraie fin de livraison,
+            // peu importe si btnRetourWO existe/est visible/est cliqué. Réutilise
+            // retournerAuWorkOrder() telle quelle (déjà validée) plutôt que de dupliquer
+            // sa logique d'assemblage (WO/preset/produit/taxes) — évite toute divergence.
+            // Idempotent : retournerAuWorkOrder() fait un UPDATE (pas un doublon INSERT)
+            // si la ligne existe déjà pour ce ticket, donc un clic manuel ultérieur sur
+            // le même ticket reste sans danger.
+            LogBus.api(node, "[AUTO-BACKUP] DELIVERY_DONE ticket=" + ticketNo
+                + " — déclenchement automatique retournerAuWorkOrder()");
+            try { retournerAuWorkOrder(); }
+            catch (Exception e) { LogBus.api(node, "[AUTO-BACKUP] ERR: " + safeMsg(e)); }
+        }
+
+        @Override
         public void onTicketInfo(String ticketNo, String deliveryUid) {
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
@@ -876,6 +893,7 @@ public class RegisterTabFragment extends Fragment {
         super.onDestroyView();
         try { ui.removeCallbacksAndMessages(null); } catch (Exception ignored) {}
         try { bg.shutdownNow(); } catch (Exception ignored) {}
+        try { remoteSearchExecutor.shutdownNow(); } catch (Exception ignored) {}
         controller = null;
         attemptedAutoAttachOnce = false;  // ← ajouter cette ligne
     }
