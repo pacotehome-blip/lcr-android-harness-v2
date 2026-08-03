@@ -449,13 +449,25 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     }
 
     /**
-     * Retourne toutes les transactions PENDING à synchroniser.
+     * Retourne toutes les transactions à synchroniser — PENDING **et** ERROR.
+     * ✅ FIX (3 août 2026, confirmé sur tickets 10899/10900/10905) : avant ce fix,
+     * cette méthode ne retournait QUE les lignes PENDING. Dès qu'un push échouait une
+     * seule fois, pushPending() appelait markError() (SYNC_ERROR), et la ligne sortait
+     * DÉFINITIVEMENT du champ de cette requête — le service de sync périodique
+     * (DeliverySyncWorker, toutes les 15 min) ne la relisait donc plus jamais, même
+     * après des heures. La livraison restait alors invisible dans Dataverse
+     * (filgo_lcr_delivery_status) indéfiniment, même si msdyn_workordersummary (mis à
+     * jour par un chemin de code séparé, patchSummaryConsolidated(), qui lit la BD
+     * locale SANS filtrer sur sync_status) affichait déjà cette livraison — d'où la
+     * confusion "je l'ai dans le résumé du WO mais pas dans la table de livraisons".
+     * Inclure ERROR ici permet un vrai retry automatique à chaque cycle, au lieu d'un
+     * abandon silencieux après le premier échec.
      */
     public List<DeliveryRow> getPendingDeliveries() {
         List<DeliveryRow> list = new ArrayList<>();
         try (Cursor c = getReadableDatabase().query(
                 TABLE_DELIVERY, null,
-                COL_SYNC_STATUS + "=?", new String[]{SYNC_PENDING},
+                COL_SYNC_STATUS + " IN (?, ?)", new String[]{SYNC_PENDING, SYNC_ERROR},
                 null, null, COL_TS_CREATED_MS + " ASC")) {
             while (c.moveToNext()) {
                 list.add(DeliveryRow.fromCursor(c));
