@@ -50,44 +50,63 @@ public class DeliverySyncWorker extends Worker {
         Log.i(TAG, "Queue: " + pending.size() + " livraisons à envoyer");
 
         // ✅ Acquérir token MSAL — bloquant car on est dans un Worker thread
-        MsalTokenProvider tokenProvider = new MsalTokenProvider(ctx);
-        CountDownLatch latch = new CountDownLatch(1);
-        AtomicReference<String> tokenRef = new AtomicReference<>();
-        AtomicReference<Exception> errRef = new AtomicReference<>();
-
-        tokenProvider.init(new MsalTokenProvider.InitCallback() {
-            @Override
-            public void onReady() {
-                // Worker n'a pas d'Activity — utiliser token silent uniquement
-                tokenProvider.acquireTokenSilentFromWorker(new MsalTokenProvider.TokenCallback() {
-                    @Override
-                    public void onSuccess(String token) {
-                        tokenRef.set(token);
-                        latch.countDown();
-                    }
-                    @Override
-                    public void onError(Exception e) {
-                        errRef.set(e);
-                        latch.countDown();
-                    }
-                });
-            }
-            @Override
-            public void onError(Exception e) {
-                errRef.set(e);
-                latch.countDown();
-            }
-        });
-
-        try { latch.await(15, java.util.concurrent.TimeUnit.SECONDS); }
-        catch (InterruptedException e) { return Result.retry(); }
-
-        if (tokenRef.get() == null) {
-            Log.w(TAG, "Token non disponible: " + (errRef.get() != null ? errRef.get().getMessage() : "timeout"));
+        // ✅ (fix 31 juillet 2026, découvert en validant l'exhaustivité du verrou global
+        // demandé par Paul) — ce Worker périodique (toutes les 15 min) est un point d'appel
+        // MSAL qui avait été MANQUÉ lors de l'ajout initial du verrou. Il peut tourner en
+        // même temps qu'un push RetourWO ou un pull utilisateur — exactement le scénario
+        // qui avait cassé le push la première fois. Verrou limité à l'acquisition du token
+        // seulement (pas toute la boucle d'envoi qui suit) pour ne pas bloquer inutilement
+        // longtemps les autres appelants — l'envoi HTTP lui-même n'touche pas l'état MSAL.
+        String token;
+        try {
+            MsalTokenProvider.MSAL_SERIAL_LOCK.acquire();
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            Log.w(TAG, "acquire() interrompu — reprogrammé au prochain cycle");
             return Result.retry();
         }
+        try {
+            MsalTokenProvider tokenProvider = new MsalTokenProvider(ctx);
+            CountDownLatch latch = new CountDownLatch(1);
+            AtomicReference<String> tokenRef = new AtomicReference<>();
+            AtomicReference<Exception> errRef = new AtomicReference<>();
 
-        String token = tokenRef.get();
+            tokenProvider.init(new MsalTokenProvider.InitCallback() {
+                @Override
+                public void onReady() {
+                    // Worker n'a pas d'Activity — utiliser token silent uniquement
+                    tokenProvider.acquireTokenSilentFromWorker(new MsalTokenProvider.TokenCallback() {
+                        @Override
+                        public void onSuccess(String token) {
+                            tokenRef.set(token);
+                            latch.countDown();
+                        }
+                        @Override
+                        public void onError(Exception e) {
+                            errRef.set(e);
+                            latch.countDown();
+                        }
+                    });
+                }
+                @Override
+                public void onError(Exception e) {
+                    errRef.set(e);
+                    latch.countDown();
+                }
+            });
+
+            try { latch.await(15, java.util.concurrent.TimeUnit.SECONDS); }
+            catch (InterruptedException e) { return Result.retry(); }
+
+            if (tokenRef.get() == null) {
+                Log.w(TAG, "Token non disponible: " + (errRef.get() != null ? errRef.get().getMessage() : "timeout"));
+                return Result.retry();
+            }
+            token = tokenRef.get();
+        } finally {
+            MsalTokenProvider.MSAL_SERIAL_LOCK.release();
+        } // fin verrou MSAL_SERIAL_LOCK — libéré avant la boucle d'envoi HTTP
+
         boolean hadFailure = false;
 
         // ✅ FIX : traiter jusqu'à 20 items en boucle, chacun pouvant prendre jusqu'à

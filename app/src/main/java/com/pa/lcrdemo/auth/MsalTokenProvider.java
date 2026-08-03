@@ -34,11 +34,22 @@ public class MsalTokenProvider {
     // processus") — verrou global partagé par TOUTE l'app. Chaque `new MsalTokenProvider(...)`
     // crée une instance MSAL distincte (createSingleAccountPublicClientApplication), et en
     // mode Single Account, plusieurs instances actives en même temps peuvent se disputer le
-    // même cache de compte/token sous-jacent. Tout appelant (push existant, pull Dataverse,
-    // ou futur code) DOIT envelopper son bloc init+acquireToken dans
-    // `synchronized (MsalTokenProvider.MSAL_SERIAL_LOCK) { ... }` pour garantir qu'aucune
-    // opération MSAL ne tourne jamais en parallèle d'une autre, où que ce soit dans l'app.
-    public static final Object MSAL_SERIAL_LOCK = new Object();
+    // même cache de compte/token sous-jacent.
+    //
+    // ✅ (2e fix, même jour) — `Semaphore(1)`, PAS `ReentrantLock`. Certains appelants
+    // (ex: DeepLinkHandler) acquièrent le token de façon ASYNCHRONE : `.acquire()` se fait
+    // sur le thread appelant, mais le callback MSAL terminal (onSuccess/onError, via
+    // acquireTokenSilentFromWorker) s'exécute sur un thread DIFFÉRENT — un ReentrantLock
+    // aurait levé IllegalMonitorStateException puisqu'il exige que lock()/unlock() soient
+    // appelés par le MÊME thread. Semaphore n'a pas cette contrainte : n'importe quel
+    // thread peut relâcher un permis acquis par un autre.
+    //
+    // Tout appelant DOIT faire `MSAL_SERIAL_LOCK.acquire()` avant d'utiliser MSAL et
+    // `MSAL_SERIAL_LOCK.release()` dès que le token est obtenu (ou l'échec confirmé) —
+    // toujours garanti même en cas d'exception (try/finally, ou release() dans chaque
+    // callback terminal pour les flux asynchrones).
+    public static final java.util.concurrent.Semaphore MSAL_SERIAL_LOCK =
+            new java.util.concurrent.Semaphore(1);
 
     // ✅ Scope Dataverse — accès via l'utilisateur connecté
     public static final String[] SCOPES = new String[]{

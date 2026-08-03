@@ -12,6 +12,9 @@
     <!-- API loopback -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- ✅ (demandé 31 juillet 2026) requis pour ConnectivityManager.registerNetworkCallback()
+         — sync immédiate dès reconnexion réseau, sans attendre le cycle WorkManager -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <!-- ✅ Storage legacy (Android 9 / API 28 uniquement) -->
     <uses-permission

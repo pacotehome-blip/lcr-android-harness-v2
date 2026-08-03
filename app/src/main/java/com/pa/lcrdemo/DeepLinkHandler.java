@@ -1903,6 +1903,19 @@ public class DeepLinkHandler {
             android.util.Log.e(TAG, "Queue ERR: " + e.getMessage());
         }
 
+        // ✅ (fix 31 juillet 2026, découvert en validant l'exhaustivité du verrou global
+        // demandé par Paul) — ce site MSAL avait été MANQUÉ lors de l'ajout initial du
+        // verrou. Flux ASYNCHRONE (pas de CountDownLatch bloquant) — donc `.lock()` posé
+        // ici et `.unlock()` posé dans CHACUN des 3 callbacks terminaux ci-dessous (succès
+        // token, erreur token, erreur init), pas un simple bloc synchronized qui ne
+        // protégerait rien à travers ces frontières asynchrones.
+        try {
+            MsalTokenProvider.MSAL_SERIAL_LOCK.acquire();
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            android.util.Log.w(TAG, "patchDataverse: acquire() interrompu — abandon");
+            return;
+        }
         MsalTokenProvider tokenProvider = new MsalTokenProvider(activity);
         tokenProvider.init(new MsalTokenProvider.InitCallback() {
             @Override
@@ -1910,6 +1923,9 @@ public class DeepLinkHandler {
                 tokenProvider.acquireTokenSilentFromWorker(new MsalTokenProvider.TokenCallback() {
                     @Override
                     public void onSuccess(String accessToken) {
+                        // Token obtenu — l'état MSAL n'est plus en jeu, libérer le verrou
+                        // avant l'envoi HTTP (qui peut prendre plusieurs secondes).
+                        MsalTokenProvider.MSAL_SERIAL_LOCK.release();
                         btExec.execute(() -> {
                             try {
                                 // ✅ FIX : patchSummaryConsolidated() au lieu de patchSummary()
@@ -1968,12 +1984,14 @@ public class DeepLinkHandler {
                     }
                     @Override
                     public void onError(Exception e) {
+                        MsalTokenProvider.MSAL_SERIAL_LOCK.release();
                         android.util.Log.w(TAG, "patchDataverse token ERR: " + e.getMessage());
                     }
                 });
             }
             @Override
             public void onError(Exception e) {
+                MsalTokenProvider.MSAL_SERIAL_LOCK.release();
                 android.util.Log.w(TAG, "patchDataverse MSAL init ERR: " + e.getMessage());
             }
         });

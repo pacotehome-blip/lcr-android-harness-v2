@@ -208,6 +208,133 @@ public synchronized void start() throws Exception {
      * des conventions inconsistantes selon l'endpoint), puis dans la query string.
      * Retourne null si rien n'est trouvé — c'est un cas normal et attendu, pas une erreur.
      */
+    // =========================================================
+    // Implémentation des 3 routes Support (demandé 31 juillet 2026)
+    // =========================================================
+
+    /** GET /v1/support/events?ticket_no=X */
+    private ApiResult apiSupportEvents(String ticketNo) {
+        com.pa.lcr.lcp.storage.DeliveryDb dbHelper = null;
+        android.database.sqlite.SQLiteDatabase db = null;
+        try {
+            dbHelper = new com.pa.lcr.lcp.storage.DeliveryDb(appCtx);
+            db = dbHelper.getReadableDatabase();
+
+            JSONArray events = new JSONArray();
+            try (android.database.Cursor c = db.rawQuery(
+                    "SELECT ts, serial_id, ticket_no, event_type, event_code, event_where, detail_short " +
+                    "FROM v_diagnostic_events WHERE ticket_no = ? ORDER BY ts DESC LIMIT 300",
+                    new String[]{ticketNo})) {
+                while (c.moveToNext()) {
+                    JSONObject e = new JSONObject();
+                    e.put("ts", c.getLong(0));
+                    e.put("serial_id", c.getString(1));
+                    e.put("ticket_no", c.getString(2));
+                    e.put("event_type", c.getString(3));
+                    e.put("event_code", c.getString(4));
+                    e.put("event_where", c.getString(5));
+                    e.put("detail_short", c.getString(6));
+                    events.put(e);
+                }
+            }
+
+            JSONObject data = new JSONObject();
+            data.put("ticket_no", ticketNo);
+            data.put("count", events.length());
+            data.put("events", events);
+            return ApiResult.ok("support/events: " + events.length() + " événement(s)", data);
+        } catch (Exception e) {
+            return ApiResult.fail("support/events: 0 - " + e.getMessage(), "SUPPORT_EVENTS_ERROR");
+        } finally {
+            if (db != null) try { db.close(); } catch (Exception ignored) {}
+            if (dbHelper != null) try { dbHelper.close(); } catch (Exception ignored) {}
+        }
+    }
+
+    /** GET /v1/support/logbus?node=N */
+    private ApiResult apiSupportLogBus(String nodeStr) {
+        int node;
+        try {
+            node = Integer.parseInt(nodeStr);
+        } catch (NumberFormatException e) {
+            return ApiResult.fail("support/logbus: node invalide", "BAD_PARAM");
+        }
+
+        com.pa.lcr.lcp.storage.DeliveryDb dbHelper = null;
+        android.database.sqlite.SQLiteDatabase db = null;
+        try {
+            dbHelper = new com.pa.lcr.lcp.storage.DeliveryDb(appCtx);
+            db = dbHelper.getReadableDatabase();
+
+            JSONArray lines = new JSONArray();
+            try (android.database.Cursor c = db.rawQuery(
+                    "SELECT ts, src, msg FROM log_bus_event WHERE node = ? ORDER BY ts DESC LIMIT 500",
+                    new String[]{String.valueOf(node)})) {
+                while (c.moveToNext()) {
+                    JSONObject e = new JSONObject();
+                    e.put("ts", c.getLong(0));
+                    e.put("src", c.getString(1));
+                    e.put("msg", c.getString(2));
+                    lines.put(e);
+                }
+            }
+
+            JSONObject data = new JSONObject();
+            data.put("node", node);
+            data.put("count", lines.length());
+            data.put("lines", lines);
+            return ApiResult.ok("support/logbus: " + lines.length() + " ligne(s)", data);
+        } catch (Exception e) {
+            return ApiResult.fail("support/logbus: 0 - " + e.getMessage(), "SUPPORT_LOGBUS_ERROR");
+        } finally {
+            if (db != null) try { db.close(); } catch (Exception ignored) {}
+            if (dbHelper != null) try { dbHelper.close(); } catch (Exception ignored) {}
+        }
+    }
+
+    /** GET /v1/support/diagnose?ticket_no=X&node=N */
+    private ApiResult apiSupportDiagnose(String ticketNo, String nodeStr) {
+        try {
+            com.pa.lcr.lcp.diagnostic.SupportTriageEngine.TriageResult r =
+                    com.pa.lcr.lcp.diagnostic.SupportTriageEngine.computeTriage(appCtx, ticketNo, nodeStr);
+
+            JSONArray matchesJson = new JSONArray();
+            for (com.pa.lcr.lcp.diagnostic.DiagnosticMatch m : r.matches) {
+                JSONObject mj = new JSONObject();
+                mj.put("rule_name", m.ruleName);
+                mj.put("diagnostic", m.diagnostic);
+                mj.put("confidence", m.confidence);
+                mj.put("support_level", m.supportLevel);
+                mj.put("recommended_action", m.recommendedAction);
+                matchesJson.put(mj);
+            }
+
+            JSONObject counts = new JSONObject();
+            counts.put("transport", r.transportCount);
+            counts.put("api", r.apiCount);
+            counts.put("ui", r.uiCount);
+            counts.put("indetermine", r.indetermineCount);
+
+            JSONObject data = new JSONObject();
+            data.put("ticket_no", ticketNo);
+            data.put("support_level", r.supportLevel);
+            data.put("layer", r.layer);
+            data.put("layer_counts", counts);
+            data.put("matches", matchesJson);
+
+            return ApiResult.ok("support/diagnose: niveau=" + r.supportLevel + " couche=" + r.layer, data);
+        } catch (Exception e) {
+            return ApiResult.fail("support/diagnose: 0 - " + e.getMessage(), "SUPPORT_DIAGNOSE_ERROR");
+        }
+    }
+
+
+    /**
+     * Phase 1c — extraction best-effort de serial_id/ticket_no pour api_trace.
+     * Cherche d'abord dans le body JSON (plusieurs clés possibles, l'API utilisant
+     * des conventions inconsistantes selon l'endpoint), puis dans la query string.
+     * Retourne null si rien n'est trouvé — c'est un cas normal et attendu, pas une erreur.
+     */
     private static String extractBestEffort(JSONObject body, Map<String, String> query, String... keys) {
         for (String k : keys) {
             if (body != null) {
@@ -656,6 +783,42 @@ public synchronized void start() throws Exception {
             if (jobId != null && jobId.trim().isEmpty()) jobId = null;
             final String fJobId = jobId;
             return withAutoConnectRetry(null, () -> facade.api_deliveryJobGet(fJobId));
+        }
+
+        // =========================================================
+        // Support (demandé 31 juillet 2026) — expose l'onglet Support à l'API pour que
+        // Field Service Mobile ou tout autre appelant puisse interroger le diagnostic.
+        // Lecture seule — aucune de ces 3 routes ne modifie delivery_event/api_trace/
+        // log_bus_event/diagnostic_rules. diagnose écrit dans diagnostic_match_history
+        // (même comportement que le bouton Diagnostiquer — c'est voulu, pas un effet de bord).
+        // =========================================================
+
+        // GET /v1/support/events?ticket_no=X — historique v_diagnostic_events pour un ticket
+        if ("GET".equals(req.method) && "/v1/support/events".equals(req.path)) {
+            String ticketNo = req.query != null ? req.query.get("ticket_no") : null;
+            if (ticketNo == null || ticketNo.trim().isEmpty()) {
+                return ApiResult.fail("support/events: ticket_no requis", "MISSING_PARAM");
+            }
+            return apiSupportEvents(ticketNo.trim());
+        }
+
+        // GET /v1/support/logbus?node=N — log brut du registre (UI/API/IO_TX/IO_RX) persisté
+        if ("GET".equals(req.method) && "/v1/support/logbus".equals(req.path)) {
+            String nodeStr = req.query != null ? req.query.get("node") : null;
+            if (nodeStr == null || nodeStr.trim().isEmpty()) {
+                return ApiResult.fail("support/logbus: node requis", "MISSING_PARAM");
+            }
+            return apiSupportLogBus(nodeStr.trim());
+        }
+
+        // GET /v1/support/diagnose?ticket_no=X&node=N — triage complet (niveau + couche)
+        if ("GET".equals(req.method) && "/v1/support/diagnose".equals(req.path)) {
+            String ticketNo = req.query != null ? req.query.get("ticket_no") : null;
+            String nodeStr = req.query != null ? req.query.get("node") : null;
+            if (ticketNo == null || ticketNo.trim().isEmpty()) {
+                return ApiResult.fail("support/diagnose: ticket_no requis", "MISSING_PARAM");
+            }
+            return apiSupportDiagnose(ticketNo.trim(), nodeStr != null ? nodeStr.trim() : null);
         }
 
         // Delivery job continue

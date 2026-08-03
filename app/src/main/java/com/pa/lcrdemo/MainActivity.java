@@ -1207,7 +1207,8 @@ private void setupTabsTop() {
         try {
             // ✅ (fix 31 juillet 2026, demande Paul : "il ne doit JAMAIS concurrencer
             // aucun processus") — même verrou global que le push et le pull côté registre.
-            synchronized (MsalTokenProvider.MSAL_SERIAL_LOCK) {
+            MsalTokenProvider.MSAL_SERIAL_LOCK.acquire();
+            try {
             MsalTokenProvider msal = new MsalTokenProvider(getApplicationContext());
             final String[] tokenHolder = {null};
             final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
@@ -1292,7 +1293,9 @@ private void setupTabsTop() {
             // (delivery_event/api_trace) n'est pas alimentée par ce pull Dataverse, qui
             // écrit uniquement dans LcrDeliveryStatusDb. Un second appel n'ajouterait
             // rien et risquerait une boucle si le mapping revenait incomplet.
-            } // fin synchronized (MSAL_SERIAL_LOCK)
+            } finally {
+                MsalTokenProvider.MSAL_SERIAL_LOCK.release();
+            } // fin verrou MSAL_SERIAL_LOCK
         } catch (Exception e) {
             runOnUiThread(() -> {
                 if (txtSupportDiagnosis != null) {
@@ -1596,98 +1599,18 @@ private void setupTabsTop() {
      */
     private String[] computeSupportTriage(String ticketFilter, String nodeFilter,
                                            java.util.List<com.pa.lcr.lcp.diagnostic.DiagnosticMatch> matches) {
-        int cTransport = 0, cApi = 0, cUi = 0, cIndetermine = 0;
-
-        com.pa.lcr.lcp.storage.DeliveryDb dbHelper = null;
-        android.database.sqlite.SQLiteDatabase db = null;
-        try {
-            dbHelper = new com.pa.lcr.lcp.storage.DeliveryDb(getApplicationContext());
-            db = dbHelper.getReadableDatabase();
-
-            // 1. v_diagnostic_events pour ce ticket
-            try (android.database.Cursor c = db.rawQuery(
-                    "SELECT event_where, level, event_type, event_code, data_json " +
-                    "FROM v_diagnostic_events WHERE ticket_no = ?", new String[]{ticketFilter})) {
-                while (c.moveToNext()) {
-                    String eventWhere = c.getString(0);
-                    String level = c.getString(1);
-                    String eventType = c.getString(2);
-                    String eventCode = c.getString(3);
-                    String dataJson = c.getString(4);
-
-                    if (dataJson != null && dataJson.contains("\"level\":\"TRANSPORT\"")) {
-                        cTransport++;
-                    } else if ("LCP".equals(eventWhere)) {
-                        cTransport++;
-                    } else if ("API_TRACE".equals(eventType) || "ApiServer".equals(eventWhere)) {
-                        cApi++;
-                    } else if (eventType != null && eventType.startsWith("UI_")) {
-                        cUi++;
-                    } else {
-                        cIndetermine++;
-                    }
-                }
-            }
-
-            // 2. log_bus_event pour ce node (si renseigné) — signal transport brut TX/RX
-            if (nodeFilter != null && !nodeFilter.trim().isEmpty()) {
-                try {
-                    int node = Integer.parseInt(nodeFilter.trim());
-                    try (android.database.Cursor c2 = db.rawQuery(
-                            "SELECT src FROM log_bus_event WHERE node = ?", new String[]{String.valueOf(node)})) {
-                        while (c2.moveToNext()) {
-                            String src = c2.getString(0);
-                            if ("IO_TX".equals(src) || "IO_RX".equals(src)) cTransport++;
-                            else if ("API".equals(src)) cApi++;
-                            else if ("UI".equals(src)) cUi++;
-                            else cIndetermine++;
-                        }
-                    }
-                } catch (NumberFormatException ignored) {}
-            }
-        } catch (Exception ignored) {
-        } finally {
-            if (db != null) try { db.close(); } catch (Exception ignored) {}
-            if (dbHelper != null) try { dbHelper.close(); } catch (Exception ignored) {}
-        }
-
-        // Couche dominante par vote majoritaire (heuristique, pas une science exacte)
-        String layer;
-        int maxCount = Math.max(Math.max(cTransport, cApi), cUi);
-        if (maxCount == 0) {
-            layer = "INDÉTERMINÉ";
-        } else if (maxCount == cTransport) {
-            layer = "TRANSPORT (BT/USB/TCP/registre)";
-        } else if (maxCount == cApi) {
-            layer = "API";
-        } else {
-            layer = "UI";
-        }
-        String detail = "Transport=" + cTransport + " API=" + cApi + " UI=" + cUi + " Indéterminé=" + cIndetermine;
-
-        // Niveau support = le pire parmi les règles qui matchent (N4 > N3 > N2 > N1)
-        String supportLevel = "N/A (aucune règle ne matche)";
-        int worstSeverity = -1;
-        for (com.pa.lcr.lcp.diagnostic.DiagnosticMatch m : matches) {
-            int sev = severityOfSupportLevel(m.supportLevel);
-            if (sev > worstSeverity) {
-                worstSeverity = sev;
-                supportLevel = m.supportLevel;
-            }
-        }
-
-        return new String[]{supportLevel, layer, detail};
+        // ✅ (refactor 31 juillet 2026) — délègue au moteur partagé SupportTriageEngine, pour
+        // que l'onglet Support (ici) et l'API HTTP exposent EXACTEMENT la même logique de
+        // triage, plutôt que deux implémentations qui pourraient diverger avec le temps.
+        com.pa.lcr.lcp.diagnostic.SupportTriageEngine.TriageResult r =
+                com.pa.lcr.lcp.diagnostic.SupportTriageEngine.computeTriage(
+                        getApplicationContext(), ticketFilter, nodeFilter, matches);
+        String detail = "Transport=" + r.transportCount + " API=" + r.apiCount
+                + " UI=" + r.uiCount + " Indéterminé=" + r.indetermineCount;
+        return new String[]{r.supportLevel, r.layer, detail};
     }
 
-    /** N1=1 (chauffeur) ... N4=4 (escalade dev max). Retourne 0 si format inconnu. */
-    private int severityOfSupportLevel(String supportLevel) {
-        if (supportLevel == null || supportLevel.length() < 2 || supportLevel.charAt(0) != 'N') return 0;
-        try {
-            return Integer.parseInt(supportLevel.substring(1).trim());
-        } catch (NumberFormatException e) {
-            return 0;
-        }
-    }
+    // (severityOfSupportLevel supprimée — logique maintenant dans SupportTriageEngine, partagée avec l'API)
 
     // =========================================================
     // Boucle de rétroaction (Phase 3 — 27 juillet 2026)

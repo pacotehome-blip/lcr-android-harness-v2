@@ -2309,11 +2309,43 @@ public class RegisterTabFragment extends Fragment {
                 }
                 try { lcrDb.close(); } catch (Exception ignored) {}
 
+                // ✅ (demandé 31 juillet 2026, suite à la perte du ticket 10898) : backup
+                // JSON durable dans Téléchargements — survit à une désinstallation, contrairement
+                // à la BD SQLite privée. Écrit AVANT même la tentative de push Dataverse, donc
+                // une copie existe dès que la livraison est confirmée localement, peu importe
+                // si le push réussit ou non ensuite. Best-effort — ne bloque jamais le flux.
+                try {
+                    org.json.JSONObject backupPayload = new org.json.JSONObject();
+                    backupPayload.put("wo_num", woNum != null ? woNum : "");
+                    backupPayload.put("wo_id_guid", woIdGuid != null ? woIdGuid : "");
+                    backupPayload.put("ticket_no", ticketNo != null ? ticketNo : "");
+                    backupPayload.put("sale_no", saleNo != null ? saleNo : "");
+                    backupPayload.put("net_l", netL);
+                    backupPayload.put("gross_l", grossL);
+                    backupPayload.put("serial_id", serialFromArgs != null ? serialFromArgs : "");
+                    backupPayload.put("lcrnode", node);
+                    backupPayload.put("backup_ts", System.currentTimeMillis());
+                    backupPayload.put("payload_complet", payloadJson != null ? payloadJson : "");
+                    com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
+                        requireContext().getApplicationContext(), woNum, ticketNo, backupPayload);
+                } catch (Exception e) {
+                    android.util.Log.w("RetourWO", "Backup local ERR (non-bloquant): " + e.getMessage());
+                }
+
                 // 3. Tenter push MSAL vers Dataverse
                 // ✅ (fix 31 juillet 2026, demande Paul : "il ne doit JAMAIS concurrencer
                 // aucun processus") — même verrou global que le pull Dataverse, pour garantir
                 // qu'aucune opération MSAL ne tourne jamais en parallèle d'une autre.
-                synchronized (com.pa.lcrdemo.auth.MsalTokenProvider.MSAL_SERIAL_LOCK) {
+                // Semaphore(1) — PAS ReentrantLock (voir MsalTokenProvider pour le
+                // raisonnement : acquire()/release() peuvent se faire sur des threads
+                // différents, ce qu'un ReentrantLock interdit).
+                try {
+                    com.pa.lcrdemo.auth.MsalTokenProvider.MSAL_SERIAL_LOCK.acquire();
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    android.util.Log.w("RetourWO", "Push Dataverse annulé — acquire() interrompu");
+                    return;
+                }
                 try {
                     com.pa.lcrdemo.auth.MsalTokenProvider msal =
                         new com.pa.lcrdemo.auth.MsalTokenProvider(requireContext());
@@ -2431,8 +2463,9 @@ public class RegisterTabFragment extends Fragment {
                     }
                 } catch (Exception e) {
                     android.util.Log.w("RetourWO", "Push Dataverse ERR: " + e.getMessage());
-                }
-                } // fin synchronized (MSAL_SERIAL_LOCK)
+                } finally {
+                    com.pa.lcrdemo.auth.MsalTokenProvider.MSAL_SERIAL_LOCK.release();
+                } // fin verrou MSAL_SERIAL_LOCK
 
                 // 4. Effacer ActiveDeliveryStore
                 try {
@@ -3597,7 +3630,8 @@ public class RegisterTabFragment extends Fragment {
             // ✅ (fix 31 juillet 2026, demande Paul) : verrou global — garantit qu'aucune
             // opération MSAL (celle-ci ou toute autre dans l'app, ex: le push existant)
             // ne tourne jamais en parallèle d'une autre, où que ce soit.
-            synchronized (com.pa.lcrdemo.auth.MsalTokenProvider.MSAL_SERIAL_LOCK) {
+            com.pa.lcrdemo.auth.MsalTokenProvider.MSAL_SERIAL_LOCK.acquire();
+            try {
             com.pa.lcrdemo.auth.MsalTokenProvider msal =
                 new com.pa.lcrdemo.auth.MsalTokenProvider(requireContext());
             final String[] tokenHolder = {null};
@@ -3682,7 +3716,9 @@ public class RegisterTabFragment extends Fragment {
             }
 
             return resolved;
-            } // fin synchronized (MSAL_SERIAL_LOCK)
+            } finally {
+                com.pa.lcrdemo.auth.MsalTokenProvider.MSAL_SERIAL_LOCK.release();
+            } // fin verrou MSAL_SERIAL_LOCK
         } catch (Exception e) {
             LogBus.api(node, "[WO-DETECT] pull Dataverse ERR: " + safeMsg(e));
             return null;
