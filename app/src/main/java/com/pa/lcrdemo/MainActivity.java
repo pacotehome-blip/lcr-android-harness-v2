@@ -109,6 +109,16 @@ public class MainActivity extends AppCompatActivity {
     private EditText edtSupportSerialFilter;
     private EditText edtSupportNodeFilter;
     private TextView txtSupportCount;
+    private CheckBox chkSupportErrorsOnly;
+    // ✅ (ajouté 3 août 2026, demande Paul : "copier-coller l'ensemble des lignes") —
+    // conserve la dernière liste chargée pour que le bouton Copier puisse la sérialiser
+    // en texte, sans avoir à re-requêter la BD.
+    private final java.util.List<String> lastSupportHeaders = new java.util.ArrayList<>();
+    private final java.util.List<String> lastSupportDetails = new java.util.ArrayList<>();
+    // ✅ (ajouté 3 août 2026, demande Paul : "je veux faire une sélection") — positions
+    // cochées en mode sélection, réinitialisé à chaque nouveau chargement de la liste.
+    private final java.util.Set<Integer> supportSelectedPositions = new java.util.HashSet<>();
+    private boolean supportSelectionMode = false;
     private TextView txtSupportDiagnosis;
     private TextView txtSupportRestoreStatus;
     private ListView listSupportEvents;
@@ -823,6 +833,20 @@ public class MainActivity extends AppCompatActivity {
         edtSupportSerialFilter = findViewById(R.id.edtSupportSerialFilter);
         edtSupportNodeFilter = findViewById(R.id.edtSupportNodeFilter);
         txtSupportCount = findViewById(R.id.txtSupportCount);
+        chkSupportErrorsOnly = findViewById(R.id.chkSupportErrorsOnly);
+        if (chkSupportErrorsOnly != null) {
+            chkSupportErrorsOnly.setOnCheckedChangeListener((btn, checked) -> refreshSupportEvents());
+        }
+        CheckBox chkSupportSelectionMode = findViewById(R.id.chkSupportSelectionMode);
+        if (chkSupportSelectionMode != null) {
+            chkSupportSelectionMode.setOnCheckedChangeListener((btn, checked) -> {
+                supportSelectionMode = checked;
+                if (!checked) supportSelectedPositions.clear();
+                if (listSupportEvents != null && listSupportEvents.getAdapter() != null) {
+                    ((SupportEventAdapter) listSupportEvents.getAdapter()).notifyDataSetChanged();
+                }
+            });
+        }
         txtSupportDiagnosis = findViewById(R.id.txtSupportDiagnosis);
         listSupportEvents = findViewById(R.id.listSupportEvents);
         Button btnSupportRefresh = findViewById(R.id.btnSupportRefresh);
@@ -841,6 +865,11 @@ public class MainActivity extends AppCompatActivity {
         Button btnSupportRestoreBackup = findViewById(R.id.btnSupportRestoreBackup);
         if (btnSupportRestoreBackup != null) {
             btnSupportRestoreBackup.setOnClickListener(v -> confirmAndRunRestoreBackup());
+        }
+
+        Button btnSupportCopyAll = findViewById(R.id.btnSupportCopyAll);
+        if (btnSupportCopyAll != null) {
+            btnSupportCopyAll.setOnClickListener(v -> copySupportListToClipboard());
         }
         edtSupportValidatedBy = findViewById(R.id.edtSupportValidatedBy);
         rowSupportIncident = findViewById(R.id.rowSupportIncident);
@@ -1361,6 +1390,40 @@ private void setupTabsTop() {
         }, "SupportRelatedProcess").start();
     }
 
+    // ✅ (ajouté 3 août 2026, demande Paul : "faire un copier coller de l'ensemble des
+    // lignes... plus facile de te montrer ce que j'ai") — sérialise la liste actuellement
+    // affichée (après filtres/erreurs-seulement déjà appliqués) en texte brut, une ligne
+    // par événement (en-tête + détail), et la met sur le presse-papier système.
+    private void copySupportListToClipboard() {
+        if (lastSupportHeaders.isEmpty()) {
+            Toast.makeText(this, "Rien à copier — rafraîchis d'abord la liste", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        StringBuilder sb = new StringBuilder();
+        String ticketFilterNow = (edtSupportTicketFilter != null) ? edtSupportTicketFilter.getText().toString().trim() : "";
+        String nodeFilterNow = (edtSupportNodeFilter != null) ? edtSupportNodeFilter.getText().toString().trim() : "";
+        // ✅ (ajouté 3 août 2026, demande Paul : "je veux faire une sélection") — si des
+        // lignes sont cochées en mode sélection, ne copier QUE celles-là; sinon, tout copier
+        // comme avant (comportement inchangé quand la sélection n'est pas utilisée).
+        boolean useSelection = !supportSelectedPositions.isEmpty();
+        int copiedCount = useSelection ? supportSelectedPositions.size() : lastSupportHeaders.size();
+        sb.append("=== Support LCR — ticket=").append(ticketFilterNow.isEmpty() ? "—" : ticketFilterNow)
+          .append(" node=").append(nodeFilterNow.isEmpty() ? "—" : nodeFilterNow)
+          .append(useSelection ? " (sélection : " : " (")
+          .append(copiedCount).append(" événements) ===\n\n");
+        for (int i = 0; i < lastSupportHeaders.size(); i++) {
+            if (useSelection && !supportSelectedPositions.contains(i)) continue;
+            sb.append(lastSupportHeaders.get(i)).append('\n');
+            String d = (i < lastSupportDetails.size()) ? lastSupportDetails.get(i) : "";
+            if (d != null && !d.isEmpty()) sb.append("    ").append(d).append('\n');
+        }
+        android.content.ClipboardManager clipboard =
+            (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        android.content.ClipData clip = android.content.ClipData.newPlainText("Support LCR", sb.toString());
+        clipboard.setPrimaryClip(clip);
+        Toast.makeText(this, copiedCount + " événement(s) copié(s)", Toast.LENGTH_SHORT).show();
+    }
+
     private void refreshSupportEvents() {
         final String ticketFilter = (edtSupportTicketFilter != null)
                 ? edtSupportTicketFilter.getText().toString().trim() : "";
@@ -1478,15 +1541,38 @@ private void setupTabsTop() {
             // Tri global décroissant par ts (le plus récent en premier), toutes sources confondues
             rows.sort((a, b) -> Long.compare((Long) b[0], (Long) a[0]));
 
+            // ✅ (ajouté 3 août 2026, demande Paul : "afficher les enregistrements qui
+            // sont en erreur pour visualiser facilement les erreurs") — filtre client
+            // simple sur le texte déjà assemblé (header+détail), plutôt que sur la
+            // colonne "level" seule : la branche api_trace de v_diagnostic_events fixe
+            // TOUJOURS level='INFO' (même pour un push Dataverse échoué, voir
+            // DATAVERSE_PUSH_FAILED), donc filtrer sur level manquerait ces cas. Un
+            // filtre texte large (ERR/FAIL) couvre ERR_IO, JOBGET_READ_FAIL,
+            // CONTINUE_RUN_FAIL, "push ERR", etc. — peu importe la source.
+            final boolean errorsOnly = (chkSupportErrorsOnly != null) && chkSupportErrorsOnly.isChecked();
+            final java.util.List<Object[]> filteredRows;
+            if (errorsOnly) {
+                filteredRows = new java.util.ArrayList<>();
+                for (Object[] r : rows) {
+                    String h = String.valueOf(r[1]).toUpperCase(java.util.Locale.ROOT);
+                    String d = String.valueOf(r[2]).toUpperCase(java.util.Locale.ROOT);
+                    if (h.contains("ERR") || h.contains("FAIL") || d.contains("ERR") || d.contains("FAIL")) {
+                        filteredRows.add(r);
+                    }
+                }
+            } else {
+                filteredRows = rows;
+            }
+
             final java.util.List<String> headers = new java.util.ArrayList<>();
             final java.util.List<String> details = new java.util.ArrayList<>();
             final java.util.List<Long> attemptIds = new java.util.ArrayList<>();
-            for (Object[] r : rows) {
+            for (Object[] r : filteredRows) {
                 headers.add((String) r[1]);
                 details.add((String) r[2]);
                 attemptIds.add(r.length > 3 ? (Long) r[3] : null);
             }
-            int count = rows.size();
+            int count = filteredRows.size();
 
             // ✅ (demandé 31 juillet 2026) : si un ticket est filtré et que la BD locale
             // est vide pour lui, OU qu'il n'a pas de #delivery-uid/#wo, avertir et tenter
@@ -1501,12 +1587,24 @@ private void setupTabsTop() {
                     txtSupportCount.setText(finalCount + " événement" + (finalCount > 1 ? "s" : ""));
                 }
                 if (listSupportEvents != null) {
-                    SupportEventAdapter adapter = new SupportEventAdapter(this, headers, details);
+                    lastSupportHeaders.clear();
+                    lastSupportHeaders.addAll(headers);
+                    lastSupportDetails.clear();
+                    lastSupportDetails.addAll(details);
+                    supportSelectedPositions.clear(); // ✅ nouvelle liste = sélection réinitialisée
+                    SupportEventAdapter adapter = new SupportEventAdapter(this, headers, details, supportSelectedPositions);
                     listSupportEvents.setAdapter(adapter);
-                    // ✅ (ajouté 3 août 2026, demande Paul : "voir tout le processus lié") —
-                    // taper une ligne dont l'attemptId est connu affiche la chronologie
-                    // complète de cette tentative (delivery_attempt), pas juste cette ligne.
+                    // ✅ (ajouté 3 août 2026, demande Paul : "voir tout le processus lié" /
+                    // "je veux faire une sélection") — en mode sélection, taper une ligne
+                    // la coche/décoche au lieu d'ouvrir le dialogue "processus lié".
                     listSupportEvents.setOnItemClickListener((parent, view, position, id) -> {
+                        if (supportSelectionMode) {
+                            if (!supportSelectedPositions.remove(position)) {
+                                supportSelectedPositions.add(position);
+                            }
+                            adapter.notifyDataSetChanged();
+                            return;
+                        }
                         Long attemptId = (position < attemptIds.size()) ? attemptIds.get(position) : null;
                         if (attemptId == null) {
                             Toast.makeText(this,
@@ -1593,6 +1691,11 @@ private void setupTabsTop() {
                 "N/A — Aucune règle de diagnostic ne matche pour ce ticket. Ne veut pas " +
                 "dire qu'il n'y a pas de problème, juste qu'aucune des règles connues ne " +
                 "l'a détecté automatiquement.\n\n" +
+                "N1/N2 (tendance) — Aucune règle exacte ne matche, mais la couche " +
+                "(Transport/API/UI) est clairement dominante dans les événements de ce " +
+                "ticket. Suggestion basée sur cette tendance, PAS un diagnostic confirmé — " +
+                "à valider manuellement. N/A reste affiché seulement si même la couche est " +
+                "indéterminée (aucun signal exploitable).\n\n" +
                 "─────────────────────────────\n\n" +
                 "COUCHES PAR COMPLEXITÉ\n\n" +
                 "TRANSPORT (BT/USB/TCP/registre)\n" +
@@ -1749,10 +1852,13 @@ private void setupTabsTop() {
      */
     private static final class SupportEventAdapter extends ArrayAdapter<String> {
         private final java.util.List<String> details;
+        private final java.util.Set<Integer> selectedPositions;
 
-        SupportEventAdapter(android.content.Context ctx, java.util.List<String> headers, java.util.List<String> details) {
+        SupportEventAdapter(android.content.Context ctx, java.util.List<String> headers,
+                             java.util.List<String> details, java.util.Set<Integer> selectedPositions) {
             super(ctx, R.layout.row_support_event, R.id.txtRowHeader, headers);
             this.details = details;
+            this.selectedPositions = selectedPositions;
         }
 
         @Override
@@ -1762,6 +1868,8 @@ private void setupTabsTop() {
             if (txtDetail != null && position < details.size()) {
                 txtDetail.setText(details.get(position));
             }
+            // ✅ (ajouté 3 août 2026) — surlignage simple des lignes cochées en mode sélection
+            row.setBackgroundColor(selectedPositions.contains(position) ? 0x334CAF50 : 0x00000000);
             return row;
         }
     }

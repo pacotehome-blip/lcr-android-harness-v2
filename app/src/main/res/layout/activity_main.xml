@@ -952,6 +952,13 @@
                 android:layout_height="wrap_content"
                 android:text="Restaurer depuis backup"/>
 
+            <Button
+                android:id="@+id/btnSupportCopyAll"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="6dp"
+                android:text="Copier"/>
+
             <TextView
                 android:id="@+id/txtSupportRestoreStatus"
                 android:layout_width="0dp"
@@ -999,6 +1006,30 @@
                 android:layout_height="wrap_content"
                 android:layout_marginStart="6dp"
                 android:text="Enregistrer incident"/>
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <CheckBox
+                android:id="@+id/chkSupportErrorsOnly"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:paddingStart="8dp"
+                android:textSize="13sp"
+                android:text="Erreurs seulement"/>
+
+            <CheckBox
+                android:id="@+id/chkSupportSelectionMode"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:paddingEnd="8dp"
+                android:textSize="13sp"
+                android:text="Mode sélection"/>
         </LinearLayout>
 
         <TextView
