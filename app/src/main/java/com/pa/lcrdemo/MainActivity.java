@@ -1656,9 +1656,47 @@ private void setupTabsTop() {
                         "SELECT ts, serial_id, ticket_no, event_type, event_code, event_where, detail_short, attempt_id " +
                         "FROM v_diagnostic_events WHERE 1=1 ");
                 java.util.List<String> args = new java.util.ArrayList<>();
-                if (!ticketFilter.isEmpty()) {
+                // ✅ FIX (4 août 2026, demande Paul — "ceci touche directement la couche
+                // support") — v_diagnostic_events inclut maintenant log_bus_event en 3e
+                // branche (voir DeliveryDb.createDiagnosticEventsView, v21). Ces lignes
+                // n'ont ni ticket_no ni serial_id (scopées par node uniquement) — le filtre
+                // ticket doit donc les laisser passer plutôt que les exclure, sinon elles
+                // redeviennent invisibles dès qu'un filtre ticket est actif. Dérivation
+                // node→ticket conservée (ancienne fusion manuelle) mais appliquée ICI comme
+                // filtre unique, pour ne plus dupliquer les lignes log_bus_event.
+                String effectiveNodeFilter0 = nodeFilter;
+                if (effectiveNodeFilter0.isEmpty() && !ticketFilter.isEmpty()) {
+                    try {
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDbNode0 =
+                            new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(getApplicationContext());
+                        try {
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow rowNode0 =
+                                lcrDbNode0.getByTicketNo(ticketFilter);
+                            if (rowNode0 != null && rowNode0.lcrnode > 0) {
+                                effectiveNodeFilter0 = String.valueOf(rowNode0.lcrnode);
+                            }
+                        } finally {
+                            try { lcrDbNode0.close(); } catch (Exception ignored) {}
+                        }
+                    } catch (Exception ignored) {}
+                }
+                boolean hasTicket = !ticketFilter.isEmpty();
+                boolean hasNode = !effectiveNodeFilter0.isEmpty();
+                if (hasTicket && hasNode) {
+                    sql.append("AND (ticket_no = ? OR (event_type = 'LOG_BUS' AND event_where = ?)) ");
+                    args.add(ticketFilter);
+                    args.add("LogBus(node=" + effectiveNodeFilter0 + ")");
+                } else if (hasTicket) {
                     sql.append("AND ticket_no = ? ");
                     args.add(ticketFilter);
+                } else if (hasNode) {
+                    // Filtre node seul (sans ticket) : ne restreint QUE les lignes LOG_BUS —
+                    // les événements ticket-scopés (delivery_event/api_trace) n'ont pas de
+                    // notion de node dans cette vue, donc ils restent visibles peu importe
+                    // le node filtré (comportement identique à avant ce fix : le filtre node
+                    // seul n'a jamais restreint les événements par ticket).
+                    sql.append("AND (event_type != 'LOG_BUS' OR event_where = ?) ");
+                    args.add("LogBus(node=" + effectiveNodeFilter0 + ")");
                 }
                 if (!serialFilter.isEmpty()) {
                     sql.append("AND serial_id = ? ");
@@ -1689,58 +1727,8 @@ private void setupTabsTop() {
                     // (delivery_attempt), triés chronologiquement — pas juste cette ligne isolée.
                     rows.add(new Object[]{ts, header, detail, attemptId});
                 }
-
-                // ✅ (demandé 31 juillet 2026 : "a-t-on pris en compte le log du tab") —
-                // fusionne les événements LogBus persistés (log_bus_event), filtrés par node
-                // si renseigné. LogBus n'a pas de notion de ticket_no/serial_id (scopé par
-                // registre, pas par livraison), donc pas de filtre ticket/serial ici — juste
-                // node + une fenêtre récente raisonnable pour rester lisible.
-                // ✅ (ajouté 3 août 2026, demande Paul : "je ne vois pas les erreurs du
-                // log du tab ni les communications du tab selon le node") — log_bus_event
-                // n'a pas de notion de ticket_no (scopé par node uniquement), donc jusqu'ici
-                // ces logs n'apparaissaient QUE si le champ "node" était rempli séparément —
-                // un filtre distinct que personne ne pense à remplir en plus du ticket.
-                // Dérivation automatique : si un ticket est filtré mais pas de node, retrouver
-                // le node de CE ticket via LcrDeliveryStatusDb (COL_LCRNODE) pour merger les
-                // logs BT/comms automatiquement, sans action manuelle supplémentaire.
-                String effectiveNodeFilter = nodeFilter;
-                if (effectiveNodeFilter.isEmpty() && !ticketFilter.isEmpty()) {
-                    try {
-                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDbNode =
-                            new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(getApplicationContext());
-                        try {
-                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow rowNode =
-                                lcrDbNode.getByTicketNo(ticketFilter);
-                            if (rowNode != null && rowNode.lcrnode > 0) {
-                                effectiveNodeFilter = String.valueOf(rowNode.lcrnode);
-                            }
-                        } finally {
-                            try { lcrDbNode.close(); } catch (Exception ignored) {}
-                        }
-                    } catch (Exception ignored) {}
-                }
-                if (!effectiveNodeFilter.isEmpty()) {
-                    try {
-                        int node = Integer.parseInt(effectiveNodeFilter);
-                        try (android.database.Cursor c2 = db.rawQuery(
-                                "SELECT ts, src, msg FROM log_bus_event WHERE node = ? ORDER BY ts DESC LIMIT 300",
-                                new String[]{String.valueOf(node)})) {
-                            while (c2.moveToNext()) {
-                                long ts2 = c2.getLong(0);
-                                String src2 = c2.getString(1);
-                                String msg2 = c2.getString(2);
-                                String tsFmt2 = android.text.format.DateFormat.format("MM-dd HH:mm:ss", ts2).toString();
-                                String header2 = tsFmt2 + "  [LOG:" + src2 + "]  node=" + node;
-                                String detail2 = msg2 != null ? msg2 : "";
-                                rows.add(new Object[]{ts2, header2, detail2, null});
-                            }
-                        }
-                    } catch (NumberFormatException nfe) {
-                        rows.add(new Object[]{System.currentTimeMillis(), "Filtre node invalide", effectiveNodeFilter, null});
-                    }
-                }
             } catch (Exception e) {
-                rows.add(new Object[]{System.currentTimeMillis(), "Erreur lecture v_diagnostic_events/log_bus_event",
+                rows.add(new Object[]{System.currentTimeMillis(), "Erreur lecture v_diagnostic_events",
                         String.valueOf(e.getMessage()), null});
             } finally {
                 if (c != null) try { c.close(); } catch (Exception ignored) {}

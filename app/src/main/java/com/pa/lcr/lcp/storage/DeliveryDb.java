@@ -43,7 +43,7 @@ public class DeliveryDb extends SQLiteOpenHelper {
     //      chaque soir) + diagnostic_match_history (persiste chaque résultat de
     //      DiagnosticRuleEngine, jusqu'ici calculé à la volée et jamais stocké — nécessaire
     //      pour calibrer les règles / futur agent IA, demande Paul 31 juillet 2026).
-    public static final int DB_VERSION = 20;
+    public static final int DB_VERSION = 21;
 
     private static final String TAG = "DeliveryDb";
 
@@ -185,6 +185,19 @@ public class DeliveryDb extends SQLiteOpenHelper {
         // "afficher le processus lié" à un événement). DROP+CREATE d'une vue est toujours
         // sans risque de perte de données.
         if (oldVersion < 20) {
+            createDiagnosticEventsView(db);
+        }
+        // v21 (demande Paul, 4 août 2026 — "ceci touche directement la couche support avec
+        // le type de niveau nécessaire") : v_diagnostic_events expose maintenant AUSSI
+        // log_bus_event en 3e branche UNION. Avant ce fix, log_bus_event persistait déjà
+        // CHAQUE événement LogBus (dont [RSM-ABANDON] et les nouveaux LogBus.err() ajoutés
+        // cette session), mais restait invisible en Support car v_diagnostic_events
+        // n'incluait que delivery_event (ticket-scoped) et api_trace (attempt_id nullable,
+        // mais toujours API only). Erreurs d'infrastructure pré-ticket (session/transport,
+        // ex. getOrCreateLocked) n'avaient donc structurellement aucun endroit où vivre en
+        // Support — pas un oubli isolé, une vraie lacune de conception. DROP+CREATE d'une
+        // vue est toujours sans risque de perte de données.
+        if (oldVersion < 21) {
             createDiagnosticEventsView(db);
         }
     }
@@ -471,6 +484,40 @@ public class DeliveryDb extends SQLiteOpenHelper {
             "  NULL                 AS result_json, " +
             "  NULL                 AS error_json " +
             "FROM api_trace t " +
+            "UNION ALL " +
+            // ✅ v21 (demande Paul, 4 août 2026) — 3e branche : log_bus_event.
+            // Couvre les erreurs d'infrastructure pré-ticket (session/transport,
+            // ex. [RSM-ABANDON], opGetField80) qui n'ont ni attempt_id ni
+            // ticket_no au moment où elles se produisent — seul le node est
+            // connu. Niveau dérivé du contenu du message (LogBus n'a pas de
+            // champ level natif) : ERROR si préfixé "[ERR]" (format exact de
+            // LogBus.err()), WARN si le message signale une alerte/un abandon
+            // explicite (⚠, ABANDON, BLOQUÉ, échoué/échec), sinon INFO —
+            // pour que la couche Support distingue vraiment les niveaux au
+            // lieu de tout aplatir en INFO.
+            "SELECT " +
+            "  b.id                 AS event_id, " +
+            "  NULL                 AS attempt_id, " +
+            "  b.ts, " +
+            "  NULL                 AS serial_id, " +
+            "  NULL                 AS ticket_no, " +
+            "  NULL                 AS job_id, " +
+            "  'LOG_BUS'             AS attempt_source, " +
+            "  CASE " +
+            "    WHEN b.msg LIKE '[ERR]%' THEN 'ERROR' " +
+            "    WHEN b.msg LIKE '%⚠%' OR b.msg LIKE '%ABANDON%' OR b.msg LIKE '%BLOQUÉ%' " +
+            "         OR b.msg LIKE '%échoué%' OR b.msg LIKE '%échec%' THEN 'WARN' " +
+            "    ELSE 'INFO' " +
+            "  END                  AS level, " +
+            "  'LOG_BUS'             AS event_type, " +
+            "  b.src                 AS event_code, " +
+            "  ('LogBus(node=' || b.node || ')') AS event_where, " +
+            "  b.msg                 AS detail_short, " +
+            "  NULL                 AS data_json, " +
+            "  NULL                 AS last_state, " +
+            "  NULL                 AS result_json, " +
+            "  NULL                 AS error_json " +
+            "FROM log_bus_event b " +
             "ORDER BY ts;"
         );
     }
