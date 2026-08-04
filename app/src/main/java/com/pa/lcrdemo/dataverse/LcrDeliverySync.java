@@ -93,7 +93,21 @@ public class LcrDeliverySync {
     }
 
     public static void pushPending(Context ctx, String accessToken) throws Exception {
+        // ✅ FIX (4 août 2026) — même classe de bug que les 14 fuites corrigées le
+        // 24 juillet dans RegisterTabFragment.java (SQLiteConnectionPool
+        // exhaustion) : cette connexion n'était JAMAIS fermée. Particulièrement
+        // grave ici car pushPending() tourne maintenant sur le cycle périodique
+        // du worker (toutes les 15 min, depuis le fix du 3 août qui l'a enfin
+        // raccroché) — donc une fuite à CHAQUE cycle, indéfiniment.
         LcrDeliveryStatusDb db = new LcrDeliveryStatusDb(ctx);
+        try {
+            pushPendingInternal(ctx, accessToken, db);
+        } finally {
+            try { db.close(); } catch (Exception ignored) {}
+        }
+    }
+
+    private static void pushPendingInternal(Context ctx, String accessToken, LcrDeliveryStatusDb db) throws Exception {
         List<DeliveryRow> pending = db.getPendingDeliveries();
 
         if (pending.isEmpty()) {
@@ -340,7 +354,14 @@ public class LcrDeliverySync {
                 notes.add(cv);
             }
 
-            new LcrDeliveryStatusDb(ctx).replaceAllNotes(notes);
+            // ✅ FIX (4 août 2026) — même bug : instance jetée sans jamais être
+            // fermée. Impossible à fermer tant qu'elle n'est pas assignée.
+            LcrDeliveryStatusDb notesDb = new LcrDeliveryStatusDb(ctx);
+            try {
+                notesDb.replaceAllNotes(notes);
+            } finally {
+                try { notesDb.close(); } catch (Exception ignored) {}
+            }
             Log.i(TAG, "syncNotes: " + notes.size() + " note(s) synchronisée(s)");
 
         } finally {
