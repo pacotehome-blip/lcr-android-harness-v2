@@ -1064,7 +1064,50 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                 d.put("vid", dev.getVendorId());
                 d.put("pid", dev.getProductId());
                 d.put("deviceName", dev.getDeviceName());
-                return ApiResult.fail("Open/Ping USB: 0 - Permission requise (accorde USB une fois via UI).", "ERR_USB_PERMISSION_REQUIRED", d);
+                // ✅ FIX (4 août 2026, demande Paul — "USB arrive de deeplink,
+                // le média est off, Configure dit média pas disponible, TROUVE
+                // LE TROU") — trouvé : avant ce fix, cette méthode se contentait
+                // de CONSTATER l'absence de permission USB et échouait,
+                // silencieusement pour l'appelant auto-connect
+                // (listCandidateTransportKeysForAutoConnect ignore le résultat
+                // de retour). Aucune re-demande de permission n'était
+                // déclenchée. Scénario exact : câble USB déjà branché avant que
+                // l'app (re)démarre, ou permission jamais accordée — dans ce
+                // cas, UsbReceiver.handleAttach() (qui demande la permission)
+                // ne se redéclenche JAMAIS, puisque ACTION_USB_DEVICE_ATTACHED
+                // ne refire pas pour un appareil déjà branché. Résultat :
+                // aucun chemin du code ne redemandait jamais la permission tant
+                // que le câble n'était pas physiquement débranché/rebranché.
+                // Ici : demande la permission activement (même flux que
+                // UsbReceiver.handleAttach(), compat Android 9-15) — le
+                // dialogue système apparaîtra, et une fois accordée,
+                // l'utilisateur (ou un prochain scan auto) pourra réessayer.
+                // Aussi élevé vers LogBus/Support — avant ce fix, ce cas précis
+                // n'était visible NULLE PART, ni logcat ni Support.
+                try {
+                    int flags;
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                        flags = android.app.PendingIntent.FLAG_UPDATE_CURRENT
+                              | android.app.PendingIntent.FLAG_MUTABLE
+                              | android.app.PendingIntent.FLAG_ALLOW_UNSAFE_IMPLICIT_INTENT;
+                    } else {
+                        flags = android.app.PendingIntent.FLAG_UPDATE_CURRENT
+                              | android.app.PendingIntent.FLAG_MUTABLE;
+                    }
+                    Intent permIntent = new Intent(UsbReceiver.ACTION_USB_PERMISSION);
+                    permIntent.setPackage(appCtx.getPackageName());
+                    android.app.PendingIntent pi = android.app.PendingIntent.getBroadcast(
+                        appCtx, 0, permIntent, flags);
+                    usbManager.requestPermission(dev, pi);
+                    com.pa.lcr.lcp.log.LogBus.api(-1, "[USB-PERMISSION] Permission manquante pour vid="
+                        + dev.getVendorId() + " pid=" + dev.getProductId() + " — redemandée activement "
+                        + "(dialogue système attendu). Cause probable : câble déjà branché avant "
+                        + "(re)démarrage de l'app, ou permission jamais accordée.");
+                } catch (Exception permEx) {
+                    com.pa.lcr.lcp.log.LogBus.err(-1,
+                        "MultiRegisterApiFacadeImpl.api_openPingUsb.requestPermission", permEx);
+                }
+                return ApiResult.fail("Open/Ping USB: 0 - Permission requise (redemandée — accepter le dialogue système).", "ERR_USB_PERMISSION_REQUIRED", d);
             }
             UsbSerialDriver driver = UsbSerialProber.getDefaultProber().probeDevice(dev);
             if (driver == null || driver.getPorts() == null || driver.getPorts().isEmpty()) {
