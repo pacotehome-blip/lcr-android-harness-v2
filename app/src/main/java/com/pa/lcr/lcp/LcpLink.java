@@ -179,6 +179,125 @@ public class LcpLink {
         }
     }
 
+    // =========================================================================
+    // ✅ (4 août 2026, demande Paul) — décodage bit par bit du "Machine Code
+    // Byte" (devStatus), documenté page 59 de "LCR LCP API Internal Messages"
+    // (Liquid Controls, Rev. L, ©1998-2018). Non documenté nulle part dans le
+    // code avant ce fix — devStatus n'était que passé brut (dev=0x%02X). Placé
+    // ici (LcpLink, pas DeliveryController) car le format du byte est défini
+    // par le protocole LCP générique lui-même (message "Get Machine Status" /
+    // 0x23, universel SR200 → SR1000, pas spécifique LCR-II) — donc hérité
+    // automatiquement par Lc3Link et tout futur type de registre qui étend
+    // LcpLink, sans duplication.
+    //
+    // Structure du byte (page 59) :
+    //   bits 0-2 (masque 0x07) — position du switch (rouge) :
+    //     0x00 = entre deux positions · 0x01 = RUN · 0x02 = STOP
+    //     0x03 = PRINT · 0x04 = SHIFT-PRINT · 0x05 = CALIBRATE
+    //     0x07 = statut réel indisponible (ex. réponse à un message broadcast)
+    //   bit 3 (masque 0x08) — imprimante RS-232 en cours d'impression
+    //   bits 4-6 (masque 0x70) — état machine :
+    //     0x00 = RUN (livraison démarrée, flux actif)
+    //     0x10 = STOP (livraison démarrée, flux inactif)
+    //     0x20 = END DELIVERY (aucune livraison, aucun flux)
+    //     0x30 = AUXILIARY · 0x40 = SHIFT · 0x50 = CALIBRATE
+    //     0x60 = WAIT FOR NO FLOW (arrêt demandé, flux pas encore confirmé stoppé)
+    //   bit 7 (masque 0x80) — erreur détectée (vérifier delivery/printer/hw status)
+    //
+    // ⚠️ Note fabricant : "0x?0 — switch entre deux positions" et le "0x07"
+    // listé deux fois (à la fois comme masque et comme valeur "indisponible")
+    // sont ambigus dans le document source — retranscrits tels quels, pas
+    // d'invention de notre part. Croisé et confirmé avec le SDK Android
+    // officiel Liquid Controls (Android_SDK_Documentation, objet DevStatus,
+    // p.22-23) : switch=6 = "Not used", confirmé aussi que ce même
+    // découpage (errorBit/stateBits/printerBit/switchBits) est la source de
+    // vérité officielle, pas une interprétation de notre part.
+    public static final int DEV_SWITCH_MASK          = 0x07;
+    public static final int DEV_SWITCH_RUN           = 0x01;
+    public static final int DEV_SWITCH_STOP          = 0x02;
+    public static final int DEV_SWITCH_PRINT         = 0x03;
+    public static final int DEV_SWITCH_SHIFT_PRINT   = 0x04;
+    public static final int DEV_SWITCH_CALIBRATE     = 0x05;
+    public static final int DEV_SWITCH_UNAVAILABLE   = 0x07;
+
+    public static final int DEV_PRINTER_PRINTING     = 0x08;
+
+    public static final int DEV_STATE_MASK           = 0x70;
+    public static final int DEV_STATE_RUN            = 0x00;
+    public static final int DEV_STATE_STOP           = 0x10;
+    public static final int DEV_STATE_END_DELIVERY   = 0x20;
+    public static final int DEV_STATE_AUXILIARY      = 0x30;
+    public static final int DEV_STATE_SHIFT          = 0x40;
+    public static final int DEV_STATE_CALIBRATE      = 0x50;
+    public static final int DEV_STATE_WAIT_NO_FLOW   = 0x60;
+
+    public static final int DEV_ERROR_FLAG           = 0x80;
+
+    /** Instantané décodé et lisible d'un devStatus brut. */
+    public static final class DeviceStatusDecoded {
+        public final int rawValue;
+        public final int switchPositionCode;
+        public final String switchPositionName;
+        public final int machineStateCode;
+        public final String machineStateName;
+        public final boolean printerPrinting;
+        public final boolean errorFlag;
+
+        DeviceStatusDecoded(int rawValue, int switchPositionCode, String switchPositionName,
+                             int machineStateCode, String machineStateName,
+                             boolean printerPrinting, boolean errorFlag) {
+            this.rawValue = rawValue;
+            this.switchPositionCode = switchPositionCode;
+            this.switchPositionName = switchPositionName;
+            this.machineStateCode = machineStateCode;
+            this.machineStateName = machineStateName;
+            this.printerPrinting = printerPrinting;
+            this.errorFlag = errorFlag;
+        }
+
+        @Override public String toString() {
+            return String.format(java.util.Locale.ROOT,
+                "dev=0x%02X [switch=%s state=%s printer=%s error=%s]",
+                rawValue, switchPositionName, machineStateName,
+                printerPrinting ? "PRINTING" : "idle", errorFlag ? "OUI" : "non");
+        }
+    }
+
+    public static DeviceStatusDecoded decodeDeviceStatus(int devStatus) {
+        int sw = devStatus & DEV_SWITCH_MASK;
+        String swName;
+        switch (sw) {
+            case DEV_SWITCH_RUN:         swName = "RUN"; break;
+            case DEV_SWITCH_STOP:        swName = "STOP"; break;
+            case DEV_SWITCH_PRINT:       swName = "PRINT"; break;
+            case DEV_SWITCH_SHIFT_PRINT: swName = "SHIFT_PRINT"; break;
+            case DEV_SWITCH_CALIBRATE:   swName = "CALIBRATE"; break;
+            case DEV_SWITCH_UNAVAILABLE: swName = "INDISPONIBLE"; break;
+            case 0x00:                   swName = "ENTRE_DEUX_POSITIONS"; break;
+            case 0x06:                   swName = "NON_UTILISE"; break;
+            default:                     swName = "INCONNU(0x" + Integer.toHexString(sw) + ")";
+        }
+
+        int st = devStatus & DEV_STATE_MASK;
+        String stName;
+        switch (st) {
+            case DEV_STATE_RUN:          stName = "RUN (livraison+flux actifs)"; break;
+            case DEV_STATE_STOP:         stName = "STOP (livraison active, flux inactif)"; break;
+            case DEV_STATE_END_DELIVERY: stName = "END_DELIVERY (inactif)"; break;
+            case DEV_STATE_AUXILIARY:    stName = "AUXILIARY"; break;
+            case DEV_STATE_SHIFT:        stName = "SHIFT"; break;
+            case DEV_STATE_CALIBRATE:    stName = "CALIBRATE"; break;
+            case DEV_STATE_WAIT_NO_FLOW: stName = "WAIT_NO_FLOW (arrêt demandé)"; break;
+            default:                     stName = "INCONNU(0x" + Integer.toHexString(st) + ")";
+        }
+
+        boolean printing = (devStatus & DEV_PRINTER_PRINTING) != 0;
+        boolean error    = (devStatus & DEV_ERROR_FLAG) != 0;
+
+        return new DeviceStatusDecoded(devStatus, sw, swName, st, stName, printing, error);
+    }
+    // =========================================================================
+
     public interface ScanProgressCallback {
         void onProduct(String message);
     }

@@ -632,6 +632,10 @@ private void reproEvent(String level, String type, String message, JSONObject da
         volatile boolean done = false;
         volatile String state; // PENDING/RUNNING/DONE/ERROR
         volatile String err;
+        // ✅ (4 août 2026) — dernier pause_reason déjà loggué, pour n'émettre
+        // un événement visible que sur CHANGEMENT (le poll tourne toutes les
+        // ~100-900ms — logguer à chaque poll serait du bruit pur).
+        volatile String lastLoggedPauseReason;
 
         // trace attempt id (SQLite)
         volatile long attemptId = 0L;
@@ -1039,11 +1043,36 @@ FullStatus fs = readFullStatus("status/full");
 
 
                 // keep last known dev/prn for B+ tick bus
+                final int prevDevStatusKnown = lastDevStatusKnown;
                 lastDevStatusKnown = fs.devStatus;
                 lastPrnStatusKnown = fs.prnStatus;
 
-                emitLog(String.format("[STATUS] dev=0x%02X prn=0x%02X ds=0x%04X dc=0x%04X",
-                        fs.devStatus, fs.prnStatus, fs.delStatus, fs.delCode));
+                // ✅ FIX (4 août 2026, demande Paul) — décodé maintenant via
+                // LcpLink.decodeDeviceStatus() (doc protocole officielle,
+                // page 59 "Machine Code Bits") au lieu de rester un octet brut
+                // opaque. Ce qui semblait une fluctuation suspecte
+                // (0x21→0x01→0x61) est en réalité un comportement NORMAL :
+                // switch=RUN à chaque fois, seul l'état machine change
+                // légitimement (END_DELIVERY → RUN → WAIT_NO_FLOW) au fil
+                // d'une vraie livraison.
+                LcpLink.DeviceStatusDecoded devDecoded = LcpLink.decodeDeviceStatus(fs.devStatus);
+                emitLog(String.format("[STATUS] %s prn=0x%02X ds=0x%04X dc=0x%04X",
+                        devDecoded, fs.prnStatus, fs.delStatus, fs.delCode));
+
+                // ✅ (4 août 2026, demande Paul) — un changement de devStatus pendant
+                // une fenêtre affichée comme stable (ex. RUNNING_FLOWING continu)
+                // n'était visible qu'en comparant manuellement des lignes [STATUS]
+                // une par une dans le log brut — rien ne le signalait comme
+                // événement distinct dans Support/LogBus. Élevé ici en événement
+                // explicite dès que la valeur change, avec le décodage lisible —
+                // un changement d'état machine légitime (ex. RUN→WAIT_NO_FLOW) se
+                // distingue maintenant clairement d'une vraie anomalie.
+                if (prevDevStatusKnown >= 0 && prevDevStatusKnown != fs.devStatus) {
+                    LcpLink.DeviceStatusDecoded prevDecoded = LcpLink.decodeDeviceStatus(prevDevStatusKnown);
+                    com.pa.lcr.lcp.log.LogBus.api((link != null) ? (link.getHostAddr() & 0xFF) : -1,
+                        String.format("[DEV-STATUS-CHANGE] %s → %s (état contrôleur=%s)",
+                            prevDecoded, devDecoded, state != null ? state.name() : "?"));
+                }
 
                 ensureDigits();
                 double scale = Math.pow(10, cachedDigits);
@@ -2926,11 +2955,28 @@ job.presetNetL_requested = presetNetL;
             // Auxiliary+Print (opDiagnosticReset) remet vraiment le compteur à zéro,
             // ou est-ce l'armement d'une nouvelle livraison qui le fait tout seul,
             // ou ni l'un ni l'autre (livraison démarrerait encore avec un résidu) ?
+            //
+            // ✅ RÉPONSE CONFIRMÉE (4 août 2026, analyse logs terrain + BD) — un
+            // forçage de reset avait été ajouté ici sur l'hypothèse qu'une
+            // lecture non nulle à ce point = résidu de la livraison précédente
+            // qui contaminerait celle-ci. Analyse complète des BD (net/gross
+            // réellement poussés vs lus ici) a INFIRMÉ cette hypothèse : à
+            // chaque livraison, la valeur finale poussée était TOUJOURS plus
+            // basse que cette lecture pré-CMD_RUN (ex. lu=26.8 → poussé=6.7 ;
+            // lu=11.7 → poussé=9.9) — impossible pour un compteur qui
+            // accumulerait vraiment. Le registre remet bel et bien le compteur
+            // à zéro lui-même au moment réel de CMD_RUN ; cette lecture ici
+            // n'est qu'un instantané transitoire pris un instant trop tôt
+            // (entre l'écriture du preset et l'envoi de CMD_RUN), pas un
+            // résidu réel. Le forçage de reset a été retiré — il risquait
+            // d'interférer avec la séquence de reset naturelle du registre
+            // sans corriger un problème qui n'existait pas. Conservé en
+            // lecture seule pour diagnostic futur si besoin.
             try {
                 double[] postArmNg = readNetGrossL();
                 emitLog("[VERIF-ARMED] net/gross après armement (avant CMD_RUN): net="
                     + postArmNg[0] + " gross=" + postArmNg[1]
-                    + " (0 attendu si le reset a fonctionné ou si l'armement le fait naturellement)");
+                    + " (lecture transitoire — le registre se remet à zéro lui-même à CMD_RUN, voir note ci-dessus)");
             } catch (Exception e) {
                 emitLog("[VERIF-ARMED] lecture ERR (non bloquant): " + e.getMessage());
             }
@@ -3425,6 +3471,19 @@ if (deliveryActive && !job.baselineCaptured) {
                         pauseReason = "FLOW_OFF_CONFIRMING";
                     }
                 }
+            }
+
+            // ✅ (4 août 2026, demande Paul) — pause_reason (dont WAIT_FLOW_ON,
+            // l'état "armé mais aucun flux réel encore") n'existait QUE dans le
+            // JSON retourné à chaque poll — invisible dans Support/LogBus, donc
+            // impossible à confirmer après coup depuis un log texte. Émis
+            // maintenant comme événement visible, uniquement au changement
+            // (pas à chaque poll, pour éviter le bruit).
+            if (!java.util.Objects.equals(pauseReason, job.lastLoggedPauseReason)) {
+                job.lastLoggedPauseReason = pauseReason;
+                com.pa.lcr.lcp.log.LogBus.api((link != null) ? (link.getHostAddr() & 0xFF) : -1,
+                    "[PAUSE-REASON] " + (pauseReason == null ? "(aucune — flux actif)" : pauseReason)
+                        + " — ticket=" + job.ticketNo + " jobId=" + job.id);
             }
 
             JSONObject data = new JSONObject();
