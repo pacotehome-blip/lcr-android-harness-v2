@@ -55,6 +55,17 @@ public class LcrHttpService extends Service {
     private volatile boolean httpRunning = false;
     private static final int HTTP_PORT = 8766;
 
+    // ✅ État réel exposé statiquement — permet à MainActivity (onglet API)
+    // d'afficher le statut du VRAI service permanent, au lieu d'une instance
+    // locale séparée. isApiRunning() était un stub retournant toujours false
+    // avant ce fix (3 août 2026).
+    private static volatile boolean sHttpsRunning = false;
+    private static volatile boolean sHttpRunning = false;
+
+    public static boolean isHttpRunning() { return sHttpRunning; }
+    public static int getApiPort() { return API_PORT; }
+    public static int getHttpPort() { return HTTP_PORT; }
+
     // Dernier résultat livraison — écrit par DeepLinkHandler
     public static volatile String lastResultJson = null;
 
@@ -159,8 +170,10 @@ public class LcrHttpService extends Service {
                 apiServer = new com.pa.lcr.lcp.ApiServer(
                     facade, line -> Log.d(TAG, line), API_PORT, this);
                 apiServer.start();
+                sHttpsRunning = true;
                 Log.i(TAG, "ApiServer HTTPS démarré port " + API_PORT);
             } catch (Exception e) {
+                sHttpsRunning = false;
                 Log.e(TAG, "ApiServer HTTPS FAIL: " + e.getMessage());
             }
         }
@@ -178,11 +191,14 @@ public class LcrHttpService extends Service {
         } catch (Exception ignored) {
         } finally {
             apiServer = null;
+            sHttpsRunning = false;
         }
         stopHttpServer();
     }
 
-    public static boolean isApiRunning() { return false; }
+    // ✅ FIX 3 août 2026 : ce stub retournait toujours false, donc l'onglet
+    // API ne pouvait jamais refléter le vrai état du service permanent.
+    public static boolean isApiRunning() { return sHttpsRunning; }
 
     // =========================================================
     // HTTP 8766 — sans SSL
@@ -196,6 +212,7 @@ public class LcrHttpService extends Service {
             try {
                 httpServerSocket = new java.net.ServerSocket(
                     HTTP_PORT, 50, java.net.InetAddress.getByName("127.0.0.1"));
+                sHttpRunning = true;
                 Log.i(TAG, "Serveur HTTP démarré port " + HTTP_PORT);
                 while (httpRunning) {
                     try {
@@ -207,12 +224,15 @@ public class LcrHttpService extends Service {
                 }
             } catch (Exception e) {
                 Log.e(TAG, "HTTP server FAIL: " + e.getMessage());
+            } finally {
+                sHttpRunning = false;
             }
         });
     }
 
     private void stopHttpServer() {
         httpRunning = false;
+        sHttpRunning = false;
         try { if (httpServerSocket != null) httpServerSocket.close(); } catch (Exception ignored) {}
         try { if (httpExecutor != null) httpExecutor.shutdownNow(); } catch (Exception ignored) {}
     }

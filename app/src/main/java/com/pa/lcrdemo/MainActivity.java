@@ -196,6 +196,9 @@ public class MainActivity extends AppCompatActivity {
 
     // ===== API runtime =====
     private static final int API_PORT = 8765;
+    // ⚠️ LEGACY — non utilisé (aucun appelant de getApiServer()). Le vrai
+    // ApiServer actif tourne dans LcrHttpService. Conservé le temps du
+    // retrait complet du bouton API legacy.
     private ApiServer apiServer;
     public ApiServer getApiServer() { return apiServer; }
     private DeliveryLogStore deliveryStore;
@@ -951,8 +954,10 @@ tabRegisters = findViewById(R.id.tabRegisters);
         txtBtSerial2 = findViewById(R.id.txtBtSerial2);
         btnBtConnect1 = findViewById(R.id.btnBtConnect1);
         btnBtConnect2 = findViewById(R.id.btnBtConnect2);
+        // ✅ Valeur initiale posée ici ; refreshApiStatus() (appelée dans
+        // onCreate()) écrase ensuite avec l'état réel de LcrHttpService.
         if (txtApiUrl != null) {
-            txtApiUrl.setText("https://127.0.0.1:" + API_PORT);
+            txtApiUrl.setText("https://127.0.0.1:" + LcrHttpService.getApiPort());
         }
     }
 
@@ -3632,25 +3637,17 @@ private void scanUsb() {
     // =========================
     // API Server
     // =========================
+    // ⚠️ LEGACY — 3 août 2026 : cette instance locale d'ApiServer, créée par
+    // ce bouton, était SÉPARÉE du vrai service permanent LcrHttpService
+    // (démarré au onCreate() / au boot). Le statut/URL affiché dans l'onglet
+    // API reflétait ce doublon (souvent en conflit de port 8765) et non le
+    // service réellement actif en continu sur le camion.
+    // Neutralisé volontairement (no-op) — à retirer complètement plus tard.
+    // Le statut réel est maintenant lu directement depuis LcrHttpService
+    // (voir refreshApiStatus()).
     private void startApiServer() {
-        if (apiServer != null && apiServer.isRunning()) {
-            logApi(null, "[API] déjà RUNNING");
-            refreshApiStatus();
-            return;
-        }
-        try {
-            ApiFacade facade = new MultiRegisterApiFacadeImpl(this);
-            apiServer = new ApiServer(facade, this::onApiLine, API_PORT, this);
-            apiServer.start();
-            refreshApiStatus();
-            toast("API démarrée (127.0.0.1:" + API_PORT + ")");
-            // ✅ TEST SSL — auto-ping après démarrage
-            testSslPing();
-        } catch (Exception e) {
-            logApi(null, "[API] START FAIL: " + safeMsg(e));
-            refreshApiStatus();
-            toast("API start error: " + safeMsg(e));
-        }
+        logApi(null, "[API] Bouton legacy désactivé — le service réel LcrHttpService tourne déjà en continu");
+        refreshApiStatus();
     }
 
     // ✅ Quit — bouton header (haut droit). Confirme avant de fermer car
@@ -3691,17 +3688,15 @@ private void scanUsb() {
         ui.postDelayed(() -> android.os.Process.killProcess(android.os.Process.myPid()), 300);
     }
 
+    // ⚠️ LEGACY — voir startApiServer(). Ne touche plus à l'instance locale
+    // apiServer (conservée nulle). quitApp() continue d'appeler cette méthode
+    // par sécurité mais elle est désormais un no-op sur le plan fonctionnel ;
+    // l'arrêt réel du service se fait via stopService(LcrHttpService) ailleurs
+    // dans quitApp().
     private void stopApiServer(String reason) {
-        try {
-            if (apiServer != null && apiServer.isRunning()) {
-                apiServer.stop();
-                logApi(null, "[API] STOP (" + reason + ")");
-            }
-        } catch (Exception ignored) {
-        } finally {
-            apiServer = null;
-            refreshApiStatus();
-        }
+        logApi(null, "[API] Bouton/appel legacy STOP (" + reason + ") — no-op, voir LcrHttpService");
+        apiServer = null;
+        refreshApiStatus();
     }
 
     // ✅ TEST SSL — appel HttpsURLConnection interne vers notre propre serveur
@@ -3752,12 +3747,19 @@ private void scanUsb() {
         }).start();
     }
 
+    // ✅ FIX 3 août 2026 : reflète le VRAI service HTTPS permanent
+    // (LcrHttpService), pas l'ancienne instance locale apiServer (legacy).
     private void refreshApiStatus() {
         if (txtApiStatus == null) return;
-        boolean running = (apiServer != null && apiServer.isRunning());
-        txtApiStatus.setText("Status: " + (running ? "RUNNING (loopback only)" : "STOPPED"));
-        if (btnApiStart != null) btnApiStart.setEnabled(!running);
-        if (btnApiStop != null) btnApiStop.setEnabled(running);
+        boolean httpsRunning = LcrHttpService.isApiRunning();
+        txtApiStatus.setText("Status: " + (httpsRunning ? "RUNNING (service permanent)" : "STOPPED"));
+        if (txtApiUrl != null) {
+            txtApiUrl.setText("https://127.0.0.1:" + LcrHttpService.getApiPort());
+        }
+        // Boutons legacy — désactivés en permanence, le service tourne déjà
+        // seul en continu. Conservés visuellement pour l'instant (à retirer).
+        if (btnApiStart != null) btnApiStart.setEnabled(false);
+        if (btnApiStop != null) btnApiStop.setEnabled(false);
     }
 
     private void onApiLine(String line) {
