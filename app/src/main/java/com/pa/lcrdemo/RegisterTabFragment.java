@@ -1774,6 +1774,34 @@ public class RegisterTabFragment extends Fragment {
             try { MediaTransportManager.get(requireContext()).activateExclusive(tkPinned, "TAB_CONNECT"); } catch (Exception ignored) {}
             TransportIo io = null;
             try { io = MediaTransportManager.get(requireContext()).getByKey(tkPinned); } catch (Exception ignored) {}
+            // ✅ FIX (4 août 2026, demande Paul — "j'arrive de fieldservice...
+            // ça capote et ne trouve pas le registre... je débranche/rebranche
+            // le câble, ça marche") — confirmé par logcat : ce chemin se
+            // contentait d'activateExclusive(), qui ne fait que MARQUER un
+            // transport déjà ouvert comme actif — il n'ouvre jamais
+            // physiquement le port. Un rebranchement manuel déclenche
+            // ACTION_USB_DEVICE_ATTACHED → permission → scan → ouverture
+            // réelle (tout ce chemin OS). L'arrivée deep link, elle, ne
+            // déclenche RIEN de tout ça si le câble était déjà branché avant
+            // — donc io=null, "transport pinné fermé", abandon direct vers
+            // diagnostic, sans jamais avoir tenté une vraie ouverture. Ici :
+            // avant d'abandonner, tenter une ouverture active via la même
+            // méthode que le point d'entrée unifié (api_openPingUsb / BT
+            // activate), puis revérifier — pas de nouveau chemin séparé,
+            // réutilise ce qui existe déjà.
+            if (io == null || !io.isOpen()) {
+                try {
+                    com.pa.lcr.lcp.MultiRegisterApiFacadeImpl facadeOpen =
+                        new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(requireActivity());
+                    if (tkPinned.toUpperCase(java.util.Locale.ROOT).startsWith("USB")) {
+                        facadeOpen.api_openPingUsb();
+                    } else if (tkPinned.toUpperCase(java.util.Locale.ROOT).startsWith("BT:")) {
+                        facadeOpen.api_btActivate();
+                    }
+                } catch (Exception ignored) {}
+                try { MediaTransportManager.get(requireContext()).activateExclusive(tkPinned, "TAB_CONNECT_RETRY"); } catch (Exception ignored) {}
+                try { io = MediaTransportManager.get(requireContext()).getByKey(tkPinned); } catch (Exception ignored) {}
+            }
             if (io == null || !io.isOpen()) {
                 tabMediaReady = false;
                 pendingReconnect = true;
