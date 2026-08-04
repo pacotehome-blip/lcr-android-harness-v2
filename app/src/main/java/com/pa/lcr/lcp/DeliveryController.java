@@ -857,7 +857,15 @@ private void reproEvent(String level, String type, String message, JSONObject da
             if (isStopped()) return;
             setState(DeliveryState.CONNECTED);
  // Auto close delivery for END path
- try { onDeliveryFinishedIfNeeded("END"); } catch (Exception ignored) {}
+ // ✅ (4 août 2026, demande Paul) — instrumenté : si ça échoue silencieusement,
+ // le déclenchement auto du backup/push (fix 3 août) ne se lance jamais —
+ // exactement la classe de bug du ticket 10909 (échec total, aucune trace).
+ try { onDeliveryFinishedIfNeeded("END"); }
+ catch (Exception e) {
+     com.pa.lcr.lcp.log.LogBus.err(
+         (link != null) ? (link.getHostAddr() & 0xFF) : -1,
+         "DeliveryController.initialize", e);
+ }
 
             emitLog("LCP pret (sans refresh automatique)");
             if (listener != null) listener.onLiveStatus("LIVE: CONNECTED - (pret)");
@@ -3847,7 +3855,16 @@ private String resolveActiveMedia() {
              if (listener != null) listener.onDeliveryFinished(fSerialId, fTicketNo, fSaleNo, fNetL, fGrossL);
          } catch (Exception ignored) {}
 
-     } catch (Exception ignored) {
+     } catch (Exception e) {
+         // ✅ FIX (4 août 2026, demande Paul) — LE point le plus critique de tout
+         // le fichier : c'était le catch englobant de la méthode ENTIÈRE qui
+         // déclenche le backup/push automatique (fix 3 août). Un échec ici,
+         // avant même d'atteindre listener.onDeliveryFinished(), signifiait
+         // AUCUNE trace nulle part — exactement le mécanisme qui a rendu le
+         // ticket 10909 indiagnosticable avant sa correction.
+         com.pa.lcr.lcp.log.LogBus.err(
+             (link != null) ? (link.getHostAddr() & 0xFF) : -1,
+             "DeliveryController.onDeliveryFinishedIfNeeded[" + reason + "]", e);
      } finally {
          currentDeliveryAttemptId = null;
      }

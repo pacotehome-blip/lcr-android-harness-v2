@@ -1,4 +1,3 @@
-
 package com.pa.lcr.lcp.log;
 
 import java.text.SimpleDateFormat;
@@ -77,6 +76,29 @@ public final class LogBus {
 
     public static void ioRx(int node, String msg) {
         emit(node, Src.IO_RX, msg);
+    }
+
+    // ✅ (4 août 2026, demande Paul) — les 662 catch(Exception ignored){} du
+    // projet ne laissaient AUCUNE trace diagnosticable, ni dans LogBus (buffer
+    // mémoire, perdu au redémarrage, invisible sans l'onglet log ouvert), ni
+    // dans logcat (aucun appel android.util.Log dans ce fichier avant ce fix).
+    // C'est exactement la classe de trou qui a rendu le ticket 10909
+    // indiagnosticable (échec total, aucune trace nulle part). Ce nouvel
+    // emitter écrit dans LES DEUX à la fois : logcat (survit même sans capture
+    // en direct via un futur pull de logs) + LogBus (visible immédiatement
+    // dans l'app). Usage : LogBus.err(node, "TAG", e) dans un catch au lieu de
+    // catch (Exception ignored) {}.
+    public static void err(int node, String tag, Throwable e) {
+        String msg = (e != null)
+            ? (e.getClass().getSimpleName() + ": " + e.getMessage())
+            : "erreur inconnue";
+        try { android.util.Log.e(tag, msg, e); } catch (Exception ignored) {}
+        emit(node, Src.API, "[ERR][" + tag + "] " + msg);
+    }
+
+    /** Surcharge sans tag — utilise le nom de la classe appelante par défaut. */
+    public static void err(int node, Throwable e) {
+        err(node, "LCR", e);
     }
 
     public static synchronized void emit(int node, Src src, String msg) {
