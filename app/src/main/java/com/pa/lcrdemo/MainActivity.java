@@ -4930,9 +4930,81 @@ private void ensureActiveTransport(String transportKey, String reason) {
                         }
                     }
                 }
+
+                if (!"TAB_SWITCH".equals(reason) && !isTransportSwitchSafe(transportKey.trim(), reason)) {
+                    return;
+                }
+
                 mediaTransportManager.activateExclusive(transportKey.trim(), (reason != null ? reason : "UI"));
             }
         } catch (Exception ignored) {}
+    }
+
+    // ✅ FIX (4 août 2026, demande Paul) — "on ne doit jamais oublier l'arrivée
+    // du deeplink peu importe le transport trouvé". Cette garde vivait
+    // uniquement dans ensureActiveTransport() — mais DeepLinkHandler appelle
+    // AUSSI mediaTransportManager.activateExclusive() DIRECTEMENT plus loin
+    // dans son flux (juste avant le oneshot start, raison
+    // "DEEPLINK_ONESHOT"), contournant complètement ce garde. Extrait ici en
+    // méthode publique réutilisable par MainActivity (ensureActiveTransport)
+    // ET par DeepLinkHandler, pour qu'AUCUN chemin d'activation de transport
+    // ne puisse contourner la règle — peu importe le média (BT/USB/TCP) et
+    // peu importe le point d'entrée (USB branché, BT connecté, deep link,
+    // oneshot start).
+    //
+    // Retourne false si une livraison est active sur le transport actuel ET
+    // que le nouveau transport ne correspond pas au même registre (node+
+    // #série) — dans ce cas, l'appelant ne doit PAS voler l'exclusivité.
+    public boolean isTransportSwitchSafe(String newTransportKey, String reason) {
+        try {
+            if (newTransportKey == null || newTransportKey.trim().isEmpty()) return true;
+            if (mediaTransportManager == null) mediaTransportManager = MediaTransportManager.get(this);
+            if (mediaTransportManager == null) return true;
+
+            String activeKeyBefore = mediaTransportManager.getActiveKey();
+            String tkNew = newTransportKey.trim();
+            if (activeKeyBefore == null || activeKeyBefore.equalsIgnoreCase(tkNew)) return true;
+
+            for (TabSpec spec : tabsByKey.values()) {
+                if (spec == null || spec.transportKey == null) continue;
+                if (!activeKeyBefore.equalsIgnoreCase(spec.transportKey)) continue;
+                com.pa.lcr.lcp.DeliveryController dcActive =
+                    com.pa.lcr.lcp.RegisterSessionManager.get(this)
+                        .getController(spec.transportKey, spec.node);
+                if (dcActive == null) continue;
+                com.pa.lcr.lcp.DeliveryState st = dcActive.getState();
+                boolean deliveryRunning = st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
+                        || st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED;
+                if (!deliveryRunning) continue;
+
+                // Livraison active trouvée sur l'ancien transport actif.
+                // Le nouveau transport a-t-il le même node+#série ?
+                boolean sameRegister = false;
+                for (TabSpec newSpec : tabsByKey.values()) {
+                    if (newSpec == null || newSpec.transportKey == null) continue;
+                    if (!tkNew.equalsIgnoreCase(newSpec.transportKey)) continue;
+                    if (newSpec.node == spec.node
+                            && newSpec.serialId != null && spec.serialId != null
+                            && newSpec.serialId.trim().equalsIgnoreCase(spec.serialId.trim())) {
+                        sameRegister = true;
+                        break;
+                    }
+                }
+                if (!sameRegister) {
+                    android.util.Log.w("MainActivity", "isTransportSwitchSafe: BLOQUÉ — livraison "
+                        + "active sur " + activeKeyBefore + " (node=" + spec.node + " serial="
+                        + spec.serialId + "), nouveau transport " + tkNew + " n'est pas le même"
+                        + " registre — exclusivité NON transférée (reason=" + reason + ")");
+                    return false;
+                }
+                android.util.Log.i("MainActivity", "isTransportSwitchSafe: même registre "
+                    + "(node=" + spec.node + " serial=" + spec.serialId + ") détecté sur "
+                    + tkNew + " — bascule autorisée malgré livraison active");
+            }
+            return true;
+        } catch (Exception e) {
+            return true; // best-effort — ne jamais bloquer sur une erreur du garde lui-même
+        }
     }
 
 }

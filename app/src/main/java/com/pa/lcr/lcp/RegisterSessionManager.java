@@ -286,6 +286,29 @@ public final class RegisterSessionManager {
         return (s != null) ? s.dc : null;
     }
 
+    // ✅ (4 août 2026, demande Paul : "on ne doit jamais oublier l'arrivée du
+    // deeplink peu importe le transport trouvé" + "valide aussi pour l'API")
+    // — vérifie si une livraison est en cours (RUNNING_FLOWING/PAUSED) sur
+    // N'IMPORTE QUEL node connu pour un transport donné. Utilisé par
+    // MultiRegisterApiFacadeImpl avant tout activateExclusive() déclenché par
+    // un appel API (BT auto-connect, register/connect-auto, etc.) pour ne
+    // jamais voler l'exclusivité d'un transport à une livraison déjà active,
+    // peu importe le point d'entrée (UI ou API).
+    public synchronized boolean hasRunningDeliveryOn(String transportKey) {
+        if (transportKey == null || transportKey.trim().isEmpty()) return false;
+        String prefix = transportKey.trim() + ":";
+        for (Map.Entry<String, NodeSession> e : sessions.entrySet()) {
+            if (e.getKey() == null || !e.getKey().startsWith(prefix)) continue;
+            NodeSession s = e.getValue();
+            if (s == null || s.dc == null) continue;
+            try {
+                DeliveryState st = s.dc.getState();
+                if (st == DeliveryState.RUNNING_FLOWING || st == DeliveryState.RUNNING_PAUSED) return true;
+            } catch (Exception ignored) {}
+        }
+        return false;
+    }
+
     /** v7: retrouve le transportKey associé à un controller (si présent). */
     public synchronized String findTransportKeyForController(DeliveryController dc) {
         if (dc == null) return null;

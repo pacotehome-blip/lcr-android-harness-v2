@@ -255,6 +255,10 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             try {
                 TransportIo existing = mediaMgr.getByKey(key);
                 if (existing != null && existing.isOpen()) {
+                    if (!isApiTransportSwitchSafe(key)) {
+                        return ApiResult.fail("BT activate: 0 - livraison active sur un autre transport",
+                            "ERR_DELIVERY_ACTIVE_ELSEWHERE");
+                    }
                     mediaMgr.activateExclusive(key, "API_BT_AUTO");
                     JSONObject d = new JSONObject();
                     d.put("transportKey", key);
@@ -264,6 +268,10 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             } catch (Exception ignored) {}
             BluetoothSocket sock = null;
             try {
+                if (!isApiTransportSwitchSafe(key)) {
+                    return ApiResult.fail("BT activate: 0 - livraison active sur un autre transport",
+                        "ERR_DELIVERY_ACTIVE_ELSEWHERE");
+                }
                 sock = dev.createRfcommSocketToServiceRecord(SPP_UUID);
                 sock.connect();
                 InputStream in = sock.getInputStream();
@@ -698,6 +706,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             for (TransportSnapshot snap : mediaMgr.listSnapshots()) {
                 if (snap == null || snap.key == null || !snap.key.startsWith("BT:")) continue;
                 try {
+                    if (!isApiTransportSwitchSafe(snap.key)) continue;
                     mediaMgr.activateExclusive(snap.key, "API_AUTO_CONNECT");
                     TransportIo io = mediaMgr.getByKey(snap.key);
                     if (io != null && io.isOpen()) {
@@ -800,6 +809,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             TransportIo io = null;
             try {
                 if (mediaMgr != null) {
+                    if (!isApiTransportSwitchSafe(transportKey)) { continue; }
                     try { mediaMgr.activateExclusive(transportKey, "REGISTER_CONNECT_AUTO"); } catch (Exception ignored) {}
                     io = mediaMgr.getByKey(transportKey);
                 }
@@ -1251,6 +1261,34 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             if (b == null || b.length == 0) return null;
             return new String(b, java.nio.charset.StandardCharsets.UTF_8).trim();
         } catch (Exception ignored) { return null; }
+    }
+
+    // ✅ (4 août 2026, demande Paul) — garde générique avant tout
+    // activateExclusive() déclenché par un appel API. Contrairement au garde
+    // côté UI (MainActivity.isTransportSwitchSafe, qui compare node+#série
+    // pour autoriser une bascule vers le même registre physique), la couche
+    // API n'a souvent AUCUNE info de node/#série au moment de l'appel (ex.
+    // api_btActivate() cherche n'importe quel appareil pairé). Donc ici :
+    // plus strict — si une livraison tourne sur le transport actuellement
+    // actif, on bloque TOUT changement de transport déclenché par l'API, peu
+    // importe le nouveau transport visé. Un appelant externe (PCF, etc.) n'a
+    // pas la visibilité qu'a un utilisateur dans l'app pour juger si c'est
+    // sûr — mieux vaut refuser explicitement que courcircuiter en silence.
+    private boolean isApiTransportSwitchSafe(String newTransportKey) {
+        try {
+            if (sessions == null || newTransportKey == null || newTransportKey.trim().isEmpty()) return true;
+            String activeKeyBefore = MediaTransportManager.getActiveKeyStatic();
+            if (activeKeyBefore == null || activeKeyBefore.equalsIgnoreCase(newTransportKey.trim())) return true;
+            if (sessions.hasRunningDeliveryOn(activeKeyBefore)) {
+                android.util.Log.w("MultiRegisterApiFacadeImpl", "isApiTransportSwitchSafe: BLOQUÉ — "
+                    + "livraison active sur " + activeKeyBefore + ", refus de basculer vers "
+                    + newTransportKey);
+                return false;
+            }
+            return true;
+        } catch (Exception e) {
+            return true; // best-effort — ne jamais bloquer sur une erreur du garde lui-même
+        }
     }
 
     private DeliveryController requireSession(Integer nodeDec, Integer fromDec) {

@@ -734,6 +734,23 @@ public class DeepLinkHandler {
             // continue toujours vers l'oneshot ensuite (best-effort, comme avant)
             // — seule la visibilité change.
             boolean exclusiveOk = false;
+            // ✅ FIX (4 août 2026, demande Paul : "on ne doit jamais oublier
+            // l'arrivée du deeplink peu importe le transport trouvé") — avant
+            // de voler l'exclusivité ici, vérifier qu'aucune livraison n'est
+            // active sur un AUTRE registre déjà en cours ailleurs (même garde
+            // que MainActivity.ensureActiveTransport, exposée publiquement
+            // via isTransportSwitchSafe() pour que ce chemin direct ne puisse
+            // plus le contourner).
+            if (!activity.isTransportSwitchSafe(transportKey, "DEEPLINK_ONESHOT")) {
+                android.util.Log.w(TAG, "oneshot/start: activateExclusive() BLOQUÉ — livraison active "
+                    + "sur un autre registre, transportKey=" + transportKey + " n'est pas le même registre");
+                logError(fSerialId, woNum, "TRANSPORT_SWITCH_BLOCKED",
+                    "Livraison active sur un autre registre — bascule de transport refusée");
+                retournerFieldService(woNum, woIdGuid, "erreur",
+                    buildErrorJson("TRANSPORT_SWITCH_BLOCKED",
+                        "Une livraison est déjà en cours sur un autre registre"));
+                return;
+            }
             for (int i = 0; i < 3 && !exclusiveOk; i++) {
                 try {
                     exclusiveOk = activity.getMediaTransportManager()
