@@ -568,6 +568,17 @@ public class DeepLinkHandler {
             return;
         }
 
+        // ✅ FIX (4 août 2026, demande Paul : "j'arrive de deeplink, je vois le
+        // tab usb devenir (off)") — refreshAllTabsMediaStatus() était appelé
+        // une seule fois, juste après upsertRegisterTabFromScan() (ligne ~536),
+        // AVANT cette boucle d'attente — donc quasi toujours avant que le port
+        // USB soit réellement ouvert (énumération/permission USB plus lente que
+        // BT). Le tab affichait "(OFF)" à ce moment-là et rien ne le
+        // rafraîchissait ensuite, même une fois le média confirmé READY juste
+        // au-dessus. On rafraîchit maintenant l'affichage pour refléter l'état
+        // réel une fois qu'on SAIT que le média est prêt.
+        activity.runOnUiThread(activity::refreshAllTabsMediaStatus);
+
         // ✅ (4 août 2026, demande Paul) — si ce tab vient d'être créé par cet
         // appel (n'existait pas avant), attendre que le scan auto produits
         // (RegisterTabFragment.onTabActivated → autoScanProduitsSiNecessaire)
@@ -707,10 +718,37 @@ public class DeepLinkHandler {
             // l'écriture, ce qui produisait un échec quasi instantané
             // (~1s, pas un vrai timeout LCP) déguisé en "Timeout waiting LCP response".
             // Même pattern que RegisterTabFragment.lancerDepuisStore().
-            try {
-                activity.getMediaTransportManager()
-                    .activateExclusive(transportKey, "DEEPLINK_ONESHOT");
-            } catch (Exception ignored) {}
+            //
+            // ✅ FIX (4 août 2026, demande Paul : "quand j'arrive de Deeplink,
+            // j'ai un trouble avec le transport usb") — activateExclusive()
+            // retourne false si le TransportHandle n'est pas encore enregistré
+            // (cas fréquent en USB, énumération plus lente qu'en BT — le check
+            // "média READY" plus haut peut réussir avant que le handle exclusif
+            // soit prêt). Avant ce fix, un retour false OU une exception étaient
+            // tous les deux avalés silencieusement, et le code continuait quand
+            // même vers api_deliveryOneShotStart() — garanti d'échouer
+            // immédiatement via GuardedTransportIo.requireActive(), déguisé en
+            // "orchestration error" sans aucun indice sur la vraie cause.
+            // Maintenant : jusqu'à 3 tentatives (150ms d'écart, l'énumération USB
+            // peut prendre un instant), loggé si ça échoue quand même, mais on
+            // continue toujours vers l'oneshot ensuite (best-effort, comme avant)
+            // — seule la visibilité change.
+            boolean exclusiveOk = false;
+            for (int i = 0; i < 3 && !exclusiveOk; i++) {
+                try {
+                    exclusiveOk = activity.getMediaTransportManager()
+                        .activateExclusive(transportKey, "DEEPLINK_ONESHOT");
+                } catch (Exception e) {
+                    com.pa.lcr.lcp.log.LogBus.err(node,
+                        "DeepLinkHandler.activateExclusive[DEEPLINK_ONESHOT] tentative " + (i + 1), e);
+                }
+                if (!exclusiveOk) { try { Thread.sleep(150); } catch (Exception ignored) {} }
+            }
+            if (!exclusiveOk) {
+                android.util.Log.w(TAG, "oneshot/start: activateExclusive() a échoué après 3 tentatives"
+                    + " pour transportKey=" + transportKey + " — l'oneshot va probablement échouer"
+                    + " (transport pas encore armé)");
+            }
 
             com.pa.lcr.lcp.ApiResult r = controllerOneshot.api_deliveryOneShotStart(
                 woNum, fProduct, fPresetD, null);
@@ -1060,6 +1098,16 @@ public class DeepLinkHandler {
                 }
 
                 if (ready) {
+                    // ✅ FIX (4 août 2026, demande Paul : "ça devrait être le
+                    // transport au complet, pas juste USB — BT, TCP, autres")
+                    // — même bug que lancerLivraison() : refreshAllTabsMediaStatus()
+                    // (ligne ~1074, juste après upsertRegisterTabFromScan) tournait
+                    // avant que ce transport soit confirmé réellement ouvert, quel
+                    // qu'il soit (BT ici, mais le même code sert aussi TCP/USB
+                    // selon transportKey). Rafraîchi maintenant qu'on SAIT que
+                    // c'est prêt.
+                    activity.runOnUiThread(activity::refreshAllTabsMediaStatus);
+
                     // ✅ Bloquer si un poll est déjà actif
                     if (!activePolls.isEmpty()) {
                         android.util.Log.w(TAG, "connectBt: poll déjà actif — ignoré");
