@@ -2274,35 +2274,77 @@ private void setupTabsTop() {
     public String resolveIfActiveMatches(int node, String serialId) {
         if (serialId == null || serialId.trim().isEmpty()) return null;
         try {
-            String activeKey = (mediaTransportManager != null) ? mediaTransportManager.getActiveKey() : null;
-            if (activeKey == null || activeKey.trim().isEmpty()) return null;
-
+            // ✅ FIX (4 août 2026, demande Paul — "on est supposé trouver le
+            // média pour un registre, on trouve des médias, mais le média
+            // réel est mis à OFF, ça n'a pas de sens") — RÉPONSE : ce check
+            // ne validait QUE mediaTransportManager.getActiveKey(), un état
+            // "actif" purement EN MÉMOIRE (sert seulement à l'exclusivité
+            // entre transports), jamais persisté — remis à zéro à CHAQUE
+            // redémarrage du processus (Android tue l'app en arrière-plan
+            // très régulièrement, confirmé dans tous les logs analysés
+            // aujourd'hui). Le port USB, lui, physiquement, n'a pas bougé.
+            // Corrigé : on cherche maintenant le tab par node+#série d'abord,
+            // puis on vérifie l'état RÉEL de SON transport pinné
+            // (io.isOpen()) — peu importe ce que "actif" dit en mémoire — et
+            // on l'active nous-mêmes s'il est physiquement prêt mais pas
+            // encore marqué actif.
             for (TabSpec spec : tabsByKey.values()) {
                 if (spec == null) continue;
-                if (!activeKey.equalsIgnoreCase(spec.transportKey)) continue;
                 if (spec.node != node) continue;
                 if (spec.serialId == null) continue;
                 if (!serialId.trim().equalsIgnoreCase(spec.serialId.trim())) continue;
+                if (spec.transportKey == null || spec.transportKey.trim().isEmpty()) continue;
+
+                String candidateKey = spec.transportKey.trim();
+                TransportIo io = (mediaTransportManager != null) ? mediaTransportManager.getByKey(candidateKey) : null;
+                boolean reallyOpen = false;
+                try { reallyOpen = (io != null && io.isOpen()); } catch (Exception ignored2) {}
+                if (!reallyOpen) {
+                    android.util.Log.i("MainActivity", "resolveIfActiveMatches: tab trouvé pour node=" + node
+                        + " serial=" + serialId + " sur " + candidateKey + " mais transport réellement fermé — laisser chercher ailleurs");
+                    continue;
+                }
+
+                // Le port est réellement ouvert — s'assurer qu'il est bien marqué actif
+                // (pas de vol d'exclusivité si une livraison tourne ailleurs — même garde
+                // que partout dans l'app).
+                String activeKeyNow = (mediaTransportManager != null) ? mediaTransportManager.getActiveKey() : null;
+                if (activeKeyNow == null || !activeKeyNow.equalsIgnoreCase(candidateKey)) {
+                    if (!isTransportSwitchSafe(candidateKey, "RESOLVE_IF_ACTIVE_MATCHES")) {
+                        android.util.Log.i("MainActivity", "resolveIfActiveMatches: " + candidateKey
+                            + " physiquement ouvert mais livraison active ailleurs — laisser chercher ailleurs");
+                        continue;
+                    }
+                    try { mediaTransportManager.activateExclusive(candidateKey, "RESOLVE_IF_ACTIVE_MATCHES"); } catch (Exception ignored2) {}
+                }
 
                 // Confirmer qu'une session vivante existe bien pour ce couple
                 com.pa.lcr.lcp.DeliveryController dc =
-                        com.pa.lcr.lcp.RegisterSessionManager.get(this).getController(activeKey, node);
+                        com.pa.lcr.lcp.RegisterSessionManager.get(this).getController(candidateKey, node);
                 if (dc == null) {
-                    android.util.Log.i("MainActivity", "resolveIfActiveMatches: onglet trouvé mais aucune session vivante — abandon, laisser chercher un autre média");
-                    return null;
+                    // ✅ Transport physiquement ouvert mais pas encore de session — la
+                    // créer maintenant plutôt que d'abandonner : c'est exactement le
+                    // cas "même série, même node, même USB, juste le processus a
+                    // redémarré" que ce fix vise.
+                    try { dc = com.pa.lcr.lcp.RegisterSessionManager.get(this).getOrCreate(candidateKey, node, 255, io); } catch (Exception ignored2) {}
+                    if (dc == null) {
+                        android.util.Log.i("MainActivity", "resolveIfActiveMatches: " + candidateKey
+                            + " ouvert mais session non créable — abandon, laisser chercher un autre média");
+                        continue;
+                    }
                 }
                 // ✅ FIX : ne pas se contenter que la session EXISTE — vérifier
                 // qu'elle est réellement CONNECTED. Sinon, laisser le flux normal
                 // (resolveOrCreateForNode / auto-connect) chercher un autre média,
                 // au lieu de lancer la livraison sur un registre pas prêt.
                 if (dc.getState() != com.pa.lcr.lcp.DeliveryState.CONNECTED) {
-                    android.util.Log.i("MainActivity", "resolveIfActiveMatches: média actif " + activeKey
+                    android.util.Log.i("MainActivity", "resolveIfActiveMatches: média " + candidateKey
                             + " trouvé mais état=" + dc.getState() + " (pas CONNECTED) — chercher un autre média");
-                    return null;
+                    continue;
                 }
-                android.util.Log.i("MainActivity", "resolveIfActiveMatches: média actif " + activeKey
-                        + " correspond ET CONNECTED (node=" + node + " serial=" + serialId + ") — réutilisation directe");
-                return activeKey;
+                android.util.Log.i("MainActivity", "resolveIfActiveMatches: " + candidateKey
+                        + " réellement ouvert ET CONNECTED (node=" + node + " serial=" + serialId + ") — réutilisation directe");
+                return candidateKey;
             }
         } catch (Exception ignored) {}
         return null;
