@@ -652,8 +652,46 @@ public class RegisterTabFragment extends Fragment {
             // le même ticket reste sans danger.
             LogBus.api(node, "[AUTO-BACKUP] DELIVERY_DONE ticket=" + ticketNo
                 + " — déclenchement automatique retournerAuWorkOrder()");
-            try { retournerAuWorkOrder(); }
-            catch (Exception e) { LogBus.api(node, "[AUTO-BACKUP] ERR: " + safeMsg(e)); }
+
+            // ✅ FIX (4 août 2026, demande Paul — "le n'importe quoi est le 6.9
+            // deux fois, un avec delivery-uid=null et un avec 10913") — ce
+            // callback se déclenche maintenant réellement (depuis le fix
+            // MuxListener de la même session — avant, il ne se déclenchait
+            // JAMAIS, donc cette course n'existait pas). Il ignorait
+            // complètement ticketNo/netL/grossL déjà capturés au vrai instant
+            // de fin de livraison, et appelait retournerAuWorkOrder() qui
+            // redérive tout via son propre cache (api_tickSnapshot()) —
+            // parfois AVANT que le registre ait fini de mettre à jour son
+            // ticket_no interne. Résultat observé : une première insertion
+            // avec ticket_no='' (échappe à UNIQUE(wo_num,ticket_no), donc pas
+            // dédupliquée), suivie ~87s plus tard d'une deuxième insertion
+            // correcte via le poll FSM existant. Ici : on a DÉJÀ ticketNo
+            // fiable (capturé au vrai moment de fin) — on attend que le cache
+            // du controller le reflète aussi (bornée, best-effort) avant
+            // d'appeler retournerAuWorkOrder(), pour que SA propre lecture
+            // cache ne tombe plus sur un ticket_no vide.
+            bg.execute(() -> {
+                if (ticketNo != null && !ticketNo.trim().isEmpty() && controller != null) {
+                    for (int i = 0; i < 6; i++) {
+                        try {
+                            com.pa.lcr.lcp.ApiResult snap = controller.api_tickSnapshot();
+                            String cachedTicket = null;
+                            if (snap != null && snap.data != null) {
+                                org.json.JSONObject result = snap.data.optJSONObject("result");
+                                cachedTicket = (result != null) ? result.optString("ticket_no", "") : null;
+                                if (cachedTicket == null || cachedTicket.isEmpty()) {
+                                    org.json.JSONObject tick = snap.data.optJSONObject("tick");
+                                    if (tick != null) cachedTicket = tick.optString("ticket_no", "");
+                                }
+                            }
+                            if (ticketNo.equals(cachedTicket)) break; // cache à jour — sûr d'appeler maintenant
+                        } catch (Exception ignored) {}
+                        try { Thread.sleep(300); } catch (Exception ignored) {}
+                    }
+                }
+                try { ui.post(this::retournerAuWorkOrder); }
+                catch (Exception e) { LogBus.api(node, "[AUTO-BACKUP] ERR: " + safeMsg(e)); }
+            });
         }
 
         @Override
