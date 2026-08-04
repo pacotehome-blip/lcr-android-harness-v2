@@ -1373,6 +1373,62 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         return r;
     }
 
+    // ✅ (4 août 2026, demande Paul) — expose api_scanProductNames() (jusqu'ici
+    // accessible UNIQUEMENT depuis RegisterTabFragment) au niveau API, pour que
+    // /v1/register/scan-products (ApiServer) puisse aussi peupler
+    // RegisterProductStore — même mécanisme et même cache que le scan auto UI
+    // (onTabActivated) ou le bouton manuel "🔍 Scan produits". N'écrit PAS
+    // directement dans le Spinner (pas d'UI ici) — seulement dans le cache
+    // SQLite partagé, que l'UI réapplique ensuite via applierDescriptionsProduits().
+    public ApiResult api_scanProductNames(Integer lcrnode_dec, Integer from_dec, String media, String bt_mac) {
+        int node = normNode(lcrnode_dec); int from = normFrom(from_dec);
+        MediaCtx mc = resolveMediaCtx(media, bt_mac, node, from);
+        // Même garde que le OneShot — pas de scan pendant une livraison active.
+        ApiResult gate = option3_startGate(mc, node, "ScanProducts");
+        if (gate != null) return gate;
+        if (mc.dc == null) return ApiResult.fail("ScanProducts: 0 - Controller introuvable", "NO_CONTROLLER");
+
+        String serialId = null;
+        try {
+            com.pa.lcr.lcp.ApiResult vr = mc.dc.api_registerValidate(null, node, null, null, null);
+            if (vr != null && vr.data != null) serialId = vr.data.optString("serial_id", null);
+        } catch (Exception ignored) {}
+
+        try {
+            java.util.List<LcpLink.ProductScanResult> results = mc.dc.api_scanProductNames(null);
+
+            if (serialId != null && !serialId.trim().isEmpty()) {
+                try {
+                    com.pa.lcr.lcp.storage.RegisterProductStore store =
+                            new com.pa.lcr.lcp.storage.RegisterProductStore(appCtx);
+                    store.upsertAll(serialId.trim(), node, results);
+                    store.close();
+                } catch (Exception e) {
+                    android.util.Log.w("ApiFacade", "api_scanProductNames: écriture cache ERR: " + e.getMessage());
+                }
+            }
+
+            org.json.JSONObject data = new org.json.JSONObject();
+            org.json.JSONArray arr = new org.json.JSONArray();
+            for (LcpLink.ProductScanResult r : results) {
+                org.json.JSONObject o = new org.json.JSONObject();
+                try {
+                    o.put("noteIdx", r.noteIdx);
+                    o.put("description", r.description);
+                    o.put("isPropane", r.isPropane);
+                    o.put("label", r.toSpinnerLabel());
+                } catch (Exception ignored) {}
+                arr.put(o);
+            }
+            try { data.put("products", arr); } catch (Exception ignored) {}
+            return ApiResult.ok("Scan produits OK — " + results.size() + " produits", data);
+        } catch (java.io.IOException e) {
+            return ApiResult.fail("ScanProducts: 0 - " + e.getMessage(), "ERR_LCP_SCAN_PRODUCTS");
+        } catch (Exception e) {
+            return ApiResult.fail("ScanProducts: 0 - " + e.getMessage(), "ERR_SCAN_PRODUCTS");
+        }
+    }
+
     @Override
     public ApiResult api_deliveryContinue(String jobId, Integer lcrnode_dec) {
         DeliveryController dc = resolveJobController(jobId, lcrnode_dec);

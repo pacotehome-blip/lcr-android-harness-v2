@@ -756,6 +756,23 @@ public synchronized void start() throws Exception {
             });
         }
 
+        // ✅ (4 août 2026, demande Paul) — scan des noms de produits du registre.
+        // Même schéma d'appel que OneShot start (node/from/media/bt_mac,
+        // auto-connect si pas encore connecté). Écrit dans RegisterProductStore
+        // (même cache que le scan UI) — voir MultiRegisterApiFacadeImpl.
+        if ("POST".equals(req.method) && "/v1/register/scan-products".equals(req.path)) {
+            JSONObject body = safeBody(req.jsonBody());
+            ApiResult gate = gateMediaIfProvided(body);
+            if (gate != null) return gate;
+            Integer node = parseNodeDec(body);
+            Integer from = parseFromDec(body);
+            return withAutoConnectRetry(body, () -> {
+                String media = resolveMediaDefault(body);
+                String btMac = resolveBtMacDefault(body);
+                return facade.api_scanProductNames(node, from, media, btMac);
+            });
+        }
+
         // ✅ Delivery last-result — dernier résultat livraison (Stratégie B DeepLinkHandler)
         // Utilisé par filgo_lcr_ping.js onLoadForm via fetch 127.0.0.1:8765
         if ("GET".equals(req.method) && "/v1/delivery/last-result".equals(req.path)) {

@@ -208,6 +208,21 @@ public interface ApiFacade {
                 numero_livraison, product1to16, presetNetL, compartment);
     }
 
+    // ✅ (4 août 2026) — scan des 16 noms de produits du registre, exposé au
+    // niveau API (route /v1/register/scan-products dans ApiServer). Défaut :
+    // non supporté (implémentations qui ne gèrent pas plusieurs registres,
+    // ex. ApiFacadeImpl/DeliveryApiFacadeImpl simple) retournent un échec
+    // explicite plutôt qu'une NoSuchMethodError. Seule
+    // MultiRegisterApiFacadeImpl fournit une vraie implémentation.
+    default ApiResult api_scanProductNames(
+            Integer lcrnode_dec,
+            Integer from_dec,
+            String media,
+            String bt_mac) {
+        return ApiResult.fail("ScanProducts: 0 - non supporté par cette implémentation",
+                "ERR_NOT_IMPLEMENTED");
+    }
+
     ApiResult api_deliveryContinue(String jobId);
 
     default ApiResult api_deliveryContinue(String jobId, Integer lcrnode_dec) {
