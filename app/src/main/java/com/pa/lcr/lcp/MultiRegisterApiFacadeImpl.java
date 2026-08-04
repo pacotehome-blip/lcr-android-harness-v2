@@ -1536,6 +1536,13 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         }
     }
 
+    // ✅ (4 août 2026, demande Paul) — retourne le JSON brut du dump (même
+    // contenu que api_dbDump(), sans écrire dans Downloads) pour téléchargement
+    // direct côté support via /v1/db/dump/download.
+    public String api_dbDumpJson() {
+        return sessions.getStore().buildDumpJson();
+    }
+
     @Override
     public ApiResult api_tickWait(Integer lcrnode_dec, Long since_seq, Integer wait_ms) {
         int node = normNode(lcrnode_dec);

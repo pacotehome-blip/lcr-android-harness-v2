@@ -451,17 +451,7 @@ public class DeliveryLogStore {
      * - API 28- : write directly to /Download (requires legacy storage permission)
      */
     public boolean dumpJsonToDownloads(Context ctx, String fileName) throws Exception {
-        SQLiteDatabase db = helper.getReadableDatabase();
-        StringBuilder sb = new StringBuilder(1024 * 256);
-        sb.append("{\"delivery_summary\":");
-        sb.append(queryTableAsJsonArray(db, "delivery_summary"));
-        sb.append(",\"delivery_attempt\":");
-        sb.append(queryTableAsJsonArray(db, "delivery_attempt"));
-        sb.append(",\"delivery_event\":");
-        sb.append(queryTableAsJsonArray(db, "delivery_event"));
-        sb.append("}");
-
-        byte[] bytes = sb.toString().getBytes(StandardCharsets.UTF_8);
+        byte[] bytes = buildDumpJson().getBytes(StandardCharsets.UTF_8);
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             ContentValues values = new ContentValues();
@@ -497,6 +487,24 @@ public class DeliveryLogStore {
             fos.flush();
         }
         return true;
+    }
+
+    // ✅ (4 août 2026, demande Paul) — même contenu que dumpJsonToDownloads(),
+    // mais retourné en mémoire pour être servi directement en réponse HTTP
+    // (téléchargement JSON pour le support via /v1/db/dump/download), sans
+    // passer par le système de fichiers Downloads. Les deux méthodes partagent
+    // maintenant la même construction pour ne jamais diverger.
+    public String buildDumpJson() {
+        SQLiteDatabase db = helper.getReadableDatabase();
+        StringBuilder sb = new StringBuilder(1024 * 256);
+        sb.append("{\"delivery_summary\":");
+        sb.append(queryTableAsJsonArray(db, "delivery_summary"));
+        sb.append(",\"delivery_attempt\":");
+        sb.append(queryTableAsJsonArray(db, "delivery_attempt"));
+        sb.append(",\"delivery_event\":");
+        sb.append(queryTableAsJsonArray(db, "delivery_event"));
+        sb.append("}");
+        return sb.toString();
     }
 
     private static String queryTableAsJsonArray(SQLiteDatabase db, String table) {

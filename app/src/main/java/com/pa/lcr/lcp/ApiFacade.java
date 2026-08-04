@@ -141,6 +141,10 @@ public interface ApiFacade {
     // =========================================================
     ApiResult api_dbDump();
 
+    // ✅ (4 août 2026) — JSON brut pour téléchargement direct support.
+    // Défaut: non supporté par les implémentations single-register.
+    default String api_dbDumpJson() { return null; }
+
     // =========================================================
     // Delivery (legacy mono-registre)
     // =========================================================

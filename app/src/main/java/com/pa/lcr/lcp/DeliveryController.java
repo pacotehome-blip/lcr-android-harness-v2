@@ -2350,6 +2350,67 @@ public ApiResult api_registerValidate(
             return ApiResult.fail("Align A: 0 - USB non pret.", "USB_NOT_READY");
         }
         try {
+            // ✅ (4 août 2026, demande Paul) — Align/Recover ("Resolve") est le
+            // mécanisme de récupération d'un registre en état zombie : il doit
+            // s'exécuter peu importe l'état, c'est voulu, pas un bug. En usage
+            // normal, ce cas zombie se manifeste par ticket_pending (pas
+            // nécessairement deliveryActive). On capture donc d'abord un
+            // instantané complet (net/gross/ticket/état) AVANT
+            // doAlignOrRecoverFull() dès que ticket_pending et/ou deliveryActive
+            // est détecté, pour pouvoir rattraper la BD après coup si le recover
+            // finalise/efface un ticket que l'app n'avait pas encore capturé.
+            // Best-effort — même philosophie que LocalDeliveryBackup/ApiTraceStore
+            // — ne bloque jamais l'opération elle-même en cas d'échec de sauvegarde.
+            try {
+                int[] dsPre = lcpDeliveryStatus();
+                int delCodePre = dsPre[1];
+                boolean deliveryActivePre = (delCodePre & DC_DELIVERY_ACTIVE) != 0;
+                boolean ticketPendingPre  = (delCodePre & DC_TICKET_PENDING) != 0;
+                // ✅ FIX (4 août 2026) — le cas normal d'usage de Resolve est
+                // ticket_pending (pas nécessairement deliveryActive). Élargi pour
+                // couvrir les deux — sinon le cas le plus fréquent (ticket pending
+                // zombie) n'était jamais capturé.
+                if (deliveryActivePre || ticketPendingPre) {
+                    double[] ngPre = readNetGrossL();
+                    String ticketNoPre = readTicketNo23();
+                    String saleNoPre = readSaleNo22();
+                    String serialIdPre = decodeAzString(lcpGetField(FIELD_SERIAL_ID));
+                    JSONObject snap = new JSONObject();
+                    safeJsonPut(snap, "reason", "PRE_ALIGN_RECOVER_ZOMBIE_SNAPSHOT");
+                    safeJsonPut(snap, "net_l", ngPre[0]);
+                    safeJsonPut(snap, "gross_l", ngPre[1]);
+                    safeJsonPut(snap, "ticket_no", ticketNoPre);
+                    safeJsonPut(snap, "sale_no", saleNoPre);
+                    safeJsonPut(snap, "serial_id", serialIdPre);
+                    safeJsonPut(snap, "delCode", delCodePre);
+                    safeJsonPut(snap, "deliveryActive_before", deliveryActivePre ? 1 : 0);
+                    safeJsonPut(snap, "ticketPending_before", ticketPendingPre ? 1 : 0);
+                    safeJsonPut(snap, "state_before", state.name());
+                    safeJsonPut(snap, "ts_ms", System.currentTimeMillis());
+
+                    DeliveryLogStore storePre = this.logStore;
+                    if (storePre != null && serialIdPre != null && !serialIdPre.isEmpty()
+                            && ticketNoPre != null && !ticketNoPre.isEmpty()) {
+                        storePre.upsertSummaryAsync(serialIdPre, ticketNoPre, saleNoPre,
+                            "PRE_ALIGN_RECOVER", DeliveryLogStore.SOURCE_API, null, snap.toString(), null);
+                        storePre.openAttemptAsync(serialIdPre, ticketNoPre, DeliveryLogStore.SOURCE_API, null, attemptId -> {
+                            try {
+                                storePre.addEventAsync(attemptId, DeliveryLogStore.LEVEL_WARN,
+                                    "PRE_ALIGN_RECOVER_SNAPSHOT",
+                                    "Sauvegarde avant Align/Recover — ticket pending et/ou livraison active détecté",
+                                    snap.toString());
+                                storePre.closeAttemptAsync(attemptId, "SNAPSHOT", snap.toString(), null);
+                            } catch (Exception ignored) {}
+                        });
+                    }
+                    emitLog("[ALIGN-A] ⚠ Instantané pré-recover capturé — ticket=" + ticketNoPre
+                        + " net=" + ngPre[0] + " gross=" + ngPre[1]
+                        + " (ticketPending=" + ticketPendingPre + " deliveryActive=" + deliveryActivePre + ")");
+                }
+            } catch (Exception e) {
+                emitLog("[ALIGN-A] pré-snapshot ERR (non bloquant): " + e.getMessage());
+            }
+
             doAlignOrRecoverFull();
             int[] ds = lcpDeliveryStatus();
             int delStatus = ds[0];
@@ -2620,6 +2681,49 @@ public ApiResult api_registerValidate(
             return ApiResult.fail("Delivery OneShot: 0 - USB not ready.", "USB_NOT_READY");
         }
 
+        // ✅ FIX (4 août 2026, demande Paul : "ne jamais courcircuiter le processus
+        // en cours") — vérifier deliveryActive AVANT tout effet de bord. Avant ce
+        // fix, api_diagnosticReset() (qui peut envoyer un VRAI reset matériel
+        // link.opDiagnosticReset() si net/gross lit négatif) et la remise à zéro
+        // de cumulativeCorrectedNetL/GrossL/pulserResetCount s'exécutaient
+        // INCONDITIONNELLEMENT, avant même de savoir si une livraison était déjà
+        // en cours. Un appel API dupliqué (ou un double-clic UI) pendant une
+        // livraison RUNNING_FLOWING pouvait donc déclencher un reset matériel en
+        // plein milieu du flux physique (net/gross négatif transitoire = exactement
+        // le symptôme normal d'un pulser-reversal en cours) et effacer l'historique
+        // de correction pulser-reversal de la livraison active — même si l'appel
+        // lui-même était ensuite correctement refusé plus bas ("already active").
+        // Maintenant : lecture readonly du statut d'abord, bail-out immédiat et
+        // sans aucun effet de bord si une livraison tourne déjà.
+        try {
+            int[] dsEarly = lcpDeliveryStatus();
+            int delCodeEarly = dsEarly[1];
+            if ((delCodeEarly & DC_DELIVERY_ACTIVE) != 0) {
+                String ticketNoEarly = readTicketNo23();
+                String saleNoEarly = readSaleNo22();
+                String serialIdEarly = decodeAzString(lcpGetField(FIELD_SERIAL_ID));
+                boolean ticketPendingEarly = (delCodeEarly & DC_TICKET_PENDING) != 0;
+                String deliveryUidEarly = (numero_livraison == null ? "" : numero_livraison) + "-" + ticketNoEarly;
+                JSONObject data = new JSONObject();
+                safeJsonPut(data, "numero_livraison", numero_livraison);
+                safeJsonPut(data, "ticket_no", ticketNoEarly);
+                safeJsonPut(data, "sale_no", saleNoEarly);
+                safeJsonPut(data, "serial_id", serialIdEarly);
+                safeJsonPut(data, "delivery_uid", deliveryUidEarly);
+                safeJsonPut(data, "deliveryActive", 1);
+                safeJsonPut(data, "ticketPending", ticketPendingEarly ? 1 : 0);
+                safeJsonPut(data, "armed", 0);
+                safeJsonPut(data, "state", state.name());
+                safeJsonPut(data, "live_status", "LIVE: Delivery already active");
+                safeJsonPut(data, "available_actions", actionsContinueTerminate());
+                return ApiResult.ok("Delivery OneShot: 1 - Delivery already active", data);
+            }
+        } catch (Exception e) {
+            // Lecture readonly échouée — on ne bloque pas ici, la suite refera
+            // les mêmes vérifications avec sa propre gestion d'erreur habituelle.
+            emitLog("[ONESHOT] pré-check deliveryActive ERR (non bloquant): " + e.getMessage());
+        }
+
         // ✅ Vérifier net/gross avant démarrage — diagnostic reset automatique si négatif
         // (retour d'air après livraison précédente, ex: -0.1L). Attribué à
         // lastNumeroLivraison (le WO de la livraison PRÉCÉDENTE, pas celui-ci) car
@@ -2627,6 +2731,8 @@ public ApiResult api_registerValidate(
         // maintenant déterminé avant cet appel (probeSerial confirmé en amont via
         // resolveOrCreateForNode), donc plus de risque de saturer un transport
         // instable comme c'était le cas quand cet appel était différé.
+        // ⚠️ Sûr d'être exécuté ici uniquement : le pré-check ci-dessus vient de
+        // confirmer qu'aucune livraison n'est active.
         try {
             ApiResult resetCheck = api_diagnosticReset();
             if (resetCheck != null && resetCheck.data != null
@@ -2645,6 +2751,7 @@ public ApiResult api_registerValidate(
  // ✅ Nouvelle livraison — remettre le cumul logiciel à zéro. Tout ce qui a été
  // accumulé par le reset diagnostic ci-dessus appartenait à la livraison
  // PRÉCÉDENTE (résidu nettoyé avant de démarrer celle-ci) — pas à celle-ci.
+ // Sûr ici : le pré-check plus haut a confirmé qu'aucune livraison n'est active.
  cumulativeCorrectedNetL = 0.0;
  cumulativeCorrectedGrossL = 0.0;
  pulserResetCount = 0;
@@ -2680,6 +2787,9 @@ try {
                 publishTickIfChanged(net, gross, -1, -1, delStatus0, delCode0, state);
             } catch (Exception ignored) {}
 
+            // ✅ Filet de sécurité — le pré-check en haut de méthode couvre déjà ce
+            // cas normalement ; conservé ici en cas de changement d'état entre les
+            // deux lectures (fenêtre de course rare mais possible).
             if (deliveryActive0) {
                 JSONObject data = new JSONObject();
                 safeJsonPut(data, "numero_livraison", numero_livraison);
