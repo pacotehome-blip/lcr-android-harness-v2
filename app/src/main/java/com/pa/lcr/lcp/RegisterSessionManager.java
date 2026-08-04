@@ -344,6 +344,40 @@ public final class RegisterSessionManager {
         // Multi-registre: pas d'activateExclusive ici — le tab actif gère l'activation
         android.util.Log.d("RSM", "getOrCreate transport=" + tk + " node=" + node);
 
+        // ✅ FIX CRITIQUE (4 août 2026, demande Paul — "on ouvre par #série+node,
+        // le transport n'est pas une obligation... comment ça se fait qu'il y a
+        // deux transports qui cherchent en même temps") — trouvé : `sessions`
+        // est indexée par transportKey+node (ex. "BT:xx:250" vs "USB:250"),
+        // JAMAIS par node+#série. Donc si une session existe déjà pour ce node
+        // sur UN AUTRE transport (ex. BT), un appel getOrCreate("USB", node,...)
+        // pour ce MÊME registre physique ne la trouve JAMAIS — sessions.get(k)
+        // cherche une clé différente — et crée une DEUXIÈME session complète
+        // (nouveau DeliveryController, nouveau scheduler) en parallèle de la
+        // première, pour le même appareil. Les deux existent ensuite
+        // simultanément, chacune sondant/contrôlant le même matériel sans se
+        // connaître. C'est une cause plausible de plusieurs symptômes de la
+        // journée (deux transports semblant "chercher en même temps", switch
+        // BT↔USB qui ne se complète jamais). Ici : avant de créer une nouvelle
+        // session, on retire d'abord toute session existante pour CE MÊME
+        // node sur un AUTRE transport — un seul registre physique = une seule
+        // session, peu importe lequel des transports l'atteint.
+        try {
+            String nodeSuffix = ":" + node;
+            for (String otherKey : new java.util.ArrayList<>(sessions.keySet())) {
+                if (otherKey == null || otherKey.equals(k) || !otherKey.endsWith(nodeSuffix)) continue;
+                NodeSession other = sessions.get(otherKey);
+                if (other == null) continue;
+                android.util.Log.w("RSM", "getOrCreate: session existante pour le MÊME node="
+                    + node + " trouvée sur un AUTRE transport (" + otherKey + ") — migration vers "
+                    + tk + ", ancienne session fermée");
+                com.pa.lcr.lcp.log.LogBus.api(node, "[RSM-MIGRATE] node=" + node
+                    + " change de transport : " + other.transportKey + " → " + tk);
+                try { other.scheduler.shutdown(); } catch (Exception ignored) {}
+                try { other.dc.shutdown(false); } catch (Exception ignored) {}
+                sessions.remove(otherKey);
+            }
+        } catch (Exception ignored) {}
+
         NodeSession existing = sessions.get(k);
 
         if (existing != null) {
