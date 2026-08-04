@@ -636,7 +636,19 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                 DeliveryController dc = sessions.getController(snap.key, lastNodeHint);
                 if (dc != null && dc.isDeliveryActive()) return true;
             }
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            // ✅ FIX (4 août 2026, demande Paul : "ne jamais courcircuiter le
+            // processus en cours") — ce garde protège api_btSignalScan() contre
+            // un scan pendant une livraison active. Avant ce fix, une exception
+            // ici retournait silencieusement false ("aucune livraison active"),
+            // DÉSACTIVANT la protection au lieu de la faire échouer côté sûr.
+            // Maintenant : loggé ET on suppose qu'une livraison POURRAIT être
+            // active (fail-safe) plutôt que de laisser passer un scan qui
+            // pourrait interrompre une livraison réelle.
+            com.pa.lcr.lcp.log.LogBus.err(-1,
+                "MultiRegisterApiFacadeImpl.isAnyDeliveryActive", e);
+            return true;
+        }
         return false;
     }
 
