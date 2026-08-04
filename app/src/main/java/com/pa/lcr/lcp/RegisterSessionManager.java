@@ -512,6 +512,26 @@ public final class RegisterSessionManager {
         if (isLc3) {
             // Pour LC3 — serial déjà dans cachedSerial du Lc3Link via constructeur
             serialId0 = (identity != null && !identity.serialId.isEmpty()) ? identity.serialId : null;
+        } else if (isUiThread) {
+            // ✅ FIX (4 août 2026, demande Paul : "j'ai encore du trouble avec
+            // l'échange de connexion entre BT et USB sur le même registre") —
+            // AVANT ce fix, le chemin LC3 évitait déjà tout I/O bloquant sur le
+            // thread UI (probe skippé plus haut), mais le chemin LCR-II faisait
+            // quand même un vrai appel bloquant link.opGetField(80, 3000) —
+            // jusqu'à 3s de blocage potentiel, et surtout : au moment exact
+            // d'un switch BT↔USB pour le MÊME registre, le transport peut être
+            // brièvement instable/pas encore prêt, faisant échouer cette
+            // lecture (catch silencieux) → abandon de la session, donc le
+            // switch ne se complète jamais. Ici : sur le thread UI, on utilise
+            // le #série déjà connu pour ce node (expectedSerialByNode, alimenté
+            // par la session BT/USB précédente sur ce même registre) au lieu
+            // de retenter une lecture réseau. Le vrai opGetField(80) reste fait
+            // normalement quand getOrCreate est appelé hors thread UI (ex. le
+            // premier scan/connexion initiale, où il n'y a pas encore de
+            // #série connu).
+            serialId0 = expectedSerialByNode.get(node);
+            android.util.Log.i("RSM", "getOrCreate sur UI thread (LCR-II) — #série depuis cache: "
+                + (serialId0 != null ? serialId0 : "AUCUN"));
         } else {
             // Pour LCR-II — lecture rapide opGetField(80)
             try {
