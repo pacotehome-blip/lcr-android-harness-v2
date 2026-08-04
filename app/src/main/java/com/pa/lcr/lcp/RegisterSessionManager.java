@@ -543,12 +543,26 @@ public final class RegisterSessionManager {
                     ss = ss.trim();
                     if (!ss.isEmpty()) serialId0 = ss;
                 }
-            } catch (Exception ignored) {}
+            } catch (Exception e) {
+                // ✅ FIX (4 août 2026, demande Paul : "est-ce qu'on aurait pu
+                // tracer ça avec le log Support?") — RÉPONSE : non, ce catch
+                // avalait silencieusement la vraie cause d'échec (timeout,
+                // IO, etc.) sans jamais toucher LogBus, donc invisible en
+                // Support même si on avait su où chercher.
+                com.pa.lcr.lcp.log.LogBus.err(node,
+                    "RegisterSessionManager.getOrCreateLocked.opGetField80", e);
+            }
 
         }
         // ✅ LCR-II sans serial — registre pas prêt, abandonner sans créer de session
         if (!isLc3 && (serialId0 == null || serialId0.isEmpty())) {
             android.util.Log.w("RSM", "getOrCreate LCR-II sans serial — abandon transport=" + tk + " node=" + node);
+            // ✅ FIX (4 août 2026, demande Paul) — élevé aussi vers LogBus :
+            // c'est le point de décision exact qui a causé "l'échange BT/USB
+            // qui ne se complète pas" — avant ce fix, seul logcat le montrait.
+            com.pa.lcr.lcp.log.LogBus.api(node, "[RSM-ABANDON] getOrCreate LCR-II sans #série — "
+                + "session non créée. transport=" + tk + " node=" + node
+                + " (uiThread=" + isUiThread + ")");
             // ✅ FIX : si un pin (node,serial) pointait vers CE transport, l'effacer.
             // Sans ça, resolveOrCreateForNode() retente indéfiniment ce même
             // transport erroné à chaque appel (pin jamais invalidé), créant un
