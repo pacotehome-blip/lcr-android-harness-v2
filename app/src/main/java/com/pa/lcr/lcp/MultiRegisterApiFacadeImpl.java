@@ -855,12 +855,21 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         }
 
         ArrayList<String> tried = new ArrayList<>();
+        // ✅ FIX (4 août 2026, demande Paul — "je veux le détail complet de
+        // chaque tentative de connexion sur chaque transport") — trace
+        // maintenant, pour CHAQUE candidat essayé, ce qui s'est réellement
+        // passé (transport ouvert ou non, #série trouvé ou non, correspond ou
+        // pas) — attaché au résultat qu'il soit un succès ou un échec, pour
+        // que l'écran Diagnostic puisse afficher le détail réel au lieu d'un
+        // simple "Recherche... (1/3)" opaque.
+        JSONArray attemptsDetail = new JSONArray();
         ArrayList<String> candidates = listCandidateTransportKeysForAutoConnect();
 
         for (String key : candidates) {
             if (key == null || key.trim().isEmpty()) continue;
             String transportKey = key.trim();
             TransportIo io = null;
+            String attemptOutcome;
             try {
                 if (mediaMgr != null) {
                     // ✅ FIX (4 août 2026, demande Paul — "on veut éviter de
@@ -884,13 +893,28 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                 }
             } catch (Exception ignored) {}
             tried.add(transportKey);
-            if (io == null || !safeIsOpen(io)) continue;
+            if (io == null || !safeIsOpen(io)) {
+                attemptOutcome = "transport fermé/indisponible";
+                attemptsDetail.put(buildAttemptDetail(transportKey, attemptOutcome, null));
+                continue;
+            }
 
             String serial = probeSerial(io, node, from);
-            if (serial == null || serial.trim().isEmpty()) continue;
+            if (serial == null || serial.trim().isEmpty()) {
+                attemptOutcome = "ouvert mais #série illisible (registre ne répond pas)";
+                attemptsDetail.put(buildAttemptDetail(transportKey, attemptOutcome, null));
+                continue;
+            }
             serial = serial.trim();
 
-            if (hasSerial && !serialId.trim().equalsIgnoreCase(serial)) continue;
+            if (hasSerial && !serialId.trim().equalsIgnoreCase(serial)) {
+                attemptOutcome = "#série trouvé (" + serial + ") ne correspond pas à celui attendu (" + serialId.trim() + ")";
+                attemptsDetail.put(buildAttemptDetail(transportKey, attemptOutcome, serial));
+                continue;
+            }
+
+            attemptOutcome = "✓ trouvé — #série=" + serial;
+            attemptsDetail.put(buildAttemptDetail(transportKey, attemptOutcome, serial));
 
             DeliveryController dc = null;
             try { dc = sessions.getOrCreate(transportKey, node, from, io); } catch (Exception ignored) {}
@@ -933,6 +957,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             safePut(d, "net",          net);
             safePut(d, "gross",        gross);
             safePut(d, "ui",           "UPSERT_TAB");
+            safePut(d, "attemptsDetail", attemptsDetail);
             return ApiResult.ok("Registre trouvé sur " + mediaLabelFromKey(transportKey).toUpperCase(Locale.ROOT), d);
         }
 
@@ -957,6 +982,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                         safePut(d2, "serial_mismatch", hasSerial && !serialId.trim().equalsIgnoreCase(foundSerial.trim()) ? 1 : 0);
                         safePut(d2, "expected_serial", hasSerial ? serialId.trim() : null);
                         safePut(d2, "ui",              "UPSERT_TAB");
+                        safePut(d2, "attemptsDetail",  attemptsDetail);
                         String msg2 = (hasSerial && !serialId.trim().equalsIgnoreCase(foundSerial.trim()))
                                 ? "Registre trouvé mais serial différent — attendu=" + serialId + " réel=" + foundSerial
                                 : "Registre trouvé sur " + mediaLabelFromKey(activeKey).toUpperCase(Locale.ROOT);
@@ -976,7 +1002,21 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         safePut(dn, "scanSuggested", true);
         safePut(dn, "scanEndpoint",  "/v1/register/scan-auto");
         safePut(dn, "tried",         new JSONArray(tried));
+        safePut(dn, "attemptsDetail", attemptsDetail);
         return ApiResult.fail("Registre non trouvé sur BT ou USB", "ERR_REGISTER_NOT_FOUND", dn);
+    }
+
+    // ✅ FIX (4 août 2026, demande Paul) — construit une entrée de détail
+    // pour UNE tentative de connexion sur UN transport, utilisée pour donner
+    // à l'écran Diagnostic une vraie visibilité par transport au lieu d'un
+    // message opaque "Recherche... (1/3)".
+    private JSONObject buildAttemptDetail(String transportKey, String outcome, String serialFound) {
+        JSONObject o = new JSONObject();
+        safePut(o, "transportKey", transportKey);
+        safePut(o, "media", mediaLabelFromKey(transportKey));
+        safePut(o, "outcome", outcome);
+        if (serialFound != null) safePut(o, "serialFound", serialFound);
+        return o;
     }
     
     // ✅ FIX (4 août 2026, demande Paul — "il doit y avoir qu'un seul endroit

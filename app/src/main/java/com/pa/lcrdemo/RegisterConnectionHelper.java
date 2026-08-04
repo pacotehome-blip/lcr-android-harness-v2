@@ -401,19 +401,48 @@ public class RegisterConnectionHelper {
             }
         } catch (Exception ignored) {}
 
+        // ✅ FIX (4 août 2026, demande Paul — "la recherche du registre selon
+        // son média ne fonctionne pas avec diagnostic... il ne cherche pas
+        // selon son média") — trouvé : les étapes 1-2 faisaient un reset BT
+        // complet (déconnexion + bt.disable()/enable(), ~3.5s) de façon
+        // INCONDITIONNELLE, peu importe si le registre visé est sur USB, BT
+        // ou TCP. Le deep link appelle TOUJOURS lancerDiagnosticForce("", ...)
+        // avec un transportKey VIDE — donc Diagnostic n'avait de toute façon
+        // aucune info sur le média réel et traitait systématiquement ça comme
+        // un problème BT par défaut, gaspillant ~3.5s de reset BT inutile
+        // avant même d'essayer USB (qui est pourtant la priorité #1 depuis le
+        // fix d'ordre). Ici : on vérifie si un périphérique USB est
+        // physiquement présent AVANT de faire quoi que ce soit — si oui, les
+        // étapes 1-2 (spécifiques BT) sont sautées entièrement, on va
+        // directement à l'étape 3 (recherche unifiée USB→BT→TCP).
+        boolean usbDevicePresent = false;
+        try {
+            android.hardware.usb.UsbManager um =
+                (android.hardware.usb.UsbManager) activity.getSystemService(android.content.Context.USB_SERVICE);
+            if (um != null) {
+                java.util.Map<String, android.hardware.usb.UsbDevice> devs = um.getDeviceList();
+                usbDevicePresent = (devs != null && !devs.isEmpty());
+            }
+        } catch (Exception ignored) {}
+        if (usbDevicePresent) {
+            Log.i(TAG, "Diagnostic: périphérique USB physiquement présent — étapes 1-2 (reset BT) sautées, direct à l'étape 3");
+        }
+
         // ÉTAPE 1 — Fermeture connexion existante
-        etapes[0] = livraisonActive ? "Fermeture connexion — ignorée (livraison active)" : "Fermeture connexion existante";
+        etapes[0] = (livraisonActive || usbDevicePresent) ? "Fermeture connexion — ignorée ("
+                + (livraisonActive ? "livraison active" : "USB détecté") + ")" : "Fermeture connexion existante";
         updateDlg.run();
-        if (!livraisonActive) {
+        if (!livraisonActive && !usbDevicePresent) {
             try { activity.btDisconnect(); Thread.sleep(800); } catch (Exception ignored) {}
         }
         etapesOk[0] = true;
         updateDlg.run();
 
         // ÉTAPE 2 — Réinitialisation Bluetooth
-        etapes[1] = livraisonActive ? "Réinitialisation BT — ignorée (livraison active)" : "Réinitialisation Bluetooth";
+        etapes[1] = (livraisonActive || usbDevicePresent) ? "Réinitialisation BT — ignorée ("
+                + (livraisonActive ? "livraison active" : "USB détecté") + ")" : "Réinitialisation Bluetooth";
         updateDlg.run();
-        if (!livraisonActive) {
+        if (!livraisonActive && !usbDevicePresent) {
             try {
                 android.bluetooth.BluetoothAdapter bt = android.bluetooth.BluetoothAdapter.getDefaultAdapter();
                 if (bt != null && bt.isEnabled()) {
@@ -451,8 +480,11 @@ public class RegisterConnectionHelper {
             etapes[2] = "Recherche registre... (" + attempt + "/3)";
             updateDlg.run();
 
-            // ✅ Fermer les sockets BT zombis SEULEMENT à la 1ère tentative
-            if (attempt == 1) {
+            // ✅ Fermer les sockets BT zombis SEULEMENT à la 1ère tentative,
+            // et SEULEMENT si USB n'est pas physiquement présent (voir fix
+            // plus haut — inutile et potentiellement nuisible de toucher au
+            // BT quand le registre visé est sur USB).
+            if (attempt == 1 && !usbDevicePresent) {
                 try {
                     com.pa.lcr.lcp.transport.MediaTransportManager mtmClose =
                         activity.getMediaTransportManager();
@@ -487,6 +519,28 @@ public class RegisterConnectionHelper {
             com.pa.lcr.lcp.ApiResult r = facade.api_registerConnectAuto(
                 fSerialIdFinal.isEmpty() ? null : fSerialIdFinal, fNodeFinal);
             Log.i(TAG, "étape 3: code=" + r.code + " msg=" + r.msg);
+
+            // ✅ FIX (4 août 2026, demande Paul — "je veux le détail complet
+            // de chaque tentative de connexion sur chaque transport") —
+            // affiche maintenant, ligne par ligne, ce qui a été tenté sur
+            // CHAQUE transport (USB/BT/TCP), pas juste "Recherche... (1/3)".
+            try {
+                org.json.JSONArray details = (r.data != null) ? r.data.optJSONArray("attemptsDetail") : null;
+                if (details != null && details.length() > 0) {
+                    StringBuilder sbDetail = new StringBuilder();
+                    for (int di = 0; di < details.length(); di++) {
+                        org.json.JSONObject a = details.optJSONObject(di);
+                        if (a == null) continue;
+                        sbDetail.append("  • ").append(a.optString("media", "?"))
+                            .append(" (").append(a.optString("transportKey", "?")).append(") — ")
+                            .append(a.optString("outcome", "?")).append("\n");
+                    }
+                    Log.i(TAG, "étape 3: détail par transport:\n" + sbDetail);
+                    etapes[2] = "Recherche registre... (" + attempt + "/3)\n" + sbDetail.toString().trim();
+                    updateDlg.run();
+                }
+            } catch (Exception ignored) {}
+
             if (r.code == 1) {
                 String foundKey    = r.data != null ? r.data.optString("transportKey", "") : "";
                 String foundSerial = r.data != null ? r.data.optString("serial", fSerialIdFinal) : fSerialIdFinal;
@@ -506,24 +560,18 @@ public class RegisterConnectionHelper {
                 try { Thread.sleep(500); } catch (Exception ignored) {}
                 etapes[2] = "✅ Registre trouvé — " + foundKey.replace("BT:", "BT: ") + " | Serial: " + foundSerial;
                 updateDlg.run();
-                dcFinal = com.pa.lcr.lcp.RegisterSessionManager.get(activity)
-                    .resolveOrCreateForNode(fNodeFinal, 255);
 
-                // ✅ Forcer la réattachement du controller au socket actuel
-                // Comme Configure le fait — sinon le controller a un io zombi
-                try {
-                    com.pa.lcr.lcp.transport.MediaTransportManager mtmReattach =
-                        activity.getMediaTransportManager();
-                    com.pa.lcr.lcp.transport.TransportIo ioReattach =
-                        mtmReattach.getByKey(fKey);
-                    if (ioReattach != null && ioReattach.isOpen()) {
-                        com.pa.lcr.lcp.RegisterSessionManager.get(activity)
-                            .getOrCreate(fKey, fNodeFinal, 255, ioReattach);
-                        Log.i(TAG, "étape 3: controller réattaché au socket " + fKey);
-                    }
-                } catch (Exception e) {
-                    Log.w(TAG, "étape 3: réattach ERR: " + e.getMessage());
-                }
+                // ✅ FIX (4 août 2026, demande Paul — "si on fait un
+                // changement on le fait à un seul endroit") — avant ce fix,
+                // ce bloc appelait resolveOrCreateForNode() PUIS getOrCreate()
+                // encore une fois pour "réattacher" — deux appels de création
+                // de session redondants, alors que api_registerConnectAuto()
+                // (étape 3 ci-dessus) a DÉJÀ créé/attaché la session au bon
+                // socket via sessions.getOrCreate() en interne. Ici : simple
+                // LECTURE de ce qui existe déjà (getController), aucune
+                // création supplémentaire.
+                dcFinal = com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                    .getController(fKey, fNodeFinal);
 
                 btConnecte = true;
                 etapesOk[2] = true;
