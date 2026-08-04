@@ -480,6 +480,22 @@ public class DeepLinkHandler {
         final String fWoNum = woNum;
         final String fProduit = produit;
         final String fPresetStr = presetStr;
+
+        // ✅ (4 août 2026, demande Paul : "retarder le deeplink si le tab n'existait
+        // pas avant — démarrer la livraison doit être fait après le scan si le tab
+        // vient d'être créé") — déterminer AVANT upsertRegisterTabFromScan() si ce
+        // tab existe déjà, pour savoir plus bas s'il faut attendre la fin du scan
+        // auto produits (RegisterTabFragment.onTabActivated) avant de démarrer.
+        boolean tabWasNewBeforeThisCall;
+        try {
+            String mediaShortCheck = activity.mediaShortFromTransportKey(transportKey);
+            String tabKeyCheck = activity.tabKeyOf(mediaShortCheck, node, fSerialId);
+            tabWasNewBeforeThisCall = !activity.tabExists(tabKeyCheck);
+        } catch (Exception e) {
+            tabWasNewBeforeThisCall = false;
+        }
+        final boolean fTabWasNew = tabWasNewBeforeThisCall;
+
         activity.runOnUiThread(() -> {
             try {
                 if (!transportKey.isEmpty()) {
@@ -542,6 +558,36 @@ public class DeepLinkHandler {
             retournerFieldService(woNum, woIdGuid, "erreur_media",
                 buildErrorJson("MEDIA_NOT_READY", "Média non prêt après 10s"));
             return;
+        }
+
+        // ✅ (4 août 2026, demande Paul) — si ce tab vient d'être créé par cet
+        // appel (n'existait pas avant), attendre que le scan auto produits
+        // (RegisterTabFragment.onTabActivated → autoScanProduitsSiNecessaire)
+        // soit terminé AVANT de démarrer la livraison. Un tab déjà existant
+        // (donc déjà scanné lors d'une activation précédente) ne subit AUCUN
+        // délai supplémentaire. Max 10s d'attente — best-effort, ne bloque
+        // jamais indéfiniment si le fragment n'est pas trouvé ou ne répond pas.
+        if (fTabWasNew) {
+            boolean scanTermine = false;
+            for (int i = 0; i < 20; i++) {
+                try {
+                    String mediaShort = activity.mediaShortFromTransportKey(transportKey);
+                    String tabKey = activity.tabKeyOf(mediaShort, node, fSerialId);
+                    Fragment f = activity.getSupportFragmentManager()
+                        .findFragmentByTag("regtab_" + tabKey);
+                    if (!(f instanceof RegisterTabFragment)
+                            || !((RegisterTabFragment) f).isAutoProductScanBusy()) {
+                        scanTermine = true;
+                        break;
+                    }
+                } catch (Exception ignored) {
+                    scanTermine = true; // best-effort — ne jamais bloquer sur une erreur ici
+                    break;
+                }
+                try { Thread.sleep(500); } catch (Exception ignored) {}
+            }
+            android.util.Log.i(TAG, "lancerLivraison: attente scan auto produits (tab neuf) — "
+                + (scanTermine ? "terminé" : "timeout 10s, poursuite quand même"));
         }
 
         // Démarrer oneshot/start

@@ -320,6 +320,13 @@ public class MainActivity extends AppCompatActivity {
 
     // tabKey -> spec
     private final LinkedHashMap<String, TabSpec> tabsByKey = new LinkedHashMap<>();
+
+    // ✅ (4 août 2026) — accesseur read-only pour DeepLinkHandler : permet de
+    // savoir, AVANT upsertRegisterTabFromScan(), si un tab existait déjà pour
+    // cette clé (utilisé pour décider s'il faut attendre le scan auto produits).
+    public boolean tabExists(String tabKey) {
+        return tabsByKey.containsKey(tabKey);
+    }
     // regKey(node#serial) -> tabKey courant (clear ciblé si migre de média)
     private final LinkedHashMap<String, String> regKeyToTabKey = new LinkedHashMap<>();
 

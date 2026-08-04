@@ -61,6 +61,21 @@ public class RegisterTabFragment extends Fragment {
         // ✅ Vérifier si une livraison PENDING attend ce registre
         // Si oui → pré-remplir le tab et proposer de reprendre
         ui.postDelayed(() -> checkPendingDeliveryForThisRegister(), 600);
+
+        // ✅ Scan auto produits (4 août 2026, demande Paul : "après l'activation
+        // du tab, après connected ready") — armé ici, mais le scan ne se
+        // déclenche réellement qu'au moment où onStateChanged reçoit CONNECTED
+        // (voir uiListener). Si le registre est déjà CONNECTED au moment de
+        // cette activation (pas de nouvelle transition à venir), on vérifie
+        // aussi directement l'état courant en filet de sécurité.
+        autoScanArmedForThisActivation = true;
+        ui.postDelayed(() -> {
+            if (autoScanArmedForThisActivation && controller != null
+                    && controller.getState() == DeliveryState.CONNECTED) {
+                autoScanArmedForThisActivation = false;
+                autoScanProduitsSiNecessaire();
+            }
+        }, 1200);
     }
 
     /**
@@ -330,6 +345,20 @@ public class RegisterTabFragment extends Fragment {
     private String serialFromArgs = null;
     private String transportFromArgs = null;
     private boolean starting = false;
+    // ✅ Scan auto produits (4 août 2026, demande Paul) — évite un déclenchement
+    // en boucle si l'état oscille CONNECTED/DISCONNECTED/CONNECTED rapidement.
+    private volatile boolean autoProductScanInFlight = false;
+    // "Armé" à l'activation du tab, consommé au premier CONNECTED qui suit —
+    // garantit un déclenchement unique par activation de tab, au vrai moment
+    // où le registre devient CONNECTED READY (pas sur un délai fixe arbitraire).
+    private volatile boolean autoScanArmedForThisActivation = false;
+
+    // ✅ (4 août 2026) — accesseur pour DeepLinkHandler : permet d'attendre la
+    // fin du scan auto produits avant de démarrer une livraison sur un tab
+    // qui vient tout juste d'être créé (voir lancerLivraison()).
+    public boolean isAutoProductScanBusy() {
+        return autoScanArmedForThisActivation || autoProductScanInFlight;
+    }
     private long startingSinceMs = 0L;
     private volatile boolean cancelInProgress = false;
 
@@ -519,6 +548,16 @@ public class RegisterTabFragment extends Fragment {
                 if (state == DeliveryState.CONNECTED
                         && (currentWoNum == null || currentWoNum.isEmpty())) {
                     ui.postDelayed(() -> rechercherWoDepuisRegistre(), 800);
+                }
+
+                // ✅ Scan auto produits (4 août 2026, demande Paul) — se déclenche
+                // uniquement si armé par onTabActivated() (une activation de tab =
+                // un déclenchement max). "Consommé" immédiatement pour qu'une
+                // reconnexion CONNECTED ultérieure dans la même activation ne
+                // relance rien.
+                if (state == DeliveryState.CONNECTED && autoScanArmedForThisActivation) {
+                    autoScanArmedForThisActivation = false;
+                    ui.postDelayed(this::autoScanProduitsSiNecessaire, 300);
                 }
 
                 // ✅ Retour Field Service quand livraison terminée
@@ -3196,6 +3235,52 @@ public class RegisterTabFragment extends Fragment {
                     android.widget.Toast.makeText(getContext(),
                         "Erreur annulation: " + e.getMessage(),
                         android.widget.Toast.LENGTH_SHORT).show();
+                });
+            }
+        });
+    }
+
+    // ✅ Scan auto produits (4 août 2026, demande Paul) — appelé une seule fois
+    // par activation de tab (onTabActivated), pas à chaque transition CONNECTED.
+    // Vérifie d'abord le cache local (RegisterProductStore) avant de lancer un
+    // vrai scan matériel : si des produits sont déjà connus pour ce serial+node,
+    // on réapplique juste le cache (rapide, pas d'IO registre). Sinon on lance
+    // lancerScanProduits() (le même scan que le bouton manuel "🔍 Scan produits").
+    private void autoScanProduitsSiNecessaire() {
+        if (!isAdded() || getView() == null || controller == null) return;
+        if (autoProductScanInFlight) return;
+        if (controller.getState() != DeliveryState.CONNECTED) return; // état a pu changer entretemps
+        final String serialId = (serialFromArgs != null && !serialFromArgs.trim().isEmpty())
+                ? serialFromArgs.trim() : null;
+        if (serialId == null) return;
+
+        autoProductScanInFlight = true;
+        bg.execute(() -> {
+            boolean cacheDisponible = false;
+            try {
+                com.pa.lcr.lcp.storage.RegisterProductStore store =
+                        new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
+                java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> rows = store.getAll(serialId, node);
+                store.close();
+                cacheDisponible = !rows.isEmpty();
+            } catch (Exception e) {
+                android.util.Log.w("RegisterTabFragment", "autoScanProduitsSiNecessaire: lecture cache ERR: " + e.getMessage());
+            }
+
+            if (cacheDisponible) {
+                android.util.Log.i("RegisterTabFragment", "Auto-scan produits — cache déjà présent pour serial="
+                        + serialId + " node=" + node + ", pas de re-scan matériel");
+                applierDescriptionsProduits(serialId, node);
+                autoProductScanInFlight = false;
+            } else {
+                android.util.Log.i("RegisterTabFragment", "Auto-scan produits — aucun cache pour serial="
+                        + serialId + " node=" + node + ", lancement scan matériel");
+                ui.post(() -> {
+                    try {
+                        lancerScanProduits();
+                    } finally {
+                        autoProductScanInFlight = false;
+                    }
                 });
             }
         });
