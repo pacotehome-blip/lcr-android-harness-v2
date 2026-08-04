@@ -77,6 +77,44 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
 
     private static final String ACTION_NODE_SEEN = "com.pa.lcrdemo.ACTION_NODE_SEEN";
 
+    // ✅ FIX (4 août 2026, demande Paul — "il doit y avoir qu'un seul endroit
+    // pour initier la connexion au registre") — MultiRegisterApiFacadeImpl
+    // est recréé (`new`) à CHAQUE appel, à plus de 13 endroits différents
+    // (DeepLinkHandler seul en crée 13+). Un verrou d'instance ne sert donc
+    // à rien — chaque appelant a son propre objet, sans aucun état partagé.
+    // Confirmé par log terrain : deux appels concurrents à
+    // api_registerConnectAuto() (un depuis DeepLinkHandler, un depuis le
+    // diagnostic déclenché juste après) se marchaient sur les pieds sur le
+    // MÊME transport USB — l'un rapportait "trouvé", l'autre "abandon", en
+    // même temps. Même patron que RegisterConnectionHelper.diagnosticEnCours
+    // (déjà éprouvé depuis le 29 juillet pour exactement ce genre de course) :
+    // verrou STATIQUE, staleness bypass si un appel précédent reste coincé.
+    private static volatile boolean connectAutoEnCours = false;
+    private static volatile long connectAutoStartMs = 0L;
+    private static final long CONNECT_AUTO_STALE_MS = 15_000L;
+
+    private static synchronized boolean prendreLeVerrouConnectAuto(String origine) {
+        long now = System.currentTimeMillis();
+        if (connectAutoEnCours) {
+            long age = now - connectAutoStartMs;
+            if (age < CONNECT_AUTO_STALE_MS) {
+                android.util.Log.w("MultiRegisterApiFacadeImpl", origine
+                    + ": connectAuto déjà en cours depuis " + age + "ms — REFUSÉ");
+                return false;
+            }
+            android.util.Log.w("MultiRegisterApiFacadeImpl", origine
+                + ": connectAuto précédent bloqué depuis " + age + "ms — reprise du verrou");
+        }
+        connectAutoEnCours = true;
+        connectAutoStartMs = now;
+        return true;
+    }
+
+    private static synchronized void libererLeVerrouConnectAuto() {
+        connectAutoEnCours = false;
+        connectAutoStartMs = 0L;
+    }
+
     private final Context appCtx;
     private final UsbManager usbManager;
     private final RegisterSessionManager sessions;
@@ -788,6 +826,22 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     // =========================================================
     @Override
     public ApiResult api_registerConnectAuto(String serialId, Integer lcrnode) {
+        // ✅ FIX (4 août 2026) — voir commentaire du verrou plus haut. Un seul
+        // appel à la fois, peu importe combien d'endroits différents dans le
+        // code appellent cette méthode.
+        if (!prendreLeVerrouConnectAuto("api_registerConnectAuto")) {
+            JSONObject d = new JSONObject();
+            try { d.put("reason", "connexion déjà en cours ailleurs — réessaie dans un instant"); } catch (Exception ignored) {}
+            return ApiResult.fail("Register connect-auto: 0 - Connexion déjà en cours", "ERR_CONNECT_AUTO_BUSY", d);
+        }
+        try {
+            return api_registerConnectAutoLocked(serialId, lcrnode);
+        } finally {
+            libererLeVerrouConnectAuto();
+        }
+    }
+
+    private ApiResult api_registerConnectAutoLocked(String serialId, Integer lcrnode) {
         final int from = 255;
         final boolean hasNode = (lcrnode != null && lcrnode.intValue() != 0);
         final boolean hasSerial = (serialId != null && !serialId.trim().isEmpty());
@@ -809,8 +863,23 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             TransportIo io = null;
             try {
                 if (mediaMgr != null) {
-                    if (!isApiTransportSwitchSafe(transportKey)) { continue; }
-                    try { mediaMgr.activateExclusive(transportKey, "REGISTER_CONNECT_AUTO"); } catch (Exception ignored) {}
+                    // ✅ FIX (4 août 2026, demande Paul — "on veut éviter de
+                    // courcircuiter une livraison en cours si on ajoute un
+                    // nouveau registre sur un nouveau tab. mais ça il doit le
+                    // laisser passer") — avant ce fix, ce candidat était
+                    // complètement SAUTÉ (continue) si une livraison tournait
+                    // sur un autre transport, empêchant même la simple
+                    // découverte d'un NOUVEAU registre différent. Corrigé :
+                    // on ne vole plus l'exclusivité (activateExclusive() reste
+                    // sauté si ce n'est pas sûr — la livraison en cours garde
+                    // son transport), mais la découverte continue quand même
+                    // avec le transport tel quel. S'il n'est pas réellement
+                    // utilisable sans exclusivité, la lecture échouera
+                    // naturellement plus bas (io fermé/non actif) — pas besoin
+                    // de bloquer artificiellement en amont.
+                    if (isApiTransportSwitchSafe(transportKey)) {
+                        try { mediaMgr.activateExclusive(transportKey, "REGISTER_CONNECT_AUTO"); } catch (Exception ignored) {}
+                    }
                     io = mediaMgr.getByKey(transportKey);
                 }
             } catch (Exception ignored) {}
@@ -910,8 +979,21 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         return ApiResult.fail("Registre non trouvé sur BT ou USB", "ERR_REGISTER_NOT_FOUND", dn);
     }
     
+    // ✅ FIX (4 août 2026, demande Paul — "il doit y avoir qu'un seul endroit
+    // pour initier la connexion... usb est présent cherche le registre si pas
+    // présent cherche sur BT, si pas présent cherche sur tcp") — ordre
+    // ENTIÈREMENT réécrit. Avant ce fix : transport déjà actif, puis BT,
+    // puis TCP, puis USB EN DERNIER — l'inverse exact de la priorité
+    // demandée. USB est maintenant essayé en premier (après le transport
+    // déjà actif, gardé comme chemin rapide légitime), puis BT, puis TCP.
+    // La boucle appelante (api_registerConnectAutoLocked) respecte déjà
+    // l'ordre de cette liste et retourne dès le premier succès — remettre
+    // l'ordre dans le bon sens ici suffit à obtenir la recherche séquentielle
+    // demandée, sans toucher à la boucle elle-même.
     private ArrayList<String> listCandidateTransportKeysForAutoConnect() {
         ArrayList<String> keys = new ArrayList<>();
+        // 1) Transport déjà actif — chemin rapide légitime, pas de round-trip
+        // inutile s'il est déjà ouvert et prêt.
         try {
             String activeKey = MediaTransportManager.getActiveKeyStatic();
             if (activeKey != null && !activeKey.trim().isEmpty()) {
@@ -920,6 +1002,17 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                 if (io != null && safeIsOpen(io)) keys.add(k);
             }
         } catch (Exception ignored) {}
+        // 2) USB — priorité demandée en premier.
+        try {
+            String usbKey = MediaTransportManager.KEY_USB;
+            TransportIo usbIo = (mediaMgr != null) ? mediaMgr.getByKey(usbKey) : null;
+            if (usbIo == null || !safeIsOpen(usbIo)) {
+                try { api_openPingUsb(); } catch (Exception ignored2) {}
+                usbIo = (mediaMgr != null) ? mediaMgr.getByKey(usbKey) : null;
+            }
+            if (usbIo != null && safeIsOpen(usbIo) && !keys.contains(usbKey)) keys.add(usbKey);
+        } catch (Exception ignored) {}
+        // 3) BT — seulement si USB n'a rien donné.
         try {
             boolean anyBtOpen = false;
             if (mediaMgr != null) {
@@ -930,9 +1023,15 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                 }
             }
             if (!anyBtOpen) { try { api_btActivate(); } catch (Exception ignored2) {} }
+            if (mediaMgr != null) {
+                for (TransportSnapshot s : mediaMgr.listSnapshots()) {
+                    if (s == null || s.key == null || !s.key.startsWith("BT:")) continue;
+                    TransportIo io = mediaMgr.getByKey(s.key);
+                    if (io != null && safeIsOpen(io) && !keys.contains(s.key)) keys.add(s.key);
+                }
+            }
         } catch (Exception ignored) {}
-        // ✅ TCP (N-Port) — même principe que BT/USB : si aucun TCP n'est déjà
-        // ouvert, tenter une auto-connexion avant de construire la liste finale.
+        // 4) TCP (N-Port) — en dernier, seulement si USB et BT n'ont rien donné.
         // Stratégie : IP(s) connue(s) d'abord (rapide, ~1-3s), scan complet du
         // sous-réseau seulement en filet de sécurité (~5-6s) si ça échoue.
         try {
@@ -945,27 +1044,13 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                 }
             }
             if (!anyTcpOpen) { try { autoConnectTcp(); } catch (Exception ignored2) {} }
-        } catch (Exception ignored) {}
-        try {
             if (mediaMgr != null) {
                 for (TransportSnapshot s : mediaMgr.listSnapshots()) {
-                    if (s == null || s.key == null) continue;
-                    String k = s.key.trim();
-                    if (k.isEmpty()) continue;
-                    TransportIo io = mediaMgr.getByKey(k);
-                    if (io == null || !safeIsOpen(io)) continue;
-                    if (!keys.contains(k)) keys.add(k);
+                    if (s == null || s.key == null || !s.key.toUpperCase(Locale.ROOT).startsWith("TCP:")) continue;
+                    TransportIo io = mediaMgr.getByKey(s.key);
+                    if (io != null && safeIsOpen(io) && !keys.contains(s.key)) keys.add(s.key);
                 }
             }
-        } catch (Exception ignored) {}
-        try {
-            String usbKey = MediaTransportManager.KEY_USB;
-            TransportIo usbIo = (mediaMgr != null) ? mediaMgr.getByKey(usbKey) : null;
-            if (usbIo == null || !safeIsOpen(usbIo)) {
-                try { api_openPingUsb(); } catch (Exception ignored2) {}
-                usbIo = (mediaMgr != null) ? mediaMgr.getByKey(usbKey) : null;
-            }
-            if (usbIo != null && safeIsOpen(usbIo) && !keys.contains(usbKey)) keys.add(usbKey);
         } catch (Exception ignored) {}
         return keys;
     }

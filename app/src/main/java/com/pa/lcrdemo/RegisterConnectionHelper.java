@@ -471,17 +471,17 @@ public class RegisterConnectionHelper {
                 } catch (Exception ignored) {}
             }
 
-            // ✅ Étape 2: api_btActivate — ouvrir socket BT (comme bouton Connect BT manuel)
-            com.pa.lcr.lcp.ApiResult btRes = facade.api_btActivate();
-            Log.i(TAG, "étape 3: api_btActivate code=" + btRes.code + " msg=" + btRes.msg);
-            if (btRes.code != 1) {
-                erreurDetail[0] = btRes.msg;
-                if (attempt < 3) try { Thread.sleep(2000); } catch (Exception ignored) {}
-                continue;
-            }
-            try { Thread.sleep(500); } catch (Exception ignored) {}
+            // ✅ FIX (4 août 2026, demande Paul — "un seul endroit pour
+            // initier la connexion") — l'ancienne étape 2 forçait BT à
+            // s'ouvrir AVANT même d'essayer l'étape 3, alors que
+            // api_registerConnectAuto() (étape 3) gère maintenant lui-même
+            // USB→BT→TCP dans le bon ordre, avec verrou unique. Si le
+            // registre est en fait sur USB (le cas réel le plus courant),
+            // cette étape forçait un échec inutile avant même d'essayer.
+            // Retirée — l'étape 3 gère tout, un seul chemin, plus de
+            // duplication.
 
-            // ✅ Étape 3: api_registerConnectAuto — probe LCP, valide node + serial
+            // ✅ Étape 3: api_registerConnectAuto — probe LCP (USB→BT→TCP), valide node + serial
             Log.i(TAG, "étape 3: api_registerConnectAuto tentative " + attempt
                 + " node=" + fNodeFinal + " serial=" + fSerialIdFinal);
             com.pa.lcr.lcp.ApiResult r = facade.api_registerConnectAuto(
