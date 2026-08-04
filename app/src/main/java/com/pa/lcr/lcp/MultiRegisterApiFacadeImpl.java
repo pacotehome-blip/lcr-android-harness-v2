@@ -1254,10 +1254,33 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     }
 
     private DeliveryController requireSession(Integer nodeDec, Integer fromDec) {
-        UsbSerialPort port = UsbSession.getPort();
-        if (port == null) return null;
         int n = normNode(nodeDec);
         int f = normFrom(fromDec);
+        // ✅ FIX (4 août 2026, demande Paul : "USB non prêt" alors que Configure
+        // montre USB bien connecté) — cette méthode ne vérifiait QUE
+        // UsbSession.getPort() (holder statique séparé dans com.pa.lcrdemo,
+        // rempli uniquement par UsbReceiver), jamais MediaTransportManager — le
+        // système que l'onglet Configure lit réellement pour afficher l'état
+        // USB. Les deux pouvaient diverger (ex. UsbSession vidé pendant qu'un
+        // switch BT survient, alors que le TransportHandle USB dans
+        // MediaTransportManager restait READY), produisant un "USB non prêt"
+        // trompeur malgré un port réellement ouvert. MediaTransportManager est
+        // maintenant vérifié en premier (source de vérité, cohérente avec
+        // Configure) ; UsbSession reste en repli pour compat descendante si
+        // jamais un port USB existe par ce chemin legacy sans être encore
+        // enregistré dans MediaTransportManager.
+        TransportIo usbIo = (mediaMgr != null) ? mediaMgr.getByKey(MediaTransportManager.KEY_USB) : null;
+        if (usbIo != null && usbIo.isOpen()) {
+            DeliveryController dc = sessions.getOrCreate(MediaTransportManager.KEY_USB, n, f, usbIo);
+            if (dc != null) {
+                String serial = sessions.getExpectedSerial(n);
+                try { emitRegisterState(n, f, serial, MediaTransportManager.KEY_USB, null, false); } catch (Exception ignored) {}
+                return dc;
+            }
+        }
+
+        UsbSerialPort port = UsbSession.getPort();
+        if (port == null) return null;
         DeliveryController dc = sessions.getOrCreate(n, f, port);
         if (dc != null) {
             String serial = sessions.getExpectedSerial(n);
