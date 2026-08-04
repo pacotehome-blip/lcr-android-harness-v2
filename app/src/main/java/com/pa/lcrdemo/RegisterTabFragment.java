@@ -2206,15 +2206,40 @@ public class RegisterTabFragment extends Fragment {
                 // ✅ Source primaire — lecture FRAÎCHE du registre (toujours à jour,
                 // même après bouton C qui ne passe pas par DeepLinkHandler)
                 org.json.JSONObject freshSnap = null;
+
+                // ✅ FIX 4 août 2026 (demande Paul : "il faut la vérité du registre") —
+                // netAtDeliveryEnd/grossAtDeliveryEnd/ticketNoAtEnd sont figés par
+                // DeliveryController.onDeliveryFinishedIfNeeded() exactement au moment
+                // où l'état quitte RUNNING_FLOWING/RUNNING_PAUSED (fin réelle de livraison),
+                // à partir du TickBus live (pas un cache). C'est la vraie dernière lecture
+                // du registre — à privilégier avant api_tickSnapshot() (cache-only, peut
+                // être périmé, cf. ticket 10910 : 10.5 restauré vs 10.6 réel au registre).
                 try {
-                    if (controller != null) {
+                    if (controller != null
+                            && controller.netAtDeliveryEnd >= 0.0
+                            && controller.grossAtDeliveryEnd >= 0.0) {
+                        netL   = controller.netAtDeliveryEnd;
+                        grossL = controller.grossAtDeliveryEnd;
+                        if (controller.ticketNoAtEnd != null
+                                && !controller.ticketNoAtEnd.trim().isEmpty()) {
+                            ticketNo = controller.ticketNoAtEnd;
+                        }
+                        android.util.Log.i("RetourWO", "Vérité registre (fin livraison) — "
+                            + "ticket=" + ticketNo + " net=" + netL + " gross=" + grossL);
+                    }
+                } catch (Exception ignored) {}
+
+                // Fallback — lecture cache si netAtDeliveryEnd pas encore disponible
+                // (ex. livraison terminée avant ce build, ou controller recréé entretemps)
+                try {
+                    if (controller != null && (netL == 0.0 && grossL == 0.0)) {
                         ApiResult sr = controller.api_tickSnapshot();
                         if (sr != null && sr.data != null) {
                             freshSnap = sr.data;
                             org.json.JSONObject result = freshSnap.optJSONObject("result");
                             if (result != null) {
-                                ticketNo = result.optString("ticket_no", "");
-                                saleNo   = result.optString("sale_no",   "");
+                                if (ticketNo.isEmpty()) ticketNo = result.optString("ticket_no", "");
+                                if (saleNo.isEmpty())   saleNo   = result.optString("sale_no",   "");
                                 netL     = result.optDouble("fs_net_l",  0);
                                 grossL   = result.optDouble("fs_gross_l",0);
                             }
