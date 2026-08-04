@@ -3,12 +3,18 @@
   res/xml/network_security_config.xml
   - HTTPS vers 127.0.0.1 : certificat auto-signé embarqué dans l'APK
   - Ajout de "user" pour accepter le cert installé manuellement (dev) et via SOTI (prod)
-  - HTTP autorisé uniquement vers localhost (usage interne)
+  - HTTP autorisé vers 127.0.0.1 ET localhost (port 8766 — usage interne, PCF/WebView
+    qui ne peuvent pas faire confiance au cert auto-signé HTTPS)
   - Tout autre trafic HTTP vers l'extérieur reste bloqué
 -->
 <network-security-config>
-    <!-- HTTPS local 127.0.0.1 — confiance au certificat LCR embarqué + store système + store utilisateur (SOTI/dev) -->
-    <domain-config cleartextTrafficPermitted="false">
+    <!-- 127.0.0.1 — HTTPS (cert LCR embarqué + system + user) ET HTTP en clair
+         (port 8766) tous les deux permis sur ce même domaine. ✅ FIX 4 août 2026 :
+         cleartextTrafficPermitted était à "false" ici, alors que le port 8766 sans
+         SSL cible spécifiquement 127.0.0.1 — bloqué avant ce fix si un appelant
+         (WebView interne, outil de test) utilisait "127.0.0.1" plutôt que
+         "localhost" pour joindre 8766. -->
+    <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="false">127.0.0.1</domain>
         <trust-anchors>
             <certificates src="system" />
@@ -16,7 +22,7 @@
             <certificates src="@raw/lcr_local" />
         </trust-anchors>
     </domain-config>
-    <!-- HTTP autorisé UNIQUEMENT vers localhost -->
+    <!-- HTTP autorisé aussi vers localhost (alias courant de 127.0.0.1) -->
     <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="false">localhost</domain>
     </domain-config>

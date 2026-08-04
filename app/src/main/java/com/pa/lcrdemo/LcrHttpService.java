@@ -49,10 +49,9 @@ public class LcrHttpService extends Service {
     private com.pa.lcr.lcp.ApiServer apiServer;
     private static final int API_PORT = 8765;
 
-    // Serveur HTTP 8766 — sans SSL pour Field Service WebView
-    private java.net.ServerSocket httpServerSocket;
-    private java.util.concurrent.ExecutorService httpExecutor;
-    private volatile boolean httpRunning = false;
+    // ✅ (4 août 2026) — port HTTP en clair 8766, géré maintenant DIRECTEMENT
+    // par ApiServer (mêmes routes que 8765, dispatch partagé). Plus de socket
+    // séparé ici — voir ApiServer.start(port, httpPort, ctx).
     private static final int HTTP_PORT = 8766;
 
     // ✅ État réel exposé statiquement — permet à MainActivity (onglet API)
@@ -160,25 +159,31 @@ public class LcrHttpService extends Service {
     // HTTPS 8765
     // =========================================================
 
+    // ✅ (4 août 2026) — retire le duplicata de serveur socket : ApiServer gère
+    // maintenant les deux ports (HTTPS 8765 + HTTP 8766 en clair) lui-même,
+    // avec le même dispatch de routes (route()) pour les deux. Fini les deux
+    // implémentations séparées qui pouvaient diverger.
     private void startApiServer() {
         if (apiServer != null && apiServer.isRunning()) {
-            Log.i(TAG, "ApiServer HTTPS déjà running");
+            Log.i(TAG, "ApiServer déjà running (HTTPS+HTTP)");
+            sHttpsRunning = true;
+            sHttpRunning = true;
         } else {
             try {
                 com.pa.lcr.lcp.ApiFacade facade =
                     new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(this);
                 apiServer = new com.pa.lcr.lcp.ApiServer(
-                    facade, line -> Log.d(TAG, line), API_PORT, this);
+                    facade, line -> Log.d(TAG, line), API_PORT, HTTP_PORT, this);
                 apiServer.start();
                 sHttpsRunning = true;
-                Log.i(TAG, "ApiServer HTTPS démarré port " + API_PORT);
+                sHttpRunning = true;
+                Log.i(TAG, "ApiServer démarré HTTPS:" + API_PORT + " HTTP:" + HTTP_PORT);
             } catch (Exception e) {
                 sHttpsRunning = false;
-                Log.e(TAG, "ApiServer HTTPS FAIL: " + e.getMessage());
+                sHttpRunning = false;
+                Log.e(TAG, "ApiServer FAIL: " + e.getMessage());
             }
         }
-
-        startHttpServer();
         updateNotification("APK Filgo — HTTPS:" + API_PORT + " HTTP:" + HTTP_PORT);
     }
 
@@ -186,131 +191,19 @@ public class LcrHttpService extends Service {
         try {
             if (apiServer != null && apiServer.isRunning()) {
                 apiServer.stop();
-                Log.i(TAG, "ApiServer HTTPS arrêté");
+                Log.i(TAG, "ApiServer arrêté (HTTPS+HTTP)");
             }
         } catch (Exception ignored) {
         } finally {
             apiServer = null;
             sHttpsRunning = false;
+            sHttpRunning = false;
         }
-        stopHttpServer();
     }
 
     // ✅ FIX 3 août 2026 : ce stub retournait toujours false, donc l'onglet
     // API ne pouvait jamais refléter le vrai état du service permanent.
     public static boolean isApiRunning() { return sHttpsRunning; }
-
-    // =========================================================
-    // HTTP 8766 — sans SSL
-    // =========================================================
-
-    private void startHttpServer() {
-        if (httpRunning) return;
-        httpRunning = true;
-        httpExecutor = java.util.concurrent.Executors.newFixedThreadPool(4);
-        httpExecutor.execute(() -> {
-            try {
-                httpServerSocket = new java.net.ServerSocket(
-                    HTTP_PORT, 50, java.net.InetAddress.getByName("127.0.0.1"));
-                sHttpRunning = true;
-                Log.i(TAG, "Serveur HTTP démarré port " + HTTP_PORT);
-                while (httpRunning) {
-                    try {
-                        java.net.Socket client = httpServerSocket.accept();
-                        httpExecutor.execute(() -> handleHttpClient(client));
-                    } catch (Exception e) {
-                        if (httpRunning) Log.e(TAG, "HTTP accept ERR: " + e.getMessage());
-                    }
-                }
-            } catch (Exception e) {
-                Log.e(TAG, "HTTP server FAIL: " + e.getMessage());
-            } finally {
-                sHttpRunning = false;
-            }
-        });
-    }
-
-    private void stopHttpServer() {
-        httpRunning = false;
-        sHttpRunning = false;
-        try { if (httpServerSocket != null) httpServerSocket.close(); } catch (Exception ignored) {}
-        try { if (httpExecutor != null) httpExecutor.shutdownNow(); } catch (Exception ignored) {}
-    }
-
-    private void handleHttpClient(java.net.Socket socket) {
-        try {
-            java.io.BufferedReader br = new java.io.BufferedReader(
-                new java.io.InputStreamReader(socket.getInputStream()));
-            java.io.OutputStream out = socket.getOutputStream();
-
-            String line = br.readLine();
-            if (line == null) { socket.close(); return; }
-            Log.d(TAG, "HTTP REQ: " + line);
-
-            boolean isOptions    = line.startsWith("OPTIONS");
-            boolean isLastResult = line.startsWith("GET /v1/delivery/last-result");
-            boolean isPing       = line.startsWith("GET /v1/ping");
-
-            String body = "";
-            if (isLastResult) {
-                String last = lastResultJson;
-                if (last == null) {
-                    body = buildJson(0, "No result yet", null);
-                } else {
-                    try {
-                        org.json.JSONObject j = new org.json.JSONObject(last);
-                        long age = System.currentTimeMillis() - j.optLong("ts", 0);
-                        if (age > 10L * 60L * 1000L) {
-                            body = buildJson(0, "Result expired", null);
-                        } else {
-                            body = buildJson(1, "OK", last);
-                        }
-                    } catch (Exception ex) {
-                        body = buildJson(0, "Parse error", null);
-                    }
-                }
-            } else if (isPing) {
-                body = buildJson(1, "PING OK port " + HTTP_PORT, null);
-            } else if (!isOptions) {
-                writeRaw(out, "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
-                socket.close();
-                return;
-            }
-
-            byte[] bodyBytes = body.getBytes("UTF-8");
-            String header = "HTTP/1.1 200 OK\r\n"
-                + "Content-Type: application/json; charset=UTF-8\r\n"
-                + "Access-Control-Allow-Origin: *\r\n"
-                + "Access-Control-Allow-Methods: GET, OPTIONS\r\n"
-                + "Access-Control-Allow-Headers: Content-Type, Accept\r\n"
-                + "Content-Length: " + bodyBytes.length + "\r\n"
-                + "Connection: close\r\n\r\n";
-
-            writeRaw(out, header);
-            out.write(bodyBytes);
-            out.flush();
-            socket.close();
-
-        } catch (Exception e) {
-            Log.e(TAG, "HTTP handle ERR: " + e.getMessage());
-            try { socket.close(); } catch (Exception ignored) {}
-        }
-    }
-
-    private static String buildJson(int code, String msg, String data) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("{\"code\":").append(code);
-        sb.append(",\"msg\":\"").append(msg.replace("\"", "\\\"")).append("\"");
-        if (data != null) {
-            sb.append(",\"data\":").append(data);
-        }
-        sb.append("}");
-        return sb.toString();
-    }
-
-    private static void writeRaw(java.io.OutputStream out, String s) throws Exception {
-        out.write(s.getBytes("UTF-8"));
-    }
 
     // =========================================================
     // Notification

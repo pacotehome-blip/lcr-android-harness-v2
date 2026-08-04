@@ -36,6 +36,13 @@ public final class ApiServer {
     private final ApiFacade facade;
     private final ApiLogSink trace;
     private final int port;
+    // ✅ (4 août 2026, demande Paul) — port HTTP en clair, pour les appelants
+    // (PCF / WebView Field Service Mobile) qui ne peuvent pas faire confiance
+    // au certificat auto-signé de la HTTPS (network_security_config.xml ne
+    // s'applique qu'à l'app Filgo elle-même, pas à un WebView d'une autre app).
+    // Même dispatch (route()) que le port HTTPS — aucune route dupliquée.
+    // -1 = désactivé (rétrocompatible pour tout appelant qui ne le fournit pas).
+    private final int httpPort;
     private final android.content.Context appCtx;
     private final com.pa.lcr.lcp.storage.ApiTraceStore apiTraceStore;
 
@@ -43,6 +50,9 @@ public final class ApiServer {
     private ExecutorService acceptor;
     private ExecutorService workers;
     private volatile boolean running = false;
+
+    private ServerSocket httpServerSocket;
+    private ExecutorService httpAcceptor;
 
     private final AtomicInteger ridSeq = new AtomicInteger(0);
     private final Object lcpLock = new Object();
@@ -53,9 +63,15 @@ public final class ApiServer {
     private static volatile boolean scanAutoRunning  = false;
 
     public ApiServer(ApiFacade facade, ApiLogSink trace, int port, android.content.Context ctx) {
+        this(facade, trace, port, -1, ctx);
+    }
+
+    // ✅ (4 août 2026) — nouvelle surcharge avec port HTTP en clair optionnel.
+    public ApiServer(ApiFacade facade, ApiLogSink trace, int port, int httpPort, android.content.Context ctx) {
         this.facade = facade;
         this.trace = trace;
         this.port = port;
+        this.httpPort = httpPort;
         this.appCtx = ctx;
         this.apiTraceStore = new com.pa.lcr.lcp.storage.ApiTraceStore(ctx);
     }
@@ -121,12 +137,38 @@ public synchronized void start() throws Exception {
                 }
             }
         });
+
+        // ✅ (4 août 2026) — deuxième socket HTTP en clair (pas de SSL), même
+        // dispatch handleClient()/route() que le port HTTPS. Best-effort : si
+        // httpPort <= 0, ou si le bind échoue, le port HTTPS continue de
+        // fonctionner normalement — jamais bloquant pour le reste du service.
+        if (httpPort > 0) {
+            try {
+                httpServerSocket = new ServerSocket(httpPort, 50, loopback);
+                httpAcceptor = Executors.newSingleThreadExecutor();
+                t("[API " + ts() + "] START http://127.0.0.1:" + httpPort);
+                httpAcceptor.execute(() -> {
+                    while (running) {
+                        try {
+                            Socket s = httpServerSocket.accept();
+                            workers.execute(() -> handleClient(s));
+                        } catch (Exception e) {
+                            if (running) t("[API " + ts() + "] http accept ERR: " + safeMsg(e));
+                        }
+                    }
+                });
+            } catch (Exception e) {
+                t("[API " + ts() + "] http bind FAIL (non bloquant): " + safeMsg(e));
+            }
+        }
     }
 
     public synchronized void stop() {
         running = false;
         try { if (serverSocket != null) serverSocket.close(); } catch (Exception ignored) {}
         try { if (acceptor != null) acceptor.shutdownNow(); } catch (Exception ignored) {}
+        try { if (httpServerSocket != null) httpServerSocket.close(); } catch (Exception ignored) {}
+        try { if (httpAcceptor != null) httpAcceptor.shutdownNow(); } catch (Exception ignored) {}
         try { if (workers != null) workers.shutdownNow(); } catch (Exception ignored) {}
         t("[API " + ts() + "] STOP");
     }
@@ -153,6 +195,30 @@ public synchronized void start() throws Exception {
             if ("GET".equals(req.method) && "/diagnostic".equals(req.path)) {
                 writeHtml(s.getOutputStream(), loadDiagnosticHtml());
                 t("[API " + ts() + "] RESP #" + rid + " diagnostic HTML");
+                return;
+            }
+
+            // ✅ (4 août 2026, demande Paul) — DB dump téléchargeable directement
+            // en JSON pour le support, sans passer par le fichier Downloads
+            // (utile si Field Service Mobile / un outil support veut le fetch()
+            // directement). Servi hors du wrapper ApiResult habituel — Content-Type
+            // application/json + Content-Disposition: attachment.
+            if ("GET".equals(req.method) && "/v1/db/dump/download".equals(req.path)) {
+                String json;
+                try {
+                    json = facade.api_dbDumpJson();
+                } catch (Exception e) {
+                    json = null;
+                }
+                if (json == null) {
+                    writeJson(s, 200, ApiResult.fail(
+                        "DB Dump: 0 - non supporté par cette implémentation", "ERR_NOT_IMPLEMENTED").toJson());
+                    t("[API " + ts() + "] RESP #" + rid + " dump/download NOT_IMPLEMENTED");
+                    return;
+                }
+                String fileName = "lcr_delivery_" + DeliveryApiFacadeImpl.utcStampPublic() + ".json";
+                writeJsonDownload(s.getOutputStream(), json, fileName);
+                t("[API " + ts() + "] RESP #" + rid + " dump/download " + json.length() + " bytes");
                 return;
             }
 
@@ -1137,6 +1203,21 @@ public synchronized void start() throws Exception {
         byte[] body = html.getBytes(StandardCharsets.UTF_8);
         String hdr = "HTTP/1.1 200 OK\r\n" +
                 "Content-Type: text/html; charset=utf-8\r\n" +
+                "Content-Length: " + body.length + "\r\n" +
+                "Connection: close\r\n\r\n";
+        out.write(hdr.getBytes(StandardCharsets.UTF_8));
+        out.write(body);
+        out.flush();
+    }
+
+    // ✅ (4 août 2026) — sert un JSON en téléchargement direct (Content-Disposition:
+    // attachment), pour que le support puisse le fetch() ou l'ouvrir au navigateur
+    // et obtenir un vrai fichier .json, plutôt qu'un blob JSON affiché en ligne.
+    private void writeJsonDownload(OutputStream out, String json, String fileName) throws Exception {
+        byte[] body = json.getBytes(StandardCharsets.UTF_8);
+        String hdr = "HTTP/1.1 200 OK\r\n" +
+                "Content-Type: application/json; charset=utf-8\r\n" +
+                "Content-Disposition: attachment; filename=\"" + fileName + "\"\r\n" +
                 "Content-Length: " + body.length + "\r\n" +
                 "Connection: close\r\n\r\n";
         out.write(hdr.getBytes(StandardCharsets.UTF_8));
