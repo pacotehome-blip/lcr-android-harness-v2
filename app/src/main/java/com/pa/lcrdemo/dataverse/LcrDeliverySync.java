@@ -402,6 +402,56 @@ public class LcrDeliverySync {
     //
     // @return true si une livraison a été trouvée et upsertée localement, false sinon.
     // =========================================================
+    // ✅ (ajouté 3 août 2026, demande Paul : "vérifier automatiquement que les 3 sources
+    // concordent") — sibling en LECTURE SEULE de pullDeliveryByTicket(): même requête GET,
+    // mais ne fait JAMAIS upsertFromDataverseJson(). Une fonction de "vérification" ne doit
+    // jamais avoir d'effet de bord qui modifie les données qu'elle est censée comparer.
+    public static JSONObject peekDeliveryByTicket(Context ctx, String accessToken,
+                                                    String serialId, Integer lcrnode, String ticketNo) {
+        if (serialId == null || serialId.trim().isEmpty() || ticketNo == null || ticketNo.trim().isEmpty()) {
+            return null;
+        }
+        try {
+            String orgUrl = LcrConfig.getDataverseUrl(ctx);
+            String filter = "filgo_serial_id eq '" + odataEscape(serialId) + "'"
+                + (lcrnode != null ? " and filgo_lcrnode eq " + lcrnode : "")
+                + " and filgo_ticket_no eq '" + odataEscape(ticketNo) + "'";
+            String urlStr = orgUrl + "/api/data/v9.2/" + TABLE_DELIVERY
+                + "?$filter=" + java.net.URLEncoder.encode(filter, "UTF-8").replace("+", "%20")
+                + "&$orderby=filgo_transaction_no desc"
+                + "&$top=1";
+
+            URL url = new URL(urlStr);
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            try {
+                conn.setRequestMethod("GET");
+                conn.setConnectTimeout(10000);
+                conn.setReadTimeout(10000);
+                conn.setRequestProperty("Authorization",    "Bearer " + accessToken);
+                conn.setRequestProperty("Accept",           "application/json");
+                conn.setRequestProperty("OData-MaxVersion", "4.0");
+                conn.setRequestProperty("OData-Version",    "4.0");
+
+                int code = conn.getResponseCode();
+                if (code != 200) {
+                    Log.w(TAG, "peekDeliveryByTicket: HTTP " + code + " pour ticket=" + ticketNo);
+                    return null;
+                }
+
+                byte[] respBytes = readStream(conn.getInputStream());
+                JSONObject resp = new JSONObject(new String(respBytes, StandardCharsets.UTF_8));
+                JSONArray values = resp.optJSONArray("value");
+                if (values == null || values.length() == 0) return null;
+                return values.getJSONObject(0);
+            } finally {
+                conn.disconnect();
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "peekDeliveryByTicket ERR pour ticket=" + ticketNo + ": " + e.getMessage());
+            return null;
+        }
+    }
+
     public static boolean pullDeliveryByTicket(Context ctx, String accessToken,
                                                 String serialId, Integer lcrnode, String ticketNo) {
         if (serialId == null || serialId.trim().isEmpty() || ticketNo == null || ticketNo.trim().isEmpty()) {

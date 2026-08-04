@@ -857,6 +857,10 @@ public class MainActivity extends AppCompatActivity {
         if (btnSupportDiagnose != null) {
             btnSupportDiagnose.setOnClickListener(v -> runSupportDiagnosis());
         }
+        Button btnSupportCoherence = findViewById(R.id.btnSupportCoherence);
+        if (btnSupportCoherence != null) {
+            btnSupportCoherence.setOnClickListener(v -> runCoherenceCheck());
+        }
         Button btnSupportLexique = findViewById(R.id.btnSupportLexique);
         if (btnSupportLexique != null) {
             btnSupportLexique.setOnClickListener(v -> showSupportLexiqueDialog());
@@ -1056,33 +1060,9 @@ tabRegisters = findViewById(R.id.tabRegisters);
             btnDbBackup.setOnLongClickListener(v -> { requestBackupDir(); return true; });
         }
 
-        // ✅ Field Service Mobile
-
-        Button btnFieldService = findViewById(R.id.btnFieldService);
-        EditText editFsUrl = findViewById(R.id.editFieldServiceUrl);
-        // Charger l'URL sauvegardée
-        SharedPreferences fsPrefs = getSharedPreferences("filgo_prefs", MODE_PRIVATE);
-        String savedUrl = fsPrefs.getString("fs_url", "");
-        if (editFsUrl != null && !savedUrl.isEmpty()) editFsUrl.setText(savedUrl);
-        if (btnFieldService != null) {
-            btnFieldService.setOnClickListener(v -> {
-                String url = (editFsUrl != null && !editFsUrl.getText().toString().trim().isEmpty())
-                    ? editFsUrl.getText().toString().trim()
-                    : "https://votre-org.crm.dynamics.com/main.aspx";
-                fsPrefs.edit().putString("fs_url", url).apply();
-                Intent intent = new Intent(MainActivity.this, FieldServiceActivity.class);
-                intent.putExtra("url", url);
-                startActivity(intent);
-            });
-
-            btnFieldService.setOnLongClickListener(v -> {
-                SharedPreferences p = getSharedPreferences("filgo_prefs", MODE_PRIVATE);
-                boolean current = p.getBoolean("auto_launch_fs", false);
-                p.edit().putBoolean("auto_launch_fs", !current).apply();
-                toast("Auto-launch Field Service: " + (!current ? "ON" : "OFF"));
-                return true;
-            });
-        }
+        // ✅ (retiré 3 août 2026, demande Paul : "la partie Field Service Mobile je
+        // supprimerais cette notion là") — carte et wiring Field Service Mobile
+        // entièrement retirés de l'onglet API (anciennement API-Face).
 
         // BT
         if (btnBtRefresh != null) btnBtRefresh.setOnClickListener(v -> refreshBondedBtList());
@@ -1157,7 +1137,7 @@ private void setupTabsTop() {
         if (tabLayout == null) return;
         tabLayout.removeAllTabs();
         tabLayout.addTab(tabLayout.newTab().setText("MAIN"), true);
-        tabLayout.addTab(tabLayout.newTab().setText("API-Face"), false);
+        tabLayout.addTab(tabLayout.newTab().setText("API"), false);
         tabLayout.addTab(tabLayout.newTab().setText("CONFIGURE"), false);
         tabLayout.addTab(tabLayout.newTab().setText("Support"), false);
         showPage(0);
@@ -1342,14 +1322,24 @@ private void setupTabsTop() {
     // =========================================================
     private void showRelatedProcessDialog(long attemptId) {
         new Thread(() -> {
-            StringBuilder sb = new StringBuilder();
+            // ✅ (ajouté 3 août 2026, demande Paul : "forer dans l'information jusqu'à
+            // trouver les traces rx/tx") — merge de deux sources distinctes en une seule
+            // chronologie: delivery_event (par attempt_id) ET log_bus_event IO_TX/IO_RX
+            // (qui n'a pas de notion d'attempt_id, seulement node+temps). On dérive le
+            // node à partir du ticket_no/serial_id de la tentative, puis on fenêtre la
+            // recherche RX/TX sur la plage de temps réelle de cette tentative (+/- 2s de
+            // marge), pour éviter de ramener le trafic BT d'AUTRES tickets sur ce node.
+            java.util.List<long[]> tsOrder = new java.util.ArrayList<>(); // [0]=ts, index parallèle à lines
+            java.util.List<String> lines = new java.util.ArrayList<>();
             com.pa.lcr.lcp.storage.DeliveryDb dbHelper = null;
             android.database.sqlite.SQLiteDatabase db = null;
+            String ticketNoForNode = null;
+            long minTs = Long.MAX_VALUE, maxTs = Long.MIN_VALUE;
             try {
                 dbHelper = new com.pa.lcr.lcp.storage.DeliveryDb(getApplicationContext());
                 db = dbHelper.getReadableDatabase();
                 try (android.database.Cursor c = db.rawQuery(
-                        "SELECT ts, event_type, event_code, event_where, detail_short " +
+                        "SELECT ts, event_type, event_code, event_where, detail_short, ticket_no " +
                         "FROM v_diagnostic_events WHERE attempt_id = ? ORDER BY ts ASC",
                         new String[]{String.valueOf(attemptId)})) {
                     while (c.moveToNext()) {
@@ -1358,20 +1348,64 @@ private void setupTabsTop() {
                         String code = c.getString(2);
                         String where = c.getString(3);
                         String detail = c.getString(4);
+                        if (ticketNoForNode == null) ticketNoForNode = c.getString(5);
+                        if (ts < minTs) minTs = ts;
+                        if (ts > maxTs) maxTs = ts;
                         String tsFmt = android.text.format.DateFormat.format("HH:mm:ss", ts).toString();
-                        sb.append(tsFmt).append("  ")
-                          .append(code != null ? code : type).append('\n');
-                        if (where != null && !where.isEmpty()) sb.append("    où=").append(where).append('\n');
-                        if (detail != null && !detail.isEmpty()) sb.append("    ").append(detail).append('\n');
-                        sb.append('\n');
+                        StringBuilder line = new StringBuilder();
+                        line.append(tsFmt).append("  ").append(code != null ? code : type).append('\n');
+                        if (where != null && !where.isEmpty()) line.append("    où=").append(where).append('\n');
+                        if (detail != null && !detail.isEmpty()) line.append("    ").append(detail).append('\n');
+                        lines.add(line.toString());
+                        tsOrder.add(new long[]{ts});
+                    }
+                }
+
+                // Dérivation du node pour retrouver les traces RX/TX (log_bus_event n'a pas
+                // de ticket_no, seulement node) — même logique que le point 5 (auto-derive).
+                if (ticketNoForNode != null && minTs != Long.MAX_VALUE) {
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDbNode =
+                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(getApplicationContext());
+                    try {
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow rowNode =
+                            lcrDbNode.getByTicketNo(ticketNoForNode);
+                        if (rowNode != null && rowNode.lcrnode > 0) {
+                            long windowStart = minTs - 2000, windowEnd = maxTs + 2000;
+                            try (android.database.Cursor c2 = db.rawQuery(
+                                    "SELECT ts, src, msg FROM log_bus_event " +
+                                    "WHERE node = ? AND src IN ('IO_TX','IO_RX') AND ts BETWEEN ? AND ? " +
+                                    "ORDER BY ts ASC",
+                                    new String[]{String.valueOf(rowNode.lcrnode),
+                                                 String.valueOf(windowStart), String.valueOf(windowEnd)})) {
+                                while (c2.moveToNext()) {
+                                    long ts2 = c2.getLong(0);
+                                    String src2 = c2.getString(1);
+                                    String msg2 = c2.getString(2);
+                                    String tsFmt2 = android.text.format.DateFormat.format("HH:mm:ss", ts2).toString();
+                                    lines.add(tsFmt2 + "  [" + src2 + "]\n    " + (msg2 != null ? msg2 : "") + "\n");
+                                    tsOrder.add(new long[]{ts2});
+                                }
+                            }
+                        }
+                    } finally {
+                        try { lcrDbNode.close(); } catch (Exception ignored) {}
                     }
                 }
             } catch (Exception e) {
-                sb.append("Erreur lecture processus lié: ").append(e.getMessage());
+                lines.add("Erreur lecture processus lié: " + e.getMessage());
+                tsOrder.add(new long[]{0});
             } finally {
                 if (db != null) try { db.close(); } catch (Exception ignored) {}
                 if (dbHelper != null) try { dbHelper.close(); } catch (Exception ignored) {}
             }
+
+            // Fusion chronologique des deux sources
+            Integer[] idx = new Integer[lines.size()];
+            for (int i = 0; i < idx.length; i++) idx[i] = i;
+            java.util.Arrays.sort(idx, (a, b) -> Long.compare(tsOrder.get(a)[0], tsOrder.get(b)[0]));
+            StringBuilder sb = new StringBuilder();
+            for (int i : idx) sb.append(lines.get(i)).append('\n');
+
             final String text = sb.length() > 0 ? sb.toString() : "Aucun autre événement pour ce processus.";
             runOnUiThread(() -> {
                 android.widget.TextView tv = new android.widget.TextView(this);
@@ -1382,7 +1416,7 @@ private void setupTabsTop() {
                 android.widget.ScrollView scroll = new android.widget.ScrollView(this);
                 scroll.addView(tv);
                 new android.app.AlertDialog.Builder(this)
-                        .setTitle("Processus lié (attempt_id=" + attemptId + ")")
+                        .setTitle("Processus lié + RX/TX (attempt_id=" + attemptId + ")")
                         .setView(scroll)
                         .setPositiveButton("Fermer", null)
                         .show();
@@ -1422,6 +1456,170 @@ private void setupTabsTop() {
         android.content.ClipData clip = android.content.ClipData.newPlainText("Support LCR", sb.toString());
         clipboard.setPrimaryClip(clip);
         Toast.makeText(this, copiedCount + " événement(s) copié(s)", Toast.LENGTH_SHORT).show();
+    }
+
+    // =========================================================
+    // ✅ (ajouté 3 août 2026, demande Paul : "vérifier automatiquement que les 3 sources
+    // concordent — détecter les incohérences") — compare local (LcrDeliveryStatusDb),
+    // backup JSON (LocalDeliveryBackup) et Dataverse (peekDeliveryByTicket, LECTURE SEULE,
+    // aucune écriture) pour un même ticket_no. Rapporte chaque source trouvée/absente et
+    // toute divergence sur net_l/gross_l/wo_num.
+    // =========================================================
+    private void runCoherenceCheck() {
+        String ticketNo = (edtSupportTicketFilter != null) ? edtSupportTicketFilter.getText().toString().trim() : "";
+        String serialId = (edtSupportSerialFilter != null) ? edtSupportSerialFilter.getText().toString().trim() : "";
+        if (ticketNo.isEmpty()) {
+            Toast.makeText(this, "Entrez un ticket_no avant de vérifier la cohérence", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (txtSupportDiagnosis != null) {
+            txtSupportDiagnosis.setVisibility(View.VISIBLE);
+            txtSupportDiagnosis.setText("Vérification cohérence en cours (local + backup + Dataverse)...");
+        }
+
+        new Thread(() -> {
+            StringBuilder sb = new StringBuilder();
+            sb.append("=== Cohérence ticket=").append(ticketNo).append(" ===\n\n");
+            final String[] localSerialHolder = {null};
+
+            // 1) Local
+            Double localNet = null, localGross = null;
+            String localWo = null;
+            try {
+                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
+                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(getApplicationContext());
+                try {
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow row = lcrDb.getByTicketNo(ticketNo);
+                    if (row != null) {
+                        localNet = row.netL; localGross = row.grossL; localWo = row.woNum;
+                        sb.append("LOCAL (BD) : trouvé — net=").append(row.netL)
+                          .append(" gross=").append(row.grossL)
+                          .append(" wo=").append(row.woNum)
+                          .append(" sync=").append(row.syncStatus).append('\n');
+                        if (row.serialId != null) localSerialHolder[0] = row.serialId;
+                    } else {
+                        sb.append("LOCAL (BD) : ABSENT\n");
+                    }
+                } finally {
+                    try { lcrDb.close(); } catch (Exception ignored) {}
+                }
+            } catch (Exception e) {
+                sb.append("LOCAL (BD) : erreur lecture — ").append(e.getMessage()).append('\n');
+            }
+
+            // 2) Backup JSON
+            Double backupNet = null, backupGross = null;
+            String backupWo = null;
+            try {
+                com.pa.lcr.lcp.storage.LocalDeliveryBackup.BackupMatch match =
+                    com.pa.lcr.lcp.storage.LocalDeliveryBackup.findLatestByTicketNo(getApplicationContext(), ticketNo);
+                if (match != null) {
+                    backupNet = match.json.optDouble("net_l", Double.NaN);
+                    backupGross = match.json.optDouble("gross_l", Double.NaN);
+                    backupWo = match.json.optString("wo_num", "");
+                    sb.append("BACKUP (JSON) : trouvé — net=").append(backupNet)
+                      .append(" gross=").append(backupGross)
+                      .append(" wo=").append(backupWo)
+                      .append(" (backup_ts=").append(match.backupTs).append(")\n");
+                } else {
+                    sb.append("BACKUP (JSON) : ABSENT\n");
+                }
+            } catch (Exception e) {
+                sb.append("BACKUP (JSON) : erreur lecture — ").append(e.getMessage()).append('\n');
+            }
+
+            // 3) Dataverse (lecture seule)
+            Double dvNet = null, dvGross = null;
+            String dvWo = null;
+            String effectiveSerial = serialId.isEmpty() ? localSerialHolder[0] : serialId;
+            if (effectiveSerial == null || effectiveSerial.isEmpty()) {
+                sb.append("DATAVERSE : impossible de vérifier — aucun serial_id disponible " +
+                        "(remplis le champ serial_id, ou assure-toi que la ligne locale en a un)\n");
+            } else {
+                try {
+                    MsalTokenProvider.MSAL_SERIAL_LOCK.acquire();
+                    try {
+                        MsalTokenProvider msal = new MsalTokenProvider(getApplicationContext());
+                        final String[] tokenHolder = {null};
+                        final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+                        msal.init(new MsalTokenProvider.InitCallback() {
+                            @Override public void onReady() {
+                                msal.acquireTokenSilentFromWorker(new MsalTokenProvider.TokenCallback() {
+                                    @Override public void onSuccess(String token) { tokenHolder[0] = token; latch.countDown(); }
+                                    @Override public void onError(Exception e) { latch.countDown(); }
+                                });
+                            }
+                            @Override public void onError(Exception e) { latch.countDown(); }
+                        });
+                        latch.await(8, java.util.concurrent.TimeUnit.SECONDS);
+
+                        if (tokenHolder[0] == null) {
+                            sb.append("DATAVERSE : pas de token disponible (offline ou non connecté)\n");
+                        } else {
+                            org.json.JSONObject d = com.pa.lcrdemo.dataverse.LcrDeliverySync.peekDeliveryByTicket(
+                                getApplicationContext(), tokenHolder[0], effectiveSerial, null, ticketNo);
+                            if (d != null) {
+                                dvNet = d.optDouble("filgo_net_l", Double.NaN);
+                                dvGross = d.optDouble("filgo_gross_l", Double.NaN);
+                                dvWo = d.optString("filgo_wo_num", "");
+                                sb.append("DATAVERSE : trouvé — net=").append(dvNet)
+                                  .append(" gross=").append(dvGross)
+                                  .append(" wo=").append(dvWo).append('\n');
+                            } else {
+                                sb.append("DATAVERSE : ABSENT (jamais poussé, ou push échoué)\n");
+                            }
+                        }
+                    } finally {
+                        MsalTokenProvider.MSAL_SERIAL_LOCK.release();
+                    }
+                } catch (Exception e) {
+                    sb.append("DATAVERSE : erreur — ").append(e.getMessage()).append('\n');
+                }
+            }
+
+            // 4) Comparaison
+            sb.append("\n--- Comparaison ---\n");
+            java.util.List<Double> nets = new java.util.ArrayList<>();
+            java.util.List<Double> grosses = new java.util.ArrayList<>();
+            if (localNet != null) nets.add(localNet);
+            if (backupNet != null && !backupNet.isNaN()) nets.add(backupNet);
+            if (dvNet != null && !dvNet.isNaN()) nets.add(dvNet);
+            if (localGross != null) grosses.add(localGross);
+            if (backupGross != null && !backupGross.isNaN()) grosses.add(backupGross);
+            if (dvGross != null && !dvGross.isNaN()) grosses.add(dvGross);
+
+            boolean netOk = nets.size() <= 1 || allClose(nets);
+            boolean grossOk = grosses.size() <= 1 || allClose(grosses);
+            int sourcesFound = (localNet != null ? 1 : 0) + (backupNet != null ? 1 : 0) + (dvNet != null ? 1 : 0);
+
+            if (sourcesFound == 0) {
+                sb.append("⚠ AUCUNE source n'a de données pour ce ticket — rien à comparer.\n");
+            } else if (sourcesFound == 1) {
+                sb.append("ℹ Une seule source a des données — pas de comparaison possible, " +
+                        "mais pas forcément un problème (ex: livraison très récente, sync en attente).\n");
+            } else if (netOk && grossOk) {
+                sb.append("✅ COHÉRENT — les ").append(sourcesFound)
+                  .append(" sources trouvées concordent (net/gross identiques).\n");
+            } else {
+                sb.append("❌ INCOHÉRENCE DÉTECTÉE — les valeurs net/gross diffèrent entre les sources.\n");
+            }
+
+            final String text = sb.toString();
+            runOnUiThread(() -> {
+                if (txtSupportDiagnosis != null) {
+                    txtSupportDiagnosis.setVisibility(View.VISIBLE);
+                    txtSupportDiagnosis.setText(text);
+                }
+            });
+        }, "SupportCoherenceCheck").start();
+    }
+
+    private static boolean allClose(java.util.List<Double> values) {
+        double first = values.get(0);
+        for (double v : values) {
+            if (Math.abs(v - first) > 0.05) return false; // tolérance 0.05L (arrondi)
+        }
+        return true;
     }
 
     private void refreshSupportEvents() {

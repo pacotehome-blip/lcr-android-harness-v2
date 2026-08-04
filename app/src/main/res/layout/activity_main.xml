@@ -204,6 +204,31 @@
             android:text="Backup DB (Downloads)"
             android:layout_margin="8dp" />
 
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            android:paddingBottom="8dp"
+            android:gravity="center_vertical">
+
+            <Button
+                android:id="@+id/btnSupportRestoreBackup"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Restaurer depuis backup"/>
+
+            <TextView
+                android:id="@+id/txtSupportRestoreStatus"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="8dp"
+                android:textSize="12sp"
+                android:textColor="#666666"/>
+        </LinearLayout>
+
         <include
             layout="@layout/fragment_api_face"
             android:layout_width="match_parent"
@@ -926,6 +951,13 @@
                 android:text="Diagnostiquer"/>
 
             <Button
+                android:id="@+id/btnSupportCoherence"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:text="Vérifier cohérence"/>
+
+            <Button
                 android:id="@+id/btnSupportLexique"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -947,26 +979,10 @@
             android:gravity="center_vertical">
 
             <Button
-                android:id="@+id/btnSupportRestoreBackup"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Restaurer depuis backup"/>
-
-            <Button
                 android:id="@+id/btnSupportCopyAll"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="6dp"
                 android:text="Copier"/>
-
-            <TextView
-                android:id="@+id/txtSupportRestoreStatus"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginStart="8dp"
-                android:textSize="12sp"
-                android:textColor="#666666"/>
         </LinearLayout>
 
         <TextView
