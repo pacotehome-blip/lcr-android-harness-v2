@@ -571,7 +571,7 @@ public class RegisterTabFragment extends Fragment {
                 // relance rien.
                 if (state == DeliveryState.CONNECTED && autoScanArmedForThisActivation) {
                     autoScanArmedForThisActivation = false;
-                    ui.postDelayed(this::autoScanProduitsSiNecessaire, 300);
+                    ui.postDelayed(RegisterTabFragment.this::autoScanProduitsSiNecessaire, 300);
                 }
 
                 // ✅ Retour Field Service quand livraison terminée
