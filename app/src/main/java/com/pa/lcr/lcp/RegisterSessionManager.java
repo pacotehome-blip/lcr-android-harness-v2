@@ -533,24 +533,46 @@ public final class RegisterSessionManager {
             android.util.Log.i("RSM", "getOrCreate sur UI thread (LCR-II) — #série depuis cache: "
                 + (serialId0 != null ? serialId0 : "AUCUN"));
         } else {
-            // Pour LCR-II — lecture rapide opGetField(80)
-            try {
-                byte[] b80 = link.opGetField(80, 3000);
-                if (b80 != null && b80.length > 0) {
-                    String ss = new String(b80, StandardCharsets.UTF_8);
-                    int nul = ss.indexOf('\0');
-                    if (nul >= 0) ss = ss.substring(0, nul);
-                    ss = ss.trim();
-                    if (!ss.isEmpty()) serialId0 = ss;
+            // ✅ FIX (4 août 2026, demande Paul — "j'arrive de fieldservice et
+            // je suis en arrive USB (OFF)", confirmé par logcat cette fois :
+            // "TransportException: Transport not open" sur USB ET
+            // "IOException: Timeout waiting LCP response" sur BT, tous les
+            // deux juste après DEEPLINK_START) — c'est une VRAIE course de
+            // timing à l'arrivée du deep link, pas un problème de permission
+            // (déjà corrigé séparément) ni d'exclusivité (sinon on verrait
+            // IllegalStateException "Transport not ACTIVE", pas "Transport
+            // not open" — vérifié : GuardedTransportIo.isOpen() délègue à
+            // l'état réel du transport). Le port USB/BT peut ne pas être
+            // encore totalement prêt au moment exact où getOrCreateLocked()
+            // tente sa première lecture. Le reste du code (DeepLinkHandler,
+            // avant oneshot/start) a déjà ce même genre de garde (3 tentatives,
+            // 150ms d'écart, commentaire "l'énumération USB peut prendre un
+            // instant") — mais getOrCreateLocked() est appelé AVANT ce point,
+            // sans protection équivalente. Ajoutée ici, même patron.
+            final int MAX_SERIAL_READ_ATTEMPTS = 3;
+            for (int attempt = 1; attempt <= MAX_SERIAL_READ_ATTEMPTS && serialId0 == null; attempt++) {
+                try {
+                    byte[] b80 = link.opGetField(80, 3000);
+                    if (b80 != null && b80.length > 0) {
+                        String ss = new String(b80, StandardCharsets.UTF_8);
+                        int nul = ss.indexOf('\0');
+                        if (nul >= 0) ss = ss.substring(0, nul);
+                        ss = ss.trim();
+                        if (!ss.isEmpty()) serialId0 = ss;
+                    }
+                } catch (Exception e) {
+                    // ✅ FIX (4 août 2026, demande Paul : "est-ce qu'on aurait
+                    // pu tracer ça avec le log Support?") — RÉPONSE : non, ce
+                    // catch avalait silencieusement la vraie cause d'échec
+                    // (timeout, IO, etc.) sans jamais toucher LogBus, donc
+                    // invisible en Support même si on avait su où chercher.
+                    com.pa.lcr.lcp.log.LogBus.err(node,
+                        "RegisterSessionManager.getOrCreateLocked.opGetField80 (tentative "
+                            + attempt + "/" + MAX_SERIAL_READ_ATTEMPTS + ")", e);
+                    if (attempt < MAX_SERIAL_READ_ATTEMPTS) {
+                        try { Thread.sleep(150); } catch (InterruptedException ignored) {}
+                    }
                 }
-            } catch (Exception e) {
-                // ✅ FIX (4 août 2026, demande Paul : "est-ce qu'on aurait pu
-                // tracer ça avec le log Support?") — RÉPONSE : non, ce catch
-                // avalait silencieusement la vraie cause d'échec (timeout,
-                // IO, etc.) sans jamais toucher LogBus, donc invisible en
-                // Support même si on avait su où chercher.
-                com.pa.lcr.lcp.log.LogBus.err(node,
-                    "RegisterSessionManager.getOrCreateLocked.opGetField80", e);
             }
 
         }
