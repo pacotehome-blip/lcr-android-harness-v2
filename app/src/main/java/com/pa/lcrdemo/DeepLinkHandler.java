@@ -137,7 +137,15 @@ public class DeepLinkHandler {
                     btMac != null ? btMac : "",
                     lcrnode != null ? lcrnode : 250,
                     fSerialId, iProduit, dPreset, "PENDING");
-            } catch (Exception ignored) {}
+            } catch (Exception e) {
+                // ✅ FIX (4 août 2026, demande Paul) — si cette sauvegarde échoue,
+                // le flux "reprendre une livraison en attente" (RegisterTabFragment
+                // .checkPendingDeliveryForThisRegister → bouton "Lancer la
+                // livraison") n'a plus rien à lire — silencieusement aveugle sans
+                // ce log.
+                com.pa.lcr.lcp.log.LogBus.err(
+                    lcrnode != null ? lcrnode : 250, "DeepLinkHandler.ActiveDeliveryStore.save", e);
+            }
 
             // ✅ Vérifier si une livraison est déjà en cours
             try {
@@ -1189,7 +1197,13 @@ public class DeepLinkHandler {
             double presetSave = (existing != null) ? existing.preset : 0.0;
             ads.save(woNum, woIdGuid, jobId, mac, node, serialId,
                 produitSave, presetSave, "STARTED");
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            // ✅ FIX (4 août 2026, demande Paul) — même risque que la sauvegarde
+            // PENDING plus haut : si ceci échoue, ActiveDeliveryStore reste
+            // désynchronisé (status resté PENDING alors que la livraison a
+            // réellement démarré), sans aucune trace.
+            com.pa.lcr.lcp.log.LogBus.err(node, "DeepLinkHandler.ActiveDeliveryStore.save[STARTED]", e);
+        }
 
         btExec.execute(() -> {
             try {
@@ -1341,7 +1355,16 @@ public class DeepLinkHandler {
                                         } finally {
                                             try { dbTc1.close(); } catch (Exception ignored) {}
                                         }
-                                    } catch (Exception ignored) {}
+                                    } catch (Exception e) {
+                                        // ✅ FIX (4 août 2026, demande Paul) — ce bloc enregistre déjà
+                                        // une ERREUR (ticket changé / job-continue échoué). Si
+                                        // l'enregistrement de l'erreur échoue lui-même, on se
+                                        // retrouve avec une double invisibilité — ni l'erreur
+                                        // d'origine ni cet échec ne laissent de trace. Exactement
+                                        // la classe de bug du ticket 10909.
+                                        com.pa.lcr.lcp.log.LogBus.err(
+                                            node, "DeepLinkHandler.insertDelivery[TICKET_CHANGE/ERROR]", e);
+                                    }
                                 });
 
                                 // ✅ Arrêter le poll — chauffeur prend charge
@@ -1431,7 +1454,14 @@ public class DeepLinkHandler {
                                     } finally {
                                         try { dbTc2.close(); } catch (Exception ignored) {}
                                     }
-                                } catch (Exception ignored) {}
+                                } catch (Exception e) {
+                                    // ✅ FIX (4 août 2026, demande Paul) — même cas que dbTc1 :
+                                    // ce bloc enregistre déjà une ERREUR ; s'il échoue lui-même,
+                                    // double invisibilité (ni l'erreur d'origine ni cet échec
+                                    // ne laissent de trace).
+                                    com.pa.lcr.lcp.log.LogBus.err(
+                                        node, "DeepLinkHandler.insertDelivery[TICKET_CHANGE/ERROR#2]", e);
+                                }
                             });
 
                             logEvent(serialId, woNum, DeliveryLogStore.LEVEL_WARN,
@@ -1743,7 +1773,14 @@ public class DeepLinkHandler {
                 final String fStatusP = status;
                 patchDataverse(fGuidP, fWoNumP, fNetP, fGrossP, fTicketP, fStatusP);
 
-            } catch (Exception ignored) {}
+            } catch (Exception e) {
+                // ✅ FIX (4 août 2026, demande Paul) — patchDataverse() enqueue le
+                // résultat de livraison pour sync Dataverse (DeliveryResultQueueDb).
+                // Si ça échoue ici, la livraison ne sera JAMAIS mise en file —
+                // aucun retry possible puisque rien n'a été enregistré. Risque
+                // direct de perte de livraison, classe de bug ticket 10909.
+                com.pa.lcr.lcp.log.LogBus.err(-1, "DeepLinkHandler.patchDataverse[retournerFS]", e);
+            }
 
             final String fNet    = net;
             final String fGross  = gross;

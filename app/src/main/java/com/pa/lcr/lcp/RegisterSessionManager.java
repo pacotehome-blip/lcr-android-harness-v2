@@ -475,7 +475,14 @@ public final class RegisterSessionManager {
         mux.addListener(scheduler);
 
         dc.setListener(mux);
-        try { dc.initialize(); } catch (Exception ignored) {}
+        try { dc.initialize(); }
+        catch (Exception e) {
+            // ✅ (4 août 2026) — si l'initialisation du controller échoue ici, la
+            // session semble créée (tab visible) mais ses mécanismes internes
+            // (état CONNECTED, poll auto, etc.) peuvent ne jamais démarrer —
+            // silencieusement avant ce fix.
+            com.pa.lcr.lcp.log.LogBus.err(node, "RegisterSessionManager.getOrCreateLocked.dc.initialize", e);
+        }
 
         // ✅ v7: serial déjà connu via identity ou knownLc3TransportKeys — pas de opGetField(80) ici
         String serialId0 = null;
@@ -684,6 +691,37 @@ public final class RegisterSessionManager {
         @Override public void onTicketInfo(String ticketNo, String deliveryUid) {
             for (DeliveryControllerPort.Listener l : listeners) {
                 try { l.onTicketInfo(ticketNo, deliveryUid); } catch (Exception ignored) {}
+            }
+        }
+
+        // ✅ FIX CRITIQUE (4 août 2026, demande Paul) — MuxListener n'implémentait
+        // PAS onDiagnosticReset() ni onDeliveryFinished(), donc héritait
+        // silencieusement du no-op par défaut de DeliveryControllerPort.Listener.
+        // Résultat réel : DeliveryController.listener EST TOUJOURS ce MuxListener
+        // (voir RegisterSessionManager.getOrCreateLocked → dc.setListener(mux)),
+        // donc chaque appel à listener.onDeliveryFinished(...)/onDiagnosticReset(...)
+        // depuis DeliveryController ne faisait RIEN — jamais relayé vers
+        // RegisterTabFragment, malgré que ces méthodes y soient correctement
+        // implémentées. Le mécanisme de backup/push automatique du 3 août et
+        // l'audit trail du diagnostic reset étaient donc du code mort en
+        // pratique. C'est la classe de bug exacte du ticket 10909, toujours
+        // active avant ce fix.
+        @Override public void onDiagnosticReset(String woNum, double netBeforeL, double grossBeforeL) {
+            for (DeliveryControllerPort.Listener l : listeners) {
+                try { l.onDiagnosticReset(woNum, netBeforeL, grossBeforeL); }
+                catch (Exception e) {
+                    com.pa.lcr.lcp.log.LogBus.err(-1, "MuxListener.onDiagnosticReset", e);
+                }
+            }
+        }
+
+        @Override public void onDeliveryFinished(String serialId, String ticketNo, String saleNo,
+                                                    double netL, double grossL) {
+            for (DeliveryControllerPort.Listener l : listeners) {
+                try { l.onDeliveryFinished(serialId, ticketNo, saleNo, netL, grossL); }
+                catch (Exception e) {
+                    com.pa.lcr.lcp.log.LogBus.err(-1, "MuxListener.onDeliveryFinished", e);
+                }
             }
         }
     }
