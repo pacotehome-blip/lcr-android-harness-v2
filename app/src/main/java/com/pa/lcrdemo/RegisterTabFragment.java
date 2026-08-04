@@ -249,6 +249,20 @@ public class RegisterTabFragment extends Fragment {
 
             // ✅ Appel direct sur le controller du tab — un seul socket
             new Thread(() -> {
+                // ✅ (4 août 2026, demande Paul) — même garde que DeepLinkHandler
+                // .lancerLivraison() : si le scan auto produits est encore en
+                // cours pour CE tab (donc un tab qui vient d'être créé — sinon
+                // le scan ne serait pas armé/en vol), attendre sa fin avant de
+                // démarrer. Sur un tab déjà existant, isAutoProductScanBusy()
+                // est déjà false ici — aucun délai. Max 10s, best-effort.
+                boolean scanTermine = false;
+                for (int i = 0; i < 20; i++) {
+                    if (!isAutoProductScanBusy()) { scanTermine = true; break; }
+                    try { Thread.sleep(500); } catch (Exception ignored) {}
+                }
+                android.util.Log.i("RegisterTabFragment",
+                    "lancerDepuisStore: attente scan auto produits — "
+                        + (scanTermine ? "terminé" : "timeout 10s, poursuite quand même"));
                 try {
                     com.pa.lcr.lcp.ApiResult r = controller.api_deliveryOneShotStart(
                         fWoNum, fProduit, fPreset, null);

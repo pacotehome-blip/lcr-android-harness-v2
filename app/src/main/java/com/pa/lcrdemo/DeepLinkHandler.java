@@ -1058,6 +1058,30 @@ public class DeepLinkHandler {
                         activity.runOnUiThread(() -> activity.toast("↩️ Livraison déjà en cours"));
                         return;
                     }
+
+                    // ✅ (4 août 2026, demande Paul) — même garde qu'ailleurs : ce
+                    // chemin crée systématiquement le tab juste au-dessus
+                    // (upsertRegisterTabFromScan) — donc quasi toujours un tab
+                    // neuf. Attendre la fin du scan auto produits avant de
+                    // démarrer, best-effort, max 10s.
+                    try {
+                        String mediaShortWait = activity.mediaShortFromTransportKey(transportKey);
+                        String tabKeyWait = activity.tabKeyOf(mediaShortWait, node, fSerialId);
+                        boolean scanTermine = false;
+                        for (int i = 0; i < 20; i++) {
+                            Fragment fw = activity.getSupportFragmentManager()
+                                .findFragmentByTag("regtab_" + tabKeyWait);
+                            if (!(fw instanceof RegisterTabFragment)
+                                    || !((RegisterTabFragment) fw).isAutoProductScanBusy()) {
+                                scanTermine = true;
+                                break;
+                            }
+                            try { Thread.sleep(500); } catch (Exception ignored) {}
+                        }
+                        android.util.Log.i(TAG, "connectBt: attente scan auto produits — "
+                            + (scanTermine ? "terminé" : "timeout 10s, poursuite quand même"));
+                    } catch (Exception ignored) {}
+
                     try {
                         MultiRegisterApiFacadeImpl facade =
                             new MultiRegisterApiFacadeImpl(activity);
