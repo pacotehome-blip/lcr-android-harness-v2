@@ -864,6 +864,13 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         // simple "Recherche... (1/3)" opaque.
         JSONArray attemptsDetail = new JSONArray();
         ArrayList<String> candidates = listCandidateTransportKeysForAutoConnect();
+        // ✅ FIX (4 août 2026) — inclut les échecs de CONSTRUCTION de la liste
+        // de candidats elle-même (ex. USB jamais essayé car api_openPingUsb()
+        // a échoué avant même d'atteindre la boucle ci-dessous) — sans ça,
+        // ces transports disparaissaient complètement du détail affiché à
+        // Diagnostic, donnant l'impression fausse qu'ils n'avaient jamais été
+        // considérés du tout.
+        for (JSONObject f : lastCandidateBuildFailures) attemptsDetail.put(f);
 
         for (String key : candidates) {
             if (key == null || key.trim().isEmpty()) continue;
@@ -1030,7 +1037,20 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     // l'ordre de cette liste et retourne dès le premier succès — remettre
     // l'ordre dans le bon sens ici suffit à obtenir la recherche séquentielle
     // demandée, sans toucher à la boucle elle-même.
+    // ✅ FIX (4 août 2026, demande Paul — capture d'écran montrant Diagnostic
+    // qui n'affichait QUE "bt" dans son détail, aucune ligne USB, alors que
+    // "USB détecté" venait tout juste d'être annoncé) — listCandidateTransport
+    // KeysForAutoConnect() peut échouer SILENCIEUSEMENT à ajouter USB/BT/TCP
+    // aux candidats (ex. api_openPingUsb() échoue pour une raison quelconque)
+    // — dans ce cas, ce transport n'apparaît JAMAIS dans la boucle principale
+    // de api_registerConnectAutoLocked(), donc jamais dans attemptsDetail non
+    // plus. Ce champ capture la VRAIE raison de cet échec de construction de
+    // liste, pour que Diagnostic puisse quand même l'afficher.
+    private final java.util.List<JSONObject> lastCandidateBuildFailures =
+        new java.util.concurrent.CopyOnWriteArrayList<>();
+
     private ArrayList<String> listCandidateTransportKeysForAutoConnect() {
+        lastCandidateBuildFailures.clear();
         ArrayList<String> keys = new ArrayList<>();
         // 1) Transport déjà actif — chemin rapide légitime, pas de round-trip
         // inutile s'il est déjà ouvert et prêt.
@@ -1047,8 +1067,15 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             String usbKey = MediaTransportManager.KEY_USB;
             TransportIo usbIo = (mediaMgr != null) ? mediaMgr.getByKey(usbKey) : null;
             if (usbIo == null || !safeIsOpen(usbIo)) {
-                try { api_openPingUsb(); } catch (Exception ignored2) {}
+                ApiResult pingRes = null;
+                try { pingRes = api_openPingUsb(); } catch (Exception ignored2) {}
                 usbIo = (mediaMgr != null) ? mediaMgr.getByKey(usbKey) : null;
+                if ((usbIo == null || !safeIsOpen(usbIo))) {
+                    JSONObject f = buildAttemptDetail(usbKey,
+                        "jamais essayé dans la recherche — échec avant même la sonde : "
+                            + (pingRes != null ? pingRes.msg : "raison inconnue"), null);
+                    lastCandidateBuildFailures.add(f);
+                }
             }
             if (usbIo != null && safeIsOpen(usbIo) && !keys.contains(usbKey)) keys.add(usbKey);
         } catch (Exception ignored) {}
