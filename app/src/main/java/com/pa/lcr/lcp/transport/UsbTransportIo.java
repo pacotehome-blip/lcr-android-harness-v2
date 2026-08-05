@@ -10,6 +10,24 @@ public final class UsbTransportIo implements TransportIo {
     private final long generationId;
     private volatile boolean closed = false;
 
+    // ✅ FIX CRITIQUE (5 août 2026, demande Paul — "il devrait avoir un
+    // [chemin] ensuite l'autre!!!") — confirmé par log terrain : "write
+    // exception sur USB — fermeture immédiate: Connection closed" survenait
+    // pendant que PLUSIEURS chemins différents (RegisterTabFragment,
+    // Diagnostic, démarrage oneshot) écrivaient sur le MÊME port USB
+    // physique EN MÊME TEMPS, sans aucune synchronisation. Un port série USB
+    // n'est pas conçu pour des écritures/lectures concurrentes
+    // multi-thread — le conflit d'accès lève une exception que ce code
+    // interprétait comme un vrai débranchement, fermant le transport de
+    // façon PERMANENTE et cassant tous les appelants suivants, même ceux qui
+    // n'avaient rien à voir avec l'exception d'origine. Le verrou unique sur
+    // api_registerConnectAuto() protège ce chemin précis, mais pas les autres
+    // qui touchent directement au port (STATUS_B, oneshot start, etc.). Fix
+    // à la source : un verrou autour de l'I/O USB lui-même, peu importe qui
+    // appelle — sérialise les accès concurrents au lieu de les laisser
+    // entrer en collision au niveau du driver.
+    private final Object ioLock = new Object();
+
     // ✅ FIX (même cause racine que BT) : isOpen() ne vérifiait QUE si l'objet
     // port existait encore en mémoire — jamais si le câble était réellement
     // encore branché. Un débranchement physique laissait isOpen()=true
@@ -35,17 +53,22 @@ public final class UsbTransportIo implements TransportIo {
     public int write(byte[] data, int timeoutMs) throws Exception {
         if (closed || port == null) return -1;
         if (data == null || data.length == 0) return 0;
-        try {
-            port.write(data, Math.max(0, timeoutMs));
-            consecutiveFailures.set(0);
-            return data.length;
-        } catch (Exception e) {
-            // ✅ Toute exception d'écriture = signal fort de déconnexion réelle
-            // (contrairement au BT, une exception USB indique presque toujours
-            // un vrai débranchement, pas un simple délai) — fermeture immédiate.
-            android.util.Log.w("UsbTransportIo", "write exception sur " + key + " — fermeture immédiate: " + e.getMessage());
-            try { close(); } catch (Exception ignored) {}
-            throw e;
+        synchronized (ioLock) {
+            if (closed || port == null) return -1;
+            try {
+                port.write(data, Math.max(0, timeoutMs));
+                consecutiveFailures.set(0);
+                return data.length;
+            } catch (Exception e) {
+                // ✅ Toute exception d'écriture = signal fort de déconnexion réelle
+                // (contrairement au BT, une exception USB indique presque toujours
+                // un vrai débranchement, pas un simple délai) — fermeture immédiate.
+                // Maintenant sous verrou : cette exception ne peut plus provenir
+                // d'une collision d'accès concurrent entre plusieurs appelants.
+                android.util.Log.w("UsbTransportIo", "write exception sur " + key + " — fermeture immédiate: " + e.getMessage());
+                try { close(); } catch (Exception ignored) {}
+                throw e;
+            }
         }
     }
 
@@ -54,19 +77,22 @@ public final class UsbTransportIo implements TransportIo {
         if (closed || port == null) return -1;
         if (buffer == null || buffer.length == 0) return 0;
         int to = (timeoutMs < 0) ? 60_000 : timeoutMs;
-        try {
-            int n = port.read(buffer, to);
-            // ✅ Un retour à 0 (pas de données dans le délai) est NORMAL et
-            // fréquent en USB pendant une attente légitime — ce n'est PAS un
-            // signal fiable de déconnexion, contrairement au BT. On ne
-            // ferme PAS sur ce cas seul (évite un faux positif comme celui
-            // qu'on a dû corriger côté RegisterTabFragment). Seule une vraie
-            // EXCEPTION (ci-dessous) est un signal fiable de déconnexion USB.
-            return n;
-        } catch (Exception e) {
-            android.util.Log.w("UsbTransportIo", "read exception sur " + key + " — fermeture immédiate: " + e.getMessage());
-            try { close(); } catch (Exception ignored) {}
-            throw e;
+        synchronized (ioLock) {
+            if (closed || port == null) return -1;
+            try {
+                int n = port.read(buffer, to);
+                // ✅ Un retour à 0 (pas de données dans le délai) est NORMAL et
+                // fréquent en USB pendant une attente légitime — ce n'est PAS un
+                // signal fiable de déconnexion, contrairement au BT. On ne
+                // ferme PAS sur ce cas seul (évite un faux positif comme celui
+                // qu'on a dû corriger côté RegisterTabFragment). Seule une vraie
+                // EXCEPTION (ci-dessous) est un signal fiable de déconnexion USB.
+                return n;
+            } catch (Exception e) {
+                android.util.Log.w("UsbTransportIo", "read exception sur " + key + " — fermeture immédiate: " + e.getMessage());
+                try { close(); } catch (Exception ignored) {}
+                throw e;
+            }
         }
     }
 
@@ -77,4 +103,3 @@ public final class UsbTransportIo implements TransportIo {
         try { port.close(); } catch (Exception ignored) {}
     }
 }
-

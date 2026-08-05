@@ -18,6 +18,13 @@ public final class BtSppTransportIo implements TransportIo {
 
     private volatile boolean closed = false;
 
+    // ✅ FIX (5 août 2026, même cause que UsbTransportIo — voir commentaire
+    // là-bas) — write() était déjà sérialisé via writeExec (un seul thread),
+    // mais read() ne l'était pas du tout, et rien n'empêchait un write() et
+    // un read() concurrents de se chevaucher sur le même socket. Un verrou
+    // partagé couvre maintenant les deux, cohérent avec le fix USB.
+    private final Object ioLock = new Object();
+
     // ✅ FIX : OutputStream.write() sur un BluetoothSocket n'a AUCUN timeout natif —
     // un socket zombie peut bloquer write() indéfiniment, peu importe le timeoutMs
     // demandé. Ce thread dédié permet de borner réellement l'appel via Future.get().
@@ -160,6 +167,8 @@ public final class BtSppTransportIo implements TransportIo {
     public int write(final byte[] data, int timeoutMs) throws Exception {
         if (closed || out == null) return -1;
         if (data == null || data.length == 0) return 0;
+        synchronized (ioLock) {
+        if (closed || out == null) return -1;
 
         // ✅ Un write vraiment illimité n'est jamais sûr sur un socket physique —
         // même timeoutMs<=0 obtient une borne de sécurité raisonnable.
@@ -193,6 +202,7 @@ public final class BtSppTransportIo implements TransportIo {
             Throwable cause = ee.getCause();
             if (cause instanceof Exception) throw (Exception) cause;
             throw new Exception(cause);
+        }
         }
     }
 
