@@ -1197,6 +1197,36 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         try {
             UsbSerialPort existing = UsbSession.getPort();
             if (existing != null) {
+                // ✅ FIX CRITIQUE (5 août 2026, demande Paul — capture d'écran
+                // montrant "Open/Ping USB: 1 - USB prêt (port ouvert)" ET
+                // pourtant compté comme "jamais essayé dans la recherche") —
+                // trouvé : ce chemin retournait succès en se basant UNIQUEMENT
+                // sur UsbSession (un simple holder statique), sans jamais
+                // vérifier/resynchroniser MediaTransportManager — le registre
+                // que TOUT le reste du code utilise réellement (getByKey,
+                // activateExclusive, GuardedTransportIo). Si le handle de
+                // MediaTransportManager pour USB se réinitialise pour une
+                // autre raison (ex. probe BT, cleanup, changement de
+                // génération) alors que UsbSession garde encore le port brut,
+                // ce chemin déclarait "succès" tout en laissant
+                // MediaTransportManager désynchronisé — exactement le
+                // scénario du "USB fonctionnait à l'instant, puis FieldService
+                // dit USB non prêt". Ici : on s'assure activement que
+                // MediaTransportManager reflète bien ce port AVANT de
+                // retourner succès.
+                try {
+                    if (mediaMgr != null) {
+                        TransportIo mtmIo = mediaMgr.getByKey(MediaTransportManager.KEY_USB);
+                        if (mtmIo == null || !safeIsOpen(mtmIo)) {
+                            UsbDevice dev = UsbSession.getDevice();
+                            mediaMgr.onUsbReady(dev, existing, "resync depuis UsbSession (api_openPingUsb)");
+                            android.util.Log.w("MultiRegisterApiFacadeImpl",
+                                "api_openPingUsb: MediaTransportManager désynchronisé de UsbSession — resynchronisé");
+                        }
+                    }
+                } catch (Exception resyncEx) {
+                    com.pa.lcr.lcp.log.LogBus.err(-1, "MultiRegisterApiFacadeImpl.api_openPingUsb.resync", resyncEx);
+                }
                 JSONObject d = new JSONObject();
                 d.put("usb_ready", 1);
                 return ApiResult.ok("Open/Ping USB: 1 - USB prêt (port ouvert)", d);
