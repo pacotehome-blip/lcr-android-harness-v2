@@ -319,6 +319,22 @@ public final class RegisterSessionManager {
         return null;
     }
 
+    // ✅ FIX (4 août 2026, demande Paul — "comment peut-il avoir un USB(OFF)
+    // qui arrive avec ça") — retrouve le transport RÉEL actuellement utilisé
+    // pour un node donné, peu importe lequel. Utilisé par RegisterTabFragment
+    // pour se réaligner sur le bon transport après un api_registerConnectAuto()
+    // réussi, au lieu de rester bloqué à revérifier le transport ORIGINAL sur
+    // lequel ce tab a été créé (qui peut ne plus être celui qui répond).
+    public synchronized String findTransportKeyForNode(int nodeDec) {
+        String suffix = ":" + nodeDec;
+        for (Map.Entry<String, NodeSession> e : sessions.entrySet()) {
+            if (e.getKey() == null || !e.getKey().endsWith(suffix)) continue;
+            NodeSession s = e.getValue();
+            if (s != null) return s.transportKey;
+        }
+        return null;
+    }
+
     public DeliveryController getOrCreate(String transportKey, int nodeDec, int fromDec, TransportIo io) {
         int node = nodeDec;
         int from = fromDec & 0xFF;
@@ -361,17 +377,44 @@ public final class RegisterSessionManager {
         // session, on retire d'abord toute session existante pour CE MÊME
         // node sur un AUTRE transport — un seul registre physique = une seule
         // session, peu importe lequel des transports l'atteint.
+        // ✅ FIX CRITIQUE #2 (5 août 2026, demande Paul — "je n'ai jamais eu de
+        // trouble avec la connexion USB... je dis ça mais je dis rien") —
+        // confirmé par log terrain : le fix précédent (migration node+serial)
+        // détruisait la session USB qui FONCTIONNAIT (STATE=CONNECTED)
+        // immédiatement au profit d'une tentative BT qui a ensuite ÉCHOUÉ
+        // (timeout, abandon) — laissant le registre complètement déconnecté
+        // alors qu'USB marchait une seconde plus tôt. La migration était
+        // PRÉVENTIVE (avant même de savoir si la nouvelle tentative allait
+        // réussir). Corrigé : si une session SAINE existe déjà pour ce node
+        // sur un AUTRE transport, on la RÉUTILISE directement — on ne la
+        // détruit plus pour une tentative qui pourrait très bien échouer.
+        // On ne remplace une session que si l'ancienne est déjà morte/
+        // déconnectée (auquel cas la nettoyer est sans danger).
         try {
             String nodeSuffix = ":" + node;
             for (String otherKey : new java.util.ArrayList<>(sessions.keySet())) {
                 if (otherKey == null || otherKey.equals(k) || !otherKey.endsWith(nodeSuffix)) continue;
                 NodeSession other = sessions.get(otherKey);
                 if (other == null) continue;
+
+                boolean otherHealthy = false;
+                try {
+                    otherHealthy = other.dc != null && !other.dc.isStopped()
+                        && other.dc.getState() != DeliveryState.DISCONNECTED;
+                } catch (Exception ignored) {}
+
+                if (otherHealthy) {
+                    android.util.Log.i("RSM", "getOrCreate: session SAINE déjà active pour node="
+                        + node + " sur " + otherKey + " (état=" + other.dc.getState()
+                        + ") — réutilisation directe, tentative sur " + tk + " abandonnée pour ne rien casser");
+                    return other.dc;
+                }
+
                 android.util.Log.w("RSM", "getOrCreate: session existante pour le MÊME node="
-                    + node + " trouvée sur un AUTRE transport (" + otherKey + ") — migration vers "
-                    + tk + ", ancienne session fermée");
+                    + node + " trouvée sur un AUTRE transport (" + otherKey + "), mais MORTE (état="
+                    + (other.dc != null ? other.dc.getState() : "?") + ") — migration vers " + tk);
                 com.pa.lcr.lcp.log.LogBus.api(node, "[RSM-MIGRATE] node=" + node
-                    + " change de transport : " + other.transportKey + " → " + tk);
+                    + " change de transport (ancienne session morte) : " + other.transportKey + " → " + tk);
                 try { other.scheduler.shutdown(); } catch (Exception ignored) {}
                 try { other.dc.shutdown(false); } catch (Exception ignored) {}
                 sessions.remove(otherKey);
