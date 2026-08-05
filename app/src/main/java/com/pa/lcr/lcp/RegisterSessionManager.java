@@ -885,6 +885,25 @@ public final class RegisterSessionManager {
         private volatile long lastTickSeqSeen = -1L;
         private volatile int noChangeCount = 0;
 
+        // ✅ FIX CRITIQUE (5 août 2026, demande Paul — "trouve moi pourquoi")
+        // — trouvé : tick() faisait un retour immédiat, SANS AUCUN I/O, dès
+        // que l'état passait à CONNECTED (juste après la fin d'une
+        // livraison) — seul RUNNING_FLOWING/RUNNING_PAUSED déclenchait un
+        // vrai ping matériel. Le port USB restait donc en silence TOTAL
+        // (zéro octet transmis) pour toute la durée de l'attente entre deux
+        // livraisons. ~11s de silence complet sur un port série USB (chip
+        // Prolific PL2303 ici, connu pour être capricieux) suffit largement
+        // pour que la connexion soit abandonnée au niveau matériel/OS sans
+        // jamais prévenir le logiciel — qui continue de croire "CONNECTED"
+        // jusqu'à la prochaine vraie écriture, qui échoue alors avec
+        // "Connection closed". Un débranchement/rebranchement physique
+        // crée toujours une connexion fraîche, d'où pourquoi ça "marchait"
+        // dans ce cas précis. Fix : un ping léger périodique même pendant
+        // CONNECTED (pas seulement pendant une livraison active), pour ne
+        // jamais laisser le port rester totalement silencieux.
+        private volatile long lastKeepAliveMs = 0L;
+        private static final long KEEP_ALIVE_MS = 5000;
+
         private static final long LIVE_MS = 350;
         private static final long STATUS_MS = 2500;
 
@@ -923,6 +942,14 @@ public final class RegisterSessionManager {
             if (st == DeliveryState.DISCONNECTED) return;
 
             if (st == DeliveryState.CONNECTED || st == DeliveryState.PRESTART || st == DeliveryState.ENDING) {
+                // ✅ FIX (voir commentaire du champ lastKeepAliveMs) — ping
+                // léger périodique pour empêcher le port de rester totalement
+                // silencieux entre deux livraisons.
+                long now0 = System.currentTimeMillis();
+                if (now0 - lastKeepAliveMs >= KEEP_ALIVE_MS) {
+                    lastKeepAliveMs = now0;
+                    try { c.requestStatus(); } catch (Exception ignored) {}
+                }
                 return;
             }
 

@@ -79,6 +79,23 @@ public class UsbReceiver extends BroadcastReceiver {
  if (device == null) return;
  boolean granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
  if (!granted) return;
+ // ✅ FIX CRITIQUE (5 août 2026, demande Paul — "ça plante peu importe
+ // livraison ou pas, peu importe BT→USB ou pas, seul débranchement/
+ // reconnexion fonctionne") — AVANT ce fix, mgr.openDevice(device) était
+ // appelé INCONDITIONNELLEMENT, et la vérification "une session existe
+ // déjà" ne venait qu'APRÈS — donc une DEUXIÈME connexion USB au même
+ // appareil physique était créée à chaque déclenchement de ce receiver
+ // (chaque octroi/nouvelle demande de permission), même si une première
+ // tournait déjà et fonctionnait. Le simple fait d'ouvrir une deuxième
+ // connexion OS vers le même périphérique peut perturber/invalider la
+ // première au niveau du driver USB, même si cette deuxième connexion
+ // est refermée aussitôt après. Inversé : on vérifie maintenant AVANT
+ // d'ouvrir quoi que ce soit — jamais de deuxième openDevice() si une
+ // session est déjà active.
+ if (UsbSession.getPort() != null) {
+     android.util.Log.i("UsbReceiver", "handlePermission: session déjà active — openDevice() évité (ne pas perturber la connexion existante)");
+     return;
+ }
  UsbManager mgr = (UsbManager) context.getSystemService(Context.USB_SERVICE);
  UsbSerialDriver driver = UsbSerialProber.getDefaultProber().probeDevice(device);
  if (driver == null) return;
@@ -86,7 +103,9 @@ public class UsbReceiver extends BroadcastReceiver {
  if (conn == null) return;
  UsbSerialPort port = driver.getPorts().get(0);
  try {
- // ✅ R1: éviter double-open si une session est déjà active
+ // ✅ Double vérification après acquisition du conn (fenêtre de course
+ // résiduelle minime entre le check ci-dessus et l'ouverture) — sécurité
+ // supplémentaire, le vrai fix est l'inversion d'ordre ci-dessus.
  if (UsbSession.getPort() != null) {
  try { conn.close(); } catch (Exception ignore) {}
  return;

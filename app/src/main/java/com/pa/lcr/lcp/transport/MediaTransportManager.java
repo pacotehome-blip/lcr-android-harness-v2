@@ -67,6 +67,28 @@ public final class MediaTransportManager {
             h = new TransportHandle(KEY_USB);
             handles.put(KEY_USB, h);
         }
+        // ✅ FIX CRITIQUE (5 août 2026, demande Paul — "il y a qq chose qui
+        // ferme le socket USB... aussitôt le port usb est off, comme un hard
+        // déconnect", au moment précis où Diagnostic démarre) — trouvé :
+        // TransportHandle.setConnected() ferme l'ANCIEN wrapper TransportIo
+        // dès qu'un NOUVEAU objet wrapper est fourni (voir son propre
+        // commentaire, fix du 3 août pour éviter les sockets BT zombies) —
+        // mais ici, le fix de resynchronisation (api_openPingUsb) appelait
+        // onUsbReady() avec le MÊME UsbSerialPort physique déjà actif,
+        // enveloppé dans un NOUVEAU UsbTransportIo. setConnected() fermait
+        // alors l'ANCIEN wrapper — ce qui appelle port.close() sur le port
+        // PARTAGÉ par les deux wrappers, cassant la connexion physique pour
+        // tout le monde, y compris le nouveau wrapper qui se croit pourtant
+        // bon. Chaque "resynchronisation" se sabotait donc elle-même. Ici :
+        // si le port existant est déjà le MÊME objet physique, on ne crée
+        // aucun nouveau wrapper — no-op, rien à fermer, rien à casser.
+        TransportIo existingIo = h.getIo();
+        if (existingIo instanceof UsbTransportIo
+                && ((UsbTransportIo) existingIo).wrapsSamePort(port)
+                && existingIo.isOpen()) {
+            android.util.Log.i("MediaTransportManager", "onUsbReady: même port déjà actif — no-op (évite de casser la connexion existante)");
+            return;
+        }
         long nextGen = h.getGenerationId() + 1;
         TransportIo io = new UsbTransportIo(
                 KEY_USB,

@@ -49,6 +49,15 @@ public final class UsbTransportIo implements TransportIo {
     @Override public boolean isOpen()          { return !closed && port != null; }
     @Override public long    getGenerationId() { return generationId; }
 
+    // ✅ FIX (5 août 2026) — permet à MediaTransportManager.onUsbReady() de
+    // détecter si un port fraîchement "découvert" est en fait le MÊME objet
+    // physique déjà enveloppé par ce wrapper, pour éviter de créer un
+    // deuxième wrapper qui ferait fermer celui-ci (voir commentaire détaillé
+    // dans MediaTransportManager.onUsbReady()).
+    public boolean wrapsSamePort(UsbSerialPort other) {
+        return other != null && this.port == other;
+    }
+
     @Override
     public int write(byte[] data, int timeoutMs) throws Exception {
         if (closed || port == null) return -1;
@@ -101,5 +110,24 @@ public final class UsbTransportIo implements TransportIo {
         if (closed) return;
         closed = true;
         try { port.close(); } catch (Exception ignored) {}
+        // ✅ FIX CRITIQUE (5 août 2026, demande Paul — "c'est uniquement quand
+        // on essaie de reconnecter au tab... si je débranche/rebranche ça
+        // fonctionne") — retracé précisément : api_registerValidate() (premier
+        // vrai I/O sur une session RÉUTILISÉE) échoue avec "Connection closed"
+        // sur un port devenu périmé — mais UsbSession (le holder statique)
+        // n'était JAMAIS vidé ici. Donc toute tentative de récupération
+        // suivante (resync, getOrCreate, etc.) retrouvait ce MÊME port déjà
+        // mort via UsbSession.getPort(), le réutilisait, et se re-déclarait
+        // "prêt" à tort — sans jamais faire la SEULE chose qui fonctionne
+        // vraiment : une vraie réouverture fraîche (usbManager.openDevice()).
+        // Seul un débranchement physique déclenchait ça, via resetUsbState().
+        // Ici : sur une fermeture réelle (pas juste logique), on vide aussi
+        // UsbSession, pour que le prochain appel à api_openPingUsb() soit
+        // FORCÉ de faire une vraie réouverture au lieu de réutiliser le
+        // cadavre.
+        try {
+            com.pa.lcrdemo.UsbSession.clear();
+            android.util.Log.w("UsbTransportIo", "close: UsbSession vidé — prochaine tentative forcera une vraie réouverture");
+        } catch (Exception ignored) {}
     }
 }

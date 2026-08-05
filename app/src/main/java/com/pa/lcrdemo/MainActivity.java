@@ -655,8 +655,32 @@ public class MainActivity extends AppCompatActivity {
 
         LogBus.addListener(mainLogListener);
 
+        // ✅ FIX CRITIQUE (5 août 2026, demande Paul — retracé ligne par
+        // ligne : "je fais retour au bon de travail, ensuite lancer
+        // livraison, aussitôt de retour dans l'apk par deeplink, je vois
+        // USB(OFF)... avant on avait pas ce trouble nulle part") — trouvé :
+        // ce code voyait que UsbSession gardait encore une référence au port
+        // et la réutilisait AVEUGLÉMENT, sans jamais vérifier qu'elle était
+        // encore vivante. Entre le clic "retour au bon de travail" et le
+        // retour dans l'app via deep link, l'app passe par onStop() (qui
+        // désenregistre le receiver USB) pendant que tu es dans FieldService
+        // — Android peut légitimement suspendre l'accès USB d'une app en
+        // arrière-plan. Au retour, la référence en mémoire existe encore,
+        // mais la connexion sous-jacente peut être morte — exactement comme
+        // le port périmé qu'on a dû corriger côté api_openPingUsb(). Un
+        // débranchement/rebranchement physique force TOUJOURS une vraie
+        // réouverture (resetUsbState + scan + open) — c'est pour ça que ça
+        // marche systématiquement. Ici : le retour au premier plan fait
+        // maintenant la MÊME chose — on ne fait plus confiance à la
+        // référence existante, on force une vraie réouverture, à chaque
+        // retour, comme un "débranchement/rebranchement logiciel".
         UsbSerialPort p = UsbSession.getPort();
-        if (p != null && usbPort == null) onUsbPortReady(p);
+        if (p != null && usbPort == null) {
+            android.util.Log.i("MainActivity", "onStart: référence USB existante trouvée — "
+                + "vérification/réouverture forcée avant réutilisation (comme un rebranchement)");
+            resetUsbState("ONSTART_FORCE_REFRESH");
+            ui.post(() -> { scanUsb(); openSelectedUsb(); });
+        }
         refreshGlobalLogView();
         // ✅ Rattrapage — sync tabs avec sessions connues (cas arrière-plan)
         ui.postDelayed(this::syncTabsFromActiveSessions, 400);
