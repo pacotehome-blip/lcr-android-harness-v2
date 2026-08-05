@@ -401,6 +401,31 @@ public final class RegisterSessionManager {
                 try {
                     otherHealthy = other.dc != null && !other.dc.isStopped()
                         && other.dc.getState() != DeliveryState.DISCONNECTED;
+                    // ✅ FIX CRITIQUE (5 août 2026, demande Paul — "USB fonctionne
+                    // maintenant, le BT lui capote, fait la même chose!!!") —
+                    // confirmé par log terrain : ce check ne vérifiait QUE l'état
+                    // interne du DeliveryController (dc.getState()), jamais si le
+                    // TRANSPORT sous-jacent était réellement encore ouvert. Le
+                    // transport peut mourir (ex. UsbTransportIo.close() suite à
+                    // une vraie déconnexion) SANS que dc.getState() ne soit mis à
+                    // jour vers DISCONNECTED — laissant ce check croire à tort
+                    // qu'une session "RUNNING_FLOWING" était saine, alors que son
+                    // transport était mort depuis longtemps. Résultat observé :
+                    // blocage de 44 secondes du passage légitime vers BT, la
+                    // session USB "fantôme" refusant de céder la place jusqu'à ce
+                    // que Diagnostic force le passage. Ici : on vérifie aussi que
+                    // le transport de la session existante est réellement ouvert
+                    // avant de la considérer "saine".
+                    if (otherHealthy) {
+                        TransportIo otherIo = MediaTransportManager.get(appCtx).getByKey(other.transportKey);
+                        boolean otherTransportOpen = (otherIo != null && otherIo.isOpen());
+                        if (!otherTransportOpen) {
+                            android.util.Log.w("RSM", "getOrCreate: session " + otherKey
+                                + " se dit RUNNING/CONNECTED mais son transport (" + other.transportKey
+                                + ") est FERMÉ — session fantôme, pas saine malgré son état interne");
+                            otherHealthy = false;
+                        }
+                    }
                 } catch (Exception ignored) {}
 
                 if (otherHealthy) {
@@ -408,6 +433,34 @@ public final class RegisterSessionManager {
                         + node + " sur " + otherKey + " (état=" + other.dc.getState()
                         + ") — réutilisation directe, tentative sur " + tk + " abandonnée pour ne rien casser");
                     return other.dc;
+                }
+
+                // ✅ FIX (5 août 2026, demande Paul — "si je suis à
+                // RUNNING_FLOWING, je veux garder le tab ouvert en attendant
+                // d'avoir le nouveau transport pour que je puisse faire un
+                // Status pour reconnecter et partir l'écran diagnostique") —
+                // pour une session fantôme (transport mort) dont l'état était
+                // RUNNING_FLOWING/RUNNING_PAUSED au moment de la mort (une
+                // vraie livraison était en cours), on ne la ferme/supprime
+                // plus automatiquement ici. Le tab reste visible tel quel,
+                // et c'est un clic explicite sur Status (STATUS_B) — pas une
+                // migration automatique et silencieuse — qui doit déclencher
+                // la reconnexion/Diagnostic. Migration automatique silencieuse
+                // réservée aux sessions mortes qui N'ÉTAIENT PAS en pleine
+                // livraison (CONNECTED/PRESTART/ENDING) — là, pas de perte de
+                // contrôle utilisateur possible, migrer sans bruit est sûr.
+                DeliveryState otherStateAtDeath = null;
+                try { otherStateAtDeath = (other.dc != null) ? other.dc.getState() : null; } catch (Exception ignored) {}
+                boolean wasRunning = otherStateAtDeath == DeliveryState.RUNNING_FLOWING
+                        || otherStateAtDeath == DeliveryState.RUNNING_PAUSED;
+                if (wasRunning) {
+                    android.util.Log.w("RSM", "getOrCreate: session " + otherKey + " fantôme (transport mort) "
+                        + "mais était " + otherStateAtDeath + " — tab CONSERVÉ tel quel, aucune migration "
+                        + "automatique. Abandon de cette tentative sur " + tk + " — attente d'un Status manuel.");
+                    com.pa.lcr.lcp.log.LogBus.api(node, "[RSM-GHOST-KEEP] node=" + node + " transport="
+                        + other.transportKey + " mort pendant " + otherStateAtDeath
+                        + " — tab conservé, reconnexion manuelle requise (Status)");
+                    return null;
                 }
 
                 android.util.Log.w("RSM", "getOrCreate: session existante pour le MÊME node="
