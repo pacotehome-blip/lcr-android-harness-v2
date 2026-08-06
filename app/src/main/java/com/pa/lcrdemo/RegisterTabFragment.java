@@ -385,6 +385,19 @@ public class RegisterTabFragment extends Fragment {
     // sur la première valeur trouvée (deep link, bouton C annulé, ActiveDeliveryStore)
     // pour toute la durée de vie du tab, bloquant la détection de tout ticket suivant.
     private volatile String lastTicketDetected = "";
+    // ✅ FIX (4 août 2026, demande Paul — "j'ai commencé le logcat... tout est
+    // présent dans ça", en creusant pourquoi l'export Support de 300 lignes
+    // ne remontait pas jusqu'à l'échec réel) — un ticket qui échoue en
+    // continu (ex. pas encore synchronisé Dataverse) relançait la cascade
+    // complète (DB+Dataverse+backup) à CHAQUE poll (~100-800ms), sans aucun
+    // throttle — des dizaines de lignes LogBus/seconde, assez pour noyer les
+    // 300 lignes de l'export Support en quelques secondes et enterrer les
+    // vrais événements de diagnostic sous le bruit. Le comportement voulu
+    // (retenter jusqu'au succès, ne jamais verrouiller sur un échec) est
+    // conservé — seule la CADENCE des tentatives est plafonnée.
+    private volatile String lastFailedTicket = "";
+    private volatile long lastFailedAttemptMs = 0L;
+    private static final long WO_DETECT_RETRY_COOLDOWN_MS = 3000L;
     // ✅ (fix 31 juillet 2026) Limite les appels MSAL — checkAndPullMissingDeliveryDetail()
     // est maintenant appelée à chaque activation d'onglet (pas seulement Status(B)), ce qui
     // pouvait spammer des demandes de token concurrentes et interférer avec d'autres flux
@@ -982,6 +995,19 @@ public class RegisterTabFragment extends Fragment {
     @Override
     public void onDestroyView() {
         super.onDestroyView();
+        // ✅ FIX CRITIQUE (6 août 2026, demande Paul — "regarde ce log et
+        // dis-moi ce qui cloche" — chaque ligne apparaissait dupliquée,
+        // certaines 4 fois au même timestamp) — trouvé : onDestroyView()
+        // (le vrai cycle de vie Android, déclenché à chaque recréation de
+        // vue — rotation, transaction de fragment, etc.) ne détachait
+        // JAMAIS uiListener du MuxListener partagé dans
+        // RegisterSessionManager. detachUiListenerSafe() existait déjà à 3
+        // autres endroits (bouton retour, erreur de connexion, etc.) mais
+        // pas ici — le plus fondamental. Chaque recréation de vue ajoutait
+        // donc un NOUVEAU listener sans jamais retirer l'ancien, qui
+        // continuait de recevoir chaque événement — d'où la duplication qui
+        // s'accumulait au fil du temps (2x, puis 4x, etc.).
+        try { detachUiListenerSafe(); } catch (Exception ignored) {}
         try { ui.removeCallbacksAndMessages(null); } catch (Exception ignored) {}
         try { bg.shutdownNow(); } catch (Exception ignored) {}
         try { remoteSearchExecutor.shutdownNow(); } catch (Exception ignored) {}
@@ -1784,23 +1810,51 @@ public class RegisterTabFragment extends Fragment {
             // réelle (tout ce chemin OS). L'arrivée deep link, elle, ne
             // déclenche RIEN de tout ça si le câble était déjà branché avant
             // — donc io=null, "transport pinné fermé", abandon direct vers
-            // diagnostic, sans jamais avoir tenté une vraie ouverture. Ici :
-            // avant d'abandonner, tenter une ouverture active via la même
-            // méthode que le point d'entrée unifié (api_openPingUsb / BT
-            // activate), puis revérifier — pas de nouveau chemin séparé,
-            // réutilise ce qui existe déjà.
+            // diagnostic, sans jamais avoir tenté une vraie ouverture.
+            //
+            // ✅ FIX (4 août 2026, demande Paul — "c'est supposé passer par le
+            // même connecteur transport") — la première version de ce fix
+            // appelait api_openPingUsb()/api_btActivate() directement, ce qui
+            // recréait exactement la fragmentation qu'on venait de
+            // consolider. Corrigé : passe maintenant par
+            // api_registerConnectAuto() — le point d'entrée unique
+            // (USB→BT→TCP, verrou unique) construit pour tout le reste. Un
+            // seul endroit initie une connexion, pas de chemin séparé ici.
             if (io == null || !io.isOpen()) {
                 try {
                     com.pa.lcr.lcp.MultiRegisterApiFacadeImpl facadeOpen =
                         new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(requireActivity());
-                    if (tkPinned.toUpperCase(java.util.Locale.ROOT).startsWith("USB")) {
-                        facadeOpen.api_openPingUsb();
-                    } else if (tkPinned.toUpperCase(java.util.Locale.ROOT).startsWith("BT:")) {
-                        facadeOpen.api_btActivate();
-                    }
+                    String serialForConnect = (serialFromArgs != null && !serialFromArgs.trim().isEmpty())
+                        ? serialFromArgs.trim() : null;
+                    facadeOpen.api_registerConnectAuto(serialForConnect, node);
                 } catch (Exception ignored) {}
-                try { MediaTransportManager.get(requireContext()).activateExclusive(tkPinned, "TAB_CONNECT_RETRY"); } catch (Exception ignored) {}
-                try { io = MediaTransportManager.get(requireContext()).getByKey(tkPinned); } catch (Exception ignored) {}
+                // ✅ FIX (4 août 2026, demande Paul — "comment peut-il avoir un
+                // USB(OFF) qui arrive avec ça") — ce tab reste pinné à
+                // tabTransportKey pour toute sa durée de vie (fixé une seule
+                // fois à sa création, onAttach()). Si le registre (même node+
+                // #série) a été retrouvé par api_registerConnectAuto() sur un
+                // AUTRE transport que celui-ci, revérifier seulement l'ancien
+                // transport pinné (tkPinned) déclare le tab "OFF" à tort, même
+                // si le même registre répond parfaitement ailleurs. On
+                // retrouve ici le transport RÉEL actuellement utilisé pour ce
+                // node et on réaligne le tab dessus.
+                try {
+                    String realTk = sm.findTransportKeyForNode(node);
+                    if (realTk != null && !realTk.equalsIgnoreCase(tkPinned)) {
+                        android.util.Log.i("RegisterTabFragment", "connectThisRegister: registre retrouvé sur "
+                            + realTk + " au lieu de " + tkPinned + " — tab réaligné");
+                        LogBus.api(node, "[TAB-REALIGN] " + tabMediaShort + "→" + realTk
+                            + " (registre retrouvé sur un autre transport)");
+                        tabTransportKey = realTk;
+                        String up = realTk.toUpperCase(java.util.Locale.ROOT);
+                        tabMediaShort = up.startsWith("BT:") ? "BT" : (up.startsWith("USB") ? "USB" : (up.startsWith("TCP:") ? "TCP" : tabMediaShort));
+                        try { io = MediaTransportManager.get(requireContext()).getByKey(realTk); } catch (Exception ignored2) {}
+                    } else {
+                        try { io = MediaTransportManager.get(requireContext()).getByKey(tkPinned); } catch (Exception ignored2) {}
+                    }
+                } catch (Exception ignored) {
+                    try { io = MediaTransportManager.get(requireContext()).getByKey(tkPinned); } catch (Exception ignored2) {}
+                }
             }
             if (io == null || !io.isOpen()) {
                 tabMediaReady = false;
@@ -3993,6 +4047,13 @@ public class RegisterTabFragment extends Fragment {
         // plutôt si CE ticket précis a déjà été traité. Si le registre est passé à
         // un nouveau ticket depuis, on doit re-détecter le nouveau WO.
         if (ticketNo.equals(lastTicketDetected)) return;
+        // ✅ FIX (4 août 2026) — throttle sur les échecs répétés du MÊME ticket
+        // (voir commentaire du champ lastFailedTicket). N'empêche pas les
+        // nouvelles tentatives après le cooldown, ni un ticket DIFFÉRENT.
+        if (ticketNo.equals(lastFailedTicket)
+                && (System.currentTimeMillis() - lastFailedAttemptMs) < WO_DETECT_RETRY_COOLDOWN_MS) {
+            return;
+        }
 
         LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — recherche dans DB");
 
@@ -4042,6 +4103,8 @@ public class RegisterTabFragment extends Fragment {
                 if (backupDejaTente) {
                     LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo
                         + " — restauration backup déjà tentée, pas de nouvelle insertion, nouvel essai au prochain poll");
+                    lastFailedTicket = ticketNo;
+                    lastFailedAttemptMs = System.currentTimeMillis();
                     return;
                 }
 
@@ -4076,6 +4139,8 @@ public class RegisterTabFragment extends Fragment {
                     // repolle toutes les 800ms. On ne verrouille lastTicketDetected qu'après un
                     // SUCCÈS réel (voir plus bas), pour permettre les tentatives suivantes.
                     LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — introuvable (local + Dataverse + backup), nouvel essai au prochain poll");
+                    lastFailedTicket = ticketNo;
+                    lastFailedAttemptMs = System.currentTimeMillis();
                     return;
                 }
                 LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — reconstruit depuis backup local, wo=" + row.woNum);
