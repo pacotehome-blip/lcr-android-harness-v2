@@ -256,10 +256,20 @@ public class LcpLink {
         }
 
         @Override public String toString() {
+            // ✅ FIX (6 août 2026, demande Paul — "j'ai coché erreur et il y
+            // en a qu'une la dernière en bas") — trouvé : le filtre "Erreurs
+            // seulement" fait une recherche naïve de la sous-chaîne "ERR"
+            // (insensible à la casse) dans le texte — et "error=non" écrit
+            // ici contient "ERR" (les 3 premières lettres de "ERROR"), donc
+            // déclenchait le filtre à tort même quand errorFlag=false. Le mot
+            // "error" n'apparaît plus du tout quand il n'y a pas d'erreur —
+            // seulement affiché explicitement (et en majuscules ⚠) quand
+            // errorFlag est réellement vrai.
+            String errPart = errorFlag ? " ⚠PANNE" : "";
             return String.format(java.util.Locale.ROOT,
-                "dev=0x%02X [switch=%s state=%s printer=%s error=%s]",
+                "dev=0x%02X [switch=%s state=%s printer=%s%s]",
                 rawValue, switchPositionName, machineStateName,
-                printerPrinting ? "PRINTING" : "idle", errorFlag ? "OUI" : "non");
+                printerPrinting ? "PRINTING" : "idle", errPart);
         }
     }
 
@@ -295,6 +305,84 @@ public class LcpLink {
         boolean error    = (devStatus & DEV_ERROR_FLAG) != 0;
 
         return new DeviceStatusDecoded(devStatus, sw, swName, st, stName, printing, error);
+    }
+    // =========================================================================
+
+    // =========================================================================
+    // ✅ (6 août 2026, demande Paul — "je veux qu'on puisse lire comme humain
+    // les logs et comprendre l'état réel du registre") — même principe que
+    // decodeDeviceStatus() ci-dessus, appliqué à delCode et delStatus (les
+    // deux autres champs bruts hex qu'on affichait sans jamais les
+    // traduire). Sourcé des tables officielles "Delivery Code Bits" et
+    // "Delivery Status Bits" (LCR LCP API Internal Messages, p.57-58).
+    public static final int DC_TICKET_PENDING      = 0x0001; // ticket en attente d'impression
+    public static final int DC_SHIFT_TICKET_PENDING= 0x0002;
+    public static final int DC_FLOW_ACTIVE         = 0x0004; // flux réellement actif
+    public static final int DC_DELIVERY_ACTIVE     = 0x0008; // livraison active
+    public static final int DC_GROSS_PRESET_ACTIVE = 0x0010;
+    public static final int DC_NET_PRESET_ACTIVE   = 0x0020;
+    public static final int DC_GROSS_PRESET_REACHED= 0x0040;
+    public static final int DC_NET_PRESET_REACHED  = 0x0080;
+    public static final int DC_TEMP_COMPENSATED    = 0x0100;
+    public static final int DC_SOLENOID1_CLOSED    = 0x0200;
+    public static final int DC_BEGIN_DELIVERY      = 0x0400; // livraison en train de démarrer
+    public static final int DC_NEW_DELIVERY_QUEUED = 0x0800;
+    public static final int DC_DATA_ACCESS_ERROR   = 0x1000;
+    public static final int DC_CONFIG_EVENT        = 0x2000;
+    public static final int DC_CALIBRATION_EVENT   = 0x4000;
+    public static final int DC_TRANSACTION_SAVED   = 0x8000;
+
+    public static final int DS_PROGRAM_CHECKSUM_ERR   = 0x0001;
+    public static final int DS_TEMP_HW_ERR             = 0x0002;
+    public static final int DS_WATCHDOG_RESET          = 0x0004;
+    public static final int DS_COMP_FACTOR_ERR         = 0x0008;
+    public static final int DS_TEMP_OUT_OF_RANGE       = 0x0010;
+    public static final int DS_METER_CALIB_ERR         = 0x0020;
+    public static final int DS_TOO_MANY_PULSER_REVERSALS = 0x0040;
+    public static final int DS_PRESET_REACHED          = 0x0080;
+    public static final int DS_NO_FLOW_TIMEOUT         = 0x0100;
+    public static final int DS_STOP_REQUEST            = 0x0200;
+    public static final int DS_DELIVERY_END_REQUEST    = 0x0400;
+    public static final int DS_POWER_FAIL              = 0x0800;
+    public static final int DS_PRESET_FIELD_ERR        = 0x1000;
+    public static final int DS_LAPPAD_DISCONNECTED     = 0x2000;
+    public static final int DS_TICKET_PRINTER_OFFLINE  = 0x4000;
+    public static final int DS_CRITICAL_DATA_ERR       = 0x8000;
+
+    /** Traduit delCode en une phrase courte, lisible, décrivant ce qui se passe réellement. */
+    public static String describeDelCode(int delCode) {
+        java.util.List<String> parts = new java.util.ArrayList<>();
+        if ((delCode & DC_DELIVERY_ACTIVE) != 0) {
+            parts.add((delCode & DC_FLOW_ACTIVE) != 0 ? "livraison active, produit en train de couler"
+                                                        : "livraison active, mais aucun flux en ce moment");
+        } else {
+            parts.add("aucune livraison en cours");
+        }
+        if ((delCode & DC_TICKET_PENDING) != 0) parts.add("un ticket attend d'être imprimé (bloque une nouvelle livraison)");
+        if ((delCode & DC_BEGIN_DELIVERY) != 0) parts.add("démarrage de livraison en cours");
+        if ((delCode & DC_NEW_DELIVERY_QUEUED) != 0) parts.add("nouvelle livraison mise en file d'attente");
+        if ((delCode & DC_GROSS_PRESET_REACHED) != 0) parts.add("preset gross atteint");
+        if ((delCode & DC_NET_PRESET_REACHED) != 0) parts.add("preset net atteint");
+        if ((delCode & DC_DATA_ACCESS_ERROR) != 0) parts.add("⚠ erreur d'accès aux données (non critique, défaut utilisé)");
+        return String.join(", ", parts);
+    }
+
+    /** Traduit delStatus en une phrase courte, lisible — priorise les vraies erreurs. */
+    public static String describeDelStatus(int delStatus) {
+        if (delStatus == 0) return "rien à signaler";
+        java.util.List<String> parts = new java.util.ArrayList<>();
+        if ((delStatus & DS_CRITICAL_DATA_ERR) != 0) parts.add("⚠ erreur critique d'accès aux données — livraison bloquée/arrêtée");
+        if ((delStatus & DS_TICKET_PRINTER_OFFLINE) != 0) parts.add("⚠ imprimante hors ligne, ticket requis — livraison ne peut pas démarrer");
+        if ((delStatus & DS_TOO_MANY_PULSER_REVERSALS) != 0) parts.add("⚠ livraison arrêtée — trop de retours de pulser (retour d'air)");
+        if ((delStatus & DS_NO_FLOW_TIMEOUT) != 0) parts.add("livraison arrêtée — aucun flux détecté (timer no-flow expiré)");
+        if ((delStatus & DS_POWER_FAIL) != 0) parts.add("⚠ livraison arrêtée — coupure d'alimentation (>15s)");
+        if ((delStatus & DS_LAPPAD_DISCONNECTED) != 0) parts.add("terminal RS-232 déconnecté pendant la livraison");
+        if ((delStatus & DS_METER_CALIB_ERR) != 0) parts.add("⚠ erreur de calibration du compteur — livraison ne peut pas démarrer");
+        if ((delStatus & DS_STOP_REQUEST) != 0) parts.add("arrêt demandé (Command #1)");
+        if ((delStatus & DS_DELIVERY_END_REQUEST) != 0) parts.add("fin de livraison demandée (Command #2/#6)");
+        if ((delStatus & DS_PRESET_REACHED) != 0) parts.add("preset atteint");
+        if (parts.isEmpty()) parts.add("bit(s) non critique(s) actif(s) (0x" + Integer.toHexString(delStatus) + ")");
+        return String.join(", ", parts);
     }
     // =========================================================================
 

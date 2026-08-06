@@ -931,6 +931,35 @@ catch (Exception ignored) {}
         }
     }
 
+    // ✅ FIX (6 août 2026, demande Paul — "lire comme humain les logs...
+    // comprendre l'état réel du registre") — synthétise une phrase claire
+    // décrivant l'état RÉEL du registre à ce moment précis, en reprenant le
+    // ticket en cours et les dernières quantités connues (net/gross) — pas
+    // juste le nom brut de l'enum d'état.
+    private String describeStateHuman(DeliveryState s) {
+        String ticket = (lastNumeroLivraison != null && !lastNumeroLivraison.isEmpty())
+                ? ("ticket=" + lastNumeroLivraison) : "aucun ticket en cours";
+        LastTick t = lastTick;
+        String qty = (t != null) ? String.format(java.util.Locale.ROOT, "net=%.1fL gross=%.1fL", t.net, t.gross) : "";
+
+        switch (s) {
+            case DISCONNECTED:
+                return "DÉCONNECTÉ — aucune communication avec le registre en ce moment";
+            case CONNECTED:
+                return "CONNECTÉ, prêt — aucune livraison en cours (" + ticket + ")";
+            case PRESTART:
+                return "DÉMARRAGE — préparation de la livraison en cours (" + ticket + ")";
+            case RUNNING_FLOWING:
+                return "EN LIVRAISON, flux actif — " + ticket + (qty.isEmpty() ? "" : (", " + qty));
+            case RUNNING_PAUSED:
+                return "EN LIVRAISON, EN PAUSE (pas de flux en ce moment) — " + ticket + (qty.isEmpty() ? "" : (", " + qty));
+            case ENDING:
+                return "FIN DE LIVRAISON en cours — " + ticket + (qty.isEmpty() ? "" : (", " + qty));
+            default:
+                return s.name() + " — " + ticket;
+        }
+    }
+
     private void setState(DeliveryState s) {
         if (state == s) return;
         DeliveryState prevState = state;
@@ -962,6 +991,16 @@ catch (Exception ignored) {}
 
 
         if (listener != null) listener.onStateChanged(s);
+
+        // ✅ FIX (6 août 2026, demande Paul — "je veux qu'on puisse lire
+        // comme humain les logs et comprendre l'état réel du registre... on
+        // a plusieurs lignes qui ne donnent aucune explication") — au lieu
+        // de laisser "STATE=RUNNING_FLOWING" seul, sans contexte, une phrase
+        // synthétisée accompagne maintenant chaque changement d'état,
+        // reprenant le ticket et les dernières quantités connues.
+        try {
+            emitLog("[ÉTAT] " + describeStateHuman(s));
+        } catch (Exception ignored) {}
 
 // ✅ REPRO: transition FSM (sans TX/RX)
 try {
@@ -1056,8 +1095,18 @@ FullStatus fs = readFullStatus("status/full");
                 // légitimement (END_DELIVERY → RUN → WAIT_NO_FLOW) au fil
                 // d'une vraie livraison.
                 LcpLink.DeviceStatusDecoded devDecoded = LcpLink.decodeDeviceStatus(fs.devStatus);
-                emitLog(String.format("[STATUS] %s prn=0x%02X ds=0x%04X dc=0x%04X",
-                        devDecoded, fs.prnStatus, fs.delStatus, fs.delCode));
+                // ✅ FIX (6 août 2026, demande Paul — "je garderais le hex
+                // aussi en dessous... plus tard ce sera du VT100, Modbus TCP
+                // ou autre, mais on aura le même comportement, d'une source
+                // différente") — le texte lisible s'AJOUTE au hex brut, ne le
+                // remplace plus. Peu importe la source protocole (LCR-II ici,
+                // LC3/Modbus/VT100 plus tard), le hex brut original reste
+                // toujours visible pour vérification/comparaison, avec la
+                // traduction humaine juste au-dessus.
+                emitLog(String.format("[STATUS] %s | %s | %s",
+                        devDecoded, LcpLink.describeDelCode(fs.delCode), LcpLink.describeDelStatus(fs.delStatus)));
+                emitLog(String.format("[STATUS-HEX] dev=0x%02X prn=0x%02X ds=0x%04X dc=0x%04X",
+                        fs.devStatus, fs.prnStatus, fs.delStatus, fs.delCode));
 
                 // ✅ (4 août 2026, demande Paul) — un changement de devStatus pendant
                 // une fenêtre affichée comme stable (ex. RUNNING_FLOWING continu)
