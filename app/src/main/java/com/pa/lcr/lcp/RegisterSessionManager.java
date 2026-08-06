@@ -250,6 +250,13 @@ public final class RegisterSessionManager {
     // Lecture best-effort du serial (#80) sur un transport donné
     // Tente LCR-II (LcpLink) d'abord, puis LC3 (Lc3Link)
     private String probeSerial(TransportIo io, int nodeDec, int fromDec) {
+        // ✅ FIX (6 août 2026, demande Paul) — verrou partagé par node (voir
+        // LcpNodeLocks) : cette sonde crée un LcpLink temporaire, séparé de
+        // tout DeliveryController — sans ce verrou, elle pouvait entrer en
+        // collision de protocole avec le live polling d'une session déjà
+        // active sur le même transport physique, même avec une seule
+        // instance de DeliveryController.
+        synchronized (LcpNodeLocks.forNode(nodeDec)) {
         // Essai LCR-II
         try {
             LcpLink tmp = new LcpLink(io, nodeDec, fromDec, true);
@@ -283,6 +290,7 @@ public final class RegisterSessionManager {
         } catch (Exception ignored) {}
 
         return null;
+        } // fin synchronized (LcpNodeLocks.forNode(nodeDec)) — voir haut de probeSerial()
     }
 
     // =========================================================

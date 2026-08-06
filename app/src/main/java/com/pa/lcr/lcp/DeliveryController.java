@@ -258,16 +258,16 @@ private void reproEvent(String level, String type, String message, JSONObject da
     // TOUTES les instances de DeliveryController, indexé par node (le
     // registre physique réel) — deux instances pour le même node se
     // sérialisent maintenant vraiment entre elles.
-    private static final java.util.concurrent.ConcurrentHashMap<Integer, Object> lcpLocksByNode =
-        new java.util.concurrent.ConcurrentHashMap<>();
-
+    // ✅ FIX (6 août 2026) — utilise maintenant LcpNodeLocks (verrou partagé,
+    // accessible aussi depuis RegisterSessionManager.probeSerial()) au lieu
+    // d'une map locale à cette classe — voir LcpNodeLocks pour le détail
+    // complet du problème que ça règle.
     private interface LcpOp<T> { T run() throws Exception; }
 
     private Object resolveLcpLock() {
         int node = -1;
         try { if (link != null) node = link.getToAddr(); } catch (Exception ignored) {}
-        final int key = node;
-        return lcpLocksByNode.computeIfAbsent(key, k -> new Object());
+        return LcpNodeLocks.forNode(node);
     }
 
     private <T> T withLcpLock(LcpOp<T> op) throws Exception {
