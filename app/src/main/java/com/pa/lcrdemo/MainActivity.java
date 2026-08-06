@@ -2783,6 +2783,17 @@ private void setupTabsTop() {
         try {
             if (tabRegisters == null || tabRegisters.getTabCount() == 0) {
                 logUi(null, "Plus aucun tab — tentative de reconnexion automatique déclenchée");
+                // ✅ FIX (6 août 2026, demande Paul — "on devrait toujours
+                // avoir un tab si pas de registre, sinon un par défaut") —
+                // déterminer un node de repli AVANT le thread d'arrière-plan
+                // (tabKey du tab qu'on vient de retirer est le meilleur indice
+                // disponible ici).
+                int fallbackNode = -1;
+                try {
+                    String[] parts = tabKey.split(":");
+                    if (parts.length >= 2) fallbackNode = Integer.parseInt(parts[1].trim());
+                } catch (Exception ignored) {}
+                final int fFallbackNode = fallbackNode;
                 new Thread(() -> {
                     try {
                         com.pa.lcr.lcp.MultiRegisterApiFacadeImpl facadeAuto =
@@ -2790,6 +2801,31 @@ private void setupTabsTop() {
                         com.pa.lcr.lcp.ApiResult r = facadeAuto.api_registerConnectAuto(null, null);
                         android.util.Log.i("MainActivity", "Reconnexion auto (plus de tab) — code="
                             + (r != null ? r.code : "null") + " msg=" + (r != null ? r.msg : "null"));
+                        // ✅ Repli : si la reconnexion auto n'a rien trouvé, afficher quand
+                        // même un tab "inconnu" (mécanisme déjà existant, voir
+                        // ensureRegisterTab()) — jamais laisser l'écran complètement vide,
+                        // sans aucun moyen d'interagir (Status/Reconnecter/Supprimer).
+                        if (r == null || r.code != 1) {
+                            int nodeToUse = fFallbackNode;
+                            if (nodeToUse <= 0) {
+                                try {
+                                    java.util.List<String[]> known = com.pa.lcr.lcp.RegisterSessionManager
+                                        .get(this).listKnownRegisters();
+                                    if (known != null && !known.isEmpty()) {
+                                        nodeToUse = Integer.parseInt(known.get(0)[0]);
+                                    }
+                                } catch (Exception ignored2) {}
+                            }
+                            if (nodeToUse <= 0) nodeToUse = 250; // dernier repli — node par défaut du camion
+                            final int fNodeToUse = nodeToUse;
+                            runOnUiThread(() -> {
+                                if (tabRegisters == null || tabRegisters.getTabCount() == 0) {
+                                    ensureRegisterTab(fNodeToUse, 255, true);
+                                    logUi(null, "Reconnexion auto sans résultat — tab par défaut affiché (node="
+                                        + fNodeToUse + ") pour permettre une action manuelle");
+                                }
+                            });
+                        }
                     } catch (Exception ignored) {}
                 }).start();
             }
@@ -4935,15 +4971,38 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
         // au node=250 codé en dur, alors que le vrai node peut être différent
         // (ex: LC3 au node 245) — la sonde échouait donc systématiquement
         // pour rien, ajoutant un délai perceptible sans aucun bénéfice.
+        //
+        // ✅ FIX (6 août 2026, demande Paul — "je ne veux en aucun cas
+        // courcircuiter la recherche d'un registre... en arrivant de
+        // deeplink ou en branchant usb ou bt") — ce chemin sautait la sonde
+        // ENTIÈREMENT sur la seule base qu'un tab existait déjà, sans
+        // jamais vérifier que le transport était réellement encore ouvert —
+        // un vrai court-circuit de la recherche, exactement ce qui est
+        // interdit maintenant. Corrigé : on vérifie toujours l'état RÉEL du
+        // transport (io.isOpen()) avant de réutiliser le node/serial en
+        // cache — seule la sonde LENTE (identification node/serial) est
+        // évitée quand elle est déjà connue, jamais la vérification de base
+        // que la connexion existe vraiment. Si le transport n'est pas
+        // réellement ouvert, on tombe dans la recherche complète ci-dessous
+        // — jamais de court-circuit silencieux.
         try {
             for (TabSpec spec : tabsByKey.values()) {
                 if (spec != null && tk.equalsIgnoreCase(spec.transportKey)
                         && spec.serialId != null && !spec.serialId.trim().isEmpty()) {
+                    com.pa.lcr.lcp.transport.TransportIo ioCheck =
+                        (mediaTransportManager != null) ? mediaTransportManager.getByKey(tk) : null;
+                    boolean reallyOpen = false;
+                    try { reallyOpen = (ioCheck != null && ioCheck.isOpen()); } catch (Exception ignored2) {}
+                    if (!reallyOpen) {
+                        android.util.Log.i("MainActivity", "onConfigureMediaActivated: onglet connu pour " + tk
+                            + " mais transport réellement fermé — pas de court-circuit, recherche complète");
+                        break; // sort de la boucle, continue vers la recherche complète plus bas
+                    }
                     final int knownNode = spec.node;
                     final String knownSerial = spec.serialId;
                     final boolean knownIsLc3 = spec.isLc3;
                     android.util.Log.i("MainActivity", "onConfigureMediaActivated: onglet déjà connu pour " + tk
-                            + " (node=" + knownNode + " serial=" + knownSerial + ") — sonde ignorée");
+                            + " (node=" + knownNode + " serial=" + knownSerial + "), transport réellement ouvert — sonde d'identification évitée");
                     ui.post(() -> {
                         try {
                             upsertRegisterTabFromScan(tk, knownNode, 255, knownSerial, true, knownIsLc3);
