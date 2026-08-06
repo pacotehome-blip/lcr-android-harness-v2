@@ -242,19 +242,40 @@ private void reproEvent(String level, String type, String message, JSONObject da
 
 
     // =========================================================
-    // ✅ LCP global lock (UI LIVE + API)
-    // Empêche les chevauchements de transactions LCP (source majeure de rc=0x26).
-    // =========================================================
-    private final Object lcpOpLock = new Object();
+    // ✅ FIX CRITIQUE (6 août 2026, demande Paul — "j'ai eu le même résultat
+    // par BT et par USB" — confirmé : ça élimine la piste "qualité radio BT",
+    // pointe vers un problème commun aux deux transports) — trouvé : ce
+    // verrou était déclaré "global" dans le commentaire mais était en
+    // réalité un simple champ D'INSTANCE (private final Object, sans
+    // static) — donc propre à CHAQUE DeliveryController, pas partagé entre
+    // eux. Si deux instances existent en même temps pour le MÊME registre
+    // physique (exactement la classe de bug chassée toute la journée —
+    // sessions dupliquées, références périmées), chacune avait son propre
+    // verrou et rien n'empêchait deux transactions LCP simultanées sur le
+    // même registre — la "source majeure de rc=0x26" selon le commentaire
+    // original lui-même. Ce n'est pas lié au transport (BT/USB), d'où le
+    // même symptôme sur les deux. Corrigé : verrou statique, partagé entre
+    // TOUTES les instances de DeliveryController, indexé par node (le
+    // registre physique réel) — deux instances pour le même node se
+    // sérialisent maintenant vraiment entre elles.
+    private static final java.util.concurrent.ConcurrentHashMap<Integer, Object> lcpLocksByNode =
+        new java.util.concurrent.ConcurrentHashMap<>();
 
     private interface LcpOp<T> { T run() throws Exception; }
 
+    private Object resolveLcpLock() {
+        int node = -1;
+        try { if (link != null) node = link.getToAddr(); } catch (Exception ignored) {}
+        final int key = node;
+        return lcpLocksByNode.computeIfAbsent(key, k -> new Object());
+    }
+
     private <T> T withLcpLock(LcpOp<T> op) throws Exception {
-        synchronized (lcpOpLock) { return op.run(); }
+        synchronized (resolveLcpLock()) { return op.run(); }
     }
 
     private void withLcpLockVoid(LcpOp<Void> op) throws Exception {
-        synchronized (lcpOpLock) { op.run(); }
+        synchronized (resolveLcpLock()) { op.run(); }
     }
 
     // Wrappers LCP
@@ -3226,7 +3247,7 @@ job.presetNetL_requested = presetNetL;
     }
     public ApiResult api_deliveryStatusB() {
         try {
-            // ✅ Lecture directe via lcpOpLock — même verrou que UI
+            // ✅ Lecture directe via withLcpLock (verrou partagé par node) — même verrou que UI
             // PAS de requestStatus()/requestLiveSample() qui lancent des threads async
             // et créent des collisions de trames BT avec le UI
             int[] ds = lcpDeliveryStatus();
