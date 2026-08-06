@@ -1008,7 +1008,7 @@ public final class RegisterSessionManager {
                 long now0 = System.currentTimeMillis();
                 if (now0 - lastKeepAliveMs >= KEEP_ALIVE_MS) {
                     lastKeepAliveMs = now0;
-                    try { c.requestStatus(); } catch (Exception ignored) {}
+                    try { c.requestStatusKeepAlive(); } catch (Exception ignored) {}
                 }
                 return;
             }
@@ -1055,7 +1055,12 @@ public final class RegisterSessionManager {
             if (now - lastStatusMs >= stInterval) {
                 lastStatusMs = now;
                 try {
-                    c.requestStatus();
+                    // ✅ FIX (6 août 2026, demande Paul) — ce sondage automatique
+                    // (toutes les ~2.5s pendant une livraison active) se faisait
+                    // aussi passer pour un vrai clic manuel sur Status — préexistant,
+                    // pas lié à mon fix du 5 août. Même correction : étiqueté
+                    // honnêtement, plus de faux "UI_STATUS_B" répété.
+                    c.requestStatusKeepAlive();
                     if (statusBackoffMs > 0 && noChangeCount == 0) statusBackoffMs = Math.max(0, statusBackoffMs - 200);
                 } catch (Exception ignored) {}
             }

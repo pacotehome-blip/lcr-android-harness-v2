@@ -1048,11 +1048,32 @@ try {
 
     @Override
     public void requestStatus() {
+        requestStatusInternal(true);
+    }
+
+    // ✅ FIX (6 août 2026, demande Paul — "pourquoi j'ai UI_STATUS_B plusieurs
+    // fois... même timestamp REPRO à chaque fois") — trouvé : mon propre
+    // fix du 5 août (ping léger périodique pendant CONNECTED, pour éviter
+    // qu'un port USB reste silencieux trop longtemps — voir NodeScheduler)
+    // appelait requestStatus() directement, qui logue TOUJOURS "UI_STATUS_B
+    // — Status requested" — comme si c'était un vrai clic manuel sur le
+    // bouton Status, peu importe la vraie source. Le keep-alive automatique
+    // toutes les 5s se faisait donc passer pour une action utilisateur
+    // répétée. Séparé : le keep-alive appelle maintenant une variante
+    // interne SANS le repro event trompeur — même requête matérielle, mais
+    // étiquetée honnêtement.
+    void requestStatusKeepAlive() {
+        requestStatusInternal(false);
+    }
+
+    private void requestStatusInternal(boolean isManualUiAction) {
         io.execute(() -> {
             if (isStopped()) return;
             try {
                 
-// ✅ REPRO: intent Status (B)
+// ✅ REPRO: intent Status (B) — seulement si déclenché par une vraie
+// action UI (bouton Status), jamais pour le keep-alive automatique.
+if (isManualUiAction) {
 try {
     JSONObject d0 = new JSONObject();
     safeJsonPut(d0, "media", resolveActiveMedia());
@@ -1060,6 +1081,7 @@ try {
     safeJsonPut(d0, "transport_key", (link != null) ? link.getTransportKey() : JSONObject.NULL);
     reproEvent(DeliveryLogStore.LEVEL_INFO, "UI_STATUS_B", "Status requested", d0);
 } catch (Exception ignored) {}
+}
 
 FullStatus fs = readFullStatus("status/full");
 
