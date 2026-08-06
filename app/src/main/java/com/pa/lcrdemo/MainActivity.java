@@ -319,7 +319,22 @@ public class MainActivity extends AppCompatActivity {
 
 
     // tabKey -> spec
-    private final LinkedHashMap<String, TabSpec> tabsByKey = new LinkedHashMap<>();
+    // ✅ FIX (6 août 2026, demande Paul — balayage systématique, classe de
+    // bug "concurrence") — LinkedHashMap n'est PAS thread-safe, alors que
+    // cette map est touchée depuis plusieurs threads (scan USB, deep link,
+    // BT, reconnexion auto, tous en arrière-plan) en plus du thread UI.
+    // Comparer à apiRidToPath/apiFirstJobRid/apiJobSeen un peu plus bas, qui
+    // utilisent déjà ConcurrentHashMap — le code sait gérer ça correctement
+    // ailleurs, juste pas ici, malgré que ce soit l'état central des tabs.
+    // Collections.synchronizedMap() protège chaque opération individuelle
+    // (put/get/remove) tout en conservant l'ordre d'insertion de
+    // LinkedHashMap (important pour l'ordre d'affichage des tabs). Reste un
+    // point d'attention : itérer avec "for (... : tabsByKey.values())"
+    // nécessite toujours un bloc synchronized(tabsByKey) autour de
+    // l'itération elle-même pour être complètement sûr — non fait
+    // systématiquement partout, à surveiller si un ConcurrentModification
+    // apparaît en test.
+    private final Map<String, TabSpec> tabsByKey = Collections.synchronizedMap(new LinkedHashMap<>());
 
     // ✅ (4 août 2026) — accesseur read-only pour DeepLinkHandler : permet de
     // savoir, AVANT upsertRegisterTabFromScan(), si un tab existait déjà pour
@@ -328,7 +343,8 @@ public class MainActivity extends AppCompatActivity {
         return tabsByKey.containsKey(tabKey);
     }
     // regKey(node#serial) -> tabKey courant (clear ciblé si migre de média)
-    private final LinkedHashMap<String, String> regKeyToTabKey = new LinkedHashMap<>();
+    // ✅ FIX (6 août 2026) — même raison que tabsByKey ci-dessus.
+    private final Map<String, String> regKeyToTabKey = Collections.synchronizedMap(new LinkedHashMap<>());
 
     private String currentTabKey = null;
     private String visibleRegFragmentTag = null; // fragment visible dans registerContainer
@@ -759,6 +775,14 @@ public class MainActivity extends AppCompatActivity {
     protected void onDestroy() {
         stopApiServer("Activity destroyed");
         try { scanExec.shutdownNow(); } catch (Exception ignored) {}
+        // ✅ FIX (6 août 2026, demande Paul — balayage systématique des
+        // autres classes de bugs, gestion mémoire/cycle de vie) — btExec
+        // n'était jamais arrêté ici, contrairement à scanExec juste
+        // au-dessus. Si l'Activity est recréée dans le même processus
+        // (ex. après finish() suivi d'un relancement rapide), chaque
+        // nouvelle instance créait son propre btExec sans jamais nettoyer
+        // l'ancien — accumulation de threads au fil des cycles.
+        try { btExec.shutdownNow(); } catch (Exception ignored) {}
         super.onDestroy();
     }
 
@@ -804,9 +828,13 @@ public class MainActivity extends AppCompatActivity {
      */
     /** Retourne le transportKey du tab actif pour un node donné */
     public String getTransportKeyForNode(int node) {
-        for (TabSpec t : tabsByKey.values()) {
-            if (t.node == node && t.transportKey != null && !t.transportKey.isEmpty())
-                return t.transportKey;
+        // ✅ FIX (6 août 2026, concurrence) — itération protégée, voir
+        // commentaire sur la déclaration de tabsByKey.
+        synchronized (tabsByKey) {
+            for (TabSpec t : tabsByKey.values()) {
+                if (t.node == node && t.transportKey != null && !t.transportKey.isEmpty())
+                    return t.transportKey;
+            }
         }
         return null;
     }
@@ -815,7 +843,9 @@ public class MainActivity extends AppCompatActivity {
      *  Utilisé par DeepLinkHandler quand resolveOrCreateForNode() échoue mais tab existe */
     public boolean lancerLivraisonViaTabExistant(int node, String woNum, String woIdGuid,
             String produit, String presetStr) {
-        for (TabSpec t : tabsByKey.values()) {
+        java.util.List<TabSpec> snapshot;
+        synchronized (tabsByKey) { snapshot = new ArrayList<>(tabsByKey.values()); }
+        for (TabSpec t : snapshot) {
             if (t.node != node) continue;
             String tabKey = t.tabKey;
             Fragment f = getSupportFragmentManager().findFragmentByTag("regtab_" + tabKey);
@@ -2311,7 +2341,8 @@ private void setupTabsTop() {
 
     public void refreshAllTabsMediaStatus() {
         try {
-            ArrayList<String> keys = new ArrayList<>(tabsByKey.keySet());
+            ArrayList<String> keys;
+            synchronized (tabsByKey) { keys = new ArrayList<>(tabsByKey.keySet()); }
             for (String k : keys) refreshOneTabMediaStatus(k);
         } catch (Exception ignored) {}
     }
@@ -2377,10 +2408,12 @@ private void setupTabsTop() {
             String mediaShort = mediaShortFromTransportKey(transportKey);
             // on ne connaît pas encore le serial ici pour un tabKey exact —
             // on cherche par (média, node) parmi les onglets existants.
-            for (TabSpec spec : tabsByKey.values()) {
-                if (spec != null && spec.node == node
-                        && transportKey.equalsIgnoreCase(spec.transportKey)) {
-                    return spec.isLc3;
+            synchronized (tabsByKey) {
+                for (TabSpec spec : tabsByKey.values()) {
+                    if (spec != null && spec.node == node
+                            && transportKey.equalsIgnoreCase(spec.transportKey)) {
+                        return spec.isLc3;
+                    }
                 }
             }
         } catch (Exception ignored) {}
@@ -2413,7 +2446,13 @@ private void setupTabsTop() {
             // (io.isOpen()) — peu importe ce que "actif" dit en mémoire — et
             // on l'active nous-mêmes s'il est physiquement prêt mais pas
             // encore marqué actif.
-            for (TabSpec spec : tabsByKey.values()) {
+            // ✅ FIX (6 août 2026, concurrence) — copie défensive plutôt que
+            // synchronized() autour de toute la boucle : le corps fait des
+            // appels potentiellement lents (activateExclusive, getOrCreate)
+            // qu'on ne veut pas exécuter en tenant le verrou de tabsByKey.
+            java.util.List<TabSpec> specsSnapshot;
+            synchronized (tabsByKey) { specsSnapshot = new ArrayList<>(tabsByKey.values()); }
+            for (TabSpec spec : specsSnapshot) {
                 if (spec == null) continue;
                 if (spec.node != node) continue;
                 if (spec.serialId == null) continue;
@@ -2562,12 +2601,15 @@ private void setupTabsTop() {
     private void removeAllUnknownSerialTabsBestEffort() {
         try {
             java.util.ArrayList<String> toRemove = new java.util.ArrayList<>();
-            for (java.util.Map.Entry<String, TabSpec> e : tabsByKey.entrySet()) {
-                if (e == null) continue;
-                TabSpec s = e.getValue();
-                if (s == null) continue;
-                if (s.serialId == null || s.serialId.trim().isEmpty()) {
-                    toRemove.add(e.getKey());
+            // ✅ FIX (6 août 2026, concurrence)
+            synchronized (tabsByKey) {
+                for (java.util.Map.Entry<String, TabSpec> e : tabsByKey.entrySet()) {
+                    if (e == null) continue;
+                    TabSpec s = e.getValue();
+                    if (s == null) continue;
+                    if (s.serialId == null || s.serialId.trim().isEmpty()) {
+                        toRemove.add(e.getKey());
+                    }
                 }
             }
             for (String k : toRemove) {
@@ -2716,11 +2758,14 @@ private void setupTabsTop() {
         tabsByKey.remove(tabKey);
 
         // remove regKey mapping entries pointing to this tabKey
+        // ✅ FIX (6 août 2026, concurrence)
         try {
             java.util.ArrayList<String> toRemove = new java.util.ArrayList<>();
-            for (java.util.Map.Entry<String, String> e : regKeyToTabKey.entrySet()) {
-                if (e == null) continue;
-                if (tabKey.equals(e.getValue())) toRemove.add(e.getKey());
+            synchronized (regKeyToTabKey) {
+                for (java.util.Map.Entry<String, String> e : regKeyToTabKey.entrySet()) {
+                    if (e == null) continue;
+                    if (tabKey.equals(e.getValue())) toRemove.add(e.getKey());
+                }
             }
             for (String k : toRemove) regKeyToTabKey.remove(k);
         } catch (Exception ignored) {}
@@ -3841,14 +3886,17 @@ private void scanUsb() {
 
         // ✅ Multi-média: ne pas détruire les tabs BT.
         // Retirer uniquement les tabs USB (et leurs fragments) de manière explicite (A1).
+        // ✅ FIX (6 août 2026, concurrence)
         try {
             ArrayList<String> toRemove = new ArrayList<>();
-            for (Map.Entry<String, TabSpec> e : tabsByKey.entrySet()) {
-                if (e == null) continue;
-                TabSpec s = e.getValue();
-                if (s == null) continue;
-                String mShort = (s.mediaShort != null) ? s.mediaShort : mediaShortFromTransportKey(s.transportKey);
-                if ("USB".equalsIgnoreCase(mShort)) toRemove.add(e.getKey());
+            synchronized (tabsByKey) {
+                for (Map.Entry<String, TabSpec> e : tabsByKey.entrySet()) {
+                    if (e == null) continue;
+                    TabSpec s = e.getValue();
+                    if (s == null) continue;
+                    String mShort = (s.mediaShort != null) ? s.mediaShort : mediaShortFromTransportKey(s.transportKey);
+                    if ("USB".equalsIgnoreCase(mShort)) toRemove.add(e.getKey());
+                }
             }
             for (String k : toRemove) removeTabAndFragment(k, "USB detached");
         } catch (Exception ignored) {}
@@ -4646,18 +4694,23 @@ private boolean ensureBtConnectPermission() {
             if (txtBtStatus != null) txtBtStatus.setText("BT : DISCONNECTED");
             updateMediaStatusUi();
             // Forcer à (OFF) seulement les tabs du BT déconnecté
+            // ✅ FIX (6 août 2026, concurrence) — même si ce bloc tourne sur
+            // le thread UI, d'autres threads peuvent muter tabsByKey en
+            // parallèle pendant cette itération.
             try {
                 String disconnectedKey = disconnectedMac != null
                     ? MediaTransportManager.btKey(disconnectedMac) : null;
-                for (TabSpec s : tabsByKey.values()) {
-                    if (s == null) continue;
-                    if (disconnectedKey != null
-                            && !disconnectedKey.equalsIgnoreCase(s.transportKey)) continue;
-                    String ms = mediaShortFromTransportKey(s.transportKey);
-                    if ("BT".equalsIgnoreCase(ms)) {
-                        updateRegisterTabLabel(s.tabKey,
-                            tabLabelOf(ms + "(OFF)", s.node, s.serialId, s.isLc3)
-                            + (s.qtySuffix != null ? s.qtySuffix : ""));
+                synchronized (tabsByKey) {
+                    for (TabSpec s : tabsByKey.values()) {
+                        if (s == null) continue;
+                        if (disconnectedKey != null
+                                && !disconnectedKey.equalsIgnoreCase(s.transportKey)) continue;
+                        String ms = mediaShortFromTransportKey(s.transportKey);
+                        if ("BT".equalsIgnoreCase(ms)) {
+                            updateRegisterTabLabel(s.tabKey,
+                                tabLabelOf(ms + "(OFF)", s.node, s.serialId, s.isLc3)
+                                + (s.qtySuffix != null ? s.qtySuffix : ""));
+                        }
                     }
                 }
 
@@ -4986,7 +5039,9 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
         // réellement ouvert, on tombe dans la recherche complète ci-dessous
         // — jamais de court-circuit silencieux.
         try {
-            for (TabSpec spec : tabsByKey.values()) {
+            java.util.List<TabSpec> tabSnapshot;
+            synchronized (tabsByKey) { tabSnapshot = new ArrayList<>(tabsByKey.values()); }
+            for (TabSpec spec : tabSnapshot) {
                 if (spec != null && tk.equalsIgnoreCase(spec.transportKey)
                         && spec.serialId != null && !spec.serialId.trim().isEmpty()) {
                     com.pa.lcr.lcp.transport.TransportIo ioCheck =
@@ -5077,14 +5132,18 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
                 spec = tabsByKey.get(key);
             }
 
+            // ✅ FIX (6 août 2026, concurrence) — les 3 boucles ci-dessous
+            // protégées.
             // 2) fallback (node,serial)
             if (spec == null && !serial.isEmpty()) {
-                for (TabSpec s : tabsByKey.values()) {
-                    if (s == null) continue;
-                    if ((s.node & 0xFF) != (node & 0xFF)) continue;
-                    if (!serial.equalsIgnoreCase(safeSerial(s.serialId))) continue;
-                    spec = s;
-                    break;
+                synchronized (tabsByKey) {
+                    for (TabSpec s : tabsByKey.values()) {
+                        if (s == null) continue;
+                        if ((s.node & 0xFF) != (node & 0xFF)) continue;
+                        if (!serial.equalsIgnoreCase(safeSerial(s.serialId))) continue;
+                        spec = s;
+                        break;
+                    }
                 }
             }
 
@@ -5092,13 +5151,15 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
             if (spec == null) {
                 String tk = (transportKey != null ? transportKey.trim() : "");
                 if (!tk.isEmpty()) {
-                    for (TabSpec s : tabsByKey.values()) {
-                        if (s == null) continue;
-                        if ((s.node & 0xFF) != (node & 0xFF)) continue;
-                        String stk = (s.transportKey != null ? s.transportKey.trim() : "");
-                        if (tk.equalsIgnoreCase(stk)) {
-                            spec = s;
-                            break;
+                    synchronized (tabsByKey) {
+                        for (TabSpec s : tabsByKey.values()) {
+                            if (s == null) continue;
+                            if ((s.node & 0xFF) != (node & 0xFF)) continue;
+                            String stk = (s.transportKey != null ? s.transportKey.trim() : "");
+                            if (tk.equalsIgnoreCase(stk)) {
+                                spec = s;
+                                break;
+                            }
                         }
                     }
                 }
@@ -5122,24 +5183,29 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
                 spec = tabsByKey.get(key);
             }
 
+            // ✅ FIX (6 août 2026, concurrence)
             if (spec == null && !serial.isEmpty()) {
-                for (TabSpec s : tabsByKey.values()) {
-                    if (s == null) continue;
-                    if ((s.node & 0xFF) != (node & 0xFF)) continue;
-                    if (!serial.equalsIgnoreCase(safeSerial(s.serialId))) continue;
-                    spec = s;
-                    break;
+                synchronized (tabsByKey) {
+                    for (TabSpec s : tabsByKey.values()) {
+                        if (s == null) continue;
+                        if ((s.node & 0xFF) != (node & 0xFF)) continue;
+                        if (!serial.equalsIgnoreCase(safeSerial(s.serialId))) continue;
+                        spec = s;
+                        break;
+                    }
                 }
             }
 
             if (spec == null) {
                 String tk = (transportKey != null ? transportKey.trim() : "");
                 if (!tk.isEmpty()) {
-                    for (TabSpec s : tabsByKey.values()) {
-                        if (s == null) continue;
-                        if ((s.node & 0xFF) != (node & 0xFF)) continue;
-                        String stk = (s.transportKey != null ? s.transportKey.trim() : "");
-                        if (tk.equalsIgnoreCase(stk)) { spec = s; break; }
+                    synchronized (tabsByKey) {
+                        for (TabSpec s : tabsByKey.values()) {
+                            if (s == null) continue;
+                            if ((s.node & 0xFF) != (node & 0xFF)) continue;
+                            String stk = (s.transportKey != null ? s.transportKey.trim() : "");
+                            if (tk.equalsIgnoreCase(stk)) { spec = s; break; }
+                        }
                     }
                 }
             }
@@ -5206,7 +5272,12 @@ private void ensureActiveTransport(String transportKey, String reason) {
             String tkNew = newTransportKey.trim();
             if (activeKeyBefore == null || activeKeyBefore.equalsIgnoreCase(tkNew)) return true;
 
-            for (TabSpec spec : tabsByKey.values()) {
+            // ✅ FIX (6 août 2026, concurrence) — une seule copie défensive
+            // réutilisée pour les deux boucles (elles itèrent la même map).
+            java.util.List<TabSpec> tabSnapshotSafe;
+            synchronized (tabsByKey) { tabSnapshotSafe = new ArrayList<>(tabsByKey.values()); }
+
+            for (TabSpec spec : tabSnapshotSafe) {
                 if (spec == null || spec.transportKey == null) continue;
                 if (!activeKeyBefore.equalsIgnoreCase(spec.transportKey)) continue;
                 com.pa.lcr.lcp.DeliveryController dcActive =
@@ -5221,7 +5292,7 @@ private void ensureActiveTransport(String transportKey, String reason) {
                 // Livraison active trouvée sur l'ancien transport actif.
                 // Le nouveau transport a-t-il le même node+#série ?
                 boolean sameRegister = false;
-                for (TabSpec newSpec : tabsByKey.values()) {
+                for (TabSpec newSpec : tabSnapshotSafe) {
                     if (newSpec == null || newSpec.transportKey == null) continue;
                     if (!tkNew.equalsIgnoreCase(newSpec.transportKey)) continue;
                     if (newSpec.node == spec.node
