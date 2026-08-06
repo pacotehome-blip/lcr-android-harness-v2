@@ -1694,7 +1694,7 @@ private void setupTabsTop() {
                 db = dbHelper.getReadableDatabase();
 
                 StringBuilder sql = new StringBuilder(
-                        "SELECT ts, serial_id, ticket_no, event_type, event_code, event_where, detail_short, attempt_id " +
+                        "SELECT ts, serial_id, ticket_no, event_type, event_code, event_where, detail_short, attempt_id, level " +
                         "FROM v_diagnostic_events WHERE 1=1 ");
                 java.util.List<String> args = new java.util.ArrayList<>();
                 // ✅ FIX (4 août 2026, demande Paul — "ceci touche directement la couche
@@ -1755,6 +1755,15 @@ private void setupTabsTop() {
                     String eventWhere = c.getString(5);
                     String detailShort = c.getString(6);
                     Long attemptId = c.isNull(7) ? null : c.getLong(7);
+                    // ✅ FIX (6 août 2026, demande Paul — "je veux vraiment
+                    // voir de manière évidente que s'il y a une erreur je
+                    // veux un affichage couleur... le niveau de support à
+                    // faire interagir") — level était calculé dans la vue
+                    // v_diagnostic_events depuis le tout début, mais jamais
+                    // sélectionné ici — donc jamais transporté jusqu'à
+                    // l'écran. Ajouté à la ligne pour permettre le code
+                    // couleur ci-dessous (voir SupportEventAdapter).
+                    String level = c.isNull(8) ? "INFO" : c.getString(8);
 
                     String tsFmt = android.text.format.DateFormat.format("MM-dd HH:mm:ss", ts).toString();
                     String header = tsFmt + "  " + (eventCode != null ? eventCode : eventType)
@@ -1766,7 +1775,7 @@ private void setupTabsTop() {
                     // attemptId nullable transporté jusqu'à la ligne, pour permettre au clic
                     // sur une ligne de retrouver tous les événements de la MÊME tentative
                     // (delivery_attempt), triés chronologiquement — pas juste cette ligne isolée.
-                    rows.add(new Object[]{ts, header, detail, attemptId});
+                    rows.add(new Object[]{ts, header, detail, attemptId, level});
                 }
             } catch (Exception e) {
                 rows.add(new Object[]{System.currentTimeMillis(), "Erreur lecture v_diagnostic_events",
@@ -1795,7 +1804,14 @@ private void setupTabsTop() {
                 for (Object[] r : rows) {
                     String h = String.valueOf(r[1]).toUpperCase(java.util.Locale.ROOT);
                     String d = String.valueOf(r[2]).toUpperCase(java.util.Locale.ROOT);
-                    if (h.contains("ERR") || h.contains("FAIL") || d.contains("ERR") || d.contains("FAIL")) {
+                    String lvl = String.valueOf(r[4]).toUpperCase(java.util.Locale.ROOT);
+                    // ✅ FIX (6 août 2026) — la colonne level (corrigée en DB v22) est
+                    // maintenant fiable — utilisée en priorité, avec le filtre texte
+                    // large en filet de sécurité pour les cas non couverts par level
+                    // (ex. api_trace, toujours 'INFO' même en échec — voir commentaire
+                    // plus haut).
+                    if ("ERROR".equals(lvl) || "WARN".equals(lvl)
+                            || h.contains("ERR") || h.contains("FAIL") || d.contains("ERR") || d.contains("FAIL")) {
                         filteredRows.add(r);
                     }
                 }
@@ -1806,10 +1822,12 @@ private void setupTabsTop() {
             final java.util.List<String> headers = new java.util.ArrayList<>();
             final java.util.List<String> details = new java.util.ArrayList<>();
             final java.util.List<Long> attemptIds = new java.util.ArrayList<>();
+            final java.util.List<String> levels = new java.util.ArrayList<>();
             for (Object[] r : filteredRows) {
                 headers.add((String) r[1]);
                 details.add((String) r[2]);
                 attemptIds.add(r.length > 3 ? (Long) r[3] : null);
+                levels.add(r.length > 4 ? (String) r[4] : "INFO");
             }
             int count = filteredRows.size();
 
@@ -1831,7 +1849,7 @@ private void setupTabsTop() {
                     lastSupportDetails.clear();
                     lastSupportDetails.addAll(details);
                     supportSelectedPositions.clear(); // ✅ nouvelle liste = sélection réinitialisée
-                    SupportEventAdapter adapter = new SupportEventAdapter(this, headers, details, supportSelectedPositions);
+                    SupportEventAdapter adapter = new SupportEventAdapter(this, headers, details, levels, supportSelectedPositions);
                     listSupportEvents.setAdapter(adapter);
                     // ✅ (ajouté 3 août 2026, demande Paul : "voir tout le processus lié" /
                     // "je veux faire une sélection") — en mode sélection, taper une ligne
@@ -2091,12 +2109,15 @@ private void setupTabsTop() {
      */
     private static final class SupportEventAdapter extends ArrayAdapter<String> {
         private final java.util.List<String> details;
+        private final java.util.List<String> levels;
         private final java.util.Set<Integer> selectedPositions;
 
         SupportEventAdapter(android.content.Context ctx, java.util.List<String> headers,
-                             java.util.List<String> details, java.util.Set<Integer> selectedPositions) {
+                             java.util.List<String> details, java.util.List<String> levels,
+                             java.util.Set<Integer> selectedPositions) {
             super(ctx, R.layout.row_support_event, R.id.txtRowHeader, headers);
             this.details = details;
+            this.levels = levels;
             this.selectedPositions = selectedPositions;
         }
 
@@ -2107,8 +2128,37 @@ private void setupTabsTop() {
             if (txtDetail != null && position < details.size()) {
                 txtDetail.setText(details.get(position));
             }
-            // ✅ (ajouté 3 août 2026) — surlignage simple des lignes cochées en mode sélection
-            row.setBackgroundColor(selectedPositions.contains(position) ? 0x334CAF50 : 0x00000000);
+            // ✅ FIX (6 août 2026, demande Paul — "je veux vraiment voir de
+            // manière évidente que s'il y a une erreur je veux un affichage
+            // couleur... le niveau de support à faire interagir") — code
+            // couleur par niveau, sur toute la ligne (fond) ET le texte de
+            // l'en-tête, pour que ce soit visible d'un coup d'œil, pas juste
+            // lisible en cherchant le mot "ERR" dans le texte.
+            String level = (position < levels.size()) ? levels.get(position) : "INFO";
+            TextView txtHeader = row.findViewById(R.id.txtRowHeader);
+            int bgColor;
+            int headerColor;
+            switch (level == null ? "INFO" : level) {
+                case "ERROR":
+                    bgColor = 0x33F44336;      // rouge translucide
+                    headerColor = 0xFFB71C1C;  // rouge foncé
+                    break;
+                case "WARN":
+                    bgColor = 0x33FF9800;      // orange translucide
+                    headerColor = 0xFFE65100;  // orange foncé
+                    break;
+                default:
+                    bgColor = 0x00000000;
+                    headerColor = 0xFF212121;  // gris foncé standard
+                    break;
+            }
+            if (selectedPositions.contains(position)) {
+                // ✅ (ajouté 3 août 2026) — surlignage de sélection garde priorité visuelle
+                row.setBackgroundColor(0x334CAF50);
+            } else {
+                row.setBackgroundColor(bgColor);
+            }
+            if (txtHeader != null) txtHeader.setTextColor(headerColor);
             return row;
         }
     }
