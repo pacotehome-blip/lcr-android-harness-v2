@@ -901,11 +901,28 @@
         android:orientation="vertical"
         android:visibility="gone">
 
+        <!-- ✅ FIX (6 août 2026, demande Paul — "j'ai perdu les champs de
+             recherche... déposer les boutons en bas des champs et encadrer
+             les champs et aussi permettre une recherche de type google") —
+             AVANT : les 3 champs ET les 4 boutons partageaient une seule
+             ligne — sur l'écran étroit de la tablette, les boutons
+             prenaient toute la place et écrasaient les champs à largeur
+             flexible (ticket/serial), ne laissant visible que "node" (seul
+             champ à largeur fixe). Corrigé : les champs ont maintenant leur
+             propre ligne, encadrés (fond blanc + bordure arrondie, style
+             barre de recherche), et les boutons sont sur une ligne séparée
+             en dessous. Recherche "type Google" : voir le TextWatcher ajouté
+             dans MainActivity — les résultats se rafraîchissent
+             automatiquement en tapant (avec un court délai), plus besoin de
+             cliquer "Rafraîchir" à chaque frappe. -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="horizontal"
-            android:padding="8dp"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            android:paddingTop="8dp"
+            android:paddingBottom="4dp"
             android:gravity="center_vertical">
 
             <EditText
@@ -913,6 +930,7 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
+                android:background="@drawable/bg_support_search_field"
                 android:hint="ticket_no (ou vide = tous)"
                 android:inputType="text"
                 android:textSize="14sp"/>
@@ -923,24 +941,35 @@
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:layout_marginStart="6dp"
+                android:background="@drawable/bg_support_search_field"
                 android:hint="serial_id (optionnel)"
                 android:inputType="text"
                 android:textSize="14sp"/>
 
             <EditText
                 android:id="@+id/edtSupportNodeFilter"
-                android:layout_width="70dp"
+                android:layout_width="80dp"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="6dp"
+                android:background="@drawable/bg_support_search_field"
                 android:hint="node"
                 android:inputType="number"
                 android:textSize="14sp"/>
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            android:paddingBottom="4dp"
+            android:gravity="center_vertical">
 
             <Button
                 android:id="@+id/btnSupportRefresh"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
                 android:text="Rafraîchir"/>
 
             <Button
@@ -984,6 +1013,7 @@
                 android:layout_height="wrap_content"
                 android:text="Copier"/>
         </LinearLayout>
+
 
         <TextView
             android:id="@+id/txtSupportDiagnosis"

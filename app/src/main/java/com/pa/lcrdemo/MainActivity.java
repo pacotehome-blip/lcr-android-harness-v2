@@ -866,6 +866,23 @@ public class MainActivity extends AppCompatActivity {
         edtSupportTicketFilter = findViewById(R.id.edtSupportTicketFilter);
         edtSupportSerialFilter = findViewById(R.id.edtSupportSerialFilter);
         edtSupportNodeFilter = findViewById(R.id.edtSupportNodeFilter);
+        // ✅ FIX (6 août 2026, demande Paul — "permettre une recherche de
+        // type google") — les résultats se rafraîchissent maintenant
+        // automatiquement pendant la frappe (avec un court délai pour ne pas
+        // relancer une requête à chaque lettre), plus besoin de cliquer
+        // "Rafraîchir" après chaque changement.
+        android.text.TextWatcher supportLiveSearchWatcher = new android.text.TextWatcher() {
+            private final Runnable debounced = () -> refreshSupportEvents();
+            @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
+            @Override public void onTextChanged(CharSequence s, int a, int b, int c) {
+                ui.removeCallbacks(debounced);
+                ui.postDelayed(debounced, 400);
+            }
+            @Override public void afterTextChanged(android.text.Editable s) {}
+        };
+        if (edtSupportTicketFilter != null) edtSupportTicketFilter.addTextChangedListener(supportLiveSearchWatcher);
+        if (edtSupportSerialFilter != null) edtSupportSerialFilter.addTextChangedListener(supportLiveSearchWatcher);
+        if (edtSupportNodeFilter != null) edtSupportNodeFilter.addTextChangedListener(supportLiveSearchWatcher);
         txtSupportCount = findViewById(R.id.txtSupportCount);
         chkSupportErrorsOnly = findViewById(R.id.chkSupportErrorsOnly);
         if (chkSupportErrorsOnly != null) {
