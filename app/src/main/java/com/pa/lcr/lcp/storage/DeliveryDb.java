@@ -43,7 +43,7 @@ public class DeliveryDb extends SQLiteOpenHelper {
     //      chaque soir) + diagnostic_match_history (persiste chaque résultat de
     //      DiagnosticRuleEngine, jusqu'ici calculé à la volée et jamais stocké — nécessaire
     //      pour calibrer les règles / futur agent IA, demande Paul 31 juillet 2026).
-    public static final int DB_VERSION = 21;
+    public static final int DB_VERSION = 22;
 
     private static final String TAG = "DeliveryDb";
 
@@ -198,6 +198,17 @@ public class DeliveryDb extends SQLiteOpenHelper {
         // Support — pas un oubli isolé, une vraie lacune de conception. DROP+CREATE d'une
         // vue est toujours sans risque de perte de données.
         if (oldVersion < 21) {
+            createDiagnosticEventsView(db);
+        }
+        // v22 (demande Paul, 6 août 2026 — "un log clair de la suppression d'un tab...
+        // voir en clair l'accès à Dataverse qui échoue") : classification des niveaux
+        // corrigée dans v_diagnostic_events — "[DATAVERSE-PUSH] ERR ticket=..." ne
+        // matchait pas le pattern ERROR (qui exigeait "[ERR]" en tout début de message
+        // littéralement), donc restait classé INFO comme n'importe quel message de
+        // routine. "supprimé" (suppression de tab) ajouté aux patterns WARN pour rester
+        // visible clairement plutôt que noyé. DROP+CREATE d'une vue est toujours sans
+        // risque de perte de données.
+        if (oldVersion < 22) {
             createDiagnosticEventsView(db);
         }
     }
@@ -492,9 +503,20 @@ public class DeliveryDb extends SQLiteOpenHelper {
             // connu. Niveau dérivé du contenu du message (LogBus n'a pas de
             // champ level natif) : ERROR si préfixé "[ERR]" (format exact de
             // LogBus.err()), WARN si le message signale une alerte/un abandon
-            // explicite (⚠, ABANDON, BLOQUÉ, échoué/échec), sinon INFO —
+            // explicite (⚠, ABANDON, BLOQUÉ, échoué/échec, supprimé), sinon INFO —
             // pour que la couche Support distingue vraiment les niveaux au
             // lieu de tout aplatir en INFO.
+            //
+            // ✅ FIX (6 août 2026, demande Paul — "je veux un log clair de la
+            // suppression d'un tab... je veux aussi voir en clair l'accès à
+            // Dataverse qui échoue") — le pattern ERROR ne matchait QUE les
+            // messages commençant littéralement par "[ERR]" — ratant
+            // complètement "[DATAVERSE-PUSH] ERR ticket=..." (le format réel
+            // utilisé pour les échecs Dataverse), qui se retrouvait classé
+            // INFO comme n'importe quel autre message de routine. Élargi
+            // pour couvrir ce format, et "supprimé" (suppression de tab)
+            // ajouté aux patterns WARN pour que ce soit visible clairement,
+            // pas noyé dans le reste.
             "SELECT " +
             "  b.id                 AS event_id, " +
             "  NULL                 AS attempt_id, " +
@@ -504,9 +526,11 @@ public class DeliveryDb extends SQLiteOpenHelper {
             "  NULL                 AS job_id, " +
             "  'LOG_BUS'             AS attempt_source, " +
             "  CASE " +
-            "    WHEN b.msg LIKE '[ERR]%' THEN 'ERROR' " +
+            "    WHEN b.msg LIKE '[ERR]%' OR b.msg LIKE '%] ERR %' OR b.msg LIKE '%ERR ticket=%' " +
+            "         OR b.msg LIKE '%Unable to resolve host%' OR b.msg LIKE '%DATAVERSE-PUSH] ERR%' " +
+            "         THEN 'ERROR' " +
             "    WHEN b.msg LIKE '%⚠%' OR b.msg LIKE '%ABANDON%' OR b.msg LIKE '%BLOQUÉ%' " +
-            "         OR b.msg LIKE '%échoué%' OR b.msg LIKE '%échec%' THEN 'WARN' " +
+            "         OR b.msg LIKE '%échoué%' OR b.msg LIKE '%échec%' OR b.msg LIKE '%supprimé%' THEN 'WARN' " +
             "    ELSE 'INFO' " +
             "  END                  AS level, " +
             "  'LOG_BUS'             AS event_type, " +
