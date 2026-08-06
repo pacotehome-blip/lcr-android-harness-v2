@@ -1930,55 +1930,89 @@ private void setupTabsTop() {
                 }));
     }
 
+    // ✅ FIX (6 août 2026, demande Paul — "peux-tu m'ajouter les couleurs
+    // dans ?, au niveau de l'onglet Support") — le dialogue Lexique était en
+    // texte brut, sans aucune indication visuelle de gravité. Coloré
+    // maintenant avec la même logique que la liste Support (vert = simple,
+    // rouge = critique), pour que le niveau saute aux yeux avant même de
+    // lire le texte.
     private void showSupportLexiqueDialog() {
-        String texte =
-                "NIVEAUX SUPPORT\n\n" +
-                "N1 — Chauffeur\n" +
-                "  Résolution simple sur le terrain : rebrancher/reconnecter le BT ou USB, " +
-                "redémarrer l'app, vérifier l'appairage. Pas besoin d'appeler le support.\n\n" +
-                "N2 — Support technique\n" +
-                "  Nécessite une vérification par le support (état du registre, config " +
-                "Field Service, synchronisation Dataverse).\n\n" +
-                "N3 — Escalade développeur\n" +
-                "  Comportement anormal qui dépasse le dépannage standard — probable " +
-                "défaillance logicielle ou matérielle à investiguer.\n\n" +
-                "N4 — Critique / urgent développeur\n" +
-                "  Cas grave (perte de données, blocage complet) nécessitant une " +
-                "intervention immédiate.\n\n" +
-                "N/A — Aucune règle de diagnostic ne matche pour ce ticket. Ne veut pas " +
-                "dire qu'il n'y a pas de problème, juste qu'aucune des règles connues ne " +
-                "l'a détecté automatiquement.\n\n" +
-                "N1/N2 (tendance) — Aucune règle exacte ne matche, mais la couche " +
-                "(Transport/API/UI) est clairement dominante dans les événements de ce " +
-                "ticket. Suggestion basée sur cette tendance, PAS un diagnostic confirmé — " +
-                "à valider manuellement. N/A reste affiché seulement si même la couche est " +
-                "indéterminée (aucun signal exploitable).\n\n" +
-                "─────────────────────────────\n\n" +
-                "COUCHES PAR COMPLEXITÉ\n\n" +
-                "TRANSPORT (BT/USB/TCP/registre)\n" +
-                "  Le problème semble venir de la communication physique avec le registre " +
-                "(Bluetooth, USB, TCP) ou du protocole LCP lui-même — pas de la logique " +
-                "applicative. Signal : erreurs classées \"level\":\"TRANSPORT\", événements " +
-                "event_where=LCP, ou trafic IO_TX/IO_RX du log du registre.\n\n" +
-                "API\n" +
-                "  Le problème semble venir des échanges API (Field Service Mobile ↔ APK, " +
-                "ou appels REST internes) — pas du transport ni de l'interface.\n\n" +
-                "UI\n" +
-                "  Le problème semble venir d'une action ou d'un affichage côté interface " +
-                "utilisateur (boutons A/B/C, Continuer, Terminer, etc.).\n\n" +
-                "INDÉTERMINÉ\n" +
-                "  Pas assez de signal dans les logs disponibles pour trancher entre les " +
-                "trois couches ci-dessus.\n\n" +
-                "⚠️ La couche est déterminée par vote majoritaire sur les logs présents — " +
-                "c'est un point de départ pour aiguiller, pas un diagnostic définitif. Le " +
-                "détail des comptes (Transport=X API=Y UI=Z) est toujours affiché pour " +
-                "vérifier si le verdict est solide ou serré.";
+        android.text.SpannableStringBuilder sb = new android.text.SpannableStringBuilder();
+
+        appendColored(sb, "NIVEAUX SUPPORT\n\n", 0xFF212121, true);
+
+        appendColored(sb, "N1 — Chauffeur\n", 0xFF2E7D32, true);
+        sb.append("  Résolution simple sur le terrain : rebrancher/reconnecter le BT ou USB, "
+                + "redémarrer l'app, vérifier l'appairage. Pas besoin d'appeler le support.\n\n");
+
+        appendColored(sb, "N2 — Support technique\n", 0xFFF9A825, true);
+        sb.append("  Nécessite une vérification par le support (état du registre, config "
+                + "Field Service, synchronisation Dataverse).\n\n");
+
+        appendColored(sb, "N3 — Escalade développeur\n", 0xFFE65100, true);
+        sb.append("  Comportement anormal qui dépasse le dépannage standard — probable "
+                + "défaillance logicielle ou matérielle à investiguer.\n\n");
+
+        appendColored(sb, "N4 — Critique / urgent développeur\n", 0xFFB71C1C, true);
+        sb.append("  Cas grave (perte de données, blocage complet) nécessitant une "
+                + "intervention immédiate.\n\n");
+
+        appendColored(sb, "N/A", 0xFF757575, true);
+        sb.append(" — Aucune règle de diagnostic ne matche pour ce ticket. Ne veut pas "
+                + "dire qu'il n'y a pas de problème, juste qu'aucune des règles connues ne "
+                + "l'a détecté automatiquement.\n\n");
+
+        appendColored(sb, "N1/N2 (tendance)", 0xFF757575, true);
+        sb.append(" — Aucune règle exacte ne matche, mais la couche "
+                + "(Transport/API/UI) est clairement dominante dans les événements de ce "
+                + "ticket. Suggestion basée sur cette tendance, PAS un diagnostic confirmé — "
+                + "à valider manuellement. N/A reste affiché seulement si même la couche est "
+                + "indéterminée (aucun signal exploitable).\n\n");
+
+        sb.append("─────────────────────────────\n\n");
+        appendColored(sb, "COUCHES PAR COMPLEXITÉ\n\n", 0xFF212121, true);
+
+        appendColored(sb, "TRANSPORT (BT/USB/TCP/registre)\n", 0xFF1565C0, true);
+        sb.append("  Le problème semble venir de la communication physique avec le registre "
+                + "(Bluetooth, USB, TCP) ou du protocole LCP lui-même — pas de la logique "
+                + "applicative. Signal : erreurs classées \"level\":\"TRANSPORT\", événements "
+                + "event_where=LCP, ou trafic IO_TX/IO_RX du log du registre.\n\n");
+
+        appendColored(sb, "API\n", 0xFF6A1B9A, true);
+        sb.append("  Le problème semble venir des échanges API (Field Service Mobile ↔ APK, "
+                + "ou appels REST internes) — pas du transport ni de l'interface.\n\n");
+
+        appendColored(sb, "UI\n", 0xFF00838F, true);
+        sb.append("  Le problème semble venir d'une action ou d'un affichage côté interface "
+                + "utilisateur (boutons A/B/C, Continuer, Terminer, etc.).\n\n");
+
+        appendColored(sb, "INDÉTERMINÉ\n", 0xFF757575, true);
+        sb.append("  Pas assez de signal dans les logs disponibles pour trancher entre les "
+                + "trois couches ci-dessus.\n\n");
+
+        sb.append("⚠️ La couche est déterminée par vote majoritaire sur les logs présents — "
+                + "c'est un point de départ pour aiguiller, pas un diagnostic définitif. Le "
+                + "détail des comptes (Transport=X API=Y UI=Z) est toujours affiché pour "
+                + "vérifier si le verdict est solide ou serré.");
 
         new android.app.AlertDialog.Builder(this)
                 .setTitle("Lexique — Niveaux et couches de diagnostic")
-                .setMessage(texte)
+                .setMessage(sb)
                 .setPositiveButton("Fermer", null)
                 .show();
+    }
+
+    /** Ajoute un segment de texte coloré (et optionnellement en gras) à un SpannableStringBuilder. */
+    private void appendColored(android.text.SpannableStringBuilder sb, String text, int color, boolean bold) {
+        int start = sb.length();
+        sb.append(text);
+        int end = sb.length();
+        sb.setSpan(new android.text.style.ForegroundColorSpan(color), start, end,
+                android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+        if (bold) {
+            sb.setSpan(new android.text.style.StyleSpan(android.graphics.Typeface.BOLD), start, end,
+                    android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
     }
 
     private void runSupportDiagnosis() {
