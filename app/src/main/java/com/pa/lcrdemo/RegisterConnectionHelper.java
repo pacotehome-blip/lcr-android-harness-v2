@@ -660,7 +660,35 @@ public class RegisterConnectionHelper {
             } catch (Exception ignored) {}
 
             // ✅ Relancer la livraison automatiquement si paramètres deep link disponibles
-            if (deepLinkHandler != null && woNum != null && !woNum.isEmpty()) {
+            // ✅ FIX (5 août 2026, demande Paul — "valider si le ticket_number a
+            // une quantité net/gross, l'idée est de ne pas avoir de multiples
+            // livraisons") — avant de relancer automatiquement, vérifier si la
+            // DERNIÈRE livraison enregistrée pour ce WO a déjà du net/gross
+            // non-nul. Si oui, une vraie livraison a déjà eu lieu — relancer
+            // créerait une livraison EN PLUS, pas une reprise légitime d'une
+            // tentative qui n'avait jamais vraiment démarré. On ne relance
+            // automatiquement QUE si la dernière tentative était vide (0L),
+            // signe qu'elle n'avait jamais réellement livré quoi que ce soit.
+            boolean dejaLivre = false;
+            try {
+                LcrDeliveryStatusDb dbCheck = new LcrDeliveryStatusDb(activity);
+                try {
+                    LcrDeliveryStatusDb.DeliveryRow last = (woNum != null && !woNum.isEmpty())
+                        ? dbCheck.getLatestForWo(woNum) : null;
+                    if (last != null && (last.netL > 0.0 || last.grossL > 0.0)) {
+                        dejaLivre = true;
+                        Log.w(TAG, "diagnostic succès — relance auto ANNULÉE : dernière livraison pour "
+                            + woNum + " a déjà net=" + last.netL + " gross=" + last.grossL
+                            + " (ticket=" + last.ticketNo + ") — pas de relance pour éviter une livraison en plus");
+                    }
+                } finally {
+                    try { dbCheck.close(); } catch (Exception ignored) {}
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "diagnostic succès — check net/gross avant relance ERR: " + e.getMessage());
+            }
+
+            if (!dejaLivre && deepLinkHandler != null && woNum != null && !woNum.isEmpty()) {
                 Log.i(TAG, "diagnostic succès — relance livraison auto woNum=" + woNum
                     + " transportKey=" + transportKeyFinal[0]);
                 deepLinkHandler.lancerLivraison(

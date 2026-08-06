@@ -2666,6 +2666,33 @@ private void setupTabsTop() {
         }
 
         logUi(null, "TAB registre supprimé: " + tabKey + (reason != null ? (" (" + reason + ")") : ""));
+
+        // ✅ FIX (5 août 2026, demande Paul — "en toute circonstance il faut
+        // remettre un tab vide ou un bouton reconnect s'il n'y a plus de
+        // tab, on peut pas faire reconnect ou supprimer dans le tab car il
+        // n'y en a plus") — quand le DERNIER tab disparaît, il n'y a plus
+        // aucun moyen dans l'UI de déclencher une reconnexion (pas de tab,
+        // donc pas de bouton Status/Reconnect à cliquer). Plutôt que
+        // d'ajouter un nouvel élément UI (risqué à modifier en aveugle dans
+        // le layout XML), on déclenche automatiquement une tentative de
+        // reconnexion via le même point d'entrée unifié que Diagnostic
+        // utilise — le résultat est le même que si l'utilisateur avait pu
+        // cliquer "Reconnecter", sans dépendre d'un bouton qui n'existe pas
+        // dans cet état.
+        try {
+            if (tabRegisters == null || tabRegisters.getTabCount() == 0) {
+                logUi(null, "Plus aucun tab — tentative de reconnexion automatique déclenchée");
+                new Thread(() -> {
+                    try {
+                        com.pa.lcr.lcp.MultiRegisterApiFacadeImpl facadeAuto =
+                            new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(this);
+                        com.pa.lcr.lcp.ApiResult r = facadeAuto.api_registerConnectAuto(null, null);
+                        android.util.Log.i("MainActivity", "Reconnexion auto (plus de tab) — code="
+                            + (r != null ? r.code : "null") + " msg=" + (r != null ? r.msg : "null"));
+                    } catch (Exception ignored) {}
+                }).start();
+            }
+        } catch (Exception ignored) {}
     }
 
     // =========================
