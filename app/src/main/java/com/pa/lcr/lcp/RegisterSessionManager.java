@@ -92,6 +92,13 @@ public final class RegisterSessionManager {
         this.appCtx = appCtx;
         this.store = new DeliveryLogStore(appCtx);
         this.store.purgeOlderThanDaysAsync(7);
+        // ✅ FIX (6 août 2026, demande Paul — "entretien systématique pour
+        // conserver les 7 derniers jours") — même politique pour les backups
+        // JSON dans Téléchargements (purge prudente : uniquement ceux déjà
+        // confirmés SYNCED, voir LocalDeliveryBackup.purgeOldSyncedBackupsAsync).
+        try {
+            com.pa.lcr.lcp.storage.LocalDeliveryBackup.purgeOldSyncedBackupsAsync(appCtx, 7);
+        } catch (Exception ignored) {}
         // Charger les transports LC3 connus depuis SharedPreferences
         try {
             android.content.SharedPreferences prefs =

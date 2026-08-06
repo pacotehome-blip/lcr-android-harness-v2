@@ -267,6 +267,110 @@ public class LocalDeliveryBackup {
     }
 
     // =========================================================
+    // ✅ FIX (6 août 2026, demande Paul — "considérer la charge imposée sur la
+    // tablette... entretien systématique pour conserver les 7 derniers
+    // jours") — ces fichiers backup n'étaient JAMAIS nettoyés, s'accumulant
+    // indéfiniment dans Téléchargements. Purge PRUDENTE : ne supprime un
+    // fichier de plus de 7 jours QUE si la livraison correspondante est
+    // confirmée SYNCED dans la BD locale (le filet de sécurité original —
+    // survivre à une désinstallation avant sync — reste intact pour tout ce
+    // qui n'est pas encore confirmé synchronisé, peu importe son âge).
+    // =========================================================
+    public static void purgeOldSyncedBackupsAsync(Context ctx, int days) {
+        new Thread(() -> purgeOldSyncedBackups(ctx, days), "LocalDeliveryBackupPurge").start();
+    }
+
+    private static void purgeOldSyncedBackups(Context ctx, int days) {
+        long cutoffMs = System.currentTimeMillis() - (days * 24L * 60L * 60L * 1000L);
+        List<String> messages = new ArrayList<>();
+        int deleted = 0, kept = 0, errors = 0;
+
+        LcrDeliveryStatusDb lcrDb = new LcrDeliveryStatusDb(ctx.getApplicationContext());
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                try {
+                    String[] projection = { MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DISPLAY_NAME };
+                    String selection = MediaStore.MediaColumns.DISPLAY_NAME + " LIKE ?";
+                    String[] selectionArgs = { "filgo_livraison_%.json" };
+                    try (Cursor c = ctx.getContentResolver().query(
+                            MediaStore.Downloads.EXTERNAL_CONTENT_URI, projection, selection, selectionArgs, null)) {
+                        if (c == null) return;
+                        int idCol = c.getColumnIndexOrThrow(MediaStore.MediaColumns._ID);
+                        int nameCol = c.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME);
+                        while (c.moveToNext()) {
+                            long id = c.getLong(idCol);
+                            String name = c.getString(nameCol);
+                            Uri fileUri = Uri.withAppendedPath(MediaStore.Downloads.EXTERNAL_CONTENT_URI, String.valueOf(id));
+                            try {
+                                byte[] raw;
+                                try (InputStream in = ctx.getContentResolver().openInputStream(fileUri)) {
+                                    if (in == null) { errors++; continue; }
+                                    raw = readAll(in);
+                                }
+                                JSONObject j = new JSONObject(new String(raw, StandardCharsets.UTF_8));
+                                long backupTs = j.optLong("backup_ts", 0L);
+                                String ticketNo = j.optString("ticket_no", "");
+                                if (backupTs == 0L || backupTs >= cutoffMs) { kept++; continue; }
+                                LcrDeliveryStatusDb.DeliveryRow row = ticketNo.isEmpty() ? null : lcrDb.getByTicketNo(ticketNo);
+                                boolean synced = row != null && LcrDeliveryStatusDb.SYNC_SYNCED.equals(row.syncStatus);
+                                if (synced) {
+                                    ctx.getContentResolver().delete(fileUri, null, null);
+                                    deleted++;
+                                } else {
+                                    kept++;
+                                }
+                            } catch (Exception e) {
+                                errors++;
+                                messages.add(name + ": " + e.getMessage());
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    Log.w(TAG, "purgeOldSyncedBackups (MediaStore) ERR: " + e.getMessage());
+                }
+            } else {
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        int perm = ctx.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE);
+                        if (perm != PackageManager.PERMISSION_GRANTED) return;
+                    }
+                    File downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+                    File[] matches = downloads.listFiles((dir, name) ->
+                            name.startsWith("filgo_livraison_") && name.endsWith(".json"));
+                    if (matches == null) return;
+                    for (File f : matches) {
+                        try {
+                            byte[] raw;
+                            try (InputStream in = new java.io.FileInputStream(f)) { raw = readAll(in); }
+                            JSONObject j = new JSONObject(new String(raw, StandardCharsets.UTF_8));
+                            long backupTs = j.optLong("backup_ts", 0L);
+                            String ticketNo = j.optString("ticket_no", "");
+                            if (backupTs == 0L || backupTs >= cutoffMs) { kept++; continue; }
+                            LcrDeliveryStatusDb.DeliveryRow row = ticketNo.isEmpty() ? null : lcrDb.getByTicketNo(ticketNo);
+                            boolean synced = row != null && LcrDeliveryStatusDb.SYNC_SYNCED.equals(row.syncStatus);
+                            if (synced) {
+                                if (f.delete()) deleted++; else errors++;
+                            } else {
+                                kept++;
+                            }
+                        } catch (Exception e) {
+                            errors++;
+                            messages.add(f.getName() + ": " + e.getMessage());
+                        }
+                    }
+                } catch (Exception e) {
+                    Log.w(TAG, "purgeOldSyncedBackups (legacy) ERR: " + e.getMessage());
+                }
+            }
+        } finally {
+            try { lcrDb.close(); } catch (Exception ignored) {}
+        }
+
+        Log.i(TAG, "purgeOldSyncedBackups: supprimés=" + deleted + " conservés=" + kept
+                + " erreurs=" + errors + (messages.isEmpty() ? "" : (" détail=" + messages)));
+    }
+
+    // =========================================================
     // Recherche ciblée par ticket_no (demandé 3 août 2026) — utilisée quand un
     // ticket_no donné par le registre est introuvable À LA FOIS en local
     // (LcrDeliveryStatusDb) ET sur Dataverse (pullDeliveryByTicket). Contrairement

@@ -58,6 +58,37 @@ public class DeliveryLogStore {
         SQLiteDatabase db = helper.getWritableDatabase();
         // Cascades to attempts/events
         db.delete("delivery_summary", "last_ts < ?", new String[]{Long.toString(cutoff)});
+
+        // ✅ FIX (6 août 2026, demande Paul — "on devrait considérer la charge
+        // imposée sur la tablette et la quantité limite de SQLite... un
+        // entretien systématique pour conserver les 7 derniers jours") —
+        // trouvé : ce purge ne touchait QUE delivery_summary, en supposant
+        // (à tort) une cascade FK vers les autres tables. log_bus_event
+        // (et plusieurs autres) n'ont AUCUNE relation de clé étrangère avec
+        // delivery_summary — elles grossissaient donc indéfiniment, jamais
+        // nettoyées. Preuve concrète : 1780 lignes dans log_bus_event en
+        // seulement 27 minutes d'un seul test — sur 7 jours réels, ça peut
+        // facilement atteindre des centaines de milliers de lignes, chacune
+        // interrogée à chaque affichage de l'onglet Support. Purge directe
+        // ajoutée pour chaque table indépendante par sa propre colonne de
+        // temps.
+        try { db.delete("log_bus_event", "ts < ?", new String[]{Long.toString(cutoff)}); } catch (Exception ignored) {}
+        try { db.delete("api_trace", "ts < ?", new String[]{Long.toString(cutoff)}); } catch (Exception ignored) {}
+        try { db.delete("diagnostic_match_history", "ts < ?", new String[]{Long.toString(cutoff)}); } catch (Exception ignored) {}
+        try { db.delete("media_event", "ts < ?", new String[]{Long.toString(cutoff)}); } catch (Exception ignored) {}
+        try { db.delete("truck_drift", "ts_ms < ?", new String[]{Long.toString(cutoff)}); } catch (Exception ignored) {}
+        try { db.delete("bt_signal", "ts_ms < ?", new String[]{Long.toString(cutoff)}); } catch (Exception ignored) {}
+        // ✅ incident_history est un historique de diagnostic délibérément gardé
+        // plus longtemps (utile pour repérer des patterns récurrents) — purge
+        // à 30 jours plutôt que 7, pas la même politique que les logs bruts.
+        try {
+            long cutoffIncidents = System.currentTimeMillis() - (30L * 24L * 60L * 60L * 1000L);
+            db.delete("incident_history", "created_ts < ?", new String[]{Long.toString(cutoffIncidents)});
+        } catch (Exception ignored) {}
+
+        try {
+            android.util.Log.i("DeliveryLogStore", "purgeOlderThanDays(" + days + "): entretien terminé");
+        } catch (Exception ignored) {}
     }
 
     // ----------------------------
