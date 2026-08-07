@@ -1,3008 +1,4865 @@
 package com.pa.lcrdemo;
+ 
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.documentfile.provider.DocumentFile;
+import androidx.fragment.app.Fragment;
+import androidx.fragment.app.FragmentManager;
+import androidx.fragment.app.FragmentTransaction;
 
-// ═══════════════════════════════════════════════════════════════
-// COMPATIBILITÉ ANDROID : API 28 (Android 9) → API 35 (Android 15)
-// Tester sur Android 9 (192.168.134.105) ET Android 15 (R52X508K2DR)
-// ═══════════════════════════════════════════════════════════════
+import android.app.PendingIntent;
+import android.Manifest;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothSocket;
+import android.content.pm.PackageManager;
+import android.os.Build;
 
-import com.pa.lcr.lcp.transport.TransportIo;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
+
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.util.UUID;
+
 import android.content.BroadcastReceiver;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.SharedPreferences;
+
+import android.hardware.usb.UsbDevice;
+import android.hardware.usb.UsbDeviceConnection;
 import android.hardware.usb.UsbManager;
-import android.os.Build;
+import android.net.Uri;
+
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 
-import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
-import android.view.ViewGroup;
 import android.widget.*;
-import androidx.annotation.NonNull;
-import androidx.annotation.Nullable;
-import androidx.core.widget.NestedScrollView;
-import androidx.fragment.app.Fragment;
 
-import com.pa.lcr.lcp.*;
+import com.google.android.material.tabs.TabLayout;
+import com.hoho.android.usbserial.driver.UsbSerialDriver;
+import com.hoho.android.usbserial.driver.UsbSerialPort;
+import com.hoho.android.usbserial.driver.UsbSerialProber;
+
+import com.pa.lcr.lcp.ApiFacade;
+import com.pa.lcr.lcp.ApiServer;
+import com.pa.lcr.lcp.LcpLink;
+import com.pa.lcr.lcp.Lc3Link;
+import com.pa.lcr.lcp.MultiRegisterApiFacadeImpl;
+import com.pa.lcr.lcp.RegisterSessionManager;
 import com.pa.lcr.lcp.log.LogBus;
+import com.pa.lcr.lcp.storage.DeliveryDb;
+import com.pa.lcr.lcp.storage.LcrDeliveryStatusDb;
+import com.pa.lcr.lcp.storage.DeliveryLogStore;
+import com.pa.lcrdemo.dataverse.DeliverySyncScheduler;
+import com.pa.lcrdemo.auth.MsalTokenProvider;
+
+// ✅ Option A: runtime transport manager
 import com.pa.lcr.lcp.transport.MediaTransportManager;
 
+
+import com.pa.lcr.lcp.transport.TransportIo;
+import com.pa.lcr.lcp.transport.TransportSnapshot;
+import com.pa.lcr.lcp.transport.TransportStatus;
+import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-public class RegisterTabFragment extends Fragment {
+/**
+ * MAIN (clean UI) = infrastructure:
+ * - Scan USB + Ouvrir/Ping USB => UNE session UsbSession
+ * - TO/FROM + Ajouter/Focus TAB
+ * - Scan registres (autoritaire) => reset tabs + rebuild
+ * - Tabs registres (RegisterTabFragment)
+ * - Log global MAIN (LogBus)
+ *
+ * API-Face => Start/Stop + Backup DB
+ */
 
-    private static final String ARG_NODE = "node";
-    private static final String ARG_FROM = "from";
-    private static final String ARG_SERIAL = "serial";
-    private static final String ARG_TRANSPORT = "transport";
+public class MainActivity extends AppCompatActivity {
 
-    public static RegisterTabFragment newInstance(int node, int from) {
-        RegisterTabFragment f = new RegisterTabFragment();
-        Bundle b = new Bundle();
-        b.putInt(ARG_NODE, node);
-        b.putInt(ARG_FROM, from);
-        f.setArguments(b);
-        return f;
-    }
+    public static final String ACTION_USB_PERMISSION = "com.pa.lcrdemo.USB_PERMISSION";
 
-    public void onTabActivated() {
-        ui.postDelayed(() -> {
-            try { runStatusBLikeButton("TAB_ACTIVATED"); } catch (Exception ignored) {}
-        }, 300);
+    
+    // ✅ Reçu de l\'API (MultiRegisterApiFacadeImpl.notifyNodeSeenFull)
+    private static final String ACTION_NODE_SEEN = "com.pa.lcrdemo.ACTION_NODE_SEEN";
+    private UsbManager usbManager;
+    private final List<UsbDevice> usbDevices = new ArrayList<>();
+    private UsbSerialPort usbPort; // cache local (la vérité = UsbSession.getPort())
 
-        // ✅ Vérifier si une livraison PENDING attend ce registre
-        // Si oui → pré-remplir le tab et proposer de reprendre
-        ui.postDelayed(() -> checkPendingDeliveryForThisRegister(), 600);
+    // ===== Tabs / Pages (TOP: MAIN / API-Face / CONFIGURE) =====
+    private TabLayout tabLayout;
+    private View pageMain;
+    private View pageApiFace;
+    private View pageConfigure;
+    private View pageSupport;
+    private EditText edtSupportTicketFilter;
+    private EditText edtSupportSerialFilter;
+    private EditText edtSupportNodeFilter;
+    private TextView txtSupportCount;
+    private CheckBox chkSupportErrorsOnly;
+    // ✅ (ajouté 3 août 2026, demande Paul : "copier-coller l'ensemble des lignes") —
+    // conserve la dernière liste chargée pour que le bouton Copier puisse la sérialiser
+    // en texte, sans avoir à re-requêter la BD.
+    private final java.util.List<String> lastSupportHeaders = new java.util.ArrayList<>();
+    private final java.util.List<String> lastSupportDetails = new java.util.ArrayList<>();
+    // ✅ (ajouté 3 août 2026, demande Paul : "je veux faire une sélection") — positions
+    // cochées en mode sélection, réinitialisé à chaque nouveau chargement de la liste.
+    private final java.util.Set<Integer> supportSelectedPositions = new java.util.HashSet<>();
+    private boolean supportSelectionMode = false;
+    private TextView txtSupportDiagnosis;
+    private TextView txtSupportRestoreStatus;
+    private ListView listSupportEvents;
+    private EditText edtSupportValidatedBy;
+    private View rowSupportIncident;
+    private java.util.List<com.pa.lcr.lcp.diagnostic.DiagnosticMatch> lastSupportMatches
+            = new java.util.ArrayList<>();
 
-        // ✅ Scan auto produits (4 août 2026, demande Paul : "après l'activation
-        // du tab, après connected ready") — armé ici, mais le scan ne se
-        // déclenche réellement qu'au moment où onStateChanged reçoit CONNECTED
-        // (voir uiListener). Si le registre est déjà CONNECTED au moment de
-        // cette activation (pas de nouvelle transition à venir), on vérifie
-        // aussi directement l'état courant en filet de sécurité.
-        autoScanArmedForThisActivation = true;
-        ui.postDelayed(() -> {
-            if (autoScanArmedForThisActivation && controller != null
-                    && controller.getState() == DeliveryState.CONNECTED) {
-                autoScanArmedForThisActivation = false;
-                autoScanProduitsSiNecessaire();
-            }
-        }, 1200);
-    }
+    // ===== CONFIGURE UI (status + BT) =====
+    private TextView txtMediaActive;
+    private TextView txtNodesActive;
+    private Spinner spnBtBonded;
+    private Button btnBtRefresh;
+    private Button btnBtConnect;
+    private Button btnBtDisconnect;
+    private TextView txtBtStatus;
 
-    /**
-     * Vérifie si ActiveDeliveryStore a une livraison PENDING pour ce registre.
-     * Si serial + node correspondent → valider + afficher infos + bouton Lancer.
-     */
-    private volatile long lastCheckPendingMs = 0;
+    // ✅ BT Signal UI
+    private Button btnBtSignalScan;
+    private TextView txtBtSignalResult;
+    
+    // ===== CONFIGURE: Scan registres (par média) =====
+    private Button btnScanUsbRegs;
+    private TextView txtUsbRegsFound;
+    private Button btnScanBtRegs;
+    private TextView txtBtRegsFound;
+    private Button btnScanWifiRegs;
+    private TextView txtWifiRegsFound;
+    private android.widget.LinearLayout containerKnownTcp;
+    private android.widget.EditText edtTcpNode;
+    private android.widget.EditText edtTcpOctet1, edtTcpOctet2, edtTcpOctet3, edtTcpOctet4;
+    private TextView txtTcpSubnetDetected;
+    private android.widget.EditText edtTcpPort;
+    private Button btnTcpConnect;
+    private TextView txtTcpStatus;
 
-    private void checkPendingDeliveryForThisRegister() {
-        try {
-            android.content.Context ctx = getContext();
-            if (ctx == null) return;
+    // ===== CONFIGURE: Ajout manuel (2 registres par média) =====
+    private EditText edtUsbNode1, edtUsbNode2;
+    private TextView txtUsbSerial1, txtUsbSerial2;
+    private Button btnUsbConnect1, btnUsbConnect2;
 
-            // ✅ FIX lag : cette méthode est appelée 3 fois en rafale (600/800/1500ms)
-            // à chaque retour dans le tab (onTabActivated + onResume x2), chacune
-            // refaisant ActiveDeliveryStore.load() sur le thread UI. Anti-rebond pour
-            // n'exécuter le travail réel qu'une fois par courte fenêtre.
-            long now = System.currentTimeMillis();
-            if (now - lastCheckPendingMs < 1500) return;
-            lastCheckPendingMs = now;
+    private EditText edtBtNode1, edtBtNode2;
+    private TextView txtBtSerial1, txtBtSerial2;
+    private Button btnBtConnect1, btnBtConnect2;
+    // ===== BT runtime (paired-only) =====
+    private static final int REQ_ENABLE_BT = 9103;
+    
+    // ✅ Android 9 (API 28) : permission Storage legacy pour écrire dans /Download
+    //private static final int REQ_STORAGE_LEGACY = 9104;
+    //private final ExecutorService btExec = Executors.newSingleThreadExecutor();
+    private static final int REQ_STORAGE_LEGACY = 9104;
+    private static final int REQ_LOCATION_BT_SIGNAL = 9105; // ✅ BT signal scan
+    private final ExecutorService btExec = Executors.newSingleThreadExecutor();
+    private BluetoothAdapter btAdapter;
+    private final List<BluetoothDevice> btBonded = new ArrayList<>();
+    private ArrayAdapter<String> btAdapterUi;
+    private BluetoothSocket btSocket;
+    private InputStream btIn;
+    private OutputStream btOut;
+    private static final UUID SPP_UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
 
-            com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
-                new com.pa.lcr.lcp.storage.ActiveDeliveryStore(ctx);
-            com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad = ads.load();
+    // ===== Media profile store =====
+    private com.pa.lcr.lcp.storage.MediaProfileStore mediaProfileStore;
 
-            // ✅ Filet de sécurité — capturer le contexte WO stable dès qu'on le voit,
-            // et rafraîchir le panneau cumulatif. Ceci doit tourner MÊME si le
-            // controller est CONNECTED (l'état normal une fois le registre lié) —
-            // c'est une opération de lecture seule, elle n'interfère avec rien.
-            // ✅ FIX : ce bloc tournait avant APRÈS le garde d'état plus bas, qui
-            // incluait CONNECTED dans sa liste d'états à ignorer — bloquant donc
-            // systématiquement ce rafraîchissement dès que le registre était bien
-            // connecté, exactement le moment où on en a besoin.
-            if (ad != null && ad.woNum != null && !ad.woNum.isEmpty()) {
-                currentWoNum = ad.woNum;
-                if (ad.woIdGuid != null && !ad.woIdGuid.isEmpty()) currentWoIdGuid = ad.woIdGuid;
-                rafraichirCumulWo();
-            }
+    // ✅ Option A: runtime transport manager + dernier MAC connecté
+    private MediaTransportManager mediaTransportManager;
+    private String lastBtMac = null;
 
-            // ✅ Si le controller est déjà en livraison active — ne pas interférer
-            // avec la suite de cette méthode (proposer de reprendre une livraison
-            // PENDING). CONNECTED retiré de cette liste — voir commentaire ci-dessus.
-            if (controller != null) {
-                com.pa.lcr.lcp.DeliveryState st = controller.getState();
-                if (st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
-                        || st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED
-                        || st == com.pa.lcr.lcp.DeliveryState.ENDING) return;
-            }
+    // ===== API-Face UI =====
+    private TextView txtApiStatus;
+    private TextView txtApiUrl;
+    private Button btnApiStart;
+    private Button btnApiStop;
+    private Button btnDbBackup;
 
-            if (ad == null || (!"PENDING".equals(ad.status) && !"CANCELLED".equals(ad.status) && !"STARTED".equals(ad.status))) return;
+    // ===== API runtime =====
+    private static final int API_PORT = 8765;
+    // ⚠️ LEGACY — non utilisé (aucun appelant de getApiServer()). Le vrai
+    // ApiServer actif tourne dans LcrHttpService. Conservé le temps du
+    // retrait complet du bouton API legacy.
+    private ApiServer apiServer;
+    public ApiServer getApiServer() { return apiServer; }
+    private DeliveryLogStore deliveryStore;
+    private DeepLinkHandler deepLinkHandler; // ✅ Gestion deep link Field Service
 
-            // ✅ Si CANCELLED — remettre net/gross à zéro (nouvelle livraison à venir)
-            if ("CANCELLED".equals(ad.status)) {
-                ui.post(() -> {
-                    if (txtQtyNet   != null) txtQtyNet.setText("NET: 0.0");
-                    if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
-                });
-                return;
-            }
-
-            if (ad.woNum == null || ad.woNum.isEmpty()) return;
-
-            // ✅ Bon registre — effacer lastResultJson stale
-            com.pa.lcrdemo.DeepLinkHandler.lastResultJson = null;
-
-            // Forcer attachement listener UI
-            ui.post(() -> connectThisRegister(false));
-
-            // Attendre que le controller soit prêt puis afficher
-            final com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery fAd = ad;
-            ui.postDelayed(() -> showDeliveryReadyPanel(fAd), 800);
-
-        } catch (Exception e) {
-            android.util.Log.w("RegisterTabFragment",
-                "checkPendingDeliveryForThisRegister ERR: " + e.getMessage());
-        }
-    }
-
-    /**
-     * Affiche les infos de la livraison en attente et le bouton Lancer.
-     * Appelé après validation serial/node.
-     */
-    private void showDeliveryReadyPanel(
-            com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad) {
-        try {
-            // ✅ Garde: ne pas afficher si le status est DONE (livraison déjà complétée)
-            // On ne bloque plus sur le ticket affiché — trop agressif pour les nouvelles livraisons
-            if ("DONE".equals(ad.status)) {
-                android.util.Log.i("RegisterTabFragment",
-                    "showDeliveryReadyPanel annulé — status DONE");
-                return;
-            }
-
-            // ✅ Afficher infos livraison dans txtDeliveryUid
-            if (txtDeliveryUid != null) {
-                txtDeliveryUid.setText(
-                    "WO: " + ad.woNum
-                    + "  |  Produit: " + ad.produit
-                    + "  |  Preset: " + (int) ad.preset + " L");
-                txtDeliveryUid.setTextColor(
-                    android.graphics.Color.parseColor("#15803d"));
-            }
-
-            // ✅ Remplacer le bouton Retour WO par "Lancer la livraison"
-            if (btnRetourWO != null) {
-                btnRetourWO.setVisibility(android.view.View.VISIBLE);
-                btnRetourWO.setText("🚀 Lancer la livraison");
-                btnRetourWO.setBackgroundColor(
-                    android.graphics.Color.parseColor("#15803d"));
-
-                // ✅ Lancer directement sans repasser par FSM
-                final com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery fAd = ad;
-                btnRetourWO.setOnClickListener(v -> lancerDepuisStore(fAd));
-            }
-
-            android.widget.Toast.makeText(getContext(),
-                "✅ Registre validé — prêt pour " + ad.woNum,
-                android.widget.Toast.LENGTH_LONG).show();
-
-        } catch (Exception e) {
-            android.util.Log.w("RegisterTabFragment",
-                "showDeliveryReadyPanel ERR: " + e.getMessage());
-        }
-    }
+    // ✅ Getters publics pour DeepLinkHandler
+    public BluetoothAdapter getBtAdapter() { return btAdapter; }
 
     /**
-     * Lance la livraison directement depuis ActiveDeliveryStore — sans repasser par FSM.
+     * ✅ FIX (2026-07-29) : expose le DeepLinkHandler pour que le diagnostic de
+     * reconnexion puisse relancer la livraison après succès.
+     *
+     * Sans cet accès, le chemin RegisterTabFragment.surErreurConnexion →
+     * validerConnexion → lancerDiagnosticForce utilisait la surcharge à 4
+     * arguments, qui passe deepLinkHandler=null. Le diagnostic réussissait, le
+     * tab passait Connected-Ready, mais lancerLivraison() n'était jamais appelé
+     * — donc aucune reprise de la livraison et aucun dialog Continuer/Annuler
+     * (ce dialog vit dans DeepLinkHandler.lancerLivraison()).
+     *
+     * Peut retourner null si appelé avant onCreate/initialisation — les
+     * appelants doivent le tolérer.
      */
-    private void lancerDepuisStore(
-            com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad) {
+    public DeepLinkHandler getDeepLinkHandler() { return deepLinkHandler; }
+
+    // ✅ WebView Field Service — pour écrire dans localStorage avant finish()
+    public android.webkit.WebView getFieldServiceWebView() {
         try {
-            // Remettre le bouton à son état normal
-            if (btnRetourWO != null) {
-                btnRetourWO.setText("Retour au Bon de travail");
-                btnRetourWO.setBackgroundColor(
-                    android.graphics.Color.parseColor("#185FA5"));
-                btnRetourWO.setOnClickListener(v -> { LogBus.api(node, "[ACTION-CLIC] RETOUR_WO"); retournerAuWorkOrder(); });
-            }
-
-            // ✅ MAC pour deep link de retour
-            String macToUse = ad.mac != null ? ad.mac : "";
-            if (macToUse.isEmpty() && tabTransportKey != null && tabTransportKey.startsWith("BT:")) {
-                macToUse = tabTransportKey.substring(3);
-            }
-            final String fMac = macToUse;
-            final String fWoNum = ad.woNum;
-            final String fWoIdGuid = ad.woIdGuid != null ? ad.woIdGuid : "";
-            final String fSerialId = ad.serialId != null ? ad.serialId : "";
-            final int fNode = ad.node;
-            final int fProduit = ad.produit;
-            final double fPreset = ad.preset;
-
-            android.util.Log.i("RegisterTabFragment",
-                "lancerDepuisStore: wo=" + fWoNum + " node=" + fNode + " preset=" + fPreset);
-
-            // ✅ Vérifier que le controller du tab est prêt — pas créer nouveau facade
-            if (controller == null) {
-                android.util.Log.w("RegisterTabFragment", "lancerDepuisStore: controller null");
-                android.widget.Toast.makeText(requireContext(),
-                    "Registre non connecté", android.widget.Toast.LENGTH_SHORT).show();
-                return;
-            }
-            if (!verifierIoAvantAction("LANCER_LIVRAISON")) return;
-
-            // ✅ Activer le transport du tab AVANT oneshot
-            try {
-                if (tabTransportKey != null)
-                    MediaTransportManager.get(requireContext())
-                        .activateExclusive(tabTransportKey, "LANCER_LIVRAISON");
-            } catch (Exception ignored) {}
-
-            // ✅ Appel direct sur le controller du tab — un seul socket
-            new Thread(() -> {
-                // ✅ (4 août 2026, demande Paul) — même garde que DeepLinkHandler
-                // .lancerLivraison() : si le scan auto produits est encore en
-                // cours pour CE tab (donc un tab qui vient d'être créé — sinon
-                // le scan ne serait pas armé/en vol), attendre sa fin avant de
-                // démarrer. Sur un tab déjà existant, isAutoProductScanBusy()
-                // est déjà false ici — aucun délai. Max 10s, best-effort.
-                boolean scanTermine = false;
-                for (int i = 0; i < 20; i++) {
-                    if (!isAutoProductScanBusy()) { scanTermine = true; break; }
-                    try { Thread.sleep(500); } catch (Exception ignored) {}
+            // Chercher le WebView actif dans les fragments visibles
+            androidx.fragment.app.FragmentManager fm = getSupportFragmentManager();
+            for (androidx.fragment.app.Fragment f : fm.getFragments()) {
+                if (f != null && f.getView() != null) {
+                    android.webkit.WebView wv = f.getView().findViewWithTag("lcr_webview");
+                    if (wv != null) return wv;
+                    // Chercher récursivement
+                    wv = findWebView(f.getView());
+                    if (wv != null) return wv;
                 }
-                android.util.Log.i("RegisterTabFragment",
-                    "lancerDepuisStore: attente scan auto produits — "
-                        + (scanTermine ? "terminé" : "timeout 10s, poursuite quand même"));
-                try {
-                    com.pa.lcr.lcp.ApiResult r = controller.api_deliveryOneShotStart(
-                        fWoNum, fProduit, fPreset, null);
-
-                    android.util.Log.i("RegisterTabFragment",
-                        "lancerDepuisStore oneshot: code=" + r.code + " msg=" + r.msg);
-
-                    final com.pa.lcr.lcp.ApiResult fR = r;
-                    if (r.code == 1) {
-                        // ✅ Succès — relancer deep link pour poll FSM
-                        ui.post(() -> {
-                            try {
-                                android.net.Uri uri = android.net.Uri.parse(
-                                    "lcrdemo://livraison"
-                                    + "?wonum="    + android.net.Uri.encode(fWoNum)
-                                    + "&woid="     + android.net.Uri.encode(fWoIdGuid)
-                                    + "&btmac="    + android.net.Uri.encode(fMac)
-                                    + "&serialid=" + android.net.Uri.encode(fSerialId)
-                                    + "&lcrnode="  + fNode
-                                    + "&produit="  + fProduit
-                                    + "&preset="   + (int) fPreset
-                                    + "&orgurl="   + android.net.Uri.encode(
-                                        com.pa.lcrdemo.config.LcrConfig.getDataverseUrl(requireContext())));
-                                android.content.Intent intent = new android.content.Intent(
-                                    android.content.Intent.ACTION_VIEW, uri);
-                                intent.setPackage(requireContext().getPackageName());
-                                requireContext().startActivity(intent);
-                            } catch (Exception ignored) {}
-                        });
-                    } else {
-                        ui.post(() -> android.widget.Toast.makeText(requireContext(),
-                            "Échec démarrage: " + fR.msg,
-                            android.widget.Toast.LENGTH_LONG).show());
-                    }
-                } catch (Exception e) {
-                    android.util.Log.e("RegisterTabFragment",
-                        "lancerDepuisStore ERR: " + e.getMessage());
-                    ui.post(() -> surErreurConnexion(e, "LANCER_LIVRAISON"));
-                }
-            }).start();
-
+            }
+            // Fallback — chercher dans la vue principale
+            return findWebView(getWindow().getDecorView());
         } catch (Exception e) {
-            android.util.Log.e("RegisterTabFragment",
-                "lancerDepuisStore ERR: " + e.getMessage());
-            android.widget.Toast.makeText(getContext(),
-                "Erreur lancement: " + e.getMessage(),
-                android.widget.Toast.LENGTH_LONG).show();
+            android.util.Log.w("MainActivity", "getFieldServiceWebView ERR: " + e.getMessage());
+            return null;
         }
     }
-    private int node = 250;
-    private int from = 255;
 
-    private TextView txtLcrNode, txtFrom, txtSerialId, txtTicketNo, txtTicketPending;
-    private TextView txtDeliveryUid;
-    private TextView txtLive, txtQtyNet, txtQtyGross;
-    private android.widget.AutoCompleteTextView spnProduct;
-    private EditText edtPreset;
-    private Button btnConnect, btnA, btnB, btnC, btnContinue, btnFinish;
-    private android.view.View panelWoCumul;
-    private android.widget.TextView txtWoCumulNet, txtWoCumulGross, txtWoCumulCount;
-    private Button btnReprintTicket;
-    private Button btnRetourWO;
-    private Button btnCustomPrint;
-    private Button btnAnnuler;
-    private Button btnScanProducts;
-    private NestedScrollView regRootScroll;
-    private CheckBox cbShowLog, cbTxRx, cbLogTs;
+    private android.webkit.WebView findWebView(android.view.View root) {
+        if (root instanceof android.webkit.WebView) return (android.webkit.WebView) root;
+        if (root instanceof android.view.ViewGroup) {
+            android.view.ViewGroup vg = (android.view.ViewGroup) root;
+            for (int i = 0; i < vg.getChildCount(); i++) {
+                android.webkit.WebView found = findWebView(vg.getChildAt(i));
+                if (found != null) return found;
+            }
+        }
+        return null;
+    }
+    public String getLastBtMac() { return lastBtMac; }
+    public MediaTransportManager getMediaTransportManager() { return mediaTransportManager; }
+    public Handler getUiHandler() { return ui; }
+    public DeliveryLogStore getDeliveryStore() { return deliveryStore; }
+    public void updateBtStatusText(String text) {
+        if (txtBtStatus != null) txtBtStatus.setText(text);
+    }
+    public void onBtConnectedFromDeepLink(BluetoothSocket socket,
+                                           java.io.InputStream in,
+                                           java.io.OutputStream out,
+                                           String mac) {
+        btSocket  = socket;
+        btIn      = in;
+        btOut     = out;
+        lastBtMac = mac;
+        if (mediaTransportManager != null) {
+            android.bluetooth.BluetoothDevice dev = btAdapter.getRemoteDevice(mac);
+            mediaTransportManager.onBtConnected(dev, socket, in, out, "DEEPLINK");
+        }
+    }
+
+    // ===================== MAIN UI (USB + Scan) =====================
+    private Spinner spnUsbDevices;
+    private Button btnScanUsb;
+    private Button btnPingUsb;
+    private Button btnQuit;
+    private TextView txtActiveNode;
+    // ===================== Scan registres (exec) =====================
+    private final ExecutorService scanExec = Executors.newSingleThreadExecutor();
+    private final List<NodeScanItem> nodeItems = new ArrayList<>();
+    // ===================== Tabs registres =====================
+    private TabLayout tabRegisters;
+    private View registerContainer;
+
+    // ✅ Multi-media tabs: unique par (media,node,serial)
+    private static final class TabSpec {
+        final String tabKey;       // ex: BT:250:1234
+        final String mediaShort;   // BT / USB / —
+        final String transportKey; // TransportIo.getKey() best-effort
+        final int node;
+        final int from;
+        final String serialId;
+        final boolean isLc3;
+        String qtySuffix; // " | N=.. G=.."
+
+        TabSpec(String tabKey, String mediaShort, String transportKey, int node, int from, String serialId) {
+            this(tabKey, mediaShort, transportKey, node, from, serialId, false);
+        }
+
+        TabSpec(String tabKey, String mediaShort, String transportKey, int node, int from, String serialId, boolean isLc3) {
+            this.tabKey = tabKey;
+            this.mediaShort = mediaShort;
+            this.transportKey = transportKey;
+            this.node = node;
+            this.from = from;
+            this.serialId = serialId;
+            this.isLc3 = isLc3;
+        }
+    }
+
+
+
+    // tabKey -> spec
+    // ✅ FIX (6 août 2026, demande Paul — balayage systématique, classe de
+    // bug "concurrence") — LinkedHashMap n'est PAS thread-safe, alors que
+    // cette map est touchée depuis plusieurs threads (scan USB, deep link,
+    // BT, reconnexion auto, tous en arrière-plan) en plus du thread UI.
+    // Comparer à apiRidToPath/apiFirstJobRid/apiJobSeen un peu plus bas, qui
+    // utilisent déjà ConcurrentHashMap — le code sait gérer ça correctement
+    // ailleurs, juste pas ici, malgré que ce soit l'état central des tabs.
+    // Collections.synchronizedMap() protège chaque opération individuelle
+    // (put/get/remove) tout en conservant l'ordre d'insertion de
+    // LinkedHashMap (important pour l'ordre d'affichage des tabs). Reste un
+    // point d'attention : itérer avec "for (... : tabsByKey.values())"
+    // nécessite toujours un bloc synchronized(tabsByKey) autour de
+    // l'itération elle-même pour être complètement sûr — non fait
+    // systématiquement partout, à surveiller si un ConcurrentModification
+    // apparaît en test.
+    private final Map<String, TabSpec> tabsByKey = Collections.synchronizedMap(new LinkedHashMap<>());
+
+    // ✅ (4 août 2026) — accesseur read-only pour DeepLinkHandler : permet de
+    // savoir, AVANT upsertRegisterTabFromScan(), si un tab existait déjà pour
+    // cette clé (utilisé pour décider s'il faut attendre le scan auto produits).
+    public boolean tabExists(String tabKey) {
+        return tabsByKey.containsKey(tabKey);
+    }
+    // regKey(node#serial) -> tabKey courant (clear ciblé si migre de média)
+    // ✅ FIX (6 août 2026) — même raison que tabsByKey ci-dessus.
+    private final Map<String, String> regKeyToTabKey = Collections.synchronizedMap(new LinkedHashMap<>());
+
+    private String currentTabKey = null;
+    // ✅ FIX CRITIQUE (7 août 2026, demande Paul — "trouve moi le pourquoi
+    // j'ai une erreur avec le status" — camion P142) — trouvé une vraie
+    // boucle de rétroaction : le nettoyage périodique (syncTabsFromActiveSessions)
+    // retire l'ancien tab "unknown" juste AVANT d'ajouter le vrai tab —
+    // faisant tomber le compte de tabs à zéro un très court instant. Mon
+    // fix du 5 août ("reconnexion auto quand plus de tab") se déclenchait
+    // sur CHAQUE occurrence de ce zéro transitoire, pas seulement une vraie
+    // perte totale — créant des dizaines de cycles ajout/suppression/
+    // reconnexion par seconde (confirmé : ~15-20 cycles en moins d'une
+    // seconde dans le log P142). Ce refroidissement empêche une nouvelle
+    // tentative de se déclencher si une vient déjà de se produire très
+    // récemment.
+    private volatile long lastAutoReconnectAttemptMs = 0L;
+    private static final long AUTO_RECONNECT_COOLDOWN_MS = 3000;
+    // ✅ FIX (7 août 2026, demande Paul — "si on voit qu'il entre en série
+    // comme ça, arrête et affiche l'écran de passer par Configure") — un
+    // simple délai (ci-dessus) ralentit la boucle mais ne l'arrête pas
+    // vraiment — si le déclencheur physique (ex. déconnexions BT répétées
+    // sur P142) persiste, la boucle continuerait indéfiniment, juste plus
+    // lentement. Ce compteur détecte le PATRON de boucle lui-même (plusieurs
+    // tentatives rapprochées malgré le refroidissement) et coupe
+    // complètement l'automatique — plus de nouvelle tentative tant que
+    // l'utilisateur n'a pas agi manuellement depuis Configure.
+    private volatile int autoReconnectStreakCount = 0;
+    private volatile long autoReconnectStreakWindowStartMs = 0L;
+    private static final int AUTO_RECONNECT_STREAK_LIMIT = 4;
+    private static final long AUTO_RECONNECT_STREAK_WINDOW_MS = 30000;
+    private volatile boolean autoReconnectCircuitBroken = false;
+    private String visibleRegFragmentTag = null; // fragment visible dans registerContainer
+
+    private int currentRegNode = -1; // node actif (fallback pour logs API)
+
+    // ===== LOG GLOBAL (MAIN) =====
+    private CheckBox cbShowLog;
     private View logPanel;
     private TextView txtLog;
     private ScrollView logScroll;
-    private Button btnClearLog, btnCopyLog, btnScrollDown;
-
+    private Button btnClearLog;
+    private Button btnCopyLog;
+    private Button btnScrollDown;
+    private CheckBox cbTxRx;
+    private CheckBox cbLogTs;
     private boolean logTsEnabled = false;
-    private long logViewSinceMs = 0L;
-    private int ticketPendingFlag = -1;
-    private volatile String lastLiveText = null;
-    private volatile int lastDigits = 3;
-    private volatile int lastDelCode = 0;
-    private volatile long lastDelCodePollMs = 0L;
-    private static final long DELCODE_POLL_MIN_MS = 800L;
-    private volatile long lastHeaderValidateMs = 0L;
-    private static final long HEADER_VALIDATE_MIN_MS = 5000L;
-    private volatile boolean headerValidatedOnce = false;
-    private volatile boolean logUserScrolling = false;
-    private volatile long logUserScrollUntilMs = 0L;
-    private boolean attemptedAutoAttachOnce = false;
-    private boolean uiListenerAttached = false;
-    private UsbManager usbManager;
-    private DeliveryController controller;
-    private String tabTransportKey = null;
-    private volatile boolean tabMediaReady = true;
-    private volatile boolean pendingReconnect = false;
-    private volatile String tabMediaShort = "—";
-    private String serialFromArgs = null;
-    private String transportFromArgs = null;
-    private boolean starting = false;
-    // ✅ Scan auto produits (4 août 2026, demande Paul) — évite un déclenchement
-    // en boucle si l'état oscille CONNECTED/DISCONNECTED/CONNECTED rapidement.
-    private volatile boolean autoProductScanInFlight = false;
-    // "Armé" à l'activation du tab, consommé au premier CONNECTED qui suit —
-    // garantit un déclenchement unique par activation de tab, au vrai moment
-    // où le registre devient CONNECTED READY (pas sur un délai fixe arbitraire).
-    private volatile boolean autoScanArmedForThisActivation = false;
-
-    // ✅ (4 août 2026) — accesseur pour DeepLinkHandler : permet d'attendre la
-    // fin du scan auto produits avant de démarrer une livraison sur un tab
-    // qui vient tout juste d'être créé (voir lancerLivraison()).
-    public boolean isAutoProductScanBusy() {
-        return autoScanArmedForThisActivation || autoProductScanInFlight;
-    }
-    private long startingSinceMs = 0L;
-    private volatile boolean cancelInProgress = false;
-
-    // ✅ Contexte WO stable du fragment — peuplé une fois au deep link initial,
-    // jamais effacé par les flux concurrents (ActiveDeliveryStore peut être
-    // écrasé/vidé par annulation, autre poll, etc. — ces champs ne le sont pas)
-    private volatile String currentWoNum    = "";
-    // ✅ Suivre le dernier ticket_no traité pour permettre une re-détection quand
-    // le registre passe à un nouveau ticket/WO — sans ça, currentWoNum restait figé
-    // sur la première valeur trouvée (deep link, bouton C annulé, ActiveDeliveryStore)
-    // pour toute la durée de vie du tab, bloquant la détection de tout ticket suivant.
-    private volatile String lastTicketDetected = "";
-    // ✅ FIX (7 août 2026, demande Paul) — évite de reconstruire delivery_uid
-    // en boucle pour le même ticket déjà résolu (voir onTicketInfo).
-    private volatile String lastUidReconstructedForTicket = "";
-    // ✅ FIX CRITIQUE (7 août 2026, demande Paul — "je n'ai toujours pas le
-    // delivery-uid dans le tab") — trouvé le vrai bug : mon propre cache
-    // ci-dessus est un champ de l'INSTANCE du fragment, pas de la vue.
-    // initUi() remet txtDeliveryUid à "—" à CHAQUE recréation de vue
-    // (comportement Android normal, pas juste à la création initiale). Mais
-    // le cache, lui, survit à cette recréation — donc la reconstruction
-    // était sautée ("déjà fait pour ce ticket"), laissant la NOUVELLE vue
-    // bloquée sur "—" pour toujours, même si le calcul avait réussi
-    // auparavant. Ce champ garde maintenant la VALEUR calculée, pas juste
-    // un drapeau — pour pouvoir la réappliquer directement si la vue se
-    // recrée, sans dépendre d'un nouvel événement onTicketInfo.
-    private volatile String lastUidReconstructedValue = null;
-    // ✅ FIX (7 août 2026, demande Paul — "même le ticket_number ne
-    // s'affichait pas") — même bug que delivery_uid, mais touche aussi
-    // ticketNo : initUi() le remet à "—" à chaque recréation de vue, et
-    // rien ne le réappliquait avant le prochain onTicketInfo() (qui peut
-    // tarder si la session est dans un état transitoire/fantôme au moment
-    // exact de la recréation). Dernière valeur connue mise en cache ici,
-    // réappliquée immédiatement dans initUi().
-    private volatile String lastKnownTicketNo = null;
-    // ✅ FIX (4 août 2026, demande Paul — "j'ai commencé le logcat... tout est
-    // présent dans ça", en creusant pourquoi l'export Support de 300 lignes
-    // ne remontait pas jusqu'à l'échec réel) — un ticket qui échoue en
-    // continu (ex. pas encore synchronisé Dataverse) relançait la cascade
-    // complète (DB+Dataverse+backup) à CHAQUE poll (~100-800ms), sans aucun
-    // throttle — des dizaines de lignes LogBus/seconde, assez pour noyer les
-    // 300 lignes de l'export Support en quelques secondes et enterrer les
-    // vrais événements de diagnostic sous le bruit. Le comportement voulu
-    // (retenter jusqu'au succès, ne jamais verrouiller sur un échec) est
-    // conservé — seule la CADENCE des tentatives est plafonnée.
-    private volatile String lastFailedTicket = "";
-    private volatile long lastFailedAttemptMs = 0L;
-    private static final long WO_DETECT_RETRY_COOLDOWN_MS = 3000L;
-    // ✅ (fix 31 juillet 2026) Limite les appels MSAL — checkAndPullMissingDeliveryDetail()
-    // est maintenant appelée à chaque activation d'onglet (pas seulement Status(B)), ce qui
-    // pouvait spammer des demandes de token concurrentes et interférer avec d'autres flux
-    // MSAL (ex: le push existant). On ne retente le pull Dataverse pour un même ticket
-    // qu'après un délai de repos, pas à chaque activation d'onglet.
-    private volatile String lastMissingDetailAttemptTicket = "";
-    private volatile long lastMissingDetailAttemptTs = 0L;
-    private static final long MISSING_DETAIL_COOLDOWN_MS = 60_000L;
-    // ✅ true quand currentWoNum vient d'être fixé DIRECTEMENT (deep link / bouton C
-    // avec contexte Field Service) — dans ce cas, la recherche par ticket_number
-    // (lookupWoForTicket) ne doit PAS l'écraser, même si le registre affiche encore
-    // le ticket de la livraison précédente au moment où onTicketInfo() se déclenche.
-    private volatile boolean woNumFromDirectSource = false;
-    private volatile boolean deliveryNotified = false; // guard anti-doublon notification
-    private volatile String currentWoIdGuid = "";
-
-    // ✅ FIX (2026-07-29) : produit et preset du deep link mémorisés ici, et non
-    // seulement poussés dans spnProduct/edtPreset. Le diagnostic de reconnexion
-    // tourne en thread de fond et doit relayer ces valeurs à lancerLivraison()
-    // sans lire de widget hors du thread UI.
-    private volatile String currentProduit  = "";
-    private volatile String currentPreset   = "";
-    private static final int TAB_LOG_MAX_LINES = 400;
-    private static final long LOG_REFRESH_MIN_MS = 800;
-    private long lastLogRefreshMs = 0L;
-    private boolean logRefreshPending = false;
+    private long mainLogViewSinceMs = 0L;
     private final Handler ui = new Handler(Looper.getMainLooper());
-    private final ExecutorService bg = Executors.newSingleThreadExecutor();
-    // ✅ (ajouté 3 août 2026, suite ratés démarrage livraison / RUNNING_FLOWING absent sur
-    // BD vierge) — thread dédié SÉPARÉ de bg pour la cascade complète de recherche de ticket
-    // (Dataverse + scan backup). Le fix précédent (fullTicketSearchArmed) limite la FRÉQUENCE
-    // de cette cascade, mais pas sa DURÉE : sur une BD vierge, la première livraison échoue
-    // garantie à l'étape 1 (rien n'existe encore) et déclenche donc systématiquement la
-    // cascade complète — réseau + lecture de fichiers — qui bloquerait bg (partagé par 23
-    // autres usages dans ce fragment, dont l'affichage RUNNING_FLOWING et btnRetourWO) pendant
-    // toute sa durée si elle y restait. Isolée ici, elle ne peut plus jamais les retarder,
-    // peu importe combien de temps elle prend.
-    private final ExecutorService remoteSearchExecutor = Executors.newSingleThreadExecutor();
+    // ✅ FIX : garde-fou anti-concurrence — empêche finalizeTcpRegisterTab()
+    // de tourner deux fois EN MÊME TEMPS pour le même transport. Sans ça, un
+    // 2e appel (ex: connexion manuelle + auto-connect presque simultanés)
+    // pouvait interférer avec la sonde LC3 du 1er, la faire échouer à tort,
+    // et tomber dans la boucle LCR-II 1..250 (lente, ~plusieurs secondes,
+    // pour rien) — voire créer un onglet erroné selon ce que la boucle lit.
+    private final java.util.Set<String> tcpFinalizeInProgress =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private static final long MAIN_LOG_REFRESH_MIN_MS = 250;
+    private long lastMainLogRefreshMs = 0L;
+    private boolean mainLogRefreshPending = false;
 
-    private void scheduleLogRefresh() {
-        if (txtLog == null) return;
-        if (cbShowLog == null || !cbShowLog.isChecked()) return;
-        long now0 = System.currentTimeMillis();
-        if (logUserScrolling && now0 < logUserScrollUntilMs) return;
-        if (Looper.myLooper() != Looper.getMainLooper()) { ui.post(this::scheduleLogRefresh); return; }
-        long now = System.currentTimeMillis();
-        long dt = now - lastLogRefreshMs;
-        if (dt >= LOG_REFRESH_MIN_MS && !logRefreshPending) {
-            lastLogRefreshMs = now; refreshLogView(); return;
-        }
-        if (logRefreshPending) return;
-        logRefreshPending = true;
-        long delay = Math.max(0L, LOG_REFRESH_MIN_MS - dt);
-        ui.postDelayed(() -> {
-            logRefreshPending = false;
-            lastLogRefreshMs = System.currentTimeMillis();
-            refreshLogView();
-        }, delay);
+    private final Map<Integer, String> apiRidToPath = new ConcurrentHashMap<>();
+    private final Set<Integer> apiFirstJobRid = Collections.newSetFromMap(new ConcurrentHashMap<>());
+    private final Set<String> apiJobSeen = Collections.newSetFromMap(new ConcurrentHashMap<>());
+
+    
+    // ✅ Guard switch média (CONFIGURE): bloque probes/IO pendant ~800ms
+    private volatile long mediaSwitchGuardUntilMs = 0L;
+    // =========================
+    // ✅ 1 ligne courte par action (log global)
+    // =========================
+    private void logMedia1(String msg) {
+        logUi(null, "[MEDIA] " + msg);
     }
 
-    private void refreshDelCodeFromTickSnapshotThrottled() {
+    private static Integer parseRid(String line) {
         try {
-            DeliveryController c = controller;
-            if (c == null) return;
-            long now = System.currentTimeMillis();
-            if (now - lastDelCodePollMs < DELCODE_POLL_MIN_MS) return;
-            lastDelCodePollMs = now;
-            ApiResult r = c.api_tickSnapshot();
-            JSONObject d = (r != null) ? r.data : null;
-            if (d != null) lastDelCode = d.optInt("delCode", lastDelCode);
-        } catch (Exception ignored) {}
+            int i = line.indexOf("[RID=");
+            if (i < 0) return null;
+            int j = line.indexOf("]", i);
+            if (j < 0) return null;
+            String n = line.substring(i + 5, j).trim();
+            return Integer.parseInt(n);
+        } catch (Exception e) {
+            return null;
+        }
     }
 
-    private void installLogScrollInterceptionFix() {
+    private static String parseReqPath(String line) {
         try {
-            if (logScroll != null) {
-                logScroll.setOnTouchListener((v, ev) -> {
-                    try { if (regRootScroll != null) regRootScroll.requestDisallowInterceptTouchEvent(true); } catch (Exception ignored) {}
-                    int a = ev.getActionMasked();
-                    if (a == MotionEvent.ACTION_DOWN || a == MotionEvent.ACTION_MOVE) {
-                        logUserScrolling = true;
-                        logUserScrollUntilMs = System.currentTimeMillis() + 1200L;
-                    } else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
-                        logUserScrolling = false;
-                        logUserScrollUntilMs = System.currentTimeMillis() + 400L;
-                    }
-                    return false;
-                });
-            }
-            if (txtLog != null) {
-                txtLog.setOnTouchListener((v, ev) -> {
-                    try { if (regRootScroll != null) regRootScroll.requestDisallowInterceptTouchEvent(true); } catch (Exception ignored) {}
-                    int a = ev.getActionMasked();
-                    if (a == MotionEvent.ACTION_DOWN || a == MotionEvent.ACTION_MOVE) {
-                        logUserScrolling = true;
-                        logUserScrollUntilMs = System.currentTimeMillis() + 1200L;
-                    } else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
-                        logUserScrolling = false;
-                        logUserScrollUntilMs = System.currentTimeMillis() + 400L;
-                    }
-                    return false;
-                });
-            }
-        } catch (Exception ignored) {}
+            int k = line.indexOf(" REQ ");
+            if (k < 0) return null;
+            String tail = line.substring(k + 5);
+            String[] parts = tail.split(" ");
+            if (parts.length < 2) return null;
+            return parts[1].trim();
+        } catch (Exception e) {
+            return null;
+        }
     }
 
-    private void scrollLogToBottomOnly() {
+    private static String extractJobIdFromPath(String path) {
+        if (path == null) return null;
+        String pfx = "/v1/delivery/job/";
+        if (!path.startsWith(pfx)) return null;
+        return path.substring(pfx.length()).trim();
+    }
+
+    private static boolean isJobDoneRespLine(String line) {
+        return line != null && line.contains("\"msg\":\"Job: 1 - DONE\"");
+    }
+
+    private static Integer extractNodeFromPath(String path) {
+        if (path == null) return null;
+        int k = path.indexOf("lcrnode_dec=");
+        if (k < 0) return null;
+        int start = k + "lcrnode_dec=".length();
+        int end = start;
+        while (end < path.length()) {
+            char c = path.charAt(end);
+            if (c < '0' || c > '9') break;
+            end++;
+        }
         try {
-            if (logScroll == null) return;
-            final int rootY = (regRootScroll != null) ? regRootScroll.getScrollY() : -1;
-            try {
-                if (regRootScroll != null) regRootScroll.setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);
-                if (regRootScroll != null) regRootScroll.requestDisallowInterceptTouchEvent(true);
-            } catch (Exception ignored) {}
-            logUserScrolling = true;
-            logUserScrollUntilMs = System.currentTimeMillis() + 1200L;
-            logScroll.post(() -> {
-                try {
-                    logScroll.requestFocus();
-                    logScroll.fullScroll(View.FOCUS_DOWN);
-                    if (regRootScroll != null && rootY >= 0) regRootScroll.scrollTo(0, rootY);
-                } catch (Exception ignored) {
-                } finally {
-                    try { if (regRootScroll != null) regRootScroll.setDescendantFocusability(ViewGroup.FOCUS_AFTER_DESCENDANTS); } catch (Exception ignored) {}
-                    logUserScrolling = false;
-                    logUserScrollUntilMs = System.currentTimeMillis() + 400L;
-                }
-            });
-        } catch (Exception ignored) {}
+            return Integer.parseInt(path.substring(start, end));
+        } catch (Exception ignore) {
+            return null;
+        }
     }
 
-    private final DeliveryControllerPort.Listener uiListener = new DeliveryControllerPort.Listener() {
+    private final BroadcastReceiver usbUiReceiver = new BroadcastReceiver() {
         @Override
-        public void onStateChanged(DeliveryState state) {
-            ui.post(() -> {
-                if (!isAdded() || getView() == null) return;
-                if (starting && state == DeliveryState.RUNNING_FLOWING) starting = false;
-                if (starting && (System.currentTimeMillis() - startingSinceMs) > 12000L)
-                    starting = false;
-                refreshDelCodeFromTickSnapshotThrottled();
-                updateButtons(state);
-                scheduleLogRefresh();
-
-                // ✅ FIX (LE chaînon manquant) : DeliveryState.DISCONNECTED n'était
-                // JAMAIS traité spécifiquement ici — même après l'escalade
-                // automatique (timeouts LCP répétés → shutdown(true) →
-                // DISCONNECTED), rien ne réagissait pour lancer le diagnostic.
-                // Le chauffeur devait deviner qu'il fallait cliquer un bouton,
-                // alors que ça devrait se déclencher tout seul. Maintenant :
-                // dès que le controller déclare DISCONNECTED, le diagnostic se
-                // lance automatiquement, sans attendre un clic.
-                if (state == DeliveryState.DISCONNECTED) {
-                    tabMediaReady = false;
-                    android.util.Log.w("RegisterTabFragment", "onStateChanged: DISCONNECTED reçu — déclenchement automatique du diagnostic");
-                    surErreurConnexion(
-                        new java.io.IOException("Controller a déclaré DISCONNECTED (timeouts LCP répétés)"),
-                        "AUTO_DISCONNECTED");
-                }
-
-                // ✅ CONNECTED post-livraison — forcer un refresh après 2s
-                // pour laisser le temps à bg.execute (DB read pour btnRetourWO) de retourner
-                if (state == DeliveryState.CONNECTED) {
-                    ui.postDelayed(() -> {
-                        if (!isAdded() || getView() == null || controller == null) return;
-                        updateButtons(controller.getState());
-                    }, 2000);
-                }
-                // Lire le vrai état ticket pending depuis le registre
-                if (state == DeliveryState.CONNECTED) {
-                    ui.postDelayed(() -> refreshDelCodeFromTickSnapshotThrottled(), 500);
-                }
-
-
-                // ✅ Si pas de WO préfillé — chercher via ticket_no du registre
-                if (state == DeliveryState.CONNECTED
-                        && (currentWoNum == null || currentWoNum.isEmpty())) {
-                    ui.postDelayed(() -> rechercherWoDepuisRegistre(), 800);
-                }
-
-                // ✅ Scan auto produits (4 août 2026, demande Paul) — se déclenche
-                // uniquement si armé par onTabActivated() (une activation de tab =
-                // un déclenchement max). "Consommé" immédiatement pour qu'une
-                // reconnexion CONNECTED ultérieure dans la même activation ne
-                // relance rien.
-                if (state == DeliveryState.CONNECTED && autoScanArmedForThisActivation) {
-                    autoScanArmedForThisActivation = false;
-                    ui.postDelayed(RegisterTabFragment.this::autoScanProduitsSiNecessaire, 300);
-                }
-
-                // ✅ Retour Field Service quand livraison terminée
-                if (state == DeliveryState.ENDED) {
-                    if (cancelInProgress) {
-                        // Annulation — ne pas retourner dans FSM
-                        // Remettre l'UI à zéro pour permettre une nouvelle livraison
-                        cancelInProgress = false;
-                        if (txtLive    != null) txtLive.setText("LIVE: CONNECTED — prêt pour nouvelle livraison");
-                        if (txtQtyNet  != null) txtQtyNet.setText("NET: 0.0");
-                        if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
-                        if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : —");
-                        if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : —");
-                    } else {
-                        notifyDeliveryEndedToMainActivity();
-                        rafraichirCumulWo();
-                        // ✅ Forcer updateButtons même si notifyDeliveryEndedToMainActivity
-                        // a été bloqué par deliveryNotified — le bouton retour doit toujours apparaître
-                        ui.postDelayed(() -> {
-                            if (!isAdded() || getView() == null || controller == null) return;
-                            updateButtons(controller.getState());
-                        }, 500);
-                    }
-                }
-
-            });
-        }
-
-        @Override public void onProductsUpdated(List<ProductUiItem> products, int activeIndex0) {}
-
-        @Override public void onLog(String message) { scheduleLogRefresh(); }
-
-        @Override
-        public void onError(String context, Throwable error) {
-            LogBus.api(node, "[ERR][" + context + "] " + (error != null ? error.getMessage() : ""));
-            scheduleLogRefresh();
-        }
-
-        @Override
-        public void onLiveQty(double net, double gross) {
-            ui.post(() -> {
-                if (!isAdded() || getView() == null) return;
-                int d = lastDigits;
-                try { if (controller != null) d = controller.getDisplayDigits(); } catch (Exception ignored) {}
-                if (d < 0) d = 3;
-                if (d > 6) d = 6;
-                lastDigits = d;
-                int show = Math.min(6, Math.max(0, d));
-                String fmt = "%." + show + "f";
-                if (txtQtyNet != null) txtQtyNet.setText("NET: " + String.format(Locale.ROOT, fmt, net));
-                if (txtQtyGross != null) txtQtyGross.setText("GROSS: " + String.format(Locale.ROOT, fmt, gross));
-            });
-        }
-
-        @Override
-        public void onLiveStatus(String liveText) {
-            ui.post(() -> {
-                if (!isAdded() || getView() == null) return;
-                lastLiveText = liveText;
-                if (txtLive != null) txtLive.setText(liveText);
-                ensureSerialVisibleThrottled();
-                refreshDelCodeFromTickSnapshotThrottled();
-                updateButtons(controller != null ? controller.getState() : null);
-                scheduleLogRefresh();
-            });
-        }
-
-        @Override
-        public void onDeliveryFinished(String serialId, String ticketNo, String saleNo,
-                                         double netL, double grossL) {
-            // ✅ (ajouté 3 août 2026, demande Paul : "on est supposé avoir un backup
-            // automatique!!") — déclenchement GARANTI à la vraie fin de livraison,
-            // peu importe si btnRetourWO existe/est visible/est cliqué. Réutilise
-            // retournerAuWorkOrder() telle quelle (déjà validée) plutôt que de dupliquer
-            // sa logique d'assemblage (WO/preset/produit/taxes) — évite toute divergence.
-            // Idempotent : retournerAuWorkOrder() fait un UPDATE (pas un doublon INSERT)
-            // si la ligne existe déjà pour ce ticket, donc un clic manuel ultérieur sur
-            // le même ticket reste sans danger.
-            LogBus.api(node, "[AUTO-BACKUP] DELIVERY_DONE ticket=" + ticketNo
-                + " — déclenchement automatique retournerAuWorkOrder()");
-
-            // ✅ FIX (4 août 2026, demande Paul — "le n'importe quoi est le 6.9
-            // deux fois, un avec delivery-uid=null et un avec 10913") — ce
-            // callback se déclenche maintenant réellement (depuis le fix
-            // MuxListener de la même session — avant, il ne se déclenchait
-            // JAMAIS, donc cette course n'existait pas). Il ignorait
-            // complètement ticketNo/netL/grossL déjà capturés au vrai instant
-            // de fin de livraison, et appelait retournerAuWorkOrder() qui
-            // redérive tout via son propre cache (api_tickSnapshot()) —
-            // parfois AVANT que le registre ait fini de mettre à jour son
-            // ticket_no interne. Résultat observé : une première insertion
-            // avec ticket_no='' (échappe à UNIQUE(wo_num,ticket_no), donc pas
-            // dédupliquée), suivie ~87s plus tard d'une deuxième insertion
-            // correcte via le poll FSM existant. Ici : on a DÉJÀ ticketNo
-            // fiable (capturé au vrai moment de fin) — on attend que le cache
-            // du controller le reflète aussi (bornée, best-effort) avant
-            // d'appeler retournerAuWorkOrder(), pour que SA propre lecture
-            // cache ne tombe plus sur un ticket_no vide.
-            bg.execute(() -> {
-                if (ticketNo != null && !ticketNo.trim().isEmpty() && controller != null) {
-                    for (int i = 0; i < 6; i++) {
-                        try {
-                            com.pa.lcr.lcp.ApiResult snap = controller.api_tickSnapshot();
-                            String cachedTicket = null;
-                            if (snap != null && snap.data != null) {
-                                org.json.JSONObject result = snap.data.optJSONObject("result");
-                                cachedTicket = (result != null) ? result.optString("ticket_no", "") : null;
-                                if (cachedTicket == null || cachedTicket.isEmpty()) {
-                                    org.json.JSONObject tick = snap.data.optJSONObject("tick");
-                                    if (tick != null) cachedTicket = tick.optString("ticket_no", "");
-                                }
-                            }
-                            if (ticketNo.equals(cachedTicket)) break; // cache à jour — sûr d'appeler maintenant
-                        } catch (Exception ignored) {}
-                        try { Thread.sleep(300); } catch (Exception ignored) {}
-                    }
-                }
-                try { ui.post(RegisterTabFragment.this::retournerAuWorkOrder); }
-                catch (Exception e) { LogBus.api(node, "[AUTO-BACKUP] ERR: " + safeMsg(e)); }
-            });
-        }
-
-        @Override
-        public void onTicketInfo(String ticketNo, String deliveryUid) {
-            // ✅ FIX (7 août 2026) — mémorise la dernière valeur connue, pour
-            // pouvoir la réappliquer si la vue se recrée avant le prochain push.
-            if (ticketNo != null && !ticketNo.trim().isEmpty()) lastKnownTicketNo = ticketNo;
-            ui.post(() -> {
-                if (!isAdded() || getView() == null) return;
-                if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : " + (ticketNo == null ? "—" : ticketNo));
-                if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : " + (deliveryUid == null ? "—" : deliveryUid));
-                ensureSerialVisibleThrottled();
-                refreshDelCodeFromTickSnapshotThrottled();
-                updateButtons(controller != null ? controller.getState() : null);
-            });
-            // ✅ onTicketInfo est un push déjà fiable (via requestStatus()) — brancher
-            // la recherche WO/cumul ici aussi, en plus du polling explicite de
-            // rechercherWoDepuisRegistre(), pour une détection plus robuste.
-            if (ticketNo != null && !ticketNo.isEmpty()) {
-                // ✅ (ajouté 3 août 2026) — consommer le flag une seule fois : si ce
-                // onTicketInfo() suit un requestStatus() explicite (tab-entry/Status(B)),
-                // autoriser la recherche complète pour CET appel seulement; sinon (push
-                // ambiant du polling live), rester local-only.
-                final boolean allowFull = fullTicketSearchArmed;
-                fullTicketSearchArmed = false;
-                // ✅ La cascade complète (allowFull=true) tourne sur remoteSearchExecutor,
-                // JAMAIS sur bg — voir commentaire sur le champ remoteSearchExecutor.
-                // Le cas local-only (allowFull=false, largement plus fréquent) reste sur
-                // bg, rapide et sans risque de blocage.
-                java.util.concurrent.ExecutorService target = allowFull ? remoteSearchExecutor : bg;
-                target.execute(() -> {
-                    try { lookupWoForTicket(ticketNo, allowFull); }
-                    catch (Exception e) { LogBus.api(node, "[WO-DETECT] ERR (onTicketInfo): " + safeMsg(e)); }
-                    // ✅ FIX (2026-07-29) : repli sur la BD locale quand delivery_uid
-                    // arrive null.
-                    //
-                    // delivery_uid n'est PAS lu du registre ni stocké en colonne : il est
-                    // calculé par DeliveryController comme
-                    //     lastNumeroLivraison + "-" + ticketNo
-                    // où lastNumeroLivraison (= le numéro de WO) est un champ volatile
-                    // en mémoire, assigné uniquement dans api_deliveryOneShotStart().
-                    // Dès que le controller est recréé — ce que fait toute reconnexion
-                    // BT/USB après diagnostic — ce champ repart à null et l'UI affichait
-                    // "Delivery UID : —" alors que le ticket_no, lui, survivait
-                    // (il vient du registre via readTicketNo23()).
-                    //
-                    // La donnée est pourtant entièrement reconstructible : la BD locale
-                    // associe déjà ticket_no → wo_num. On refait donc le même calcul.
-                    if (deliveryUid != null && !deliveryUid.trim().isEmpty()) return;
-                    // ✅ FIX (7 août 2026, demande Paul — "le tab a vu le
-                    // registre mais n'a pas terminé sa validation") — trouvé
-                    // en creusant : ce bloc de repli se relance à CHAQUE
-                    // requestStatus() (toutes les 5s au minimum, via le
-                    // keep-alive), pour toujours le MÊME ticket déjà terminé
-                    // — puisque lastNumeroLivraison ne se repeuple jamais
-                    // pour un ticket qui n'est pas UNE NOUVELLE livraison en
-                    // cours. Avant ce fix : re-frappe la BD SQLite depuis le
-                    // disque à chaque cycle, indéfiniment, pour un résultat
-                    // qui ne changera jamais. Mis en cache une fois résolu —
-                    // ne relance la reconstruction que si le ticket change.
-                    if (ticketNo.equals(lastUidReconstructedForTicket) && lastUidReconstructedValue != null) {
-                        // ✅ Déjà calculé pour ce ticket — pas besoin de refaire le calcul,
-                        // mais on réapplique quand même la valeur à la vue actuelle, au cas
-                        // où celle-ci vient d'être recréée et affiche encore "—".
-                        final String fCachedUid = lastUidReconstructedValue;
-                        ui.post(() -> {
-                            if (!isAdded() || getView() == null) return;
-                            if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : " + fCachedUid);
-                        });
-                        return;
-                    }
-                    String uidRecupere = null;
-                    String origine = "";
-                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbUid = null;
-                    try {
-                        dbUid = new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
-                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow row =
-                            dbUid.getByTicketNo(ticketNo);
-                        if (row != null && row.woNum != null && !row.woNum.trim().isEmpty()) {
-                            uidRecupere = row.woNum.trim() + "-" + ticketNo.trim();
-                            origine = "BD locale";
-                        }
-                    } catch (Exception e) {
-                        LogBus.api(node, "[UID] repli BD ERR: " + safeMsg(e));
-                    } finally {
-                        // ✅ Toute connexion SQLite fermée en finally (règle projet —
-                        // voir les fuites corrigées le 24 juillet dans ce fichier).
-                        if (dbUid != null) { try { dbUid.close(); } catch (Exception ignored) {} }
-                    }
-                    // ✅ FIX (7 août 2026, demande Paul — "mets-le en
-                    // deuxième si la BD est vierge") — repositionné en 2e
-                    // position (juste après la recherche par ticket exact,
-                    // avant les replis suivants qui dépendent tous de la BD
-                    // locale — inutiles si elle est vraiment vide). Les
-                    // fichiers filgo_livraison_*.json SURVIVENT à une BD
-                    // vierge (réinstallation, BD corrompue) — c'est leur
-                    // raison d'être — donc les vérifier tôt évite d'attendre
-                    // deux tentatives DB vouées à l'échec sur ce scénario.
-                    if (uidRecupere == null && serialFromArgs != null && !serialFromArgs.trim().isEmpty()) {
-                        try {
-                            String woFromJson = com.pa.lcr.lcp.storage.LocalDeliveryBackup
-                                    .findMostRecentWoForSerialFromJsonBackups(requireContext(), serialFromArgs.trim());
-                            if (woFromJson != null && !woFromJson.trim().isEmpty()) {
-                                uidRecupere = woFromJson.trim() + "-" + ticketNo.trim();
-                                origine = "backup JSON (Téléchargements)";
-                            }
-                        } catch (Exception e) {
-                            LogBus.api(node, "[UID] repli backup JSON ERR: " + safeMsg(e));
-                        }
-                    }
-                    // Ensuite : le WO courant en mémoire. Moins fiable que la
-                    // BD (aucune garantie que currentWoNum corresponde à CE ticket —
-                    // il peut encore pointer la livraison précédente), donc utilisé
-                    // seulement si rien trouvé jusqu'ici, et journalisé distinctement.
-                    if (uidRecupere == null) {
-                        String wo = currentWoNum;
-                        if (wo != null && !wo.trim().isEmpty()) {
-                            uidRecupere = wo.trim() + "-" + ticketNo.trim();
-                            origine = "WO courant (mémoire)";
-                        }
-                    }
-                    // ✅ FIX (7 août 2026, demande Paul — "27 livraisons dans
-                    // l'écran Livraisons, WO correct, mais rien affiché ici,
-                    // pourquoi?") — trouvé : les replis précédents cherchent
-                    // soit CE ticket exact (échoue si jamais retourné au WO),
-                    // soit currentWoNum en mémoire (vide après une reconnexion —
-                    // voir "currentWoNum vide" dans les logs). Ce repli-ci
-                    // regarde "la dernière livraison connue pour CE #série" dans
-                    // la BD — le même filet de sécurité déjà utilisé par le
-                    // bouton "Retour au WO" (getLastDeliveryForSerial), en
-                    // dernier recours ici puisqu'il ne sert à rien sur une BD
-                    // vraiment vierge (déjà couvert par le repli JSON ci-dessus).
-                    if (uidRecupere == null && serialFromArgs != null && !serialFromArgs.trim().isEmpty()) {
-                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbFallback2 = null;
-                        try {
-                            dbFallback2 = new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
-                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow lastRow =
-                                    dbFallback2.getLastDeliveryForSerial(serialFromArgs.trim());
-                            if (lastRow != null && lastRow.woNum != null && !lastRow.woNum.trim().isEmpty()) {
-                                uidRecupere = lastRow.woNum.trim() + "-" + ticketNo.trim();
-                                origine = "dernière livraison connue pour ce #série (BD)";
-                            }
-                        } catch (Exception e) {
-                            LogBus.api(node, "[UID] repli dernière livraison BD ERR: " + safeMsg(e));
-                        } finally {
-                            if (dbFallback2 != null) { try { dbFallback2.close(); } catch (Exception ignored) {} }
-                        }
-                    }
-                    if (uidRecupere == null) {
-                        LogBus.api(node, "[UID] aucun WO trouvé pour ticket=" + ticketNo
-                                + " — delivery_uid reste vide");
-                        return;
-                    }
-                    final String fUid = uidRecupere;
-                    final String fOrigine = origine;
-                    lastUidReconstructedForTicket = ticketNo;
-                    lastUidReconstructedValue = fUid;
-                    LogBus.api(node, "[UID] delivery_uid reconstruit=" + fUid + " (" + fOrigine + ")");
-                    ui.post(() -> {
-                        if (!isAdded() || getView() == null) return;
-                        if (txtDeliveryUid != null)
-                            txtDeliveryUid.setText("Delivery UID : " + fUid);
-                    });
-                });
-            }
-        }
-
-        @Override
-        public void onDiagnosticReset(String woNum, double netBeforeL, double grossBeforeL) {
-            // ✅ Réintégré (24 juillet 2026) — confirmé par Paul : correction
-            // automatique sur détection du bit 0x0040 (retours de pulseur) doit
-            // être persistée localement ET synchronisée vers Dataverse.
-            // net_l/gross_l = 0 volontairement (aucune livraison réelle n'a eu lieu
-            // — ne doit JAMAIS s'additionner au total cumulé du WO dans
-            // rafraichirCumulWo()). Les vraies valeurs résiduelles vont dans
-            // delta_net_l/delta_gross_l, à des fins d'audit uniquement.
-            bg.execute(() -> {
-                try {
-                    android.content.Context ctx = getContext();
-                    if (ctx == null) return;
-                    String fWoNum = (woNum != null && !woNum.isEmpty()) ? woNum : "MAINTENANCE";
-                    String ticketNoForUid = lastTicketDetected != null ? lastTicketDetected : "";
-                    String deliveryUid = fWoNum + "-RESET-" + System.currentTimeMillis();
-
-                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db =
-                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(ctx);
-                    try {
-                        android.content.ContentValues cv = new android.content.ContentValues();
-                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM, fWoNum);
-                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID,
-                            serialFromArgs != null ? serialFromArgs : "");
-                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_LCRNODE, node);
-                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO, ticketNoForUid);
-                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE, "DIAGNOSTIC_RESET");
-                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE, "REGISTRE");
-                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,   0.0);
-                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L, 0.0);
-                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_DELTA_NET_L,   netBeforeL);
-                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_DELTA_GROSS_L, grossBeforeL);
-                        long id = db.insertDelivery(cv);
-                        LogBus.api(node, "[DIAGNOSTIC-RESET] persisté id=" + id
-                            + " wo=" + fWoNum + " netAvant=" + netBeforeL + " grossAvant=" + grossBeforeL);
-                    } finally {
-                        try { db.close(); } catch (Exception ignored) {}
-                    }
-
-                    // ✅ Mettre en file pour Dataverse — même mécanisme que les
-                    // livraisons normales (DeliverySyncWorker/WorkOrderUpdater).
-                    // ✅ FIX : marqué "consolidated" — sinon DeliverySyncWorker
-                    // traiterait cet item avec patchSummary() (écrase tout le champ
-                    // avec net=0/gross=0, puisque ceci n'est qu'un enregistrement de
-                    // reset, pas une vraie livraison), effaçant l'historique complet
-                    // du WO au lieu de le préserver.
-                    org.json.JSONObject payload = new org.json.JSONObject();
-                    payload.put("consolidated", true);
-                    payload.put("workOrderId", currentWoIdGuid != null ? currentWoIdGuid : "");
-                    payload.put("woNum", fWoNum);
-                    payload.put("deliveryUid", deliveryUid);
-                    payload.put("diagnosticReset", true);
-                    payload.put("preDeliveryNet", netBeforeL);
-                    payload.put("preDeliveryGross", grossBeforeL);
-
-                    com.pa.lcrdemo.dataverse.DeliveryResultQueueDb queueDb =
-                        new com.pa.lcrdemo.dataverse.DeliveryResultQueueDb(ctx);
-                    try {
-                        queueDb.upsertPending(deliveryUid, payload.toString());
-                    } finally {
-                        try { queueDb.close(); } catch (Exception ignored) {}
-                    }
-                    com.pa.lcrdemo.dataverse.DeliverySyncScheduler.triggerNow(ctx);
-                } catch (Exception e) {
-                    LogBus.api(node, "[DIAGNOSTIC-RESET] ERR: " + safeMsg(e));
-                }
-            });
-        }
-    };
-
-    private final LogBus.Listener logListener = e -> {
-        if (e == null) return;
-        if (e.node != node) return;
-        scheduleLogRefresh();
-    };
-
-    private final BroadcastReceiver usbStateReceiver = new BroadcastReceiver() {
-        @Override public void onReceive(Context context, Intent intent) {
+        public void onReceive(Context context, Intent intent) {
             if (intent == null) return;
             String a = intent.getAction();
             if (a == null) return;
+
             if (UsbReceiver.ACTION_USB_READY.equals(a)) {
-                attemptAttachIfPossible(false);
+                UsbSerialPort p = UsbSession.getPort();
+                if (p != null) onUsbPortReady(p);
+
             } else if (UsbReceiver.ACTION_USB_DETACHED.equals(a)) {
+                onUsbDetached();
+
+            } else if (ACTION_USB_PERMISSION.equals(a)) {
+                // ✅ Permission USB accordée/refusée
                 try {
-                    if (tabTransportKey != null && (tabTransportKey.toUpperCase(Locale.ROOT).startsWith("BT:")
-                            || tabTransportKey.toUpperCase(Locale.ROOT).startsWith("TCP:"))) {
-                        LogBus.api(node, "USB detached ignored (TAB sur " + tabTransportKey + ")");
+                    boolean granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
+                    if (!granted) {
+                        logUi(null, "Permission USB refusée");
                         return;
                     }
+                    logUi(null, "Permission USB accordée");
+                    // IMPORTANT: le replug crée souvent un port stale -> reset puis rescan + open
+                    resetUsbState("PERMISSION_GRANTED");
+                    scanUsb();
+                    openSelectedUsb();
                 } catch (Exception ignored) {}
-                detachUiListenerSafe();
-                controller = null;
-                starting = false;
-                ticketPendingFlag = -1;
-                ui.post(() -> {
-                    if (!isAdded() || getView() == null) return;
-                    if (txtSerialId != null) txtSerialId.setText("#Série : " + ((serialFromArgs != null && !serialFromArgs.trim().isEmpty()) ? serialFromArgs : "—"));
-                    if (txtTicketPending != null) txtTicketPending.setText("Ticket pending : —");
-                    if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : —");
-                    if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : —");
-                    if (txtLive != null) txtLive.setText("LIVE: (en attente)");
-                    if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
-                    if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
-                    updateButtons(null);
-                });
+
+            } else if (ACTION_NODE_SEEN.equals(a)) {
+                // ✅ Reçu de /register/connect-auto (BT ou USB) -> upsert tab (anti-doublon + migration média)
+                try {
+                    int node = intent.getIntExtra("node", 0);
+                    int from = intent.getIntExtra("from", 255);
+                    String serial = intent.getStringExtra("serial");
+                    String transportKey = intent.getStringExtra("transport");
+
+                    if (node < 1 || node > 250) return;
+
+                    serial = (serial != null) ? serial.trim() : "";
+                    if (!isPlausibleSerial(serial)) {
+                        logUi(null, "NODE_SEEN ignoré: serial invalide: " + serial + " (node=" + node + ")");
+                        return;
+                    }
+
+                    if (transportKey == null) transportKey = "";
+                    transportKey = transportKey.trim();
+                    if (transportKey.isEmpty()) {
+                        // fallback best-effort
+                        transportKey = MediaTransportManager.getActiveKeyStatic();
+                        if (transportKey == null) transportKey = "";
+                    }
+
+                    // Focus intelligent (ne vole pas le focus inutilement)
+                    String regKey = regKeyOf(node, serial);
+                    String oldTabKey = regKeyToTabKey.get(regKey);
+                    String mediaShort = mediaShortFromTransportKey(transportKey);
+                    String newTabKey = tabKeyOf(mediaShort, node, serial);
+
+                    boolean focus = (currentTabKey == null)
+                            || (oldTabKey != null && oldTabKey.equals(currentTabKey))
+                            || newTabKey.equals(currentTabKey);
+
+                    // ✅ Utilise la mécanique existante (migration média incluse)
+                    upsertRegisterTabFromScan(transportKey, node, from, serial, focus);
+
+                    // Rafraîchir label (OFF/READY)
+                    final String k = tabKeyOf(mediaShortFromTransportKey(transportKey), node, serial);
+                    ui.postDelayed(() -> refreshOneTabMediaStatus(k), 80);
+
+                } catch (Exception ignored) {}
+
+            } else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(a)) {
+                onUsbDetached();
+                resetUsbState("SYS_DETACHED");
+
+            } else if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(a)) {
+                // rescan seulement, l'ouverture se fait via Open/Ping
+                try { scanUsb(); } catch (Exception ignored) {}
             }
         }
     };
 
+    private final LogBus.Listener mainLogListener = e -> scheduleMainLogRefresh();
+
     @Override
-    public void onAttach(@NonNull Context context) {
-        super.onAttach(context);
-        Bundle a = getArguments();
-        if (a != null) {
-            node = a.getInt(ARG_NODE, 250);
-            from = a.getInt(ARG_FROM, 255);
-            serialFromArgs = a.getString(ARG_SERIAL, null);
-            transportFromArgs = a.getString(ARG_TRANSPORT, null);
-            if (transportFromArgs != null && !transportFromArgs.trim().isEmpty()) {
-                tabTransportKey = transportFromArgs.trim();
-                String up = tabTransportKey.toUpperCase(Locale.ROOT);
-                tabMediaShort = up.startsWith("BT:") ? "BT" : (up.startsWith("USB") ? "USB" : (up.startsWith("TCP:") ? "TCP" : tabMediaShort));
-            }
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+
+        // ✅ Reset guard diagnostic au démarrage
+        com.pa.lcrdemo.RegisterConnectionHelper.resetDiagnostic();
+
+        usbManager = (UsbManager) getSystemService(USB_SERVICE);
+
+        bindUi();
+        wireUi();
+        refreshKnownTcpList();
+        refreshDetectedSubnet();
+        initUiDefaults();
+        setupTabsTop();
+
+        // ✅ Démarrage automatique Field Service
+        if (getSharedPreferences("filgo_prefs", MODE_PRIVATE)
+                .getBoolean("auto_launch_fs", false)) {
+            startActivity(new Intent(this, FieldServiceActivity.class));
         }
-        usbManager = (UsbManager) context.getSystemService(Context.USB_SERVICE);
+
+        // CONFIGURE: media + bluetooth
+
+
+        // CONFIGURE: media + bluetooth
+        mediaProfileStore = new com.pa.lcr.lcp.storage.MediaProfileStore(this);
+        btAdapter = BluetoothAdapter.getDefaultAdapter();
+
+        // ✅ Option A: manager runtime multi-transport
+        mediaTransportManager = MediaTransportManager.get(this);
+
+        deliveryStore = new DeliveryLogStore(this);
+ // ✅ Android 9: demander la permission storage (une seule fois) pour /Download
+ ensureLegacyStoragePermissionForDownloads(true);
+        deliveryStore.purgeOlderThanDaysAsync(7);
+        deepLinkHandler = new DeepLinkHandler(this, deliveryStore, btExec);
+
+        // ✅ WorkManager — vide la queue offline Dataverse quand réseau disponible
+        DeliverySyncScheduler.schedulePeriodic(this);
+
+        // ✅ (demandé 31 juillet 2026, suite à la perte du ticket 10898) : le worker
+        // périodique attend jusqu'à 15 minutes (minimum imposé par Android pour
+        // PeriodicWorkRequest — pas un choix arbitraire du code). Ce callback réagit
+        // IMMÉDIATEMENT dès que le réseau redevient disponible, sans attendre le prochain
+        // cycle du minuteur — réduit la fenêtre de risque entre une livraison PENDING et
+        // sa synchronisation réelle.
+        try {
+            android.net.ConnectivityManager cm =
+                    (android.net.ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm != null) {
+                android.net.NetworkRequest req = new android.net.NetworkRequest.Builder()
+                        .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                        .build();
+                cm.registerNetworkCallback(req, new android.net.ConnectivityManager.NetworkCallback() {
+                    @Override
+                    public void onAvailable(android.net.Network network) {
+                        android.util.Log.i("NetworkSync", "Réseau disponible — déclenchement sync immédiat");
+                        DeliverySyncScheduler.triggerNow(getApplicationContext());
+                    }
+                });
+            }
+        } catch (Exception e) {
+            android.util.Log.w("NetworkSync", "registerNetworkCallback ERR (non-bloquant): " + e.getMessage());
+        }
+
+        // ✅ (demande Paul 31 juillet 2026 : "tout persister") — LogBus était jusqu'ici un
+        // buffer 100% en mémoire, jamais persisté, invisible pour le RCA après coup. Ce
+        // listener écrit chaque événement (UI/API/IO_TX/IO_RX) dans log_bus_event de façon
+        // async, sans jamais ralentir l'émission LogBus elle-même.
+        final com.pa.lcr.lcp.storage.LogBusStore logBusStore =
+                new com.pa.lcr.lcp.storage.LogBusStore(getApplicationContext());
+        LogBus.addListener(event -> logBusStore.addEventAsync(
+                event.node, event.src != null ? event.src.name() : "", event.msg));
+
+        // ✅ MSAL — init + login au premier démarrage de l'APK
+        // Après ce premier login le token est en cache → silent pour toutes les livraisons
+        MsalTokenProvider msal = new MsalTokenProvider(this);
+        msal.init(new MsalTokenProvider.InitCallback() {
+            @Override
+            public void onReady() {
+                msal.acquireToken(MainActivity.this, new MsalTokenProvider.TokenCallback() {
+                    @Override
+                    public void onSuccess(String token) {
+                        android.util.Log.i("MSAL", "Token OK — Dataverse prêt");
+                        // Déclencher sync immédiat si items en attente
+                        DeliverySyncScheduler.triggerNow(MainActivity.this);
+                        // ✅ Sync filgo_delivery_status + filgo_note_template au lancement
+                        new Thread(() ->
+                            com.pa.lcrdemo.dataverse.LcrDeliverySync.syncAll(
+                                MainActivity.this, token)
+                        ).start();
+                    }
+                    @Override
+                    public void onError(Exception e) {
+                        android.util.Log.w("MSAL", "Token ERR: " + e.getMessage());
+                    }
+                });
+            }
+            @Override
+            public void onError(Exception e) {
+                android.util.Log.e("MSAL", "Init ERR: " + e.getMessage());
+            }
+        });
+
+        refreshApiStatus();
+        logUi(null, "UI prête — Scan USB requis");
+        // ✅ Démarrage API via LcrHttpService (foreground service permanent)
+        android.content.Intent svcIntent = new android.content.Intent(this, LcrHttpService.class);
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            startForegroundService(svcIntent);
+        } else {
+            startService(svcIntent);
+        }
+        
+        // ✅ Deep Link au lancement (APK fermé)
+        deepLinkHandler.handleDeepLink(getIntent());
     }
 
     @Override
-    public void onStart() {
+    protected void onStart() {
         super.onStart();
-        LogBus.addListener(logListener);
         IntentFilter f = new IntentFilter();
         f.addAction(UsbReceiver.ACTION_USB_READY);
         f.addAction(UsbReceiver.ACTION_USB_DETACHED);
-        // ✅ Android 14+ (API 34+) exige RECEIVER_NOT_EXPORTED ou RECEIVER_EXPORTED
-        // Ce receiver écoute des broadcasts internes à l'APK — RECEIVER_NOT_EXPORTED
+        f.addAction(ACTION_USB_PERMISSION);
+        f.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
+        f.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
+        // ✅ AJOUT: signal API -> UI (BT/USB)
+        f.addAction(ACTION_NODE_SEEN);
         // Android 9-13 : registerReceiver(receiver, filter) — sans flag
         // Android 14+  : registerReceiver(receiver, filter, RECEIVER_NOT_EXPORTED)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            requireContext().registerReceiver(usbStateReceiver, f,
-                Context.RECEIVER_NOT_EXPORTED);
+            registerReceiver(usbUiReceiver, f, Context.RECEIVER_NOT_EXPORTED);
         } else {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            requireContext().registerReceiver(usbStateReceiver, f, Context.RECEIVER_NOT_EXPORTED);
-        } else {
-            requireContext().registerReceiver(usbStateReceiver, f);
+            registerReceiver(usbUiReceiver, f);
         }
+
+        LogBus.addListener(mainLogListener);
+
+        // ✅ FIX CRITIQUE (5 août 2026, demande Paul — retracé ligne par
+        // ligne : "je fais retour au bon de travail, ensuite lancer
+        // livraison, aussitôt de retour dans l'apk par deeplink, je vois
+        // USB(OFF)... avant on avait pas ce trouble nulle part") — trouvé :
+        // ce code voyait que UsbSession gardait encore une référence au port
+        // et la réutilisait AVEUGLÉMENT, sans jamais vérifier qu'elle était
+        // encore vivante. Entre le clic "retour au bon de travail" et le
+        // retour dans l'app via deep link, l'app passe par onStop() (qui
+        // désenregistre le receiver USB) pendant que tu es dans FieldService
+        // — Android peut légitimement suspendre l'accès USB d'une app en
+        // arrière-plan. Au retour, la référence en mémoire existe encore,
+        // mais la connexion sous-jacente peut être morte — exactement comme
+        // le port périmé qu'on a dû corriger côté api_openPingUsb(). Un
+        // débranchement/rebranchement physique force TOUJOURS une vraie
+        // réouverture (resetUsbState + scan + open) — c'est pour ça que ça
+        // marche systématiquement. Ici : le retour au premier plan fait
+        // maintenant la MÊME chose — on ne fait plus confiance à la
+        // référence existante, on force une vraie réouverture, à chaque
+        // retour, comme un "débranchement/rebranchement logiciel".
+        UsbSerialPort p = UsbSession.getPort();
+        if (p != null && usbPort == null) {
+            android.util.Log.i("MainActivity", "onStart: référence USB existante trouvée — "
+                + "vérification/réouverture forcée avant réutilisation (comme un rebranchement)");
+            resetUsbState("ONSTART_FORCE_REFRESH");
+            ui.post(() -> { scanUsb(); openSelectedUsb(); });
+        }
+        refreshGlobalLogView();
+        // ✅ Rattrapage — sync tabs avec sessions connues (cas arrière-plan)
+        ui.postDelayed(this::syncTabsFromActiveSessions, 400);
+    }
+
+    /**
+     * ✅ Rattrapage UI — synchronise les tabs avec les sessions LCP connues.
+     * Appelé au retour au premier plan pour rattraper les NODE_SEEN manqués en arrière-plan.
+     */
+    private void syncTabsFromActiveSessions() {
+        try {
+            RegisterSessionManager sessions = RegisterSessionManager.get(this);
+            List<String[]> known = sessions.listKnownRegisters();
+            if (known == null || known.isEmpty()) {
+                logUi(null, "syncTabs: aucune session connue");
+                return;
+            }
+            logUi(null, "syncTabs: " + known.size() + " session(s) connue(s)");
+            boolean focused = false;
+            for (String[] reg : known) {
+                if (reg == null || reg.length < 3) continue;
+                int node;
+                try { node = Integer.parseInt(reg[0]); } catch (Exception e) { continue; }
+                String serial      = reg[1];
+                String transportKey = reg[2];
+
+                if (!isPlausibleSerial(serial)) continue;
+
+                // ✅ FIX (la vraie source du tab TCP fantôme) : avant, si aucun
+                // transport n'était encore CONFIRMÉ (pinné) pour ce couple précis
+                // (node, serial), le code se repliait sur "le transport actif du
+                // moment" — SANS AUCUNE VÉRIFICATION que ce transport ait
+                // réellement CE registre. Ça associait à tort un registre
+                // "attendu" (ex: le LCR-II du deep link, lié tôt via
+                // bindExpectedSerial) au transport actif du moment (ex: le TCP-LC3
+                // déjà connecté), créant un onglet fantôme visible ~400ms après
+                // chaque retour au premier plan (ex: retour de Field Service).
+                // Sans transport CONFIRMÉ, on ne devine plus — on saute cette
+                // entrée, la vraie détection (deep link / scan) s'en chargera.
+                if (transportKey == null || transportKey.trim().isEmpty()) {
+                    logUi(null, "syncTabs: node=" + node + " serial=" + serial
+                            + " — aucun transport confirmé, ignoré (pas de devinette)");
+                    continue;
+                }
+
+                String mediaShort = mediaShortFromTransportKey(transportKey);
+                String tabKey = tabKeyOf(mediaShort, node, serial);
+                boolean exists = tabsByKey.containsKey(tabKey);
+
+                logUi(null, "syncTabs: node=" + node + " serial=" + serial
+                        + " media=" + mediaShort + (exists ? " (existant)" : " (nouveau)"));
+
+                // focus sur le premier tab seulement si aucun tab actif
+                boolean focus = (!focused && currentTabKey == null);
+                upsertRegisterTabFromScan(transportKey, node, 255, serial, focus);
+                if (focus) focused = true;
+
+                // Rafraîchir le statut média
+                final String fTabKey = tabKeyOf(mediaShortFromTransportKey(transportKey), node, serial);
+                ui.postDelayed(() -> refreshOneTabMediaStatus(fTabKey), 100);
+            }
+            refreshAllTabsMediaStatus();
+        } catch (Exception e) {
+            logUi(null, "syncTabs: erreur: " + e.getMessage());
         }
     }
 
     @Override
-    public void onStop() {
-        detachUiListenerSafe();
-        LogBus.removeListener(logListener);
-        try { requireContext().unregisterReceiver(usbStateReceiver); } catch (Exception ignored) {}
+    protected void onStop() {
+        try { unregisterReceiver(usbUiReceiver); } catch (Exception ignored) {}
+        LogBus.removeListener(mainLogListener);
         super.onStop();
     }
 
     @Override
-    public void onResume() {
-        super.onResume();
-        // ✅ Toujours réattacher le uiListener si nécessaire au retour du tab
-        // onStop() détache le listener — onResume() doit le réattacher
-        // Android 9-15 : même comportement — le listener est un callback direct,
-        //                pas un broadcast, il doit être réattaché à chaque onResume()
-        if (!attemptedAutoAttachOnce) {
-            attemptedAutoAttachOnce = true;
-            ui.post(() -> attemptAttachIfPossible(true));
-        } else {
-            // Deuxième visite ou retour d'arrière-plan — réattacher si listener absent
-            ui.post(() -> {
-                if (!uiListenerAttached && controller != null) {
-                    attachUiListenerIfNeeded();
-                }
-                attemptAttachIfPossible(false);
-            });
-        }
-        // ✅ Toujours vérifier si livraison PENDING à afficher quand le tab devient visible
-        ui.postDelayed(() -> checkPendingDeliveryForThisRegister(), 800);
-        // ✅ Rafraîchir le cumul WO au retour dans le tab
-        ui.postDelayed(() -> rafraichirCumulWo(), 600);
-        // Si pas de WO préfillé par deep link — chercher via ticket_no du registre
-        ui.postDelayed(() -> {
-            if (currentWoNum == null || currentWoNum.isEmpty()) {
-                rechercherWoDepuisRegistre();
-            }
-        }, 1200);
-
-        // ✅ Si controller existe et io mort → diagnostic au moment où on arrive dans le tab
-        ui.postDelayed(() -> {
-            if (!isAdded() || getView() == null) return;
-        }, 500);
+    protected void onDestroy() {
+        stopApiServer("Activity destroyed");
+        try { scanExec.shutdownNow(); } catch (Exception ignored) {}
+        // ✅ FIX (6 août 2026, demande Paul — balayage systématique des
+        // autres classes de bugs, gestion mémoire/cycle de vie) — btExec
+        // n'était jamais arrêté ici, contrairement à scanExec juste
+        // au-dessus. Si l'Activity est recréée dans le même processus
+        // (ex. après finish() suivi d'un relancement rapide), chaque
+        // nouvelle instance créait son propre btExec sans jamais nettoyer
+        // l'ancien — accumulation de threads au fil des cycles.
+        try { btExec.shutdownNow(); } catch (Exception ignored) {}
+        super.onDestroy();
     }
 
     @Override
-    public void onDestroyView() {
-        super.onDestroyView();
-        // ✅ FIX CRITIQUE (6 août 2026, demande Paul — "regarde ce log et
-        // dis-moi ce qui cloche" — chaque ligne apparaissait dupliquée,
-        // certaines 4 fois au même timestamp) — trouvé : onDestroyView()
-        // (le vrai cycle de vie Android, déclenché à chaque recréation de
-        // vue — rotation, transaction de fragment, etc.) ne détachait
-        // JAMAIS uiListener du MuxListener partagé dans
-        // RegisterSessionManager. detachUiListenerSafe() existait déjà à 3
-        // autres endroits (bouton retour, erreur de connexion, etc.) mais
-        // pas ici — le plus fondamental. Chaque recréation de vue ajoutait
-        // donc un NOUVEAU listener sans jamais retirer l'ancien, qui
-        // continuait de recevoir chaque événement — d'où la duplication qui
-        // s'accumulait au fil du temps (2x, puis 4x, etc.).
-        try { detachUiListenerSafe(); } catch (Exception ignored) {}
-        try { ui.removeCallbacksAndMessages(null); } catch (Exception ignored) {}
-        try { bg.shutdownNow(); } catch (Exception ignored) {}
-        try { remoteSearchExecutor.shutdownNow(); } catch (Exception ignored) {}
-        controller = null;
-        attemptedAutoAttachOnce = false;  // ← ajouter cette ligne
+    public void onConfigurationChanged(@androidx.annotation.NonNull android.content.res.Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        // ✅ Rotation tablette — ne pas recréer les fragments/tabs
+        // Le manifest a configChanges="orientation|screenSize|keyboardHidden|screenLayout"
+        // donc Android appelle ici au lieu de recréer l'activité
+        // Rien à faire — les fragments gèrent leur propre état
+        android.util.Log.i("MainActivity",
+            "onConfigurationChanged: orientation=" + newConfig.orientation + " — tabs conservés");
     }
-    @Nullable
+
+    // ✅ Deep Link lcrdemo:// — appelé quand Field Service Mobile lance l'APK
+    // Exemples:
+    //   lcrdemo://livraison?idWorkOrder=123&serialId=16466294&lcrnode=250
+    //   lcrdemo://ping
     @Override
-    public View onCreateView(@NonNull LayoutInflater inflater,
-                             @Nullable ViewGroup container,
-                             @Nullable Bundle savedInstanceState) {
-        View v = inflater.inflate(R.layout.fragment_register_tab, container, false);
-        bindUi(v);
-        initUi();
-        wireUi();
-        installLogScrollInterceptionFix();
-        return v;
+    protected void onNewIntent(android.content.Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (deepLinkHandler != null) deepLinkHandler.handleDeepLink(intent);
     }
 
-    private void bindUi(View v) {
-        regRootScroll = v.findViewById(R.id.regRootScroll);
-        txtLcrNode = v.findViewById(R.id.txtLcrNode);
-        txtFrom = v.findViewById(R.id.txtFrom);
-        txtSerialId = v.findViewById(R.id.txtSerialId);
-        txtTicketNo = v.findViewById(R.id.txtTicketNo);
-        txtTicketPending = v.findViewById(R.id.txtTicketPending);
-        spnProduct = v.findViewById(R.id.spnProduct);
-        if (spnProduct != null) {
-            String[] items = new String[16];
-            for (int i = 0; i < 16; i++) items[i] = String.valueOf(i + 1);
-            android.widget.ArrayAdapter<String> ad = new android.widget.ArrayAdapter<>(
-                requireContext(), android.R.layout.simple_dropdown_item_1line, items);
-            spnProduct.setAdapter(ad);
-            spnProduct.setThreshold(0);
-            spnProduct.setOnClickListener(v2 -> spnProduct.showDropDown());
-        }
-        edtPreset = v.findViewById(R.id.edtPreset);
-        btnConnect = v.findViewById(R.id.btnConnectTab);
-        btnA = v.findViewById(R.id.btnA);
-        btnB = v.findViewById(R.id.btnB);
-        btnC = v.findViewById(R.id.btnC);
-        btnContinue = v.findViewById(R.id.btnContinue);
-        btnFinish = v.findViewById(R.id.btnFinish);
-        txtLive = v.findViewById(R.id.txtLive);
-        txtQtyNet = v.findViewById(R.id.txtQtyNet);
-        txtQtyGross = v.findViewById(R.id.txtQtyGross);
-        txtDeliveryUid = v.findViewById(R.id.txtDeliveryUid);
-        btnReprintTicket = v.findViewById(R.id.btnReprintTicket);
-        btnRetourWO      = v.findViewById(R.id.btnRetourWO);
-        panelWoCumul     = v.findViewById(R.id.panelWoCumul);
-        txtWoCumulNet    = v.findViewById(R.id.txtWoCumulNet);
-        txtWoCumulGross  = v.findViewById(R.id.txtWoCumulGross);
-        txtWoCumulCount  = v.findViewById(R.id.txtWoCumulCount);
-        if (panelWoCumul != null) {
-            panelWoCumul.setOnClickListener(vv -> afficherDetailLivraisonsWo());
-            panelWoCumul.setVisibility(android.view.View.VISIBLE);
-        }
-        if (txtWoCumulNet   != null) txtWoCumulNet.setText("Total NET: 0.0 L");
-        if (txtWoCumulGross != null) txtWoCumulGross.setText("Total GROSS: 0.0 L");
-        if (txtWoCumulCount != null) txtWoCumulCount.setText("Aucune livraison");
-        btnCustomPrint   = v.findViewById(R.id.btnCustomPrint);
-        btnAnnuler       = v.findViewById(R.id.btnAnnuler);
-        btnScanProducts  = v.findViewById(R.id.btnScanProducts);
-        cbShowLog = v.findViewById(R.id.cbShowLog);
-        logPanel = v.findViewById(R.id.logPanel);
-        txtLog = v.findViewById(R.id.txtLog);
-        logScroll = v.findViewById(R.id.logScroll);
-        btnClearLog = v.findViewById(R.id.btnClearLog);
-        btnCopyLog = v.findViewById(R.id.btnCopyLog);
-        btnScrollDown = v.findViewById(R.id.btnScrollDown);
-        cbTxRx = v.findViewById(R.id.cbTxRx);
-        cbLogTs = v.findViewById(R.id.cbLogTs);
+
+
+    // ✅ Délégation à DeepLinkHandler
+    public void onDeliveryEnded(String woNum, String extraJson) {
+        if (deepLinkHandler != null) deepLinkHandler.onDeliveryEnded(woNum, extraJson);
     }
 
-    private void initUi() {
-        if (txtLcrNode != null) txtLcrNode.setText(String.format(Locale.ROOT, "LCR Node : %d", node));
-        if (txtFrom != null) txtFrom.setText(String.format(Locale.ROOT, "From : %d", from));
-        if (txtSerialId != null) txtSerialId.setText("#Série : " + ((serialFromArgs != null && !serialFromArgs.trim().isEmpty()) ? serialFromArgs : "—"));
-        if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : —");
-        if (txtTicketPending != null) txtTicketPending.setText("Ticket pending : —");
-        if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : —");
-        // ✅ FIX (7 août 2026, demande Paul — "même le ticket_number ne
-        // s'affichait pas") — réapplique immédiatement les dernières valeurs
-        // connues (ticket + delivery_uid) si la vue vient d'être recréée,
-        // sans attendre le prochain onTicketInfo() qui peut tarder.
-        if (lastKnownTicketNo != null && !lastKnownTicketNo.trim().isEmpty()) {
-            if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : " + lastKnownTicketNo);
-        }
-        if (lastUidReconstructedValue != null && !lastUidReconstructedValue.trim().isEmpty()) {
-            if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : " + lastUidReconstructedValue);
-        }
-        ticketPendingFlag = -1;
-        lastDigits = 3;
-        if (txtLive != null) txtLive.setText("LIVE: (en attente)");
-        if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
-        if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
-        if (edtPreset != null) edtPreset.setText("50");
-        if (spnProduct != null) spnProduct.setText("1", false);
-        if (cbShowLog != null) cbShowLog.setChecked(false);
-        if (logPanel != null) logPanel.setVisibility(View.GONE);
-        logViewSinceMs = 0L;
-        if (cbTxRx != null) cbTxRx.setChecked(LogBus.SHOW_IO);
-        if (cbLogTs != null) cbLogTs.setChecked(LogBus.SHOW_TS);
-        updateButtons(null);
-    }
-
-    public void prefillFromDeepLink(String woNum, String produit, String preset) {
-        prefillFromDeepLink(woNum, "", produit, preset);
-    }
-
-    public void prefillFromDeepLink(String woNum, String woIdGuid, String produit, String preset) {
-        deliveryNotified = false; // reset pour la nouvelle livraison
-        if (woNum != null && !woNum.isEmpty()) {
-            currentWoNum = woNum;
-            // ✅ Ce WO vient directement du deep link — priorité sur toute recherche
-            // par ticket_number qui pourrait se déclencher ensuite (onTicketInfo peut
-            // encore rapporter le ticket de la livraison PRÉCÉDENTE un court instant).
-            woNumFromDirectSource = true;
-            lastTicketDetected = ""; // permettre une future recherche si ce WO change de source
-        }
-        if (woIdGuid != null && !woIdGuid.isEmpty()) currentWoIdGuid = woIdGuid;
-        if (produit != null && !produit.isEmpty()) currentProduit = produit;
-        if (preset  != null && !preset.isEmpty())  currentPreset  = preset;
-        if (edtPreset != null && preset != null && !preset.isEmpty())
-            edtPreset.setText(preset);
-        if (spnProduct != null && produit != null && !produit.isEmpty())
-            spnProduct.setText(produit, false);
-        if (txtDeliveryUid != null && woNum != null && !woNum.isEmpty())
-            txtDeliveryUid.setText("Delivery UID : " + woNum);
-        // ✅ Rafraîchir le cumul WO dès que le WO est connu
-        ui.postDelayed(() -> rafraichirCumulWo(), 300);
-    }
-
-    private void notifyDeliveryEndedToMainActivity() {
-        // ✅ Source primaire — champs stables du fragment, jamais effacés
-        String woNum    = currentWoNum;
-        String woIdGuid = currentWoIdGuid;
-        // Fallback — ActiveDeliveryStore si les champs stables sont vides
-        // (ex: tout premier appel avant tout deep link/prefill)
-        if (woNum.isEmpty()) {
-            try {
-                com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
-                    new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
-                com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad = ads.load();
-                if (ad != null) {
-                    if (ad.woNum    != null) woNum    = ad.woNum;
-                    if (ad.woIdGuid != null) woIdGuid = ad.woIdGuid;
-                }
-            } catch (Exception ignored) {}
-        }
-        notifyDeliveryEndedToMainActivity(woNum, woIdGuid);
+    public void onDeliveryEnded(String woNum, String woIdGuid, String extraJson) {
+        if (deepLinkHandler != null) deepLinkHandler.onDeliveryEnded(woNum, woIdGuid, extraJson);
     }
 
     /**
-     * Version explicite — utilisée par le poll de fin de livraison du bouton C,
-     * où woNum/woIdGuid ont été capturés au DÉBUT de la livraison (figés) plutôt
-     * que relus depuis ActiveDeliveryStore à la fin, qui peut avoir changé entre
-     * temps si un autre bouton C a été cliqué pendant le poll (plusieurs minutes).
+     * ✅ Délégation à DeepLinkHandler.lancerLivraison() — permet au bouton C
+     * (relance manuelle dans l'APK) d'utiliser EXACTEMENT le même chemin que
+     * le deep link FieldService: stabilisation BT, oneshot/start, poll de fin,
+     * patchDataverse automatique. Seul le ticket number du registre change
+     * à chaque appel — woNum/woIdGuid/produit/preset restent ceux du WO en cours.
      */
-    private void notifyDeliveryEndedToMainActivity(String woNumIn, String woIdGuidIn) {
-        // ✅ Guard anti-doublon — une seule notification par livraison
-        if (deliveryNotified) return;
-        deliveryNotified = true;
-        try {
-            if (!(getActivity() instanceof MainActivity)) return;
-            MainActivity main = (MainActivity) getActivity();
-
-            String ticketNo = "";
-            double net      = 0.0;
-            double gross    = 0.0;
-            String woNum    = (woNumIn    != null) ? woNumIn    : "";
-            String woIdGuid = (woIdGuidIn != null) ? woIdGuidIn : "";
-
-            // ✅ FIX (la vraie cause du bouton "Retour au WO" manquant) : net/gross
-            // étaient lus en parsant le TEXTE affiché à l'écran (txtQtyNet/txtQtyGross)
-            // — fragile, silencieusement à 0.0 si le format ne correspondait pas
-            // exactement (locale, arrondi, etc.). Comme l'insertion en base plus
-            // bas exige "fNet > 0" pour s'exécuter, un simple échec de parsing
-            // faisait sauter l'écriture du ticket ENTIÈREMENT, empêchant à jamais
-            // "Retour au WO" d'apparaître — même pour une livraison parfaitement
-            // valide. On lit maintenant les valeurs RÉELLES depuis l'API du
-            // contrôleur (net_l/gross_l), le parsing texte ne sert plus que de
-            // filet de secours si l'API échoue.
-            org.json.JSONObject snapDataEarly = null;
-            try {
-                if (controller != null) {
-                    com.pa.lcr.lcp.ApiResult snapEarly = controller.api_tickSnapshot();
-                    if (snapEarly != null && snapEarly.data != null) snapDataEarly = snapEarly.data;
-                }
-            } catch (Exception ignored) {}
-
-            if (snapDataEarly != null) {
-                net   = snapDataEarly.optDouble("net_l", -1);
-                gross = snapDataEarly.optDouble("gross_l", -1);
-                ticketNo = snapDataEarly.optString("ticket_no", "");
+    /** Retourne le transportKey du tab actif pour un node donné */
+    public String getTransportKeyForNode(int node) {
+        // ✅ FIX (6 août 2026, concurrence) — itération protégée, voir
+        // commentaire sur la déclaration de tabsByKey.
+        synchronized (tabsByKey) {
+            for (TabSpec t : tabsByKey.values()) {
+                if (t.node == node && t.transportKey != null && !t.transportKey.isEmpty())
+                    return t.transportKey;
             }
+        }
+        return null;
+    }
 
-            try {
-                if ((net < 0) && txtQtyNet != null)
-                    net = Double.parseDouble(
-                        txtQtyNet.getText().toString()
-                                 .replace("NET: ", "").trim());
-                if ((gross < 0) && txtQtyGross != null)
-                    gross = Double.parseDouble(
-                        txtQtyGross.getText().toString()
-                                   .replace("GROSS: ", "").trim());
-                if (ticketNo.isEmpty() && txtTicketNo != null)
-                    ticketNo = txtTicketNo.getText().toString()
-                                   .replace("Ticket Number : ", "").trim();
-            } catch (Exception ignored) {}
-            if (net < 0) net = 0.0;
-            if (gross < 0) gross = 0.0;
+    /** Lance la livraison directement via le fragment du tab existant — même chemin que bouton C
+     *  Utilisé par DeepLinkHandler quand resolveOrCreateForNode() échoue mais tab existe */
+    public boolean lancerLivraisonViaTabExistant(int node, String woNum, String woIdGuid,
+            String produit, String presetStr) {
+        java.util.List<TabSpec> snapshot;
+        synchronized (tabsByKey) { snapshot = new ArrayList<>(tabsByKey.values()); }
+        for (TabSpec t : snapshot) {
+            if (t.node != node) continue;
+            String tabKey = t.tabKey;
+            Fragment f = getSupportFragmentManager().findFragmentByTag("regtab_" + tabKey);
+            if (!(f instanceof RegisterTabFragment)) continue;
+            RegisterTabFragment tab = (RegisterTabFragment) f;
+            // Préfiller le WO et lancer comme le bouton C
+            tab.prefillFromDeepLink(woNum, woIdGuid, produit, presetStr);
+            runOnUiThread(() -> tab.startNewDeliveryCFromDeepLink(woNum, woIdGuid, produit, presetStr));
+            android.util.Log.i("MainActivity", "lancerLivraisonViaTabExistant — node=" + node + " wo=" + woNum);
+            return true;
+        }
+        return false;
+    }
 
-            org.json.JSONObject extra = new org.json.JSONObject();
-            try {
-                if (controller != null) {
-                    com.pa.lcr.lcp.ApiResult snap = controller.api_tickSnapshot();
-                    if (snap != null && snap.data != null) {
-                        extra = snap.data;
-                    }
-                }
-            } catch (Exception ignored) {}
+    public void lancerLivraisonDepuisTab(String transportKey, int node, String serialId,
+                                          String woNum, String woIdGuid,
+                                          String produit, String presetStr, String mac) {
+        if (deepLinkHandler != null) {
+            // ✅ FIX : cet appel se faisait DIRECTEMENT sur le thread appelant (le
+            // thread UI, puisque déclenché depuis le clic du bouton C). Or
+            // lancerLivraison() contient le dialogue "Bon déjà complété", qui affiche
+            // via activity.runOnUiThread() PUIS bloque le thread appelant avec
+            // latch.await() en attendant le clic. Si le thread appelant EST le thread
+            // UI, le dialogue ne peut jamais s'afficher (sa propre file de messages
+            // est bloquée) et le clic ne peut jamais arriver — auto-blocage garanti.
+            // Partout ailleurs dans le code, cet appel est fait via new Thread(...) —
+            // ce point d'entrée était le seul oublié.
+            new Thread(() -> deepLinkHandler.lancerLivraison(transportKey, node, serialId,
+                woNum, woIdGuid, produit, presetStr, mac)).start();
+        }
+    }
+    /**
+     * Retourner à Field Service Mobile après la livraison.
+     * Construit l'URL ms-dynamicsxrm:// avec le statut et les données
+     * que le PCF interceptera pour mettre à jour le SQLite Dataverse local.
+     *
+     * @param idWorkOrder  GUID de l'ordre de travail (ex: {A4251FF8-...})
+     * @param status       "ok", "en_cours", "termine", "erreur"
+     * @param extra        données supplémentaires JSON (optionnel, ex: ticketNo, litres)
+     */
 
-            // ✅ Construire la structure que DeepLinkHandler.onDeliveryEnded() attend
-            // Il lit result.fs_net_l / result.fs_gross_l / result.ticket_no
-            try {
-                org.json.JSONObject result = new org.json.JSONObject();
-                result.put("fs_net_l",   net);
-                result.put("fs_gross_l", gross);
-                result.put("ticket_no",  ticketNo);
-                result.put("net",        net);
-                result.put("gross",      gross);
-                extra.put("result",    result);
-                extra.put("ticketNo",  ticketNo);
-                extra.put("netL",      net);
-                extra.put("grossL",    gross);
-            } catch (Exception ignored) {}
-
-            main.onDeliveryEnded(woNum, woIdGuid, extra.toString());
-
-            // ✅ Insérer dans LcrDeliveryStatusDb si pas déjà fait par DeepLinkHandler
-            // Cas ticket pending — le poll a quitté sans appeler onDeliveryEnded dans DeepLinkHandler
-            final String fWoNum    = woNum;
-            final String fTicketNo = ticketNo;
-            final double fNet      = net;
-            final double fGross    = gross;
-            bg.execute(() -> {
-                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb = null;
-                try {
-                    lcrDb = new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
-                    // Vérifier si déjà inséré par DeepLinkHandler
-                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow existing =
-                        lcrDb.getLatestForWo(fWoNum);
-                    boolean alreadyHasData = (existing != null
-                        && existing.ticketNo != null
-                        && !existing.ticketNo.isEmpty()
-                        && existing.netL > 0);
-                    // ✅ FIX : exiger fNet > 0 pour insérer faisait qu'une livraison
-                    // avec un ticket VALIDE mais un net à 0 (ou légitimement bas)
-                    // n'était JAMAIS enregistrée — bloquant "Retour au WO" pour rien.
-                    // Un ticket non vide suffit à justifier l'enregistrement.
-                    boolean hasTicketOrVolume = (fTicketNo != null && !fTicketNo.trim().isEmpty()) || fNet > 0;
-                    if (!alreadyHasData && hasTicketOrVolume) {
-                        android.content.ContentValues cv = new android.content.ContentValues();
-                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,    fWoNum);
-                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO, fTicketNo);
-                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,     fNet);
-                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L,   fGross);
-                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
-                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
-                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,    "TAB");
-                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
-                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
-                        lcrDb.insertDelivery(cv);
-                    }
-                    // Rafraîchir le cumul WO après insertion
-                    ui.post(() -> rafraichirCumulWo());
-                } catch (Exception ignored) {
-                } finally {
-                    if (lcrDb != null) { try { lcrDb.close(); } catch (Exception ignored) {} }
+    private void bindUi() {
+        tabLayout = findViewById(R.id.tabLayout);
+        pageMain = findViewById(R.id.pageMain);
+        pageApiFace = findViewById(R.id.pageApiFace);
+        pageConfigure = findViewById(R.id.pageConfigure);
+        pageSupport = findViewById(R.id.pageSupport);
+        edtSupportTicketFilter = findViewById(R.id.edtSupportTicketFilter);
+        edtSupportSerialFilter = findViewById(R.id.edtSupportSerialFilter);
+        edtSupportNodeFilter = findViewById(R.id.edtSupportNodeFilter);
+        // ✅ FIX (6 août 2026, demande Paul — "permettre une recherche de
+        // type google") — les résultats se rafraîchissent maintenant
+        // automatiquement pendant la frappe (avec un court délai pour ne pas
+        // relancer une requête à chaque lettre), plus besoin de cliquer
+        // "Rafraîchir" après chaque changement.
+        android.text.TextWatcher supportLiveSearchWatcher = new android.text.TextWatcher() {
+            private final Runnable debounced = () -> refreshSupportEvents();
+            @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
+            @Override public void onTextChanged(CharSequence s, int a, int b, int c) {
+                ui.removeCallbacks(debounced);
+                ui.postDelayed(debounced, 400);
+            }
+            @Override public void afterTextChanged(android.text.Editable s) {}
+        };
+        if (edtSupportTicketFilter != null) edtSupportTicketFilter.addTextChangedListener(supportLiveSearchWatcher);
+        if (edtSupportSerialFilter != null) edtSupportSerialFilter.addTextChangedListener(supportLiveSearchWatcher);
+        if (edtSupportNodeFilter != null) edtSupportNodeFilter.addTextChangedListener(supportLiveSearchWatcher);
+        txtSupportCount = findViewById(R.id.txtSupportCount);
+        chkSupportErrorsOnly = findViewById(R.id.chkSupportErrorsOnly);
+        if (chkSupportErrorsOnly != null) {
+            chkSupportErrorsOnly.setOnCheckedChangeListener((btn, checked) -> refreshSupportEvents());
+        }
+        CheckBox chkSupportSelectionMode = findViewById(R.id.chkSupportSelectionMode);
+        if (chkSupportSelectionMode != null) {
+            chkSupportSelectionMode.setOnCheckedChangeListener((btn, checked) -> {
+                supportSelectionMode = checked;
+                if (!checked) supportSelectedPositions.clear();
+                if (listSupportEvents != null && listSupportEvents.getAdapter() != null) {
+                    ((SupportEventAdapter) listSupportEvents.getAdapter()).notifyDataSetChanged();
                 }
             });
+        }
+        txtSupportDiagnosis = findViewById(R.id.txtSupportDiagnosis);
+        listSupportEvents = findViewById(R.id.listSupportEvents);
+        Button btnSupportRefresh = findViewById(R.id.btnSupportRefresh);
+        if (btnSupportRefresh != null) {
+            btnSupportRefresh.setOnClickListener(v -> refreshSupportEvents());
+        }
+        Button btnSupportDiagnose = findViewById(R.id.btnSupportDiagnose);
+        if (btnSupportDiagnose != null) {
+            btnSupportDiagnose.setOnClickListener(v -> runSupportDiagnosis());
+        }
+        Button btnSupportCoherence = findViewById(R.id.btnSupportCoherence);
+        if (btnSupportCoherence != null) {
+            btnSupportCoherence.setOnClickListener(v -> runCoherenceCheck());
+        }
+        Button btnSupportLexique = findViewById(R.id.btnSupportLexique);
+        if (btnSupportLexique != null) {
+            btnSupportLexique.setOnClickListener(v -> showSupportLexiqueDialog());
+        }
+        txtSupportRestoreStatus = findViewById(R.id.txtSupportRestoreStatus);
+        Button btnSupportRestoreBackup = findViewById(R.id.btnSupportRestoreBackup);
+        if (btnSupportRestoreBackup != null) {
+            btnSupportRestoreBackup.setOnClickListener(v -> confirmAndRunRestoreBackup());
+        }
 
-        } catch (Exception ignored) {}
-    }
+        Button btnSupportCopyAll = findViewById(R.id.btnSupportCopyAll);
+        if (btnSupportCopyAll != null) {
+            btnSupportCopyAll.setOnClickListener(v -> copySupportListToClipboard());
+        }
+        // ✅ AJOUTÉ (7 août 2026, demande Paul — "un bouton pour vider l'écran
+        // support et repartir en neuf, mais avant il doit faire un backup") —
+        // confirmation explicite avant l'action (destructive, même avec backup).
+        Button btnSupportClearAll = findViewById(R.id.btnSupportClearAll);
+        if (btnSupportClearAll != null) {
+            btnSupportClearAll.setOnClickListener(v -> {
+                new android.app.AlertDialog.Builder(this)
+                    .setTitle("Vider l'écran Support")
+                    .setMessage("Une copie complète de la base de données sera d'abord sauvegardée "
+                        + "(Téléchargements, fichier .db restaurable, conservé 7 jours), puis les "
+                        + "événements de l'écran Support seront vidés. Continuer?")
+                    .setPositiveButton("Vider", (dlg, which) -> {
+                        // ✅ FIX (7 août 2026, demande Paul — "qu'est-ce que tu
+                        // prends en backup, il y a deux BD") — trouvé : le
+                        // backup ne prenait QUE lcr_delivery.db, jamais
+                        // filgo_delivery_status.db (les vraies données de
+                        // livraison — ticket_no, net_l, gross_l, sync_status).
+                        // Corrigé : les DEUX sont maintenant sauvegardées,
+                        // même timestamp partagé pour les regrouper facilement,
+                        // même mécanisme déjà éprouvé que le bouton "Backup DB
+                        // (Downloads)" existant (backupRawDbToDownloadsQ/
+                        // Legacy). Le vidage de log_bus_event n'a lieu
+                        // qu'après le succès des DEUX sauvegardes.
+                        final String stamp = String.valueOf(System.currentTimeMillis());
+                        final String lcrBackupName = "filgo_support_backup_lcr_" + stamp + ".db";
+                        final String statusBackupName = "filgo_support_backup_status_" + stamp + ".db";
+                        final boolean[] lcrOk = {false};
+                        final boolean[] statusOk = {false};
+                        final String[] statusDetail = {""};
 
-    /** ✅ AJOUTÉ (7 août 2026, demande Paul — "icône à gauche du tab pour
-     *  faire rafraîchir le tab") — point d'entrée public appelé depuis
-     *  MainActivity quand l'utilisateur clique l'icône de rafraîchissement
-     *  sur ce tab précis, sans avoir à l'ouvrir. Tracé distinctement dans
-     *  Support pour qu'on sache que c'est CE clic précis qui a déclenché
-     *  l'action, pas un rafraîchissement automatique. */
-    public void triggerManualRefreshFromTabIcon() {
-        LogBus.api(node, "[TAB-REFRESH] Rafraîchissement manuel déclenché depuis l'icône du tab");
-        runStatusBLikeButton("tab_refresh_icon");
-    }
+                        Runnable proceedIfBothDone = () -> {
+                            if (!lcrOk[0] || !statusOk[0]) return; // attend les deux
+                            com.pa.lcr.lcp.storage.DeliveryLogStore store =
+                                new com.pa.lcr.lcp.storage.DeliveryLogStore(getApplicationContext());
+                            store.clearLogBusEventOnlyAsync((success, rowsCleared, errorMessage) -> runOnUiThread(() -> {
+                                if (success) {
+                                    Toast.makeText(this, "Backup complet (2 BD) effectué, "
+                                        + rowsCleared + " événements vidés — écran Support réinitialisé", Toast.LENGTH_LONG).show();
+                                    refreshSupportEvents();
+                                } else {
+                                    Toast.makeText(this, "Backup OK mais échec du vidage : " + errorMessage, Toast.LENGTH_LONG).show();
+                                }
+                            }));
+                        };
 
-    private void runStatusBLikeButton(String reason) {
-        try {
-            if (controller == null) return;
-            // ✅ FIX CRITIQUE (6 août 2026, demande Paul — "j'ai récupéré le
-            // #série, le node, mais rien d'autre, j'avais que des erreurs")
-            // — confirmé par log terrain : "Status(B) ERR: Task ... rejected
-            // from ThreadPoolExecutor[Terminated...]" se répétait à CHAQUE
-            // cycle CONNECTED, avec le MÊME executor (jamais renouvelé,
-            // "completed tasks" figé). Cause : controller (le champ de ce
-            // fragment) ne se rafraîchit QUE dans connectThisRegister() —
-            // mais quand RegisterSessionManager migre/recrée une session
-            // (ex. [RSM-MIGRATE] BT↔USB, très fréquent sur ce camion précis
-            // vu le log), rien ne prévient ce fragment que sa référence
-            // controller en cache pointe maintenant vers un
-            // DeliveryController déjà arrêté (executor interne Terminated).
-            // Chaque appel à requestStatus() dessus échouait donc
-            // immédiatement, systématiquement, peu importe combien de fois
-            // on réessayait — exactement "que des erreurs". Ici : avant
-            // d'utiliser controller, on vérifie qu'il est encore vivant, et
-            // sinon on va chercher la session RÉELLE et à jour directement
-            // auprès de RegisterSessionManager plutôt que de faire confiance
-            // à la référence en cache.
-            if (controller.isStopped()) {
-                android.util.Log.w("RegisterTabFragment", "runStatusBLikeButton: controller en cache est ARRÊTÉ "
-                    + "(executor Terminated) — rafraîchissement depuis RegisterSessionManager");
-                LogBus.api(node, "[STATUS-B-REFRESH] controller en cache périmé — recherche de la session à jour");
-                com.pa.lcr.lcp.DeliveryController fresh = null;
-                try {
-                    RegisterSessionManager smRefresh = RegisterSessionManager.get(requireContext());
-                    if (tabTransportKey != null) fresh = smRefresh.getController(tabTransportKey, node);
-                    if (fresh == null) {
-                        // Le node a peut-être migré de transport — chercher peu importe lequel.
-                        fresh = smRefresh.findTransportKeyForNode(node) != null
-                            ? smRefresh.getController(smRefresh.findTransportKeyForNode(node), node) : null;
+                        com.pa.lcr.lcp.storage.DeliveryLogStore storeForBackup =
+                            new com.pa.lcr.lcp.storage.DeliveryLogStore(getApplicationContext());
+                        storeForBackup.backupDbToDownloadsAsync(getApplicationContext(), lcrBackupName, (ok1, name1, detail1) -> {
+                            lcrOk[0] = ok1;
+                            if (!ok1) {
+                                runOnUiThread(() -> Toast.makeText(this,
+                                    "Échec backup lcr_delivery.db — écran NON vidé : " + detail1, Toast.LENGTH_LONG).show());
+                                return;
+                            }
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                backupRawDbToDownloadsQ(LcrDeliveryStatusDb.DB_NAME, statusBackupName, (ok2, name2, detail2) -> {
+                                    statusOk[0] = ok2;
+                                    statusDetail[0] = detail2;
+                                    if (!ok2) {
+                                        runOnUiThread(() -> Toast.makeText(this,
+                                            "Échec backup filgo_delivery_status.db — écran NON vidé : " + detail2, Toast.LENGTH_LONG).show());
+                                        return;
+                                    }
+                                    proceedIfBothDone.run();
+                                });
+                            } else {
+                                backupRawDbToDownloadsLegacy(LcrDeliveryStatusDb.DB_NAME, statusBackupName, (ok2, name2, detail2) -> {
+                                    statusOk[0] = ok2;
+                                    statusDetail[0] = detail2;
+                                    if (!ok2) {
+                                        runOnUiThread(() -> Toast.makeText(this,
+                                            "Échec backup filgo_delivery_status.db — écran NON vidé : " + detail2, Toast.LENGTH_LONG).show());
+                                        return;
+                                    }
+                                    proceedIfBothDone.run();
+                                });
+                            }
+                        });
+                    })
+                    .setNegativeButton("Annuler", null)
+                    .show();
+            });
+        }
+        // ✅ AJOUTÉ (7 août 2026, demande Paul — "oui" à l'ajout d'une vraie
+        // restauration) — liste les backups disponibles (les plus récents en
+        // premier), choix explicite, confirmation, puis restauration +
+        // redémarrage forcé (nécessaire pour repartir sur une connexion
+        // SQLite propre après avoir remplacé le fichier .db vivant).
+        Button btnSupportRestore = findViewById(R.id.btnSupportRestore);
+        if (btnSupportRestore != null) {
+            btnSupportRestore.setOnClickListener(v -> {
+                com.pa.lcr.lcp.storage.DeliveryLogStore.listSupportBackupsAsync(getApplicationContext(), backups -> runOnUiThread(() -> {
+                    if (backups.isEmpty()) {
+                        Toast.makeText(this, "Aucun backup disponible dans Téléchargements", Toast.LENGTH_LONG).show();
+                        return;
                     }
-                } catch (Exception ignored) {}
-                if (fresh != null && !fresh.isStopped()) {
-                    controller = fresh;
-                    LogBus.api(node, "[STATUS-B-REFRESH] session à jour retrouvée — controller rafraîchi");
-                } else {
-                    LogBus.api(node, "[STATUS-B-REFRESH] aucune session vivante trouvée — déclenchement diagnostic");
-                    surErreurConnexion(
-                        new java.io.IOException("runStatusBLikeButton: controller en cache mort et aucune session de remplacement"),
-                        "STATUS_B_STALE_CONTROLLER");
-                    return;
-                }
-            }
-            if (!verifierIoAvantAction("STATUS_B")) return;
-            try {
-                if (tabTransportKey != null)
-                    MediaTransportManager.get(requireContext())
-                        .activateExclusive(tabTransportKey, reason != null ? reason : "STATUS_B");
-            } catch (Exception ignored) {}
-            try {
-                // ✅ (ajouté 3 août 2026, demande Paul) — armer la recherche complète
-                // (Dataverse + backup) pour le PROCHAIN onTicketInfo() déclenché par ce
-                // requestStatus() explicite. Couvre à la fois l'entrée sur le tab
-                // (TAB_ACTIVATED/AUTO_AFTER_TAB_CREATE/TAB_REACTIVATED) et le clic Status(B),
-                // puisque tous passent par cette méthode.
-                fullTicketSearchArmed = true;
-                controller.requestStatus();
-            } catch (Exception e) {
-                LogBus.api(node, "Status(B) ERR: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
-                surErreurConnexion(e, "STATUS_B");
-                return;
-            }
-            ui.postDelayed(() -> {
+                    String[] labels = new String[backups.size()];
+                    for (int i = 0; i < backups.size(); i++) {
+                        com.pa.lcr.lcp.storage.DeliveryLogStore.BackupInfo b = backups.get(i);
+                        String dateStr = android.text.format.DateFormat.format("yyyy-MM-dd HH:mm:ss", b.dateAddedMs).toString();
+                        labels[i] = dateStr + "  —  " + b.displayLabel;
+                    }
+                    new android.app.AlertDialog.Builder(this)
+                        .setTitle("Restaurer depuis un backup")
+                        .setItems(labels, (dlg, which) -> {
+                            com.pa.lcr.lcp.storage.DeliveryLogStore.BackupInfo chosen = backups.get(which);
+                            new android.app.AlertDialog.Builder(this)
+                                .setTitle("Confirmer la restauration")
+                                .setMessage("Ceci va REMPLACER complètement les données Support actuelles "
+                                    + "par le contenu de :\n\n" + chosen.displayLabel
+                                    + "\n\nL'app redémarrera automatiquement juste après. Continuer?")
+                                .setPositiveButton("Restaurer", (d2, w2) -> {
+                                    // Fermer toute connexion SQLite ouverte avant d'écraser le fichier.
+                                    try { if (deliveryStore != null) deliveryStore.close(); } catch (Exception ignored) {}
+                                    com.pa.lcr.lcp.storage.DeliveryLogStore.restoreFromBackupAsync(
+                                        getApplicationContext(), chosen, (success, errorMessage) -> runOnUiThread(() -> {
+                                        if (success) {
+                                            Toast.makeText(this, "Restauration réussie — redémarrage...", Toast.LENGTH_LONG).show();
+                                            ui.postDelayed(() -> {
+                                                try {
+                                                    android.content.Intent intent = getPackageManager()
+                                                        .getLaunchIntentForPackage(getPackageName());
+                                                    if (intent != null) {
+                                                        intent.addFlags(android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
+                                                            | android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                                                        startActivity(intent);
+                                                    }
+                                                    android.os.Process.killProcess(android.os.Process.myPid());
+                                                } catch (Exception e) {
+                                                    android.util.Log.e("MainActivity", "Restart après restauration ERR: " + e.getMessage());
+                                                }
+                                            }, 1200);
+                                        } else {
+                                            Toast.makeText(this, "Échec de la restauration : " + errorMessage, Toast.LENGTH_LONG).show();
+                                        }
+                                    }));
+                                })
+                                .setNegativeButton("Annuler", null)
+                                .show();
+                        })
+                        .setNegativeButton("Annuler", null)
+                        .show();
+                }));
+            });
+        }
+        edtSupportValidatedBy = findViewById(R.id.edtSupportValidatedBy);
+        rowSupportIncident = findViewById(R.id.rowSupportIncident);
+        Button btnSupportRecordIncident = findViewById(R.id.btnSupportRecordIncident);
+        if (btnSupportRecordIncident != null) {
+            btnSupportRecordIncident.setOnClickListener(v -> recordSupportIncidents());
+        }
 
-                  try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
+        btnScanUsb = findViewById(R.id.btnScanUsb);
+        btnPingUsb = findViewById(R.id.btnPingUsb);
+        btnQuit = findViewById(R.id.btnQuit);
+        spnUsbDevices = findViewById(R.id.spnUsbDevices);
+txtActiveNode = findViewById(R.id.txtActiveNode);
+tabRegisters = findViewById(R.id.tabRegisters);
+        registerContainer = findViewById(R.id.registerContainer);
 
-                try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
-            }, 200);
+        cbShowLog = findViewById(R.id.cbShowLog);
+        logPanel = findViewById(R.id.logPanel);
+        txtLog = findViewById(R.id.txtLog);
+        logScroll = findViewById(R.id.logScroll);
+        btnClearLog = findViewById(R.id.btnClearLog);
+        btnCopyLog = findViewById(R.id.btnCopyLog);
+        btnScrollDown = findViewById(R.id.btnScrollDown);
+        cbTxRx = findViewById(R.id.cbTxRx);
+        cbLogTs = findViewById(R.id.cbLogTs);
 
-            // ⏸️ (suspendu 31 juillet 2026, pending investigation régression push Dataverse) :
-            // limité au clic EXPLICITE Status(B) seulement — plus déclenché automatiquement
-            // à l'arrivée sur l'onglet (TAB_ACTIVATED/AUTO_AFTER_TAB_CREATE/TAB_REACTIVATED
-            // appellent aussi runStatusBLikeButton(), donc sans ce filtre sur "reason" ça
-            // spammait des demandes de token MSAL à chaque activation d'onglet — suspecté
-            // d'avoir interféré avec le push Dataverse existant. Réactiver une fois confirmé
-            // que ce n'était pas la cause (ou corrigé autrement).
-            if ("STATUS_B".equals(reason)) {
-                bg.execute(() -> checkAndPullMissingDeliveryDetail(reason));
-            }
-        } catch (Exception ignored) {}
+        txtApiStatus = findViewById(R.id.txtApiStatus);
+        txtApiUrl = findViewById(R.id.txtApiUrl);
+        btnApiStart = findViewById(R.id.btnApiStart);
+        btnApiStop = findViewById(R.id.btnApiStop);
+        btnDbBackup = findViewById(R.id.btnDbBackup);
+
+        // CONFIGURE status + BT
+        txtMediaActive = findViewById(R.id.txtMediaActive);
+        txtNodesActive = findViewById(R.id.txtNodesActive);
+        spnBtBonded = findViewById(R.id.spnBtBonded);
+        btnBtRefresh = findViewById(R.id.btnBtRefresh);
+        btnBtConnect = findViewById(R.id.btnBtConnect);
+        btnBtDisconnect = findViewById(R.id.btnBtDisconnect);
+        txtBtStatus = findViewById(R.id.txtBtStatus);
+       
+        // ✅ BT Signal
+        btnBtSignalScan = findViewById(R.id.btnBtSignalScan);
+        txtBtSignalResult = findViewById(R.id.txtBtSignalResult);   
+
+        // CONFIGURE: scan registres (par média)
+        btnScanUsbRegs = findViewById(R.id.btnScanUsbRegs);
+        txtUsbRegsFound = findViewById(R.id.txtUsbRegsFound);
+        btnScanBtRegs = findViewById(R.id.btnScanBtRegs);
+        txtBtRegsFound = findViewById(R.id.txtBtRegsFound);
+        btnScanWifiRegs = findViewById(R.id.btnScanWifiRegs);
+        txtWifiRegsFound = findViewById(R.id.txtWifiRegsFound);
+        containerKnownTcp = findViewById(R.id.containerKnownTcp);
+        edtTcpNode = findViewById(R.id.edtTcpNode);
+        edtTcpOctet1 = findViewById(R.id.edtTcpOctet1);
+        edtTcpOctet2 = findViewById(R.id.edtTcpOctet2);
+        edtTcpOctet3 = findViewById(R.id.edtTcpOctet3);
+        edtTcpOctet4 = findViewById(R.id.edtTcpOctet4);
+        txtTcpSubnetDetected = findViewById(R.id.txtTcpSubnetDetected);
+        edtTcpPort = findViewById(R.id.edtTcpPort);
+        btnTcpConnect = findViewById(R.id.btnTcpConnect);
+        txtTcpStatus = findViewById(R.id.txtTcpStatus);
+
+        // CONFIGURE: Ajout manuel (2 registres / média)
+        edtUsbNode1 = findViewById(R.id.edtUsbNode1);
+        edtUsbNode2 = findViewById(R.id.edtUsbNode2);
+        txtUsbSerial1 = findViewById(R.id.txtUsbSerial1);
+        txtUsbSerial2 = findViewById(R.id.txtUsbSerial2);
+        btnUsbConnect1 = findViewById(R.id.btnUsbConnect1);
+        btnUsbConnect2 = findViewById(R.id.btnUsbConnect2);
+
+        edtBtNode1 = findViewById(R.id.edtBtNode1);
+        edtBtNode2 = findViewById(R.id.edtBtNode2);
+        txtBtSerial1 = findViewById(R.id.txtBtSerial1);
+        txtBtSerial2 = findViewById(R.id.txtBtSerial2);
+        btnBtConnect1 = findViewById(R.id.btnBtConnect1);
+        btnBtConnect2 = findViewById(R.id.btnBtConnect2);
+        // ✅ Valeur initiale posée ici ; refreshApiStatus() (appelée dans
+        // onCreate()) écrase ensuite avec l'état réel de LcrHttpService.
+        if (txtApiUrl != null) {
+            txtApiUrl.setText("https://127.0.0.1:" + LcrHttpService.getApiPort());
+        }
+    }
+
+    private void initUiDefaults() {
+        if (txtActiveNode != null) txtActiveNode.setText("Node actif : —");
+        if (cbShowLog != null) cbShowLog.setChecked(false);
+        if (logPanel != null) logPanel.setVisibility(View.GONE);
+
+        SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
+        boolean showTxRx = prefs.getBoolean("log_tx_rx", false);
+        if (cbTxRx != null) cbTxRx.setChecked(showTxRx);
+        LogBus.SHOW_IO = showTxRx;
+
+        boolean ts = prefs.getBoolean("log_ts", false);
+        logTsEnabled = ts;
+        if (cbLogTs != null) cbLogTs.setChecked(ts);
+        LogBus.SHOW_TS = ts;
+    nodeItems.clear();
+        // ⚠️ RETOUR EN ARRIÈRE : le retrait de cet appel a cassé la création
+        // de TOUS les onglets (pas seulement le placeholder). Remis en place
+        // le temps de comprendre la vraie dépendance avant de retoucher.
+        ensureRegisterTab(250, 255, true);
+
+        mainLogViewSinceMs = 0L;
+        refreshGlobalLogView();
     }
 
     private void wireUi() {
-        if (cbShowLog != null) {
-            cbShowLog.setOnCheckedChangeListener((b, checked) -> {
-                if (logPanel != null) logPanel.setVisibility(checked ? View.VISIBLE : View.GONE);
-                LogBus.ui(node, ts("Afficher log: " + (checked ? "ON" : "OFF")));
-                if (checked) { installLogScrollInterceptionFix(); scheduleLogRefresh(); }
+        if (btnScanUsb != null) btnScanUsb.setOnClickListener(v -> {
+            // ✅ FIX (7 août 2026, demande Paul — coupe-circuit) — clic
+            // manuel depuis Configure réarme le coupe-circuit.
+            if (autoReconnectCircuitBroken) {
+                autoReconnectCircuitBroken = false;
+                autoReconnectStreakCount = 0;
+                logUi(null, "Coupe-circuit réarmé (action manuelle depuis Configure)");
+            }
+            scanUsb();
+        });
+        if (btnPingUsb != null) btnPingUsb.setOnClickListener(v -> openSelectedUsb());
+        if (btnQuit != null) btnQuit.setOnClickListener(v -> confirmQuit());
+
+        // Tabs registres
+        if (tabRegisters != null) {
+            tabRegisters.addOnTabSelectedListener(new TabLayout.OnTabSelectedListener() {
+                @Override public void onTabSelected(TabLayout.Tab tab) {
+                    Object tag = (tab != null) ? tab.getTag() : null;
+                    if (tag instanceof String) showRegisterFragmentByKey((String) tag);
+                }
+                @Override public void onTabUnselected(TabLayout.Tab tab) {}
+                @Override public void onTabReselected(TabLayout.Tab tab) {
+                    Object tag = (tab != null) ? tab.getTag() : null;
+                    if (tag instanceof String) showRegisterFragmentByKey((String) tag);
+                }
             });
+
+            // Long press → dialogue Reconnect / Supprimer
+            tabRegisters.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) ->
+                attachTabLongPressListeners());
         }
-        if (btnScrollDown != null && logScroll != null) {
-            btnScrollDown.setOnClickListener(v -> scrollLogToBottomOnly());
+
+        // Log global
+        if (cbShowLog != null) {
+            cbShowLog.setOnCheckedChangeListener((buttonView, checked) -> {
+                if (logPanel != null) logPanel.setVisibility(checked ? View.VISIBLE : View.GONE);
+                logUi(null, "Option Afficher log global: " + (checked ? "ON" : "OFF"));
+                if (checked) refreshGlobalLogView();
+            });
         }
         if (btnClearLog != null) {
             btnClearLog.setOnClickListener(v -> {
-                logViewSinceMs = System.currentTimeMillis();
+                mainLogViewSinceMs = System.currentTimeMillis();
                 if (txtLog != null) txtLog.setText("");
-                LogBus.ui(node, ts("Clear log (vue locale)"));
+                logUi(null, "Clear log (vue MAIN)");
             });
         }
         if (btnCopyLog != null) {
             btnCopyLog.setOnClickListener(v -> {
-                android.content.ClipboardManager cm =
-                        (android.content.ClipboardManager) requireContext().getSystemService(Context.CLIPBOARD_SERVICE);
-                cm.setPrimaryClip(android.content.ClipData.newPlainText("log", txtLog != null ? txtLog.getText() : ""));
-                LogBus.ui(node, ts("Log copié"));
+                ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                cm.setPrimaryClip(ClipData.newPlainText("log", txtLog != null ? txtLog.getText() : ""));
+                logUi(null, "Log copié dans le presse-papiers");
             });
         }
-        if (cbLogTs != null) {
-            cbLogTs.setOnCheckedChangeListener((b, checked) -> {
-                logTsEnabled = checked;
-                LogBus.SHOW_TS = checked;
-                if (controller != null) controller.setLogTimestampsEnabled(checked);
-                LogBus.ui(node, ts("Timestamps: " + (checked ? "ON" : "OFF")));
-                scheduleLogRefresh();
+        if (btnScrollDown != null) {
+            btnScrollDown.setOnClickListener(v -> {
+                if (logScroll != null) logScroll.fullScroll(View.FOCUS_DOWN);
             });
         }
         if (cbTxRx != null) {
-            cbTxRx.setOnCheckedChangeListener((b, checked) -> {
+            cbTxRx.setOnCheckedChangeListener((buttonView, checked) -> {
+                SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
+                prefs.edit().putBoolean("log_tx_rx", checked).apply();
                 LogBus.SHOW_IO = checked;
-                if (controller != null) controller.setTxRxLoggingEnabled(checked);
-                LogBus.ui(node, ts("TX/RX: " + (checked ? "ON" : "OFF")));
-                scheduleLogRefresh();
+                logUi(null, "Option TX/RX (vue MAIN): " + (checked ? "ON" : "OFF"));
+                refreshGlobalLogView();
             });
         }
-        if (btnConnect != null) btnConnect.setOnClickListener(v -> {
-            // ✅ FIX (7 août 2026, demande Paul — "chaque action fait dans le
-            // tab qu'on puisse le suivre dans l'onglet Support... repérer ce
-            // comportement selon une fonction qu'on a cliqué") — chaque
-            // bouton d'action logue maintenant un marqueur clair et distinct
-            // dès le clic, avant même de savoir si l'action va réussir —
-            // pour qu'un futur repérage dans Support puisse toujours dire
-            // "c'est CE clic qui a déclenché ce qui suit".
-            LogBus.api(node, "[ACTION-CLIC] CONNECT_LCP");
-            // ✅ FIX (demandé) : Connect LCP valide le transport ET le registre
-            // précis avant de conclure quoi que ce soit. Si aucune session
-            // n'existe encore, on reconnecte directement (rien à valider).
-            // Si une session existe, on l'éprouve avec une vraie commande
-            // Status — si ça réussit, déjà connecté pour de vrai ; si ça
-            // échoue, reconnexion via le diagnostic (déclenché automatiquement
-            // par validerTransportEtRegistrePuis en cas d'échec).
-            if (controller == null) { reconnectThisRegister(true); return; }
-            validerTransportEtRegistrePuis("CONNECT_LCP", () -> {
-                try { Toast.makeText(requireContext(), "✅ Déjà connecté (validé)", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
-                // ✅ AJOUTÉ (7 août 2026, demande Paul — "récupérer le
-                // firmware du registre... dans le log du support") — lu à
-                // chaque validation réussie de connexion, sur bg (jamais sur
-                // le thread UI), résultat logué clairement dans Support.
-                DeliveryController cFw = controller;
-                if (cFw != null) {
-                    bg.execute(() -> {
-                        try {
-                            String fw = cFw.getFirmwareVersion();
-                            LogBus.api(node, "[FIRMWARE] Version logicielle du registre : "
-                                    + (fw != null && !fw.isEmpty() ? fw : "(vide)"));
-                        } catch (Exception e) {
-                            LogBus.api(node, "[FIRMWARE] Lecture ERR: " + safeMsg(e));
-                        }
-                    });
-                }
-            });
-        });
-        if (btnA != null) btnA.setOnClickListener(v -> {
-            LogBus.api(node, "[ACTION-CLIC] RESOLVE_A");
-            if (controller == null) return;
-            // ✅ Confirmation si RUNNING_FLOWING
-            if (controller.getState() == DeliveryState.RUNNING_FLOWING) {
-                new android.app.AlertDialog.Builder(requireContext())
-                    .setTitle("⚠️ Resolve pendant livraison")
-                    .setMessage("Une livraison est en cours.\nÊtes-vous sûr de vouloir résoudre l'état du registre ?")
-                    .setPositiveButton("Confirmer", (d, w) -> doResolve())
-                    .setNegativeButton("Annuler", null)
-                    .show();
-                return;
-            }
-            doResolve();
-        });
-
-        // ✅ Bouton Annuler livraison
-        if (btnAnnuler != null) {
-            btnAnnuler.setOnClickListener(v -> {
-                LogBus.api(node, "[ACTION-CLIC] ANNULER");
-                new android.app.AlertDialog.Builder(requireContext())
-                    .setTitle("Confirmer l'annulation")
-                    .setMessage("Aucun volume livré. La livraison sera annulée et le registre réinitialisé.")
-                    .setPositiveButton("Annuler la livraison", (d, w) -> annulerLivraison())
-                    .setNegativeButton("Continuer", null)
-                    .show();
-            });
-        }
-        if (btnB != null) btnB.setOnClickListener(v -> {
-            LogBus.api(node, "[ACTION-CLIC] STATUS_B");
-            if (controller == null) { reconnectThisRegister(true); return; }
-            // ✅ FIX (demandé) : Status(B) valide maintenant le transport ET le
-            // registre précis (node+serial) en envoyant une VRAIE commande
-            // Status comme test définitif — pas juste io.isOpen() qui peut
-            // mentir. Si la validation réussit, Status s'exécute normalement.
-            // Si elle échoue, le diagnostic se déclenche automatiquement.
-            validerTransportEtRegistrePuis("STATUS_B", () -> runStatusBLikeButton("STATUS_B"));
-        });
-        if (btnC != null) {
-            btnC.setOnClickListener(v -> {
-                LogBus.api(node, "[ACTION-CLIC] NEW_C");
-                if (controller == null) return;
-                // ✅ FIX (audit complet) : btnC (New) n'avait AUCUNE vérification
-                // IO avant d'agir — seul bouton d'action à ne pas passer par le
-                // diagnostic de reconnexion. Ajouté pour cohérence avec tous les
-                // autres boutons (Resolve/Status/Continuer/Terminer/Annuler).
-                if (!verifierIoAvantAction("NEW_C")) return;
-
-                // ✅ FIX : lire edtPreset sur le thread UI AVANT de passer en
-                // arrière-plan — accéder à une vue depuis bg.execute() n'est pas
-                // garanti sécuritaire, peu importe si ça semblait fonctionner.
-                final String presetTxtUi = edtPreset != null
-                    ? edtPreset.getText().toString().trim() : "";
-
-                // ✅ FIX : cette vérification faisait des requêtes SQLite synchrones
-                // DIRECTEMENT sur le thread UI (ActiveDeliveryStore.load() +
-                // LcrDeliveryStatusDb.getLatestForWo()). En cas de contention avec
-                // d'autres accès DB en cours (plusieurs mécanismes de reconnexion
-                // tournent en parallèle dans cette app), ce clic restait bloqué en
-                // silence — bouton visuellement enfoncé, aucune réaction, comme un gel.
-                bg.execute(() -> {
-                    boolean showDialog = false;
-                    String curWoNumBg = "";
-                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow existingBg = null;
-                    double presetValBg = 0;
-                    try {
-                        com.pa.lcr.lcp.storage.ActiveDeliveryStore ads4 =
-                            new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
-                        com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad4 = ads4.load();
-                        curWoNumBg = (ad4 != null && ad4.woNum != null) ? ad4.woNum : "";
-                        if (!curWoNumBg.isEmpty()) {
-                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb statusDb =
-                                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
-                            try {
-                                existingBg = statusDb.getLatestForWo(curWoNumBg);
-                            } finally {
-                                try { statusDb.close(); } catch (Exception ignored) {}
-                            }
-                            if (existingBg != null && existingBg.type != null
-                                    && !"ANNULATION".equals(existingBg.type)) {
-                                try {
-                                    if (!presetTxtUi.isEmpty()) presetValBg = Double.parseDouble(presetTxtUi);
-                                } catch (Exception ignored) {}
-                                boolean livraisonComplete = (presetValBg <= 0 || existingBg.netL >= presetValBg);
-                                showDialog = livraisonComplete && !bypassDeliveryDialog;
-                            }
-                        }
-                    } catch (Exception ignored) {}
-
-                    final boolean fShowDialog = showDialog;
-                    final String fCurWoNum = curWoNumBg;
-                    final com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow fExisting = existingBg;
-
-                    ui.post(() -> {
-                        if (!isAdded()) return;
-                        if (fShowDialog && fExisting != null) {
-                            new android.app.AlertDialog.Builder(requireContext())
-                                .setTitle("Bon déjà complété")
-                                .setMessage("Le bon " + fCurWoNum + " a déjà été livré"
-                                    + " (ticket #" + fExisting.ticketNo
-                                    + ", " + fExisting.netL + "L net).\n\n"
-                                    + "Voulez-vous créer une nouvelle livraison sur ce même bon ?")
-                                .setPositiveButton("Continuer", (d, w) -> startNewDeliveryC())
-                                .setNegativeButton("Annuler", null)
-                                .show();
-                            return;
-                        }
-                        bypassDeliveryDialog = false;
-                        startNewDeliveryC();
-                    });
-                });
-            });
-        }
-        if (btnContinue != null) btnContinue.setOnClickListener(v -> {
-            LogBus.api(node, "[ACTION-CLIC] CONTINUER");
-            if (controller == null) return;
-            if (!verifierIoAvantAction("CONTINUE")) return;
-            if (controller.getState() != DeliveryState.RUNNING_PAUSED) {
-                try { controller.requestLiveSample(); } catch (Exception ignored) {}
-                try { Toast.makeText(requireContext(), "Attendre confirmation FLOW OFF", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
-                LogBus.ui(node, ts("Continue ignoré: FLOW OFF pas encore confirmé"));
-                return;
-            }
-            controller.resumeIfPaused();
-        });
-        if (btnFinish != null) btnFinish.setOnClickListener(v -> {
-            LogBus.api(node, "[ACTION-CLIC] TERMINER");
-            if (controller == null) return;
-            if (!verifierIoAvantAction("FINISH")) return;
-            boolean stableOff2 = false;
-            try { stableOff2 = controller.isFlowOffStable(); } catch (Exception ignored) {}
-            if (!stableOff2) {
-                try { controller.requestLiveSample(); } catch (Exception ignored) {}
-                try { Toast.makeText(requireContext(), "FLOW OFF en confirmation...", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
-                return;
-            }
-            controller.endDelivery();
-            ui.postDelayed(() -> {
-                try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
-                try { validateHeaderAsync(); } catch (Exception ignored) {}
-                try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
-                refreshDelCodeFromTickSnapshotThrottled();
-                updateButtons(controller != null ? controller.getState() : null);
-            }, 1500);
-        });
-
-        // ✅ REPRINT: vérification divergence net/gross avant impression
-        // Lit les compteurs via opGetField(45/44) — valeurs courantes du registre
-        // Si delta >= 0.5L vs WO → bloquer reprint standard + ticket incident custom
-        if (btnReprintTicket != null) {
-            btnReprintTicket.setOnClickListener(v -> {
-                LogBus.api(node, "[ACTION-CLIC] REIMPRIMER");
-                DeliveryController c = controller;
-                if (c == null) return;
-                // ✅ FIX (audit complet) : Reprint n'avait AUCUNE vérification IO
-                // avant d'agir. Ajouté pour cohérence.
-                if (!verifierIoAvantAction("REPRINT")) return;
-                bg.execute(() -> {
-                    try {
-                        if (tabTransportKey != null) {
-                            MediaTransportManager.get(requireContext())
-                                    .activateExclusive(tabTransportKey, "REPRINT");
-                        }
-
-                        // Lire ticket_no AVANT reprint
-                        String ticketNoBefore = "";
-                        try {
-                            ApiResult snap = c.api_tickSnapshot();
-                            if (snap != null && snap.data != null) {
-                                ticketNoBefore = snap.data.optString("ticket_no", "");
-                                org.json.JSONObject result = snap.data.optJSONObject("result");
-                                if (result != null && ticketNoBefore.isEmpty())
-                                    ticketNoBefore = result.optString("ticket_no", "");
-                            }
-                        } catch (Exception ignored) {}
-
-                        // Lire net/gross du WO depuis lastResultJson
-                        double netWo = -1.0, grossWo = -1.0;
-                        String woNum = "", woIdGuid = "";
-                        try {
-                            String last = com.pa.lcrdemo.DeepLinkHandler.lastResultJson;
-                            if (last != null) {
-                                org.json.JSONObject j = new org.json.JSONObject(last);
-                                woNum    = j.optString("wonum", "");
-                                woIdGuid = j.optString("woid",  "");
-                                org.json.JSONObject payload = j.optJSONObject("payload");
-                                if (payload != null) {
-                                    org.json.JSONObject result = payload.optJSONObject("result");
-                                    if (result != null) {
-                                        netWo   = result.optDouble("fs_net_l",   -1.0);
-                                        grossWo = result.optDouble("fs_gross_l", -1.0);
-                                    }
-                                }
-                            }
-                        } catch (Exception ignored) {}
-
-                        // Lire net/gross courant via opGetField(45/44) — valeurs live du registre
-                        double netRegistre   = -1.0;
-                        double grossRegistre = -1.0;
-                        try {
-                            // Field #2 GrossQty_NE + Field #3 NetQty_NE
-                            // Quantites facturables selon SDK LCR-II
-                            double[] hw = c.readNetGrossFromHardware();
-                            netRegistre   = hw[0];
-                            grossRegistre = hw[1];
-                        } catch (Exception ignored) {}
-
-                        final String fTicketNoBefore = ticketNoBefore;
-                        final String fWoNum          = woNum;
-                        final String fWoIdGuid       = woIdGuid;
-                        final double fNetWo          = netWo;
-                        final double fGrossWo        = grossWo;
-                        final double fNetReg         = netRegistre;
-                        final double fGrossReg       = grossRegistre;
-
-                        boolean divergence = (netWo > 0 && netRegistre > 0
-                            && Math.abs(netRegistre - netWo) >= POST_DELIVERY_LEAK_THRESHOLD_L);
-
-                        if (divergence) {
-                            double delta = netRegistre - netWo;
-                            LogBus.api(node, "[REPRINT] DIVERGENCE netWO=" + netWo
-                                + "L netReg=" + netRegistre + "L delta=" + delta + "L");
-                            ui.post(() -> {
-                                if (!isAdded() || getView() == null) return;
-                                StringBuilder sb = new StringBuilder();
-                                sb.append("DIVERGENCE DETECTEE\n\n");
-                                sb.append("Ticket ref : ").append(fTicketNoBefore).append("\n");
-                                sb.append(String.format(java.util.Locale.ROOT, "NET WO       : %.3f L\n", fNetWo));
-                                sb.append(String.format(java.util.Locale.ROOT, "NET registre : %.3f L\n", fNetReg));
-                                sb.append(String.format(java.util.Locale.ROOT, "DELTA        : %.3f L\n\n", fNetReg - fNetWo));
-                                sb.append("Reprint standard bloque.");
-                                new android.app.AlertDialog.Builder(requireContext())
-                                    .setTitle("Reprint bloque - Divergence")
-                                    .setMessage(sb.toString())
-                                    .setCancelable(false)
-                                    .setPositiveButton("Imprimer ticket incident", (d, w) ->
-                                        terminerPostLivraisonAvecVolumesReels(fNetReg, fGrossReg, fTicketNoBefore))
-                                    .setNegativeButton("Aviser le repartiteur", (d, w) ->
-                                        logFuiteVanneDataverse(fNetWo, fNetReg, fGrossWo, fGrossReg,
-                                            fTicketNoBefore, fNetReg - fNetWo))
-                                    .show();
-                            });
-                            return;
-                        }
-
-                        // Pas de divergence — reprint standard
-                        ApiResult r = c.api_ticketReprintCurrent();
-                        LogBus.api(node, "[REPRINT] " + (r != null ? r.msg : "null"));
-
-                        String ticketNoAfter = "";
-                        double netL = 0, grossL = 0;
-                        try {
-                            Thread.sleep(500);
-                            ApiResult snap2 = c.api_tickSnapshot();
-                            if (snap2 != null && snap2.data != null) {
-                                org.json.JSONObject result = snap2.data.optJSONObject("result");
-                                if (result != null) {
-                                    ticketNoAfter = result.optString("ticket_no", "");
-                                    netL   = result.optDouble("fs_net_l",  0);
-                                    grossL = result.optDouble("fs_gross_l",0);
-                                }
-                            }
-                        } catch (Exception ignored) {}
-
-                        if (!ticketNoAfter.isEmpty() && !ticketNoAfter.equals(ticketNoBefore)) {
-                            android.content.ContentValues cv = new android.content.ContentValues();
-                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,       woNum);
-                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID,   woIdGuid);
-                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO,    ticketNoAfter);
-                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO_REF,ticketNoBefore);
-                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,        netL);
-                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L,      grossL);
-                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
-                                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_REPRINT);
-                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,       "REGISTRE");
-                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE,    "LIVRAISON");
-                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
-                                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
-                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
-                                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
-                            try {
-                                lcrDb.insertDelivery(cv);
-                            } finally {
-                                try { lcrDb.close(); } catch (Exception ignored) {}
-                            }
-                        }
-
-                    } catch (Exception e) {
-                        LogBus.api(node, "[REPRINT] ERR: " + safeMsg(e));
-                        surErreurConnexion(e, "REPRINT");
-                    }
-                });
+        if (cbLogTs != null) {
+            cbLogTs.setOnCheckedChangeListener((buttonView, checked) -> {
+                SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
+                prefs.edit().putBoolean("log_ts", checked).apply();
+                logTsEnabled = checked;
+                LogBus.SHOW_TS = checked;
+                logUi(null, "Option timestamps (UI+IO+API): " + (checked ? "ON" : "OFF"));
+                refreshGlobalLogView();
             });
         }
 
-        // ✅ RETOUR WO: câblage du bouton Retour au Work Order (Bloc 5)
-        if (btnRetourWO != null) {
-            btnRetourWO.setOnClickListener(v -> { LogBus.api(node, "[ACTION-CLIC] RETOUR_WO"); retournerAuWorkOrder(); });
+        // API-Face
+        if (btnApiStart != null) btnApiStart.setOnClickListener(v -> startApiServer());
+        if (btnApiStop != null) btnApiStop.setOnClickListener(v -> stopApiServer("Stop button"));
+
+        if (btnDbBackup != null) {
+            btnDbBackup.setOnClickListener(v -> doBackupDb());
+            btnDbBackup.setOnLongClickListener(v -> { requestBackupDir(); return true; });
         }
 
-        // ✅ Custom print — impression ligne par ligne via opPrintText
-        if (btnCustomPrint != null) {
-            btnCustomPrint.setOnClickListener(v -> lancerImpressionCustom());
-        }
-        if (btnScanProducts != null) {
-            btnScanProducts.setOnClickListener(v -> {
-                LogBus.api(node, "[ACTION-CLIC] SCAN_PRODUITS");
-                lancerScanProduits();
-            });
-        }
-    }
+        // ✅ (retiré 3 août 2026, demande Paul : "la partie Field Service Mobile je
+        // supprimerais cette notion là") — carte et wiring Field Service Mobile
+        // entièrement retirés de l'onglet API (anciennement API-Face).
 
-    public void onTabMediaStatusChanged(boolean ready, String mediaShort) {
-        tabMediaReady = ready;
-        tabMediaShort = (mediaShort == null || mediaShort.trim().isEmpty()) ? "—" : mediaShort.trim();
-        ui.post(() -> {
-            if (!isAdded() || getView() == null) return;
-            if (!tabMediaReady) {
-                // ✅ Message contextuel selon l'état de la livraison
-                String liveMsg;
-                if (controller != null) {
-                    com.pa.lcr.lcp.DeliveryState st = controller.getState();
-                    if (st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING) {
-                        liveMsg = "⚠️ " + tabMediaShort + " COUPÉ pendant livraison — le registre continue physiquement — reconnectez le BT";
-                    } else if (st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED) {
-                        liveMsg = "⚠️ " + tabMediaShort + " COUPÉ — livraison en pause — reconnectez le BT";
-                    } else {
-                        liveMsg = "LIVE: " + tabMediaShort + "(OFF) — reconnect requis";
-                    }
-                } else {
-                    liveMsg = "LIVE: " + tabMediaShort + "(OFF) — reconnect requis";
-                }
-                if (txtLive != null) txtLive.setText(liveMsg);
-                pendingReconnect = true;
-                updateButtons(controller != null ? controller.getState() : null);
-                return;
-            }
-            if (pendingReconnect) { pendingReconnect = false; reconnectThisRegister(false); }
-            // ✅ Toujours vérifier PENDING quand le média devient disponible
-            ui.postDelayed(() -> checkPendingDeliveryForThisRegister(), 1500);
+        // BT
+        if (btnBtRefresh != null) btnBtRefresh.setOnClickListener(v -> refreshBondedBtList());
+        if (btnBtConnect != null) btnBtConnect.setOnClickListener(v -> btConnectSelected());
+        // ✅ AJOUTÉ (7 août 2026, demande Paul — "réduire la vitesse de
+        // transmission entre 19200 et 4800 dans les tests de diagnostic,
+        // autant pour BT que USB" — précisé ensuite : "pas à l'intérieur du
+        // tab, le média est supporté par le tab mais pas à l'intérieur" —
+        // donc placé ici, dans CONFIGURE (zone média), pas dans
+        // RegisterTabFragment (zone communication directe avec le
+        // registre). Appui long, pas un nouveau bouton (évite de modifier
+        // le layout XML en aveugle sans vérification visuelle).
+        if (btnBtConnect != null) btnBtConnect.setOnLongClickListener(v -> {
+            showBaudDiagnosticDialog();
+            return true;
         });
-    }
-
-    /** Appelé depuis MainActivity dialog long press. */
-    public void reconnectFromDialog() {
-        // ✅ DIRECTIVE CLAIRE : Reconnect (long-press) = lance le diagnostique.
-        // Point final. Aucune condition sur tabMediaReady, aucun passage par
-        // reconnectThisRegister()/connectThisRegister() et leurs multiples
-        // branches — ce bouton force directement le même diagnostic que
-        // Status/Continuer utilisent, sans détour.
-        ui.post(() -> {
-            try { Toast.makeText(requireContext(), "🔄 Reconnexion — diagnostic en cours...", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
-            android.util.Log.i("RegisterTabFragment", "reconnectFromDialog: appel direct du diagnostic (sans condition)");
-            surErreurConnexion(
-                new java.io.IOException("Reconnect demandé manuellement (long-press)"),
-                "RECONNECT_LONGPRESS_DIRECT");
-        });
-    }
-
-    private void reconnectThisRegister(boolean userInitiated) {
-        if (!tabMediaReady) {
-            pendingReconnect = true;
-            // ✅ FIX (bétonnage) : avant, quand le média était OFF, ce chemin ne
-            // faisait RIEN d'actif — juste un drapeau posé + toast passif, en
-            // attendant qu'un événement externe (onTabMediaStatusChanged) se
-            // déclenche tout seul. Sur une vraie déconnexion USB/BT, cet
-            // événement n'arrive pas forcément — d'où "reconnect ne change
-            // rien". On déclenche maintenant activement le diagnostic (même
-            // mécanisme que Status/Continuer), au lieu d'attendre passivement.
-            if (userInitiated) {
-                try { Toast.makeText(requireContext(), tabMediaShort + "(OFF) — reconnexion en cours…", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
-                android.util.Log.w("RegisterTabFragment", "reconnectThisRegister: média OFF — diagnostic actif déclenché (userInitiated)");
-                surErreurConnexion(
-                    new java.io.IOException("Média OFF — reconnexion demandée par l'utilisateur"),
-                    "RECONNECT_LONGPRESS");
-            }
-            return;
-        }
-        // ✅ Ne pas nullifier le controller si livraison active — le tick continue
-        // Réattacher seulement le listener UI
-        if (controller != null) {
-            com.pa.lcr.lcp.DeliveryState st = controller.getState();
-            if (st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
-                    || st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED
-                    || st == com.pa.lcr.lcp.DeliveryState.ENDING) {
-                android.util.Log.i("RegisterTabFragment",
-                    "reconnect: livraison active (" + st + ") — réattach UI seulement, controller préservé");
-                connectThisRegister(userInitiated);
-                return;
-            }
-        }
-        try { detachUiListenerSafe(); } catch (Exception ignored) {}
-        controller = null;
-        starting = false;
-        ticketPendingFlag = -1;
-        connectThisRegister(userInitiated);
-    }
-
-    private void attemptAttachIfPossible(boolean verboseLog) {
-        if (!tabMediaReady && !pendingReconnect) return;
-        if (uiListenerAttached && controller != null) { syncUiFromController(); return; }
-        connectThisRegister(false);
-    }
-
-
-    private void connectThisRegister(boolean userInitiated) {
-        // ✅ Si le controller existant est mort (shutdown après erreur BT "Error writing"
-        // par exemple) — forcer la recréation au lieu de continuer à l'utiliser
-        if (controller != null && controller.isStopped()) {
-            LogBus.api(node, "Controller mort détecté — recréation forcée");
-            controller = null;
-        }
-        // Si controller existe et transport prêt — pas besoin de recréer
-        if (controller != null && tabMediaReady) {
-            syncUiFromController();
-            validateHeaderAsync();
-            ui.postDelayed(() -> runStatusBLikeButton("TAB_REACTIVATED"), 250);
-            triggerWoDetectionThrottled();
-            return;
-        }
-        RegisterSessionManager sm = RegisterSessionManager.get(requireContext());
-        DeliveryController dc = null;
-
-        if (tabTransportKey != null && !tabTransportKey.trim().isEmpty()) {
-            final String tkPinned = tabTransportKey.trim();
-            try { MediaTransportManager.get(requireContext()).activateExclusive(tkPinned, "TAB_CONNECT"); } catch (Exception ignored) {}
-            TransportIo io = null;
-            try { io = MediaTransportManager.get(requireContext()).getByKey(tkPinned); } catch (Exception ignored) {}
-            // ✅ FIX (4 août 2026, demande Paul — "j'arrive de fieldservice...
-            // ça capote et ne trouve pas le registre... je débranche/rebranche
-            // le câble, ça marche") — confirmé par logcat : ce chemin se
-            // contentait d'activateExclusive(), qui ne fait que MARQUER un
-            // transport déjà ouvert comme actif — il n'ouvre jamais
-            // physiquement le port. Un rebranchement manuel déclenche
-            // ACTION_USB_DEVICE_ATTACHED → permission → scan → ouverture
-            // réelle (tout ce chemin OS). L'arrivée deep link, elle, ne
-            // déclenche RIEN de tout ça si le câble était déjà branché avant
-            // — donc io=null, "transport pinné fermé", abandon direct vers
-            // diagnostic, sans jamais avoir tenté une vraie ouverture.
-            //
-            // ✅ FIX (4 août 2026, demande Paul — "c'est supposé passer par le
-            // même connecteur transport") — la première version de ce fix
-            // appelait api_openPingUsb()/api_btActivate() directement, ce qui
-            // recréait exactement la fragmentation qu'on venait de
-            // consolider. Corrigé : passe maintenant par
-            // api_registerConnectAuto() — le point d'entrée unique
-            // (USB→BT→TCP, verrou unique) construit pour tout le reste. Un
-            // seul endroit initie une connexion, pas de chemin séparé ici.
-            if (io == null || !io.isOpen()) {
-                try {
-                    com.pa.lcr.lcp.MultiRegisterApiFacadeImpl facadeOpen =
-                        new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(requireActivity());
-                    String serialForConnect = (serialFromArgs != null && !serialFromArgs.trim().isEmpty())
-                        ? serialFromArgs.trim() : null;
-                    facadeOpen.api_registerConnectAuto(serialForConnect, node);
-                } catch (Exception ignored) {}
-                // ✅ FIX (4 août 2026, demande Paul — "comment peut-il avoir un
-                // USB(OFF) qui arrive avec ça") — ce tab reste pinné à
-                // tabTransportKey pour toute sa durée de vie (fixé une seule
-                // fois à sa création, onAttach()). Si le registre (même node+
-                // #série) a été retrouvé par api_registerConnectAuto() sur un
-                // AUTRE transport que celui-ci, revérifier seulement l'ancien
-                // transport pinné (tkPinned) déclare le tab "OFF" à tort, même
-                // si le même registre répond parfaitement ailleurs. On
-                // retrouve ici le transport RÉEL actuellement utilisé pour ce
-                // node et on réaligne le tab dessus.
-                try {
-                    String realTk = sm.findTransportKeyForNode(node);
-                    if (realTk != null && !realTk.equalsIgnoreCase(tkPinned)) {
-                        android.util.Log.i("RegisterTabFragment", "connectThisRegister: registre retrouvé sur "
-                            + realTk + " au lieu de " + tkPinned + " — tab réaligné");
-                        LogBus.api(node, "[TAB-REALIGN] " + tabMediaShort + "→" + realTk
-                            + " (registre retrouvé sur un autre transport)");
-                        tabTransportKey = realTk;
-                        String up = realTk.toUpperCase(java.util.Locale.ROOT);
-                        tabMediaShort = up.startsWith("BT:") ? "BT" : (up.startsWith("USB") ? "USB" : (up.startsWith("TCP:") ? "TCP" : tabMediaShort));
-                        try { io = MediaTransportManager.get(requireContext()).getByKey(realTk); } catch (Exception ignored2) {}
-                    } else {
-                        try { io = MediaTransportManager.get(requireContext()).getByKey(tkPinned); } catch (Exception ignored2) {}
-                    }
-                } catch (Exception ignored) {
-                    try { io = MediaTransportManager.get(requireContext()).getByKey(tkPinned); } catch (Exception ignored2) {}
-                }
-            }
-            if (io == null || !io.isOpen()) {
-                tabMediaReady = false;
-                pendingReconnect = true;
-                String msg = tabMediaShort + "(OFF) — reconnect requis";
-                LogBus.api(node, msg);
-                android.util.Log.w("RegisterTabFragment", "connectThisRegister: io=" + (io == null ? "null" : "fermé")
-                        + " pour transport=" + tkPinned + " — déclenchement diagnostic");
-                reportMediaOffToApi("CONNECT_CLICK", msg);
-                ui.post(() -> {
-                    if (!isAdded() || getView() == null) return;
-                    if (txtLive != null) txtLive.setText("LIVE: " + tabMediaShort + "(OFF) — reconnexion en cours...");
-                    updateButtons(null);
-                });
-                // ✅ FIX (LA vraie cause, même bug que plus bas) : ce chemin ne
-                // faisait que mettre à jour un texte puis s'arrêtait — JAMAIS
-                // d'appel à surErreurConnexion(), donc jamais de diagnostic
-                // déclenché. C'est le chemin le PLUS fréquemment emprunté
-                // (tabTransportKey est presque toujours déjà défini pour un
-                // onglet existant), donc probablement la cause principale du
-                // "aucune réaction" sur long-press Reconnect / Status.
-                surErreurConnexion(
-                    new java.io.IOException("connectThisRegister: transport pinné fermé — " + tkPinned),
-                    "CONNECT_THIS_REGISTER_PINNED");
-                return;
-            }
-            // ✅ Si le controller du session manager est aussi mort — le retirer avant getOrCreate
-            try {
-                if (controller != null && controller.isStopped()) {
-                    android.util.Log.i("RegisterTabFragment", "Controller mort — recréation forcée");
-                    controller = null;
-                }
-            } catch (Exception ignored) {}
-            dc = sm.getOrCreate(tkPinned, node, from, io);
-        }
-        if (dc == null && (tabTransportKey == null || tabTransportKey.trim().isEmpty())) {
-            dc = sm.resolveOrCreateForNode(node, from);
-        }
-        if (dc == null) {
-            LogBus.api(node, "Aucun média prêt / registre introuvable pour ce node");
-            android.util.Log.w("RegisterTabFragment", "connectThisRegister: dc=null pour node=" + node
-                    + " tabTransportKey=" + tabTransportKey + " userInitiated=" + userInitiated
-                    + " — déclenchement diagnostic");
-            // ✅ FIX (LA vraie cause du "aucune réaction" sur long-press Reconnect
-            // et Status) : ce chemin se contentait d'un toast discret puis
-            // s'arrêtait — JAMAIS d'appel à surErreurConnexion(), donc JAMAIS
-            // de diagnostic déclenché, peu importe combien de fois le chauffeur
-            // cliquait. C'est une fonction séparée de verifierIoAvantAction/
-            // Status(B), avec sa propre logique d'abandon silencieux jamais
-            // corrigée jusqu'ici.
-            if (userInitiated) {
-                try { Toast.makeText(requireContext(), "Aucun média prêt (USB/BT) — diagnostic en cours...", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
-            }
-            surErreurConnexion(
-                new java.io.IOException("connectThisRegister: aucun média prêt/registre introuvable"),
-                "CONNECT_THIS_REGISTER");
-            return;
-        }
-
-        controller = dc;
-        try {
-            String tk = sm.findTransportKeyForController(controller);
-            // Ne mettre à jour tabTransportKey que si cohérent avec transportFromArgs
-            if (tk != null && !tk.trim().isEmpty()) {
-                if (transportFromArgs == null || transportFromArgs.trim().isEmpty()) {
-                    tabTransportKey = tk.trim();
-                } else if (tk.trim().equalsIgnoreCase(transportFromArgs.trim())) {
-                    tabTransportKey = tk.trim();
-                }
-                // Sinon garder tabTransportKey original — ne pas écraser avec mauvais transport
-            }
-        } catch (Exception ignored) {}
-
-        try {
-            if (tabTransportKey != null) MediaTransportManager.get(requireContext()).activateExclusive(tabTransportKey, "TAB_CONNECT_FINAL");
-        } catch (Exception ignored) {}
-        if (!uiListenerAttached) {
-            try {
-                if (tabTransportKey != null) sm.attachUiListener(tabTransportKey, node, uiListener);
-                else sm.attachUiListener(node, uiListener);
-            } catch (Exception ignored) {}
-            uiListenerAttached = true;
-        }
-        if (cbTxRx != null) controller.setTxRxLoggingEnabled(cbTxRx.isChecked());
-        if (cbLogTs != null) controller.setLogTimestampsEnabled(cbLogTs.isChecked());
-        syncUiFromController();
-        validateHeaderAsync();
-        ui.postDelayed(() -> runStatusBLikeButton("AUTO_AFTER_TAB_CREATE"), 250);
-        if (userInitiated) LogBus.api(node, "Connect TAB: 1 - UI attached");
-        scheduleLogRefresh();
-        triggerWoDetectionThrottled();
-    }
-
-    private volatile long lastWoDetectTriggerMs = 0;
-    // ✅ (ajouté 3 août 2026) — armé juste avant un déclenchement explicite (entrée tab
-    // ou clic Status(B)), consommé une seule fois par onTicketInfo() pour autoriser la
-    // recherche complète (Dataverse + backup). Voir lookupWoForTicket(ticketNo, allowFullSearch).
-    private volatile boolean fullTicketSearchArmed = false;
-
-    /**
-     * ✅ FIX : rechercherWoDepuisRegistre()/rafraichirCumulWo() doivent tourner au
-     * moment réel où la connexion est confirmée (pas seulement sur des délais fixes
-     * décorrélés du temps de connexion BT) — mais connectThisRegister() peut être
-     * appelée bien plus souvent qu'un vrai événement de connexion (boucles de
-     * vérification périodiques existantes). Sans ce anti-rebond dédié, chaque appel
-     * ouvrait une nouvelle connexion LcrDeliveryStatusDb — d'où la rafale de
-     * "SQLiteConnection leaked" observée en rafale dans les logs.
-     */
-    private void triggerWoDetectionThrottled() {
-        long now = System.currentTimeMillis();
-        if (now - lastWoDetectTriggerMs < 2000) return;
-        lastWoDetectTriggerMs = now;
-        rechercherWoDepuisRegistre();
-        rafraichirCumulWo();
-    }
-
-    private void attachUiListenerIfNeeded() {
-        if (uiListenerAttached) return;
-        try {
-            RegisterSessionManager sm = RegisterSessionManager.get(requireContext());
-            if (tabTransportKey != null) sm.attachUiListener(tabTransportKey, node, uiListener);
-            else sm.attachUiListener(node, uiListener);
-            uiListenerAttached = true;
-            // Sync immédiat de l'état actuel pour rattraper RUNNING_FLOWING manqué
-            syncUiFromController();
-            LogBus.api(node, "uiListener réattaché au retour du tab");
-        } catch (Exception ignored) {}
-    }
-
-    private void detachUiListenerSafe() {
-        if (!uiListenerAttached) return;
-        try {
-            RegisterSessionManager sm = RegisterSessionManager.get(requireContext());
-            if (tabTransportKey != null) sm.detachUiListener(tabTransportKey, node, uiListener);
-            else sm.detachUiListener(node, uiListener);
-        } catch (Exception ignored) {}
-        uiListenerAttached = false;
-    }
-
-    private void syncUiFromController() {
-        if (controller == null) return;
-        DeliveryState st = controller.getState();
-        refreshDelCodeFromTickSnapshotThrottled();
-        updateButtons(st);
-    }
-
-    private void ensureSerialVisibleThrottled() {
-        try {
-            if (txtSerialId == null) return;
-            if (headerValidatedOnce) return;
-            String cur = String.valueOf(txtSerialId.getText());
-            boolean missing = (cur.contains("—") || cur.trim().endsWith(":") || cur.trim().endsWith(": —"));
-            if (!missing) return;
-            long now = System.currentTimeMillis();
-            if (now - lastHeaderValidateMs < HEADER_VALIDATE_MIN_MS) return;
-            lastHeaderValidateMs = now;
-            validateHeaderAsync();
-        } catch (Exception ignored) {}
-    }
-
-    private void validateHeaderAsync() {
-        try { if (bg.isShutdown() || bg.isTerminated()) return; } catch (Exception ignored) {}
-        try {
-            bg.execute(() -> {
-                try {
-                    DeliveryController c = controller;
-                    if (c == null) return;
-
-                    // Si serial déjà connu depuis args, l'utiliser directement sans naviguer Mode 8
-                    String serial = (serialFromArgs != null && !serialFromArgs.trim().isEmpty())
-                        ? serialFromArgs.trim() : "";
-                    int tp = -1;
-                    if (serial.isEmpty()) {
-                        ApiResult r = c.api_registerValidate(null, node, null, null, null, false);
-                        JSONObject j = r.toJson().optJSONObject("data");
-                        if (j == null) return;
-                        serial = j.optString("serial_id", "");
-                        tp = j.optInt("ticketPending", -1);
-                    } else {
-                        ApiResult r = c.api_registerValidate(null, node, null, null, null, false);
-                        JSONObject j = r != null ? r.toJson().optJSONObject("data") : null;
-                        if (j != null) tp = j.optInt("ticketPending", -1);
-                    }
-
-                    try { RegisterSessionManager.get(requireContext()).bindExpectedSerial(node, serial); } catch (Exception ignored) {}
-                    // int tp = j.optInt("ticketPending", -1);
-                    ticketPendingFlag = (tp == 1 ? 1 : (tp == 0 ? 0 : -1));
-
-                    final String fSerial = serial;
-                    ui.post(() -> {
-                        if (!isAdded() || getView() == null) return;
-                        if (txtSerialId != null) {
-                            txtSerialId.setText("#Série : " + ((fSerial == null || fSerial.isEmpty()) ? "—" : fSerial));
-                            if (fSerial != null && !fSerial.trim().isEmpty()) headerValidatedOnce = true;
-                        }
-
-                        if (txtTicketPending != null) {
-                            txtTicketPending.setText("Ticket pending : " +
-                                    (ticketPendingFlag == 1 ? "OUI" : (ticketPendingFlag == 0 ? "NON" : "—")));
-                        }
-                        refreshDelCodeFromTickSnapshotThrottled();
-                        updateButtons(controller != null ? controller.getState() : null);
-                        scheduleLogRefresh();
-                        if (fSerial != null && !fSerial.trim().isEmpty())
-                            applierDescriptionsProduits(fSerial, node);
-                    });
-                } catch (Exception e) {
-                    LogBus.api(node, "validate header fail: " + safeMsg(e));
-                }
-            });
-        } catch (java.util.concurrent.RejectedExecutionException ignored) {}
-    }
-
-    private void updateButtons(DeliveryState state) {
-        if (btnConnect == null || btnA == null || btnB == null || btnC == null
-                || btnContinue == null || btnFinish == null) return;
-
-        if (controller == null) {
-            btnConnect.setEnabled(true);
-            btnA.setEnabled(false);
-            btnB.setEnabled(false);
-            btnC.setEnabled(false);
-            btnContinue.setEnabled(false);
-            btnFinish.setEnabled(false);
-            if (btnReprintTicket != null) btnReprintTicket.setEnabled(false);
-            return;
-        }
-
-        DeliveryState st = (state != null) ? state : controller.getState();
-        boolean connected = (st == DeliveryState.CONNECTED);
-        boolean paused    = (st == DeliveryState.RUNNING_PAUSED);
-        boolean flowing   = (st == DeliveryState.RUNNING_FLOWING);
-        boolean ending    = (st == DeliveryState.ENDING);
-
-        btnConnect.setEnabled(!flowing);
-        btnB.setEnabled(true);
-        btnA.setEnabled((connected || paused || flowing) && tabMediaReady);
-
-        btnC.setEnabled(connected);
-
-        if (starting) {
-            btnContinue.setEnabled(false);
-            btnFinish.setEnabled(false);
-        } else {
-            String lt = lastLiveText;
-            boolean flowOffPhase = (lt != null && lt.contains("Flow OFF"));
-            boolean enable = (paused || flowOffPhase) && tabMediaReady;
-            btnContinue.setEnabled(enable);
-            btnFinish.setEnabled(enable);
-        }
-
-        // ✅ REPRINT: actif sur CONNECTED, RUNNING_PAUSED, ENDING
-        if (btnReprintTicket != null) {
-            btnReprintTicket.setEnabled(connected || paused || ending);
-        }
-
-        // ✅ Custom print — même visibilité que Reprint
-        if (btnCustomPrint != null) {
-            btnCustomPrint.setVisibility(connected || paused || ending
-                ? android.view.View.VISIBLE : android.view.View.GONE);
-            btnCustomPrint.setEnabled(connected || paused || ending);
-        }
-
-        // ✅ Bouton Annuler — visible si CONNECTED ou RUNNING_FLOWING
-        // Désactivé si volume détecté pendant le flow
-        if (btnAnnuler != null) {
-            double net   = parseDisplayNet();
-            double gross = parseDisplayGross();
-            boolean flowStarted = (net > 0.0 || gross > 0.0);
-            // ✅ Annuler seulement si une livraison a été démarrée (WO présent)
-            boolean hasActiveDelivery = false;
-            try {
-                String uid = txtDeliveryUid != null ?
-                    txtDeliveryUid.getText().toString()
-                        .replace("Delivery UID : ", "").trim() : "";
-                hasActiveDelivery = (!uid.isEmpty() && !uid.equals("—"))
-                    || (currentWoNum != null && !currentWoNum.isEmpty());
-            } catch (Exception ignored) {}
-            boolean canCancel = (connected || flowing || paused) && !starting && hasActiveDelivery;
-            if (canCancel) {
-                btnAnnuler.setVisibility(android.view.View.VISIBLE);
-                if (flowStarted) {
-                    // Volume détecté (peu importe l'état — flowing ou ticket pending) — impossible d'annuler
-                    btnAnnuler.setText("⛔ Impossible d'annuler — terminez la livraison");
-                    btnAnnuler.setEnabled(false);
-                    btnAnnuler.setBackgroundTintList(
-                        android.content.res.ColorStateList.valueOf(
-                            android.graphics.Color.parseColor("#888888")));
-                } else {
-                    btnAnnuler.setText("⛔ Annuler la livraison");
-                    btnAnnuler.setEnabled(true);
-                    btnAnnuler.setBackgroundTintList(
-                        android.content.res.ColorStateList.valueOf(
-                            android.graphics.Color.parseColor("#CC2222")));
-                }
-            } else {
-                btnAnnuler.setVisibility(android.view.View.GONE);
-            }
-        }
-
-        // ✅ RETOUR WO: visible seulement quand livraison terminée (CONNECTED post-livraison)
-        // et qu'on a des données de livraison (ticket non vide + WO actif)
-        if (btnRetourWO != null) {
-            // ✅ Source de vérité: LcrDeliveryStatusDb — indépendant du timing UI
-            // Lecture en background pour ne pas bloquer le UI thread
-            final boolean connectedFinal = connected;
-            final String woForCheck = currentWoNum;
-            final String serialForFallback = serialFromArgs;
-            // ✅ FIX (la vraie cause du bouton manquant après reconnexion) :
-            // ActiveDeliveryStore est VIDÉ une fois la livraison terminée — donc
-            // si l'onglet est recréé/reconnecté APRÈS la fin d'une livraison
-            // (ex: coupure USB juste après Terminer, puis reconnexion via le
-            // diagnostic), currentWoNum ne peut plus se restaurer via ce chemin
-            // et reste vide indéfiniment, cachant le bouton pour toujours même
-            // si un ticket parfaitement valide existe déjà dans la DB locale.
-            // Filet de secours : si currentWoNum est vide, retrouver le dernier
-            // WO livré pour CE #série précis (pas tous registres confondus).
-            bg.execute(() -> {
-                String woCheck = woForCheck;
-                if ((woCheck == null || woCheck.isEmpty()) && serialForFallback != null && !serialForFallback.isEmpty()) {
-                    try {
-                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbFallback =
-                                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
-                        try {
-                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow lastRow =
-                                    dbFallback.getLastDeliveryForSerial(serialForFallback);
-                            if (lastRow != null && lastRow.woNum != null && !lastRow.woNum.isEmpty()) {
-                                woCheck = lastRow.woNum;
-                                final String fWoRecovered = woCheck;
-                                final String fWoIdRecovered = lastRow.woIdGuid;
-                                android.util.Log.i("RegisterTabFragment", "btnRetourWO: currentWoNum vide — WO récupéré depuis dernière livraison serial="
-                                        + serialForFallback + " -> wo=" + fWoRecovered);
-                                ui.post(() -> {
-                                    currentWoNum = fWoRecovered;
-                                    if (fWoIdRecovered != null && !fWoIdRecovered.isEmpty()) currentWoIdGuid = fWoIdRecovered;
-                                });
-                            }
-                        } finally {
-                            try { dbFallback.close(); } catch (Exception ignored) {}
-                        }
-                    } catch (Exception ignored) {}
-                }
-
-                boolean hasData = false;
-                if (woCheck != null && !woCheck.isEmpty()) {
-                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db = null;
-                    try {
-                        db = new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
-                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow row =
-                            db.getLatestForWo(woCheck);
-                        // ✅ FIX : n'exiger un ticket non vide QUE pour une livraison
-                        // normale. Une ANNULATION (cas confirmé par logcat : ticket
-                        // vide + net négatif après plusieurs pressions rapides sur C)
-                        // est un enregistrement légitime — sans ce correctif, le
-                        // chauffeur restait bloqué sans AUCUN moyen de retourner au
-                        // bon de travail après une annulation.
-                        boolean isAnnulation = row != null && "ANNULATION".equalsIgnoreCase(row.type);
-                        boolean hasTicket = row != null && row.ticketNo != null && !row.ticketNo.isEmpty();
-                        hasData = row != null && (hasTicket || isAnnulation);
-                    } catch (Exception ignored) {
-                    } finally {
-                        if (db != null) { try { db.close(); } catch (Exception ignored) {} }
-                    }
-                }
-                final boolean show = connectedFinal && hasData;
-                ui.post(() -> {
-                    if (!isAdded() || getView() == null || btnRetourWO == null) return;
-                    if (show) {
-                        btnRetourWO.setVisibility(android.view.View.VISIBLE);
-                        btnRetourWO.setEnabled(true);
-                        btnRetourWO.setText("Retour au Bon de livraison");
-                        btnRetourWO.setBackgroundColor(android.graphics.Color.parseColor("#185FA5"));
-                        btnRetourWO.setOnClickListener(v -> { LogBus.api(node, "[ACTION-CLIC] RETOUR_WO"); retournerAuWorkOrder(); });
-                    } else {
-                        btnRetourWO.setVisibility(android.view.View.GONE);
-                    }
-                });
-            });
-        }
-    }
-
-    // =========================================================
-    // ✅ Impression custom — ticket ligne par ligne via opPrintText
-    // =========================================================
-    private void lancerImpressionCustom() {
-        LogBus.api(node, "[ACTION-CLIC] IMPRESSION_CUSTOM");
-        DeliveryController c = controller;
-        if (c == null) return;
-        // ✅ FIX (audit complet) : Print Custom n'avait AUCUNE vérification IO
-        // avant d'agir. Ajouté pour cohérence.
-        if (!verifierIoAvantAction("CUSTOM_PRINT")) return;
-
-        if (btnCustomPrint != null) btnCustomPrint.setEnabled(false);
-
-        bg.execute(() -> {
-            try {
-                // Lire données depuis lastResultJson
-                String ticketNo = "", saleNo = "", serialId = "", woNum = "";
-                double netL = 0, grossL = 0;
-                String startUtc = "", endUtc = "";
-
-                try {
-                    String last = com.pa.lcrdemo.DeepLinkHandler.lastResultJson;
-                    if (last != null) {
-                        org.json.JSONObject j = new org.json.JSONObject(last);
-                        woNum = j.optString("wonum", "");
-                        org.json.JSONObject payload = j.optJSONObject("payload");
-                        if (payload != null) {
-                            org.json.JSONObject result = payload.optJSONObject("result");
-                            if (result != null) {
-                                ticketNo = result.optString("ticket_no",  "");
-                                saleNo   = result.optString("sale_no",    "");
-                                serialId = result.optString("serial_id",  "");
-                                netL     = result.optDouble("fs_net_l",   0);
-                                grossL   = result.optDouble("fs_gross_l", 0);
-                                startUtc = result.optString("start_utc",  "");
-                                endUtc   = result.optString("end_utc",    "");
-                            }
-                        }
-                    }
-                } catch (Exception ignored) {}
-
-                // Construire les lignes du ticket
-                int cols = 30;
-                String sep = "=".repeat(cols);
-                String dashs = "-".repeat(cols);
-                java.util.List<String> lines = new java.util.ArrayList<>();
-                lines.add(sep);
-                lines.add(center("TICKET DE LIVRAISON", cols));
-                lines.add(sep);
-                lines.add("WO       : " + woNum);
-                lines.add("Ticket # : " + ticketNo);
-                lines.add("Vente #  : " + saleNo);
-                lines.add("Serie    : " + serialId);
-                lines.add(dashs);
-                lines.add(String.format("NET      : %.1f L", netL));
-                lines.add(String.format("GROSS    : %.1f L", grossL));
-                lines.add(dashs);
-                lines.add("Debut    : " + formatUtc(startUtc));
-                lines.add("Fin      : " + formatUtc(endUtc));
-                lines.add(sep);
-                lines.add("");
-
-                // Envoyer ligne par ligne via opPrintText
-                if (tabTransportKey != null) {
-                    MediaTransportManager.get(requireContext())
-                        .activateExclusive(tabTransportKey, "CUSTOM_PRINT");
-                }
-                int errors = 0;
-                for (String line : lines) {
-                    try {
-                        c.api_printTextLine(line);
-                        Thread.sleep(150);
-                    } catch (Exception e) {
-                        errors++;
-                        LogBus.api(node, "[CUSTOM_PRINT] ERR ligne: " + safeMsg(e));
-                        surErreurConnexion(e, "CUSTOM_PRINT");
-                    }
-                }
-
-                final int fErrors = errors;
-                ui.post(() -> {
-                    if (fErrors == 0) {
-                        android.widget.Toast.makeText(requireContext(),
-                            "✅ Impression custom envoyée", android.widget.Toast.LENGTH_SHORT).show();
-                    } else {
-                        android.widget.Toast.makeText(requireContext(),
-                            "⚠️ " + fErrors + " ligne(s) en erreur", android.widget.Toast.LENGTH_SHORT).show();
-                    }
-                    if (btnCustomPrint != null) btnCustomPrint.setEnabled(true);
-                });
-
-            } catch (Exception e) {
-                LogBus.api(node, "[CUSTOM_PRINT] ERR: " + safeMsg(e));
-                ui.post(() -> {
-                    android.widget.Toast.makeText(requireContext(),
-                        "Erreur impression: " + safeMsg(e), android.widget.Toast.LENGTH_SHORT).show();
-                    if (btnCustomPrint != null) btnCustomPrint.setEnabled(true);
-                });
-            }
-        });
-    }
-
-    private static String center(String s, int cols) {
-        if (s.length() >= cols) return s.substring(0, cols);
-        int pad = (cols - s.length()) / 2;
-        return " ".repeat(pad) + s;
-    }
-
-    private static String formatUtc(String utc) {
-        if (utc == null || utc.isEmpty()) return "—";
-        // 2026-06-15T17:43:42.549Z → 15/06 17:43
-        try {
-            return utc.substring(8, 10) + "/" + utc.substring(5, 7)
-                + " " + utc.substring(11, 16);
-        } catch (Exception ignored) { return utc; }
-    }
-    // Compile payload complet → SQLite local → MSAL push → deep link FSM
-    // =========================================================
-    private void retournerAuWorkOrder() {
-        android.util.Log.i("RetourWO", "Clic reçu — démarrage retournerAuWorkOrder()");
-        if (!(getActivity() instanceof MainActivity)) {
-            android.util.Log.w("RetourWO", "getActivity() n'est pas MainActivity — abandon");
-            return;
-        }
-        MainActivity main = (MainActivity) getActivity();
-
-        // Désactiver le bouton pendant le traitement
-        if (btnRetourWO != null) btnRetourWO.setEnabled(false);
-
-        bg.execute(() -> {
-            try {
-                // 1. Compiler le payload complet
-                String ticketNo   = "";
-                String saleNo     = "";
-                double netL       = 0.0;
-                double grossL     = 0.0;
-                // ✅ Source primaire — champs stables du fragment, jamais effacés
-                String woNum      = currentWoNum;
-                String woIdGuid   = currentWoIdGuid;
-                String payloadJson = "{}";
-
-                // ✅ Source primaire — lecture FRAÎCHE du registre (toujours à jour,
-                // même après bouton C qui ne passe pas par DeepLinkHandler)
-                org.json.JSONObject freshSnap = null;
-
-                // ✅ FIX 4 août 2026 (demande Paul : "il faut la vérité du registre") —
-                // netAtDeliveryEnd/grossAtDeliveryEnd/ticketNoAtEnd sont figés par
-                // DeliveryController.onDeliveryFinishedIfNeeded() exactement au moment
-                // où l'état quitte RUNNING_FLOWING/RUNNING_PAUSED (fin réelle de livraison),
-                // à partir du TickBus live (pas un cache). C'est la vraie dernière lecture
-                // du registre — à privilégier avant api_tickSnapshot() (cache-only, peut
-                // être périmé, cf. ticket 10910 : 10.5 restauré vs 10.6 réel au registre).
-                try {
-                    if (controller != null
-                            && controller.netAtDeliveryEnd >= 0.0
-                            && controller.grossAtDeliveryEnd >= 0.0) {
-                        netL   = controller.netAtDeliveryEnd;
-                        grossL = controller.grossAtDeliveryEnd;
-                        if (controller.ticketNoAtEnd != null
-                                && !controller.ticketNoAtEnd.trim().isEmpty()) {
-                            ticketNo = controller.ticketNoAtEnd;
-                        }
-                        android.util.Log.i("RetourWO", "Vérité registre (fin livraison) — "
-                            + "ticket=" + ticketNo + " net=" + netL + " gross=" + grossL);
-                    }
-                } catch (Exception ignored) {}
-
-                // Fallback — lecture cache si netAtDeliveryEnd pas encore disponible
-                // (ex. livraison terminée avant ce build, ou controller recréé entretemps)
-                try {
-                    if (controller != null && (netL == 0.0 && grossL == 0.0)) {
-                        ApiResult sr = controller.api_tickSnapshot();
-                        if (sr != null && sr.data != null) {
-                            freshSnap = sr.data;
-                            org.json.JSONObject result = freshSnap.optJSONObject("result");
-                            if (result != null) {
-                                if (ticketNo.isEmpty()) ticketNo = result.optString("ticket_no", "");
-                                if (saleNo.isEmpty())   saleNo   = result.optString("sale_no",   "");
-                                netL     = result.optDouble("fs_net_l",  0);
-                                grossL   = result.optDouble("fs_gross_l",0);
-                            }
-                        }
-                    }
-                } catch (Exception ignored) {}
-
-                // ✅ Fallback — lastResultJson (statique) seulement si lecture fraîche vide
-                try {
-                    if (ticketNo.isEmpty()) {
-                        String lastJson = com.pa.lcrdemo.DeepLinkHandler.lastResultJson;
-                        if (lastJson != null && !lastJson.isEmpty()) {
-                            org.json.JSONObject last = new org.json.JSONObject(lastJson);
-                            org.json.JSONObject payload = last.optJSONObject("payload");
-                            if (payload != null) {
-                                org.json.JSONObject result = payload.optJSONObject("result");
-                                if (result != null) {
-                                    ticketNo = result.optString("ticket_no", "");
-                                    saleNo   = result.optString("sale_no",   "");
-                                    netL     = result.optDouble("fs_net_l",  0);
-                                    grossL   = result.optDouble("fs_gross_l",0);
-                                }
-                                // Fallback tick si result vide
-                                if (netL == 0) {
-                                    org.json.JSONObject tick = payload.optJSONObject("tick");
-                                    if (tick != null) {
-                                        netL   = tick.optDouble("net",   0);
-                                        grossL = tick.optDouble("gross", 0);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    // woNum/woIdGuid viennent toujours de lastResultJson ou ActiveDeliveryStore
-                    // (pas du registre — le registre ne connaît pas le WO)
-                    String lastJson2 = com.pa.lcrdemo.DeepLinkHandler.lastResultJson;
-                    if (lastJson2 != null && !lastJson2.isEmpty()) {
-                        org.json.JSONObject last2 = new org.json.JSONObject(lastJson2);
-                        woNum    = last2.optString("wonum", "");
-                        woIdGuid = last2.optString("woid",  "");
-                    }
-                } catch (Exception ignored) {}
-
-                // Fallback TextViews si tout est vide
-                try {
-                    if (ticketNo.isEmpty() && txtTicketNo != null)
-                        ticketNo = txtTicketNo.getText().toString()
-                            .replace("Ticket Number : ", "").trim();
-                    if (netL == 0.0 && txtQtyNet != null)
-                        netL = Double.parseDouble(
-                            txtQtyNet.getText().toString().replace("NET: ", "").trim());
-                    if (grossL == 0.0 && txtQtyGross != null)
-                        grossL = Double.parseDouble(
-                            txtQtyGross.getText().toString().replace("GROSS: ", "").trim());
-                } catch (Exception ignored) {}
-
-                // Récupérer snapshot complet du controller si encore dispo
-                org.json.JSONObject snap = new org.json.JSONObject();
-                try {
-                    if (controller != null) {
-                        ApiResult sr = controller.api_tickSnapshot();
-                        if (sr != null && sr.data != null) {
-                            snap = sr.data;
-                            if (saleNo.isEmpty()) saleNo = snap.optString("sale_no", "");
-                            org.json.JSONObject result = snap.optJSONObject("result");
-                            if (result != null) {
-                                if (netL == 0.0)      netL      = result.optDouble("fs_net_l",   netL);
-                                if (grossL == 0.0)    grossL    = result.optDouble("fs_gross_l", grossL);
-                                if (ticketNo.isEmpty()) ticketNo = result.optString("ticket_no", "");
-                                if (saleNo.isEmpty())   saleNo   = result.optString("sale_no",   "");
-                            }
-                        }
-                    }
-                } catch (Exception ignored) {}
-
-                // Récupérer woIdGuid + woNum depuis ActiveDeliveryStore en priorité
-                try {
-                    com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
-                        new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
-                    com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery active = ads.load();
-                    if (active != null) {
-                        if (active.woIdGuid != null && !active.woIdGuid.isEmpty())
-                            woIdGuid = active.woIdGuid;
-                        if (active.woNum != null && !active.woNum.isEmpty())
-                            woNum = active.woNum;
-                    }
-                } catch (Exception ignored) {}
-
-                // ⚠️ Ne pas utiliser txtDeliveryUid comme fallback — contient delivery_uid pas wo_num
-                // woNum doit venir de lastResultJson ou ActiveDeliveryStore uniquement
-                if (woNum.isEmpty()) {
-                    android.util.Log.w("RetourWO", "woNum vide — lastResultJson et ActiveDeliveryStore épuisés");
-                }
-
-                snap.put("ticketNo", ticketNo);
-                snap.put("saleNo",   saleNo);
-                snap.put("netL",     netL);
-                snap.put("grossL",   grossL);
-                snap.put("woNum",    woNum);
-                snap.put("woIdGuid", woIdGuid);
-                payloadJson = snap.toString();
-
-                // 2. Écrire dans LcrDeliveryStatusDb — vérifier si ticket déjà enregistré
-                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
-                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
-                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow existing =
-                    lcrDb.getLatestForWo(woNum);
-                if (existing != null && !ticketNo.isEmpty() && ticketNo.equals(existing.ticketNo)) {
-                    // Ticket déjà enregistré — mettre à jour si netL = 0
-                    if (existing.netL == 0 && netL > 0) {
-                        android.content.ContentValues cvUpdate = new android.content.ContentValues();
-                        cvUpdate.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,   netL);
-                        cvUpdate.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L, grossL);
-                        cvUpdate.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID, woIdGuid);
-                        lcrDb.updateDelivery(existing.id, cvUpdate);
-                        android.util.Log.i("RetourWO", "Ticket " + ticketNo
-                            + " mis a jour — net=" + netL + " gross=" + grossL);
-                    } else {
-                        android.util.Log.i("RetourWO", "Ticket " + ticketNo
-                            + " deja enregistre (id=" + existing.id + ") — skip INSERT");
-                    }
-                } else {
-                    android.content.ContentValues cv = new android.content.ContentValues();
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,      woNum);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID,  woIdGuid);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO,   ticketNo);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SALE_NO,     saleNo);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,       netL);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L,     grossL);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
-                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,      "REGISTRE");
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE,   "LIVRAISON");
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
-                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PAYLOAD_JSON, payloadJson);
-
-                    long localId = lcrDb.insertDelivery(cv);
-                    android.util.Log.i("RetourWO", "Delivery sauvegardée localId=" + localId
-                        + " wo=" + woNum + " net=" + netL + " gross=" + grossL);
-                }
-                try { lcrDb.close(); } catch (Exception ignored) {}
-
-                // ✅ (demandé 31 juillet 2026, suite à la perte du ticket 10898) : backup
-                // JSON durable dans Téléchargements — survit à une désinstallation, contrairement
-                // à la BD SQLite privée. Écrit AVANT même la tentative de push Dataverse, donc
-                // une copie existe dès que la livraison est confirmée localement, peu importe
-                // si le push réussit ou non ensuite. Best-effort — ne bloque jamais le flux.
-                try {
-                    org.json.JSONObject backupPayload = new org.json.JSONObject();
-                    backupPayload.put("wo_num", woNum != null ? woNum : "");
-                    backupPayload.put("wo_id_guid", woIdGuid != null ? woIdGuid : "");
-                    backupPayload.put("ticket_no", ticketNo != null ? ticketNo : "");
-                    backupPayload.put("sale_no", saleNo != null ? saleNo : "");
-                    backupPayload.put("net_l", netL);
-                    backupPayload.put("gross_l", grossL);
-                    backupPayload.put("serial_id", serialFromArgs != null ? serialFromArgs : "");
-                    backupPayload.put("lcrnode", node);
-                    backupPayload.put("backup_ts", System.currentTimeMillis());
-                    backupPayload.put("payload_complet", payloadJson != null ? payloadJson : "");
-                    com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
-                        requireContext().getApplicationContext(), woNum, ticketNo, backupPayload);
-                } catch (Exception e) {
-                    android.util.Log.w("RetourWO", "Backup local ERR (non-bloquant): " + e.getMessage());
-                }
-
-                // 3. Tenter push MSAL vers Dataverse
-                // ✅ (fix 31 juillet 2026, demande Paul : "il ne doit JAMAIS concurrencer
-                // aucun processus") — même verrou global que le pull Dataverse, pour garantir
-                // qu'aucune opération MSAL ne tourne jamais en parallèle d'une autre.
-                // Semaphore(1) — PAS ReentrantLock (voir MsalTokenProvider pour le
-                // raisonnement : acquire()/release() peuvent se faire sur des threads
-                // différents, ce qu'un ReentrantLock interdit).
-                try {
-                    com.pa.lcrdemo.auth.MsalTokenProvider.MSAL_SERIAL_LOCK.acquire();
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    android.util.Log.w("RetourWO", "Push Dataverse annulé — acquire() interrompu");
+        if (btnBtDisconnect != null) btnBtDisconnect.setOnClickListener(v -> btDisconnect());
+        // ✅ BT Signal scan
+        if (btnBtSignalScan != null) {
+            btnBtSignalScan.setOnClickListener(v -> {
+                if (!ensureLocationPermissionForBtScan(true)) {
+                    if (txtBtSignalResult != null)
+                        txtBtSignalResult.setText("Permission localisation requise pour le scan RSSI");
                     return;
                 }
-                try {
-                    com.pa.lcrdemo.auth.MsalTokenProvider msal =
-                        new com.pa.lcrdemo.auth.MsalTokenProvider(requireContext());
-                    final String[] tokenHolder = {null};
-                    final java.util.concurrent.CountDownLatch latch =
-                        new java.util.concurrent.CountDownLatch(1);
-                    msal.init(new com.pa.lcrdemo.auth.MsalTokenProvider.InitCallback() {
-                        @Override public void onReady() {
-                            msal.acquireTokenSilentFromWorker(
-                                new com.pa.lcrdemo.auth.MsalTokenProvider.TokenCallback() {
-                                    @Override public void onSuccess(String token) {
-                                        tokenHolder[0] = token;
-                                        latch.countDown();
-                                    }
-                                    @Override public void onError(Exception e) {
-                                        android.util.Log.w("RetourWO", "Token silent ERR: " + e.getMessage());
-                                        latch.countDown();
-                                    }
-                                });
+                if (txtBtSignalResult != null) txtBtSignalResult.setText("Scan RSSI en cours...");
+                btnBtSignalScan.setEnabled(false);
+                scanExec.execute(() -> {
+                    try {
+                        MultiRegisterApiFacadeImpl facade = new MultiRegisterApiFacadeImpl(MainActivity.this);
+                        com.pa.lcr.lcp.ApiResult r = facade.api_btSignalScan(lastBtMac);
+                        String txt;
+                        if (r != null && r.code == 1) {
+                            JSONObject d = r.data;
+                            JSONArray scanned = (d != null) ? d.optJSONArray("scanned") : null;
+                            StringBuilder sb = new StringBuilder();
+                            sb.append("Scan RSSI — ").append(r.msg).append("\n");
+                            if (scanned != null) {
+                                for (int i = 0; i < scanned.length(); i++) {
+                                    JSONObject row = scanned.optJSONObject(i);
+                                    if (row == null) continue;
+                                    sb.append("• ").append(row.optString("name", "?"))
+                                      .append("  MAC=").append(row.optString("mac", "?"))
+                                      .append("  RSSI=").append(row.optInt("rssi", 0)).append(" dBm")
+                                      .append("  (").append(row.optString("rssi_quality", "?")).append(")\n");
+                                }
+                            }
+                            txt = sb.toString().trim();
+                        } else {
+                            txt = "Scan RSSI: " + (r != null ? r.msg : "null");
                         }
-                        @Override public void onError(Exception e) {
-                            android.util.Log.w("RetourWO", "MSAL init ERR: " + e.getMessage());
-                            latch.countDown();
-                        }
+                        final String fTxt = txt;
+                        ui.post(() -> {
+                            if (txtBtSignalResult != null) txtBtSignalResult.setText(fTxt);
+                            btnBtSignalScan.setEnabled(true);
+                        });
+                    } catch (Exception e) {
+                        ui.post(() -> {
+                            if (txtBtSignalResult != null) txtBtSignalResult.setText("Scan RSSI ERR: " + safeMsg(e));
+                            btnBtSignalScan.setEnabled(true);
+                        });
+                    }
+                });
+            });
+        }
+        
+
+        // CONFIGURE: scan registres par média
+        if (btnScanUsbRegs != null) btnScanUsbRegs.setOnClickListener(v -> scanRegistersUsbOnly());
+        if (btnScanBtRegs != null) btnScanBtRegs.setOnClickListener(v -> scanRegistersBtOnly());
+        if (btnScanWifiRegs != null) btnScanWifiRegs.setOnClickListener(v -> scanWifiRegisters());
+        if (btnTcpConnect != null) btnTcpConnect.setOnClickListener(v -> connectTcpManual());
+
+        // CONFIGURE: ajout manuel (2 slots / média)
+        if (btnUsbConnect1 != null) btnUsbConnect1.setOnClickListener(v -> connectManualUsbSlot(1));
+        if (btnUsbConnect2 != null) btnUsbConnect2.setOnClickListener(v -> connectManualUsbSlot(2));
+        if (btnBtConnect1 != null) btnBtConnect1.setOnClickListener(v -> connectManualBtSlot(1));
+        if (btnBtConnect2 != null) btnBtConnect2.setOnClickListener(v -> connectManualBtSlot(2));
+
+        loadManualSlotsFromPrefs();
+    }
+
+private void setupTabsTop() {
+        if (tabLayout == null) return;
+        tabLayout.removeAllTabs();
+        tabLayout.addTab(tabLayout.newTab().setText("MAIN"), true);
+        tabLayout.addTab(tabLayout.newTab().setText("API"), false);
+        tabLayout.addTab(tabLayout.newTab().setText("CONFIGURE"), false);
+        tabLayout.addTab(tabLayout.newTab().setText("Support"), false);
+        showPage(0);
+        tabLayout.addOnTabSelectedListener(new TabLayout.OnTabSelectedListener() {
+            @Override public void onTabSelected(TabLayout.Tab tab) { showPage(tab.getPosition()); }
+            @Override public void onTabUnselected(TabLayout.Tab tab) {}
+            @Override public void onTabReselected(TabLayout.Tab tab) {}
+        });
+    }
+
+    public void showPage(int index) {
+        if (pageMain != null) pageMain.setVisibility(index == 0 ? View.VISIBLE : View.GONE);
+        if (pageApiFace != null) pageApiFace.setVisibility(index == 1 ? View.VISIBLE : View.GONE);
+        if (pageConfigure != null) pageConfigure.setVisibility(index == 2 ? View.VISIBLE : View.GONE);
+        if (pageSupport != null) pageSupport.setVisibility(index == 3 ? View.VISIBLE : View.GONE);
+        if (index == 1) refreshApiStatus();
+        if (index == 2) {
+            updateMediaStatusUi();
+            updateNodesStatusUi();
+            refreshBondedBtList();
+        }
+        if (index == 3) refreshSupportEvents();
+    }
+
+    // =========================================================
+    // Support tab: lecture de v_diagnostic_events (Phase 1b — 27 juillet 2026)
+    // Lecture seule, thread background, curseur/DB toujours fermés en finally.
+    // =========================================================
+    /**
+     * (Demandé 31 juillet 2026) Écran diagnostic (Support) : si le ticket filtré n'a pas
+     * de détail de livraison local (BD vide pour ce ticket, ou #delivery-uid/#wo manquant),
+     * avertit l'utilisateur ET tente automatiquement un pull Dataverse. Le lcrnode n'est pas
+     * connu depuis cet écran (pas de contexte registre) — filtre Dataverse sur serial_id +
+     * ticket_no seulement. Doit être appelée depuis un thread d'arrière-plan.
+     */
+    private void checkAndPullSupportMissingDetail(String ticketFilter, String serialFilter, int eventCount) {
+        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow row = null;
+        try {
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
+                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(getApplicationContext());
+            try {
+                row = lcrDb.getByTicketNo(ticketFilter);
+            } finally {
+                try { lcrDb.close(); } catch (Exception ignored) {}
+            }
+        } catch (Exception ignored) {}
+
+        boolean missing = (row == null)
+                || row.woNum == null || row.woNum.isEmpty()
+                || row.woIdGuid == null || row.woIdGuid.isEmpty();
+        if (!missing) return; // détail déjà présent localement — rien à faire
+
+        if (serialFilter.isEmpty()) {
+            // Sans serial_id, impossible d'interroger Dataverse de façon fiable — informer seulement.
+            runOnUiThread(() -> {
+                if (txtSupportDiagnosis != null) {
+                    txtSupportDiagnosis.setVisibility(View.VISIBLE);
+                    txtSupportDiagnosis.setText((eventCount == 0
+                            ? "Aucune donnée locale pour ce ticket. "
+                            : "Ticket sans #delivery-uid/#wo local. ")
+                            + "Entrez un serial_id pour tenter une recherche Dataverse.");
+                }
+            });
+            return;
+        }
+
+        runOnUiThread(() -> {
+            if (txtSupportDiagnosis != null) {
+                txtSupportDiagnosis.setVisibility(View.VISIBLE);
+                txtSupportDiagnosis.setText((eventCount == 0
+                        ? "Aucune donnée locale pour ce ticket. "
+                        : "Ticket sans #delivery-uid/#wo local. ") + "Tentative Dataverse...");
+            }
+        });
+
+        try {
+            // ✅ (fix 31 juillet 2026, demande Paul : "il ne doit JAMAIS concurrencer
+            // aucun processus") — même verrou global que le push et le pull côté registre.
+            MsalTokenProvider.MSAL_SERIAL_LOCK.acquire();
+            try {
+            MsalTokenProvider msal = new MsalTokenProvider(getApplicationContext());
+            final String[] tokenHolder = {null};
+            final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+            msal.init(new MsalTokenProvider.InitCallback() {
+                @Override public void onReady() {
+                    msal.acquireTokenSilentFromWorker(new MsalTokenProvider.TokenCallback() {
+                        @Override public void onSuccess(String token) { tokenHolder[0] = token; latch.countDown(); }
+                        @Override public void onError(Exception e) { latch.countDown(); }
                     });
-                    latch.await(8, java.util.concurrent.TimeUnit.SECONDS);
-                    if (tokenHolder[0] != null) {
-                        com.pa.lcrdemo.dataverse.LcrDeliverySync.pushPending(
-                            requireContext(), tokenHolder[0]);
-                        android.util.Log.i("RetourWO", "Push Dataverse OK");
+                }
+                @Override public void onError(Exception e) { latch.countDown(); }
+            });
+            latch.await(8, java.util.concurrent.TimeUnit.SECONDS);
 
-                        // ✅ PATCH final consolidé — toutes les livraisons du WO
-                        // pushPending() envoie chaque row individuellement
-                        // Ce PATCH final garantit que msdyn_workordersummary a le payload complet
-                        try {
-                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrFinal =
-                                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
-                            java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> allRows;
-                            try {
-                                allRows = lcrFinal.getAllForWo(woNum);
-                            } finally {
-                                try { lcrFinal.close(); } catch (Exception ignored) {}
-                            }
-                            org.json.JSONArray livraisons = new org.json.JSONArray();
-                            for (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow r : allRows) {
-                                if (r.netL > 0 || "ANNULATION".equals(r.type)) {
-                                    org.json.JSONObject entry = new org.json.JSONObject();
-                                    entry.put("ticket_no", r.ticketNo != null ? r.ticketNo : "");
-                                    entry.put("net_l",     r.netL);
-                                    entry.put("gross_l",   r.grossL);
-                                    entry.put("type",      r.type != null ? r.type : "");
-                                    entry.put("end_utc",   r.endUtc != null ? r.endUtc : "");
-                                    livraisons.put(entry);
-                                }
-                            }
-                            // ✅ Lire woIdGuid depuis LcrDeliveryStatusDb — source de vérité
-                            // La première livraison du WO a le GUID sauvegardé depuis le deep link
-                            // Toutes les livraisons du même WO partagent le même GUID
-                            String patchGuid = "";
-                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrGuid = null;
-                            try {
-                                lcrGuid = new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
-                                java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> allForGuid =
-                                    lcrGuid.getAllForWo(woNum);
-                                for (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow r : allForGuid) {
-                                    if (r.woIdGuid != null && !r.woIdGuid.isEmpty()) {
-                                        patchGuid = r.woIdGuid;
-                                        break;
-                                    }
-                                }
-                            } catch (Exception ignored) {
-                            } finally {
-                                if (lcrGuid != null) { try { lcrGuid.close(); } catch (Exception ignored) {} }
-                            }
-                            android.util.Log.i("RetourWO", "patchGuid=" + patchGuid + " rows=" + livraisons.length());
-                            if (livraisons.length() > 0 && !patchGuid.isEmpty()) {
-                                com.pa.lcrdemo.dataverse.WorkOrderUpdater.patchSummaryConsolidated(
-                                    tokenHolder[0], patchGuid, woNum, livraisons);
-                                android.util.Log.i("RetourWO", "Patch final consolidé OK — "
-                                    + livraisons.length() + " livraisons");
-                            }
-                        } catch (Exception ePatch) {
-                            android.util.Log.w("RetourWO", "Patch final ERR (probablement hors ligne) — "
-                                + "mise en file pour retry automatique: " + ePatch.getMessage());
-                            // ✅ FIX : avant, cette erreur était juste loguée — rien n'était
-                            // mis en file, donc le dialogue qui promet "sera envoyé dès que
-                            // le réseau revient" mentait. On met maintenant en file via
-                            // DeliveryResultQueueDb (même mécanisme que DeliverySyncWorker),
-                            // marqué "consolidated" pour que le retry utilise bien
-                            // patchSummaryConsolidated() (avec fusion+ETag) et pas la version
-                            // simple qui écraserait l'historique.
-                            try {
-                                org.json.JSONObject queuePayload = new org.json.JSONObject();
-                                queuePayload.put("consolidated", true);
-                                queuePayload.put("workOrderId", woIdGuid != null ? woIdGuid : "");
-                                queuePayload.put("woNum", woNum != null ? woNum : "");
-                                String queueUid = (woNum != null ? woNum : "wo") + "-consolidated-"
-                                    + System.currentTimeMillis();
-                                queuePayload.put("deliveryUid", queueUid);
-                                com.pa.lcrdemo.dataverse.DeliveryResultQueueDb queueDbRetry =
-                                    new com.pa.lcrdemo.dataverse.DeliveryResultQueueDb(requireContext());
-                                try {
-                                    queueDbRetry.upsertPending(queueUid, queuePayload.toString());
-                                } finally {
-                                    try { queueDbRetry.close(); } catch (Exception ignored) {}
-                                }
-                                com.pa.lcrdemo.dataverse.DeliverySyncScheduler.triggerNow(requireContext());
-                                android.util.Log.i("RetourWO", "Mise en file OK — retry via DeliverySyncWorker dès réseau dispo");
-                            } catch (Exception eQueue) {
-                                android.util.Log.w("RetourWO", "Mise en file ERR: " + eQueue.getMessage());
-                            }
-                        }
-                    } else {
-                        android.util.Log.w("RetourWO", "Pas de token — données en PENDING local");
+            if (tokenHolder[0] == null) {
+                runOnUiThread(() -> {
+                    if (txtSupportDiagnosis != null) {
+                        txtSupportDiagnosis.setText("Pas de token Dataverse disponible (offline ou non connecté).");
                     }
-                } catch (Exception e) {
-                    android.util.Log.w("RetourWO", "Push Dataverse ERR: " + e.getMessage());
-                } finally {
-                    com.pa.lcrdemo.auth.MsalTokenProvider.MSAL_SERIAL_LOCK.release();
-                } // fin verrou MSAL_SERIAL_LOCK
+                });
+                return;
+            }
 
-                // 4. Effacer ActiveDeliveryStore
+            boolean found = com.pa.lcrdemo.dataverse.LcrDeliverySync.pullDeliveryByTicket(
+                    getApplicationContext(), tokenHolder[0], serialFilter, null, ticketFilter);
+
+            if (!found) {
+                runOnUiThread(() -> {
+                    if (txtSupportDiagnosis != null) {
+                        txtSupportDiagnosis.setText("Aucune donnée trouvée (local + Dataverse) pour ce ticket.");
+                    }
+                });
+                return;
+            }
+
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb2 =
+                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(getApplicationContext());
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow pulled;
+            try {
+                pulled = lcrDb2.getByTicketNo(ticketFilter);
+            } finally {
+                try { lcrDb2.close(); } catch (Exception ignored) {}
+            }
+
+            final com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow fPulled = pulled;
+
+            // ✅ (demandé 31 juillet 2026) : rapatrie aussi toutes les autres transactions
+            // de ce même #wo (pas seulement celle du ticket demandé).
+            int nTransactions = 1;
+            if (fPulled != null && fPulled.woNum != null && !fPulled.woNum.isEmpty()) {
                 try {
-                    new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext()).clear();
+                    nTransactions = com.pa.lcrdemo.dataverse.LcrDeliverySync.pullAllDeliveriesForWorkOrder(
+                            getApplicationContext(), tokenHolder[0], fPulled.woNum, serialFilter);
+                    if (nTransactions <= 0) nTransactions = 1;
                 } catch (Exception ignored) {}
+            }
+            final int fNTransactions = nTransactions;
 
-                // 4b. Vérifier si des livraisons sont encore PENDING après le push
-                int pendingCount = 0;
-                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrCheck = null;
+            // ✅ (demandé 31 juillet 2026) : rapatrie aussi les autres arrêts de la même
+            // journée pour ce registre (#série), au-delà du seul #wo. Ancre de date =
+            // start_utc de la livraison résolue (jamais devinée/aujourd'hui par défaut).
+            int nDay = 0;
+            if (fPulled != null && fPulled.startUtc != null && !fPulled.startUtc.isEmpty()) {
                 try {
-                    lcrCheck = new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
-                    java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> pendingRows =
-                        lcrCheck.getPendingDeliveries();
-                    // Filtrer seulement les PENDING pour ce WO
-                    for (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow r : pendingRows) {
-                        if (woNum != null && woNum.equals(r.woNum)) pendingCount++;
+                    nDay = com.pa.lcrdemo.dataverse.LcrDeliverySync.pullAllDeliveriesForDay(
+                            getApplicationContext(), tokenHolder[0], serialFilter, fPulled.startUtc);
+                } catch (Exception ignored) {}
+            }
+            final int fNDay = nDay;
+
+            runOnUiThread(() -> {
+                if (txtSupportDiagnosis != null && fPulled != null) {
+                    txtSupportDiagnosis.setText("Récupéré depuis Dataverse — WO=" + fPulled.woNum
+                            + "  delivery-uid=" + fPulled.woNum + "-" + ticketFilter
+                            + "  produit=" + fPulled.produitNo
+                            + "  preset=" + fPulled.presetL
+                            + "  (" + fNTransactions + " transaction(s) de ce WO, "
+                            + fNDay + " livraison(s) de la journée rapatriée(s))");
+                }
+            });
+            // Note : pas de rappel à refreshSupportEvents() ici — v_diagnostic_events
+            // (delivery_event/api_trace) n'est pas alimentée par ce pull Dataverse, qui
+            // écrit uniquement dans LcrDeliveryStatusDb. Un second appel n'ajouterait
+            // rien et risquerait une boucle si le mapping revenait incomplet.
+            } finally {
+                MsalTokenProvider.MSAL_SERIAL_LOCK.release();
+            } // fin verrou MSAL_SERIAL_LOCK
+        } catch (Exception e) {
+            runOnUiThread(() -> {
+                if (txtSupportDiagnosis != null) {
+                    txtSupportDiagnosis.setText("Erreur pull Dataverse: " + e.getMessage());
+                }
+            });
+        }
+    }
+
+    // =========================================================
+    // "Voir le processus lié" (demandé 3 août 2026, suite écran ticket 10905) — un attempt_id
+    // regroupe déjà TOUS les événements d'une même tentative de livraison dans delivery_event
+    // (voir schéma delivery_attempt/delivery_event). Cette méthode affiche cette chronologie
+    // complète pour l'attempt_id de la ligne tapée, plutôt que l'événement isolé seul.
+    // =========================================================
+    private void showRelatedProcessDialog(long attemptId) {
+        new Thread(() -> {
+            // ✅ (ajouté 3 août 2026, demande Paul : "forer dans l'information jusqu'à
+            // trouver les traces rx/tx") — merge de deux sources distinctes en une seule
+            // chronologie: delivery_event (par attempt_id) ET log_bus_event IO_TX/IO_RX
+            // (qui n'a pas de notion d'attempt_id, seulement node+temps). On dérive le
+            // node à partir du ticket_no/serial_id de la tentative, puis on fenêtre la
+            // recherche RX/TX sur la plage de temps réelle de cette tentative (+/- 2s de
+            // marge), pour éviter de ramener le trafic BT d'AUTRES tickets sur ce node.
+            java.util.List<long[]> tsOrder = new java.util.ArrayList<>(); // [0]=ts, index parallèle à lines
+            java.util.List<String> lines = new java.util.ArrayList<>();
+            com.pa.lcr.lcp.storage.DeliveryDb dbHelper = null;
+            android.database.sqlite.SQLiteDatabase db = null;
+            String ticketNoForNode = null;
+            long minTs = Long.MAX_VALUE, maxTs = Long.MIN_VALUE;
+            try {
+                dbHelper = new com.pa.lcr.lcp.storage.DeliveryDb(getApplicationContext());
+                db = dbHelper.getReadableDatabase();
+                try (android.database.Cursor c = db.rawQuery(
+                        "SELECT ts, event_type, event_code, event_where, detail_short, ticket_no " +
+                        "FROM v_diagnostic_events WHERE attempt_id = ? ORDER BY ts ASC",
+                        new String[]{String.valueOf(attemptId)})) {
+                    while (c.moveToNext()) {
+                        long ts = c.getLong(0);
+                        String type = c.getString(1);
+                        String code = c.getString(2);
+                        String where = c.getString(3);
+                        String detail = c.getString(4);
+                        if (ticketNoForNode == null) ticketNoForNode = c.getString(5);
+                        if (ts < minTs) minTs = ts;
+                        if (ts > maxTs) maxTs = ts;
+                        String tsFmt = android.text.format.DateFormat.format("HH:mm:ss", ts).toString();
+                        StringBuilder line = new StringBuilder();
+                        line.append(tsFmt).append("  ").append(code != null ? code : type).append('\n');
+                        if (where != null && !where.isEmpty()) line.append("    où=").append(where).append('\n');
+                        if (detail != null && !detail.isEmpty()) line.append("    ").append(detail).append('\n');
+                        lines.add(line.toString());
+                        tsOrder.add(new long[]{ts});
                     }
-                } catch (Exception ignored) {
-                } finally {
-                    if (lcrCheck != null) { try { lcrCheck.close(); } catch (Exception ignored) {} }
                 }
 
-                // 5. Retour FSM
-                final String fWoIdGuid  = woIdGuid;
-                final int    fPending   = pendingCount;
-                ui.post(() -> {
-                    if (!isAdded() || getView() == null) return;
-                    if (fPending > 0) {
-                        // Livraisons non synchronisées — avertir sans bloquer
-                        new android.app.AlertDialog.Builder(requireContext())
-                            .setTitle("Donnees en attente de sync")
-                            .setMessage(fPending + " livraison(s) pas encore envoyee(s) a Dataverse."
-                                + " Elles seront envoyees des que le reseau revient."
-                                + "\n\nVoulez-vous retourner quand meme ?")
-                            .setCancelable(false)
-                            .setPositiveButton("Retourner quand même", (d, w) -> {
-                                try { if (getActivity() != null) getActivity().finish(); }
-                                catch (Exception ignored) {}
-                            })
-                            .setNegativeButton("Attendre la sync", (d, w) -> {
-                                if (btnRetourWO != null) btnRetourWO.setEnabled(true);
-                            })
-                            .show();
-                    } else {
-                        try {
-                            android.util.Log.i("RetourWO", "finish() → FSM woId=" + fWoIdGuid);
-                            if (getActivity() != null) getActivity().finish();
-                        } catch (Exception e) {
-                            android.util.Log.e("RetourWO", "finish() ERR: " + e.getMessage());
-                        } finally {
-                            if (btnRetourWO != null) btnRetourWO.setEnabled(true);
+                // Dérivation du node pour retrouver les traces RX/TX (log_bus_event n'a pas
+                // de ticket_no, seulement node) — même logique que le point 5 (auto-derive).
+                if (ticketNoForNode != null && minTs != Long.MAX_VALUE) {
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDbNode =
+                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(getApplicationContext());
+                    try {
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow rowNode =
+                            lcrDbNode.getByTicketNo(ticketNoForNode);
+                        if (rowNode != null && rowNode.lcrnode > 0) {
+                            long windowStart = minTs - 2000, windowEnd = maxTs + 2000;
+                            try (android.database.Cursor c2 = db.rawQuery(
+                                    "SELECT ts, src, msg FROM log_bus_event " +
+                                    "WHERE node = ? AND src IN ('IO_TX','IO_RX') AND ts BETWEEN ? AND ? " +
+                                    "ORDER BY ts ASC",
+                                    new String[]{String.valueOf(rowNode.lcrnode),
+                                                 String.valueOf(windowStart), String.valueOf(windowEnd)})) {
+                                while (c2.moveToNext()) {
+                                    long ts2 = c2.getLong(0);
+                                    String src2 = c2.getString(1);
+                                    String msg2 = c2.getString(2);
+                                    String tsFmt2 = android.text.format.DateFormat.format("HH:mm:ss", ts2).toString();
+                                    lines.add(tsFmt2 + "  [" + src2 + "]\n    " + (msg2 != null ? msg2 : "") + "\n");
+                                    tsOrder.add(new long[]{ts2});
+                                }
+                            }
                         }
+                    } finally {
+                        try { lcrDbNode.close(); } catch (Exception ignored) {}
                     }
-                });
-
+                }
             } catch (Exception e) {
-                android.util.Log.e("RetourWO", "retournerAuWorkOrder ERR: " + e.getMessage());
-                ui.post(() -> {
-                    android.widget.Toast.makeText(requireContext(),
-                        "Erreur retour WO: " + e.getMessage(),
-                        android.widget.Toast.LENGTH_SHORT).show();
-                    if (btnRetourWO != null) btnRetourWO.setEnabled(true);
-                });
+                lines.add("Erreur lecture processus lié: " + e.getMessage());
+                tsOrder.add(new long[]{0});
+            } finally {
+                if (db != null) try { db.close(); } catch (Exception ignored) {}
+                if (dbHelper != null) try { dbHelper.close(); } catch (Exception ignored) {}
+            }
+
+            // Fusion chronologique des deux sources
+            Integer[] idx = new Integer[lines.size()];
+            for (int i = 0; i < idx.length; i++) idx[i] = i;
+            java.util.Arrays.sort(idx, (a, b) -> Long.compare(tsOrder.get(a)[0], tsOrder.get(b)[0]));
+            StringBuilder sb = new StringBuilder();
+            for (int i : idx) sb.append(lines.get(i)).append('\n');
+
+            final String text = sb.length() > 0 ? sb.toString() : "Aucun autre événement pour ce processus.";
+            runOnUiThread(() -> {
+                android.widget.TextView tv = new android.widget.TextView(this);
+                tv.setText(text);
+                tv.setTextIsSelectable(true);
+                int pad = (int) (16 * getResources().getDisplayMetrics().density);
+                tv.setPadding(pad, pad, pad, pad);
+                android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+                scroll.addView(tv);
+                new android.app.AlertDialog.Builder(this)
+                        .setTitle("Processus lié + RX/TX (attempt_id=" + attemptId + ")")
+                        .setView(scroll)
+                        .setPositiveButton("Fermer", null)
+                        .show();
+            });
+        }, "SupportRelatedProcess").start();
+    }
+
+    // ✅ (ajouté 3 août 2026, demande Paul : "faire un copier coller de l'ensemble des
+    // lignes... plus facile de te montrer ce que j'ai") — sérialise la liste actuellement
+    // affichée (après filtres/erreurs-seulement déjà appliqués) en texte brut, une ligne
+    // par événement (en-tête + détail), et la met sur le presse-papier système.
+    private void copySupportListToClipboard() {
+        if (lastSupportHeaders.isEmpty()) {
+            Toast.makeText(this, "Rien à copier — rafraîchis d'abord la liste", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        StringBuilder sb = new StringBuilder();
+        String ticketFilterNow = (edtSupportTicketFilter != null) ? edtSupportTicketFilter.getText().toString().trim() : "";
+        String nodeFilterNow = (edtSupportNodeFilter != null) ? edtSupportNodeFilter.getText().toString().trim() : "";
+        // ✅ (ajouté 3 août 2026, demande Paul : "je veux faire une sélection") — si des
+        // lignes sont cochées en mode sélection, ne copier QUE celles-là; sinon, tout copier
+        // comme avant (comportement inchangé quand la sélection n'est pas utilisée).
+        boolean useSelection = !supportSelectedPositions.isEmpty();
+        int copiedCount = useSelection ? supportSelectedPositions.size() : lastSupportHeaders.size();
+        sb.append("=== Support LCR — ticket=").append(ticketFilterNow.isEmpty() ? "—" : ticketFilterNow)
+          .append(" node=").append(nodeFilterNow.isEmpty() ? "—" : nodeFilterNow)
+          .append(useSelection ? " (sélection : " : " (")
+          .append(copiedCount).append(" événements) ===\n\n");
+        for (int i = 0; i < lastSupportHeaders.size(); i++) {
+            if (useSelection && !supportSelectedPositions.contains(i)) continue;
+            sb.append(lastSupportHeaders.get(i)).append('\n');
+            String d = (i < lastSupportDetails.size()) ? lastSupportDetails.get(i) : "";
+            if (d != null && !d.isEmpty()) sb.append("    ").append(d).append('\n');
+        }
+        android.content.ClipboardManager clipboard =
+            (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        android.content.ClipData clip = android.content.ClipData.newPlainText("Support LCR", sb.toString());
+        clipboard.setPrimaryClip(clip);
+        Toast.makeText(this, copiedCount + " événement(s) copié(s)", Toast.LENGTH_SHORT).show();
+    }
+
+    // =========================================================
+    // ✅ (ajouté 3 août 2026, demande Paul : "vérifier automatiquement que les 3 sources
+    // concordent — détecter les incohérences") — compare local (LcrDeliveryStatusDb),
+    // backup JSON (LocalDeliveryBackup) et Dataverse (peekDeliveryByTicket, LECTURE SEULE,
+    // aucune écriture) pour un même ticket_no. Rapporte chaque source trouvée/absente et
+    // toute divergence sur net_l/gross_l/wo_num.
+    // =========================================================
+    private void runCoherenceCheck() {
+        String ticketNo = (edtSupportTicketFilter != null) ? edtSupportTicketFilter.getText().toString().trim() : "";
+        String serialId = (edtSupportSerialFilter != null) ? edtSupportSerialFilter.getText().toString().trim() : "";
+        if (ticketNo.isEmpty()) {
+            Toast.makeText(this, "Entrez un ticket_no avant de vérifier la cohérence", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (txtSupportDiagnosis != null) {
+            txtSupportDiagnosis.setVisibility(View.VISIBLE);
+            txtSupportDiagnosis.setText("Vérification cohérence en cours (local + backup + Dataverse)...");
+        }
+
+        new Thread(() -> {
+            StringBuilder sb = new StringBuilder();
+            sb.append("=== Cohérence ticket=").append(ticketNo).append(" ===\n\n");
+            final String[] localSerialHolder = {null};
+
+            // 1) Local
+            Double localNet = null, localGross = null;
+            String localWo = null;
+            try {
+                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
+                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(getApplicationContext());
+                try {
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow row = lcrDb.getByTicketNo(ticketNo);
+                    if (row != null) {
+                        localNet = row.netL; localGross = row.grossL; localWo = row.woNum;
+                        sb.append("LOCAL (BD) : trouvé — net=").append(row.netL)
+                          .append(" gross=").append(row.grossL)
+                          .append(" wo=").append(row.woNum)
+                          .append(" sync=").append(row.syncStatus).append('\n');
+                        if (row.serialId != null) localSerialHolder[0] = row.serialId;
+                    } else {
+                        sb.append("LOCAL (BD) : ABSENT\n");
+                    }
+                } finally {
+                    try { lcrDb.close(); } catch (Exception ignored) {}
+                }
+            } catch (Exception e) {
+                sb.append("LOCAL (BD) : erreur lecture — ").append(e.getMessage()).append('\n');
+            }
+
+            // 2) Backup JSON
+            Double backupNet = null, backupGross = null;
+            String backupWo = null;
+            try {
+                com.pa.lcr.lcp.storage.LocalDeliveryBackup.BackupMatch match =
+                    com.pa.lcr.lcp.storage.LocalDeliveryBackup.findLatestByTicketNo(getApplicationContext(), ticketNo);
+                if (match != null) {
+                    backupNet = match.json.optDouble("net_l", Double.NaN);
+                    backupGross = match.json.optDouble("gross_l", Double.NaN);
+                    backupWo = match.json.optString("wo_num", "");
+                    sb.append("BACKUP (JSON) : trouvé — net=").append(backupNet)
+                      .append(" gross=").append(backupGross)
+                      .append(" wo=").append(backupWo)
+                      .append(" (backup_ts=").append(match.backupTs).append(")\n");
+                } else {
+                    sb.append("BACKUP (JSON) : ABSENT\n");
+                }
+            } catch (Exception e) {
+                sb.append("BACKUP (JSON) : erreur lecture — ").append(e.getMessage()).append('\n');
+            }
+
+            // 3) Dataverse (lecture seule)
+            Double dvNet = null, dvGross = null;
+            String dvWo = null;
+            String effectiveSerial = serialId.isEmpty() ? localSerialHolder[0] : serialId;
+            if (effectiveSerial == null || effectiveSerial.isEmpty()) {
+                sb.append("DATAVERSE : impossible de vérifier — aucun serial_id disponible " +
+                        "(remplis le champ serial_id, ou assure-toi que la ligne locale en a un)\n");
+            } else {
+                try {
+                    MsalTokenProvider.MSAL_SERIAL_LOCK.acquire();
+                    try {
+                        MsalTokenProvider msal = new MsalTokenProvider(getApplicationContext());
+                        final String[] tokenHolder = {null};
+                        final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+                        msal.init(new MsalTokenProvider.InitCallback() {
+                            @Override public void onReady() {
+                                msal.acquireTokenSilentFromWorker(new MsalTokenProvider.TokenCallback() {
+                                    @Override public void onSuccess(String token) { tokenHolder[0] = token; latch.countDown(); }
+                                    @Override public void onError(Exception e) { latch.countDown(); }
+                                });
+                            }
+                            @Override public void onError(Exception e) { latch.countDown(); }
+                        });
+                        latch.await(8, java.util.concurrent.TimeUnit.SECONDS);
+
+                        if (tokenHolder[0] == null) {
+                            sb.append("DATAVERSE : pas de token disponible (offline ou non connecté)\n");
+                        } else {
+                            org.json.JSONObject d = com.pa.lcrdemo.dataverse.LcrDeliverySync.peekDeliveryByTicket(
+                                getApplicationContext(), tokenHolder[0], effectiveSerial, null, ticketNo);
+                            if (d != null) {
+                                dvNet = d.optDouble("filgo_net_l", Double.NaN);
+                                dvGross = d.optDouble("filgo_gross_l", Double.NaN);
+                                dvWo = d.optString("filgo_wo_num", "");
+                                sb.append("DATAVERSE : trouvé — net=").append(dvNet)
+                                  .append(" gross=").append(dvGross)
+                                  .append(" wo=").append(dvWo).append('\n');
+                            } else {
+                                sb.append("DATAVERSE : ABSENT (jamais poussé, ou push échoué)\n");
+                            }
+                        }
+                    } finally {
+                        MsalTokenProvider.MSAL_SERIAL_LOCK.release();
+                    }
+                } catch (Exception e) {
+                    sb.append("DATAVERSE : erreur — ").append(e.getMessage()).append('\n');
+                }
+            }
+
+            // 4) Comparaison
+            sb.append("\n--- Comparaison ---\n");
+            java.util.List<Double> nets = new java.util.ArrayList<>();
+            java.util.List<Double> grosses = new java.util.ArrayList<>();
+            if (localNet != null) nets.add(localNet);
+            if (backupNet != null && !backupNet.isNaN()) nets.add(backupNet);
+            if (dvNet != null && !dvNet.isNaN()) nets.add(dvNet);
+            if (localGross != null) grosses.add(localGross);
+            if (backupGross != null && !backupGross.isNaN()) grosses.add(backupGross);
+            if (dvGross != null && !dvGross.isNaN()) grosses.add(dvGross);
+
+            boolean netOk = nets.size() <= 1 || allClose(nets);
+            boolean grossOk = grosses.size() <= 1 || allClose(grosses);
+            int sourcesFound = (localNet != null ? 1 : 0) + (backupNet != null ? 1 : 0) + (dvNet != null ? 1 : 0);
+
+            if (sourcesFound == 0) {
+                sb.append("⚠ AUCUNE source n'a de données pour ce ticket — rien à comparer.\n");
+            } else if (sourcesFound == 1) {
+                sb.append("ℹ Une seule source a des données — pas de comparaison possible, " +
+                        "mais pas forcément un problème (ex: livraison très récente, sync en attente).\n");
+            } else if (netOk && grossOk) {
+                sb.append("✅ COHÉRENT — les ").append(sourcesFound)
+                  .append(" sources trouvées concordent (net/gross identiques).\n");
+            } else {
+                sb.append("❌ INCOHÉRENCE DÉTECTÉE — les valeurs net/gross diffèrent entre les sources.\n");
+            }
+
+            final String text = sb.toString();
+            runOnUiThread(() -> {
+                if (txtSupportDiagnosis != null) {
+                    txtSupportDiagnosis.setVisibility(View.VISIBLE);
+                    txtSupportDiagnosis.setText(text);
+                }
+            });
+        }, "SupportCoherenceCheck").start();
+    }
+
+    private static boolean allClose(java.util.List<Double> values) {
+        double first = values.get(0);
+        for (double v : values) {
+            if (Math.abs(v - first) > 0.05) return false; // tolérance 0.05L (arrondi)
+        }
+        return true;
+    }
+
+    private void refreshSupportEvents() {
+        final String ticketFilter = (edtSupportTicketFilter != null)
+                ? edtSupportTicketFilter.getText().toString().trim() : "";
+        final String serialFilter = (edtSupportSerialFilter != null)
+                ? edtSupportSerialFilter.getText().toString().trim() : "";
+        final String nodeFilter = (edtSupportNodeFilter != null)
+                ? edtSupportNodeFilter.getText().toString().trim() : "";
+
+        new Thread(() -> {
+            // Chaque entrée : {ts, header, detail} — fusionné ensuite avec log_bus_event et trié
+            final java.util.List<Object[]> rows = new java.util.ArrayList<>();
+            com.pa.lcr.lcp.storage.DeliveryDb dbHelper = null;
+            android.database.sqlite.SQLiteDatabase db = null;
+            android.database.Cursor c = null;
+            try {
+                dbHelper = new com.pa.lcr.lcp.storage.DeliveryDb(getApplicationContext());
+                db = dbHelper.getReadableDatabase();
+
+                StringBuilder sql = new StringBuilder(
+                        "SELECT ts, serial_id, ticket_no, event_type, event_code, event_where, detail_short, attempt_id, level " +
+                        "FROM v_diagnostic_events WHERE 1=1 ");
+                java.util.List<String> args = new java.util.ArrayList<>();
+                // ✅ FIX (4 août 2026, demande Paul — "ceci touche directement la couche
+                // support") — v_diagnostic_events inclut maintenant log_bus_event en 3e
+                // branche (voir DeliveryDb.createDiagnosticEventsView, v21). Ces lignes
+                // n'ont ni ticket_no ni serial_id (scopées par node uniquement) — le filtre
+                // ticket doit donc les laisser passer plutôt que les exclure, sinon elles
+                // redeviennent invisibles dès qu'un filtre ticket est actif. Dérivation
+                // node→ticket conservée (ancienne fusion manuelle) mais appliquée ICI comme
+                // filtre unique, pour ne plus dupliquer les lignes log_bus_event.
+                String effectiveNodeFilter0 = nodeFilter;
+                if (effectiveNodeFilter0.isEmpty() && !ticketFilter.isEmpty()) {
+                    try {
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDbNode0 =
+                            new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(getApplicationContext());
+                        try {
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow rowNode0 =
+                                lcrDbNode0.getByTicketNo(ticketFilter);
+                            if (rowNode0 != null && rowNode0.lcrnode > 0) {
+                                effectiveNodeFilter0 = String.valueOf(rowNode0.lcrnode);
+                            }
+                        } finally {
+                            try { lcrDbNode0.close(); } catch (Exception ignored) {}
+                        }
+                    } catch (Exception ignored) {}
+                }
+                boolean hasTicket = !ticketFilter.isEmpty();
+                boolean hasNode = !effectiveNodeFilter0.isEmpty();
+                if (hasTicket && hasNode) {
+                    sql.append("AND (ticket_no = ? OR (event_type = 'LOG_BUS' AND event_where = ?)) ");
+                    args.add(ticketFilter);
+                    args.add("LogBus(node=" + effectiveNodeFilter0 + ")");
+                } else if (hasTicket) {
+                    sql.append("AND ticket_no = ? ");
+                    args.add(ticketFilter);
+                } else if (hasNode) {
+                    // Filtre node seul (sans ticket) : ne restreint QUE les lignes LOG_BUS —
+                    // les événements ticket-scopés (delivery_event/api_trace) n'ont pas de
+                    // notion de node dans cette vue, donc ils restent visibles peu importe
+                    // le node filtré (comportement identique à avant ce fix : le filtre node
+                    // seul n'a jamais restreint les événements par ticket).
+                    sql.append("AND (event_type != 'LOG_BUS' OR event_where = ?) ");
+                    args.add("LogBus(node=" + effectiveNodeFilter0 + ")");
+                }
+                if (!serialFilter.isEmpty()) {
+                    sql.append("AND serial_id = ? ");
+                    args.add(serialFilter);
+                }
+                sql.append("ORDER BY ts DESC LIMIT 300");
+
+                c = db.rawQuery(sql.toString(), args.toArray(new String[0]));
+                while (c.moveToNext()) {
+                    long ts = c.getLong(0);
+                    String serialId = c.getString(1);
+                    String ticketNo = c.getString(2);
+                    String eventType = c.getString(3);
+                    String eventCode = c.getString(4);
+                    String eventWhere = c.getString(5);
+                    String detailShort = c.getString(6);
+                    Long attemptId = c.isNull(7) ? null : c.getLong(7);
+                    // ✅ FIX (6 août 2026, demande Paul — "je veux vraiment
+                    // voir de manière évidente que s'il y a une erreur je
+                    // veux un affichage couleur... le niveau de support à
+                    // faire interagir") — level était calculé dans la vue
+                    // v_diagnostic_events depuis le tout début, mais jamais
+                    // sélectionné ici — donc jamais transporté jusqu'à
+                    // l'écran. Ajouté à la ligne pour permettre le code
+                    // couleur ci-dessous (voir SupportEventAdapter).
+                    String level = c.isNull(8) ? "INFO" : c.getString(8);
+
+                    String tsFmt = android.text.format.DateFormat.format("MM-dd HH:mm:ss", ts).toString();
+                    // ✅ FIX (7 août 2026, demande Paul — "une colonne après
+                    // le timestamp avec le ticket_number associé") — avant ce
+                    // fix, le ticket_no était relégué à la toute fin de la
+                    // ligne entre crochets, facile à manquer. Déplacé juste
+                    // après le timestamp, avec une largeur fixe (padStart)
+                    // pour qu'il s'aligne comme une vraie colonne d'une ligne
+                    // à l'autre — txtRowHeader utilise déjà une police à
+                    // espacement fixe (monospace), donc l'alignement visuel
+                    // fonctionne directement sans changer le layout XML.
+                    String ticketCol = ticketNo != null && !ticketNo.trim().isEmpty() ? ticketNo.trim() : "—";
+                    if (ticketCol.length() > 10) ticketCol = ticketCol.substring(0, 10);
+                    String header = tsFmt + "  [" + String.format(java.util.Locale.ROOT, "%-10s", ticketCol) + "]  "
+                            + (eventCode != null ? eventCode : eventType);
+                    String detail = (serialId != null ? "serial=" + serialId + "  " : "")
+                            + (eventWhere != null ? "où=" + eventWhere + "  " : "")
+                            + (detailShort != null ? detailShort : "");
+                    // ✅ (ajouté 3 août 2026, demande Paul : "voir tout le processus lié") —
+                    // attemptId nullable transporté jusqu'à la ligne, pour permettre au clic
+                    // sur une ligne de retrouver tous les événements de la MÊME tentative
+                    // (delivery_attempt), triés chronologiquement — pas juste cette ligne isolée.
+                    rows.add(new Object[]{ts, header, detail, attemptId, level});
+                }
+            } catch (Exception e) {
+                rows.add(new Object[]{System.currentTimeMillis(), "Erreur lecture v_diagnostic_events",
+                        String.valueOf(e.getMessage()), null});
+            } finally {
+                if (c != null) try { c.close(); } catch (Exception ignored) {}
+                if (db != null) try { db.close(); } catch (Exception ignored) {}
+                if (dbHelper != null) try { dbHelper.close(); } catch (Exception ignored) {}
+            }
+
+            // Tri global décroissant par ts (le plus récent en premier), toutes sources confondues
+            rows.sort((a, b) -> Long.compare((Long) b[0], (Long) a[0]));
+
+            // ✅ (ajouté 3 août 2026, demande Paul : "afficher les enregistrements qui
+            // sont en erreur pour visualiser facilement les erreurs") — filtre client
+            // simple sur le texte déjà assemblé (header+détail), plutôt que sur la
+            // colonne "level" seule : la branche api_trace de v_diagnostic_events fixe
+            // TOUJOURS level='INFO' (même pour un push Dataverse échoué, voir
+            // DATAVERSE_PUSH_FAILED), donc filtrer sur level manquerait ces cas. Un
+            // filtre texte large (ERR/FAIL) couvre ERR_IO, JOBGET_READ_FAIL,
+            // CONTINUE_RUN_FAIL, "push ERR", etc. — peu importe la source.
+            final boolean errorsOnly = (chkSupportErrorsOnly != null) && chkSupportErrorsOnly.isChecked();
+            final java.util.List<Object[]> filteredRows;
+            if (errorsOnly) {
+                filteredRows = new java.util.ArrayList<>();
+                for (Object[] r : rows) {
+                    String h = String.valueOf(r[1]).toUpperCase(java.util.Locale.ROOT);
+                    String d = String.valueOf(r[2]).toUpperCase(java.util.Locale.ROOT);
+                    String lvl = String.valueOf(r[4]).toUpperCase(java.util.Locale.ROOT);
+                    // ✅ FIX (6 août 2026) — la colonne level (corrigée en DB v22) est
+                    // maintenant fiable — utilisée en priorité, avec le filtre texte
+                    // large en filet de sécurité pour les cas non couverts par level
+                    // (ex. api_trace, toujours 'INFO' même en échec — voir commentaire
+                    // plus haut).
+                    if ("ERROR".equals(lvl) || "WARN".equals(lvl)
+                            || h.contains("ERR") || h.contains("FAIL") || d.contains("ERR") || d.contains("FAIL")) {
+                        filteredRows.add(r);
+                    }
+                }
+            } else {
+                filteredRows = rows;
+            }
+
+            final java.util.List<String> headers = new java.util.ArrayList<>();
+            final java.util.List<String> details = new java.util.ArrayList<>();
+            final java.util.List<Long> attemptIds = new java.util.ArrayList<>();
+            final java.util.List<String> levels = new java.util.ArrayList<>();
+            for (Object[] r : filteredRows) {
+                headers.add((String) r[1]);
+                details.add((String) r[2]);
+                attemptIds.add(r.length > 3 ? (Long) r[3] : null);
+                levels.add(r.length > 4 ? (String) r[4] : "INFO");
+            }
+            int count = filteredRows.size();
+
+            // ✅ (demandé 31 juillet 2026) : si un ticket est filtré et que la BD locale
+            // est vide pour lui, OU qu'il n'a pas de #delivery-uid/#wo, avertir et tenter
+            // automatiquement un pull Dataverse.
+            if (!ticketFilter.isEmpty()) {
+                checkAndPullSupportMissingDetail(ticketFilter, serialFilter, count);
+            }
+
+            final int finalCount = count;
+            runOnUiThread(() -> {
+                if (txtSupportCount != null) {
+                    txtSupportCount.setText(finalCount + " événement" + (finalCount > 1 ? "s" : ""));
+                }
+                if (listSupportEvents != null) {
+                    lastSupportHeaders.clear();
+                    lastSupportHeaders.addAll(headers);
+                    lastSupportDetails.clear();
+                    lastSupportDetails.addAll(details);
+                    supportSelectedPositions.clear(); // ✅ nouvelle liste = sélection réinitialisée
+                    SupportEventAdapter adapter = new SupportEventAdapter(this, headers, details, levels, supportSelectedPositions);
+                    listSupportEvents.setAdapter(adapter);
+                    // ✅ (ajouté 3 août 2026, demande Paul : "voir tout le processus lié" /
+                    // "je veux faire une sélection") — en mode sélection, taper une ligne
+                    // la coche/décoche au lieu d'ouvrir le dialogue "processus lié".
+                    listSupportEvents.setOnItemClickListener((parent, view, position, id) -> {
+                        if (supportSelectionMode) {
+                            if (!supportSelectedPositions.remove(position)) {
+                                supportSelectedPositions.add(position);
+                            }
+                            adapter.notifyDataSetChanged();
+                            return;
+                        }
+                        Long attemptId = (position < attemptIds.size()) ? attemptIds.get(position) : null;
+                        if (attemptId == null) {
+                            Toast.makeText(this,
+                                "Aucun processus lié pour cet événement (source LogBus ou API_TRACE)",
+                                Toast.LENGTH_SHORT).show();
+                            return;
+                        }
+                        showRelatedProcessDialog(attemptId);
+                    });
+                }
+            });
+        }, "SupportEventsLoader").start();
+    }
+
+    // =========================================================
+    // Diagnostic rules engine (Phase 2 — 27 juillet 2026)
+    // Exige un ticket_no dans le filtre : les règles corrèlent une chronologie par ticket.
+    // =========================================================
+    /**
+     * Lexique des niveaux support et couches de diagnostic (demandé 31 juillet 2026) —
+     * explique ce que veulent dire les deux valeurs affichées par "Diagnostiquer", pour
+     * que support/utilisateur sache comment les interpréter sans avoir à demander.
+     */
+    /**
+     * (Demandé 31 juillet 2026, suite à la perte du ticket 10898) — Restaure les livraisons
+     * depuis les backups JSON dans Téléchargements (écrits par LocalDeliveryBackup à chaque
+     * livraison, survivent à une désinstallation). Confirmation demandée avant d'agir —
+     * ça modifie la BD locale (insertions).
+     */
+    private void confirmAndRunRestoreBackup() {
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Restaurer depuis backup")
+                .setMessage("Ceci va chercher les livraisons sauvegardées dans Téléchargements " +
+                        "et réinsérer localement celles qui manquent (en attente de synchronisation " +
+                        "vers Dataverse). Les livraisons déjà présentes localement ne seront jamais " +
+                        "écrasées.\n\nContinuer ?")
+                .setPositiveButton("Restaurer", (d, w) -> runRestoreBackup())
+                .setNegativeButton("Annuler", null)
+                .show();
+    }
+
+    private void runRestoreBackup() {
+        if (txtSupportRestoreStatus != null) {
+            txtSupportRestoreStatus.setText("Restauration en cours...");
+        }
+        com.pa.lcr.lcp.storage.LocalDeliveryBackup.restoreAllAsync(getApplicationContext(),
+                (restored, skipped, failed, messages) -> runOnUiThread(() -> {
+                    if (txtSupportRestoreStatus != null) {
+                        txtSupportRestoreStatus.setText(restored + " restaurée(s), "
+                                + skipped + " déjà présente(s), " + failed + " erreur(s)");
+                    }
+                    if (restored > 0) {
+                        // Les lignes restaurées sont en PENDING — déclenche une tentative
+                        // de push immédiate plutôt que d'attendre le prochain cycle.
+                        try {
+                            com.pa.lcrdemo.dataverse.DeliverySyncScheduler.triggerNow(getApplicationContext());
+                        } catch (Exception ignored) {}
+                        Toast.makeText(this, restored + " livraison(s) restaurée(s) — synchronisation lancée",
+                                Toast.LENGTH_LONG).show();
+                    } else if (failed > 0) {
+                        Toast.makeText(this, "Restauration terminée avec des erreurs — voir détails",
+                                Toast.LENGTH_LONG).show();
+                    } else {
+                        Toast.makeText(this, "Aucune livraison à restaurer trouvée", Toast.LENGTH_SHORT).show();
+                    }
+                }));
+    }
+
+    // ✅ FIX (6 août 2026, demande Paul — "peux-tu m'ajouter les couleurs
+    // dans ?, au niveau de l'onglet Support") — le dialogue Lexique était en
+    // texte brut, sans aucune indication visuelle de gravité. Coloré
+    // maintenant avec la même logique que la liste Support (vert = simple,
+    // rouge = critique), pour que le niveau saute aux yeux avant même de
+    // lire le texte.
+    private void showSupportLexiqueDialog() {
+        android.text.SpannableStringBuilder sb = new android.text.SpannableStringBuilder();
+
+        appendColored(sb, "NIVEAUX SUPPORT\n\n", 0xFF212121, true);
+
+        appendColored(sb, "N1 — Chauffeur\n", 0xFF2E7D32, true);
+        sb.append("  Résolution simple sur le terrain : rebrancher/reconnecter le BT ou USB, "
+                + "redémarrer l'app, vérifier l'appairage. Pas besoin d'appeler le support.\n\n");
+
+        appendColored(sb, "N2 — Support technique\n", 0xFFF9A825, true);
+        sb.append("  Nécessite une vérification par le support (état du registre, config "
+                + "Field Service, synchronisation Dataverse).\n\n");
+
+        appendColored(sb, "N3 — Escalade développeur\n", 0xFFE65100, true);
+        sb.append("  Comportement anormal qui dépasse le dépannage standard — probable "
+                + "défaillance logicielle ou matérielle à investiguer.\n\n");
+
+        appendColored(sb, "N4 — Critique / urgent développeur\n", 0xFFB71C1C, true);
+        sb.append("  Cas grave (perte de données, blocage complet) nécessitant une "
+                + "intervention immédiate.\n\n");
+
+        appendColored(sb, "N/A", 0xFF757575, true);
+        sb.append(" — Aucune règle de diagnostic ne matche pour ce ticket. Ne veut pas "
+                + "dire qu'il n'y a pas de problème, juste qu'aucune des règles connues ne "
+                + "l'a détecté automatiquement.\n\n");
+
+        appendColored(sb, "N1/N2 (tendance)", 0xFF757575, true);
+        sb.append(" — Aucune règle exacte ne matche, mais la couche "
+                + "(Transport/API/UI) est clairement dominante dans les événements de ce "
+                + "ticket. Suggestion basée sur cette tendance, PAS un diagnostic confirmé — "
+                + "à valider manuellement. N/A reste affiché seulement si même la couche est "
+                + "indéterminée (aucun signal exploitable).\n\n");
+
+        sb.append("─────────────────────────────\n\n");
+        appendColored(sb, "COUCHES PAR COMPLEXITÉ\n\n", 0xFF212121, true);
+
+        appendColored(sb, "TRANSPORT (BT/USB/TCP/registre)\n", 0xFF1565C0, true);
+        sb.append("  Le problème semble venir de la communication physique avec le registre "
+                + "(Bluetooth, USB, TCP) ou du protocole LCP lui-même — pas de la logique "
+                + "applicative. Signal : erreurs classées \"level\":\"TRANSPORT\", événements "
+                + "event_where=LCP, ou trafic IO_TX/IO_RX du log du registre.\n\n");
+
+        appendColored(sb, "API\n", 0xFF6A1B9A, true);
+        sb.append("  Le problème semble venir des échanges API (Field Service Mobile ↔ APK, "
+                + "ou appels REST internes) — pas du transport ni de l'interface.\n\n");
+
+        appendColored(sb, "UI\n", 0xFF00838F, true);
+        sb.append("  Le problème semble venir d'une action ou d'un affichage côté interface "
+                + "utilisateur (boutons A/B/C, Continuer, Terminer, etc.).\n\n");
+
+        appendColored(sb, "INDÉTERMINÉ\n", 0xFF757575, true);
+        sb.append("  Pas assez de signal dans les logs disponibles pour trancher entre les "
+                + "trois couches ci-dessus.\n\n");
+
+        sb.append("⚠️ La couche est déterminée par vote majoritaire sur les logs présents — "
+                + "c'est un point de départ pour aiguiller, pas un diagnostic définitif. Le "
+                + "détail des comptes (Transport=X API=Y UI=Z) est toujours affiché pour "
+                + "vérifier si le verdict est solide ou serré.");
+
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Lexique — Niveaux et couches de diagnostic")
+                .setMessage(sb)
+                .setPositiveButton("Fermer", null)
+                .show();
+    }
+
+    /** Ajoute un segment de texte coloré (et optionnellement en gras) à un SpannableStringBuilder. */
+    private void appendColored(android.text.SpannableStringBuilder sb, String text, int color, boolean bold) {
+        int start = sb.length();
+        sb.append(text);
+        int end = sb.length();
+        sb.setSpan(new android.text.style.ForegroundColorSpan(color), start, end,
+                android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+        if (bold) {
+            sb.setSpan(new android.text.style.StyleSpan(android.graphics.Typeface.BOLD), start, end,
+                    android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+    }
+
+    private void runSupportDiagnosis() {
+        final String ticketFilter = (edtSupportTicketFilter != null)
+                ? edtSupportTicketFilter.getText().toString().trim() : "";
+        final String nodeFilter = (edtSupportNodeFilter != null)
+                ? edtSupportNodeFilter.getText().toString().trim() : "";
+
+        if (ticketFilter.isEmpty()) {
+            if (txtSupportDiagnosis != null) {
+                txtSupportDiagnosis.setVisibility(View.VISIBLE);
+                txtSupportDiagnosis.setText("Entrez un ticket_no dans le filtre avant de diagnostiquer.");
+            }
+            return;
+        }
+
+        new Thread(() -> {
+            java.util.List<com.pa.lcr.lcp.diagnostic.DiagnosticMatch> matches;
+            try {
+                com.pa.lcr.lcp.diagnostic.DiagnosticRuleEngine engine =
+                        new com.pa.lcr.lcp.diagnostic.DiagnosticRuleEngine(getApplicationContext());
+                matches = engine.evaluateForTicket(ticketFilter);
+            } catch (Exception e) {
+                matches = new java.util.ArrayList<>();
+            }
+            final java.util.List<com.pa.lcr.lcp.diagnostic.DiagnosticMatch> finalMatches = matches;
+
+            // ✅ (demandé 31 juillet 2026) : triage sur TOUS les logs présents (v_diagnostic_events
+            // + log_bus_event, pas seulement les règles qui matchent) — deux valeurs pour
+            // aiguiller support/utilisateur :
+            //   1. Niveau support : le pire (le plus élevé) parmi les règles qui matchent
+            //   2. Couche par complexité : où le problème semble se situer (Transport/API/UI)
+            String[] triage = computeSupportTriage(ticketFilter, nodeFilter, finalMatches);
+            final String triageSupportLevel = triage[0];
+            final String triageLayer = triage[1];
+            final String triageDetail = triage[2];
+
+            final StringBuilder sb = new StringBuilder();
+            sb.append("▶ Niveau support suggéré : ").append(triageSupportLevel).append("\n");
+            sb.append("▶ Couche probable : ").append(triageLayer).append("  (").append(triageDetail).append(")\n\n");
+
+            if (finalMatches.isEmpty()) {
+                sb.append("Aucune règle de diagnostic ne matche pour ce ticket.");
+            } else {
+                for (com.pa.lcr.lcp.diagnostic.DiagnosticMatch m : finalMatches) {
+                    sb.append("• [").append(m.supportLevel).append(" — ").append(m.confidence).append("%] ")
+                      .append(m.diagnostic);
+                    if (m.recommendedAction != null && !m.recommendedAction.isEmpty()) {
+                        sb.append("\n  → ").append(m.recommendedAction);
+                    }
+                    sb.append("\n");
+                }
+            }
+
+            runOnUiThread(() -> {
+                lastSupportMatches = finalMatches;
+                if (txtSupportDiagnosis != null) {
+                    txtSupportDiagnosis.setVisibility(View.VISIBLE);
+                    txtSupportDiagnosis.setText(sb.toString().trim());
+                }
+                if (rowSupportIncident != null) {
+                    rowSupportIncident.setVisibility(finalMatches.isEmpty() ? View.GONE : View.VISIBLE);
+                }
+                // ✅ FIX (7 août 2026, demande Paul — "je veux que tu ajoutes
+                // une approche de résolution lorsqu'il y a une erreur selon
+                // le niveau support apporté, affiché dans une fenêtre
+                // dialogue") — recommendedAction existait déjà par règle,
+                // mais restait noyé dans le texte en ligne de l'écran
+                // Support. Affiché maintenant dans une vraie fenêtre
+                // dialogue, colorée par niveau (même palette que le Lexique),
+                // pour que l'approche de résolution soit le point central,
+                // pas une ligne perdue parmi le reste.
+                showDiagnosisResolutionDialog(triageSupportLevel, triageLayer, triageDetail, finalMatches);
+            });
+        }, "SupportDiagnosisLoader").start();
+    }
+
+    /** Couleur associée à un niveau support (N1=vert...N4=rouge), même palette que le Lexique. */
+    private int colorForSupportLevel(String level) {
+        if (level == null) return 0xFF757575;
+        switch (level.trim().toUpperCase(java.util.Locale.ROOT)) {
+            case "N1": return 0xFF2E7D32; // vert
+            case "N2": return 0xFFF9A825; // jaune/orange
+            case "N3": return 0xFFE65100; // orange foncé
+            case "N4": return 0xFFB71C1C; // rouge
+            default:   return 0xFF757575; // gris — N/A ou inconnu
+        }
+    }
+
+    /**
+     * Fenêtre dialogue affichant l'approche de résolution suggérée pour le ticket
+     * diagnostiqué, colorée par niveau support — voir demande Paul du 7 août 2026.
+     */
+    private void showDiagnosisResolutionDialog(String triageSupportLevel, String triageLayer,
+            String triageDetail, java.util.List<com.pa.lcr.lcp.diagnostic.DiagnosticMatch> matches) {
+        android.text.SpannableStringBuilder sb = new android.text.SpannableStringBuilder();
+
+        int levelColor = colorForSupportLevel(triageSupportLevel);
+        appendColored(sb, "Niveau support : " + triageSupportLevel + "\n", levelColor, true);
+        sb.append("Couche probable : ").append(triageLayer).append("  (").append(triageDetail).append(")\n\n");
+
+        if (matches == null || matches.isEmpty()) {
+            appendColored(sb, "Aucune règle de diagnostic ne matche pour ce ticket.\n\n", 0xFF757575, false);
+            sb.append("Ça ne veut pas dire qu'il n'y a pas de problème — juste qu'aucune règle "
+                    + "connue ne l'a détecté automatiquement. Vérifie l'onglet Support pour le détail "
+                    + "brut des événements.");
+        } else {
+            for (com.pa.lcr.lcp.diagnostic.DiagnosticMatch m : matches) {
+                int mColor = colorForSupportLevel(m.supportLevel);
+                appendColored(sb, "● [" + m.supportLevel + " — " + m.confidence + "%] ", mColor, true);
+                sb.append(m.diagnostic).append("\n");
+                if (m.recommendedAction != null && !m.recommendedAction.trim().isEmpty()) {
+                    appendColored(sb, "  → Approche de résolution :\n", 0xFF212121, true);
+                    sb.append("  ").append(m.recommendedAction.trim()).append("\n");
+                } else {
+                    appendColored(sb, "  → Aucune approche de résolution enregistrée pour cette règle.\n", 0xFF757575, false);
+                }
+                sb.append("\n");
+            }
+        }
+
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Diagnostic — Approche de résolution")
+                .setMessage(sb)
+                .setPositiveButton("Fermer", null)
+                .show();
+    }
+
+    /**
+     * Triage global (demandé 31 juillet 2026) : agrège TOUS les logs présents pour ce
+     * ticket/node — v_diagnostic_events (event_where, level, data_json) et log_bus_event
+     * (src) — et produit deux valeurs pour aiguiller support/utilisateur :
+     *   [0] niveau support suggéré : le pire (le plus élevé) parmi les règles qui matchent
+     *       (N1=chauffeur, N2=support, N3/N4=escalade dev). "N/A" si aucune règle ne matche.
+     *   [1] couche probable : TRANSPORT / API / UI / INDÉTERMINÉ — dérivée par vote majoritaire
+     *       sur les signaux disponibles (pas une science exacte, un point de départ pour aiguiller).
+     *   [2] détail des comptes par couche, pour transparence (pas juste un verdict opaque).
+     * Doit être appelée depuis un thread d'arrière-plan.
+     */
+    private String[] computeSupportTriage(String ticketFilter, String nodeFilter,
+                                           java.util.List<com.pa.lcr.lcp.diagnostic.DiagnosticMatch> matches) {
+        // ✅ (refactor 31 juillet 2026) — délègue au moteur partagé SupportTriageEngine, pour
+        // que l'onglet Support (ici) et l'API HTTP exposent EXACTEMENT la même logique de
+        // triage, plutôt que deux implémentations qui pourraient diverger avec le temps.
+        com.pa.lcr.lcp.diagnostic.SupportTriageEngine.TriageResult r =
+                com.pa.lcr.lcp.diagnostic.SupportTriageEngine.computeTriage(
+                        getApplicationContext(), ticketFilter, nodeFilter, matches);
+        String detail = "Transport=" + r.transportCount + " API=" + r.apiCount
+                + " UI=" + r.uiCount + " Indéterminé=" + r.indetermineCount;
+        return new String[]{r.supportLevel, r.layer, detail};
+    }
+
+    // (severityOfSupportLevel supprimée — logique maintenant dans SupportTriageEngine, partagée avec l'API)
+
+    // =========================================================
+    // Boucle de rétroaction (Phase 3 — 27 juillet 2026)
+    // Enregistre chaque diagnostic actuellement affiché dans incident_history.
+    // Upsert géré par IncidentHistoryStore (incrémente occurrence_count si déjà vu).
+    // =========================================================
+    private void recordSupportIncidents() {
+        final java.util.List<com.pa.lcr.lcp.diagnostic.DiagnosticMatch> matches = lastSupportMatches;
+        if (matches == null || matches.isEmpty()) return;
+
+        final String ticketFilter = (edtSupportTicketFilter != null)
+                ? edtSupportTicketFilter.getText().toString().trim() : "";
+        final String serialFilter = (edtSupportSerialFilter != null)
+                ? edtSupportSerialFilter.getText().toString().trim() : "";
+        final String validatedBy = (edtSupportValidatedBy != null)
+                ? edtSupportValidatedBy.getText().toString().trim() : "";
+
+        new Thread(() -> {
+            try {
+                com.pa.lcr.lcp.storage.IncidentHistoryStore store =
+                        new com.pa.lcr.lcp.storage.IncidentHistoryStore(getApplicationContext());
+                for (com.pa.lcr.lcp.diagnostic.DiagnosticMatch m : matches) {
+                    store.recordIncident(m.ruleId, serialFilter.isEmpty() ? null : serialFilter,
+                            ticketFilter.isEmpty() ? null : ticketFilter, m.diagnostic, null, null, null,
+                            validatedBy.isEmpty() ? null : validatedBy);
+                }
+            } catch (Exception ignored) {
+                // Best-effort — un incident non enregistré ne doit jamais bloquer l'utilisateur.
+            }
+            runOnUiThread(() -> toast("Incident(s) enregistré(s) dans l'historique."));
+        }, "IncidentHistoryWriter").start();
+    }
+
+    /**
+     * Adapter simple 2 lignes (header + detail) pour la liste Support.
+     */
+    private static final class SupportEventAdapter extends ArrayAdapter<String> {
+        private final java.util.List<String> details;
+        private final java.util.List<String> levels;
+        private final java.util.Set<Integer> selectedPositions;
+
+        SupportEventAdapter(android.content.Context ctx, java.util.List<String> headers,
+                             java.util.List<String> details, java.util.List<String> levels,
+                             java.util.Set<Integer> selectedPositions) {
+            super(ctx, R.layout.row_support_event, R.id.txtRowHeader, headers);
+            this.details = details;
+            this.levels = levels;
+            this.selectedPositions = selectedPositions;
+        }
+
+        @Override
+        public View getView(int position, View convertView, android.view.ViewGroup parent) {
+            View row = super.getView(position, convertView, parent);
+            TextView txtDetail = row.findViewById(R.id.txtRowDetail);
+            if (txtDetail != null && position < details.size()) {
+                txtDetail.setText(details.get(position));
+            }
+            // ✅ FIX (6 août 2026, demande Paul — "je veux vraiment voir de
+            // manière évidente que s'il y a une erreur je veux un affichage
+            // couleur... le niveau de support à faire interagir") — code
+            // couleur par niveau, sur toute la ligne (fond) ET le texte de
+            // l'en-tête, pour que ce soit visible d'un coup d'œil, pas juste
+            // lisible en cherchant le mot "ERR" dans le texte.
+            String level = (position < levels.size()) ? levels.get(position) : "INFO";
+            TextView txtHeader = row.findViewById(R.id.txtRowHeader);
+            int bgColor;
+            int headerColor;
+            switch (level == null ? "INFO" : level) {
+                case "ERROR":
+                    bgColor = 0x33F44336;      // rouge translucide
+                    headerColor = 0xFFB71C1C;  // rouge foncé
+                    break;
+                case "WARN":
+                    bgColor = 0x33FF9800;      // orange translucide
+                    headerColor = 0xFFE65100;  // orange foncé
+                    break;
+                // ✅ FIX (7 août 2026, demande Paul — "voir de manière
+                // évidente les connexions et déconnexions") — couleurs
+                // dédiées, distinctes des ERROR/WARN, pour repérer ces
+                // transitions d'un coup d'œil dans la liste.
+                case "CONNECT":
+                    bgColor = 0x334CAF50;      // vert translucide
+                    headerColor = 0xFF2E7D32;  // vert foncé
+                    break;
+                case "DISCONNECT":
+                    bgColor = 0x33607D8B;      // bleu-gris translucide
+                    headerColor = 0xFF37474F;  // bleu-gris foncé
+                    break;
+                default:
+                    bgColor = 0x00000000;
+                    headerColor = 0xFF212121;  // gris foncé standard
+                    break;
+            }
+            if (selectedPositions.contains(position)) {
+                // ✅ (ajouté 3 août 2026) — surlignage de sélection garde priorité visuelle
+                row.setBackgroundColor(0x334CAF50);
+            } else {
+                row.setBackgroundColor(bgColor);
+            }
+            if (txtHeader != null) txtHeader.setTextColor(headerColor);
+            return row;
+        }
+    }
+
+    // =========================
+// Register tabs helpers (multi-media)
+// =========================
+
+    public static String mediaShortFromTransportKey(String transportKey) {
+        if (transportKey == null) return "—";
+        String k = transportKey.trim().toUpperCase(java.util.Locale.ROOT);
+        if (k.startsWith("BT:")) return "BT";
+        if (k.startsWith("USB")) return "USB";
+        if (k.startsWith("TCP:")) return "TCP";
+        if (k.contains("BT")) return "BT";
+        if (k.contains("USB")) return "USB";
+        if (k.contains("TCP")) return "TCP";
+        return "—";
+    }
+
+    private static String safeSerial(String serialId) {
+        if (serialId == null) return "";
+        return serialId.trim();
+    }
+
+    private static String serialShort(String serialId) {
+        String s = safeSerial(serialId);
+        if (s.isEmpty()) return "—";
+        if (s.length() <= 6) return s;
+        return s.substring(Math.max(0, s.length() - 6));
+    }
+
+    public static String tabKeyOf(String mediaShort, int node, String serialId) {
+        String m = (mediaShort == null || mediaShort.trim().isEmpty()) ? "—" : mediaShort.trim();
+                return m + ":" + node + ":" + safeSerial(serialId);
+    }
+
+    private static String regKeyOf(int node, String serialId) {
+        return (node & 0xFF) + "#" + safeSerial(serialId);
+    }
+
+    private String tabLabelOf(String mediaShort, int node, String serialId) {
+        return tabLabelOf(mediaShort, node, serialId, false);
+    }
+
+    private String tabLabelOf(String mediaShort, int node, String serialId, boolean isLc3) {
+        String m = (mediaShort == null || mediaShort.trim().isEmpty()) ? "—" : mediaShort.trim();
+        String badge = isLc3 ? "[LC3] " : "[LCR-II] ";
+        return m + " - " + badge + serialShort(serialId) + " - " + node;
+    }
+
+    private boolean isTransportReady(String transportKey) {
+        try {
+            if (mediaTransportManager == null) return false;
+            if (transportKey == null || transportKey.trim().isEmpty()) return false;
+            // getByKey retourne null si DISCONNECTED ou ERROR
+            TransportIo io = mediaTransportManager.getByKey(transportKey.trim());
+            return io != null && io.isOpen();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private void persistTabMediaStatusForApi(TabSpec spec, boolean ready, String media) {
+        try {
+            if (deliveryStore == null || spec == null) return;
+            String serial = safeSerial(spec.serialId);
+            if (serial.isEmpty()) return;
+
+            String ticketKey = "TAB-" + (spec.node & 0xFF);
+            JSONObject data = new JSONObject();
+            data.put("event_type", "TAB_MEDIA_STATUS");
+            data.put("state", ready ? "READY" : "OFF");
+            data.put("media", media);
+            data.put("transport_key", spec.transportKey);
+            data.put("node", (spec.node & 0xFF));
+            data.put("serial_id", serial);
+            data.put("ts_ms", System.currentTimeMillis());
+
+            deliveryStore.upsertSummaryAsync(serial, ticketKey, null,
+                    ready ? "TAB_READY" : "TAB_OFF",
+                    DeliveryLogStore.SOURCE_UI, null, null, null);
+
+            final String tk = ticketKey;
+            deliveryStore.openAttemptAsync(serial, tk, DeliveryLogStore.SOURCE_UI, null, attemptId -> {
+                deliveryStore.addEventAsync(attemptId, DeliveryLogStore.LEVEL_INFO,
+                        "TAB_MEDIA_STATUS",
+                        "Tab media status",
+                        data.toString());
+                deliveryStore.closeAttemptAsync(attemptId, "DONE", data.toString(), null);
+            });
+        } catch (Exception ignored) {}
+    }
+
+    private void refreshOneTabMediaStatus(String tabKey) {
+        if (tabKey == null) return;
+        TabSpec spec = tabsByKey.get(tabKey);
+        if (spec == null) return;
+
+        boolean ready = isTransportReady(spec.transportKey);
+        String media = mediaShortFromTransportKey(spec.transportKey);
+        String mediaLabel = ready ? media : (media + "(OFF)");
+
+        // ✅ Format: BT(OFF) - [LC3] 123456 - 250
+        updateRegisterTabLabel(tabKey, tabLabelOf(mediaLabel, spec.node, spec.serialId, spec.isLc3) + (spec.qtySuffix != null ? spec.qtySuffix : ""));
+
+        // ✅ FIX (7 août 2026, demande Paul — "avec le bouton refresh à
+        // gauche du tab on pourra suivre s'il y a une perte de connexion
+        // avec le registre") — teinte de l'icône reflète l'état réel de
+        // connexion, pas juste un bouton statique. Vert = transport
+        // physiquement ouvert ET registre qui répond (DeliveryController
+        // pas DISCONNECTED). Rouge = perte de connexion, peu importe si
+        // c'est le transport (BT/USB coupé) ou le registre lui-même qui ne
+        // répond plus alors que le transport reste ouvert.
+        boolean registreOk = ready;
+        try {
+            com.pa.lcr.lcp.DeliveryController dc = com.pa.lcr.lcp.RegisterSessionManager
+                    .get(this).getController(spec.transportKey, spec.node);
+            if (dc != null && dc.getState() == com.pa.lcr.lcp.DeliveryState.DISCONNECTED) {
+                registreOk = false;
+            }
+        } catch (Exception ignored) {}
+        updateTabRefreshIconTint(tabKey, registreOk);
+
+        try {
+            Fragment f = getSupportFragmentManager().findFragmentByTag("regtab_" + tabKey);
+            if (f instanceof RegisterTabFragment) {
+                ((RegisterTabFragment) f).onTabMediaStatusChanged(ready, media);
+            }
+        } catch (Exception ignored) {}
+
+        persistTabMediaStatusForApi(spec, ready, media);
+    }
+
+    /** ✅ AJOUTÉ (7 août 2026, demande Paul) — teinte l'icône de rafraîchissement
+     *  d'un tab selon l'état réel de connexion : vert = OK, rouge = perte de
+     *  connexion (transport fermé OU registre qui ne répond plus). */
+    private void updateTabRefreshIconTint(String tabKey, boolean healthy) {
+        try {
+            if (tabRegisters == null) return;
+            for (int i = 0; i < tabRegisters.getTabCount(); i++) {
+                TabLayout.Tab t = tabRegisters.getTabAt(i);
+                if (t == null) continue;
+                Object tag = t.getTag();
+                if (!(tag instanceof String) || !tabKey.equals(tag)) continue;
+                View custom = t.getCustomView();
+                if (custom == null) return;
+                ImageView img = custom.findViewById(R.id.imgTabRefresh);
+                if (img == null) return;
+                img.setColorFilter(healthy ? 0xFF2E7D32 : 0xFFB71C1C); // vert / rouge
+                return;
+            }
+        } catch (Exception ignored) {}
+    }
+
+    public void refreshAllTabsMediaStatus() {
+        try {
+            ArrayList<String> keys;
+            synchronized (tabsByKey) { keys = new ArrayList<>(tabsByKey.keySet()); }
+            for (String k : keys) refreshOneTabMediaStatus(k);
+        } catch (Exception ignored) {}
+    }
+
+
+    /**
+     * Legacy: créer un TAB "unknown serial" (avant scan) — pas de regKey mapping.
+     */
+    private void ensureRegisterTab(int node, int from, boolean focus) {
+        if (node < 1 || node > 250) {
+            logUi(null, "TAB registre: node invalide: " + node);
+            return;
+        }
+        if (from < 0 || from > 255) from = 255;
+
+        String tabKey = tabKeyOf("—", node, "");
+        if (!tabsByKey.containsKey(tabKey)) {
+            TabSpec spec = new TabSpec(tabKey, "—", null, node, from, "");
+            tabsByKey.put(tabKey, spec);
+            addRegisterTabUi(spec);
+            logUi(null, "TAB registre ajouté (unknown): " + node);
+        } else {
+            logUi(null, "TAB registre déjà présent (unknown): " + node + " (focus)");
+        }
+
+        if (focus) {
+            selectRegisterTabByKey(tabKey);
+            showRegisterFragmentByKey(tabKey);
+        } else if (currentTabKey == null) {
+            selectRegisterTabByKey(tabKey);
+            showRegisterFragmentByKey(tabKey);
+        }
+    }
+
+    /**
+     * Upsert issu d'un scan (serial connu).
+     * Règle: clear ciblé A1 si même (node,serial) apparaît sur un autre média.
+     */
+    public void upsertRegisterTabFromScan(String transportKey, int node, int from, String serialId, boolean focus) {
+        upsertRegisterTabFromScan(transportKey, node, from, serialId, focus, resolveIsLc3(transportKey, node));
+    }
+
+    // ✅ Point d'entrée UNIQUE pour déterminer si un registre est LC3, avant
+    // de créer/mettre à jour un onglet. Remplace les vérifications dupliquées
+    // qui existaient séparément dans DeepLinkHandler, RegisterConnectionHelper
+    // et l'ancienne version de cette méthode (qui devinait via un onglet
+    // existant — toujours faux pour un premier onglet créé sur un LC3).
+    //
+    // Ordre de résolution :
+    //   1) DeliveryController.getLink() — source de vérité si une session
+    //      est déjà active pour ce (transportKey, node).
+    //   2) Onglet existant (repli) — utile si un onglet a déjà été créé
+    //      correctement avant qu'une session ne soit (re)créée.
+    public boolean resolveIsLc3(String transportKey, int node) {
+        try {
+            com.pa.lcr.lcp.DeliveryController dc =
+                    com.pa.lcr.lcp.RegisterSessionManager.get(this).getController(transportKey, node);
+            if (dc != null && dc.getLink() instanceof com.pa.lcr.lcp.Lc3Link) return true;
+            if (dc != null) return false; // session existe et n'est PAS Lc3Link → LCR-II confirmé
+        } catch (Exception ignored) {}
+
+        try {
+            String mediaShort = mediaShortFromTransportKey(transportKey);
+            // on ne connaît pas encore le serial ici pour un tabKey exact —
+            // on cherche par (média, node) parmi les onglets existants.
+            synchronized (tabsByKey) {
+                for (TabSpec spec : tabsByKey.values()) {
+                    if (spec != null && spec.node == node
+                            && transportKey.equalsIgnoreCase(spec.transportKey)) {
+                        return spec.isLc3;
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return false;
+    }
+
+    // ✅ Nouvelle étape de résolution (demandée) : AVANT de sonder quoi que ce
+    // soit (transport/onglet/registre), valider si le node+#série demandés
+    // sont déjà ce qui tourne sur le MÉDIA ACTUELLEMENT ACTIF. Si oui →
+    // réutilisation immédiate, aucun scan/sondage d'un autre média nécessaire.
+    // Si non → retourne null, laissant le flux normal (resolveOrCreateForNode
+    // / auto-connect) chercher ailleurs.
+    //
+    // C'est ce qui évite de sonder un TCP-LC3 déjà connecté quand la
+    // livraison en cours cible en réalité un tout autre registre BT.
+    public String resolveIfActiveMatches(int node, String serialId) {
+        if (serialId == null || serialId.trim().isEmpty()) return null;
+        try {
+            // ✅ FIX (4 août 2026, demande Paul — "on est supposé trouver le
+            // média pour un registre, on trouve des médias, mais le média
+            // réel est mis à OFF, ça n'a pas de sens") — RÉPONSE : ce check
+            // ne validait QUE mediaTransportManager.getActiveKey(), un état
+            // "actif" purement EN MÉMOIRE (sert seulement à l'exclusivité
+            // entre transports), jamais persisté — remis à zéro à CHAQUE
+            // redémarrage du processus (Android tue l'app en arrière-plan
+            // très régulièrement, confirmé dans tous les logs analysés
+            // aujourd'hui). Le port USB, lui, physiquement, n'a pas bougé.
+            // Corrigé : on cherche maintenant le tab par node+#série d'abord,
+            // puis on vérifie l'état RÉEL de SON transport pinné
+            // (io.isOpen()) — peu importe ce que "actif" dit en mémoire — et
+            // on l'active nous-mêmes s'il est physiquement prêt mais pas
+            // encore marqué actif.
+            // ✅ FIX (6 août 2026, concurrence) — copie défensive plutôt que
+            // synchronized() autour de toute la boucle : le corps fait des
+            // appels potentiellement lents (activateExclusive, getOrCreate)
+            // qu'on ne veut pas exécuter en tenant le verrou de tabsByKey.
+            java.util.List<TabSpec> specsSnapshot;
+            synchronized (tabsByKey) { specsSnapshot = new ArrayList<>(tabsByKey.values()); }
+            for (TabSpec spec : specsSnapshot) {
+                if (spec == null) continue;
+                if (spec.node != node) continue;
+                if (spec.serialId == null) continue;
+                if (!serialId.trim().equalsIgnoreCase(spec.serialId.trim())) continue;
+                if (spec.transportKey == null || spec.transportKey.trim().isEmpty()) continue;
+
+                String candidateKey = spec.transportKey.trim();
+                TransportIo io = (mediaTransportManager != null) ? mediaTransportManager.getByKey(candidateKey) : null;
+                boolean reallyOpen = false;
+                try { reallyOpen = (io != null && io.isOpen()); } catch (Exception ignored2) {}
+                if (!reallyOpen) {
+                    android.util.Log.i("MainActivity", "resolveIfActiveMatches: tab trouvé pour node=" + node
+                        + " serial=" + serialId + " sur " + candidateKey + " mais transport réellement fermé — laisser chercher ailleurs");
+                    continue;
+                }
+
+                // Le port est réellement ouvert — s'assurer qu'il est bien marqué actif
+                // (pas de vol d'exclusivité si une livraison tourne ailleurs — même garde
+                // que partout dans l'app).
+                String activeKeyNow = (mediaTransportManager != null) ? mediaTransportManager.getActiveKey() : null;
+                if (activeKeyNow == null || !activeKeyNow.equalsIgnoreCase(candidateKey)) {
+                    if (!isTransportSwitchSafe(candidateKey, "RESOLVE_IF_ACTIVE_MATCHES")) {
+                        android.util.Log.i("MainActivity", "resolveIfActiveMatches: " + candidateKey
+                            + " physiquement ouvert mais livraison active ailleurs — laisser chercher ailleurs");
+                        continue;
+                    }
+                    try { mediaTransportManager.activateExclusive(candidateKey, "RESOLVE_IF_ACTIVE_MATCHES"); } catch (Exception ignored2) {}
+                }
+
+                // Confirmer qu'une session vivante existe bien pour ce couple
+                com.pa.lcr.lcp.DeliveryController dc =
+                        com.pa.lcr.lcp.RegisterSessionManager.get(this).getController(candidateKey, node);
+                if (dc == null) {
+                    // ✅ Transport physiquement ouvert mais pas encore de session — la
+                    // créer maintenant plutôt que d'abandonner : c'est exactement le
+                    // cas "même série, même node, même USB, juste le processus a
+                    // redémarré" que ce fix vise.
+                    try { dc = com.pa.lcr.lcp.RegisterSessionManager.get(this).getOrCreate(candidateKey, node, 255, io); } catch (Exception ignored2) {}
+                    if (dc == null) {
+                        android.util.Log.i("MainActivity", "resolveIfActiveMatches: " + candidateKey
+                            + " ouvert mais session non créable — abandon, laisser chercher un autre média");
+                        continue;
+                    }
+                }
+                // ✅ FIX : ne pas se contenter que la session EXISTE — vérifier
+                // qu'elle est réellement CONNECTED. Sinon, laisser le flux normal
+                // (resolveOrCreateForNode / auto-connect) chercher un autre média,
+                // au lieu de lancer la livraison sur un registre pas prêt.
+                if (dc.getState() != com.pa.lcr.lcp.DeliveryState.CONNECTED) {
+                    android.util.Log.i("MainActivity", "resolveIfActiveMatches: média " + candidateKey
+                            + " trouvé mais état=" + dc.getState() + " (pas CONNECTED) — chercher un autre média");
+                    continue;
+                }
+                android.util.Log.i("MainActivity", "resolveIfActiveMatches: " + candidateKey
+                        + " réellement ouvert ET CONNECTED (node=" + node + " serial=" + serialId + ") — réutilisation directe");
+                return candidateKey;
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    // ✅ Rendu public : DeepLinkHandler et RegisterConnectionHelper doivent
+    // pouvoir passer isLc3 explicitement (vrai type de Link connu via
+    // DeliveryController.getLink()), plutôt que de passer par la version à
+    // 5 arguments qui devine isLc3 depuis un onglet existant — toujours
+    // faux pour un premier onglet créé sur un registre LC3.
+    public void upsertRegisterTabFromScan(String transportKey, int node, int from, String serialId, boolean focus, boolean isLc3) {
+        // ✅ Log d'entrée AVEC pile d'appel — pour identifier, une fois pour
+        // toutes, QUI appelle cette méthode avec quelles données. Le log de
+        // migration seul ne suffisait pas : il ne se déclenche que la 2e fois
+        // (quand un ancien tab existe déjà) — jamais lors de la toute première
+        // création, qui est justement le moment qu'on n'arrivait pas à tracer.
+        android.util.Log.i("MainActivity", "upsertRegisterTabFromScan: APPEL transportKey=" + transportKey
+                + " node=" + node + " serial=" + serialId + " isLc3=" + isLc3 + " focus=" + focus
+                + "\n" + android.util.Log.getStackTraceString(new Exception("stacktrace-only")));
+        if (node < 1 || (!isLc3 && node > 250)) return;
+        if (from < 0 || from > 255) from = 255;
+        String mediaShort = mediaShortFromTransportKey(transportKey);
+        String serial = safeSerial(serialId);
+        if (serial.isEmpty()) return;
+
+        // 1) retirer les tabs legacy (serial vide) dès qu'on trouve au moins un registre
+        removeAllUnknownSerialTabsBestEffort();
+
+        // 2) clear ciblé si migration (même node+serial+type, média différent)
+        // ✅ FIX : migration réelle UNIQUEMENT si l'ancien transport n'est plus
+        // joignable. Avant ce correctif, deux registres INDÉPENDANTS partageant
+        // par coïncidence le même (node, serial, type) sur deux médias
+        // différents pouvaient s'écraser l'un l'autre — alors qu'ils doivent
+        // pouvoir coexister connectés simultanément (voir onConfigureMediaActivated).
+        // ✅ FIX : plus de suffixe ":lc3"/":lcr" dans regKey — même #série + même
+        // node = MÊME registre physique, peu importe le type détecté (correct
+        // ou mal détecté) lors d'une tentative précédente. Avant ce correctif,
+        // un ancien tab mal typé (ex: isLc3=true par erreur) utilisait un regKey
+        // différent ("...:lc3" vs "...:lcr"), donc n'était JAMAIS trouvé lors de
+        // la recherche du "vieux tab à migrer" — les deux persistaient.
+        String regKey = regKeyOf(node, serial);
+        String newTabKey = tabKeyOf(mediaShort, node, serial);
+        String oldTabKey = regKeyToTabKey.get(regKey);
+        if (oldTabKey != null && !oldTabKey.equals(newTabKey)) {
+            TabSpec oldSpec = tabsByKey.get(oldTabKey);
+            android.util.Log.i("MainActivity", "upsertRegisterTabFromScan: regKey=" + regKey
+                    + " oldTabKey=" + oldTabKey + " newTabKey=" + newTabKey
+                    + " oldSpec.isLc3=" + (oldSpec != null ? oldSpec.isLc3 : "null") + " isLc3=" + isLc3);
+            if (oldSpec != null) {
+                // ✅ RÈGLE SIMPLE (demandée) : même #série + même node = on
+                // reprend, on supprime l'ancien onglet et on applique le nouveau
+                // média — sans AUCUNE condition, ni sur le transport ni sur
+                // isLc3. Avant ce correctif, si un ancien tab avait été créé
+                // avec un isLc3 incorrect (ex: faux-positif LC3 sur un LCR-II
+                // réel), la migration ne se déclenchait JAMAIS puisqu'elle
+                // exigeait oldSpec.isLc3 == isLc3 — les deux onglets
+                // persistaient indéfiniment côte à côte pour LE MÊME registre.
+                android.util.Log.i("MainActivity", "upsertRegisterTabFromScan: MIGRATION — suppression de " + oldTabKey);
+                removeTabAndFragment(oldTabKey, "migrated to " + newTabKey);
+            }
+        }
+        regKeyToTabKey.put(regKey, newTabKey);
+          // Pré-populer le serial pour LC3 avant création du fragment
+        if (isLc3 && !serial.isEmpty()) {
+            try {
+                RegisterSessionManager sm = RegisterSessionManager.get(getApplicationContext());
+                sm.bindExpectedSerial(node, serial);
+            } catch (Exception ignored) {}
+        }      
+
+        // 3) upsert tab
+        TabSpec existing = tabsByKey.get(newTabKey);
+        if (existing == null) {
+            TabSpec spec = new TabSpec(newTabKey, mediaShort, transportKey, node, from, serial, isLc3);
+            tabsByKey.put(newTabKey, spec);
+            addRegisterTabUi(spec);
+            logUi(null, "TAB registre ajouté: " + tabLabelOf(mediaShort, node, serial, isLc3));
+        } else {
+            TabSpec spec = new TabSpec(newTabKey, mediaShort, transportKey, node, from, serial, isLc3);
+            tabsByKey.put(newTabKey, spec);
+            updateRegisterTabLabel(newTabKey, tabLabelOf(mediaShort, node, serial, isLc3));
+        }
+
+        if (focus) {
+            selectRegisterTabByKey(newTabKey);
+            showRegisterFragmentByKey(newTabKey);
+        }
+    }
+
+    private void removeAllUnknownSerialTabsBestEffort() {
+        try {
+            java.util.ArrayList<String> toRemove = new java.util.ArrayList<>();
+            // ✅ FIX (6 août 2026, concurrence)
+            synchronized (tabsByKey) {
+                for (java.util.Map.Entry<String, TabSpec> e : tabsByKey.entrySet()) {
+                    if (e == null) continue;
+                    TabSpec s = e.getValue();
+                    if (s == null) continue;
+                    if (s.serialId == null || s.serialId.trim().isEmpty()) {
+                        toRemove.add(e.getKey());
+                    }
+                }
+            }
+            for (String k : toRemove) {
+                removeTabAndFragment(k, "remove legacy unknown tab");
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private void addRegisterTabUi(TabSpec spec) {
+        if (tabRegisters == null || spec == null) return;
+        TabLayout.Tab t = tabRegisters.newTab();
+        t.setTag(spec.tabKey);
+        tabRegisters.addTab(t, false);
+        // ✅ FIX (7 août 2026, demande Paul — "ajouter une icône à gauche du
+        // tab pour faire rafraîchir le tab") — vue personnalisée avec icône
+        // cliquable + texte, remplace le setText() simple d'avant.
+        View custom = getLayoutInflater().inflate(R.layout.tab_register_custom, null);
+        TextView txtLabel = custom.findViewById(R.id.txtTabLabel);
+        if (txtLabel != null) txtLabel.setText(tabLabelOf(spec.mediaShort, spec.node, spec.serialId, spec.isLc3));
+        ImageView imgRefresh = custom.findViewById(R.id.imgTabRefresh);
+        if (imgRefresh != null) {
+            imgRefresh.setOnClickListener(v -> onTabRefreshClicked(spec.tabKey));
+        }
+        t.setCustomView(custom);
+    }
+
+    /** ✅ AJOUTÉ (7 août 2026, demande Paul) — clic sur l'icône de
+     *  rafraîchissement à gauche d'un tab : relance une vérification de
+     *  connexion pour CE tab précis (même chemin que le bouton Status),
+     *  sans avoir à ouvrir le tab d'abord. Chaque clic tracé dans Support. */
+    private void onTabRefreshClicked(String tabKey) {
+        try {
+            logUi(null, "[TAB-REFRESH] Clic icône rafraîchir — tabKey=" + tabKey);
+            Fragment f = getSupportFragmentManager().findFragmentByTag("regtab_" + tabKey);
+            if (f instanceof RegisterTabFragment) {
+                ((RegisterTabFragment) f).triggerManualRefreshFromTabIcon();
+            } else {
+                refreshOneTabMediaStatus(tabKey);
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private void updateRegisterTabLabel(String tabKey, String label) {
+        try {
+            if (tabRegisters == null) return;
+            for (int i = 0; i < tabRegisters.getTabCount(); i++) {
+                TabLayout.Tab t = tabRegisters.getTabAt(i);
+                if (t == null) continue;
+                Object tag = t.getTag();
+                if (tag instanceof String && tabKey.equals(tag)) {
+                    View custom = t.getCustomView();
+                    if (custom != null) {
+                        TextView txtLabel = custom.findViewById(R.id.txtTabLabel);
+                        if (txtLabel != null) { txtLabel.setText(label); return; }
+                    }
+                    t.setText(label); // repli si la vue personnalisée n'existe pas encore
+                    return;
+                }
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private void selectRegisterTabByKey(String tabKey) {
+        if (tabRegisters == null || tabKey == null) return;
+        for (int i = 0; i < tabRegisters.getTabCount(); i++) {
+            TabLayout.Tab t = tabRegisters.getTabAt(i);
+            if (t != null && t.getTag() instanceof String && tabKey.equals((String) t.getTag())) {
+                t.select();
+                return;
+            }
+        }
+    }
+
+    private void showRegisterFragmentByKey(String tabKey) {
+        if (registerContainer == null || tabKey == null) return;
+        TabSpec spec = tabsByKey.get(tabKey);
+        if (spec == null) return;
+
+        // ✅ B1 FSM: activer le transport du tab (évite boutons morts après switch)
+        ensureActiveTransport(spec.transportKey, "TAB_SWITCH");
+
+        currentTabKey = tabKey;
+        currentRegNode = spec.node;
+
+        if (txtActiveNode != null) {
+            txtActiveNode.setText("Node actif : " + tabLabelOf(spec.mediaShort, spec.node, spec.serialId, spec.isLc3));
+        }
+
+        FragmentManager fm = getSupportFragmentManager();
+        String tag = "regtab_" + tabKey;
+        Fragment existing = fm.findFragmentByTag(tag);
+        // Recréer si serial manquant dans le fragment existant
+
+        boolean needsRebuild = false;
+            if (existing instanceof RegisterTabFragment) {
+                String existingSerial = ((RegisterTabFragment) existing).getSerialFromArgs();
+                int existingNode = ((RegisterTabFragment) existing).getNodeFromArgs(); // ← ajouter
+                needsRebuild = (spec.serialId != null && !spec.serialId.trim().isEmpty()
+                        && !spec.serialId.trim().equals(existingSerial != null ? existingSerial.trim() : ""))
+                    || (spec.node != existingNode); // ← ajouter
+            }
+
+        Fragment f = (existing != null && !needsRebuild) ? existing
+                : RegisterTabFragment.newInstance(spec.node, spec.from, spec.serialId, spec.transportKey);
+        FragmentTransaction tx = fm.beginTransaction();
+        tx.replace(R.id.registerContainer, f, tag);
+        tx.setReorderingAllowed(true);
+        tx.commitAllowingStateLoss();
+        ui.postDelayed(() -> refreshOneTabMediaStatus(tabKey), 50);
+        ui.postDelayed(() -> {
+            try {
+             Fragment ff = getSupportFragmentManager().findFragmentByTag("regtab_" + tabKey);
+             if (ff instanceof RegisterTabFragment) {
+                ((RegisterTabFragment) ff).onTabActivated();
+             }
+            } catch (Exception ignored) {}
+        }, 100);        
+    }
+
+    /**
+     * ✅ Clear ciblé A1: retire TAB + Fragment explicitement.
+     */
+    private void attachTabLongPressListeners() {
+        if (tabRegisters == null) return;
+        android.view.ViewGroup strip = (android.view.ViewGroup) tabRegisters.getChildAt(0);
+        if (strip == null) return;
+        for (int i = 0; i < strip.getChildCount(); i++) {
+            android.view.View tabView = strip.getChildAt(i);
+            final int idx = i;
+            tabView.setOnLongClickListener(v -> {
+                TabLayout.Tab tab = tabRegisters.getTabAt(idx);
+                if (tab == null) return true;
+                Object tag = tab.getTag();
+                if (!(tag instanceof String)) return true;
+                showTabContextDialog((String) tag, tab.getText() != null ? tab.getText().toString() : "");
+                return true;
+            });
+        }
+    }
+
+    private void showTabContextDialog(String tabKey, String tabLabel) {
+        new androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle(tabLabel)
+            .setItems(new String[]{"Reconnect", "Supprimer"}, (dialog, which) -> {
+                if (which == 0) {
+                    // Reconnect
+                    FragmentManager fm = getSupportFragmentManager();
+                    Fragment f = fm.findFragmentByTag("regtab_" + tabKey);
+                    if (f instanceof RegisterTabFragment) {
+                        selectRegisterTabByKey(tabKey);
+                        showRegisterFragmentByKey(tabKey);
+                        ((RegisterTabFragment) f).reconnectFromDialog();
+                    }
+                } else {
+                    // Supprimer
+                    new androidx.appcompat.app.AlertDialog.Builder(this)
+                        .setTitle("Supprimer le tab ?")
+                        .setMessage("Supprimer " + tabLabel + " ?")
+                        .setPositiveButton("Supprimer", (d, w) -> {
+                            removeTabAndFragment(tabKey, "user deleted");
+                            // Si plus aucun tab registre → afficher tab par défaut
+                            if (tabRegisters != null && tabRegisters.getTabCount() == 0) {
+                                showPage(0); // retour à MAIN
+                                logUi(null, "Tous les tabs supprimés — retour MAIN");
+                            }
+                        })
+                        .setNegativeButton("Annuler", null)
+                        .show();
+                }
+            })
+            .show();
+    }
+
+    private void removeTabAndFragment(String tabKey, String reason) {
+        if (tabKey == null) return;
+
+        tabsByKey.remove(tabKey);
+
+        // remove regKey mapping entries pointing to this tabKey
+        // ✅ FIX (6 août 2026, concurrence)
+        try {
+            java.util.ArrayList<String> toRemove = new java.util.ArrayList<>();
+            synchronized (regKeyToTabKey) {
+                for (java.util.Map.Entry<String, String> e : regKeyToTabKey.entrySet()) {
+                    if (e == null) continue;
+                    if (tabKey.equals(e.getValue())) toRemove.add(e.getKey());
+                }
+            }
+            for (String k : toRemove) regKeyToTabKey.remove(k);
+        } catch (Exception ignored) {}
+
+        // remove tab UI
+        try {
+            if (tabRegisters != null) {
+                for (int i = 0; i < tabRegisters.getTabCount(); i++) {
+                    TabLayout.Tab t = tabRegisters.getTabAt(i);
+                    if (t == null) continue;
+                    Object tag = t.getTag();
+                    if (tag instanceof String && tabKey.equals(tag)) {
+                        tabRegisters.removeTabAt(i);
+                        break;
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+
+        // remove fragment explicitly
+        try {
+            FragmentManager fm = getSupportFragmentManager();
+            String ftag = "regtab_" + tabKey;
+            Fragment f = fm.findFragmentByTag(ftag);
+            if (f != null) {
+                FragmentTransaction tx = fm.beginTransaction();
+                tx.remove(f);
+                tx.commitAllowingStateLoss();
+        ui.postDelayed(() -> refreshOneTabMediaStatus(tabKey), 50);
+            }
+        } catch (Exception ignored) {}
+
+        if (tabKey.equals(currentTabKey)) {
+            currentTabKey = null;
+            currentRegNode = -1;
+            try {
+                if (tabRegisters != null && tabRegisters.getTabCount() > 0) {
+                    TabLayout.Tab t0 = tabRegisters.getTabAt(0);
+                    if (t0 != null) t0.select();
+                    Object tag = (t0 != null) ? t0.getTag() : null;
+                    if (tag instanceof String) showRegisterFragmentByKey((String) tag);
+                }
+            } catch (Exception ignored) {}
+        }
+
+        logUi(null, "TAB registre supprimé: " + tabKey + (reason != null ? (" (" + reason + ")") : ""));
+
+        // ✅ FIX (5 août 2026, demande Paul — "en toute circonstance il faut
+        // remettre un tab vide ou un bouton reconnect s'il n'y a plus de
+        // tab, on peut pas faire reconnect ou supprimer dans le tab car il
+        // n'y en a plus") — quand le DERNIER tab disparaît, il n'y a plus
+        // aucun moyen dans l'UI de déclencher une reconnexion (pas de tab,
+        // donc pas de bouton Status/Reconnect à cliquer). Plutôt que
+        // d'ajouter un nouvel élément UI (risqué à modifier en aveugle dans
+        // le layout XML), on déclenche automatiquement une tentative de
+        // reconnexion via le même point d'entrée unifié que Diagnostic
+        // utilise — le résultat est le même que si l'utilisateur avait pu
+        // cliquer "Reconnecter", sans dépendre d'un bouton qui n'existe pas
+        // dans cet état.
+        try {
+            if (tabRegisters == null || tabRegisters.getTabCount() == 0) {
+                // ✅ FIX (7 août 2026, demande Paul — coupe-circuit) — vérifié
+                // AVANT le refroidissement simple : si le circuit est déjà
+                // ouvert (boucle détectée précédemment), on n'essaie même
+                // plus, peu importe le temps écoulé, tant que l'utilisateur
+                // n'a pas agi manuellement depuis Configure.
+                if (autoReconnectCircuitBroken) {
+                    logUi(null, "Reconnexion auto désactivée (boucle détectée précédemment) — "
+                        + "passe par Configure pour reconnecter manuellement");
+                    return;
+                }
+                long nowCooldown = System.currentTimeMillis();
+
+                // Détection du patron de boucle : compte les tentatives dans une
+                // fenêtre glissante de 30s, peu importe le refroidissement de 3s.
+                if (nowCooldown - autoReconnectStreakWindowStartMs > AUTO_RECONNECT_STREAK_WINDOW_MS) {
+                    autoReconnectStreakWindowStartMs = nowCooldown;
+                    autoReconnectStreakCount = 0;
+                }
+                autoReconnectStreakCount++;
+                if (autoReconnectStreakCount > AUTO_RECONNECT_STREAK_LIMIT) {
+                    autoReconnectCircuitBroken = true;
+                    logUi(null, "⚠ Boucle de reconnexion détectée (" + autoReconnectStreakCount
+                        + " tentatives en moins de 30s) — automatique COUPÉ, passage forcé à Configure");
+                    runOnUiThread(() -> {
+                        try {
+                            showPage(2);
+                            Toast.makeText(this, "⚠ Reconnexion automatique arrêtée (boucle détectée) — "
+                                + "vérifie la connexion depuis Configure", Toast.LENGTH_LONG).show();
+                        } catch (Exception ignored) {}
+                    });
+                    return;
+                }
+
+                if (nowCooldown - lastAutoReconnectAttemptMs < AUTO_RECONNECT_COOLDOWN_MS) {
+                    logUi(null, "Plus aucun tab (transitoire, probablement pendant une migration) — "
+                        + "reconnexion auto sautée, une tentative vient déjà de se produire");
+                    return;
+                }
+                lastAutoReconnectAttemptMs = nowCooldown;
+                logUi(null, "Plus aucun tab — tentative de reconnexion automatique déclenchée");
+                // ✅ FIX (6 août 2026, demande Paul — "on devrait toujours
+                // avoir un tab si pas de registre, sinon un par défaut") —
+                // déterminer un node de repli AVANT le thread d'arrière-plan
+                // (tabKey du tab qu'on vient de retirer est le meilleur indice
+                // disponible ici).
+                int fallbackNode = -1;
+                try {
+                    String[] parts = tabKey.split(":");
+                    if (parts.length >= 2) fallbackNode = Integer.parseInt(parts[1].trim());
+                } catch (Exception ignored) {}
+                final int fFallbackNode = fallbackNode;
+                new Thread(() -> {
+                    try {
+                        com.pa.lcr.lcp.MultiRegisterApiFacadeImpl facadeAuto =
+                            new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(this);
+                        com.pa.lcr.lcp.ApiResult r = facadeAuto.api_registerConnectAuto(null, null);
+                        android.util.Log.i("MainActivity", "Reconnexion auto (plus de tab) — code="
+                            + (r != null ? r.code : "null") + " msg=" + (r != null ? r.msg : "null"));
+                        // ✅ Repli : si la reconnexion auto n'a rien trouvé, afficher quand
+                        // même un tab "inconnu" (mécanisme déjà existant, voir
+                        // ensureRegisterTab()) — jamais laisser l'écran complètement vide,
+                        // sans aucun moyen d'interagir (Status/Reconnecter/Supprimer).
+                        if (r == null || r.code != 1) {
+                            int nodeToUse = fFallbackNode;
+                            if (nodeToUse <= 0) {
+                                try {
+                                    java.util.List<String[]> known = com.pa.lcr.lcp.RegisterSessionManager
+                                        .get(this).listKnownRegisters();
+                                    if (known != null && !known.isEmpty()) {
+                                        nodeToUse = Integer.parseInt(known.get(0)[0]);
+                                    }
+                                } catch (Exception ignored2) {}
+                            }
+                            if (nodeToUse <= 0) nodeToUse = 250; // dernier repli — node par défaut du camion
+                            final int fNodeToUse = nodeToUse;
+                            runOnUiThread(() -> {
+                                if (tabRegisters == null || tabRegisters.getTabCount() == 0) {
+                                    ensureRegisterTab(fNodeToUse, 255, true);
+                                    logUi(null, "Reconnexion auto sans résultat — tab par défaut affiché (node="
+                                        + fNodeToUse + ") pour permettre une action manuelle");
+                                }
+                            });
+                        }
+                    } catch (Exception ignored) {}
+                }).start();
+            }
+        } catch (Exception ignored) {}
+    }
+
+    // =========================
+    // ✅ Serial plausibility (évite les serial garbage: "��")
+    // =========================
+    private static boolean isPlausibleSerial(String serial) {
+        if (serial == null) return false;
+        String s = serial.trim();
+        if (s.isEmpty()) return false;
+        if (s.indexOf('�') >= 0) return false; // unicode replacement char
+        if (s.length() < 4 || s.length() > 32) return false;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c < 0x20 || c == 0x7F) return false; // control
+            boolean ok = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+                    || c == '-' || c == '_' || c == '.';
+            if (!ok) return false;
+        }
+        return true;
+    }
+
+    private static final class ProbeResult {
+        final boolean ok;
+        final String serial;
+        final String reason;
+        ProbeResult(boolean ok, String serial, String reason) {
+            this.ok = ok;
+            this.serial = serial;
+            this.reason = reason;
+        }
+        static ProbeResult ok(String serial) { return new ProbeResult(true, serial, null); }
+        static ProbeResult fail(String reason) { return new ProbeResult(false, null, reason); }
+    }
+
+    /**
+     * Probe best-effort équivalent à un Status(B) minimal:
+     * - MachineStatus (best-effort)
+     * - 0x28 delivery status (timeout court)
+     * - #80 serial (timeout court)
+     */
+    private ProbeResult probeRegisterReadable(TransportIo io, int node, int from, String expectedSerial) {
+        if (io == null || !io.isOpen()) return ProbeResult.fail("transport_not_ready");
+        if (node < 1 || node > 250) return ProbeResult.fail("node_invalid");
+        if (from < 0 || from > 255) from = 255;
+        try {
+            LcpLink tmp = new LcpLink(io, node, from, true);
+            try { tmp.opGetMachineStatus(); } catch (Exception ignored) {}
+            try { tmp.opDeliveryStatus(450); } catch (Exception ignored) {}
+            String serial = decodeAz(tmp.opGetField(80, 750));
+            if (!isPlausibleSerial(serial)) return ProbeResult.fail("serial_invalid");
+            if (expectedSerial != null && !expectedSerial.trim().isEmpty()) {
+                String exp = expectedSerial.trim();
+                if (!serial.equalsIgnoreCase(exp)) {
+                    return ProbeResult.fail("serial_mismatch(" + exp + " != " + serial + ")");
+                }
+            }
+            return ProbeResult.ok(serial);
+        } catch (Exception e) {
+            return ProbeResult.fail("probe_err:" + safeMsg(e));
+        }
+    }
+
+// =========================
+    // Scan registres Option B (0x28 + #80 + #23) - AUTORITAIRE
+    // =========================
+// =========================
+// Scan registres Option B (0x28 + #80 + #23) - AUTORITAIRE
+// ✅ Option B strict: tout passe par TransportIo (USB/BT)
+// =========================
+
+    // =========================
+    // CONFIGURE: Scan registres par média (USB / BT / Wi‑Fi)
+    // - Un scan = un seul média.
+    // - Résultats affichés sous la section correspondante (serial complet + node + TO/FROM).
+    // - Tabs MAIN: libellé abrégé (6 derniers) : MEDIA - <last6> - <node>.
+    // =========================
+
+    private void scanRegistersUsbOnly() {
+        TransportIo io = null;
+        try {
+            if (mediaTransportManager != null) {
+                io = mediaTransportManager.getByKey(MediaTransportManager.KEY_USB);
+            }
+        } catch (Exception ignored) {}
+        if (io == null || !io.isOpen()) {
+            logUi(null, "Scan USB registres: USB non prêt. Faire Scan USB (devices) + Ouvrir/Ping.");
+            toast("Scan USB registres: USB non prêt");
+            return;
+        }
+        ensureActiveTransport(io.getKey(), "SCAN_USB");
+ scanRegistersWithIo(io, io.getKey(), txtUsbRegsFound);
+    }
+
+    private void scanRegistersBtOnly() {
+        if (mediaTransportManager == null) return;
+        // Scanner tous les transports BT connectés
+        try {
+            for (TransportSnapshot s : mediaTransportManager.listSnapshots()) {
+                if (s == null || s.key == null) continue;
+                if (!s.key.toUpperCase().startsWith("BT:")) continue;
+                if (s.status == TransportStatus.DISCONNECTED || s.status == TransportStatus.ERROR) continue;
+                TransportIo io = mediaTransportManager.getByKey(s.key);
+                if (io == null || !io.isOpen()) continue;
+                final TransportIo ioFinal = io;
+                final String keyFinal = s.key;
+                scanExec.execute(() -> scanRegistersWithIo(ioFinal, keyFinal, txtBtRegsFound));
+            }
+        } catch (Exception e) {
+            logUi(null, "Scan BT registres: erreur: " + e.getMessage());
+        }
+    }
+
+    // ✅ TCP (N-Port raw passthrough) — connexion manuelle via 4 cases d'octets
+    // IP (xxx.xxx.xxx.xxx), même style visuel vert que BT/USB. Node optionnel :
+    // si rempli, connexion directe à ce node (comme BT), sinon détection auto.
+    private void connectTcpManual() {
+        String o1 = readOctet(edtTcpOctet1);
+        String o2 = readOctet(edtTcpOctet2);
+        String o3 = readOctet(edtTcpOctet3);
+        String o4 = readOctet(edtTcpOctet4);
+        if (o1 == null || o2 == null || o3 == null || o4 == null) {
+            toast("TCP: adresse IP incomplète (4 cases requises)");
+            return;
+        }
+        String ip = o1 + "." + o2 + "." + o3 + "." + o4;
+
+        String portStr = (edtTcpPort != null && edtTcpPort.getText() != null)
+                ? edtTcpPort.getText().toString().trim() : "";
+        int port;
+        try {
+            port = portStr.isEmpty()
+                    ? com.pa.lcr.lcp.api.WifiRegisterScanController.DEFAULT_RAW_PORT
+                    : Integer.parseInt(portStr);
+        } catch (NumberFormatException e) {
+            toast("TCP: port invalide");
+            return;
+        }
+
+        int expectedNode = -1;
+        String nodeStr = (edtTcpNode != null && edtTcpNode.getText() != null)
+                ? edtTcpNode.getText().toString().trim() : "";
+        if (!nodeStr.isEmpty()) {
+            try {
+                int n = Integer.parseInt(nodeStr);
+                if (n < 1 || n > 250) { toast("TCP: node invalide (1..250)"); return; }
+                expectedNode = n;
+            } catch (NumberFormatException e) {
+                toast("TCP: node invalide (1..250)");
+                return;
+            }
+        }
+        connectTcpTo(ip, port, expectedNode);
+    }
+
+    // ✅ Lit un octet IP (0-255) depuis une case, ou null si vide/invalide.
+    private String readOctet(android.widget.EditText edt) {
+        if (edt == null || edt.getText() == null) return null;
+        String s = edt.getText().toString().trim();
+        if (s.isEmpty()) return null;
+        try {
+            int v = Integer.parseInt(s);
+            if (v < 0 || v > 255) return null;
+            return String.valueOf(v);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    // ✅ Connexion TCP réutilisable — appelée par la saisie manuelle ET par
+    // le bouton Connect de chaque ligne de la liste des N-Port connus.
+    // expectedNode : -1 = détection auto (LC3 puis boucle LCR-II), sinon
+    // connexion directe à ce node précis (comme connectManualWithIo pour BT).
+    private void connectTcpTo(final String ip, final int port) {
+        connectTcpTo(ip, port, -1);
+    }
+
+    private void connectTcpTo(final String ip, final int port, final int expectedNode) {
+        if (txtTcpStatus != null) txtTcpStatus.setText("Statut : connexion en cours vers " + ip + ":" + port + "...");
+
+        scanExec.execute(() -> {
+            com.pa.lcr.lcp.api.WifiRegisterScanController ctl =
+                    new com.pa.lcr.lcp.api.WifiRegisterScanController(this, mediaTransportManager);
+            com.pa.lcr.lcp.ApiResult r = ctl.connectManual(ip, port);
+            runOnUiThread(() -> {
+                if (txtTcpStatus != null) txtTcpStatus.setText("Statut : " + r.msg);
+                toast(r.msg);
+                refreshKnownTcpList();
+            });
+            if (r.code == 1) {
+                try {
+                    String key = MediaTransportManager.tcpKey(ip, port);
+                    TransportIo io = mediaTransportManager.getByKey(key);
+                    if (io != null && io.isOpen()) {
+                        // ✅ FIX : un seul sondage LCP (plus d'appel séparé à
+                        // scanRegistersWithIo en plus) — les deux faisaient chacun
+                        // leur propre probeAndIdentify sur le MÊME socket, mis en
+                        // file sur scanExec (single-thread) : le 1er sondage
+                        // (finalize, synchrone dans cette tâche) s'exécutait avant
+                        // le 2e (scanRegistersWithIo, tâche mise en file séparément)
+                        // — redondant, et le 1er semblait s'interrompre avant la
+                        // lecture du serial. Un seul sondage suffit et finalise.
+                        finalizeTcpRegisterTab(io, key, txtWifiRegsFound, expectedNode);
+                    }
+                } catch (Exception ignored) {}
             }
         });
     }
 
-    private void refreshLogView() {
-        if (txtLog == null) return;
-        if (cbShowLog == null || !cbShowLog.isChecked()) return;
-        long now0 = System.currentTimeMillis();
-        if (logUserScrolling && now0 < logUserScrollUntilMs) return;
-        if (Looper.myLooper() != Looper.getMainLooper()) { ui.post(this::refreshLogView); return; }
-        if (!isAdded() || getView() == null) return;
-        List<LogBus.LogEvent> events = LogBus.snapshotForNode(node, TAB_LOG_MAX_LINES);
-        if (logViewSinceMs > 0) {
-            ArrayList<LogBus.LogEvent> filtered = new ArrayList<>(events.size());
-            for (LogBus.LogEvent e : events) { if (e.ts >= logViewSinceMs) filtered.add(e); }
-            events = filtered;
+    // ✅ FIX (remplace l'ancien appel à onConfigureMediaActivated, qui devinait
+    // le node à 250 par défaut — faux pour un LC3 réel trouvé au node 245).
+    //
+    // scanRegistersWithIo() détecte volontairement SANS créer de session
+    // complète (voir son commentaire "sans créer de session complète") — pour
+    // BT/USB, c'est le chauffeur qui confirme ensuite manuellement via le
+    // bouton "Node X + Connect" (connectManualWithIo, qui lit le VRAI node,
+    // jamais deviné). Pour TCP, la connexion elle-même EST déjà l'action
+    // déliberée équivalente — donc on refait ici la même détection
+    // (LC3 d'abord, LCR-II en fallback, exactement comme scanRegistersWithIo)
+    // puis on finalise directement avec le node réel trouvé, sans deviner.
+    //
+    // ✅ UN SEUL sondage LCP par appel (plus de scanRegistersWithIo() en double
+    // sur le même socket) — logs explicites à chaque étape pour diagnostic.
+    //
+    // expectedNode : -1 = détection auto (LC3 puis boucle LCR-II, comme avant).
+    // Si > 0 (saisi dans le champ "Node :"), connexion DIRECTE à ce node exact —
+    // aucune détection, aucune boucle — même principe que connectManualWithIo
+    // pour BT/USB (le node est fourni, jamais deviné).
+    private void finalizeTcpRegisterTab(TransportIo io, String transportKey, TextView consoleTarget, int expectedNode) {
+        final String TAG = "MainActivity";
+
+        // ✅ FIX : si un appel est déjà en cours pour CE transport, on l'ignore
+        // plutôt que de laisser deux sondes LC3 se dérouler en même temps
+        // sur le même registre (interférence → faux négatif → boucle LCR-II
+        // 1..250 inutile, voire onglet erroné).
+        if (!tcpFinalizeInProgress.add(transportKey)) {
+            android.util.Log.w(TAG, "finalizeTcpRegisterTab: déjà en cours pour " + transportKey + " — appel ignoré");
+            return;
         }
+        try {
+            finalizeTcpRegisterTabLocked(io, transportKey, consoleTarget, expectedNode);
+        } finally {
+            tcpFinalizeInProgress.remove(transportKey);
+        }
+    }
+
+    private void finalizeTcpRegisterTabLocked(TransportIo io, String transportKey, TextView consoleTarget, int expectedNode) {
+        final String TAG = "MainActivity";
+        android.util.Log.i(TAG, "finalizeTcpRegisterTab: début, transportKey=" + transportKey + " expectedNode=" + expectedNode);
+
+        if (io == null || !io.isOpen()) {
+            android.util.Log.w(TAG, "finalizeTcpRegisterTab: transport fermé/null, abandon");
+            return;
+        }
+
+        // ✅ Node explicite fourni : connexion directe, pas de détection.
+        if (expectedNode > 0) {
+            try {
+                LcpLink tmp = new LcpLink(io, expectedNode, 255, true);
+                String serial = decodeAz(tmp.opGetField(80, 600));
+                if (serial != null && !serial.trim().isEmpty()) {
+                    final String serialFinal = serial.trim();
+                    // ✅ AJOUTÉ (7 août 2026, demande Paul)
+                    String fwTmp;
+                    try { fwTmp = tmp.opGetFirmwareVersion(); } catch (Exception ignored4) { fwTmp = null; }
+                    final String fwFinal = fwTmp;
+                    android.util.Log.i(TAG, "finalizeTcpRegisterTab: node explicite " + expectedNode + " -> serial=" + serialFinal);
+                    ui.post(() -> {
+                        if (consoleTarget != null) {
+                            consoleTarget.setText("Node " + expectedNode + " — serial=" + serialFinal
+                                + "  [Firmware (" + (fwFinal != null && !fwFinal.isEmpty() ? fwFinal : "—") + ")] (onglet créé)");
+                        }
+                        upsertRegisterTabFromScan(transportKey, expectedNode, 255, serialFinal, true);
+                        refreshAllTabsMediaStatus();
+                    });
+                } else {
+                    android.util.Log.w(TAG, "finalizeTcpRegisterTab: node explicite " + expectedNode + " -> aucun serial (registre absent à ce node ?)");
+                    if (consoleTarget != null) {
+                        final String msg = "Node " + expectedNode + " : aucun registre trouvé";
+                        ui.post(() -> consoleTarget.setText(msg));
+                    }
+                }
+            } catch (Exception e) {
+                android.util.Log.e(TAG, "finalizeTcpRegisterTab: node explicite " + expectedNode + " -> exception: " + safeMsg(e));
+                if (consoleTarget != null) {
+                    final String msg = "Node " + expectedNode + " : erreur (" + safeMsg(e) + ")";
+                    ui.post(() -> consoleTarget.setText(msg));
+                }
+            }
+            return;
+        }
+
+        try {
+            Lc3Link.RegisterIdentity identity = null;
+            try { identity = Lc3Link.probeAndIdentify(io); } catch (Exception e) {
+                android.util.Log.w(TAG, "finalizeTcpRegisterTab: probeAndIdentify (LC3) exception: " + safeMsg(e));
+            }
+
+            if (identity != null && identity.isLc3) {
+                final int node = identity.nodeId > 0 ? identity.nodeId : 250;
+                final String serialFixed = identity.serialId;
+
+                // ✅ Le retry sur le placeholder "LC3" vit maintenant DANS
+                // Lc3Link.probeAndIdentify() lui-même (mécanisme unique,
+                // partagé par tous les appelants) — plus besoin de le refaire
+                // ici. Si serialFixed vaut encore "LC3" à ce stade, les deux
+                // tentatives internes ont échoué — on rejette proprement.
+                android.util.Log.i(TAG, "finalizeTcpRegisterTab: LC3 détecté node=" + node + " serial=" + serialFixed);
+
+                boolean serialValid = serialFixed != null && !serialFixed.trim().isEmpty()
+                        && !serialFixed.trim().equals("LC3");
+
+                if (serialValid) {
+                    final String serialFinal = serialFixed.trim();
+                    // ✅ AJOUTÉ (7 août 2026, demande Paul) — échoue proprement
+                    // pour LC3 (pas encore implémenté), affiche "—".
+                    String fwTmp2;
+                    try {
+                        Lc3Link lc3fwTcp = new Lc3Link(io);
+                        fwTmp2 = lc3fwTcp.opGetFirmwareVersion();
+                    } catch (Exception ignored5) { fwTmp2 = null; }
+                    final String fwFinal2 = fwTmp2;
+                    // ✅ FIX : sans cet appel, RegisterSessionManager.getOrCreate()
+                    // (appelé depuis le thread UI par RegisterTabFragment) ne sait
+                    // JAMAIS que ce transport TCP est un LC3 — il retombe sur un
+                    // LcpLink générique, et le NET/GROSS live ne se lit pas
+                    // correctement (mauvaise sous-classe de protocole).
+                    try {
+                        RegisterSessionManager.get(getApplicationContext())
+                                .markAsLc3Transport(transportKey, serialFinal, node);
+                        android.util.Log.i(TAG, "finalizeTcpRegisterTab: markAsLc3Transport(" + transportKey + ") appelé");
+                    } catch (Exception e) {
+                        android.util.Log.w(TAG, "finalizeTcpRegisterTab: markAsLc3Transport exception: " + safeMsg(e));
+                    }
+                    ui.post(() -> {
+                        if (consoleTarget != null) {
+                            consoleTarget.setText("LC3 trouvé — node=" + node + " serial=" + serialFinal
+                                + "  [Firmware (" + (fwFinal2 != null && !fwFinal2.isEmpty() ? fwFinal2 : "—") + ")] (onglet créé)");
+                        }
+                        android.util.Log.i(TAG, "finalizeTcpRegisterTab: appel upsertRegisterTabFromScan(node=" + node + ", serial=" + serialFinal + ")");
+                        // ✅ FIX : la version à 5 arguments devine isLc3 en regardant
+                        // si un onglet existe déjà — pour un NOUVEL onglet (cas normal
+                        // ici), elle suppose systématiquement false, affichant à tort
+                        // "[LCR-II]" même quand le registre est un LC3 confirmé.
+                        // On passe maintenant isLc3=true explicitement (6 arguments).
+                        upsertRegisterTabFromScan(transportKey, node, 255, serialFinal, true, true);
+                        refreshAllTabsMediaStatus();
+                        android.util.Log.i(TAG, "finalizeTcpRegisterTab: upsertRegisterTabFromScan terminé");
+                    });
+                } else {
+                    android.util.Log.w(TAG, "finalizeTcpRegisterTab: LC3 identifié mais #série illisible (placeholder LC3 persistant après retry), aucun onglet créé");
+                    if (consoleTarget != null) ui.post(() -> consoleTarget.setText("LC3 détecté mais #série illisible — relance le scan"));
+                }
+                return;
+            }
+
+            android.util.Log.i(TAG, "finalizeTcpRegisterTab: pas de LC3, boucle LCR-II (node 1..250)");
+            // LCR-II — même boucle que scanRegistersWithIo, mais on s'arrête
+            // au premier node valide trouvé pour finaliser l'onglet.
+            for (int node = 1; node <= 250; node++) {
+                try {
+                    LcpLink tmp = new LcpLink(io, node, 255, true);
+                    String serial = decodeAz(tmp.opGetField(80, 300));
+                    if (serial != null && !serial.trim().isEmpty()) {
+                        final int nodeFinal = node;
+                        final String serialFinal = serial.trim();
+                        // ✅ AJOUTÉ (7 août 2026, demande Paul)
+                        String fwTmp3;
+                        try { fwTmp3 = tmp.opGetFirmwareVersion(); } catch (Exception ignored6) { fwTmp3 = null; }
+                        final String fwFinal3 = fwTmp3;
+                        android.util.Log.i(TAG, "finalizeTcpRegisterTab: LCR-II trouvé node=" + nodeFinal + " serial=" + serialFinal);
+                        ui.post(() -> {
+                            if (consoleTarget != null) {
+                                consoleTarget.setText("LCR-II trouvé — node=" + nodeFinal + " serial=" + serialFinal
+                                    + "  [Firmware (" + (fwFinal3 != null && !fwFinal3.isEmpty() ? fwFinal3 : "—") + ")] (onglet créé)");
+                            }
+                            upsertRegisterTabFromScan(transportKey, nodeFinal, 255, serialFinal, true, false);
+                            refreshAllTabsMediaStatus();
+                        });
+                        return;
+                    }
+                } catch (Exception ignored) {}
+            }
+            android.util.Log.w(TAG, "finalizeTcpRegisterTab: aucun registre LCR-II trouvé (1..250), aucun onglet créé");
+            if (consoleTarget != null) ui.post(() -> consoleTarget.setText("Aucun registre trouvé sur ce transport (1..250)"));
+        } catch (Exception e) {
+            android.util.Log.e(TAG, "finalizeTcpRegisterTab: exception globale: " + safeMsg(e));
+        }
+    }
+
+    // ✅ Scan réseau (subnet /24) à la recherche du port raw N-Port (4001 défaut).
+    // Chaque socket ouvert est enregistré comme transport puis identifié
+    // avec la même mécanique que le scan USB/BT.
+    private void scanWifiRegisters() {
+        // ✅ Le port n'est plus figé à 4001 — on lit le champ port déjà présent
+        // dans l'UI (edtTcpPort), qui sert maintenant à la fois à la connexion
+        // manuelle ET au scan réseau. Un N-Port peut être configuré sur
+        // n'importe quel port TCP (ex: 5002) selon l'installation.
+        String portStr = (edtTcpPort != null && edtTcpPort.getText() != null)
+                ? edtTcpPort.getText().toString().trim() : "";
+        final int scanPort;
+        if (portStr.isEmpty()) {
+            scanPort = com.pa.lcr.lcp.api.WifiRegisterScanController.DEFAULT_RAW_PORT;
+        } else {
+            int parsed;
+            try { parsed = Integer.parseInt(portStr); }
+            catch (NumberFormatException e) { toast("TCP: port invalide"); return; }
+            scanPort = parsed;
+        }
+
+        if (btnScanWifiRegs != null) btnScanWifiRegs.setEnabled(false);
+        if (txtWifiRegsFound != null) txtWifiRegsFound.setText("Scan réseau en cours (1..254, port " + scanPort + ")...");
+
+        scanExec.execute(() -> {
+            com.pa.lcr.lcp.api.WifiRegisterScanController ctl =
+                    new com.pa.lcr.lcp.api.WifiRegisterScanController(this, mediaTransportManager);
+            com.pa.lcr.lcp.ApiResult r = ctl.scanSubnet(scanPort);
+
+            runOnUiThread(() -> {
+                if (txtWifiRegsFound != null) txtWifiRegsFound.setText(r.msg);
+                if (btnScanWifiRegs != null) btnScanWifiRegs.setEnabled(true);
+                toast(r.msg);
+                refreshKnownTcpList();
+                refreshDetectedSubnet();
+            });
+
+            // Identification des nodes sur chaque transport TCP découvert
+            // — un même socket (un même port) peut révéler PLUSIEURS registres
+            // (bus RS-485 multi-point). Un seul sondage par transport
+            // (finalizeTcpRegisterTab), plus de scanRegistersWithIo() en double.
+            if (mediaTransportManager != null) {
+                try {
+                    for (TransportSnapshot s : mediaTransportManager.listSnapshots()) {
+                        if (s == null || s.key == null) continue;
+                        if (!s.key.toUpperCase().startsWith("TCP:")) continue;
+                        if (s.status == TransportStatus.DISCONNECTED || s.status == TransportStatus.ERROR) continue;
+                        TransportIo io = mediaTransportManager.getByKey(s.key);
+                        if (io == null || !io.isOpen()) continue;
+                        finalizeTcpRegisterTab(io, s.key, txtWifiRegsFound, -1);
+                    }
+                } catch (Exception ignored) {}
+            }
+        });
+    }
+
+    // ✅ Reconstruit la liste des N-Port connus (containerKnownTcp) — même
+    // principe que les "appareils appairés" BT : une ligne par appareil déjà
+    // vu, avec son propre bouton Connect, pour éviter de retaper l'IP.
+    private void refreshKnownTcpList() {
+        if (containerKnownTcp == null) return;
+        scanExec.execute(() -> {
+            org.json.JSONArray known;
+            try {
+                com.pa.lcr.lcp.storage.KnownTcpDeviceStore store =
+                        new com.pa.lcr.lcp.storage.KnownTcpDeviceStore(this);
+                known = store.listKnown();
+            } catch (Exception e) {
+                known = new org.json.JSONArray();
+            }
+            final org.json.JSONArray knownFinal = known;
+            runOnUiThread(() -> buildKnownTcpRows(knownFinal));
+        });
+    }
+
+    // ✅ Peuple txtTcpSubnetDetected avec le sous-réseau Wi-Fi réel de la
+    // tablette (format xxx.xxx.xxx.xxx), demandé pour la case verte TCP.
+    private void refreshDetectedSubnet() {
+        if (txtTcpSubnetDetected == null) return;
+        scanExec.execute(() -> {
+            String subnet;
+            try {
+                com.pa.lcr.lcp.api.WifiRegisterScanController ctl =
+                        new com.pa.lcr.lcp.api.WifiRegisterScanController(this, mediaTransportManager);
+                subnet = ctl.detectSubnet();
+            } catch (Exception e) {
+                subnet = null;
+            }
+            final String subnetFinal = subnet;
+            runOnUiThread(() -> {
+                if (txtTcpSubnetDetected != null) {
+                    txtTcpSubnetDetected.setText("Sous-réseau : " + (subnetFinal != null ? subnetFinal : "indisponible (Wi-Fi désactivé ?)"));
+                }
+            });
+        });
+    }
+
+    private void buildKnownTcpRows(org.json.JSONArray known) {
+        if (containerKnownTcp == null) return;
+        containerKnownTcp.removeAllViews();
+
+        if (known == null || known.length() == 0) {
+            TextView empty = new TextView(this);
+            empty.setText("(aucun N-Port mémorisé pour l'instant)");
+            empty.setTextSize(11f);
+            empty.setTextColor(0xFF888888);
+            containerKnownTcp.addView(empty);
+            return;
+        }
+
+        for (int i = 0; i < known.length(); i++) {
+            try {
+                org.json.JSONObject o = known.getJSONObject(i);
+                final String ip = o.getString("ip");
+                final int port = o.getInt("port");
+                String serialId = o.isNull("serial_id") ? null : o.optString("serial_id", null);
+
+                android.widget.LinearLayout row = new android.widget.LinearLayout(this);
+                row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+                row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+                int padPx = (int) (6 * getResources().getDisplayMetrics().density);
+                row.setPadding(padPx, padPx, padPx, padPx);
+                row.setBackgroundColor(0xFF0B6623); // même vert que les cases manuelles BT/USB
+
+                TextView label = new TextView(this);
+                String txt = ip + ":" + port + (serialId != null ? "  (#" + serialId + ")" : "");
+                label.setText(txt);
+                label.setTextColor(0xFFFFFFFF);
+                label.setTextSize(12f);
+                android.widget.LinearLayout.LayoutParams lp = new android.widget.LinearLayout.LayoutParams(
+                        0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+                row.addView(label, lp);
+
+                Button btn = new Button(this);
+                btn.setText("Connect");
+                btn.setTextColor(0xFFFFFFFF);
+                btn.setOnClickListener(v -> connectTcpTo(ip, port));
+                row.addView(btn);
+
+                android.widget.LinearLayout.LayoutParams rowLp = new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
+                rowLp.setMargins(0, 0, 0, (int) (4 * getResources().getDisplayMetrics().density));
+                containerKnownTcp.addView(row, rowLp);
+            } catch (Exception ignored) {}
+        }
+    }
+
+    private void scanRegistersBtOnlyLegacy() {
+        if (lastBtMac == null || lastBtMac.trim().isEmpty()) {
+            logUi(null, "Scan BT registres: aucun BT connecté.");
+            return;
+        }
+        TransportIo io = null;
+        try {
+            String key = MediaTransportManager.btKey(lastBtMac);
+            if (mediaTransportManager != null) {
+                io = mediaTransportManager.getByKey(key);
+
+            }
+        } catch (Exception ignored) {}
+        if (io == null || !io.isOpen()) {
+            logUi(null, "Scan BT registres: BT non prêt. Faire Connect BT.");
+            toast("Scan BT registres: BT non prêt");
+            return;
+        }
+        ensureActiveTransport(io.getKey(), "SCAN_BT");
+ scanRegistersWithIo(io, io.getKey(), txtBtRegsFound);
+    }
+
+    private void scanRegistersWithIo(TransportIo io, String transportKey, TextView target) {
+        if (io == null || !io.isOpen()) return;
+        final String tk = (transportKey != null ? transportKey : io.getKey());
+        final String mediaShort = mediaShortFromTransportKey(tk);
+
+        logUi(null, "Scan registres (" + mediaShort + ") demandé");
+
+        // disable buttons during scan (best-effort)
+        try { if ("USB".equalsIgnoreCase(mediaShort) && btnScanUsbRegs != null) btnScanUsbRegs.setEnabled(false); } catch (Exception ignored) {}
+        try { if ("BT".equalsIgnoreCase(mediaShort) && btnScanBtRegs != null) btnScanBtRegs.setEnabled(false); } catch (Exception ignored) {}
+
+       if (target != null) ui.post(() -> target.setText("Scan en cours... (" + mediaShort + ")"));
+
+        final TransportIo ioFinal = io;
+        scanExec.execute(() -> {
+            final long scanStartedMs = System.currentTimeMillis();
+            LinkedHashMap<Integer, NodeScanItem> found = new LinkedHashMap<>();
+            final int T28 = 300;
+            final int TF = 300;
+
+            // APRÈS — LC3 d'abord, LCR-II en fallback
+            Lc3Link.RegisterIdentity identity = null;
+            try { identity = Lc3Link.probeAndIdentify(ioFinal); } catch (Exception ignored) {}
+
+            if (identity != null && identity.isLc3) {
+                // LC3 détecté — pas de boucle node
+                int    lc3Node  = identity.nodeId > 0 ? identity.nodeId : 250;
+                String serialId = identity.serialId;
+                // ✅ Le retry sur le placeholder "LC3" vit maintenant DANS
+                // Lc3Link.probeAndIdentify() lui-même — mécanisme unique
+                // partagé par tous les appelants (RegisterSessionManager,
+                // finalizeTcpRegisterTab, ici). Plus besoin de le refaire.
+                String ticketNo = "";
+                try {
+                    Lc3Link lc3tmp = new Lc3Link(ioFinal);
+                    ticketNo = u32beDec(lc3tmp.opGetField(23, 3000));
+                } catch (Exception ignored) {}
+                NodeScanItem lc3Item = new NodeScanItem(
+                    lc3Node, serialId, ticketNo,
+                    false, false, false, false, true
+                );
+                // ✅ AJOUTÉ (7 août 2026, demande Paul) — Lc3Link n'a pas
+                // encore d'implémentation réelle (voir commentaire honnête
+                // dans Lc3Link.opGetFirmwareVersion) — échoue proprement,
+                // affiche "—" plutôt qu'une valeur LCR-II erronée.
+                try {
+                    Lc3Link lc3fw = new Lc3Link(ioFinal);
+                    lc3Item.firmware = lc3fw.opGetFirmwareVersion();
+                } catch (Exception ignored3) { lc3Item.firmware = null; }
+                found.put(lc3Node, lc3Item);
+                android.util.Log.i("MainActivity", "Scan LC3: node=" + lc3Node
+                        + " serial=" + serialId);
+                // Pré-populer knownLc3TransportKeys sans créer de session complète
+
+                try {
+                    RegisterSessionManager sm = RegisterSessionManager.get(getApplicationContext());
+                    sm.bindExpectedSerial(lc3Node, serialId);
+                    sm.markAsLc3Transport(tk, serialId, lc3Node);
+                } catch (Exception ignored) {}
+
+            } else {
+                // LCR-II — boucle classique
+                for (int node = 1; node <= 250; node++) {
+                    try {
+                        LcpLink tmp = new LcpLink(ioFinal, node, 255, true);
+                        int[] ds = tmp.opDeliveryStatus(T28);
+                        int delCode = ds[1];
+                        boolean ticketPending  = (delCode & 0x0001) != 0;
+                        boolean flowActive     = (delCode & 0x0004) != 0;
+                        boolean deliveryActive = (delCode & 0x0008) != 0;
+                        String serialId = decodeAz(tmp.opGetField(80, TF));
+                        String ticketNo = u32beDec(tmp.opGetField(23, TF));
+                        if (serialId != null && !serialId.trim().isEmpty()) {
+                            NodeScanItem item = new NodeScanItem(
+                                node, serialId, ticketNo,
+                                ticketPending, deliveryActive, flowActive, false
+                            );
+                            // ✅ AJOUTÉ (7 août 2026, demande Paul — "va me
+                            // chercher aussi le firmware, affiche-le moi
+                            // entre [Firmware ()] dans chacun des tests
+                            // USB, BT et TCP") — réutilise le même LcpLink
+                            // temporaire déjà ouvert pour ce node, pas de
+                            // sonde séparée.
+                            try { item.firmware = tmp.opGetFirmwareVersion(); }
+                            catch (Exception ignored2) { item.firmware = null; }
+                            found.put(node, item);
+                        }
+                    } catch (Exception ignored) {}
+                }
+            }
+
+            final long scanFinishedMs = System.currentTimeMillis();
+            persistScanEvents(scanStartedMs, scanFinishedMs, found);
+
+            ui.post(() -> {
+                try {
+                    nodeItems.clear();
+                    nodeItems.addAll(found.values());
+
+                    if (target != null) {
+                        if (found.isEmpty()) {
+                         ui.post(() -> target.setText("(aucun registre trouvé)\n" + mediaShort));
+                        } else {
+                            StringBuilder sb = new StringBuilder();
+                            sb.append(mediaShort).append(" — ").append(found.size()).append(" registre(s)\n");
+                            for (NodeScanItem it : found.values()) {
+                                if (it == null) continue;
+                                sb.append("Serial=").append(safeSerial(it.serialId))
+                                  .append("  Node=").append(it.lcrnode)
+                                  .append("  TO=").append(it.lcrnode)
+                                  .append("  From=255")
+                                  .append("  [Firmware (").append(it.firmware != null && !it.firmware.isEmpty() ? it.firmware : "—").append(")]")
+                                  .append("\n");
+                            }
+
+                           final String result = sb.toString().trim();
+                           ui.post(() -> target.setText(result));
+
+                        }
+                    }
+
+                    if (!found.isEmpty()) {
+                        boolean focused = false;
+                        for (NodeScanItem it : found.values()) {
+                            if (it == null) continue;
+                            boolean focus = false;
+                            if (!focused && it.lcrnode == 250) focus = true;
+                            upsertRegisterTabFromScan(tk, it.lcrnode, 255, it.serialId, focus, it.isLc3);
+                            if (focus) focused = true;
+                        }
+                        if (!focused) {
+                            NodeScanItem first = found.values().iterator().next();
+                            if (first != null) upsertRegisterTabFromScan(tk, first.lcrnode, 255, first.serialId, true, first.isLc3);
+                        }
+                    }
+                } finally {
+                    try { if ("USB".equalsIgnoreCase(mediaShort) && btnScanUsbRegs != null) btnScanUsbRegs.setEnabled(true); } catch (Exception ignored) {}
+                    try { if ("BT".equalsIgnoreCase(mediaShort) && btnScanBtRegs != null) btnScanBtRegs.setEnabled(true); } catch (Exception ignored) {}
+                    updateNodesStatusUi();
+                }
+            });
+        });
+    }
+
+
+
+
+
+
+
+    /**
+     * ✅ Option 2 + Option 5:
+     * - SCAN_NODE_DETECTED: only for nodes truly detected
+     * - SCAN_COMPLETED: always once at end (even if found_count==0)
+     */
+    private void persistScanEvents(long scanStartedMs, long scanFinishedMs, Map<Integer, NodeScanItem> found) {
+        if (deliveryStore == null) return;
+        final long durationMs = Math.max(0L, scanFinishedMs - scanStartedMs);
+        final int foundCount = (found != null) ? found.size() : 0;
+
+        // 1) Per-node detected events (ONLY if found)
+        if (found != null && !found.isEmpty()) {
+            for (NodeScanItem it : found.values()) {
+                if (it == null) continue;
+                if (it.serialId == null || it.serialId.trim().isEmpty()) continue;
+
+                long detectedMs = System.currentTimeMillis();
+            String tno = (it.ticketNo != null && !it.ticketNo.trim().isEmpty()) ? it.ticketNo.trim() : ("SCAN-" + scanStartedMs + "-N" + it.lcrnode);
+            JSONObject data = new JSONObject();
+                try {
+                    data.put("event_type", "SCAN_NODE_DETECTED");
+                    data.put("node", it.lcrnode);
+                    data.put("from", 255);
+                    data.put("scan_started_ms", scanStartedMs);
+                    data.put("detected_ms", detectedMs);
+                    data.put("scan_finished_ms", scanFinishedMs);
+                    data.put("duration_ms", durationMs);
+                    data.put("serial_id", it.serialId);
+                    data.put("ticket_no", it.ticketNo);
+                data.put("ticket_key", tno);
+                    data.put("ticketPending", it.ticketPending ? 1 : 0);
+                    data.put("deliveryActive", it.deliveryActive ? 1 : 0);
+                    data.put("flowActive", it.flowActive ? 1 : 0);
+                } catch (Exception ignored) {}
+
+                deliveryStore.upsertSummaryAsync(
+                        it.serialId,
+                        tno,
+                        null,
+                        "NODE_DETECTED_SCAN",
+                        DeliveryLogStore.SOURCE_UI,
+                        null,
+                        null,
+                        null
+        );
+
+        deliveryStore.openAttemptAsync(it.serialId, tno, DeliveryLogStore.SOURCE_UI, null, attemptId -> {
+                    deliveryStore.addEventAsync(attemptId, DeliveryLogStore.LEVEL_INFO,
+                            "SCAN_NODE_DETECTED",
+"Scan registres: node détecté",
+                            data.toString());
+                    deliveryStore.closeAttemptAsync(attemptId, "SEEN", data.toString(), null);
+                });
+            }
+        }
+
+        // 2) Completion event (ALWAYS)
+        final String scanSerial = "__SCAN__";
+        final String scanTicket = "SCAN-" + scanStartedMs;
+        final String scanState = "SCAN_COMPLETED";
+
+        JSONObject summary = new JSONObject();
+        try {
+            summary.put("event_type", "SCAN_COMPLETED");
+            summary.put("scan_started_ms", scanStartedMs);
+            summary.put("scan_finished_ms", scanFinishedMs);
+            summary.put("duration_ms", durationMs);
+            summary.put("found_count", foundCount);
+
+            JSONArray nodes = new JSONArray();
+            if (found != null) {
+                int k = 0;
+                for (Integer n : found.keySet()) {
+                    if (n == null) continue;
+                    nodes.put(n.intValue());
+                    if (++k >= 50) break;
+                }
+            }
+            summary.put("nodes", nodes);
+            summary.put("nodes_truncated", (foundCount > 50) ? 1 : 0);
+        } catch (Exception ignored) {}
+
+        deliveryStore.upsertSummaryAsync(
+                scanSerial,
+                scanTicket,
+                null,
+                scanState,
+                DeliveryLogStore.SOURCE_UI,
+                null,
+                null,
+                null
+        );
+
+        deliveryStore.openAttemptAsync(scanSerial, scanTicket, DeliveryLogStore.SOURCE_UI, null, attemptId -> {
+            deliveryStore.addEventAsync(attemptId, DeliveryLogStore.LEVEL_INFO,
+                    "SCAN_COMPLETED",
+                    (foundCount == 0)
+                            ? "Scan registres terminé: aucun node détecté"
+                            : ("Scan registres terminé: " + foundCount + " node(s) détecté(s)"),
+                    summary.toString());
+            deliveryStore.closeAttemptAsync(attemptId, "DONE", summary.toString(), null);
+        });
+    }
+
+    // -------------------------
+    // Helpers decode
+    // -------------------------
+    private static String decodeAz(byte[] b) {
+        if (b == null || b.length == 0) return "";
+        String s = new String(b, StandardCharsets.UTF_8);
+        int nul = s.indexOf('\0');
+        if (nul >= 0) s = s.substring(0, nul);
+        return s.trim();
+    }
+
+    private static String u32beDec(byte[] be4) {
+        if (be4 == null || be4.length < 4) return "";
+        long u = ((be4[0] & 0xFFL) << 24)
+                | ((be4[1] & 0xFFL) << 16)
+                | ((be4[2] & 0xFFL) << 8)
+                | (be4[3] & 0xFFL);
+        return String.valueOf(u & 0xFFFFFFFFL);
+    }
+
+    private static final class NodeScanItem {
+        final int lcrnode;
+        final String serialId;
+        String qtySuffix; // " | N=.. G=.."
+        // ✅ AJOUTÉ (7 août 2026, demande Paul — "va me chercher aussi le
+        // firmware, affiche-le moi entre [Firmware ()] dans chacun des
+        // tests USB, BT et TCP")
+        String firmware;
+        final String ticketNo;
+        final boolean ticketPending;
+        final boolean deliveryActive;
+        final boolean flowActive;
+        final boolean isDefault;
+        final boolean isLc3;
+
+        NodeScanItem(int lcrnode, String serialId, String ticketNo,
+                     boolean ticketPending, boolean deliveryActive, boolean flowActive, boolean isDefault) {
+            this(lcrnode, serialId, ticketNo, ticketPending, deliveryActive, flowActive, isDefault, false);
+        }
+
+        NodeScanItem(int lcrnode, String serialId, String ticketNo,
+                     boolean ticketPending, boolean deliveryActive, boolean flowActive, boolean isDefault, boolean isLc3) {
+            this.lcrnode = lcrnode;
+            this.serialId = serialId;
+            this.ticketNo = ticketNo;
+            this.ticketPending = ticketPending;
+            this.deliveryActive = deliveryActive;
+            this.flowActive = flowActive;
+            this.isDefault = isDefault;
+            this.isLc3 = isLc3;
+        }
+
+        static NodeScanItem default250() { return new NodeScanItem(250, "", "", false, false, false, true); }
+
+        NodeScanItem asDefault() {
+            return new NodeScanItem(lcrnode, serialId, ticketNo, ticketPending, deliveryActive, flowActive, true, isLc3);
+        }
+
+        @Override public String toString() {
+            String base = (isDefault ? "Défaut " : "") + lcrnode;
+            String sid = (serialId == null || serialId.isEmpty()) ? "serial=—" : ("serial=" + serialId);
+            String tno = (ticketNo == null || ticketNo.isEmpty()) ? "ticket=—" : ("ticket=" + ticketNo);
+            String pend = "pending=" + (ticketPending ? "1" : "0");
+            String act = "active=" + (deliveryActive ? "1" : "0");
+            return base + " — " + sid + " — " + tno + " — " + pend + " — " + act;
+        }
+    }
+
+    // =========================
+    // USB
+    // =========================
+    
+    // =========================
+    // ✅ USB reset (detach/replug)
+    // =========================
+    private void resetUsbState(String reason) {
+        try { logUi(null, "USB reset: " + (reason != null ? reason : "-")); } catch (Exception ignored) {}
+        try { if (usbPort != null) usbPort.close(); } catch (Exception ignored) {}
+        usbPort = null;
+        try { UsbSession.clear(); } catch (Exception ignored) {}
+    }
+
+private void scanUsb() {
+        usbDevices.clear();
+        usbDevices.addAll(usbManager.getDeviceList().values());
+        logUi(null, "Scan USB: " + usbDevices.size() + " périphérique(s)");
+
+        List<String> labels = new ArrayList<>();
+        for (UsbDevice d : usbDevices) {
+            String m = d.getManufacturerName();
+            String p = d.getProductName();
+            if (m == null) m = "Unknown";
+            if (p == null) p = "Device";
+            labels.add(m + " - " + p);
+            logUi(null, String.format(Locale.ROOT, " - %s - %s (VID=%04X PID=%04X)", m, p, d.getVendorId(), d.getProductId()));
+        }
+
+        spnUsbDevices.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, labels));
+    }
+
+    private void openSelectedUsb() {
+        logMedia1("USB Open/Ping");
+
+        // ✅ Replug: reset du port stale avant toute logique
+        try {
+            if (UsbSession.getPort() == null && usbPort != null) {
+                try { usbPort.close(); } catch (Exception ignored) {}
+                usbPort = null;
+            }
+        } catch (Exception ignored) {}
+
+        // ✅ Si liste USB vide, rescanner
+        try { if (usbDevices != null && usbDevices.isEmpty()) scanUsb(); } catch (Exception ignored) {}
+
+
+        UsbSerialPort sessionPort = UsbSession.getPort();
+        if (sessionPort != null) {
+            if (usbPort == null) usbPort = sessionPort;
+            logUi(null, "USB déjà prêt (UsbSession port déjà ouvert)");
+            logMedia1("USB Open/Ping: déjà prêt");
+            return;
+        }
+
+        if (usbPort != null) {
+            logUi(null, "USB déjà prêt (port déjà ouvert)");
+            UsbDevice dev = (usbDevices.isEmpty() ? null : getSelectedUsbDeviceSafe());
+            if (dev != null) UsbSession.set(dev, usbPort);
+            logMedia1("USB Open/Ping: déjà prêt");
+            return;
+        }
+
+        UsbDevice dev = getSelectedUsbDeviceSafe();
+        if (dev == null) {
+            logUi(null, "Aucun périphérique USB sélectionné");
+            logMedia1("USB Open/Ping: ÉCHEC");
+            return;
+        }
+
+        if (!usbManager.hasPermission(dev)) {
+            PendingIntent pi = PendingIntent.getBroadcast(
+                    this, 0, new Intent(ACTION_USB_PERMISSION),
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE
+            );
+                        usbManager.requestPermission(dev, pi);
+            logUi(null, "Permission USB demandée");
+            logMedia1("USB Open/Ping: permission requise");
+            return;
+        }
+
+        UsbSerialDriver driver = UsbSerialProber.getDefaultProber().probeDevice(dev);
+        if (driver == null) {
+            logUi(null, "Driver USB série introuvable");
+            logMedia1("USB Open/Ping: ÉCHEC");
+            return;
+        }
+
+        try {
+            UsbDeviceConnection conn = usbManager.openDevice(dev);
+            UsbSerialPort port = driver.getPorts().get(0);
+            port.open(conn);
+            port.setParameters(19200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
+            usbPort = port;
+            UsbSession.set(dev, port);
+            // ✅ Publish USB ready (requis pour Scan registres USB via MediaTransportManager)
+            try {
+                if (mediaTransportManager != null) {
+                    mediaTransportManager.onUsbReady(dev, usbPort, "USB prêt (OpenSelectedUsb)");
+                // ✅ CONFIGURE: média activé -> rebind tab sur USB
+                onConfigureMediaActivated(MediaTransportManager.KEY_USB, "USB_READY");
+                }
+            } catch (Exception ignored) {}
+            logUi(null, "USB prêt");
+            logMedia1("USB Open/Ping: OK");
+        } catch (Exception e) {
+            logErr(null, "Open USB ERR: " + safeMsg(e));
+            try { if (usbPort != null) usbPort.close(); } catch (Exception ignored) {}
+            usbPort = null;
+            try { UsbSession.clear(); } catch (Exception ignored) {}
+            logMedia1("USB Open/Ping: ÉCHEC");
+        }
+    }
+
+    private UsbDevice getSelectedUsbDeviceSafe() {
+        try {
+            int idx = spnUsbDevices.getSelectedItemPosition();
+            if (idx < 0 || idx >= usbDevices.size()) return null;
+            return usbDevices.get(idx);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    public void onUsbPortReady(UsbSerialPort port) {
+        if (port == null) return;
+
+        // ✅ Si usbPort stale (fermé ou différent du nouveau) → remplacer
+        if (usbPort != null && usbPort != port) {
+            boolean stale = false;
+            try { stale = !usbPort.isOpen(); } catch (Exception e) { stale = true; }
+            if (stale) {
+                try { usbPort.close(); } catch (Exception ignore) {}
+                usbPort = null;
+                logUi(null, "USB: port stale remplacé");
+            }
+        }
+
+        if (usbPort != null) {
+            // Port valide déjà ouvert — fermer le doublon
+            try { port.close(); } catch (Exception ignore) {}
+            return;
+        }
+
+        usbPort = port;
+        logUi(null, "USB prêt (receiver)");
+
+        // ✅ Option A: publish USB ready
+        try {
+            if (mediaTransportManager != null) {
+                mediaTransportManager.onUsbReady(null, usbPort, "USB prêt (MainActivity)");
+                // ✅ CONFIGURE: média activé -> rebind tab sur USB
+                onConfigureMediaActivated(MediaTransportManager.KEY_USB, "USB_READY_RX");
+            }
+        } catch (Exception ignored) {}
+
+        logMedia1("USB Ready");
+    }
+
+    public void onUsbDetached() {
+        logUi(null, "USB détaché");
+        // ✅ Option A: publish USB detached
+        try {
+            if (mediaTransportManager != null) {
+                mediaTransportManager.onUsbDetached("USB detached");
+            }
+        } catch (Exception ignored) {}
+        logMedia1("USB Detached");
+
+        try { UsbSession.clear(); } catch (Exception ignore) {}
+        //stopApiServer("USB detached");
+
+        // ✅ FIX (7 août 2026, demande Paul — "je pars du BT pour arriver
+        // avec USB [fluide], si je pars du USB pour BT, j'ai le tab par
+        // défaut qui arrive") — trouvé l'asymétrie exacte : btDisconnect()
+        // (juste en dessous) ne détruit JAMAIS le tab BT à la déconnexion —
+        // il le marque juste "(OFF)", données et fragment intacts, prêt à
+        // être migré en douceur dès qu'un autre transport arrive. Ici,
+        // onUsbDetached() détruisait le tab USB IMMÉDIATEMENT — laissant une
+        // fenêtre sans aucun tab, où la reconnexion auto pouvait tomber sur
+        // le placeholder générique "unknown" si la sonde BT n'avait pas
+        // encore fini. Corrigé pour suivre EXACTEMENT le même patron que
+        // btDisconnect() — marquer "(OFF)", jamais détruire ici.
+        try {
+            ArrayList<String> toMarkOff = new ArrayList<>();
+            synchronized (tabsByKey) {
+                for (Map.Entry<String, TabSpec> e : tabsByKey.entrySet()) {
+                    if (e == null) continue;
+                    TabSpec s = e.getValue();
+                    if (s == null) continue;
+                    String mShort = (s.mediaShort != null) ? s.mediaShort : mediaShortFromTransportKey(s.transportKey);
+                    if ("USB".equalsIgnoreCase(mShort)) toMarkOff.add(e.getKey());
+                }
+            }
+            for (String k : toMarkOff) {
+                TabSpec s = tabsByKey.get(k);
+                if (s == null) continue;
+                updateRegisterTabLabel(k,
+                    tabLabelOf("USB(OFF)", s.node, s.serialId, s.isLc3)
+                    + (s.qtySuffix != null ? s.qtySuffix : ""));
+            }
+        } catch (Exception ignored) {}
+
+        usbPort = null;
+        updateMediaStatusUi();
+        updateNodesStatusUi();
+    }
+
+
+    // =========================
+    // API Server
+    // =========================
+    // ⚠️ LEGACY — 3 août 2026 : cette instance locale d'ApiServer, créée par
+    // ce bouton, était SÉPARÉE du vrai service permanent LcrHttpService
+    // (démarré au onCreate() / au boot). Le statut/URL affiché dans l'onglet
+    // API reflétait ce doublon (souvent en conflit de port 8765) et non le
+    // service réellement actif en continu sur le camion.
+    // Neutralisé volontairement (no-op) — à retirer complètement plus tard.
+    // Le statut réel est maintenant lu directement depuis LcrHttpService
+    // (voir refreshApiStatus()).
+    private void startApiServer() {
+        logApi(null, "[API] Bouton legacy désactivé — le service réel LcrHttpService tourne déjà en continu");
+        refreshApiStatus();
+    }
+
+    // ✅ Quit — bouton header (haut droit). Confirme avant de fermer car
+    // l'APK tourne normalement en continu sur les tablettes camion
+    // (LcrBootReceiver la relance au boot) : une fermeture accidentelle
+    // interromprait le service HTTP local utilisé par Field Service Mobile.
+    // ✅ Compatibilité Android 9-15 (API 28-35) : finish() et
+    // Process.killProcess() sont des API stables depuis l'API 16 — aucune
+    // branche SDK_INT nécessaire ici.
+    private void confirmQuit() {
+        new androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Quitter l'application")
+            .setMessage("Fermer Filgo Registre ? Le service local (API/Field Service) sera arrêté.")
+            .setPositiveButton("Quitter", (dialog, which) -> quitApp())
+            .setNegativeButton("Annuler", null)
+            .show();
+    }
+
+    private void quitApp() {
+        try { stopApiServer("Quit button"); } catch (Exception ignored) {}
+        try {
+            android.content.Intent svcIntent = new android.content.Intent(this, LcrHttpService.class);
+            stopService(svcIntent);
+        } catch (Exception ignored) {}
+        try { UsbSession.clear(); } catch (Exception ignored) {}
+        try {
+            if (mediaTransportManager != null) mediaTransportManager.clearActiveIfMatches(
+                mediaTransportManager.getActiveKey());
+        } catch (Exception ignored) {}
+        // ✅ FIX : finishAffinity() fermait TOUTE la tâche Android — y compris
+        // Field Service Mobile, puisque MainActivity partage délibérément sa
+        // tâche via android:taskAffinity="com.microsoft.crm.crmphone.fieldServices"
+        // (transition fluide voulue pour le deep link). finish() ne ferme QUE
+        // notre propre Activity — Field Service Mobile reste ouvert en dessous.
+        finish();
+        // ✅ Léger délai avant killProcess() pour laisser la transition visuelle
+        // de finish() se terminer proprement (évite un flash noir à l'écran).
+        ui.postDelayed(() -> android.os.Process.killProcess(android.os.Process.myPid()), 300);
+    }
+
+    // ⚠️ LEGACY — voir startApiServer(). Ne touche plus à l'instance locale
+    // apiServer (conservée nulle). quitApp() continue d'appeler cette méthode
+    // par sécurité mais elle est désormais un no-op sur le plan fonctionnel ;
+    // l'arrêt réel du service se fait via stopService(LcrHttpService) ailleurs
+    // dans quitApp().
+    private void stopApiServer(String reason) {
+        logApi(null, "[API] Bouton/appel legacy STOP (" + reason + ") — no-op, voir LcrHttpService");
+        apiServer = null;
+        refreshApiStatus();
+    }
+
+    // ✅ TEST SSL — appel HttpsURLConnection interne vers notre propre serveur
+    private void testSslPing() {
+        new Thread(() -> {
+            String result;
+            try {
+                // Utiliser le même SSLSocketFactory que LcrBridge (lcr_local.crt depuis res/raw)
+                java.security.cert.CertificateFactory cf = java.security.cert.CertificateFactory.getInstance("X.509");
+                java.io.InputStream caInput = getResources().openRawResource(R.raw.lcr_local);
+                java.security.cert.Certificate ca = cf.generateCertificate(caInput);
+                caInput.close();
+
+                java.security.KeyStore ks = java.security.KeyStore.getInstance(java.security.KeyStore.getDefaultType());
+                ks.load(null, null);
+                ks.setCertificateEntry("lcr_local", ca);
+
+                javax.net.ssl.TrustManagerFactory tmf = javax.net.ssl.TrustManagerFactory.getInstance(
+                    javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm());
+                tmf.init(ks);
+
+                javax.net.ssl.SSLContext sslCtx = javax.net.ssl.SSLContext.getInstance("TLS");
+                sslCtx.init(null, tmf.getTrustManagers(), null);
+
+                java.net.URL url = new java.net.URL("https://127.0.0.1:" + API_PORT + "/v1/ping");
+                javax.net.ssl.HttpsURLConnection conn = (javax.net.ssl.HttpsURLConnection) url.openConnection();
+                conn.setSSLSocketFactory(sslCtx.getSocketFactory());
+                conn.setConnectTimeout(3000);
+                conn.setReadTimeout(3000);
+                conn.setRequestMethod("GET");
+                int code = conn.getResponseCode();
+                java.io.InputStream is = conn.getInputStream();
+                byte[] buf = new byte[1024];
+                int n = is.read(buf);
+                String body = new String(buf, 0, n, java.nio.charset.StandardCharsets.UTF_8);
+                conn.disconnect();
+                result = "✅ SSL OK — HTTP " + code + " — " + body.substring(0, Math.min(80, body.length()));
+            } catch (javax.net.ssl.SSLHandshakeException e) {
+                result = "❌ SSL HANDSHAKE FAIL: " + e.getMessage();
+            } catch (javax.net.ssl.SSLException e) {
+                result = "❌ SSL ERROR: " + e.getMessage();
+            } catch (Exception e) {
+                result = "❌ ERREUR: " + e.getClass().getSimpleName() + " — " + e.getMessage();
+            }
+            final String finalResult = result;
+            android.util.Log.e("LCRDEMO_SSL", finalResult);
+            runOnUiThread(() -> toast(finalResult));
+        }).start();
+    }
+
+    // ✅ FIX 3 août 2026 : reflète le VRAI service HTTPS permanent
+    // (LcrHttpService), pas l'ancienne instance locale apiServer (legacy).
+    private void refreshApiStatus() {
+        if (txtApiStatus == null) return;
+        boolean httpsRunning = LcrHttpService.isApiRunning();
+        txtApiStatus.setText("Status: " + (httpsRunning ? "RUNNING (service permanent)" : "STOPPED"));
+        if (txtApiUrl != null) {
+            txtApiUrl.setText("https://127.0.0.1:" + LcrHttpService.getApiPort());
+        }
+        // Boutons legacy — désactivés en permanence, le service tourne déjà
+        // seul en continu. Conservés visuellement pour l'instant (à retirer).
+        if (btnApiStart != null) btnApiStart.setEnabled(false);
+        if (btnApiStop != null) btnApiStop.setEnabled(false);
+    }
+
+    private void onApiLine(String line) {
+        if (line == null) return;
+
+        Integer rid = parseRid(line);
+        boolean isReq = line.contains("] REQ ");
+        boolean isResp = line.contains("] RESP ");
+
+        if (rid != null && isReq) {
+            String path = parseReqPath(line);
+            if (path != null) apiRidToPath.put(rid, path);
+
+            Integer node = extractNodeFromPath(path);
+            if (node == null && currentRegNode > 0) node = currentRegNode;
+
+            String jobId = extractJobIdFromPath(path);
+            if (jobId != null) {
+                if (apiJobSeen.contains(jobId)) return;
+                apiJobSeen.add(jobId);
+                apiFirstJobRid.add(rid);
+                logApi(node, line);
+                return;
+            }
+
+            logApi(node, line);
+            return;
+        }
+
+        if (rid != null && isResp) {
+            String path = apiRidToPath.remove(rid);
+            Integer node = extractNodeFromPath(path);
+            if (node == null && currentRegNode > 0) node = currentRegNode;
+
+            String jobId = extractJobIdFromPath(path);
+            if (jobId != null) {
+                if (apiFirstJobRid.remove(rid)) {
+                    logApi(node, line);
+                    return;
+                }
+                if (isJobDoneRespLine(line)) logApi(node, line);
+                return;
+            }
+
+            logApi(node, line);
+            return;
+        }
+
+        logApi((currentRegNode > 0 ? currentRegNode : null), line);
+    }
+
+    // =========================
+    // Backup DB
+    // =========================
+    private static final int REQ_PICK_BACKUP_DIR = 9102;
+    private static final String PREF_BACKUP_DIR_URI = "backup_dir_uri";
+
+    private void doBackupDb() {
+        if (deliveryStore == null) {
+            toast("Backup DB impossible: store absent");
+            return;
+        }
+
+        Uri savedDir = getSavedBackupDirUri();
+        if (savedDir != null) {
+            backupDbToChosenDir(savedDir);
+            return;
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            String name = "lcr_delivery_" + utcStamp() + ".db";
+            deliveryStore.backupDbToDownloadsAsync(this, name, (ok, fileName, detail) -> {
+                if (ok) toast("Backup OK (Downloads): " + fileName);
+                else toast("Backup FAIL: " + fileName + " " + detail);
+            });
+            String statusName = "filgo_delivery_status_" + utcStamp() + ".db";
+            backupRawDbToDownloadsQ(LcrDeliveryStatusDb.DB_NAME, statusName, (ok, fileName, detail) -> {
+                if (ok) toast("Backup OK (Downloads): " + fileName);
+                else android.util.Log.w("MainActivity", "Backup filgo_delivery_status.db FAIL: " + detail);
+            });
+        } else {
+		// Android 9 et - : tenter Downloads si permission accordée, sinon demander permission puis fallback dossier
+		if (ensureLegacyStoragePermissionForDownloads(true)) {
+			String name = "lcr_delivery_" + utcStamp() + ".db";
+			deliveryStore.backupDbToDownloadsAsync(this, name, (ok, fileName, detail) -> {
+				if (ok) toast("Backup OK (Downloads): " + fileName);
+				else toast("Backup FAIL: " + fileName + " " + detail);
+			});
+			String statusName = "filgo_delivery_status_" + utcStamp() + ".db";
+			backupRawDbToDownloadsLegacy(LcrDeliveryStatusDb.DB_NAME, statusName, (ok, fileName, detail) -> {
+				if (ok) toast("Backup OK (Downloads): " + fileName);
+				else android.util.Log.w("MainActivity", "Backup filgo_delivery_status.db FAIL: " + detail);
+			});
+		} else {
+			requestBackupDir();
+		}
+	}
+    }
+
+    private interface RawBackupCallback {
+        void onDone(boolean ok, String fileName, String detail);
+    }
+
+    /**
+     * Copie brute d'un fichier SQLite quelconque vers Downloads via MediaStore (Android Q+).
+     * Ajouté pour que filgo_delivery_status.db (LcrDeliveryStatusDb) soit exporté au même
+     * titre que la base de DeliveryLogStore — jusqu'ici seule cette dernière l'était.
+     */
+    private void backupRawDbToDownloadsQ(String dbName, String destName, RawBackupCallback cb) {
+        new Thread(() -> {
+            try {
+                java.io.File src = getDatabasePath(dbName);
+                if (src == null || !src.exists()) {
+                    cb.onDone(false, destName, "DB introuvable (" + dbName + ")");
+                    return;
+                }
+                android.content.ContentValues cv = new android.content.ContentValues();
+                cv.put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, destName);
+                cv.put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "application/x-sqlite3");
+                cv.put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS);
+
+                Uri outUri = getContentResolver().insert(
+                    android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv);
+                if (outUri == null) {
+                    cb.onDone(false, destName, "insert MediaStore a échoué");
+                    return;
+                }
+                try (java.io.InputStream in = new java.io.FileInputStream(src);
+                     java.io.OutputStream out = getContentResolver().openOutputStream(outUri)) {
+                    if (out == null) {
+                        cb.onDone(false, destName, "output stream null");
+                        return;
+                    }
+                    byte[] buf = new byte[64 * 1024];
+                    int r;
+                    while ((r = in.read(buf)) > 0) out.write(buf, 0, r);
+                    out.flush();
+                }
+                cb.onDone(true, destName, null);
+            } catch (Exception e) {
+                cb.onDone(false, destName, e.getMessage());
+            }
+        }).start();
+    }
+
+    /**
+     * Copie brute vers Downloads pour Android 9-10 (permission legacy déjà accordée
+     * par ensureLegacyStoragePermissionForDownloads avant cet appel).
+     */
+    private void backupRawDbToDownloadsLegacy(String dbName, String destName, RawBackupCallback cb) {
+        new Thread(() -> {
+            try {
+                java.io.File src = getDatabasePath(dbName);
+                if (src == null || !src.exists()) {
+                    cb.onDone(false, destName, "DB introuvable (" + dbName + ")");
+                    return;
+                }
+                java.io.File downloads = android.os.Environment.getExternalStoragePublicDirectory(
+                    android.os.Environment.DIRECTORY_DOWNLOADS);
+                java.io.File dest = new java.io.File(downloads, destName);
+                try (java.io.InputStream in = new java.io.FileInputStream(src);
+                     java.io.OutputStream out = new java.io.FileOutputStream(dest)) {
+                    byte[] buf = new byte[64 * 1024];
+                    int r;
+                    while ((r = in.read(buf)) > 0) out.write(buf, 0, r);
+                    out.flush();
+                }
+                cb.onDone(true, destName, null);
+            } catch (Exception e) {
+                cb.onDone(false, destName, e.getMessage());
+            }
+        }).start();
+    }
+
+    private void requestBackupDir() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        i.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        i.addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        i.addFlags(Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+        startActivityForResult(i, REQ_PICK_BACKUP_DIR);
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+
+        if (requestCode == REQ_ENABLE_BT) {
+            refreshBondedBtList();
+            return;
+        }
+
+        if (requestCode == REQ_PICK_BACKUP_DIR) {
+            if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+                toast("Backup: sélection de dossier annulée");
+                return;
+            }
+            Uri dirUri = data.getData();
+            final int takeFlags = data.getFlags() & (
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                            | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            );
+                        try { getContentResolver().takePersistableUriPermission(dirUri, takeFlags); } catch (Exception ignored) {}
+            saveBackupDirUri(dirUri);
+            toast("Backup: dossier enregistré");
+            backupDbToChosenDir(dirUri);
+        }
+    }
+
+    private Uri getSavedBackupDirUri() {
+        SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
+        String s = prefs.getString(PREF_BACKUP_DIR_URI, null);
+        if (s == null || s.trim().isEmpty()) return null;
+        try { return Uri.parse(s); } catch (Exception e) { return null; }
+    }
+
+    private void saveBackupDirUri(Uri uri) {
+        SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
+        prefs.edit().putString(PREF_BACKUP_DIR_URI, uri.toString()).apply();
+    }
+
+    private void backupDbToChosenDir(Uri dirUri) {
+        try {
+            java.io.File dbFile = getDatabasePath(DeliveryDb.DB_NAME);
+            if (dbFile == null || !dbFile.exists()) {
+                toast("Backup FAIL: DB introuvable (" + DeliveryDb.DB_NAME + ")");
+                return;
+            }
+
+            if (deliveryStore != null) deliveryStore.checkpointWalBestEffort();
+
+            String name = "lcr_delivery_" + utcStamp() + ".db";
+            DocumentFile dir = DocumentFile.fromTreeUri(this, dirUri);
+            if (dir == null || !dir.canWrite()) {
+                toast("Backup FAIL: dossier non accessible en écriture");
+                return;
+            }
+
+            DocumentFile existing = dir.findFile(name);
+            if (existing != null) { try { existing.delete(); } catch (Exception ignore) {} }
+
+            DocumentFile target = dir.createFile("application/x-sqlite3", name);
+            if (target == null || target.getUri() == null) {
+                toast("Backup FAIL: création du fichier impossible");
+                return;
+            }
+
+            Uri outUri = target.getUri();
+            try (java.io.InputStream in = new java.io.FileInputStream(dbFile);
+                 java.io.OutputStream out = getContentResolver().openOutputStream(outUri)) {
+
+                if (out == null) {
+                    toast("Backup FAIL: output stream null");
+                    return;
+                }
+
+                byte[] buf = new byte[64 * 1024];
+                int r;
+                while ((r = in.read(buf)) > 0) out.write(buf, 0, r);
+                out.flush();
+            }
+
+            // ✅ Étendre le backup pour ramasser aussi filgo_delivery_status.db
+            // (LcrDeliveryStatusDb) — jusqu'ici seul DeliveryDb était exporté ici,
+            // donc les tables de LcrDeliveryStatusDb (totaux NET/GROSS par WO)
+            // n'apparaissaient jamais dans le backup.
+            String statusName = "filgo_delivery_status_" + utcStamp() + ".db";
+            boolean statusOk = copyRawDbToDir(dir, LcrDeliveryStatusDb.DB_NAME, statusName);
+
+            toast("Backup OK (dossier choisi): " + name
+                + (statusOk ? " + " + statusName : " (filgo_delivery_status.db absent)"));
+
+        } catch (Exception e) {
+            toast("Backup FAIL: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
+        }
+    }
+
+    /**
+     * Copie brute d'un fichier SQLite quelconque vers un dossier SAF déjà ouvert.
+     * Utilisé pour ajouter filgo_delivery_status.db au backup existant sans dupliquer
+     * toute la logique de copie déjà en place pour DeliveryDb.
+     */
+    private boolean copyRawDbToDir(DocumentFile dir, String dbName, String destName) {
+        try {
+            java.io.File src = getDatabasePath(dbName);
+            if (src == null || !src.exists()) return false;
+
+            DocumentFile existing = dir.findFile(destName);
+            if (existing != null) { try { existing.delete(); } catch (Exception ignore) {} }
+
+            DocumentFile target = dir.createFile("application/x-sqlite3", destName);
+            if (target == null || target.getUri() == null) return false;
+
+            try (java.io.InputStream in = new java.io.FileInputStream(src);
+                 java.io.OutputStream out = getContentResolver().openOutputStream(target.getUri())) {
+                if (out == null) return false;
+                byte[] buf = new byte[64 * 1024];
+                int r;
+                while ((r = in.read(buf)) > 0) out.write(buf, 0, r);
+                out.flush();
+            }
+            return true;
+        } catch (Exception e) {
+            android.util.Log.w("MainActivity", "copyRawDbToDir(" + dbName + ") ERR: " + e.getMessage());
+            return false;
+        }
+    }
+
+    private static String utcStamp() {
+        SimpleDateFormat df = new SimpleDateFormat("yyyy-MM-dd'T'HH-mm-ss'Z'", Locale.ROOT);
+        df.setTimeZone(TimeZone.getTimeZone("UTC"));
+        return df.format(new Date());
+    }
+
+    // =========================
+    // Log principal via LogBus
+    // =========================
+    private void scheduleMainLogRefresh() {
+        if (txtLog == null) return;
+        if (cbShowLog != null && !cbShowLog.isChecked()) return;
+
+        long now = System.currentTimeMillis();
+        long dt = now - lastMainLogRefreshMs;
+
+        if (dt >= MAIN_LOG_REFRESH_MIN_MS && !mainLogRefreshPending) {
+            lastMainLogRefreshMs = now;
+            refreshGlobalLogView();
+            return;
+        }
+
+        if (mainLogRefreshPending) return;
+        mainLogRefreshPending = true;
+
+        long delay = Math.max(0L, MAIN_LOG_REFRESH_MIN_MS - dt);
+        ui.postDelayed(() -> {
+            mainLogRefreshPending = false;
+            lastMainLogRefreshMs = System.currentTimeMillis();
+            refreshGlobalLogView();
+        }, delay);
+    }
+
+    private void refreshGlobalLogView() {
+        if (txtLog == null) return;
+        if (cbShowLog != null && !cbShowLog.isChecked()) return;
+
+        List<LogBus.LogEvent> events = LogBus.snapshotGlobal(1400, mainLogViewSinceMs);
         txtLog.setText(LogBus.buildText(events));
     }
 
-    private String ts(String msg) { if (!logTsEnabled) return msg; return uiTs() + " " + msg; }
-
-    private String uiTs() {
-        return new SimpleDateFormat("HH:mm:ss.SSS", Locale.CANADA_FRENCH)
-                .format(new Date(System.currentTimeMillis()));
+    private void logUi(Integer node, String msg) {
+        if (msg == null) return;
+        int n = (node != null ? node : 0);
+        LogBus.ui(n, maybeUiTimestamp(msg));
     }
 
-    private static double parseDouble(String s, double def) {
-        try { return Double.parseDouble(s.trim()); } catch (Exception e) { return def; }
+    private void logApi(Integer node, String msg) {
+        if (msg == null) return;
+        int n = (node != null ? node : 0);
+        LogBus.api(n, msg);
+    }
+
+    private void logErr(Integer node, String msg) {
+        if (msg == null) return;
+        int n = (node != null ? node : 0);
+        LogBus.api(n, "[ERR] " + msg);
+    }
+
+    private String maybeUiTimestamp(String line) {
+        if (!logTsEnabled) return line;
+        return uiTs() + " " + line;
+    }
+
+    private String uiTs() {
+        SimpleDateFormat df = new SimpleDateFormat("HH:mm:ss.SSS", Locale.CANADA_FRENCH);
+        return df.format(new Date(System.currentTimeMillis()));
+    }
+
+    private int parseInt(String s, int def) {
+        try { return Integer.parseInt(s.trim()); } catch (Exception e) { return def; }
+    }
+
+    public void toast(String s) {
+        ui.post(() -> Toast.makeText(this, s, Toast.LENGTH_SHORT).show());
     }
 
     private static String safeMsg(Exception e) {
@@ -3011,1456 +4868,1000 @@ public class RegisterTabFragment extends Fragment {
         return (m == null) ? e.getClass().getSimpleName() : m;
     }
 
-    public static RegisterTabFragment newInstance(int node, int from, String serialId, String transportKey) {
-        RegisterTabFragment f = new RegisterTabFragment();
-        Bundle b = new Bundle();
-        b.putInt(ARG_NODE, node);
-        b.putInt(ARG_FROM, from);
-        if (serialId != null) b.putString(ARG_SERIAL, serialId);
-        if (transportKey != null) b.putString(ARG_TRANSPORT, transportKey);
-        f.setArguments(b);
-        return f;
-    }
-
-    /**
-     * ✅ Appelé dans chaque catch qui attrape une erreur LCP/BT.
-     * Si c'est une erreur de connexion → affiche immédiatement l'écran de diagnostic.
-     */
-    /**
-     * ✅ Vérifie que le transport io est ouvert avant toute action sur le registre.
-     * Si fermé → déclenche immédiatement l'écran de diagnostic.
-     * @return true si io est ouvert, false si diagnostic lancé
-     */
-    // ✅ POINT D'ENTRÉE UNIFIÉ (demandé) : Status(B), Connect LCP et Reconnect
-    // valident maintenant le TRANSPORT ET LE REGISTRE PRÉCIS (node+serial) —
-    // pas juste un flag passif (io.isOpen()) qui peut mentir. On envoie une
-    // VRAIE commande Status (api_tickSnapshot) comme test définitif. Si CETTE
-    // commande échoue aussi, la déconnexion est confirmée à 100% — pas une
-    // supposition basée sur un compteur de timeouts passifs.
-    // Tourne TOUJOURS en arrière-plan (jamais sur le thread UI).
-    private void validerTransportEtRegistrePuis(String contexte, Runnable onSuccess) {
-        bg.execute(() -> {
-            boolean ok = false;
-            String raison = "";
-            try {
-                if (tabTransportKey == null || tabTransportKey.trim().isEmpty()) {
-                    raison = "transport inconnu";
-                } else {
-                    com.pa.lcr.lcp.transport.TransportIo io =
-                        MediaTransportManager.get(requireContext()).getByKey(tabTransportKey);
-                    if (io == null || !io.isOpen()) {
-                        raison = "transport fermé (" + tabTransportKey + ")";
-                    } else if (controller == null) {
-                        raison = "controller null";
-                    } else {
-                        // ✅ FIX (l'erreur signalée) : api_tickSnapshot() ne fait
-                        // AUCUNE IO réelle — c'est une lecture de CACHE qui
-                        // retourne TOUJOURS ok=1, peu importe l'état réel de la
-                        // connexion. Ça ne validait absolument rien. La vraie
-                        // commande synchrone qui fait de l'IO réelle et peut
-                        // réellement échouer est api_registerValidate() — elle
-                        // lit le VRAI statut du registre (readFullStatus) et
-                        // retourne fail() sur une vraie exception LCP.
-                        com.pa.lcr.lcp.ApiResult r = controller.api_registerValidate(
-                                null, node, serialFromArgs, null, null);
-                        // ✅ IMPORTANT : api_registerValidate() peut aussi échouer
-                        // pour des raisons LÉGITIMES (ticket en attente, livraison
-                        // active, mauvais serial) — ce ne sont PAS des signes de
-                        // déconnexion. Seul err="ERR_LCP_CONNECT_FAILED" indique
-                        // une vraie panne de communication. Les autres échecs sont
-                        // des états métier normaux, pas une raison de diagnostiquer.
-                        boolean vraieDeconnexion = r != null && r.code != 1
-                                && com.pa.lcr.lcp.RegisterValidator.Codes.ERR_LCP_CONNECT_FAILED.equals(r.err);
-                        ok = (r != null && r.code == 1) || (r != null && !vraieDeconnexion);
-                        raison = (r != null) ? ("err=" + r.err + " msg=" + r.msg) : "r=null";
-                    }
-                }
-            } catch (Exception e) {
-                raison = "exception: " + e.getMessage();
-            }
-            android.util.Log.i("RegisterTabFragment", "validerTransportEtRegistrePuis [" + contexte
-                    + "]: node=" + node + " serial=" + serialFromArgs + " transport=" + tabTransportKey
-                    + " -> " + (ok ? "OK" : "ÉCHEC (" + raison + ")"));
-            if (ok) {
-                if (onSuccess != null) ui.post(onSuccess);
-            } else {
-                final String fRaison = raison;
-                surErreurConnexion(
-                    new java.io.IOException("Validation transport+registre échouée (node=" + node
-                        + " serial=" + serialFromArgs + "): " + fRaison),
-                    contexte);
-            }
-        });
-    }
-
-    private boolean verifierIoAvantAction(String contexte) {
+    // =========================
+    // CONFIGURE: Status UI (media + nodes)
+    // =========================
+    private void updateMediaStatusUi() {
         try {
-            // ✅ FIX (bétonnage) : si tabTransportKey est null/vide, l'ancien code
-            // sautait la vérification ENTIÈREMENT et retournait true par défaut —
-            // laissant croire que tout va bien alors qu'on ne sait même pas à quel
-            // transport se fier. Plus aucun cas ne passe sans vérification réelle.
-            if (tabTransportKey == null || tabTransportKey.trim().isEmpty()) {
-                android.util.Log.w("RegisterTabFragment", "verifierIoAvantAction [" + contexte
-                        + "]: tabTransportKey vide/null — transport inconnu, diagnostic forcé");
-                surErreurConnexion(
-                    new java.io.IOException("Transport inconnu (tabTransportKey vide) — BT/USB débranché"),
-                    contexte);
-                return false;
+            String s;
+            boolean usbReady = (UsbSession.getPort() != null);
+            boolean btReady = (btSocket != null && btSocket.isConnected());
+            if (usbReady) s = "Média : USB (prêt)";
+            else if (btReady) s = "Média : BT (connecté)";
+            else s = "Média : —";
+            if (txtMediaActive != null) txtMediaActive.setText(s);
+        } catch (Exception ignored) {}
+    }
+
+    private void updateNodesStatusUi() {
+        try {
+            if (txtNodesActive == null) return;
+            if (nodeItems == null || nodeItems.isEmpty()) {
+                txtNodesActive.setText("Nodes : —");
+                return;
             }
-            com.pa.lcr.lcp.transport.TransportIo io =
-                MediaTransportManager.get(requireContext()).getByKey(tabTransportKey);
-            if (io == null || !io.isOpen()) {
-                android.util.Log.w("RegisterTabFragment", "verifierIoAvantAction [" + contexte
-                        + "]: io=" + (io == null ? "null" : "fermé") + " pour transport=" + tabTransportKey);
-                surErreurConnexion(
-                    new java.io.IOException("Transport fermé — BT/USB débranché"),
-                    contexte);
-                return false;
+            int count = nodeItems.size();
+            StringBuilder sb = new StringBuilder();
+            sb.append("Nodes : ").append(count).append(" (");
+            int shown = 0;
+            for (NodeScanItem it : nodeItems) {
+                if (it == null) continue;
+                if (shown > 0) sb.append(", ");
+                sb.append(it.lcrnode);
+                shown++;
+                if (shown >= 3) break;
             }
+            if (count > 3) sb.append(", …");
+            sb.append(")");
+            txtNodesActive.setText(sb.toString());
+        } catch (Exception ignored) {}
+    }
+
+    // =========================
+    // CONFIGURE: Bluetooth (paired only)
+    // =========================
+    
+ // =========================
+ // ✅ Storage legacy (Android 9 / API 28) : permission runtime
+ // - Requis pour écrire dans /storage/emulated/0/Download
+ // - Sur Android 10+ : non requis (MediaStore / scoped storage)
+ // =========================
+ private boolean ensureLegacyStoragePermissionForDownloads(boolean prompt) {
+     try {
+         // Android 10+ : pas besoin
+         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) return true;
+         // Android 9 et - : WRITE_EXTERNAL_STORAGE runtime (API 23+)
+         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true;
+         int p = ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE);
+         if (p == PackageManager.PERMISSION_GRANTED) return true;
+         if (!prompt) return false;
+         ActivityCompat.requestPermissions(this,
+                 new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE, Manifest.permission.READ_EXTERNAL_STORAGE},
+                 REQ_STORAGE_LEGACY);
+         return false;
+     } catch (Exception ignored) {
+         return false;
+     }
+ }
+
+    // =========================
+    // ✅ TAB label Net/Gross
+    // =========================
+    private static String formatQtyLabel(double net, double gross) {
+        return String.format(java.util.Locale.ROOT, " | N=%.2f G=%.2f", net, gross);
+    }
+
+
+private boolean ensureBtConnectPermission() {
+        // Android 9: pas de permission runtime; Android 12+: BLUETOOTH_CONNECT.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true;
+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT)
+                == PackageManager.PERMISSION_GRANTED) {
+            return true;
+        }
+
+        ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.BLUETOOTH_CONNECT}, 9101);
+        return false;
+    }
+
+    private void refreshBondedBtList() {
+        if (!ensureBtConnectPermission()) {
+            if (txtBtStatus != null) txtBtStatus.setText("BT : permission requise (BLUETOOTH_CONNECT)");
+            logMedia1("BT Refresh: permission");
+            return;
+        }
+
+        btBonded.clear();
+
+        if (btAdapter == null) {
+            if (txtBtStatus != null) txtBtStatus.setText("BT : non disponible");
+            logMedia1("BT Refresh: non dispo");
+            return;
+        }
+
+        try {
+            if (!btAdapter.isEnabled()) {
+                if (txtBtStatus != null) txtBtStatus.setText("BT : désactivé — activation requise");
+                try {
+                    Intent i = new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE);
+                    startActivityForResult(i, REQ_ENABLE_BT);
+                } catch (Exception ignored) {}
+                logMedia1("BT Refresh: BT OFF");
+                return;
+            }
+        } catch (Exception ignored) {}
+
+        try {
+            Set<BluetoothDevice> bonded = btAdapter.getBondedDevices();
+            if (bonded != null) btBonded.addAll(bonded);
         } catch (Exception e) {
-            android.util.Log.w("RegisterTabFragment", "verifierIoAvantAction [" + contexte
-                    + "]: exception " + e.getMessage());
-            surErreurConnexion(e, contexte);
-            return false;
+            if (txtBtStatus != null) txtBtStatus.setText("BT : erreur liste appairés");
+            logMedia1("BT Refresh: ÉCHEC");
+            return;
         }
-        return true;
-    }
 
-    /** Extrait la MAC depuis tabTransportKey ("BT:AA:BB:.."), ou "" si le
-     *  transport n'est pas Bluetooth (USB / TCP). */
-    private String macDepuisTransportKey() {
-        try {
-            String k = tabTransportKey;
-            if (k != null && k.toUpperCase().startsWith("BT:")) return k.substring(3).trim();
-        } catch (Exception ignored) {}
-        return "";
-    }
+        List<String> labels = new ArrayList<>();
+        for (BluetoothDevice d : btBonded) {
+            String name = (d.getName() != null) ? d.getName() : "(no-name)";
+            String mac = (d.getAddress() != null) ? d.getAddress() : "";
+            labels.add(name + " — " + mac);
+        }
 
-    private void surErreurConnexion(Exception e, String contexte) {
-        android.util.Log.w("RegisterTabFragment", "surErreurConnexion [" + contexte + "]: "
-            + (e != null ? e.getMessage() : "null"));
-        if (com.pa.lcrdemo.RegisterConnectionHelper.estErreurConnexion(e)) {
-            // ✅ FIX (bétonnage définitif) : validerConnexion() était appelée
-            // SYNCHRONE sur le thread UI (puisque surErreurConnexion est
-            // déclenchée directement depuis les clics de boutons). Si
-            // validerConnexion() levait n'importe quelle exception AVANT
-            // d'atteindre son propre new Thread(...) interne, elle était
-            // avalée SILENCIEUSEMENT ici — "aucune réaction" à l'écran, sans
-            // même une ligne dans le logcat. Toute cette étape passe
-            // maintenant par son propre thread, avec logging explicite de
-            // toute exception, pour qu'un échec ne soit plus jamais invisible.
-            final String fContexte = contexte;
-            new Thread(() -> {
-                try {
-                    if (getActivity() instanceof com.pa.lcrdemo.MainActivity
-                            && requireActivity() instanceof com.pa.lcrdemo.MainActivity) {
-                        android.util.Log.i("RegisterTabFragment", "surErreurConnexion [" + fContexte
-                                + "]: appel validerConnexion — transportKey=" + tabTransportKey
-                                + " node=" + node + " serial=" + serialFromArgs + " wo=" + currentWoNum);
-                        new com.pa.lcrdemo.RegisterConnectionHelper(
-                            (com.pa.lcrdemo.MainActivity) requireActivity())
-                            .validerConnexion(
-                                tabTransportKey != null ? tabTransportKey : "",
-                                node,
-                                serialFromArgs != null ? serialFromArgs : "",
-                                currentWoNum != null ? currentWoNum : "",
-                                // ✅ FIX : contexte deep link relayé jusqu'au diagnostic,
-                                // sans quoi la relance automatique de la livraison ne peut
-                                // pas se déclencher après une reconnexion réussie.
-                                currentWoIdGuid != null ? currentWoIdGuid : "",
-                                currentProduit  != null ? currentProduit  : "",
-                                currentPreset   != null ? currentPreset   : "",
-                                macDepuisTransportKey(),
-                                (getActivity() instanceof com.pa.lcrdemo.MainActivity)
-                                    ? ((com.pa.lcrdemo.MainActivity) getActivity()).getDeepLinkHandler()
-                                    : null);
-                    } else {
-                        android.util.Log.w("RegisterTabFragment", "surErreurConnexion [" + fContexte
-                                + "]: activité indisponible — diagnostic annulé");
-                    }
-                } catch (Exception ex) {
-                    android.util.Log.e("RegisterTabFragment", "surErreurConnexion [" + fContexte
-                            + "]: EXCEPTION pendant validerConnexion — " + ex, ex);
-                }
-            }).start();
+        if (btAdapterUi == null) {
+            btAdapterUi = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, labels);
+            btAdapterUi.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+            if (spnBtBonded != null) spnBtBonded.setAdapter(btAdapterUi);
         } else {
-            android.util.Log.w("RegisterTabFragment", "surErreurConnexion [" + contexte
-                    + "]: estErreurConnexion() a retourné false — diagnostic NON déclenché pour " + e);
+            btAdapterUi.clear();
+            btAdapterUi.addAll(labels);
+            btAdapterUi.notifyDataSetChanged();
         }
+
+        if (txtBtStatus != null) txtBtStatus.setText("BT : " + labels.size() + " appareil(s) appairé(s)");
+        logMedia1("BT Refresh: appairés=" + btBonded.size());
     }
 
-    private void reportMediaOffToApi(String origin, String detail) {
-        try {
-            if (getActivity() instanceof MainActivity) {
-                ((MainActivity) getActivity()).reportMediaNotReadyFromTab(node, serialFromArgs, tabTransportKey, origin, detail);
-            }
-        } catch (Exception ignored) {}
-    }
-    private int getPendingProduct() {
-        if (spnProduct != null) {
-            String txt = spnProduct.getText().toString().trim();
-            if (!txt.isEmpty()) {
-                String num = txt.contains(" - ") ? txt.substring(0, txt.indexOf(" - ")).trim() : txt;
-                try { return Integer.parseInt(num); } catch (Exception ignored) {}
-            }
-        }
-        return 1;
+    private BluetoothDevice getSelectedBonded() {
+        if (spnBtBonded == null) return null;
+        int idx = spnBtBonded.getSelectedItemPosition();
+        if (idx < 0 || idx >= btBonded.size()) return null;
+        return btBonded.get(idx);
     }
 
-    public String getSerialFromArgs() { return serialFromArgs; }
-
-    public int getNodeFromArgs() {
-        Bundle a = getArguments();
-        return a != null ? a.getInt(ARG_NODE, 250) : 250;
-    }
-
-    // ── Resolve (btnA) ───────────────────────────────────────────────────────────────
-    // ── Bouton C — nouvelle livraison ─────────────────────────────────
-    /** Appelé par DeepLinkHandler via MainActivity quand le tab existe déjà
-     *  Même comportement que le bouton C mais avec préfill du WO */
-    public void startNewDeliveryCFromDeepLink(String woNum, String woIdGuid,
-            String produit, String presetStr) {
-        // Préfiller
-        if (woNum != null && !woNum.isEmpty()) {
-            currentWoNum = woNum;
-            woNumFromDirectSource = true;
-            lastTicketDetected = "";
-        }
-        if (woIdGuid != null && !woIdGuid.isEmpty()) currentWoIdGuid = woIdGuid;
-        if (produit != null && !produit.isEmpty() && spnProduct != null)
-            spnProduct.setText(produit, false);
-        if (presetStr != null && !presetStr.isEmpty() && edtPreset != null)
-            edtPreset.setText(presetStr);
-        deliveryNotified = false;
-        // Bypasser le dialog "Bon déjà complété" — FSM a déjà validé la livraison
-        // Appeler startNewDeliveryC() qui lance la livraison sans le guard du dialog
-        if (controller == null) return;
-        try {
-            new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext()).clear();
-        } catch (Exception ignored) {}
-        bypassDeliveryDialog = true;
-        startNewDeliveryC();
-    }
-
-    private void startNewDeliveryC() {
-        if (controller == null) return;
-        refreshDelCodeFromTickSnapshotThrottled();
-        int dc = lastDelCode;
-        boolean tp = (dc & 0x0001) != 0;
-        boolean flow = (dc & 0x0004) != 0;
-        boolean act = (dc & 0x0008) != 0;
-        if (tp || flow || act) {
-            if (txtLive != null) txtLive.setText("LIVE: registre non prêt — faire Status (B) / Resolve (A)");
-            LogBus.ui(node, ts("C bloqué: delCode=0x" + Integer.toHexString(dc)));
-            updateButtons(controller.getState());
+    /** ✅ AJOUTÉ (7 août 2026, demande Paul — "réduire la vitesse de
+     *  transmission entre 19200 et 4800 dans les tests de diagnostic,
+     *  autant pour BT que USB") — ⚠️ RISQUÉ : change la vitesse DU REGISTRE
+     *  via LCP (Set Baud, msgID 0x7C), puis reconfigure le port local pour
+     *  matcher. Un mismatch entre les deux rend le registre injoignable
+     *  jusqu'à un cycle d'alimentation. Diagnostic seulement — jamais
+     *  utilisé dans le flux normal. Placé ici (zone média/CONFIGURE), pas
+     *  dans RegisterTabFragment (zone communication directe registre) —
+     *  précision de Paul : le média est "supporté par" le tab mais la
+     *  configuration média elle-même n'appartient pas à l'intérieur du tab. */
+    private void showBaudDiagnosticDialog() {
+        int targetNode = currentRegNode;
+        if (targetNode <= 0) {
+            Toast.makeText(this, "Aucun registre actif — sélectionne d'abord un tab", Toast.LENGTH_SHORT).show();
             return;
         }
-        if (!(getActivity() instanceof MainActivity)) return;
-        MainActivity main = (MainActivity) getActivity();
-
-        starting = true;
-        startingSinceMs = System.currentTimeMillis();
-        updateButtons(controller.getState());
-        if (txtLive != null) txtLive.setText("LIVE: RUNNING_FLOWING (flow off - waiting progression)");
-
-        int prod = getPendingProduct();
-        String presetStr = edtPreset != null ? edtPreset.getText().toString() : "0";
-
-        // ✅ Même principe que le deep link FieldService — woNum/woIdGuid déjà
-        // connus du fragment (stables, jamais effacés), seul le ticket number
-        // du registre change à chaque nouvelle livraison. Réutilise
-        // lancerLivraison() de DeepLinkHandler: stabilisation BT, oneshot/start,
-        // poll de fin, patchDataverse automatique — exactement le chemin testé
-        // et fonctionnel du flux FSM normal.
-        deliveryNotified = false; // reset pour la nouvelle livraison
-        // ✅ Si ActiveDeliveryStore contient encore une livraison non terminée
-        // (ex: ticket pending résolu via bouton B sans passer par doResolve)
-        // → notifier + effacer avant de démarrer la nouvelle livraison
-        try {
-            com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
-                new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
-            com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery active = ads.load();
-            if (active != null && active.jobId != null && !active.jobId.isEmpty()) {
-                ads.clear();
-                // Notifier la livraison précédente comme terminée
-                notifyDeliveryEndedToMainActivity();
-            }
-        } catch (Exception ignored) {}
-
-        String tk = (tabTransportKey != null) ? tabTransportKey.trim() : "";
-        main.lancerLivraisonDepuisTab(tk, node, serialFromArgs,
-            currentWoNum, currentWoIdGuid, String.valueOf(prod), presetStr, "");
-    }
-
-    private void doResolve() {
-        if (controller == null) return;
-        if (!verifierIoAvantAction("RESOLVE")) return;
-        try { controller.alignOrRecover(); } catch (Exception e) { surErreurConnexion(e, "RESOLVE"); return; }
-        ui.postDelayed(() -> {
-            try {
-                if (tabTransportKey != null)
-                    MediaTransportManager.get(requireContext())
-                        .activateExclusive(tabTransportKey, "TAB_A");
-            } catch (Exception ignored) {}
-            try { if (controller != null) controller.requestStatus(); } catch (Exception ignored) {}
-            try { validateHeaderAsync(); } catch (Exception ignored) {}
-            try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
-            refreshDelCodeFromTickSnapshotThrottled();
-            updateButtons(controller != null ? controller.getState() : null);
-
-            // ✅ Après resolve ticket pending — notifier seulement si ActiveDeliveryStore
-            // contient encore une livraison (= DeepLinkHandler n'a pas encore appelé onDeliveryEnded)
-            // Si ActiveDeliveryStore est vide = DeepLinkHandler a déjà notifié → ne pas doubler
-            ui.postDelayed(() -> {
-                if (!isAdded() || getView() == null || controller == null) return;
-                if (controller.getState() != com.pa.lcr.lcp.DeliveryState.CONNECTED) return;
-                if (currentWoNum == null || currentWoNum.isEmpty()) return;
-                try {
-                    com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
-                        new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
-                    com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery active = ads.load();
-                    if (active != null && active.jobId != null && !active.jobId.isEmpty()) {
-                        // ActiveDeliveryStore non vide = ticket pending non résolu par DeepLinkHandler
-                        ads.clear();
-                        notifyDeliveryEndedToMainActivity();
-                    }
-                    // Si ActiveDeliveryStore vide = DeepLinkHandler a déjà notifié → rien à faire
-                } catch (Exception ignored) {}
-            }, 1500);
-        }, 900);
-    }
-
-    // ── Annuler livraison ─────────────────────────────────────────────────────────────
-    private void annulerLivraison() {
-        DeliveryController c = controller;
-        if (c == null) return;
-        if (!verifierIoAvantAction("ANNULER")) return;
-        if (btnAnnuler != null) {
-            btnAnnuler.setEnabled(false);
-            btnAnnuler.setText("⏳ Annulation en cours — veuillez patienter");
-        }
-        if (btnConnect  != null) btnConnect.setEnabled(false);
-        if (btnA        != null) btnA.setEnabled(false);
-        if (btnB        != null) btnB.setEnabled(false);
-        if (btnC        != null) btnC.setEnabled(false);
-        if (btnContinue != null) btnContinue.setEnabled(false);
-        if (btnFinish   != null) btnFinish.setEnabled(false);
-        if (btnRetourWO != null) btnRetourWO.setEnabled(false);
-        double netAtCancelRaw   = parseDisplayNet();
-        double grossAtCancelRaw = parseDisplayGross();
-
-        // ✅ FIX (1/2) : utiliser la valeur CORRIGÉE (retour de gaz) si le
-        // mécanisme de correction a accumulé quelque chose — sinon, retomber
-        // sur la valeur brute affichée. Avant ce correctif, l'annulation
-        // sauvegardait toujours la valeur brute, même quand la correction
-        // retour-de-gaz avait des données plus fiables.
-        double corrNet = 0.0, corrGross = 0.0;
-        try { corrNet = c.getCumulativeCorrectedNetL(); } catch (Exception ignored) {}
-        try { corrGross = c.getCumulativeCorrectedGrossL(); } catch (Exception ignored) {}
-        final double netAtCancel   = (corrNet   != 0.0) ? corrNet   : netAtCancelRaw;
-        final double grossAtCancel = (corrGross != 0.0) ? corrGross : grossAtCancelRaw;
-
-        // ✅ FIX (2/2) : bloquer/confirmer si le NET reste négatif (retour de
-        // gaz probable — pression du gun inférieure à celle du réservoir de
-        // destination). Ne jamais sauvegarder silencieusement une annulation
-        // avec NET négatif sans que le chauffeur en soit conscient.
-        if (netAtCancel < 0) {
-            if (btnAnnuler != null) {
-                btnAnnuler.setEnabled(true);
-                btnAnnuler.setText("⛔ Annuler la livraison");
-            }
-            if (btnConnect  != null) btnConnect.setEnabled(true);
-            if (btnA        != null) btnA.setEnabled(true);
-            if (btnB        != null) btnB.setEnabled(true);
-            if (btnC        != null) btnC.setEnabled(true);
-            if (btnContinue != null) btnContinue.setEnabled(true);
-            if (btnFinish   != null) btnFinish.setEnabled(true);
-            if (btnRetourWO != null) btnRetourWO.setEnabled(true);
-            final double fNetAtCancel = netAtCancel;
-            final double fGrossAtCancel = grossAtCancel;
-            new androidx.appcompat.app.AlertDialog.Builder(requireContext())
-                .setTitle("⚠️ NET négatif détecté")
-                .setMessage("NET = " + String.format(Locale.ROOT, "%.2f", fNetAtCancel) + " L — probable retour de gaz "
-                    + "(pression du gun inférieure à celle du réservoir de destination).\n\n"
-                    + "Confirmer l'annulation quand même avec cette valeur ?")
-                .setPositiveButton("Confirmer l'annulation", (d, w) ->
-                    proceedWithAnnulation(c, fNetAtCancel, fGrossAtCancel))
-                .setNegativeButton("Annuler (revenir en arrière)", null)
-                .setCancelable(true)
-                .show();
+        String activeTransportKey = (mediaTransportManager != null) ? mediaTransportManager.getActiveKey() : null;
+        if (activeTransportKey == null || activeTransportKey.trim().isEmpty()) {
+            Toast.makeText(this, "Aucun transport actif", Toast.LENGTH_SHORT).show();
             return;
         }
-
-        proceedWithAnnulation(c, netAtCancel, grossAtCancel);
-    }
-
-    // ✅ Extrait de la logique d'annulation existante — inchangée, juste
-    // déplacée pour permettre le blocage/confirmation ci-dessus sur NET négatif.
-    private void proceedWithAnnulation(DeliveryController c, double netAtCancel, double grossAtCancel) {
-        if (btnAnnuler != null) {
-            btnAnnuler.setEnabled(false);
-            btnAnnuler.setText("⏳ Annulation en cours — veuillez patienter");
-        }
-        if (btnConnect  != null) btnConnect.setEnabled(false);
-        if (btnA        != null) btnA.setEnabled(false);
-        if (btnB        != null) btnB.setEnabled(false);
-        if (btnC        != null) btnC.setEnabled(false);
-        if (btnContinue != null) btnContinue.setEnabled(false);
-        if (btnFinish   != null) btnFinish.setEnabled(false);
-        if (btnRetourWO != null) btnRetourWO.setEnabled(false);
-        // ✅ Poser le flag AVANT bg.execute — évite race avec onStateChanged(ENDED)
-        cancelInProgress = true;
-        bg.execute(() -> {
-            try {
-                // 1. Terminer la livraison ET confirmer via lecture réelle du registre
-                // (deliveryActive == false) — évite état transitoire au redémarrage
-                boolean confirmed = false;
-                try { confirmed = c.forceEndSync(8000); } catch (Exception ignored) {}
-                android.util.Log.i("Annuler", "forceEndSync confirmed=" + confirmed);
-
-                // 3. Resolve synchrone — consomme le ticket pending → CONNECTED propre
-                // api_deliveryAlignA() est synchrone contrairement à alignOrRecover()
-                try { c.api_deliveryAlignA(); } catch (Exception ignored) {}
-                // ✅ Reset lastDelCode — évite btnC grisé à cause de bits stale
-                lastDelCode = 0;
-
-                // 4. Attendre CONNECTED propre (max 5s)
-                for (int i = 0; i < 25; i++) {
-                    try { Thread.sleep(200); } catch (Exception ignored) {}
-                    if (c.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
-                }
-                // Reconnecter le transport si nécessaire
-                try {
-                    if (tabTransportKey != null)
-                        com.pa.lcr.lcp.transport.MediaTransportManager.get(requireContext())
-                            .activateExclusive(tabTransportKey, "ANNULATION_DONE");
-                } catch (Exception ignored) {}
-                // Rafraîchir l'état UI → CONNECTED Ready
-                try { c.requestStatus(); } catch (Exception ignored) {}
-
-                // 4. Lire le ticket UID généré par endDelivery
-                String ticketNo = "";
-                try {
-                    com.pa.lcr.lcp.ApiResult snap = c.api_tickSnapshot();
-                    if (snap != null && snap.data != null) {
-                        ticketNo = snap.data.optString("ticket_no", "");
-                        org.json.JSONObject result = snap.data.optJSONObject("result");
-                        if (result != null && ticketNo.isEmpty())
-                            ticketNo = result.optString("ticket_no", "");
-                    }
-                } catch (Exception ignored) {}
-
-                // 5. Contexte WO depuis ActiveDeliveryStore
-                String woNum = "", woIdGuid = "";
-                try {
-                    com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
-                        new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
-                    com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad = ads.load();
-                    if (ad != null) {
-                        woNum    = ad.woNum    != null ? ad.woNum    : "";
-                        woIdGuid = ad.woIdGuid != null ? ad.woIdGuid : "";
-                    }
-                } catch (Exception ignored) {}
-
-                // 6. Logger TYPE_ANNULATION dans SQLite avec le ticket UID
-                try {
-                    android.content.ContentValues cv = new android.content.ContentValues();
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,      woNum);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID,  woIdGuid);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO,   ticketNo);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,       netAtCancel);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L,     grossAtCancel);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
-                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ANNULATION);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,      "OPERATEUR");
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE,   "ANNULATION");
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
-                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
-                    org.json.JSONObject payload = new org.json.JSONObject();
-                    payload.put("cancelled",       true);
-                    payload.put("cancel_reason",   "operator_cancel");
-                    payload.put("net_at_cancel",   netAtCancel);
-                    payload.put("gross_at_cancel", grossAtCancel);
-                    payload.put("cancel_ts",       System.currentTimeMillis());
-                    payload.put("ticket_no",       ticketNo);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PAYLOAD_JSON, payload.toString());
-                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbAnnuler =
-                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
-                    try {
-                        dbAnnuler.insertDelivery(cv);
-                    } finally {
-                        try { dbAnnuler.close(); } catch (Exception ignored) {}
-                    }
-                    android.util.Log.i("Annuler", "Annulation loggée wo=" + woNum + " ticket=" + ticketNo);
-                } catch (Exception e) {
-                    android.util.Log.w("Annuler", "Insert ERR: " + e.getMessage());
-                }
-
-                // 7. Marquer CANCELLED dans ActiveDeliveryStore — garder le contexte WO
-                // pour que retournerAuWorkOrder() ait encore le woNum/woIdGuid
-                // si le chauffeur relance avec bouton C sans repasser par FSM
-                try {
-                    com.pa.lcr.lcp.storage.ActiveDeliveryStore ads2 =
-                        new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
-                    com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad2 = ads2.load();
-                    if (ad2 != null) {
-                        ads2.save(ad2.woNum, ad2.woIdGuid, ad2.jobId,
-                            ad2.mac, ad2.node, ad2.serialId,
-                            ad2.produit, ad2.preset, "CANCELLED");
-                    }
-                } catch (Exception ignored) {}
-
-                // 8. Rester dans l'APK — remettre l'UI à zéro
-                cancelInProgress = false;
-
-                // ✅ Boucle de confirmation — réessaie jusqu'à ce que le bit ticket
-                // pending soit vraiment retombé (max 5s), au lieu d'un délai fixe
-                // qui pouvait être insuffisant et laisser btnC grisé à tort
-                try {
-                    DeliveryController cRefresh = controller;
-                    if (cRefresh != null) {
-                        for (int i = 0; i < 17; i++) {
-                            try { Thread.sleep(300); } catch (Exception ignored) {}
-                            com.pa.lcr.lcp.ApiResult snapRefresh = cRefresh.api_tickSnapshot();
-                            if (snapRefresh != null && snapRefresh.data != null) {
-                                int dcRefresh = snapRefresh.data.optInt("delCode", lastDelCode);
-                                lastDelCode = dcRefresh;
-                                boolean tpStill = (dcRefresh & 0x0001) != 0;
-                                if (!tpStill) break;
-                            }
-                        }
-                    }
-                } catch (Exception ignored) {}
-
-                ui.post(() -> {
-                    if (txtQtyNet   != null) txtQtyNet.setText("NET: 0.0");
-                    if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
-                    if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : —");
-                    if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : —");
-                    // ✅ Réactiver tous les boutons désactivés pendant l'annulation
-                    if (btnAnnuler  != null) btnAnnuler.setEnabled(true);
-                    if (btnConnect  != null) btnConnect.setEnabled(true);
-                    if (btnA        != null) btnA.setEnabled(true);
-                    if (btnB        != null) btnB.setEnabled(true);
-                    if (btnC        != null) btnC.setEnabled(true);
-                    if (btnContinue != null) btnContinue.setEnabled(true);
-                    if (btnFinish   != null) btnFinish.setEnabled(true);
-                    if (btnRetourWO != null) btnRetourWO.setEnabled(true);
-                    updateButtons(controller != null ? controller.getState() : null);
-                    android.widget.Toast.makeText(getContext(),
-                        "Livraison annulée — registre prêt",
-                        android.widget.Toast.LENGTH_SHORT).show();
-                });
-
-            } catch (Exception e) {
-                cancelInProgress = false;
-                android.util.Log.e("Annuler", "ERR: " + e.getMessage());
-                ui.post(() -> {
-                    if (btnAnnuler  != null) btnAnnuler.setEnabled(true);
-                    if (btnConnect  != null) btnConnect.setEnabled(true);
-                    if (btnA        != null) btnA.setEnabled(true);
-                    if (btnB        != null) btnB.setEnabled(true);
-                    if (btnC        != null) btnC.setEnabled(true);
-                    if (btnContinue != null) btnContinue.setEnabled(true);
-                    if (btnFinish   != null) btnFinish.setEnabled(true);
-                    if (btnRetourWO != null) btnRetourWO.setEnabled(true);
-                    android.widget.Toast.makeText(getContext(),
-                        "Erreur annulation: " + e.getMessage(),
-                        android.widget.Toast.LENGTH_SHORT).show();
-                });
-            }
-        });
-    }
-
-    // ✅ Scan auto produits (4 août 2026, demande Paul) — appelé une seule fois
-    // par activation de tab (onTabActivated), pas à chaque transition CONNECTED.
-    // Vérifie d'abord le cache local (RegisterProductStore) avant de lancer un
-    // vrai scan matériel : si des produits sont déjà connus pour ce serial+node,
-    // on réapplique juste le cache (rapide, pas d'IO registre). Sinon on lance
-    // lancerScanProduits() (le même scan que le bouton manuel "🔍 Scan produits").
-    private void autoScanProduitsSiNecessaire() {
-        if (!isAdded() || getView() == null || controller == null) return;
-        if (autoProductScanInFlight) return;
-        if (controller.getState() != DeliveryState.CONNECTED) return; // état a pu changer entretemps
-        final String serialId = (serialFromArgs != null && !serialFromArgs.trim().isEmpty())
-                ? serialFromArgs.trim() : null;
-        if (serialId == null) return;
-
-        autoProductScanInFlight = true;
-        bg.execute(() -> {
-            boolean cacheDisponible = false;
-            try {
-                com.pa.lcr.lcp.storage.RegisterProductStore store =
-                        new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
-                java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> rows = store.getAll(serialId, node);
-                store.close();
-                cacheDisponible = !rows.isEmpty();
-            } catch (Exception e) {
-                android.util.Log.w("RegisterTabFragment", "autoScanProduitsSiNecessaire: lecture cache ERR: " + e.getMessage());
-            }
-
-            if (cacheDisponible) {
-                android.util.Log.i("RegisterTabFragment", "Auto-scan produits — cache déjà présent pour serial="
-                        + serialId + " node=" + node + ", pas de re-scan matériel");
-                applierDescriptionsProduits(serialId, node);
-                autoProductScanInFlight = false;
-            } else {
-                android.util.Log.i("RegisterTabFragment", "Auto-scan produits — aucun cache pour serial="
-                        + serialId + " node=" + node + ", lancement scan matériel");
-                ui.post(() -> {
-                    try {
-                        lancerScanProduits();
-                    } finally {
-                        autoProductScanInFlight = false;
-                    }
-                });
-            }
-        });
-    }
-
-    private void lancerScanProduits() {
-        DeliveryController c = controller;
+        com.pa.lcr.lcp.DeliveryController c = com.pa.lcr.lcp.RegisterSessionManager
+                .get(this).getController(activeTransportKey, targetNode);
         if (c == null) {
-            android.widget.Toast.makeText(requireContext(), "Registre non connecté", android.widget.Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "Registre non connecté", Toast.LENGTH_SHORT).show();
             return;
         }
-        com.pa.lcr.lcp.DeliveryState st = c.getState();
-        if (st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
-                || st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED
-                || st == com.pa.lcr.lcp.DeliveryState.ENDING) {
-            android.widget.Toast.makeText(requireContext(), "Impossible pendant une livraison", android.widget.Toast.LENGTH_SHORT).show();
-            return;
-        }
-        if (btnScanProducts != null) { btnScanProducts.setEnabled(false); btnScanProducts.setText("⏳ Scan..."); }
-        final String serialId = (serialFromArgs != null && !serialFromArgs.trim().isEmpty()) ? serialFromArgs.trim() : null;
-        ui.post(() -> { if (txtLive != null) txtLive.setText("🔍 Scan produits 1 / 16..."); });
-        bg.execute(() -> {
-            try {
-                if (tabTransportKey != null)
-                    com.pa.lcr.lcp.transport.MediaTransportManager.get(requireContext()).activateExclusive(tabTransportKey, "SCAN_PRODUITS");
-                java.util.List<com.pa.lcr.lcp.LcpLink.ProductScanResult> results =
-                    c.api_scanProductNames(msg -> {
-                        LogBus.api(node, "[SCAN] " + msg);
-                        try {
-                            int colon = msg.indexOf(':');
-                            int n = Integer.parseInt(msg.substring("Produit ".length(), colon).trim());
-                            String d = msg.substring(colon + 1).trim();
-                            ui.post(() -> { if (isAdded() && getView() != null && txtLive != null) txtLive.setText("🔍 Scan " + n + " / 16" + (d.isEmpty() ? "" : "  —  " + d)); });
-                        } catch (Exception ignored) {}
-                    });
-                if (serialId != null) {
-                    com.pa.lcr.lcp.storage.RegisterProductStore store = new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
-                    store.upsertAll(serialId, node, results);
-                    store.close();
-                }
-                final String[] labels = new String[16];
-                for (int i = 0; i < 16; i++) labels[i] = String.valueOf(i + 1);
-                final int[] propaneRef = {-1};
-                for (com.pa.lcr.lcp.LcpLink.ProductScanResult r : results) {
-                    int idx = r.noteIdx - 1;
-                    if (idx >= 0 && idx < 16) labels[idx] = r.toSpinnerLabel();
-                    if (r.isPropane && propaneRef[0] == -1) propaneRef[0] = r.noteIdx;
-                }
-                ui.post(() -> {
-                    try {
-                        if (spnProduct != null) spnProduct.setAdapter(new android.widget.ArrayAdapter<>(requireContext(), android.R.layout.simple_dropdown_item_1line, labels));
-                        if (propaneRef[0] > 0 && spnProduct != null) {
-                            spnProduct.setText(labels[propaneRef[0] - 1], false);
-                            if (txtLive != null) txtLive.setText("✅ Scan terminé — Propane produit " + propaneRef[0]);
-                            android.widget.Toast.makeText(requireContext(), "✅ Propane — produit " + propaneRef[0] + " sélectionné", android.widget.Toast.LENGTH_LONG).show();
-                        } else {
-                            if (txtLive != null) txtLive.setText("✅ Scan terminé — " + results.size() + " produits");
-                        }
-                    } finally {
-                        if (btnScanProducts != null) { btnScanProducts.setEnabled(true); btnScanProducts.setText("🔍 Scan produits"); }
-                    }
-                });
-            } catch (Exception e) {
-                android.util.Log.e("RegisterTabFragment", "lancerScanProduits ERR: " + e.getMessage());
-                ui.post(() -> {
-                    if (txtLive != null) txtLive.setText("❌ Scan ERR: " + e.getMessage());
-                    if (btnScanProducts != null) { btnScanProducts.setEnabled(true); btnScanProducts.setText("🔍 Scan produits"); }
-                });
-            }
-        });
-    }
-
-    public void applierDescriptionsProduits(String serialId, int lcrNode) {
-        if (serialId == null || serialId.isEmpty()) return;
-        bg.execute(() -> {
-            try {
-                com.pa.lcr.lcp.storage.RegisterProductStore store = new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
-                java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> rows = store.getAll(serialId, lcrNode);
-                if (rows.isEmpty()) rows = store.getAll(serialId);
-                store.close();
-                if (rows.isEmpty()) return;
-                final String[] labels = new String[16];
-                for (int i = 0; i < 16; i++) labels[i] = String.valueOf(i + 1);
-                for (com.pa.lcr.lcp.storage.RegisterProductStore.Row r : rows) {
-                    int idx = r.noteIdx - 1;
-                    if (idx >= 0 && idx < 16) labels[idx] = r.toSpinnerLabel();
-                }
-                ui.post(() -> {
-                    if (!isAdded() || getView() == null || spnProduct == null) return;
-                    String cur = spnProduct.getText().toString();
-                    spnProduct.setAdapter(new android.widget.ArrayAdapter<>(requireContext(), android.R.layout.simple_dropdown_item_1line, labels));
-                    if (!cur.isEmpty()) spnProduct.setText(cur, false);
-                });
-            } catch (Exception e) {
-                android.util.Log.w("RegisterTabFragment", "applierDescriptions ERR: " + e.getMessage());
-            }
-        });
-    }
-
-    private double parseDisplayNet() {
-        try {
-            if (txtQtyNet == null) return 0.0;
-            return Double.parseDouble(txtQtyNet.getText().toString().replace("NET: ", "").trim());
-        } catch (Exception e) { return 0.0; }
-    }
-
-    private double parseDisplayGross() {
-        try {
-            if (txtQtyGross == null) return 0.0;
-            return Double.parseDouble(txtQtyGross.getText().toString().replace("GROSS: ", "").trim());
-        } catch (Exception e) { return 0.0; }
-    }
-    private static final double POST_DELIVERY_LEAK_THRESHOLD_L = 0.5;
-    private static final long   POST_DELIVERY_POLL_INTERVAL_MS = 5_000;
-    private volatile boolean    postDeliveryPollActive = false;
-    private volatile boolean    bypassDeliveryDialog   = false; // true quand lancé depuis FSM
-
-    private void demarrerPollPostLivraison(double netRef, double grossRef, String ticketNo) {
-        if (postDeliveryPollActive) return;
-        postDeliveryPollActive = true;
-        LogBus.api(node, "[POST-LIVRAISON] Poll demarré netRef=" + netRef + "L ticket=" + ticketNo);
-        Runnable pollRunnable = new Runnable() {
-            @Override public void run() {
-                if (!postDeliveryPollActive || !isAdded() || getView() == null) return;
-                if (controller == null) { postDeliveryPollActive = false; return; }
-                DeliveryState st = controller.getState();
-                if (st == DeliveryState.RUNNING_FLOWING || st == DeliveryState.RUNNING_PAUSED
-                        || st == DeliveryState.PRESTART  || st == DeliveryState.ENDING) {
-                    postDeliveryPollActive = false;
-                    return;
-                }
-                bg.execute(() -> {
-                    double netCourant = -1.0, grossCourant = -1.0;
-                    try {
-                        if (controller != null) {
-                            double[] hw = controller.readNetGrossFromHardware();
-                            netCourant   = hw[0];
-                            grossCourant = hw[1];
-                        }
-                    } catch (Exception ignored) {}
-                    final double fNet = netCourant, fGross = grossCourant;
-                    ui.post(() -> {
-                        if (!postDeliveryPollActive || !isAdded() || getView() == null) return;
-                        if (fNet < 0) { ui.postDelayed(this, POST_DELIVERY_POLL_INTERVAL_MS); return; }
-                        double delta = fNet - netRef;
-                        if (delta >= POST_DELIVERY_LEAK_THRESHOLD_L) {
-                            postDeliveryPollActive = false;
-                            afficherAlerteVanneOuverte(netRef, fNet, grossRef, fGross, ticketNo, delta);
-                            return;
-                        }
-                        ui.postDelayed(this, POST_DELIVERY_POLL_INTERVAL_MS);
-                    });
-                });
-            }
+        final String finalTransportKey = activeTransportKey;
+        final int finalNode = targetNode;
+        final String[] labels = {"19200 (défaut)", "9600", "4800"};
+        final int[] indices = {
+            com.pa.lcr.lcp.LcpLink.BAUD_IDX_19200,
+            com.pa.lcr.lcp.LcpLink.BAUD_IDX_9600,
+            com.pa.lcr.lcp.LcpLink.BAUD_IDX_4800
         };
-        ui.postDelayed(pollRunnable, POST_DELIVERY_POLL_INTERVAL_MS);
-    }
+        final int[] usbBauds = {19200, 9600, 4800};
 
-    private void arreterPollPostLivraison() { postDeliveryPollActive = false; }
-
-    private void afficherAlerteVanneOuverte(double netRef, double netCourant,
-            double grossRef, double grossCourant, String ticketNo, double delta) {
-        if (!isAdded() || getView() == null) return;
-        String msg;
-        try {
-            com.pa.lcr.lcp.LcpLink link = null;
-            if (controller != null) {
-                try { link = (com.pa.lcr.lcp.LcpLink) controller.getLink(); } catch (Exception ignored) {}
-            }
-            msg = (link != null)
-                ? link.getLeakAlertMessage(ticketNo, netRef, netCourant, delta)
-                : "Volume detecte apres arret ticket=" + ticketNo;
-        } catch (Exception e) { msg = "Volume detecte apres arret ticket=" + ticketNo; }
-        new android.app.AlertDialog.Builder(requireContext())
-            .setTitle("Vanne encore ouverte ?")
-            .setMessage(msg)
-            .setCancelable(false)
-            .setPositiveButton("Terminer avec volumes reels", (d, w) ->
-                terminerPostLivraisonAvecVolumesReels(netCourant, grossCourant, ticketNo))
-            .setNegativeButton("J'ai avise le repartiteur", (d, w) ->
-                logFuiteVanneDataverse(netRef, netCourant, grossRef, grossCourant, ticketNo, delta))
+        new android.app.AlertDialog.Builder(this)
+            .setTitle("⚠️ Diagnostic — Vitesse de transmission")
+            .setMessage("Change la vitesse DU REGISTRE lui-même (node=" + finalNode + "). Si la "
+                + "reconfiguration locale échoue après ce changement, la communication sera "
+                + "perdue jusqu'à un cycle d'alimentation du registre.\n\n"
+                + "Sur BT, l'effet réel n'est pas garanti (le lien radio SPP n'a pas de "
+                + "\"vitesse\" au sens câblé) — à valider sur le terrain.\n\n"
+                + "Choisir une vitesse :")
+            .setItems(labels, (dlg, which) -> {
+                logMedia1("[ACTION-CLIC] SET_BAUD_DIAGNOSTIC (" + labels[which] + ") node=" + finalNode);
+                new android.app.AlertDialog.Builder(this)
+                    .setTitle("Confirmer le changement de vitesse")
+                    .setMessage("Vitesse choisie : " + labels[which] + " pour node=" + finalNode + ". Continuer?")
+                    .setPositiveButton("Confirmer", (d2, w2) ->
+                        applyBaudChange(c, finalTransportKey, indices[which], usbBauds[which], labels[which]))
+                    .setNegativeButton("Annuler", null)
+                    .show();
+            })
+            .setNegativeButton("Annuler", null)
             .show();
     }
 
-    private void terminerPostLivraisonAvecVolumesReels(double netFinal, double grossFinal,
-            String ticketNoOriginal) {
-        if (controller == null) return;
-        bg.execute(() -> {
+    private void applyBaudChange(com.pa.lcr.lcp.DeliveryController c, String transportKey,
+            int lcpBaudIndex, int usbBaud, String label) {
+        new Thread(() -> {
             try {
-                double netRef   = controller.netAtDeliveryEnd;
-                double grossRef = controller.grossAtDeliveryEnd;
-                double delta    = netFinal - netRef;
-                String woNum = "", saleNo = "", serialId = "";
+                c.setBaud(lcpBaudIndex);
+                logMedia1("[BAUD] Registre confirmé à " + label + " (Set Baud LCP OK)");
+
+                // Reconfiguration IMMÉDIATE du port local pour matcher — sinon
+                // perte de communication garantie dès la prochaine trame.
+                if ("USB".equalsIgnoreCase(mediaShortFromTransportKey(transportKey))) {
+                    try {
+                        UsbSerialPort port = UsbSession.getPort();
+                        if (port != null) {
+                            port.setParameters(usbBaud, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
+                            logMedia1("[BAUD] Port USB local reconfiguré à " + usbBaud + " bauds pour matcher");
+                        } else {
+                            logMedia1("[BAUD] ⚠ Port USB introuvable pour reconfiguration locale — "
+                                + "communication probablement perdue, cycle d'alimentation du registre requis");
+                        }
+                    } catch (Exception e) {
+                        logMedia1("[BAUD] ⚠ Reconfiguration USB locale ERR: " + e.getMessage()
+                            + " — communication probablement perdue");
+                    }
+                } else {
+                    logMedia1("[BAUD] Transport BT — aucune reconfiguration locale applicable "
+                        + "(SPP n'expose pas de paramètre de vitesse côté app)");
+                }
+            } catch (Exception e) {
+                logMedia1("[BAUD] Set Baud LCP ERR: " + e.getMessage());
+            }
+        }).start();
+    }
+
+    private void btConnectSelected() {
+        // ✅ FIX (7 août 2026, demande Paul — coupe-circuit) — un vrai clic
+        // manuel sur Connexion depuis Configure réarme le coupe-circuit —
+        // l'utilisateur a explicitement repris le contrôle, la reconnexion
+        // automatique peut recommencer à fonctionner normalement.
+        if (autoReconnectCircuitBroken) {
+            autoReconnectCircuitBroken = false;
+            autoReconnectStreakCount = 0;
+            logUi(null, "Coupe-circuit réarmé (action manuelle depuis Configure)");
+        }
+        if (!ensureBtConnectPermission()) {
+            if (txtBtStatus != null) txtBtStatus.setText("BT : permission requise (BLUETOOTH_CONNECT)");
+            logMedia1("BT Connect: permission");
+            return;
+        }
+
+        final BluetoothDevice dev = getSelectedBonded();
+        if (dev == null) {
+            if (txtBtStatus != null) txtBtStatus.setText("BT : aucun device sélectionné");
+            logMedia1("BT Connect: aucun device");
+            return;
+        }
+
+        logMedia1("BT Connect: demandé " + dev.getAddress());
+
+        if (txtBtStatus != null) txtBtStatus.setText("BT : connecting…");
+
+        btExec.execute(() -> {
+            BluetoothSocket s = null;
+            try {
+                btDisconnect();
+
+                // ✅ FIX: éviter que la discovery casse le RFCOMM (ret=-1)
+                try { if (btAdapter != null) btAdapter.cancelDiscovery(); } catch (Exception ignored) {}
+
+                // ✅ FIX: insecure RFCOMM d'abord (souvent requis sur adaptateurs série),
+                // puis fallback secure si nécessaire.
                 try {
-                    String last = com.pa.lcrdemo.DeepLinkHandler.lastResultJson;
-                    if (last != null) {
-                        org.json.JSONObject j = new org.json.JSONObject(last);
-                        woNum = j.optString("wonum", "");
-                        org.json.JSONObject payload = j.optJSONObject("payload");
-                        if (payload != null) {
-                            org.json.JSONObject result = payload.optJSONObject("result");
-                            if (result != null) {
-                                saleNo   = result.optString("sale_no",   "");
-                                serialId = result.optString("serial_id", "");
+                    s = dev.createInsecureRfcommSocketToServiceRecord(SPP_UUID);
+                } catch (Exception insecureNotSupported) {
+                    s = dev.createRfcommSocketToServiceRecord(SPP_UUID);
+                }
+
+                s.connect();
+
+                btSocket = s;
+                btIn = s.getInputStream();
+                btOut = s.getOutputStream();
+
+                // ✅ Option A: publish BT connected
+                try {
+                    lastBtMac = (dev != null ? dev.getAddress() : null);
+                    if (mediaTransportManager != null) {
+                        mediaTransportManager.onBtConnected(dev, btSocket, btIn, btOut, "BT SPP CONNECTED");
+                    }
+                    // ✅ CONFIGURE: média activé -> rebind tab sur BT
+                    try { onConfigureMediaActivated(MediaTransportManager.btKey(lastBtMac), "BT_READY"); } catch (Exception ignored) {}
+                } catch (Exception ignored) {}
+                ui.postDelayed(this::refreshAllTabsMediaStatus, 200);
+                if (mediaProfileStore != null) {
+                    mediaProfileStore.setActiveBt(dev.getName(), dev.getAddress(), SPP_UUID.toString());
+                    mediaProfileStore.setActiveStatus("CONNECTED", null);
+                }
+                ui.post(() -> {
+                    if (txtBtStatus != null) txtBtStatus.setText("BT : CONNECTED — " + dev.getName());
+                    updateMediaStatusUi();
+                });
+                logMedia1("BT Connect: OK " + dev.getAddress());
+
+            } catch (Exception e) {
+
+                try { if (s != null) s.close(); } catch (Exception ignored) {}
+
+                // ✅ Option A: publish BT error
+                try {
+                    String mac = (dev != null ? dev.getAddress() : lastBtMac);
+                    if (mediaTransportManager != null) {
+                        mediaTransportManager.onBtError(mac,
+                                (e.getMessage() != null) ? e.getMessage() : e.getClass().getSimpleName());
+                    }
+                } catch (Exception ignored) {}
+
+                if (mediaProfileStore != null) {
+                    mediaProfileStore.setActiveBt(dev.getName(), dev.getAddress(), SPP_UUID.toString());
+                    mediaProfileStore.setActiveStatus("ERROR",
+                            (e.getMessage() != null) ? e.getMessage() : e.getClass().getSimpleName());
+                }
+
+                ui.post(() -> {
+                    if (txtBtStatus != null) txtBtStatus.setText("BT : FAIL — " +
+                            (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
+                    updateMediaStatusUi();
+                });
+
+                logMedia1("BT Connect: ÉCHEC " + dev.getAddress());
+            }
+        });
+    }
+
+    public synchronized void btDisconnect() {
+        logMedia1("BT Disconnect: " + (lastBtMac != null ? lastBtMac : "-"));
+
+        // ✅ Option A: publish BT disconnected
+        try {
+            if (mediaTransportManager != null) {
+                mediaTransportManager.onBtDisconnected(lastBtMac, "BT disconnected");
+            }
+        } catch (Exception ignored) {}
+
+        try { if (btIn != null) btIn.close(); } catch (Exception ignored) {}
+        try { if (btOut != null) btOut.close(); } catch (Exception ignored) {}
+        try { if (btSocket != null) btSocket.close(); } catch (Exception ignored) {}
+
+        btIn = null;
+        btOut = null;
+        btSocket = null;
+
+        if (mediaProfileStore != null) {
+            try { mediaProfileStore.setActiveStatus("DISCONNECTED", null); } catch (Exception ignored) {}
+        }
+
+        final String disconnectedMac = lastBtMac;
+        lastBtMac = null;
+
+        ui.post(() -> {
+            if (txtBtStatus != null) txtBtStatus.setText("BT : DISCONNECTED");
+            updateMediaStatusUi();
+            // Forcer à (OFF) seulement les tabs du BT déconnecté
+            // ✅ FIX (6 août 2026, concurrence) — même si ce bloc tourne sur
+            // le thread UI, d'autres threads peuvent muter tabsByKey en
+            // parallèle pendant cette itération.
+            try {
+                String disconnectedKey = disconnectedMac != null
+                    ? MediaTransportManager.btKey(disconnectedMac) : null;
+                synchronized (tabsByKey) {
+                    for (TabSpec s : tabsByKey.values()) {
+                        if (s == null) continue;
+                        if (disconnectedKey != null
+                                && !disconnectedKey.equalsIgnoreCase(s.transportKey)) continue;
+                        String ms = mediaShortFromTransportKey(s.transportKey);
+                        if ("BT".equalsIgnoreCase(ms)) {
+                            updateRegisterTabLabel(s.tabKey,
+                                tabLabelOf(ms + "(OFF)", s.node, s.serialId, s.isLc3)
+                                + (s.qtySuffix != null ? s.qtySuffix : ""));
+                        }
+                    }
+                }
+
+            } catch (Exception ignored) {}
+        });
+
+        logMedia1("BT Disconnect: OK");
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        
+	if (requestCode == REQ_STORAGE_LEGACY) {
+		boolean ok = (grantResults != null && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED);
+		if (ok) {
+			toast("Storage OK (Android 9): accès Downloads accordé");
+			logUi(null, "Storage permission granted (Downloads)");
+		} else {
+			toast("Storage refusé: /Download indisponible (Android 9)");
+			logUi(null, "Storage permission denied (Downloads)");
+		}
+		return;
+	}
+        if (requestCode == REQ_LOCATION_BT_SIGNAL) {
+            boolean ok = (grantResults != null && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED);
+            if (ok) logMedia1("BT Signal: permission localisation accordée");
+            else { logMedia1("BT Signal: permission localisation refusée"); toast("Permission localisation requise pour le scan RSSI BT"); }
+            return;
+        }
+
+if (requestCode == 9101) {
+            boolean ok = (grantResults != null && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED);
+            if (ok) refreshBondedBtList();
+            else if (txtBtStatus != null) txtBtStatus.setText("BT : permission refusée");
+            if (!ok) logMedia1("BT Permission: refusée");
+        }
+    }
+
+    /**
+     * ✅ Permission localisation requise pour BluetoothAdapter.startDiscovery() (scan RSSI).
+     * Android 6-11 : ACCESS_FINE_LOCATION
+     * Android 12+  : BLUETOOTH_SCAN
+     */
+    private boolean ensureLocationPermissionForBtScan(boolean prompt) {
+        try {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                int p = ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN);
+                if (p == PackageManager.PERMISSION_GRANTED) return true;
+                if (!prompt) return false;
+                ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.BLUETOOTH_SCAN}, REQ_LOCATION_BT_SIGNAL);
+                return false;
+            }
+            int p = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION);
+            if (p == PackageManager.PERMISSION_GRANTED) return true;
+            if (!prompt) return false;
+            ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, REQ_LOCATION_BT_SIGNAL);
+            return false;
+        } catch (Exception ignored) { return false; }
+    }
+
+// =========================
+// CONFIGURE: Ajout manuel (2 registres par média)
+// - Node saisi -> Connect -> lecture #80 (serial) -> mise à jour slot + upsert tab
+// - Persisté en SharedPreferences (simple)
+// =========================
+private static final String PREF_USB_NODE1 = "manual_usb_node1";
+private static final String PREF_USB_NODE2 = "manual_usb_node2";
+private static final String PREF_USB_SER1  = "manual_usb_ser1";
+private static final String PREF_USB_SER2  = "manual_usb_ser2";
+private static final String PREF_BT_NODE1  = "manual_bt_node1";
+private static final String PREF_BT_NODE2  = "manual_bt_node2";
+private static final String PREF_BT_SER1   = "manual_bt_ser1";
+private static final String PREF_BT_SER2   = "manual_bt_ser2";
+
+private void loadManualSlotsFromPrefs() {
+    try {
+        SharedPreferences p = getSharedPreferences("prefs", MODE_PRIVATE);
+
+        int un1 = p.getInt(PREF_USB_NODE1, 0);
+        int un2 = p.getInt(PREF_USB_NODE2, 0);
+        String us1 = p.getString(PREF_USB_SER1, "");
+        String us2 = p.getString(PREF_USB_SER2, "");
+
+        int bn1 = p.getInt(PREF_BT_NODE1, 0);
+        int bn2 = p.getInt(PREF_BT_NODE2, 0);
+        String bs1 = p.getString(PREF_BT_SER1, "");
+        String bs2 = p.getString(PREF_BT_SER2, "");
+
+        if (edtUsbNode1 != null && un1 > 0) edtUsbNode1.setText(String.valueOf(un1));
+        if (edtUsbNode2 != null && un2 > 0) edtUsbNode2.setText(String.valueOf(un2));
+        if (txtUsbSerial1 != null) txtUsbSerial1.setText("#Série : " + ((us1 == null || us1.trim().isEmpty()) ? "—" : us1));
+        if (txtUsbSerial2 != null) txtUsbSerial2.setText("#Série : " + ((us2 == null || us2.trim().isEmpty()) ? "—" : us2));
+
+        if (edtBtNode1 != null && bn1 > 0) edtBtNode1.setText(String.valueOf(bn1));
+        if (edtBtNode2 != null && bn2 > 0) edtBtNode2.setText(String.valueOf(bn2));
+        if (txtBtSerial1 != null) txtBtSerial1.setText("#Série : " + ((bs1 == null || bs1.trim().isEmpty()) ? "—" : bs1));
+        if (txtBtSerial2 != null) txtBtSerial2.setText("#Série : " + ((bs2 == null || bs2.trim().isEmpty()) ? "—" : bs2));
+
+    } catch (Exception ignored) {}
+}
+
+private void saveManualSlotToPrefs(boolean usb, int slot, int node, String serial) {
+    try {
+        SharedPreferences p = getSharedPreferences("prefs", MODE_PRIVATE);
+        SharedPreferences.Editor e = p.edit();
+        if (usb) {
+            if (slot == 1) { e.putInt(PREF_USB_NODE1, node); e.putString(PREF_USB_SER1, serial != null ? serial : ""); }
+            if (slot == 2) { e.putInt(PREF_USB_NODE2, node); e.putString(PREF_USB_SER2, serial != null ? serial : ""); }
+        } else {
+            if (slot == 1) { e.putInt(PREF_BT_NODE1, node); e.putString(PREF_BT_SER1, serial != null ? serial : ""); }
+            if (slot == 2) { e.putInt(PREF_BT_NODE2, node); e.putString(PREF_BT_SER2, serial != null ? serial : ""); }
+        }
+        e.apply();
+    } catch (Exception ignored) {}
+}
+
+private int readNode(EditText edt) {
+    try {
+        if (edt == null) return -1;
+        String s = String.valueOf(edt.getText());
+        if (s == null) return -1;
+        s = s.trim();
+        if (s.isEmpty()) return -1;
+        int n = Integer.parseInt(s);
+        if (n < 1 || n > 250) return -1;
+        return n;
+    } catch (Exception ignored) { return -1; }
+}
+
+private void connectManualUsbSlot(int slot) {
+    int node = (slot == 1) ? readNode(edtUsbNode1) : readNode(edtUsbNode2);
+    if (node < 0) { toast("USB: node invalide (1..250)"); return; }
+
+    TransportIo io = null;
+    try {
+        if (mediaTransportManager != null) io = mediaTransportManager.getByKey(MediaTransportManager.KEY_USB);
+    } catch (Exception ignored) {}
+
+    if (io == null || !io.isOpen()) {
+        toast("USB(OFF): média non prêt");
+        if (slot == 1 && txtUsbSerial1 != null) txtUsbSerial1.setText("#Série : USB(OFF)");
+        if (slot == 2 && txtUsbSerial2 != null) txtUsbSerial2.setText("#Série : USB(OFF)");
+        return;
+    }
+
+    TextView out = (slot == 1) ? txtUsbSerial1 : txtUsbSerial2;
+    ensureActiveTransport(io.getKey(), "MANUAL_USB");
+ connectManualWithIo(io, io.getKey(), "USB", slot, node, out, true);
+}
+
+private void connectManualBtSlot(int slot) {
+    int node = (slot == 1) ? readNode(edtBtNode1) : readNode(edtBtNode2);
+    if (node < 0) { toast("BT: node invalide (1..250)"); return; }
+
+    // ✅ BT manuel: ne dépend pas de lastBtMac. Cherche un BT READY.
+    TransportIo io = null;
+    String transportKey = null;
+    try {
+        if (mediaTransportManager != null) {
+            java.util.List<TransportSnapshot> snaps = mediaTransportManager.listSnapshots();
+            if (snaps != null) {
+                for (TransportSnapshot s : snaps) {
+                    if (s == null || s.key == null) continue;
+                    if (!s.key.toUpperCase(java.util.Locale.ROOT).startsWith("BT:")) continue;
+                    if (s.status != TransportStatus.READY) continue;
+                    transportKey = s.key;
+                    io = mediaTransportManager.getByKey(s.key);
+                    if (io != null && io.isOpen()) break;
+                }
+            }
+        }
+    } catch (Exception ignored) {}
+
+    // fallback: si lastBtMac présent
+    if ((io == null || !io.isOpen()) && lastBtMac != null && !lastBtMac.trim().isEmpty()) {
+        try {
+            transportKey = MediaTransportManager.btKey(lastBtMac);
+            if (mediaTransportManager != null) io = mediaTransportManager.getByKey(transportKey);
+        } catch (Exception ignored) {}
+    }
+
+    if (io == null || !io.isOpen()) {
+        toast("BT(OFF): média non prêt");
+        if (slot == 1 && txtBtSerial1 != null) txtBtSerial1.setText("#Série : BT(OFF)");
+        if (slot == 2 && txtBtSerial2 != null) txtBtSerial2.setText("#Série : BT(OFF)");
+        return;
+    }
+
+    TextView out = (slot == 1) ? txtBtSerial1 : txtBtSerial2;
+    ensureActiveTransport((transportKey != null ? transportKey : io.getKey()), "MANUAL_BT");
+ connectManualWithIo(io, (transportKey != null ? transportKey : io.getKey()), "BT", slot, node, out, false);
+}
+
+private void connectManualWithIo(TransportIo io, String transportKey, String mediaShort, int slot, int node, TextView out, boolean usb) {
+    if (io == null || !io.isOpen()) return;
+    final int from = 255;
+
+    scanExec.execute(() -> {
+        try {
+            LcpLink tmp = new LcpLink(io, node, from, true);
+            byte[] b80 = tmp.opGetField(80, 600);
+            String serial = decodeAz(b80);
+            if (serial == null) serial = "";
+            serial = serial.trim();
+
+            final String fSerial = serial;
+            ui.post(() -> {
+                if (out != null) out.setText("#Série : " + (fSerial.isEmpty() ? "—" : fSerial));
+            });
+
+            if (fSerial.isEmpty()) {
+                ui.post(() -> toast(mediaShort + ": lecture #80 (serial) échouée"));
+                saveManualSlotToPrefs(usb, slot, node, "");
+                return;
+            }
+
+            final String tk = transportKey;
+            ui.post(() -> {
+                upsertRegisterTabFromScan(tk, node, from, fSerial, true);
+                refreshAllTabsMediaStatus();
+            });
+
+            saveManualSlotToPrefs(usb, slot, node, fSerial);
+
+        } catch (Exception e) {
+            ui.post(() -> toast(mediaShort + ": connect manuel ERR: " + safeMsg(e)));
+        }
+    });
+}
+
+
+
+ // =========================
+ // ✅ Reçu des tabs: média OFF/not-ready (pour que l'API/FS sache avant/pendant)
+ // =========================
+ public void reportMediaNotReadyFromTab(int node, String serialId, String transportKey, String origin, String detail) {
+     try {
+         String media = mediaShortFromTransportKey(transportKey);
+         LogBus.api(node, "TAB_MEDIA_STATUS OFF (from TAB) media=" + media + " origin=" + origin + " detail=" + detail);
+
+         if (deliveryStore == null) return;
+         String serial = safeSerial(serialId);
+         if (serial.isEmpty()) serial = "__TAB__";
+         String ticketKey = "TAB-" + (node & 0xFF);
+
+         JSONObject data = new JSONObject();
+         data.put("event_type", "TAB_MEDIA_STATUS");
+         data.put("state", "OFF");
+         data.put("media", media);
+         data.put("transport_key", transportKey);
+         data.put("node", (node & 0xFF));
+         data.put("serial_id", serial);
+         data.put("origin", origin != null ? origin : "-");
+         data.put("detail", detail != null ? detail : "-");
+         data.put("ts_ms", System.currentTimeMillis());
+
+         deliveryStore.upsertSummaryAsync(serial, ticketKey, null, "TAB_OFF", DeliveryLogStore.SOURCE_UI, null, null, null);
+         deliveryStore.openAttemptAsync(serial, ticketKey, DeliveryLogStore.SOURCE_UI, null, attemptId -> {
+             deliveryStore.addEventAsync(attemptId, DeliveryLogStore.LEVEL_INFO,
+                     "TAB_MEDIA_STATUS",
+                     "Tab media OFF (reported)",
+                     data.toString());
+             deliveryStore.closeAttemptAsync(attemptId, "DONE", data.toString(), null);
+         });
+     } catch (Exception ignored) {}
+ }
+
+
+
+    // =========================
+    // ✅ B1 FSM: rendre un transport ACTIVE avant toute opération IO (USB/BT)
+    // =========================
+    
+
+    // =========================
+    // ✅ Guard switch média (CONFIGURE)
+    // - Empêche les probes/validations pendant un switch (BT↔USB)
+    // - Rebind le tab courant sur le nouveau transport (évite "Transport not open")
+    // =========================
+    private void beginMediaSwitchGuard(String reason) {
+        try {
+            long now = System.currentTimeMillis();
+            mediaSwitchGuardUntilMs = now + 800; // 0.8s
+            logMedia1("MEDIA SWITCH (guard) " + (reason != null ? reason : ""));
+        } catch (Exception ignored) {}
+    }
+
+    private boolean isMediaSwitchGuardActive() {
+        try { return System.currentTimeMillis() < mediaSwitchGuardUntilMs; }
+        catch (Exception e) { return false; }
+    }
+
+    /**
+     * Appelé quand un média devient READY via CONFIGURE (USB Open/Ping / BT Connect).
+     * But: forcer le transport actif + rebind sur un tab du même registre.
+     */
+    public void onConfigureMediaActivated(String transportKey, String reason) {
+        if (transportKey == null || transportKey.trim().isEmpty()) return;
+        beginMediaSwitchGuard(reason);
+        final String tk = transportKey.trim();
+
+        // 1) activer exclusif immédiatement
+        ensureActiveTransport(tk, "CONFIGURE_MEDIA_SWITCH");
+
+        // ✅ FIX (perf) : si un onglet valide existe DÉJÀ pour ce transport
+        // précis, on réutilise directement son node/serial/isLc3 connus —
+        // aucune sonde réseau nécessaire. Avant ce correctif, CHAQUE arrivée
+        // de deep link relançait une sonde réelle (jusqu'à ~600ms+ sur TCP)
+        // au node=250 codé en dur, alors que le vrai node peut être différent
+        // (ex: LC3 au node 245) — la sonde échouait donc systématiquement
+        // pour rien, ajoutant un délai perceptible sans aucun bénéfice.
+        //
+        // ✅ FIX (6 août 2026, demande Paul — "je ne veux en aucun cas
+        // courcircuiter la recherche d'un registre... en arrivant de
+        // deeplink ou en branchant usb ou bt") — ce chemin sautait la sonde
+        // ENTIÈREMENT sur la seule base qu'un tab existait déjà, sans
+        // jamais vérifier que le transport était réellement encore ouvert —
+        // un vrai court-circuit de la recherche, exactement ce qui est
+        // interdit maintenant. Corrigé : on vérifie toujours l'état RÉEL du
+        // transport (io.isOpen()) avant de réutiliser le node/serial en
+        // cache — seule la sonde LENTE (identification node/serial) est
+        // évitée quand elle est déjà connue, jamais la vérification de base
+        // que la connexion existe vraiment. Si le transport n'est pas
+        // réellement ouvert, on tombe dans la recherche complète ci-dessous
+        // — jamais de court-circuit silencieux.
+        try {
+            java.util.List<TabSpec> tabSnapshot;
+            synchronized (tabsByKey) { tabSnapshot = new ArrayList<>(tabsByKey.values()); }
+            for (TabSpec spec : tabSnapshot) {
+                if (spec != null && tk.equalsIgnoreCase(spec.transportKey)
+                        && spec.serialId != null && !spec.serialId.trim().isEmpty()) {
+                    com.pa.lcr.lcp.transport.TransportIo ioCheck =
+                        (mediaTransportManager != null) ? mediaTransportManager.getByKey(tk) : null;
+                    boolean reallyOpen = false;
+                    try { reallyOpen = (ioCheck != null && ioCheck.isOpen()); } catch (Exception ignored2) {}
+                    if (!reallyOpen) {
+                        android.util.Log.i("MainActivity", "onConfigureMediaActivated: onglet connu pour " + tk
+                            + " mais transport réellement fermé — pas de court-circuit, recherche complète");
+                        break; // sort de la boucle, continue vers la recherche complète plus bas
+                    }
+                    final int knownNode = spec.node;
+                    final String knownSerial = spec.serialId;
+                    final boolean knownIsLc3 = spec.isLc3;
+                    android.util.Log.i("MainActivity", "onConfigureMediaActivated: onglet déjà connu pour " + tk
+                            + " (node=" + knownNode + " serial=" + knownSerial + "), transport réellement ouvert — sonde d'identification évitée");
+                    ui.post(() -> {
+                        try {
+                            upsertRegisterTabFromScan(tk, knownNode, 255, knownSerial, true, knownIsLc3);
+                            refreshAllTabsMediaStatus();
+                        } catch (Exception ignored) {}
+                    });
+                    return;
+                }
+            }
+        } catch (Exception ignored) {}
+
+        // ✅ FIX : ne JAMAIS présumer que l'onglet actuellement affiché
+        // (currentTabKey) appartient au transport qu'on vient d'activer.
+        // Avant ce correctif, le node+serial de l'onglet courant étaient
+        // réutilisés aveuglément pour N'IMPORTE QUEL nouveau transport
+        // activé (ex: scan BT alors qu'un LC3 était affiché en TCP) — la
+        // logique de "migration" d'upsertRegisterTabFromScan supprimait
+        // alors l'onglet existant en le croyant "déplacé" vers le nouveau
+        // média, alors qu'il s'agit de deux registres réellement
+        // indépendants pouvant coexister connectés simultanément.
+        //
+        // Seule une VRAIE sonde sur CE transport peut justifier de créer
+        // ou migrer un onglet — jamais une simple supposition basée sur
+        // "quel onglet est affiché à l'écran". Ce chemin ne s'exécute
+        // maintenant que pour un transport VRAIMENT nouveau (aucun onglet
+        // existant trouvé ci-dessus).
+        int node = 250; // valeur neutre, uniquement pour tenter la sonde ci-dessous
+        String serial = null;
+        try {
+            TransportIo ioT = (mediaTransportManager != null) ? mediaTransportManager.getByKey(tk) : null;
+            if (ioT != null && ioT.isOpen()) {
+                ProbeResult pr = probeRegisterReadable(ioT, node, 255, null);
+                if (pr != null && pr.ok && pr.serial != null && isPlausibleSerial(pr.serial)) {
+                    serial = safeSerial(pr.serial);
+                }
+            }
+        } catch (Exception ignored) {}
+
+        if (serial == null || serial.trim().isEmpty() || !isPlausibleSerial(serial)) {
+            // Rien de réel trouvé sur ce transport — ne touche à AUCUN onglet existant.
+            ui.post(this::refreshAllTabsMediaStatus);
+            return;
+        }
+
+        final int fNode = node;
+        final String fSerial = serial;
+
+        // 2) créer/activer un tab pour ce transport (registre réellement sondé) + focus
+        ui.post(() -> {
+            try {
+                upsertRegisterTabFromScan(tk, fNode, 255, fSerial, true);
+                refreshAllTabsMediaStatus();
+            } catch (Exception ignored) {}
+        });
+    }
+
+
+    // =========================
+    // ✅ Status(B) -> TAB label Net/Gross
+    // - SUCCÈS: afficher N/G sur le tab
+    // - ÉCHEC : effacer N/G du tab
+    // =========================
+    public void reportTabQuantitiesFromStatusB(int node, String serialId, String transportKey, double net, double gross) {
+        try {
+            String serial = safeSerial(serialId);
+            TabSpec spec = null;
+
+            // 1) match exact (media,node,serial)
+            if (!serial.isEmpty()) {
+                String media = mediaShortFromTransportKey(transportKey);
+                String key = tabKeyOf(media, node, serial);
+                spec = tabsByKey.get(key);
+            }
+
+            // ✅ FIX (6 août 2026, concurrence) — les 3 boucles ci-dessous
+            // protégées.
+            // 2) fallback (node,serial)
+            if (spec == null && !serial.isEmpty()) {
+                synchronized (tabsByKey) {
+                    for (TabSpec s : tabsByKey.values()) {
+                        if (s == null) continue;
+                        if ((s.node & 0xFF) != (node & 0xFF)) continue;
+                        if (!serial.equalsIgnoreCase(safeSerial(s.serialId))) continue;
+                        spec = s;
+                        break;
+                    }
+                }
+            }
+
+            // 3) fallback (node,transportKey)
+            if (spec == null) {
+                String tk = (transportKey != null ? transportKey.trim() : "");
+                if (!tk.isEmpty()) {
+                    synchronized (tabsByKey) {
+                        for (TabSpec s : tabsByKey.values()) {
+                            if (s == null) continue;
+                            if ((s.node & 0xFF) != (node & 0xFF)) continue;
+                            String stk = (s.transportKey != null ? s.transportKey.trim() : "");
+                            if (tk.equalsIgnoreCase(stk)) {
+                                spec = s;
+                                break;
                             }
                         }
                     }
-                } catch (Exception ignored) {}
-                int cols = 30;
-                String sep = "=".repeat(cols), dashs = "-".repeat(cols);
-                java.util.List<String> lignes = new java.util.ArrayList<>();
-                lignes.add(sep);
-                lignes.add(center("INCIDENT VANNE", cols));
-                lignes.add(sep);
-                lignes.add("WO :" + woNum);
-                lignes.add("Tkt:" + ticketNoOriginal);
-                lignes.add("Ser:" + serialId);
-                lignes.add(dashs);
-                lignes.add(String.format(java.util.Locale.ROOT, "NET ref:%.3fL", netRef));
-                lignes.add(String.format(java.util.Locale.ROOT, "NET fin:%.3fL", netFinal));
-                lignes.add(String.format(java.util.Locale.ROOT, "GROSS : %.3fL", grossFinal));
-                lignes.add(String.format(java.util.Locale.ROOT, "DELTA :+%.3fL", delta));
-                lignes.add(dashs);
-                lignes.add("FUITE POST-PRESET");
-                lignes.add(new java.text.SimpleDateFormat("dd/MM HH:mm:ss",
-                    java.util.Locale.ROOT).format(new java.util.Date()));
-                lignes.add(sep);
-                lignes.add("");
-                if (tabTransportKey != null)
-                    MediaTransportManager.get(requireContext())
-                        .activateExclusive(tabTransportKey, "POST_LIVRAISON_PRINT");
-                for (String ligne : lignes) {
-                    try { controller.api_printTextLine(ligne); Thread.sleep(150); }
-                    catch (Exception e) { LogBus.api(node, "[POST-LIVRAISON] ERR: " + safeMsg(e)); }
                 }
-                try {
-                    android.content.ContentValues cv = new android.content.ContentValues();
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,        woNum);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO,     ticketNoOriginal);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO_REF, ticketNoOriginal);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,         netFinal);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L,       grossFinal);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_DELTA_NET_L,   delta);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_DELTA_GROSS_L, grossFinal - grossRef);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
-                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_FUITE_VANNE);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,        "FUITE_VANNE");
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE,     "INCIDENT");
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
-                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
-                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbFuite =
-                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
-                    try {
-                        dbFuite.insertDelivery(cv);
-                    } finally {
-                        try { dbFuite.close(); } catch (Exception ignored) {}
-                    }
-                } catch (Exception e) { LogBus.api(node, "[POST-LIVRAISON] ERR DB: " + safeMsg(e)); }
-                ui.post(() -> {
-                    if (!isAdded() || getView() == null) return;
-                    android.widget.Toast.makeText(requireContext(),
-                        "Incident enregistre et ticket imprime", android.widget.Toast.LENGTH_SHORT).show();
-                });
-            } catch (Exception e) { LogBus.api(node, "[POST-LIVRAISON] ERR: " + e.getMessage()); }
-        });
-    }
-
-    private void logFuiteVanneDataverse(double netRef, double netFinal,
-            double grossRef, double grossFinal, String ticketNo, double delta) {
-        LogBus.api(node, "[FUITE-VANNE] ticket=" + ticketNo + " delta=" + delta + "L INCIDENT");
-    }
-
-
-
-    // ✅ Afficher le cumul WO à droite du live — lecture depuis LcrDeliveryStatusDb
-    private void rafraichirCumulWo() {
-        if (currentWoNum == null || currentWoNum.isEmpty()) {
-            LogBus.api(node, "[CUMUL-WO] appelée mais currentWoNum vide — skip");
-            // Ne pas cacher le panel — il doit toujours etre visible
-            return;
-        }
-        final String wo = currentWoNum;
-        LogBus.api(node, "[CUMUL-WO] recherche pour wo=" + wo);
-        bg.execute(() -> {
-            double totalNet = 0, totalGross = 0;
-            int count = 0;
-            try {
-                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db =
-                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
-                java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> rows;
-                try {
-                    rows = db.getAllForWo(wo);
-                } finally {
-                    try { db.close(); } catch (Exception ignored) {}
-                }
-                LogBus.api(node, "[CUMUL-WO] getAllForWo(" + wo + ") a retourné " + rows.size() + " ligne(s)");
-                for (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow r : rows) {
-                    if (!"ANNULATION".equals(r.type) && r.netL > 0) {
-                        totalNet   += r.netL;
-                        totalGross += r.grossL;
-                        count++;
-                    }
-                }
-            } catch (Exception e) {
-                LogBus.api(node, "[CUMUL-WO] ERR: " + safeMsg(e));
             }
-            final double fNet = totalNet, fGross = totalGross;
-            final int fCount = count;
-            ui.post(() -> {
-                if (!isAdded() || getView() == null || panelWoCumul == null) {
-                    LogBus.api(node, "[CUMUL-WO] UI non prête (isAdded/getView/panelWoCumul) — mise à jour ignorée");
+
+            if (spec == null) return;
+            spec.qtySuffix = formatQtyLabel(net, gross);
+            String base = tabLabelOf(spec.mediaShort, spec.node, spec.serialId, spec.isLc3);
+            updateRegisterTabLabel(spec.tabKey, base + spec.qtySuffix);
+        } catch (Exception ignored) {}
+    }
+
+    public void clearTabQuantitiesFromStatusB(int node, String serialId, String transportKey) {
+        try {
+            String serial = safeSerial(serialId);
+            TabSpec spec = null;
+
+            if (!serial.isEmpty()) {
+                String media = mediaShortFromTransportKey(transportKey);
+                String key = tabKeyOf(media, node, serial);
+                spec = tabsByKey.get(key);
+            }
+
+            // ✅ FIX (6 août 2026, concurrence)
+            if (spec == null && !serial.isEmpty()) {
+                synchronized (tabsByKey) {
+                    for (TabSpec s : tabsByKey.values()) {
+                        if (s == null) continue;
+                        if ((s.node & 0xFF) != (node & 0xFF)) continue;
+                        if (!serial.equalsIgnoreCase(safeSerial(s.serialId))) continue;
+                        spec = s;
+                        break;
+                    }
+                }
+            }
+
+            if (spec == null) {
+                String tk = (transportKey != null ? transportKey.trim() : "");
+                if (!tk.isEmpty()) {
+                    synchronized (tabsByKey) {
+                        for (TabSpec s : tabsByKey.values()) {
+                            if (s == null) continue;
+                            if ((s.node & 0xFF) != (node & 0xFF)) continue;
+                            String stk = (s.transportKey != null ? s.transportKey.trim() : "");
+                            if (tk.equalsIgnoreCase(stk)) { spec = s; break; }
+                        }
+                    }
+                }
+            }
+
+            if (spec == null) return;
+            spec.qtySuffix = null;
+            String base = tabLabelOf(spec.mediaShort, spec.node, spec.serialId, spec.isLc3);
+            updateRegisterTabLabel(spec.tabKey, base);
+        } catch (Exception ignored) {}
+    }
+
+private void ensureActiveTransport(String transportKey, String reason) {
+        try {
+            if (transportKey == null || transportKey.trim().isEmpty()) return;
+            if (mediaTransportManager == null) mediaTransportManager = MediaTransportManager.get(this);
+            if (mediaTransportManager != null) {
+                // TAB_SWITCH entre deux BT différents — pas d'activateExclusive
+                // chaque registre BT garde son transport actif
+                if ("TAB_SWITCH".equals(reason)) {
+                    String tk = transportKey.trim();
+                    boolean isBt = tk.toUpperCase().startsWith("BT:");
+                    if (isBt) {
+                        // Vérifier si l'autre transport actif est aussi BT
+                        String activeKey = mediaTransportManager.getActiveKey();
+                        boolean otherIsBt = activeKey != null && activeKey.toUpperCase().startsWith("BT:");
+                        if (otherIsBt && !activeKey.equalsIgnoreCase(tk)) {
+                            // Deux BT différents — pas d'exclusion
+                            return;
+                        }
+                    }
+                }
+
+                if (!"TAB_SWITCH".equals(reason) && !isTransportSwitchSafe(transportKey.trim(), reason)) {
                     return;
                 }
-                // Toujours afficher panelWoCumul — même si 0 livraisons
-                panelWoCumul.setVisibility(android.view.View.VISIBLE);
-                if (txtWoCumulNet != null)
-                    txtWoCumulNet.setText(String.format(java.util.Locale.ROOT,
-                        "Total NET: %.1f L", fNet));
-                if (txtWoCumulGross != null)
-                    txtWoCumulGross.setText(String.format(java.util.Locale.ROOT,
-                        "Total GROSS: %.1f L", fGross));
-                if (txtWoCumulCount != null)
-                    txtWoCumulCount.setText(fCount > 0
-                        ? fCount + " livraison" + (fCount > 1 ? "s" : "")
-                        : "Aucune livraison");
-            });
-        });
+
+                mediaTransportManager.activateExclusive(transportKey.trim(), (reason != null ? reason : "UI"));
+            }
+        } catch (Exception ignored) {}
     }
 
-
-    // ✅ Chercher le WO depuis le ticket_no courant du registre
-    // Utilisé quand on arrive dans l'APK sans deep link FSM
-    // Le deep link a toujours précédence — appelé seulement si currentWoNum est vide
-    // ✅ delivery_uid n'est pas stocké tel quel dans LcrDeliveryStatusDb —
-    // il se reconstruit toujours de la même façon que dans DeliveryController
-    // (numero_livraison + "-" + ticketNo). Permet de valider Field Service
-    // Mobile vs l'APK pour ce même WO si une synchronisation a été manquée.
+    // ✅ FIX (4 août 2026, demande Paul) — "on ne doit jamais oublier l'arrivée
+    // du deeplink peu importe le transport trouvé". Cette garde vivait
+    // uniquement dans ensureActiveTransport() — mais DeepLinkHandler appelle
+    // AUSSI mediaTransportManager.activateExclusive() DIRECTEMENT plus loin
+    // dans son flux (juste avant le oneshot start, raison
+    // "DEEPLINK_ONESHOT"), contournant complètement ce garde. Extrait ici en
+    // méthode publique réutilisable par MainActivity (ensureActiveTransport)
+    // ET par DeepLinkHandler, pour qu'AUCUN chemin d'activation de transport
+    // ne puisse contourner la règle — peu importe le média (BT/USB/TCP) et
+    // peu importe le point d'entrée (USB branché, BT connecté, deep link,
+    // oneshot start).
     //
-    // TODO AMÉLIORATION FUTURE (discuté le 22 juillet 2026) :
-    // Actuellement, la validation Field Service Mobile vs APK est VISUELLE
-    // uniquement — le chauffeur compare les delivery_uid affichés ici avec ce
-    // qu'il voit dans Field Service Mobile, à l'œil. Amélioration envisagée :
-    // interroger Dataverse directement (via MSAL, même mécanisme que
-    // patchDataverse) pour comparer automatiquement les enregistrements
-    // filgo_lcr_delivery_statuses (ou table équivalente) côté serveur avec
-    // LcrDeliveryStatusDb côté local, et signaler explicitement les écarts
-    // (livraison locale non synchronisée, ticket manquant côté Dataverse, etc.)
-    // au lieu de compter sur une comparaison manuelle. Pas encore implémenté —
-    // en attente de confirmation du besoin exact avec Paul.
-    private void rechercherWoDepuisRegistre() {
-        if (controller == null) return;
-        bg.execute(() -> {
-            try {
-                // ✅ FIX MAJEUR : api_tickSnapshot() ne contient JAMAIS de champ
-                // "ticket_no" (buildTickJsonSnapshot() expose seulement seq/net/gross/
-                // devStatus/prnStatus/delStatus/delCode/state/jobId — jamais ticket_no).
-                // optString("ticket_no", "") retournait donc TOUJOURS "" et cette
-                // méthode sortait silencieusement ici à chaque appel, depuis le tout
-                // début — c'est pour ça que [WO-DETECT] n'est jamais apparu dans aucun
-                // log de toute la session. api_registerValidate() est la bonne méthode :
-                // elle met toujours ticket_no dans son JSON, peu importe le résultat.
-                ApiResult snap = controller.api_registerValidate(null, null, null, null, null);
-                if (snap == null || snap.data == null) return;
-                String ticketNo = snap.data.optString("ticket_no", "");
-                if (ticketNo.isEmpty()) return;
-                // ✅ (ajouté 3 août 2026) — cascade complète toujours autorisée ici
-                // (appel explicite/throttlé à 2s), mais isolée sur remoteSearchExecutor,
-                // jamais sur bg (voir commentaire sur le champ remoteSearchExecutor).
-                remoteSearchExecutor.execute(() -> lookupWoForTicket(ticketNo, true));
-            } catch (Exception e) {
-                LogBus.api(node, "[WO-DETECT] ERR: " + safeMsg(e));
-            }
-        });
-    }
-
-    /**
-     * ✅ Recherche du WO + rafraîchissement du cumul à partir d'un ticket_no déjà
-     * connu — appelée à la fois par rechercherWoDepuisRegistre() (poll explicite via
-     * api_registerValidate) ET par onTicketInfo() (push déjà fiable du contrôleur via
-     * requestStatus()). onTicketInfo étant le mécanisme qui affiche déjà le ticket
-     * avec succès dans le tab, la brancher ici aussi rend la détection du WO/cumul
-     * beaucoup plus robuste, sans dépendre uniquement du polling explicite.
-     * Doit être appelée depuis un thread d'arrière-plan (fait des requêtes SQLite).
-     */
-    /**
-     * Tentative de récupération d'une livraison sur Dataverse par ticket_no + serial_id + lcrnode,
-     * quand elle n'existe pas (encore) localement. Best-effort : MSAL silent avec timeout 8s
-     * (même pattern que le push Dataverse existant plus bas dans ce fichier) — si le token
-     * échoue (offline, pas de compte, etc.), retourne simplement null sans bloquer le flux.
-     * Doit être appelée depuis un thread d'arrière-plan (bloquant réseau + SQLite).
-     */
-    /**
-     * (Demandé 31 juillet 2026) Après Status(B) ou sur demande explicite : si le ticket
-     * actuellement affiché par le registre n'a PAS de détail de livraison local (BD vide
-     * pour ce ticket, ou #delivery-uid/#wo manquant), avertit l'utilisateur ET tente
-     * automatiquement un pull Dataverse — sans attendre le prochain poll de
-     * rechercherWoDepuisRegistre() (qui peut prendre jusqu'à 800ms, et surtout qui
-     * n'agit que si le ticket n'a jamais encore été "verrouillé" via lastTicketDetected).
-     * Doit être appelée depuis un thread d'arrière-plan.
-     */
-    private static final String LOGCAT_TAG = "WO-DETECT";
-
-    private void checkAndPullMissingDeliveryDetail(String reason) {
-        android.util.Log.i(LOGCAT_TAG, "[" + reason + "] checkAndPullMissingDeliveryDetail: appelé, controller="
-                + (controller == null ? "null" : "OK"));
-        if (controller == null) return;
+    // Retourne false si une livraison est active sur le transport actuel ET
+    // que le nouveau transport ne correspond pas au même registre (node+
+    // #série) — dans ce cas, l'appelant ne doit PAS voler l'exclusivité.
+    public boolean isTransportSwitchSafe(String newTransportKey, String reason) {
         try {
-            ApiResult snap = controller.api_registerValidate(null, null, null, null, null);
-            String snapTicket = (snap != null && snap.data != null) ? snap.data.optString("ticket_no", "") : null;
-            android.util.Log.i(LOGCAT_TAG, "[" + reason + "] api_registerValidate: snap="
-                    + (snap == null ? "null" : "OK") + " ticket_no=" + snapTicket);
-            if (snap == null || snap.data == null) return;
-            String ticketNo = snap.data.optString("ticket_no", "");
-            if (ticketNo.isEmpty()) {
-                android.util.Log.i(LOGCAT_TAG, "[" + reason + "] aucun ticket actif sur le registre — rien à vérifier");
-                return;
+            if (newTransportKey == null || newTransportKey.trim().isEmpty()) return true;
+            if (mediaTransportManager == null) mediaTransportManager = MediaTransportManager.get(this);
+            if (mediaTransportManager == null) return true;
+
+            String activeKeyBefore = mediaTransportManager.getActiveKey();
+            String tkNew = newTransportKey.trim();
+            if (activeKeyBefore == null || activeKeyBefore.equalsIgnoreCase(tkNew)) return true;
+
+            // ✅ FIX (6 août 2026, concurrence) — une seule copie défensive
+            // réutilisée pour les deux boucles (elles itèrent la même map).
+            java.util.List<TabSpec> tabSnapshotSafe;
+            synchronized (tabsByKey) { tabSnapshotSafe = new ArrayList<>(tabsByKey.values()); }
+
+            for (TabSpec spec : tabSnapshotSafe) {
+                if (spec == null || spec.transportKey == null) continue;
+                if (!activeKeyBefore.equalsIgnoreCase(spec.transportKey)) continue;
+                com.pa.lcr.lcp.DeliveryController dcActive =
+                    com.pa.lcr.lcp.RegisterSessionManager.get(this)
+                        .getController(spec.transportKey, spec.node);
+                if (dcActive == null) continue;
+                com.pa.lcr.lcp.DeliveryState st = dcActive.getState();
+                boolean deliveryRunning = st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
+                        || st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED;
+                if (!deliveryRunning) continue;
+
+                // Livraison active trouvée sur l'ancien transport actif.
+                // Le nouveau transport a-t-il le même node+#série ?
+                boolean sameRegister = false;
+                for (TabSpec newSpec : tabSnapshotSafe) {
+                    if (newSpec == null || newSpec.transportKey == null) continue;
+                    if (!tkNew.equalsIgnoreCase(newSpec.transportKey)) continue;
+                    if (newSpec.node == spec.node
+                            && newSpec.serialId != null && spec.serialId != null
+                            && newSpec.serialId.trim().equalsIgnoreCase(spec.serialId.trim())) {
+                        sameRegister = true;
+                        break;
+                    }
+                }
+                if (!sameRegister) {
+                    android.util.Log.w("MainActivity", "isTransportSwitchSafe: BLOQUÉ — livraison "
+                        + "active sur " + activeKeyBefore + " (node=" + spec.node + " serial="
+                        + spec.serialId + "), nouveau transport " + tkNew + " n'est pas le même"
+                        + " registre — exclusivité NON transférée (reason=" + reason + ")");
+                    return false;
+                }
+                android.util.Log.i("MainActivity", "isTransportSwitchSafe: même registre "
+                    + "(node=" + spec.node + " serial=" + spec.serialId + ") détecté sur "
+                    + tkNew + " — bascule autorisée malgré livraison active");
             }
-
-            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db =
-                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
-            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow row;
-            try {
-                row = db.getByTicketNo(ticketNo);
-            } finally {
-                try { db.close(); } catch (Exception ignored) {}
-            }
-
-            boolean missing = (row == null)
-                    || row.woNum == null || row.woNum.isEmpty()
-                    || row.woIdGuid == null || row.woIdGuid.isEmpty();
-            android.util.Log.i(LOGCAT_TAG, "[" + reason + "] ticket=" + ticketNo + " — ligne locale="
-                    + (row == null ? "absente" : ("wo=" + row.woNum + " woIdGuid=" + row.woIdGuid))
-                    + " missing=" + missing);
-            if (!missing) return; // détail déjà présent localement — rien à faire
-
-            // ✅ (fix 31 juillet 2026) : ne retente pas le pull Dataverse (donc pas de
-            // nouvelle demande MSAL) pour ce même ticket avant MISSING_DETAIL_COOLDOWN_MS —
-            // évite le spam de tokens à chaque activation/réactivation d'onglet.
-            long now = System.currentTimeMillis();
-            if (ticketNo.equals(lastMissingDetailAttemptTicket)
-                    && (now - lastMissingDetailAttemptTs) < MISSING_DETAIL_COOLDOWN_MS) {
-                android.util.Log.i(LOGCAT_TAG, "[" + reason + "] ticket=" + ticketNo
-                        + " — cooldown actif (" + (MISSING_DETAIL_COOLDOWN_MS - (now - lastMissingDetailAttemptTs)) / 1000
-                        + "s restantes), pas de nouvelle tentative");
-                return;
-            }
-            lastMissingDetailAttemptTicket = ticketNo;
-            lastMissingDetailAttemptTs = now;
-
-            android.util.Log.i(LOGCAT_TAG, "[" + reason + "] ticket=" + ticketNo
-                    + " — BD vide/incomplète, lancement tryPullDeliveryFromDataverse()");
-            LogBus.api(node, "[" + reason + "] ticket=" + ticketNo
-                    + " — BD vide/incomplète (pas de #delivery-uid), tentative Dataverse");
-            ui.post(() -> {
-                try {
-                    Toast.makeText(requireContext(),
-                        "Aucune donnée locale pour ce ticket — tentative Dataverse...",
-                        Toast.LENGTH_SHORT).show();
-                } catch (Exception ignored) {}
-            });
-
-            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow pulled =
-                    tryPullDeliveryFromDataverse(ticketNo);
-
-            android.util.Log.i(LOGCAT_TAG, "[" + reason + "] ticket=" + ticketNo
-                    + " — résultat tryPullDeliveryFromDataverse: "
-                    + (pulled == null ? "null (échec)" : ("wo=" + pulled.woNum)));
-
-            if (pulled != null && pulled.woNum != null && !pulled.woNum.isEmpty()) {
-                // Permet à lookupWoForTicket() normal de reprendre la main proprement
-                // (rafraîchit currentWoNum/currentWoIdGuid/UI comme d'habitude).
-                lastTicketDetected = "";
-                final String fWo = pulled.woNum;
-                ui.post(() -> {
-                    try {
-                        Toast.makeText(requireContext(),
-                            "Livraison récupérée depuis Dataverse (WO " + fWo + ")",
-                            Toast.LENGTH_SHORT).show();
-                    } catch (Exception ignored) {}
-                });
-                lookupWoForTicket(ticketNo);
-            } else {
-                ui.post(() -> {
-                    try {
-                        Toast.makeText(requireContext(),
-                            "Aucune donnée trouvée (local + Dataverse) pour ce ticket.",
-                            Toast.LENGTH_SHORT).show();
-                    } catch (Exception ignored) {}
-                });
-            }
+            return true;
         } catch (Exception e) {
-            LogBus.api(node, "[" + reason + "] checkAndPullMissingDeliveryDetail ERR: " + safeMsg(e));
-            android.util.Log.e(LOGCAT_TAG, "[" + reason + "] checkAndPullMissingDeliveryDetail EXCEPTION", e);
+            return true; // best-effort — ne jamais bloquer sur une erreur du garde lui-même
         }
     }
-
-    private com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow tryPullDeliveryFromDataverse(String ticketNo) {
-        final String serialId = (serialFromArgs != null && !serialFromArgs.trim().isEmpty())
-                ? serialFromArgs.trim() : null;
-        android.util.Log.i(LOGCAT_TAG, "tryPullDeliveryFromDataverse: ticket=" + ticketNo
-                + " serialFromArgs=" + serialId + " node=" + node);
-        if (serialId == null) {
-            LogBus.api(node, "[WO-DETECT] pull Dataverse annulé — serial_id inconnu pour ce fragment");
-            android.util.Log.w(LOGCAT_TAG, "tryPullDeliveryFromDataverse: ANNULÉ — serialFromArgs est null pour ce fragment");
-            return null;
-        }
-
-        try {
-            // ✅ (fix 31 juillet 2026, demande Paul) : verrou global — garantit qu'aucune
-            // opération MSAL (celle-ci ou toute autre dans l'app, ex: le push existant)
-            // ne tourne jamais en parallèle d'une autre, où que ce soit.
-            com.pa.lcrdemo.auth.MsalTokenProvider.MSAL_SERIAL_LOCK.acquire();
-            try {
-            com.pa.lcrdemo.auth.MsalTokenProvider msal =
-                new com.pa.lcrdemo.auth.MsalTokenProvider(requireContext());
-            final String[] tokenHolder = {null};
-            final java.util.concurrent.CountDownLatch latch =
-                new java.util.concurrent.CountDownLatch(1);
-            msal.init(new com.pa.lcrdemo.auth.MsalTokenProvider.InitCallback() {
-                @Override public void onReady() {
-                    msal.acquireTokenSilentFromWorker(
-                        new com.pa.lcrdemo.auth.MsalTokenProvider.TokenCallback() {
-                            @Override public void onSuccess(String token) {
-                                tokenHolder[0] = token;
-                                android.util.Log.i(LOGCAT_TAG, "tryPullDeliveryFromDataverse: token MSAL obtenu (silent)");
-                                latch.countDown();
-                            }
-                            @Override public void onError(Exception e) {
-                                LogBus.api(node, "[WO-DETECT] pull Dataverse — token silent ERR: " + safeMsg(e));
-                                android.util.Log.w(LOGCAT_TAG, "tryPullDeliveryFromDataverse: token silent ERR", e);
-                                latch.countDown();
-                            }
-                        });
-                }
-                @Override public void onError(Exception e) {
-                    LogBus.api(node, "[WO-DETECT] pull Dataverse — MSAL init ERR: " + safeMsg(e));
-                    android.util.Log.w(LOGCAT_TAG, "tryPullDeliveryFromDataverse: MSAL init ERR", e);
-                    latch.countDown();
-                }
-            });
-            latch.await(8, java.util.concurrent.TimeUnit.SECONDS);
-
-            if (tokenHolder[0] == null) {
-                LogBus.api(node, "[WO-DETECT] pull Dataverse annulé — pas de token (offline ou non connecté)");
-                android.util.Log.w(LOGCAT_TAG, "tryPullDeliveryFromDataverse: ANNULÉ — aucun token après 8s (offline, pas de compte, ou init/silent en échec)");
-                return null;
-            }
-
-            boolean found = com.pa.lcrdemo.dataverse.LcrDeliverySync.pullDeliveryByTicket(
-                    requireContext(), tokenHolder[0], serialId, node, ticketNo);
-            android.util.Log.i(LOGCAT_TAG, "tryPullDeliveryFromDataverse: pullDeliveryByTicket found=" + found
-                    + " (serial=" + serialId + " lcrnode=" + node + " ticket=" + ticketNo + ")");
-            if (!found) return null;
-
-            // Relit la ligne locale (maintenant upsertée) pour connaître le #wo résolu
-            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db2 =
-                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
-            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow resolved;
-            try {
-                resolved = db2.getByTicketNo(ticketNo);
-            } finally {
-                try { db2.close(); } catch (Exception ignored) {}
-            }
-
-            // ✅ (demandé 31 juillet 2026) : un ticket ne donne qu'UNE transaction — mais
-            // plusieurs transactions peuvent partager le même #wo (chaque impression du
-            // registre génère un nouveau ticket_no). Rapatrie TOUTES les transactions de
-            // ce #wo pour ce #série, pas seulement celle du ticket demandé.
-            if (resolved != null && resolved.woNum != null && !resolved.woNum.isEmpty()) {
-                try {
-                    int n = com.pa.lcrdemo.dataverse.LcrDeliverySync.pullAllDeliveriesForWorkOrder(
-                            requireContext(), tokenHolder[0], resolved.woNum, serialId);
-                    LogBus.api(node, "[WO-DETECT] wo=" + resolved.woNum + " — " + n
-                            + " transaction(s) au total rapatriée(s) depuis Dataverse");
-                } catch (Exception e) {
-                    LogBus.api(node, "[WO-DETECT] pullAllDeliveriesForWorkOrder ERR: " + safeMsg(e));
-                }
-            }
-
-            // ✅ (demandé 31 juillet 2026) : au-delà d'un même #wo, rapatrie aussi les
-            // AUTRES arrêts de la même journée pour ce registre (#série) — utile quand la
-            // tournée du jour comporte plusieurs #wo différents sur le même registre.
-            // Ancre de date = start_utc de la livraison déjà résolue (jamais devinée).
-            if (resolved != null && resolved.startUtc != null && !resolved.startUtc.isEmpty()) {
-                try {
-                    int n = com.pa.lcrdemo.dataverse.LcrDeliverySync.pullAllDeliveriesForDay(
-                            requireContext(), tokenHolder[0], serialId, resolved.startUtc);
-                    LogBus.api(node, "[WO-DETECT] jour=" + resolved.startUtc.substring(0, Math.min(10, resolved.startUtc.length()))
-                            + " — " + n + " livraison(s) de la journée rapatriée(s) pour serial=" + serialId);
-                } catch (Exception e) {
-                    LogBus.api(node, "[WO-DETECT] pullAllDeliveriesForDay ERR: " + safeMsg(e));
-                }
-            } else {
-                LogBus.api(node, "[WO-DETECT] pull journée sauté — start_utc inconnu pour ce ticket");
-            }
-
-            return resolved;
-            } finally {
-                com.pa.lcrdemo.auth.MsalTokenProvider.MSAL_SERIAL_LOCK.release();
-            } // fin verrou MSAL_SERIAL_LOCK
-        } catch (Exception e) {
-            LogBus.api(node, "[WO-DETECT] pull Dataverse ERR: " + safeMsg(e));
-            return null;
-        }
-    }
-
-    private void lookupWoForTicket(String ticketNo) {
-        lookupWoForTicket(ticketNo, true);
-    }
-
-    /**
-     * @param allowFullSearch si false, s'arrête après la recherche locale (étape 1) —
-     *                        n'exécute JAMAIS les étapes 2 (Dataverse) et 3 (backup local).
-     *                        (ajouté 3 août 2026, demande Paul suite aux ratés de démarrage
-     *                        de livraison / RUNNING_FLOWING qui n'affichait pas) — onTicketInfo()
-     *                        est déclenché en continu par le polling live du registre (toutes
-     *                        les ~100-800ms pendant une livraison active). Avant ce fix, CHAQUE
-     *                        déclenchement relançait la cascade complète (appel réseau Dataverse
-     *                        + scan de fichiers backup) dès qu'un ticket restait "introuvable"
-     *                        ne serait-ce que quelques secondes — martelant le thread unique
-     *                        partagé (bg) avec des opérations réseau/IO répétées, au détriment
-     *                        des autres tâches en file sur ce même thread (dont l'affichage de
-     *                        RUNNING_FLOWING et la visibilité de btnRetourWO). La recherche
-     *                        complète est désormais réservée à l'entrée sur le tab et au clic
-     *                        explicite Status(B) — voir fullTicketSearchArmed.
-     */
-    private void lookupWoForTicket(String ticketNo, boolean allowFullSearch) {
-        if (ticketNo == null || ticketNo.isEmpty()) return;
-        // ✅ Ne pas sortir juste parce que currentWoNum est déjà connu — vérifier
-        // plutôt si CE ticket précis a déjà été traité. Si le registre est passé à
-        // un nouveau ticket depuis, on doit re-détecter le nouveau WO.
-        if (ticketNo.equals(lastTicketDetected)) return;
-        // ✅ FIX (4 août 2026) — throttle sur les échecs répétés du MÊME ticket
-        // (voir commentaire du champ lastFailedTicket). N'empêche pas les
-        // nouvelles tentatives après le cooldown, ni un ticket DIFFÉRENT.
-        if (ticketNo.equals(lastFailedTicket)
-                && (System.currentTimeMillis() - lastFailedAttemptMs) < WO_DETECT_RETRY_COOLDOWN_MS) {
-            return;
-        }
-
-        LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — recherche dans DB");
-
-        // Chercher ce ticket dans LcrDeliveryStatusDb
-        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db =
-            new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
-        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow row;
-        try {
-            row = db.getByTicketNo(ticketNo);
-        } finally {
-            try { db.close(); } catch (Exception ignored) {}
-        }
-        // ✅ (ajouté 3 août 2026, fix boucle infinie signalé par Paul) — capturer si la
-        // restauration backup a DÉJÀ été tentée pour ce ticket, peu importe si elle a
-        // abouti à un woNum utilisable. Sans ce flag, chaque poll (toutes les 800ms)
-        // relançait findLatestByTicketNo() + insertDelivery() indéfiniment dès que
-        // row.woNum restait vide après restauration — dupliquant une nouvelle ligne
-        // PENDING à chaque cycle.
-        boolean backupDejaTente = row != null
-            && "RESTORE_BACKUP".equals(row.source);
-
-        if (row == null || row.woNum == null || row.woNum.isEmpty()) {
-            if (!allowFullSearch) {
-                // ✅ Déclenchement passif (onTicketInfo via polling live du registre) —
-                // pas de recherche Dataverse/backup ici, seulement en local. Sinon chaque
-                // cycle de poll relancerait un appel réseau + un scan de fichiers sur le
-                // thread unique partagé (bg), au détriment de l'affichage RUNNING_FLOWING
-                // et de btnRetourWO. La recherche complète se fera au prochain Status(B)
-                // ou à la prochaine entrée sur le tab (voir fullTicketSearchArmed).
-                return;
-            }
-            LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — pas dans DB, tentative Dataverse (online)");
-            row = tryPullDeliveryFromDataverse(ticketNo);
-            if (row == null || row.woNum == null || row.woNum.isEmpty()) {
-                // ✅ (ajouté 3 août 2026, demande Paul) — étape 3 : ni local ni Dataverse
-                // n'ont ce ticket. Avant d'abandonner, chercher un backup JSON local
-                // (Téléchargements) pour ce ticket précis. S'il existe (potentiellement
-                // plusieurs versions — on garde la plus récente par backup_ts), on le
-                // réinsère en PENDING et on déclenche le service de sync existant pour
-                // reconstruire l'enregistrement manquant dans Dataverse.
-                //
-                // ✅ SAUF si une restauration a déjà été tentée pour ce ticket (voir
-                // backupDejaTente) — dans ce cas on ne réinsère jamais une deuxième fois,
-                // qu'elle ait ou non produit un woNum valide. Le prochain push Dataverse
-                // (service de sync existant, déjà déclenché à la tentative précédente)
-                // reste seul responsable de compléter/corriger cette ligne.
-                if (backupDejaTente) {
-                    LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo
-                        + " — restauration backup déjà tentée, pas de nouvelle insertion, nouvel essai au prochain poll");
-                    lastFailedTicket = ticketNo;
-                    lastFailedAttemptMs = System.currentTimeMillis();
-                    return;
-                }
-
-                LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — introuvable (local + Dataverse), recherche backup local");
-                com.pa.lcr.lcp.storage.LocalDeliveryBackup.BackupMatch match =
-                    com.pa.lcr.lcp.storage.LocalDeliveryBackup.findLatestByTicketNo(requireContext(), ticketNo);
-
-                if (match != null) {
-                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db2 =
-                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
-                    try {
-                        long localId = db2.insertDelivery(
-                            com.pa.lcr.lcp.storage.LocalDeliveryBackup.toContentValues(match.json));
-                        LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo
-                            + " — trouvé backup local (backup_ts=" + match.backupTs
-                            + "), réinséré en PENDING (id=" + localId + "), reconstruction Dataverse déclenchée");
-                        row = db2.getByTicketNo(ticketNo);
-                    } finally {
-                        try { db2.close(); } catch (Exception ignored) {}
-                    }
-                    try {
-                        com.pa.lcrdemo.dataverse.DeliverySyncScheduler.triggerNow(requireContext().getApplicationContext());
-                    } catch (Exception e) {
-                        LogBus.api(node, "[WO-DETECT] triggerNow ERR (non-bloquant): " + safeMsg(e));
-                    }
-                }
-
-                if (row == null || row.woNum == null || row.woNum.isEmpty()) {
-                    // ✅ FIX : ne PAS marquer lastTicketDetected ici — sinon un échec temporaire
-                    // (token MSAL pas encore prêt, latence réseau, Dataverse pas encore à jour)
-                    // bloque tout nouvel essai pour ce ticket, même si rechercherWoDepuisRegistre()
-                    // repolle toutes les 800ms. On ne verrouille lastTicketDetected qu'après un
-                    // SUCCÈS réel (voir plus bas), pour permettre les tentatives suivantes.
-                    LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — introuvable (local + Dataverse + backup), nouvel essai au prochain poll");
-                    lastFailedTicket = ticketNo;
-                    lastFailedAttemptMs = System.currentTimeMillis();
-                    return;
-                }
-                LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — reconstruit depuis backup local, wo=" + row.woNum);
-            } else {
-                LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — trouvé sur Dataverse, wo=" + row.woNum);
-            }
-        }
-
-        // ✅ Recherche réussie (locale ou Dataverse) — on peut maintenant verrouiller ce ticket
-        lastTicketDetected = ticketNo;
-
-        final String fWoNum    = row.woNum;
-
-        // ✅ Un WO connu directement (deep link) a priorité — ne pas l'écraser avec
-        // le résultat d'une recherche par ticket_number qui pointerait vers un WO
-        // différent (probablement encore le ticket de la livraison PRÉCÉDENTE, le
-        // registre n'ayant pas encore émis de nouveau ticket pour la nouvelle
-        // livraison). Si le ticket confirme le MÊME WO, on peut lever la priorité
-        // en toute sécurité — les deux sources sont maintenant d'accord.
-        if (woNumFromDirectSource) {
-            if (!fWoNum.equals(currentWoNum)) {
-                LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " → WO=" + fWoNum
-                    + " ignoré, WO direct prioritaire=" + currentWoNum);
-                return;
-            }
-            woNumFromDirectSource = false; // les deux sources concordent désormais
-        }
-
-        final String fWoIdGuid = row.woIdGuid != null ? row.woIdGuid : "";
-        // ✅ delivery_uid n'est pas stocké tel quel dans LcrDeliveryStatusDb —
-        // il se reconstruit toujours de la même façon que dans DeliveryController
-        // (numero_livraison + "-" + ticketNo). Permet de valider Field Service
-        // Mobile vs l'APK pour ce même WO si une synchronisation a été manquée.
-        final String fDeliveryUid = fWoNum + "-" + ticketNo;
-
-        // ✅ Le preset doit venir en priorité de la ligne trouvée dans
-        // filgo_delivery_status (row.presetL/row.produitNo — la vraie valeur de
-        // CETTE livraison complétée). ActiveDeliveryStore ne sert que pour une
-        // livraison EN COURS (deep link pas encore complété) — il est vidé
-        // (clear()) une fois la livraison terminée.
-        String fPresetStr  = (row.presetL > 0) ? String.valueOf(row.presetL) : null;
-        String fProduitStr = (row.produitNo > 0) ? String.valueOf(row.produitNo) : null;
-        if (fPresetStr == null || fProduitStr == null) {
-            try {
-                com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
-                    new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
-                com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery active = ads.load();
-                if (active != null && fWoNum.equals(active.woNum)) {
-                    if (fPresetStr == null)  fPresetStr  = String.valueOf(active.preset);
-                    if (fProduitStr == null) fProduitStr = String.valueOf(active.produit);
-                }
-            } catch (Exception ignored) {}
-        }
-        final String ffPresetStr  = fPresetStr;
-        final String ffProduitStr = fProduitStr;
-
-        ui.post(() -> {
-            currentWoNum    = fWoNum;
-            currentWoIdGuid = fWoIdGuid;
-            LogBus.api(node, "[WO-DETECT] WO trouvé=" + fWoNum + " deliveryUid=" + fDeliveryUid);
-            if (txtTicketNo != null)
-                txtTicketNo.setText("Ticket Number : " + ticketNo);
-            if (txtDeliveryUid != null)
-                txtDeliveryUid.setText("Delivery UID : " + fDeliveryUid);
-            if (ffPresetStr != null && edtPreset != null)
-                edtPreset.setText(ffPresetStr);
-            if (ffProduitStr != null && spnProduct != null)
-                spnProduct.setText(ffProduitStr, false);
-            rafraichirCumulWo();
-        });
-    }
-
-    // ✅ Dialog liste de toutes les livraisons du WO
-    private void afficherDetailLivraisonsWo() {
-        if (currentWoNum == null || currentWoNum.isEmpty()) return;
-        bg.execute(() -> {
-            try {
-                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db =
-                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
-                java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> rows;
-                try {
-                    rows = db.getAllForWo(currentWoNum);
-                } finally {
-                    try { db.close(); } catch (Exception ignored) {}
-                }
-
-                StringBuilder sb = new StringBuilder();
-                sb.append("WO : ").append(currentWoNum).append("\n");
-                sb.append("─────────────────────────\n");
-                double totalNet = 0, totalGross = 0;
-                for (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow r : rows) {
-                    if (r.netL > 0) {
-                        String uid = currentWoNum + "-" + r.ticketNo;
-                        sb.append("Ticket : ").append(r.ticketNo)
-                          .append("  (UID: ").append(uid).append(")\n");
-                        sb.append(String.format(java.util.Locale.ROOT,
-                            "  NET: %.3f L  GROSS: %.3f L\n", r.netL, r.grossL));
-                        totalNet   += r.netL;
-                        totalGross += r.grossL;
-                    }
-                }
-                sb.append("─────────────────────────\n");
-                sb.append(String.format(java.util.Locale.ROOT,
-                    "TOTAL NET  : %.3f L\n", totalNet));
-                sb.append(String.format(java.util.Locale.ROOT,
-                    "TOTAL GROSS: %.3f L\n", totalGross));
-                sb.append(rows.size() + " livraison(s)");
-
-                final String msg = sb.toString();
-                ui.post(() -> {
-                    if (!isAdded() || getView() == null) return;
-                    new android.app.AlertDialog.Builder(requireContext())
-                        .setTitle("Livraisons — WO " + currentWoNum)
-                        .setMessage(msg)
-                        .setPositiveButton("Retour", null)
-                        .show();
-                });
-            } catch (Exception e) {
-                LogBus.api(node, "[WO-DETAIL] ERR: " + safeMsg(e));
-            }
-        });
-    }
-
 
 }

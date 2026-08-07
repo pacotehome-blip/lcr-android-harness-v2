@@ -308,6 +308,15 @@ private void reproEvent(String level, String type, String message, JSONObject da
     // partagé que toute autre transaction, même patron que les autres
     // wrappers de cette classe.
     public String getFirmwareVersion() throws Exception { return withLcpLock(() -> link.opGetFirmwareVersion()); }
+    // ✅ AJOUTÉ (7 août 2026, demande Paul — "donne-moi l'info des deux pour
+    // voir s'il y a une différence")
+    public String getProductIdRevision() throws Exception { return withLcpLock(() -> link.opGetProductIdRevision()); }
+    // ✅ AJOUTÉ (7 août 2026, demande Paul — "réduire la vitesse de
+    // transmission entre 19200 et 4800 dans les tests de diagnostic, autant
+    // pour BT que USB") — ⚠️ RISQUÉ, diagnostic seulement, voir avertissement
+    // complet sur LcpLink.opSetBaud(). L'appelant (RegisterTabFragment) est
+    // responsable de reconfigurer le port physique local juste après.
+    public void setBaud(int baudIndex) throws Exception { withLcpLockVoid(() -> { link.opSetBaud(baudIndex); return null; }); }
 
     private void lcpSetField(int field, byte[] value) throws Exception {
         withLcpLockVoid(() -> { link.opSetField(field, value); return null; });

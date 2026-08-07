@@ -72,7 +72,18 @@ public class LcpLink {
     private static final byte MSG_GET_MACHINE_STATUS = 0x23;
     private static final byte MSG_ISSUE_COMMAND = 0x24;
     private static final byte MSG_GET_DELIVERY_STATUS = 0x28;
+    // ✅ AJOUTÉ (7 août 2026, demande Paul — "donne-moi l'info des deux pour
+    // voir s'il y a une différence") — message générique LCP "Get Product
+    // ID" (msgID=0x00, tout appareil LCP le supporte). Réponse : productID
+    // (0x02 = LCR) + chaîne ASCIIZ "nom+révision" (ex: "SR200b2.05") — une
+    // SOURCE SÉPARÉE du Field #60, pour comparer.
+    private static final byte MSG_GET_PRODUCT_ID = 0x00;
     private static final byte MSG_CHECK_REQUEST = 0x7D;
+    // ✅ AJOUTÉ (7 août 2026, demande Paul — "réduire la vitesse de
+    // transmission entre 19200 et 4800 dans les tests de diagnostic") —
+    // message générique LCP "Set Baud" (msgID=0x7C), sourcé de la doc
+    // officielle. Index : 0=57600, 1=19200, 2=9600, 3=4800, 4=2400.
+    private static final byte MSG_SET_BAUD = (byte) 0x7C;
 
     // Cadence du CHECK_REQUEST
     private static final int QP_MS = 200;
@@ -572,10 +583,56 @@ public class LcpLink {
         return s.trim();
     }
 
+    // ✅ AJOUTÉ (7 août 2026, demande Paul — "donne-moi l'info des deux pour
+    // voir s'il y a une différence") — "Get Product ID" est un message LCP
+    // GÉNÉRIQUE (tout appareil LCP le supporte, même avant de savoir si
+    // c'est un LCR-II), sourcé de la doc officielle. Réponse : rc,
+    // productID (0x02 attendu = LCR), et une chaîne ASCIIZ "nom+révision"
+    // (ex: "SR200b2.05") — indépendante de Field #60, donc utile pour
+    // vérifier s'il y a une divergence entre les deux sources.
+    public String opGetProductIdRevision() throws IOException {
+        Response r = sendRecv(buildPayload(MSG_GET_PRODUCT_ID, null), 5000);
+        ensureOk(r, "GET_PRODUCT_ID");
+        // ✅ FIX (vérifié contre opGetMachineStatus) — r.payload exclut déjà rc
+        // (extrait séparément dans r.rc par le framework) — donc payload[0] =
+        // productID, PAS rc. Mon premier jet supposait à tort payload[0]=rc.
+        if (r.payload == null || r.payload.length < 1) return "";
+        byte[] nameBytes = new byte[r.payload.length - 1];
+        System.arraycopy(r.payload, 1, nameBytes, 0, nameBytes.length);
+        String s = new String(nameBytes, java.nio.charset.StandardCharsets.UTF_8);
+        int nul = s.indexOf('\0');
+        if (nul >= 0) s = s.substring(0, nul);
+        return s.trim();
+    }
+
+    public static final int BAUD_IDX_57600 = 0;
+    public static final int BAUD_IDX_19200 = 1;
+    public static final int BAUD_IDX_9600  = 2;
+    public static final int BAUD_IDX_4800  = 3;
+    public static final int BAUD_IDX_2400  = 4;
+
+    /**
+     * ⚠️ RISQUÉ — change la vitesse de transmission DU REGISTRE lui-même via
+     * LCP. Le registre applique la nouvelle vitesse IMMÉDIATEMENT après cette
+     * réponse — l'appelant DOIT reconfigurer son propre port physique pour
+     * matcher tout de suite après, sinon toute communication ultérieure
+     * échoue jusqu'à un cycle d'alimentation du registre (le registre garde
+     * la nouvelle vitesse même après une déconnexion). Diagnostic seulement
+     * — jamais utilisé dans le flux normal de livraison. Sur BT (SPP), le
+     * lien radio lui-même n'a pas de "vitesse" au sens UART — mais le
+     * module BT du registre relaie en interne vers son UART réel, donc
+     * cette commande peut quand même avoir un effet (à valider sur le
+     * terrain — pas garanti par la doc, qui décrit le comportement RS-232).
+     */
+    public void opSetBaud(int baudIndex) throws IOException {
+        Response r = sendRecv(buildPayload(MSG_SET_BAUD, new byte[]{(byte) baudIndex}), 5000);
+        ensureOk(r, "SET_BAUD idx=" + baudIndex);
+    }
+
+
     // =========================================================
     // ✅ Précision décimale NET/GROSS — responsabilité du protocole,
     // PAS de l'UI ni d'un cache générique partagé dans DeliveryController.
-    //
     // Chaque sous-classe de Link connaît sa propre façon de représenter
     // NET/GROSS (registre à registre, protocole à protocole) et doit
     // garantir que le résultat final (valeur physique réelle en litres)
