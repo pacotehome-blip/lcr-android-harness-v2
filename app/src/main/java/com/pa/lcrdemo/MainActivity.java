@@ -2558,6 +2558,24 @@ private void setupTabsTop() {
         // ✅ Format: BT(OFF) - [LC3] 123456 - 250
         updateRegisterTabLabel(tabKey, tabLabelOf(mediaLabel, spec.node, spec.serialId, spec.isLc3) + (spec.qtySuffix != null ? spec.qtySuffix : ""));
 
+        // ✅ FIX (7 août 2026, demande Paul — "avec le bouton refresh à
+        // gauche du tab on pourra suivre s'il y a une perte de connexion
+        // avec le registre") — teinte de l'icône reflète l'état réel de
+        // connexion, pas juste un bouton statique. Vert = transport
+        // physiquement ouvert ET registre qui répond (DeliveryController
+        // pas DISCONNECTED). Rouge = perte de connexion, peu importe si
+        // c'est le transport (BT/USB coupé) ou le registre lui-même qui ne
+        // répond plus alors que le transport reste ouvert.
+        boolean registreOk = ready;
+        try {
+            com.pa.lcr.lcp.DeliveryController dc = com.pa.lcr.lcp.RegisterSessionManager
+                    .get(this).getController(spec.transportKey, spec.node);
+            if (dc != null && dc.getState() == com.pa.lcr.lcp.DeliveryState.DISCONNECTED) {
+                registreOk = false;
+            }
+        } catch (Exception ignored) {}
+        updateTabRefreshIconTint(tabKey, registreOk);
+
         try {
             Fragment f = getSupportFragmentManager().findFragmentByTag("regtab_" + tabKey);
             if (f instanceof RegisterTabFragment) {
@@ -2566,6 +2584,27 @@ private void setupTabsTop() {
         } catch (Exception ignored) {}
 
         persistTabMediaStatusForApi(spec, ready, media);
+    }
+
+    /** ✅ AJOUTÉ (7 août 2026, demande Paul) — teinte l'icône de rafraîchissement
+     *  d'un tab selon l'état réel de connexion : vert = OK, rouge = perte de
+     *  connexion (transport fermé OU registre qui ne répond plus). */
+    private void updateTabRefreshIconTint(String tabKey, boolean healthy) {
+        try {
+            if (tabRegisters == null) return;
+            for (int i = 0; i < tabRegisters.getTabCount(); i++) {
+                TabLayout.Tab t = tabRegisters.getTabAt(i);
+                if (t == null) continue;
+                Object tag = t.getTag();
+                if (!(tag instanceof String) || !tabKey.equals(tag)) continue;
+                View custom = t.getCustomView();
+                if (custom == null) return;
+                ImageView img = custom.findViewById(R.id.imgTabRefresh);
+                if (img == null) return;
+                img.setColorFilter(healthy ? 0xFF2E7D32 : 0xFFB71C1C); // vert / rouge
+                return;
+            }
+        } catch (Exception ignored) {}
     }
 
     public void refreshAllTabsMediaStatus() {
