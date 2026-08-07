@@ -1023,6 +1023,14 @@
                 android:layout_marginStart="8dp"
                 android:backgroundTint="#B71C1C"
                 android:text="Vider (avec backup)"/>
+
+            <Button
+                android:id="@+id/btnSupportRestore"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:backgroundTint="#1565C0"
+                android:text="Restaurer"/>
         </LinearLayout>
 
 
