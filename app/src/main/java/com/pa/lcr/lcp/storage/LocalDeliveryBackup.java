@@ -136,6 +136,47 @@ public class LocalDeliveryBackup {
         void onDone(int restored, int skippedAlreadyPresent, int failed, List<String> messages);
     }
 
+    // =========================================================
+    // ✅ AJOUTÉ (7 août 2026, demande Paul — "que fais-tu du fichier JSON
+    // dans Téléchargements") — sur une BD VRAIMENT vierge (réinstallation,
+    // BD corrompue), même le repli getLastDeliveryForSerial() de
+    // RegisterTabFragment échouerait, puisque la BD elle-même est vide. Les
+    // fichiers filgo_livraison_*.json, eux, SURVIVENT à ce scénario — c'est
+    // exactement leur raison d'être (voir backupDeliveryAsync). Cette
+    // méthode cherche, parmi tous les backups JSON présents, le plus RÉCENT
+    // (par backup_ts) qui correspond au #série donné, et retourne son
+    // wo_num — dernier filet de sécurité avant d'abandonner.
+    // =========================================================
+    public static String findMostRecentWoForSerialFromJsonBackups(Context ctx, String serialId) {
+        try {
+            List<String> messages = new ArrayList<>();
+            List<byte[]> files = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+                    ? listBackupFilesMediaStore(ctx, messages)
+                    : listBackupFilesLegacy(ctx, messages);
+
+            String bestWoNum = null;
+            long bestTs = -1;
+            for (byte[] raw : files) {
+                try {
+                    JSONObject j = new JSONObject(new String(raw, StandardCharsets.UTF_8));
+                    String fileSerial = j.optString("serial_id", "");
+                    if (!serialId.equalsIgnoreCase(fileSerial)) continue;
+                    String woNum = j.optString("wo_num", "");
+                    if (woNum.isEmpty()) continue;
+                    long ts = j.optLong("backup_ts", 0L);
+                    if (ts > bestTs) {
+                        bestTs = ts;
+                        bestWoNum = woNum;
+                    }
+                } catch (Exception ignored) {}
+            }
+            return bestWoNum;
+        } catch (Exception e) {
+            Log.w(TAG, "findMostRecentWoForSerialFromJsonBackups ERR: " + e.getMessage());
+            return null;
+        }
+    }
+
     public static void restoreAllAsync(Context ctx, RestoreCallback cb) {
         new Thread(() -> {
             List<String> messages = new ArrayList<>();
