@@ -388,6 +388,18 @@ public class RegisterTabFragment extends Fragment {
     // ✅ FIX (7 août 2026, demande Paul) — évite de reconstruire delivery_uid
     // en boucle pour le même ticket déjà résolu (voir onTicketInfo).
     private volatile String lastUidReconstructedForTicket = "";
+    // ✅ FIX CRITIQUE (7 août 2026, demande Paul — "je n'ai toujours pas le
+    // delivery-uid dans le tab") — trouvé le vrai bug : mon propre cache
+    // ci-dessus est un champ de l'INSTANCE du fragment, pas de la vue.
+    // initUi() remet txtDeliveryUid à "—" à CHAQUE recréation de vue
+    // (comportement Android normal, pas juste à la création initiale). Mais
+    // le cache, lui, survit à cette recréation — donc la reconstruction
+    // était sautée ("déjà fait pour ce ticket"), laissant la NOUVELLE vue
+    // bloquée sur "—" pour toujours, même si le calcul avait réussi
+    // auparavant. Ce champ garde maintenant la VALEUR calculée, pas juste
+    // un drapeau — pour pouvoir la réappliquer directement si la vue se
+    // recrée, sans dépendre d'un nouvel événement onTicketInfo.
+    private volatile String lastUidReconstructedValue = null;
     // ✅ FIX (4 août 2026, demande Paul — "j'ai commencé le logcat... tout est
     // présent dans ça", en creusant pourquoi l'export Support de 300 lignes
     // ne remontait pas jusqu'à l'échec réel) — un ticket qui échoue en
@@ -765,7 +777,17 @@ public class RegisterTabFragment extends Fragment {
                     // disque à chaque cycle, indéfiniment, pour un résultat
                     // qui ne changera jamais. Mis en cache une fois résolu —
                     // ne relance la reconstruction que si le ticket change.
-                    if (ticketNo.equals(lastUidReconstructedForTicket)) return;
+                    if (ticketNo.equals(lastUidReconstructedForTicket) && lastUidReconstructedValue != null) {
+                        // ✅ Déjà calculé pour ce ticket — pas besoin de refaire le calcul,
+                        // mais on réapplique quand même la valeur à la vue actuelle, au cas
+                        // où celle-ci vient d'être recréée et affiche encore "—".
+                        final String fCachedUid = lastUidReconstructedValue;
+                        ui.post(() -> {
+                            if (!isAdded() || getView() == null) return;
+                            if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : " + fCachedUid);
+                        });
+                        return;
+                    }
                     String uidRecupere = null;
                     String origine = "";
                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbUid = null;
@@ -851,6 +873,7 @@ public class RegisterTabFragment extends Fragment {
                     final String fUid = uidRecupere;
                     final String fOrigine = origine;
                     lastUidReconstructedForTicket = ticketNo;
+                    lastUidReconstructedValue = fUid;
                     LogBus.api(node, "[UID] delivery_uid reconstruit=" + fUid + " (" + fOrigine + ")");
                     ui.post(() -> {
                         if (!isAdded() || getView() == null) return;
@@ -1153,6 +1176,14 @@ public class RegisterTabFragment extends Fragment {
         if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : —");
         if (txtTicketPending != null) txtTicketPending.setText("Ticket pending : —");
         if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : —");
+        // ✅ FIX (7 août 2026, demande Paul — "je n'ai toujours pas le
+        // delivery-uid") — réapplique immédiatement la valeur déjà connue en
+        // cache si la vue vient d'être recréée, sans attendre le prochain
+        // onTicketInfo() (jusqu'à 5s plus tard via le keep-alive) — évite un
+        // "—" visible inutilement pour un ticket déjà résolu auparavant.
+        if (lastUidReconstructedValue != null && !lastUidReconstructedValue.trim().isEmpty()) {
+            if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : " + lastUidReconstructedValue);
+        }
         ticketPendingFlag = -1;
         lastDigits = 3;
         if (txtLive != null) txtLive.setText("LIVE: (en attente)");
