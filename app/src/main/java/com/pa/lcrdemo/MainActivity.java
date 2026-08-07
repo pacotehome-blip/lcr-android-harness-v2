@@ -339,6 +339,10 @@ public class MainActivity extends AppCompatActivity {
     // systématiquement partout, à surveiller si un ConcurrentModification
     // apparaît en test.
     private final Map<String, TabSpec> tabsByKey = Collections.synchronizedMap(new LinkedHashMap<>());
+    // ✅ AJOUTÉ (7 août 2026, demande Paul — logs dupliqués malgré le fix
+    // onDestroyView) — anti-rebond pour upsertRegisterTabFromScan(), voir
+    // commentaire complet sur son utilisation.
+    private final Map<String, Long> upsertTabDebounceMap = new java.util.concurrent.ConcurrentHashMap<>();
 
     // ✅ (4 août 2026) — accesseur read-only pour DeepLinkHandler : permet de
     // savoir, AVANT upsertRegisterTabFromScan(), si un tab existait déjà pour
@@ -2872,6 +2876,29 @@ private void setupTabsTop() {
         String mediaShort = mediaShortFromTransportKey(transportKey);
         String serial = safeSerial(serialId);
         if (serial.isEmpty()) return;
+
+        // ✅ FIX CRITIQUE (7 août 2026, demande Paul — "on dirait qu'ils
+        // sont doublés" — la fuite de listener onDestroyView était déjà
+        // corrigée, donc une DEUXIÈME source distincte) — trouvé :
+        // FragmentTransaction.commitAllowingStateLoss() est ASYNCHRONE (mis
+        // en file, pas exécuté immédiatement). Si cette méthode est
+        // appelée deux fois très rapprochées pour le MÊME tab (ex. pendant
+        // les cycles syncTabs/migration qu'on a vus dans les logs — parfois
+        // plusieurs "TAB registre ajouté" en quelques ms), la DEUXIÈME
+        // exécution peut voir "existing" comme s'il n'existait pas encore
+        // (la 1ère transaction n'a pas fini de s'exécuter) — créant DEUX
+        // fragments réellement distincts pour le même tab, chacun attachant
+        // son propre listener. Anti-rebond : ignore un appel pour le même
+        // tabKey qui arrive à moins de 200ms du précédent.
+        String debounceKey = tabKeyOf(mediaShort, node, serial);
+        long nowDebounce = System.currentTimeMillis();
+        Long lastCall = upsertTabDebounceMap.get(debounceKey);
+        if (lastCall != null && (nowDebounce - lastCall) < 200) {
+            android.util.Log.w("MainActivity", "upsertRegisterTabFromScan: appel rapproché ignoré "
+                + "(anti-rebond) pour " + debounceKey + " — " + (nowDebounce - lastCall) + "ms depuis le précédent");
+            return;
+        }
+        upsertTabDebounceMap.put(debounceKey, nowDebounce);
 
         // 1) retirer les tabs legacy (serial vide) dès qu'on trouve au moins un registre
         removeAllUnknownSerialTabsBestEffort();
