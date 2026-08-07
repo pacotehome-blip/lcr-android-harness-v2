@@ -784,15 +784,63 @@ public class RegisterTabFragment extends Fragment {
                         // voir les fuites corrigées le 24 juillet dans ce fichier).
                         if (dbUid != null) { try { dbUid.close(); } catch (Exception ignored) {} }
                     }
-                    // Dernier recours : le WO courant en mémoire. Moins fiable que la
+                    // ✅ FIX (7 août 2026, demande Paul — "mets-le en
+                    // deuxième si la BD est vierge") — repositionné en 2e
+                    // position (juste après la recherche par ticket exact,
+                    // avant les replis suivants qui dépendent tous de la BD
+                    // locale — inutiles si elle est vraiment vide). Les
+                    // fichiers filgo_livraison_*.json SURVIVENT à une BD
+                    // vierge (réinstallation, BD corrompue) — c'est leur
+                    // raison d'être — donc les vérifier tôt évite d'attendre
+                    // deux tentatives DB vouées à l'échec sur ce scénario.
+                    if (uidRecupere == null && serialFromArgs != null && !serialFromArgs.trim().isEmpty()) {
+                        try {
+                            String woFromJson = com.pa.lcr.lcp.storage.LocalDeliveryBackup
+                                    .findMostRecentWoForSerialFromJsonBackups(requireContext(), serialFromArgs.trim());
+                            if (woFromJson != null && !woFromJson.trim().isEmpty()) {
+                                uidRecupere = woFromJson.trim() + "-" + ticketNo.trim();
+                                origine = "backup JSON (Téléchargements)";
+                            }
+                        } catch (Exception e) {
+                            LogBus.api(node, "[UID] repli backup JSON ERR: " + safeMsg(e));
+                        }
+                    }
+                    // Ensuite : le WO courant en mémoire. Moins fiable que la
                     // BD (aucune garantie que currentWoNum corresponde à CE ticket —
                     // il peut encore pointer la livraison précédente), donc utilisé
-                    // seulement si la BD n'a rien, et journalisé distinctement.
+                    // seulement si rien trouvé jusqu'ici, et journalisé distinctement.
                     if (uidRecupere == null) {
                         String wo = currentWoNum;
                         if (wo != null && !wo.trim().isEmpty()) {
                             uidRecupere = wo.trim() + "-" + ticketNo.trim();
                             origine = "WO courant (mémoire)";
+                        }
+                    }
+                    // ✅ FIX (7 août 2026, demande Paul — "27 livraisons dans
+                    // l'écran Livraisons, WO correct, mais rien affiché ici,
+                    // pourquoi?") — trouvé : les replis précédents cherchent
+                    // soit CE ticket exact (échoue si jamais retourné au WO),
+                    // soit currentWoNum en mémoire (vide après une reconnexion —
+                    // voir "currentWoNum vide" dans les logs). Ce repli-ci
+                    // regarde "la dernière livraison connue pour CE #série" dans
+                    // la BD — le même filet de sécurité déjà utilisé par le
+                    // bouton "Retour au WO" (getLastDeliveryForSerial), en
+                    // dernier recours ici puisqu'il ne sert à rien sur une BD
+                    // vraiment vierge (déjà couvert par le repli JSON ci-dessus).
+                    if (uidRecupere == null && serialFromArgs != null && !serialFromArgs.trim().isEmpty()) {
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbFallback2 = null;
+                        try {
+                            dbFallback2 = new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow lastRow =
+                                    dbFallback2.getLastDeliveryForSerial(serialFromArgs.trim());
+                            if (lastRow != null && lastRow.woNum != null && !lastRow.woNum.trim().isEmpty()) {
+                                uidRecupere = lastRow.woNum.trim() + "-" + ticketNo.trim();
+                                origine = "dernière livraison connue pour ce #série (BD)";
+                            }
+                        } catch (Exception e) {
+                            LogBus.api(node, "[UID] repli dernière livraison BD ERR: " + safeMsg(e));
+                        } finally {
+                            if (dbFallback2 != null) { try { dbFallback2.close(); } catch (Exception ignored) {} }
                         }
                     }
                     if (uidRecupere == null) {
