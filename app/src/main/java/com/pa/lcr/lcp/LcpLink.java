@@ -555,6 +555,23 @@ public class LcpLink {
         return out;
     }
 
+    // ✅ AJOUTÉ (7 août 2026, demande Paul — "je veux être en mesure de
+    // récupérer le firmware du registre et je le veux dans le log du
+    // support") — Field #60 "Software_NE" (TEXT), sourcé directement de la
+    // doc officielle LCP ("Version of the software running in the LCR").
+    // Un seul appel, réutilise opGetField() comme n'importe quel autre champ
+    // texte (même patron que le #80 pour le #série).
+    public static final int FIELD_SOFTWARE_VERSION = 60;
+
+    public String opGetFirmwareVersion() throws IOException {
+        byte[] raw = opGetField(FIELD_SOFTWARE_VERSION, 5000);
+        if (raw == null || raw.length == 0) return "";
+        String s = new String(raw, java.nio.charset.StandardCharsets.UTF_8);
+        int nul = s.indexOf('\0');
+        if (nul >= 0) s = s.substring(0, nul);
+        return s.trim();
+    }
+
     // =========================================================
     // ✅ Précision décimale NET/GROSS — responsabilité du protocole,
     // PAS de l'UI ni d'un cache générique partagé dans DeliveryController.

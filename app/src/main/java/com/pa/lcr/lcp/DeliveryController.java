@@ -303,6 +303,11 @@ private void reproEvent(String level, String type, String message, JSONObject da
     private int[] lcpDeliveryStatus() throws Exception { return withLcpLock(() -> link.opDeliveryStatus()); }
     private LcpLink.MachineStatus lcpMachineStatus() throws Exception { return withLcpLock(() -> link.opGetMachineStatus()); }
     private byte[] lcpGetField(int field) throws Exception { return withLcpLock(() -> link.opGetField(field)); }
+    // ✅ AJOUTÉ (7 août 2026, demande Paul — "récupérer le firmware du
+    // registre... dans le log du support") — passe par le même verrou LCP
+    // partagé que toute autre transaction, même patron que les autres
+    // wrappers de cette classe.
+    public String getFirmwareVersion() throws Exception { return withLcpLock(() -> link.opGetFirmwareVersion()); }
 
     private void lcpSetField(int field, byte[] value) throws Exception {
         withLcpLockVoid(() -> { link.opSetField(field, value); return null; });

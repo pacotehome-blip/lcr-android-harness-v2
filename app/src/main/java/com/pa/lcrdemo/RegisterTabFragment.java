@@ -1551,6 +1551,22 @@ public class RegisterTabFragment extends Fragment {
             if (controller == null) { reconnectThisRegister(true); return; }
             validerTransportEtRegistrePuis("CONNECT_LCP", () -> {
                 try { Toast.makeText(requireContext(), "✅ Déjà connecté (validé)", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
+                // ✅ AJOUTÉ (7 août 2026, demande Paul — "récupérer le
+                // firmware du registre... dans le log du support") — lu à
+                // chaque validation réussie de connexion, sur bg (jamais sur
+                // le thread UI), résultat logué clairement dans Support.
+                DeliveryController cFw = controller;
+                if (cFw != null) {
+                    bg.execute(() -> {
+                        try {
+                            String fw = cFw.getFirmwareVersion();
+                            LogBus.api(node, "[FIRMWARE] Version logicielle du registre : "
+                                    + (fw != null && !fw.isEmpty() ? fw : "(vide)"));
+                        } catch (Exception e) {
+                            LogBus.api(node, "[FIRMWARE] Lecture ERR: " + safeMsg(e));
+                        }
+                    });
+                }
             });
         });
         if (btnA != null) btnA.setOnClickListener(v -> {
