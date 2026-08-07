@@ -262,20 +262,41 @@ private void reproEvent(String level, String type, String message, JSONObject da
     // accessible aussi depuis RegisterSessionManager.probeSerial()) au lieu
     // d'une map locale à cette classe — voir LcpNodeLocks pour le détail
     // complet du problème que ça règle.
+    // ✅ FIX CRITIQUE (7 août 2026) — synchronized remplacé par
+    // tryLock(timeout) — voir LcpNodeLocks pour le détail complet. Sans ça,
+    // une session morte avec un thread bloqué dans une lecture bas niveau
+    // pouvait geler indéfiniment TOUTE nouvelle session sur le même node.
     private interface LcpOp<T> { T run() throws Exception; }
 
-    private Object resolveLcpLock() {
+    private int resolveLcpNode() {
         int node = -1;
         try { if (link != null) node = link.getToAddr(); } catch (Exception ignored) {}
-        return LcpNodeLocks.forNode(node);
+        return node;
     }
 
     private <T> T withLcpLock(LcpOp<T> op) throws Exception {
-        synchronized (resolveLcpLock()) { return op.run(); }
+        int node = resolveLcpNode();
+        java.util.concurrent.locks.ReentrantLock lock;
+        try {
+            lock = LcpNodeLocks.tryAcquire(node, LcpNodeLocks.LOCK_TIMEOUT_MS);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new java.io.IOException("Interrompu en attendant le verrou LCP (node=" + node + ")");
+        }
+        if (lock == null) {
+            throw new java.io.IOException("Timeout verrou LCP (node=" + node + ") — probablement une "
+                + "session morte bloquée dans une lecture bas niveau, jamais relâché après "
+                + LcpNodeLocks.LOCK_TIMEOUT_MS + "ms");
+        }
+        try {
+            return op.run();
+        } finally {
+            LcpNodeLocks.release(lock);
+        }
     }
 
     private void withLcpLockVoid(LcpOp<Void> op) throws Exception {
-        synchronized (resolveLcpLock()) { op.run(); }
+        withLcpLock(op);
     }
 
     // Wrappers LCP
