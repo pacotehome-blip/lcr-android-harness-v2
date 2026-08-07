@@ -347,6 +347,34 @@ public class MainActivity extends AppCompatActivity {
     private final Map<String, String> regKeyToTabKey = Collections.synchronizedMap(new LinkedHashMap<>());
 
     private String currentTabKey = null;
+    // ✅ FIX CRITIQUE (7 août 2026, demande Paul — "trouve moi le pourquoi
+    // j'ai une erreur avec le status" — camion P142) — trouvé une vraie
+    // boucle de rétroaction : le nettoyage périodique (syncTabsFromActiveSessions)
+    // retire l'ancien tab "unknown" juste AVANT d'ajouter le vrai tab —
+    // faisant tomber le compte de tabs à zéro un très court instant. Mon
+    // fix du 5 août ("reconnexion auto quand plus de tab") se déclenchait
+    // sur CHAQUE occurrence de ce zéro transitoire, pas seulement une vraie
+    // perte totale — créant des dizaines de cycles ajout/suppression/
+    // reconnexion par seconde (confirmé : ~15-20 cycles en moins d'une
+    // seconde dans le log P142). Ce refroidissement empêche une nouvelle
+    // tentative de se déclencher si une vient déjà de se produire très
+    // récemment.
+    private volatile long lastAutoReconnectAttemptMs = 0L;
+    private static final long AUTO_RECONNECT_COOLDOWN_MS = 3000;
+    // ✅ FIX (7 août 2026, demande Paul — "si on voit qu'il entre en série
+    // comme ça, arrête et affiche l'écran de passer par Configure") — un
+    // simple délai (ci-dessus) ralentit la boucle mais ne l'arrête pas
+    // vraiment — si le déclencheur physique (ex. déconnexions BT répétées
+    // sur P142) persiste, la boucle continuerait indéfiniment, juste plus
+    // lentement. Ce compteur détecte le PATRON de boucle lui-même (plusieurs
+    // tentatives rapprochées malgré le refroidissement) et coupe
+    // complètement l'automatique — plus de nouvelle tentative tant que
+    // l'utilisateur n'a pas agi manuellement depuis Configure.
+    private volatile int autoReconnectStreakCount = 0;
+    private volatile long autoReconnectStreakWindowStartMs = 0L;
+    private static final int AUTO_RECONNECT_STREAK_LIMIT = 4;
+    private static final long AUTO_RECONNECT_STREAK_WINDOW_MS = 30000;
+    private volatile boolean autoReconnectCircuitBroken = false;
     private String visibleRegFragmentTag = null; // fragment visible dans registerContainer
 
     private int currentRegNode = -1; // node actif (fallback pour logs API)
@@ -1209,7 +1237,16 @@ tabRegisters = findViewById(R.id.tabRegisters);
     }
 
     private void wireUi() {
-        if (btnScanUsb != null) btnScanUsb.setOnClickListener(v -> scanUsb());
+        if (btnScanUsb != null) btnScanUsb.setOnClickListener(v -> {
+            // ✅ FIX (7 août 2026, demande Paul — coupe-circuit) — clic
+            // manuel depuis Configure réarme le coupe-circuit.
+            if (autoReconnectCircuitBroken) {
+                autoReconnectCircuitBroken = false;
+                autoReconnectStreakCount = 0;
+                logUi(null, "Coupe-circuit réarmé (action manuelle depuis Configure)");
+            }
+            scanUsb();
+        });
         if (btnPingUsb != null) btnPingUsb.setOnClickListener(v -> openSelectedUsb());
         if (btnQuit != null) btnQuit.setOnClickListener(v -> confirmQuit());
 
@@ -1295,6 +1332,18 @@ tabRegisters = findViewById(R.id.tabRegisters);
         // BT
         if (btnBtRefresh != null) btnBtRefresh.setOnClickListener(v -> refreshBondedBtList());
         if (btnBtConnect != null) btnBtConnect.setOnClickListener(v -> btConnectSelected());
+        // ✅ AJOUTÉ (7 août 2026, demande Paul — "réduire la vitesse de
+        // transmission entre 19200 et 4800 dans les tests de diagnostic,
+        // autant pour BT que USB" — précisé ensuite : "pas à l'intérieur du
+        // tab, le média est supporté par le tab mais pas à l'intérieur" —
+        // donc placé ici, dans CONFIGURE (zone média), pas dans
+        // RegisterTabFragment (zone communication directe avec le
+        // registre). Appui long, pas un nouveau bouton (évite de modifier
+        // le layout XML en aveugle sans vérification visuelle).
+        if (btnBtConnect != null) btnBtConnect.setOnLongClickListener(v -> {
+            showBaudDiagnosticDialog();
+            return true;
+        });
         if (btnBtDisconnect != null) btnBtDisconnect.setOnClickListener(v -> btDisconnect());
         // ✅ BT Signal scan
         if (btnBtSignalScan != null) {
@@ -3126,6 +3175,45 @@ private void setupTabsTop() {
         // dans cet état.
         try {
             if (tabRegisters == null || tabRegisters.getTabCount() == 0) {
+                // ✅ FIX (7 août 2026, demande Paul — coupe-circuit) — vérifié
+                // AVANT le refroidissement simple : si le circuit est déjà
+                // ouvert (boucle détectée précédemment), on n'essaie même
+                // plus, peu importe le temps écoulé, tant que l'utilisateur
+                // n'a pas agi manuellement depuis Configure.
+                if (autoReconnectCircuitBroken) {
+                    logUi(null, "Reconnexion auto désactivée (boucle détectée précédemment) — "
+                        + "passe par Configure pour reconnecter manuellement");
+                    return;
+                }
+                long nowCooldown = System.currentTimeMillis();
+
+                // Détection du patron de boucle : compte les tentatives dans une
+                // fenêtre glissante de 30s, peu importe le refroidissement de 3s.
+                if (nowCooldown - autoReconnectStreakWindowStartMs > AUTO_RECONNECT_STREAK_WINDOW_MS) {
+                    autoReconnectStreakWindowStartMs = nowCooldown;
+                    autoReconnectStreakCount = 0;
+                }
+                autoReconnectStreakCount++;
+                if (autoReconnectStreakCount > AUTO_RECONNECT_STREAK_LIMIT) {
+                    autoReconnectCircuitBroken = true;
+                    logUi(null, "⚠ Boucle de reconnexion détectée (" + autoReconnectStreakCount
+                        + " tentatives en moins de 30s) — automatique COUPÉ, passage forcé à Configure");
+                    runOnUiThread(() -> {
+                        try {
+                            showPage(2);
+                            Toast.makeText(this, "⚠ Reconnexion automatique arrêtée (boucle détectée) — "
+                                + "vérifie la connexion depuis Configure", Toast.LENGTH_LONG).show();
+                        } catch (Exception ignored) {}
+                    });
+                    return;
+                }
+
+                if (nowCooldown - lastAutoReconnectAttemptMs < AUTO_RECONNECT_COOLDOWN_MS) {
+                    logUi(null, "Plus aucun tab (transitoire, probablement pendant une migration) — "
+                        + "reconnexion auto sautée, une tentative vient déjà de se produire");
+                    return;
+                }
+                lastAutoReconnectAttemptMs = nowCooldown;
                 logUi(null, "Plus aucun tab — tentative de reconnexion automatique déclenchée");
                 // ✅ FIX (6 août 2026, demande Paul — "on devrait toujours
                 // avoir un tab si pas de registre, sinon un par défaut") —
@@ -3435,10 +3523,15 @@ private void setupTabsTop() {
                 String serial = decodeAz(tmp.opGetField(80, 600));
                 if (serial != null && !serial.trim().isEmpty()) {
                     final String serialFinal = serial.trim();
+                    // ✅ AJOUTÉ (7 août 2026, demande Paul)
+                    String fwTmp;
+                    try { fwTmp = tmp.opGetFirmwareVersion(); } catch (Exception ignored4) { fwTmp = null; }
+                    final String fwFinal = fwTmp;
                     android.util.Log.i(TAG, "finalizeTcpRegisterTab: node explicite " + expectedNode + " -> serial=" + serialFinal);
                     ui.post(() -> {
                         if (consoleTarget != null) {
-                            consoleTarget.setText("Node " + expectedNode + " — serial=" + serialFinal + " (onglet créé)");
+                            consoleTarget.setText("Node " + expectedNode + " — serial=" + serialFinal
+                                + "  [Firmware (" + (fwFinal != null && !fwFinal.isEmpty() ? fwFinal : "—") + ")] (onglet créé)");
                         }
                         upsertRegisterTabFromScan(transportKey, expectedNode, 255, serialFinal, true);
                         refreshAllTabsMediaStatus();
@@ -3482,6 +3575,14 @@ private void setupTabsTop() {
 
                 if (serialValid) {
                     final String serialFinal = serialFixed.trim();
+                    // ✅ AJOUTÉ (7 août 2026, demande Paul) — échoue proprement
+                    // pour LC3 (pas encore implémenté), affiche "—".
+                    String fwTmp2;
+                    try {
+                        Lc3Link lc3fwTcp = new Lc3Link(io);
+                        fwTmp2 = lc3fwTcp.opGetFirmwareVersion();
+                    } catch (Exception ignored5) { fwTmp2 = null; }
+                    final String fwFinal2 = fwTmp2;
                     // ✅ FIX : sans cet appel, RegisterSessionManager.getOrCreate()
                     // (appelé depuis le thread UI par RegisterTabFragment) ne sait
                     // JAMAIS que ce transport TCP est un LC3 — il retombe sur un
@@ -3496,7 +3597,8 @@ private void setupTabsTop() {
                     }
                     ui.post(() -> {
                         if (consoleTarget != null) {
-                            consoleTarget.setText("LC3 trouvé — node=" + node + " serial=" + serialFinal + " (onglet créé)");
+                            consoleTarget.setText("LC3 trouvé — node=" + node + " serial=" + serialFinal
+                                + "  [Firmware (" + (fwFinal2 != null && !fwFinal2.isEmpty() ? fwFinal2 : "—") + ")] (onglet créé)");
                         }
                         android.util.Log.i(TAG, "finalizeTcpRegisterTab: appel upsertRegisterTabFromScan(node=" + node + ", serial=" + serialFinal + ")");
                         // ✅ FIX : la version à 5 arguments devine isLc3 en regardant
@@ -3525,10 +3627,15 @@ private void setupTabsTop() {
                     if (serial != null && !serial.trim().isEmpty()) {
                         final int nodeFinal = node;
                         final String serialFinal = serial.trim();
+                        // ✅ AJOUTÉ (7 août 2026, demande Paul)
+                        String fwTmp3;
+                        try { fwTmp3 = tmp.opGetFirmwareVersion(); } catch (Exception ignored6) { fwTmp3 = null; }
+                        final String fwFinal3 = fwTmp3;
                         android.util.Log.i(TAG, "finalizeTcpRegisterTab: LCR-II trouvé node=" + nodeFinal + " serial=" + serialFinal);
                         ui.post(() -> {
                             if (consoleTarget != null) {
-                                consoleTarget.setText("LCR-II trouvé — node=" + nodeFinal + " serial=" + serialFinal + " (onglet créé)");
+                                consoleTarget.setText("LCR-II trouvé — node=" + nodeFinal + " serial=" + serialFinal
+                                    + "  [Firmware (" + (fwFinal3 != null && !fwFinal3.isEmpty() ? fwFinal3 : "—") + ")] (onglet créé)");
                             }
                             upsertRegisterTabFromScan(transportKey, nodeFinal, 255, serialFinal, true, false);
                             refreshAllTabsMediaStatus();
@@ -3750,10 +3857,19 @@ private void setupTabsTop() {
                     Lc3Link lc3tmp = new Lc3Link(ioFinal);
                     ticketNo = u32beDec(lc3tmp.opGetField(23, 3000));
                 } catch (Exception ignored) {}
-                found.put(lc3Node, new NodeScanItem(
+                NodeScanItem lc3Item = new NodeScanItem(
                     lc3Node, serialId, ticketNo,
                     false, false, false, false, true
-                ));
+                );
+                // ✅ AJOUTÉ (7 août 2026, demande Paul) — Lc3Link n'a pas
+                // encore d'implémentation réelle (voir commentaire honnête
+                // dans Lc3Link.opGetFirmwareVersion) — échoue proprement,
+                // affiche "—" plutôt qu'une valeur LCR-II erronée.
+                try {
+                    Lc3Link lc3fw = new Lc3Link(ioFinal);
+                    lc3Item.firmware = lc3fw.opGetFirmwareVersion();
+                } catch (Exception ignored3) { lc3Item.firmware = null; }
+                found.put(lc3Node, lc3Item);
                 android.util.Log.i("MainActivity", "Scan LC3: node=" + lc3Node
                         + " serial=" + serialId);
                 // Pré-populer knownLc3TransportKeys sans créer de session complète
@@ -3777,10 +3893,19 @@ private void setupTabsTop() {
                         String serialId = decodeAz(tmp.opGetField(80, TF));
                         String ticketNo = u32beDec(tmp.opGetField(23, TF));
                         if (serialId != null && !serialId.trim().isEmpty()) {
-                            found.put(node, new NodeScanItem(
+                            NodeScanItem item = new NodeScanItem(
                                 node, serialId, ticketNo,
                                 ticketPending, deliveryActive, flowActive, false
-                            ));
+                            );
+                            // ✅ AJOUTÉ (7 août 2026, demande Paul — "va me
+                            // chercher aussi le firmware, affiche-le moi
+                            // entre [Firmware ()] dans chacun des tests
+                            // USB, BT et TCP") — réutilise le même LcpLink
+                            // temporaire déjà ouvert pour ce node, pas de
+                            // sonde séparée.
+                            try { item.firmware = tmp.opGetFirmwareVersion(); }
+                            catch (Exception ignored2) { item.firmware = null; }
+                            found.put(node, item);
                         }
                     } catch (Exception ignored) {}
                 }
@@ -3805,7 +3930,9 @@ private void setupTabsTop() {
                                 sb.append("Serial=").append(safeSerial(it.serialId))
                                   .append("  Node=").append(it.lcrnode)
                                   .append("  TO=").append(it.lcrnode)
-                                  .append("  From=255\n");
+                                  .append("  From=255")
+                                  .append("  [Firmware (").append(it.firmware != null && !it.firmware.isEmpty() ? it.firmware : "—").append(")]")
+                                  .append("\n");
                             }
 
                            final String result = sb.toString().trim();
@@ -3971,6 +4098,10 @@ private void setupTabsTop() {
         final int lcrnode;
         final String serialId;
         String qtySuffix; // " | N=.. G=.."
+        // ✅ AJOUTÉ (7 août 2026, demande Paul — "va me chercher aussi le
+        // firmware, affiche-le moi entre [Firmware ()] dans chacun des
+        // tests USB, BT et TCP")
+        String firmware;
         final String ticketNo;
         final boolean ticketPending;
         final boolean deliveryActive;
@@ -4888,7 +5019,108 @@ private boolean ensureBtConnectPermission() {
         return btBonded.get(idx);
     }
 
+    /** ✅ AJOUTÉ (7 août 2026, demande Paul — "réduire la vitesse de
+     *  transmission entre 19200 et 4800 dans les tests de diagnostic,
+     *  autant pour BT que USB") — ⚠️ RISQUÉ : change la vitesse DU REGISTRE
+     *  via LCP (Set Baud, msgID 0x7C), puis reconfigure le port local pour
+     *  matcher. Un mismatch entre les deux rend le registre injoignable
+     *  jusqu'à un cycle d'alimentation. Diagnostic seulement — jamais
+     *  utilisé dans le flux normal. Placé ici (zone média/CONFIGURE), pas
+     *  dans RegisterTabFragment (zone communication directe registre) —
+     *  précision de Paul : le média est "supporté par" le tab mais la
+     *  configuration média elle-même n'appartient pas à l'intérieur du tab. */
+    private void showBaudDiagnosticDialog() {
+        int targetNode = currentRegNode;
+        if (targetNode <= 0) {
+            Toast.makeText(this, "Aucun registre actif — sélectionne d'abord un tab", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        String activeTransportKey = (mediaTransportManager != null) ? mediaTransportManager.getActiveKey() : null;
+        if (activeTransportKey == null || activeTransportKey.trim().isEmpty()) {
+            Toast.makeText(this, "Aucun transport actif", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        com.pa.lcr.lcp.DeliveryController c = com.pa.lcr.lcp.RegisterSessionManager
+                .get(this).getController(activeTransportKey, targetNode);
+        if (c == null) {
+            Toast.makeText(this, "Registre non connecté", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        final String finalTransportKey = activeTransportKey;
+        final int finalNode = targetNode;
+        final String[] labels = {"19200 (défaut)", "9600", "4800"};
+        final int[] indices = {
+            com.pa.lcr.lcp.LcpLink.BAUD_IDX_19200,
+            com.pa.lcr.lcp.LcpLink.BAUD_IDX_9600,
+            com.pa.lcr.lcp.LcpLink.BAUD_IDX_4800
+        };
+        final int[] usbBauds = {19200, 9600, 4800};
+
+        new android.app.AlertDialog.Builder(this)
+            .setTitle("⚠️ Diagnostic — Vitesse de transmission")
+            .setMessage("Change la vitesse DU REGISTRE lui-même (node=" + finalNode + "). Si la "
+                + "reconfiguration locale échoue après ce changement, la communication sera "
+                + "perdue jusqu'à un cycle d'alimentation du registre.\n\n"
+                + "Sur BT, l'effet réel n'est pas garanti (le lien radio SPP n'a pas de "
+                + "\"vitesse\" au sens câblé) — à valider sur le terrain.\n\n"
+                + "Choisir une vitesse :")
+            .setItems(labels, (dlg, which) -> {
+                logMedia1("[ACTION-CLIC] SET_BAUD_DIAGNOSTIC (" + labels[which] + ") node=" + finalNode);
+                new android.app.AlertDialog.Builder(this)
+                    .setTitle("Confirmer le changement de vitesse")
+                    .setMessage("Vitesse choisie : " + labels[which] + " pour node=" + finalNode + ". Continuer?")
+                    .setPositiveButton("Confirmer", (d2, w2) ->
+                        applyBaudChange(c, finalTransportKey, indices[which], usbBauds[which], labels[which]))
+                    .setNegativeButton("Annuler", null)
+                    .show();
+            })
+            .setNegativeButton("Annuler", null)
+            .show();
+    }
+
+    private void applyBaudChange(com.pa.lcr.lcp.DeliveryController c, String transportKey,
+            int lcpBaudIndex, int usbBaud, String label) {
+        new Thread(() -> {
+            try {
+                c.setBaud(lcpBaudIndex);
+                logMedia1("[BAUD] Registre confirmé à " + label + " (Set Baud LCP OK)");
+
+                // Reconfiguration IMMÉDIATE du port local pour matcher — sinon
+                // perte de communication garantie dès la prochaine trame.
+                if ("USB".equalsIgnoreCase(mediaShortFromTransportKey(transportKey))) {
+                    try {
+                        UsbSerialPort port = UsbSession.getPort();
+                        if (port != null) {
+                            port.setParameters(usbBaud, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
+                            logMedia1("[BAUD] Port USB local reconfiguré à " + usbBaud + " bauds pour matcher");
+                        } else {
+                            logMedia1("[BAUD] ⚠ Port USB introuvable pour reconfiguration locale — "
+                                + "communication probablement perdue, cycle d'alimentation du registre requis");
+                        }
+                    } catch (Exception e) {
+                        logMedia1("[BAUD] ⚠ Reconfiguration USB locale ERR: " + e.getMessage()
+                            + " — communication probablement perdue");
+                    }
+                } else {
+                    logMedia1("[BAUD] Transport BT — aucune reconfiguration locale applicable "
+                        + "(SPP n'expose pas de paramètre de vitesse côté app)");
+                }
+            } catch (Exception e) {
+                logMedia1("[BAUD] Set Baud LCP ERR: " + e.getMessage());
+            }
+        }).start();
+    }
+
     private void btConnectSelected() {
+        // ✅ FIX (7 août 2026, demande Paul — coupe-circuit) — un vrai clic
+        // manuel sur Connexion depuis Configure réarme le coupe-circuit —
+        // l'utilisateur a explicitement repris le contrôle, la reconnexion
+        // automatique peut recommencer à fonctionner normalement.
+        if (autoReconnectCircuitBroken) {
+            autoReconnectCircuitBroken = false;
+            autoReconnectStreakCount = 0;
+            logUi(null, "Coupe-circuit réarmé (action manuelle depuis Configure)");
+        }
         if (!ensureBtConnectPermission()) {
             if (txtBtStatus != null) txtBtStatus.setText("BT : permission requise (BLUETOOTH_CONNECT)");
             logMedia1("BT Connect: permission");
