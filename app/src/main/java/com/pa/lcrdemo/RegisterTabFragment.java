@@ -212,7 +212,7 @@ public class RegisterTabFragment extends Fragment {
                 btnRetourWO.setText("Retour au Bon de travail");
                 btnRetourWO.setBackgroundColor(
                     android.graphics.Color.parseColor("#185FA5"));
-                btnRetourWO.setOnClickListener(v -> retournerAuWorkOrder());
+                btnRetourWO.setOnClickListener(v -> { LogBus.api(node, "[ACTION-CLIC] RETOUR_WO"); retournerAuWorkOrder(); });
             }
 
             // ✅ MAC pour deep link de retour
@@ -1533,6 +1533,14 @@ public class RegisterTabFragment extends Fragment {
             });
         }
         if (btnConnect != null) btnConnect.setOnClickListener(v -> {
+            // ✅ FIX (7 août 2026, demande Paul — "chaque action fait dans le
+            // tab qu'on puisse le suivre dans l'onglet Support... repérer ce
+            // comportement selon une fonction qu'on a cliqué") — chaque
+            // bouton d'action logue maintenant un marqueur clair et distinct
+            // dès le clic, avant même de savoir si l'action va réussir —
+            // pour qu'un futur repérage dans Support puisse toujours dire
+            // "c'est CE clic qui a déclenché ce qui suit".
+            LogBus.api(node, "[ACTION-CLIC] CONNECT_LCP");
             // ✅ FIX (demandé) : Connect LCP valide le transport ET le registre
             // précis avant de conclure quoi que ce soit. Si aucune session
             // n'existe encore, on reconnecte directement (rien à valider).
@@ -1546,6 +1554,7 @@ public class RegisterTabFragment extends Fragment {
             });
         });
         if (btnA != null) btnA.setOnClickListener(v -> {
+            LogBus.api(node, "[ACTION-CLIC] RESOLVE_A");
             if (controller == null) return;
             // ✅ Confirmation si RUNNING_FLOWING
             if (controller.getState() == DeliveryState.RUNNING_FLOWING) {
@@ -1563,6 +1572,7 @@ public class RegisterTabFragment extends Fragment {
         // ✅ Bouton Annuler livraison
         if (btnAnnuler != null) {
             btnAnnuler.setOnClickListener(v -> {
+                LogBus.api(node, "[ACTION-CLIC] ANNULER");
                 new android.app.AlertDialog.Builder(requireContext())
                     .setTitle("Confirmer l'annulation")
                     .setMessage("Aucun volume livré. La livraison sera annulée et le registre réinitialisé.")
@@ -1572,6 +1582,7 @@ public class RegisterTabFragment extends Fragment {
             });
         }
         if (btnB != null) btnB.setOnClickListener(v -> {
+            LogBus.api(node, "[ACTION-CLIC] STATUS_B");
             if (controller == null) { reconnectThisRegister(true); return; }
             // ✅ FIX (demandé) : Status(B) valide maintenant le transport ET le
             // registre précis (node+serial) en envoyant une VRAIE commande
@@ -1582,6 +1593,7 @@ public class RegisterTabFragment extends Fragment {
         });
         if (btnC != null) {
             btnC.setOnClickListener(v -> {
+                LogBus.api(node, "[ACTION-CLIC] NEW_C");
                 if (controller == null) return;
                 // ✅ FIX (audit complet) : btnC (New) n'avait AUCUNE vérification
                 // IO avant d'agir — seul bouton d'action à ne pas passer par le
@@ -1655,6 +1667,7 @@ public class RegisterTabFragment extends Fragment {
             });
         }
         if (btnContinue != null) btnContinue.setOnClickListener(v -> {
+            LogBus.api(node, "[ACTION-CLIC] CONTINUER");
             if (controller == null) return;
             if (!verifierIoAvantAction("CONTINUE")) return;
             if (controller.getState() != DeliveryState.RUNNING_PAUSED) {
@@ -1666,6 +1679,7 @@ public class RegisterTabFragment extends Fragment {
             controller.resumeIfPaused();
         });
         if (btnFinish != null) btnFinish.setOnClickListener(v -> {
+            LogBus.api(node, "[ACTION-CLIC] TERMINER");
             if (controller == null) return;
             if (!verifierIoAvantAction("FINISH")) return;
             boolean stableOff2 = false;
@@ -1690,6 +1704,7 @@ public class RegisterTabFragment extends Fragment {
         // Si delta >= 0.5L vs WO → bloquer reprint standard + ticket incident custom
         if (btnReprintTicket != null) {
             btnReprintTicket.setOnClickListener(v -> {
+                LogBus.api(node, "[ACTION-CLIC] REIMPRIMER");
                 DeliveryController c = controller;
                 if (c == null) return;
                 // ✅ FIX (audit complet) : Reprint n'avait AUCUNE vérification IO
@@ -1835,7 +1850,7 @@ public class RegisterTabFragment extends Fragment {
 
         // ✅ RETOUR WO: câblage du bouton Retour au Work Order (Bloc 5)
         if (btnRetourWO != null) {
-            btnRetourWO.setOnClickListener(v -> retournerAuWorkOrder());
+            btnRetourWO.setOnClickListener(v -> { LogBus.api(node, "[ACTION-CLIC] RETOUR_WO"); retournerAuWorkOrder(); });
         }
 
         // ✅ Custom print — impression ligne par ligne via opPrintText
@@ -1843,7 +1858,10 @@ public class RegisterTabFragment extends Fragment {
             btnCustomPrint.setOnClickListener(v -> lancerImpressionCustom());
         }
         if (btnScanProducts != null) {
-            btnScanProducts.setOnClickListener(v -> lancerScanProduits());
+            btnScanProducts.setOnClickListener(v -> {
+                LogBus.api(node, "[ACTION-CLIC] SCAN_PRODUITS");
+                lancerScanProduits();
+            });
         }
     }
 
@@ -2390,7 +2408,7 @@ public class RegisterTabFragment extends Fragment {
                         btnRetourWO.setEnabled(true);
                         btnRetourWO.setText("Retour au Bon de livraison");
                         btnRetourWO.setBackgroundColor(android.graphics.Color.parseColor("#185FA5"));
-                        btnRetourWO.setOnClickListener(v -> retournerAuWorkOrder());
+                        btnRetourWO.setOnClickListener(v -> { LogBus.api(node, "[ACTION-CLIC] RETOUR_WO"); retournerAuWorkOrder(); });
                     } else {
                         btnRetourWO.setVisibility(android.view.View.GONE);
                     }
@@ -2403,6 +2421,7 @@ public class RegisterTabFragment extends Fragment {
     // ✅ Impression custom — ticket ligne par ligne via opPrintText
     // =========================================================
     private void lancerImpressionCustom() {
+        LogBus.api(node, "[ACTION-CLIC] IMPRESSION_CUSTOM");
         DeliveryController c = controller;
         if (c == null) return;
         // ✅ FIX (audit complet) : Print Custom n'avait AUCUNE vérification IO
