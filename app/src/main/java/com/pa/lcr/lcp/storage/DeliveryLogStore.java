@@ -39,9 +39,13 @@ public class DeliveryLogStore {
 
     private final DeliveryDb helper;
     private final Executor io;
+    // ✅ AJOUTÉ (7 août 2026, demande Paul) — nécessaire pour
+    // backupAndClearAllAsync() (écriture MediaStore/legacy dans Téléchargements).
+    private final Context appCtx;
 
     public DeliveryLogStore(Context context) {
-        this.helper = new DeliveryDb(context.getApplicationContext());
+        this.appCtx = context.getApplicationContext();
+        this.helper = new DeliveryDb(this.appCtx);
         this.io = Executors.newSingleThreadExecutor();
     }
 
@@ -89,6 +93,123 @@ public class DeliveryLogStore {
         try {
             android.util.Log.i("DeliveryLogStore", "purgeOlderThanDays(" + days + "): entretien terminé");
         } catch (Exception ignored) {}
+    }
+
+    // =========================================================
+    // ✅ AJOUTÉ (7 août 2026, demande Paul — "un bouton pour vider l'écran
+    // support et repartir en neuf, mais avant il doit faire un backup, qui
+    // lui aussi après 7 jours est supprimé") — sauvegarde intégrale de
+    // log_bus_event dans un fichier JSON horodaté dans Téléchargements
+    // (même mécanisme que LocalDeliveryBackup — survit à une désinstallation),
+    // PUIS vidage réel de la table. Le backup lui-même est purgé après 7
+    // jours par purgeOldSupportBackups(), appelée automatiquement au
+    // démarrage (voir RegisterSessionManager) — cohérent avec la politique
+    // de rétention déjà en place pour les backups de livraison.
+    // =========================================================
+    public interface ClearCallback {
+        void onDone(boolean success, int rowsBackedUp, String errorMessage);
+    }
+
+    public void backupAndClearAllAsync(ClearCallback cb) {
+        io.execute(() -> {
+            int rowsBackedUp = 0;
+            try {
+                SQLiteDatabase db = helper.getWritableDatabase();
+
+                // 1) Export intégral vers JSON
+                org.json.JSONArray arr = new org.json.JSONArray();
+                try (Cursor c = db.rawQuery(
+                        "SELECT id, ts, node, src, msg FROM log_bus_event ORDER BY ts ASC", null)) {
+                    while (c.moveToNext()) {
+                        JSONObject o = new JSONObject();
+                        o.put("id", c.getLong(0));
+                        o.put("ts", c.getLong(1));
+                        o.put("node", c.isNull(2) ? JSONObject.NULL : (Object) c.getInt(2));
+                        o.put("src", c.isNull(3) ? JSONObject.NULL : c.getString(3));
+                        o.put("msg", c.isNull(4) ? JSONObject.NULL : c.getString(4));
+                        arr.put(o);
+                        rowsBackedUp++;
+                    }
+                }
+
+                JSONObject root = new JSONObject();
+                root.put("backup_ts", System.currentTimeMillis());
+                root.put("row_count", rowsBackedUp);
+                root.put("events", arr);
+
+                String fileName = "filgo_support_backup_" + System.currentTimeMillis() + ".json";
+                byte[] bytes = root.toString(2).getBytes(StandardCharsets.UTF_8);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    LocalDeliveryBackup.backupViaMediaStore(appCtx, fileName, bytes);
+                } else {
+                    LocalDeliveryBackup.backupViaLegacyFile(appCtx, fileName, bytes);
+                }
+
+                // 2) Vidage réel — seulement après que le backup ait réussi (pas d'exception
+                // levée avant ce point). log_bus_event est la table qui fait vraiment grossir
+                // l'écran Support (voir fix du 6 août) — c'est elle qu'on vide pour "repartir
+                // en neuf". Les tables liées à un ticket (delivery_event, api_trace, etc.) ne
+                // sont PAS touchées ici — elles ont leur propre cycle de vie lié aux livraisons
+                // réelles, pas au confort d'affichage de Support.
+                db.delete("log_bus_event", null, null);
+
+                android.util.Log.i("DeliveryLogStore", "backupAndClearAllAsync: " + rowsBackedUp
+                        + " événements sauvegardés dans " + fileName + " puis log_bus_event vidée");
+                if (cb != null) cb.onDone(true, rowsBackedUp, null);
+            } catch (Exception e) {
+                android.util.Log.w("DeliveryLogStore", "backupAndClearAllAsync ERR: " + e.getMessage());
+                if (cb != null) cb.onDone(false, rowsBackedUp, e.getMessage());
+            }
+        });
+    }
+
+    /** Purge les backups Support de plus de {days} jours — appelée au démarrage, comme
+     *  purgeOldSyncedBackupsAsync() pour les backups de livraison. Politique simple par âge
+     *  (pas de vérification "synced" — ce sont des archives de logs, pas des données
+     *  financières à protéger comme les livraisons). */
+    public static void purgeOldSupportBackupsAsync(Context ctx, int days) {
+        new Thread(() -> {
+            long cutoffMs = System.currentTimeMillis() - (days * 24L * 60L * 60L * 1000L);
+            int deleted = 0, errors = 0;
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    String[] projection = { MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DISPLAY_NAME,
+                            MediaStore.MediaColumns.DATE_ADDED };
+                    String selection = MediaStore.MediaColumns.DISPLAY_NAME + " LIKE ?";
+                    String[] selectionArgs = { "filgo_support_backup_%.json" };
+                    try (Cursor c = ctx.getContentResolver().query(
+                            MediaStore.Downloads.EXTERNAL_CONTENT_URI, projection, selection, selectionArgs, null)) {
+                        if (c == null) return;
+                        int idCol = c.getColumnIndexOrThrow(MediaStore.MediaColumns._ID);
+                        int dateCol = c.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_ADDED);
+                        while (c.moveToNext()) {
+                            long dateAddedMs = c.getLong(dateCol) * 1000L;
+                            if (dateAddedMs >= cutoffMs) continue;
+                            long id = c.getLong(idCol);
+                            Uri fileUri = Uri.withAppendedPath(MediaStore.Downloads.EXTERNAL_CONTENT_URI, String.valueOf(id));
+                            try { ctx.getContentResolver().delete(fileUri, null, null); deleted++; }
+                            catch (Exception e) { errors++; }
+                        }
+                    }
+                } else {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        int perm = ctx.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE);
+                        if (perm != android.content.pm.PackageManager.PERMISSION_GRANTED) return;
+                    }
+                    File downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+                    File[] matches = downloads.listFiles((dir, name) ->
+                            name.startsWith("filgo_support_backup_") && name.endsWith(".json"));
+                    if (matches == null) return;
+                    for (File f : matches) {
+                        if (f.lastModified() >= cutoffMs) continue;
+                        if (f.delete()) deleted++; else errors++;
+                    }
+                }
+            } catch (Exception e) {
+                android.util.Log.w("DeliveryLogStore", "purgeOldSupportBackupsAsync ERR: " + e.getMessage());
+            }
+            android.util.Log.i("DeliveryLogStore", "purgeOldSupportBackupsAsync: supprimés=" + deleted + " erreurs=" + errors);
+        }, "SupportBackupPurge").start();
     }
 
     // ----------------------------

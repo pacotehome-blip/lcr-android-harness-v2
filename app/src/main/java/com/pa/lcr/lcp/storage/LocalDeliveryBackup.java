@@ -69,7 +69,9 @@ public class LocalDeliveryBackup {
         }
     }
 
-    private static void backupViaMediaStore(Context ctx, String fileName, byte[] bytes) {
+    // ✅ FIX (7 août 2026, demande Paul) — visibilité élargie (package-private,
+    // au lieu de private) pour être réutilisée par DeliveryLogStore.backupAndClearAllAsync().
+    static void backupViaMediaStore(Context ctx, String fileName, byte[] bytes) {
         try {
             ContentValues cv = new ContentValues();
             cv.put(MediaStore.MediaColumns.DISPLAY_NAME, fileName);
@@ -95,7 +97,8 @@ public class LocalDeliveryBackup {
         }
     }
 
-    private static void backupViaLegacyFile(Context ctx, String fileName, byte[] bytes) {
+    // ✅ FIX (7 août 2026, demande Paul) — visibilité élargie, voir commentaire ci-dessus.
+    static void backupViaLegacyFile(Context ctx, String fileName, byte[] bytes) {
         try {
             // Best-effort : si la permission legacy (Android 9-10) n'a pas été accordée,
             // on échoue silencieusement plutôt que de la redemander ici (pas d'Activity

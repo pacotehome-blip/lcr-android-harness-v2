@@ -1012,6 +1012,17 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="Copier"/>
+
+            <!-- ✅ AJOUTÉ (7 août 2026, demande Paul — "un bouton pour vider
+                 l'écran support et repartir en neuf, mais avant il doit
+                 faire un backup") -->
+            <Button
+                android:id="@+id/btnSupportClearAll"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:backgroundTint="#B71C1C"
+                android:text="Vider (avec backup)"/>
         </LinearLayout>
 
 

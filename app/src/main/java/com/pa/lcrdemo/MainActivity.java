@@ -956,6 +956,34 @@ public class MainActivity extends AppCompatActivity {
         if (btnSupportCopyAll != null) {
             btnSupportCopyAll.setOnClickListener(v -> copySupportListToClipboard());
         }
+        // ✅ AJOUTÉ (7 août 2026, demande Paul — "un bouton pour vider l'écran
+        // support et repartir en neuf, mais avant il doit faire un backup") —
+        // confirmation explicite avant l'action (destructive, même avec backup).
+        Button btnSupportClearAll = findViewById(R.id.btnSupportClearAll);
+        if (btnSupportClearAll != null) {
+            btnSupportClearAll.setOnClickListener(v -> {
+                new android.app.AlertDialog.Builder(this)
+                    .setTitle("Vider l'écran Support")
+                    .setMessage("Tous les événements seront d'abord sauvegardés dans un fichier "
+                        + "JSON (Téléchargements, conservé 7 jours), puis l'écran Support repartira "
+                        + "à zéro. Continuer?")
+                    .setPositiveButton("Vider", (dlg, which) -> {
+                        com.pa.lcr.lcp.storage.DeliveryLogStore store =
+                            new com.pa.lcr.lcp.storage.DeliveryLogStore(getApplicationContext());
+                        store.backupAndClearAllAsync((success, rowsBackedUp, errorMessage) -> runOnUiThread(() -> {
+                            if (success) {
+                                Toast.makeText(this, rowsBackedUp + " événements sauvegardés — "
+                                    + "écran Support vidé", Toast.LENGTH_LONG).show();
+                                refreshSupportEvents();
+                            } else {
+                                Toast.makeText(this, "Échec du vidage : " + errorMessage, Toast.LENGTH_LONG).show();
+                            }
+                        }));
+                    })
+                    .setNegativeButton("Annuler", null)
+                    .show();
+            });
+        }
         edtSupportValidatedBy = findViewById(R.id.edtSupportValidatedBy);
         rowSupportIncident = findViewById(R.id.rowSupportIncident);
         Button btnSupportRecordIncident = findViewById(R.id.btnSupportRecordIncident);
@@ -1796,8 +1824,19 @@ private void setupTabsTop() {
                     String level = c.isNull(8) ? "INFO" : c.getString(8);
 
                     String tsFmt = android.text.format.DateFormat.format("MM-dd HH:mm:ss", ts).toString();
-                    String header = tsFmt + "  " + (eventCode != null ? eventCode : eventType)
-                            + "  [" + (ticketNo != null ? ticketNo : "—") + "]";
+                    // ✅ FIX (7 août 2026, demande Paul — "une colonne après
+                    // le timestamp avec le ticket_number associé") — avant ce
+                    // fix, le ticket_no était relégué à la toute fin de la
+                    // ligne entre crochets, facile à manquer. Déplacé juste
+                    // après le timestamp, avec une largeur fixe (padStart)
+                    // pour qu'il s'aligne comme une vraie colonne d'une ligne
+                    // à l'autre — txtRowHeader utilise déjà une police à
+                    // espacement fixe (monospace), donc l'alignement visuel
+                    // fonctionne directement sans changer le layout XML.
+                    String ticketCol = ticketNo != null && !ticketNo.trim().isEmpty() ? ticketNo.trim() : "—";
+                    if (ticketCol.length() > 10) ticketCol = ticketCol.substring(0, 10);
+                    String header = tsFmt + "  [" + String.format(java.util.Locale.ROOT, "%-10s", ticketCol) + "]  "
+                            + (eventCode != null ? eventCode : eventType);
                     String detail = (serialId != null ? "serial=" + serialId + "  " : "")
                             + (eventWhere != null ? "où=" + eventWhere + "  " : "")
                             + (detailShort != null ? detailShort : "");

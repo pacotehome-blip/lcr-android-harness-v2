@@ -99,6 +99,11 @@ public final class RegisterSessionManager {
         try {
             com.pa.lcr.lcp.storage.LocalDeliveryBackup.purgeOldSyncedBackupsAsync(appCtx, 7);
         } catch (Exception ignored) {}
+        // ✅ AJOUTÉ (7 août 2026, demande Paul) — même politique de rétention 7 jours
+        // pour les backups Support créés par le nouveau bouton "Vider (avec backup)".
+        try {
+            com.pa.lcr.lcp.storage.DeliveryLogStore.purgeOldSupportBackupsAsync(appCtx, 7);
+        } catch (Exception ignored) {}
         // Charger les transports LC3 connus depuis SharedPreferences
         try {
             android.content.SharedPreferences prefs =
