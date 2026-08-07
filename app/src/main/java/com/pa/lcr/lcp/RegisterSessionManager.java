@@ -261,7 +261,24 @@ public final class RegisterSessionManager {
         // collision de protocole avec le live polling d'une session déjà
         // active sur le même transport physique, même avec une seule
         // instance de DeliveryController.
-        synchronized (LcpNodeLocks.forNode(nodeDec)) {
+        // ✅ FIX CRITIQUE (7 août 2026) — synchronized remplacé par
+        // tryLock(timeout) — voir LcpNodeLocks pour le détail complet. Sans
+        // ça, une sonde pouvait rester bloquée indéfiniment derrière une
+        // session morte tenant le verrou pour toujours, empêchant même une
+        // NOUVELLE connexion parfaitement saine de jamais s'établir.
+        java.util.concurrent.locks.ReentrantLock lock;
+        try {
+            lock = LcpNodeLocks.tryAcquire(nodeDec, LcpNodeLocks.LOCK_TIMEOUT_MS);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            return null;
+        }
+        if (lock == null) {
+            android.util.Log.w("RSM", "probeSerial: timeout verrou LCP (node=" + nodeDec
+                + ") — probablement une session morte bloquée, sonde abandonnée");
+            return null;
+        }
+        try {
         // Essai LCR-II
         try {
             LcpLink tmp = new LcpLink(io, nodeDec, fromDec, true);
@@ -295,7 +312,9 @@ public final class RegisterSessionManager {
         } catch (Exception ignored) {}
 
         return null;
-        } // fin synchronized (LcpNodeLocks.forNode(nodeDec)) — voir haut de probeSerial()
+        } finally {
+            LcpNodeLocks.release(lock);
+        }
     }
 
     // =========================================================
@@ -1064,19 +1083,17 @@ public final class RegisterSessionManager {
                 } catch (Exception ignored) {}
             }
 
-            long stInterval = STATUS_MS + statusBackoffMs;
-            if (now - lastStatusMs >= stInterval) {
-                lastStatusMs = now;
-                try {
-                    // ✅ FIX (6 août 2026, demande Paul) — ce sondage automatique
-                    // (toutes les ~2.5s pendant une livraison active) se faisait
-                    // aussi passer pour un vrai clic manuel sur Status — préexistant,
-                    // pas lié à mon fix du 5 août. Même correction : étiqueté
-                    // honnêtement, plus de faux "UI_STATUS_B" répété.
-                    c.requestStatusKeepAlive();
-                    if (statusBackoffMs > 0 && noChangeCount == 0) statusBackoffMs = Math.max(0, statusBackoffMs - 200);
-                } catch (Exception ignored) {}
-            }
+            // ✅ FIX (7 août 2026, demande Paul — "quand on a le running
+            // flowing, on n'a pas besoin du status, on est en plein
+            // travail") — le sondage de statut complet est retiré d'ici.
+            // Cette section (tick live) ne s'exécute QUE pendant
+            // RUNNING_FLOWING/RUNNING_PAUSED (retour anticipé plus haut pour
+            // tous les autres états) — donc le sondage complet tournait à
+            // CHAQUE livraison active, en concurrence directe avec le tick
+            // live pour le même verrou LCP, causant le lag rapporté. Le tick
+            // live et le tick snapshot (tout en haut de tick(), déjà
+            // inconditionnel) couvrent déjà net/gross/delCode/delStatus
+            // pendant une livraison — le statut complet était redondant ici.
         }
 
         @Override public void onStateChanged(DeliveryState state) {

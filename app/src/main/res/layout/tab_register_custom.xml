@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ✅ AJOUTÉ (7 août 2026, demande Paul — "ajouter une icône à gauche du
+     tab pour faire rafraîchir le tab... avec le bouton refresh à gauche du
+     tab on pourra suivre s'il y a une perte de connexion avec le registre")
+     — icône de rafraîchissement cliquable, dont la couleur reflète aussi
+     l'état de connexion réel avec le registre (pas juste un bouton, un
+     indicateur visuel). -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:paddingStart="4dp"
+    android:paddingEnd="4dp">
+
+    <ImageView
+        android:id="@+id/imgTabRefresh"
+        android:layout_width="20dp"
+        android:layout_height="20dp"
+        android:layout_marginEnd="6dp"
+        android:src="@android:drawable/ic_popup_sync"
+        android:contentDescription="Rafraîchir ce tab / état de connexion"
+        android:padding="2dp"/>
+
+    <TextView
+        android:id="@+id/txtTabLabel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:textAllCaps="true"
+        android:textSize="14sp"/>
+
+</LinearLayout>

@@ -400,6 +400,14 @@ public class RegisterTabFragment extends Fragment {
     // un drapeau — pour pouvoir la réappliquer directement si la vue se
     // recrée, sans dépendre d'un nouvel événement onTicketInfo.
     private volatile String lastUidReconstructedValue = null;
+    // ✅ FIX (7 août 2026, demande Paul — "même le ticket_number ne
+    // s'affichait pas") — même bug que delivery_uid, mais touche aussi
+    // ticketNo : initUi() le remet à "—" à chaque recréation de vue, et
+    // rien ne le réappliquait avant le prochain onTicketInfo() (qui peut
+    // tarder si la session est dans un état transitoire/fantôme au moment
+    // exact de la recréation). Dernière valeur connue mise en cache ici,
+    // réappliquée immédiatement dans initUi().
+    private volatile String lastKnownTicketNo = null;
     // ✅ FIX (4 août 2026, demande Paul — "j'ai commencé le logcat... tout est
     // présent dans ça", en creusant pourquoi l'export Support de 300 lignes
     // ne remontait pas jusqu'à l'échec réel) — un ticket qui échoue en
@@ -724,6 +732,9 @@ public class RegisterTabFragment extends Fragment {
 
         @Override
         public void onTicketInfo(String ticketNo, String deliveryUid) {
+            // ✅ FIX (7 août 2026) — mémorise la dernière valeur connue, pour
+            // pouvoir la réappliquer si la vue se recrée avant le prochain push.
+            if (ticketNo != null && !ticketNo.trim().isEmpty()) lastKnownTicketNo = ticketNo;
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
                 if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : " + (ticketNo == null ? "—" : ticketNo));
@@ -1176,11 +1187,13 @@ public class RegisterTabFragment extends Fragment {
         if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : —");
         if (txtTicketPending != null) txtTicketPending.setText("Ticket pending : —");
         if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : —");
-        // ✅ FIX (7 août 2026, demande Paul — "je n'ai toujours pas le
-        // delivery-uid") — réapplique immédiatement la valeur déjà connue en
-        // cache si la vue vient d'être recréée, sans attendre le prochain
-        // onTicketInfo() (jusqu'à 5s plus tard via le keep-alive) — évite un
-        // "—" visible inutilement pour un ticket déjà résolu auparavant.
+        // ✅ FIX (7 août 2026, demande Paul — "même le ticket_number ne
+        // s'affichait pas") — réapplique immédiatement les dernières valeurs
+        // connues (ticket + delivery_uid) si la vue vient d'être recréée,
+        // sans attendre le prochain onTicketInfo() qui peut tarder.
+        if (lastKnownTicketNo != null && !lastKnownTicketNo.trim().isEmpty()) {
+            if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : " + lastKnownTicketNo);
+        }
         if (lastUidReconstructedValue != null && !lastUidReconstructedValue.trim().isEmpty()) {
             if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : " + lastUidReconstructedValue);
         }
@@ -1377,6 +1390,17 @@ public class RegisterTabFragment extends Fragment {
             });
 
         } catch (Exception ignored) {}
+    }
+
+    /** ✅ AJOUTÉ (7 août 2026, demande Paul — "icône à gauche du tab pour
+     *  faire rafraîchir le tab") — point d'entrée public appelé depuis
+     *  MainActivity quand l'utilisateur clique l'icône de rafraîchissement
+     *  sur ce tab précis, sans avoir à l'ouvrir. Tracé distinctement dans
+     *  Support pour qu'on sache que c'est CE clic précis qui a déclenché
+     *  l'action, pas un rafraîchissement automatique. */
+    public void triggerManualRefreshFromTabIcon() {
+        LogBus.api(node, "[TAB-REFRESH] Rafraîchissement manuel déclenché depuis l'icône du tab");
+        runStatusBLikeButton("tab_refresh_icon");
     }
 
     private void runStatusBLikeButton(String reason) {

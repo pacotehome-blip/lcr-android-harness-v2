@@ -2850,9 +2850,35 @@ private void setupTabsTop() {
     private void addRegisterTabUi(TabSpec spec) {
         if (tabRegisters == null || spec == null) return;
         TabLayout.Tab t = tabRegisters.newTab();
-        t.setText(tabLabelOf(spec.mediaShort, spec.node, spec.serialId, spec.isLc3));
         t.setTag(spec.tabKey);
         tabRegisters.addTab(t, false);
+        // ✅ FIX (7 août 2026, demande Paul — "ajouter une icône à gauche du
+        // tab pour faire rafraîchir le tab") — vue personnalisée avec icône
+        // cliquable + texte, remplace le setText() simple d'avant.
+        View custom = getLayoutInflater().inflate(R.layout.tab_register_custom, null);
+        TextView txtLabel = custom.findViewById(R.id.txtTabLabel);
+        if (txtLabel != null) txtLabel.setText(tabLabelOf(spec.mediaShort, spec.node, spec.serialId, spec.isLc3));
+        ImageView imgRefresh = custom.findViewById(R.id.imgTabRefresh);
+        if (imgRefresh != null) {
+            imgRefresh.setOnClickListener(v -> onTabRefreshClicked(spec.tabKey));
+        }
+        t.setCustomView(custom);
+    }
+
+    /** ✅ AJOUTÉ (7 août 2026, demande Paul) — clic sur l'icône de
+     *  rafraîchissement à gauche d'un tab : relance une vérification de
+     *  connexion pour CE tab précis (même chemin que le bouton Status),
+     *  sans avoir à ouvrir le tab d'abord. Chaque clic tracé dans Support. */
+    private void onTabRefreshClicked(String tabKey) {
+        try {
+            logUi(null, "[TAB-REFRESH] Clic icône rafraîchir — tabKey=" + tabKey);
+            Fragment f = getSupportFragmentManager().findFragmentByTag("regtab_" + tabKey);
+            if (f instanceof RegisterTabFragment) {
+                ((RegisterTabFragment) f).triggerManualRefreshFromTabIcon();
+            } else {
+                refreshOneTabMediaStatus(tabKey);
+            }
+        } catch (Exception ignored) {}
     }
 
     private void updateRegisterTabLabel(String tabKey, String label) {
@@ -2863,7 +2889,12 @@ private void setupTabsTop() {
                 if (t == null) continue;
                 Object tag = t.getTag();
                 if (tag instanceof String && tabKey.equals(tag)) {
-                    t.setText(label);
+                    View custom = t.getCustomView();
+                    if (custom != null) {
+                        TextView txtLabel = custom.findViewById(R.id.txtTabLabel);
+                        if (txtLabel != null) { txtLabel.setText(label); return; }
+                    }
+                    t.setText(label); // repli si la vue personnalisée n'existe pas encore
                     return;
                 }
             }
