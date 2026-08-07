@@ -43,7 +43,7 @@ public class DeliveryDb extends SQLiteOpenHelper {
     //      chaque soir) + diagnostic_match_history (persiste chaque résultat de
     //      DiagnosticRuleEngine, jusqu'ici calculé à la volée et jamais stocké — nécessaire
     //      pour calibrer les règles / futur agent IA, demande Paul 31 juillet 2026).
-    public static final int DB_VERSION = 22;
+    public static final int DB_VERSION = 23;
 
     private static final String TAG = "DeliveryDb";
 
@@ -209,6 +209,13 @@ public class DeliveryDb extends SQLiteOpenHelper {
         // visible clairement plutôt que noyé. DROP+CREATE d'une vue est toujours sans
         // risque de perte de données.
         if (oldVersion < 22) {
+            createDiagnosticEventsView(db);
+        }
+        // v23 (demande Paul, 7 août 2026 — "voir de manière évidente les connexions et
+        // déconnexions") : niveaux CONNECT/DISCONNECT ajoutés à la classification, pour
+        // un code couleur dédié côté UI, distinct des ERROR/WARN/INFO. DROP+CREATE d'une
+        // vue est toujours sans risque de perte de données.
+        if (oldVersion < 23) {
             createDiagnosticEventsView(db);
         }
     }
@@ -531,6 +538,8 @@ public class DeliveryDb extends SQLiteOpenHelper {
             "         THEN 'ERROR' " +
             "    WHEN b.msg LIKE '%⚠%' OR b.msg LIKE '%ABANDON%' OR b.msg LIKE '%BLOQUÉ%' " +
             "         OR b.msg LIKE '%échoué%' OR b.msg LIKE '%échec%' OR b.msg LIKE '%supprimé%' THEN 'WARN' " +
+            "    WHEN b.msg LIKE '[CONNEXION]%' THEN 'CONNECT' " +
+            "    WHEN b.msg LIKE '[DÉCONNEXION]%' THEN 'DISCONNECT' " +
             "    ELSE 'INFO' " +
             "  END                  AS level, " +
             "  'LOG_BUS'             AS event_type, " +

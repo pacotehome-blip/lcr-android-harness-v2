@@ -2106,8 +2106,69 @@ private void setupTabsTop() {
                 if (rowSupportIncident != null) {
                     rowSupportIncident.setVisibility(finalMatches.isEmpty() ? View.GONE : View.VISIBLE);
                 }
+                // ✅ FIX (7 août 2026, demande Paul — "je veux que tu ajoutes
+                // une approche de résolution lorsqu'il y a une erreur selon
+                // le niveau support apporté, affiché dans une fenêtre
+                // dialogue") — recommendedAction existait déjà par règle,
+                // mais restait noyé dans le texte en ligne de l'écran
+                // Support. Affiché maintenant dans une vraie fenêtre
+                // dialogue, colorée par niveau (même palette que le Lexique),
+                // pour que l'approche de résolution soit le point central,
+                // pas une ligne perdue parmi le reste.
+                showDiagnosisResolutionDialog(triageSupportLevel, triageLayer, triageDetail, finalMatches);
             });
         }, "SupportDiagnosisLoader").start();
+    }
+
+    /** Couleur associée à un niveau support (N1=vert...N4=rouge), même palette que le Lexique. */
+    private int colorForSupportLevel(String level) {
+        if (level == null) return 0xFF757575;
+        switch (level.trim().toUpperCase(java.util.Locale.ROOT)) {
+            case "N1": return 0xFF2E7D32; // vert
+            case "N2": return 0xFFF9A825; // jaune/orange
+            case "N3": return 0xFFE65100; // orange foncé
+            case "N4": return 0xFFB71C1C; // rouge
+            default:   return 0xFF757575; // gris — N/A ou inconnu
+        }
+    }
+
+    /**
+     * Fenêtre dialogue affichant l'approche de résolution suggérée pour le ticket
+     * diagnostiqué, colorée par niveau support — voir demande Paul du 7 août 2026.
+     */
+    private void showDiagnosisResolutionDialog(String triageSupportLevel, String triageLayer,
+            String triageDetail, java.util.List<com.pa.lcr.lcp.diagnostic.DiagnosticMatch> matches) {
+        android.text.SpannableStringBuilder sb = new android.text.SpannableStringBuilder();
+
+        int levelColor = colorForSupportLevel(triageSupportLevel);
+        appendColored(sb, "Niveau support : " + triageSupportLevel + "\n", levelColor, true);
+        sb.append("Couche probable : ").append(triageLayer).append("  (").append(triageDetail).append(")\n\n");
+
+        if (matches == null || matches.isEmpty()) {
+            appendColored(sb, "Aucune règle de diagnostic ne matche pour ce ticket.\n\n", 0xFF757575, false);
+            sb.append("Ça ne veut pas dire qu'il n'y a pas de problème — juste qu'aucune règle "
+                    + "connue ne l'a détecté automatiquement. Vérifie l'onglet Support pour le détail "
+                    + "brut des événements.");
+        } else {
+            for (com.pa.lcr.lcp.diagnostic.DiagnosticMatch m : matches) {
+                int mColor = colorForSupportLevel(m.supportLevel);
+                appendColored(sb, "● [" + m.supportLevel + " — " + m.confidence + "%] ", mColor, true);
+                sb.append(m.diagnostic).append("\n");
+                if (m.recommendedAction != null && !m.recommendedAction.trim().isEmpty()) {
+                    appendColored(sb, "  → Approche de résolution :\n", 0xFF212121, true);
+                    sb.append("  ").append(m.recommendedAction.trim()).append("\n");
+                } else {
+                    appendColored(sb, "  → Aucune approche de résolution enregistrée pour cette règle.\n", 0xFF757575, false);
+                }
+                sb.append("\n");
+            }
+        }
+
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Diagnostic — Approche de résolution")
+                .setMessage(sb)
+                .setPositiveButton("Fermer", null)
+                .show();
     }
 
     /**
@@ -2210,6 +2271,18 @@ private void setupTabsTop() {
                 case "WARN":
                     bgColor = 0x33FF9800;      // orange translucide
                     headerColor = 0xFFE65100;  // orange foncé
+                    break;
+                // ✅ FIX (7 août 2026, demande Paul — "voir de manière
+                // évidente les connexions et déconnexions") — couleurs
+                // dédiées, distinctes des ERROR/WARN, pour repérer ces
+                // transitions d'un coup d'œil dans la liste.
+                case "CONNECT":
+                    bgColor = 0x334CAF50;      // vert translucide
+                    headerColor = 0xFF2E7D32;  // vert foncé
+                    break;
+                case "DISCONNECT":
+                    bgColor = 0x33607D8B;      // bleu-gris translucide
+                    headerColor = 0xFF37474F;  // bleu-gris foncé
                     break;
                 default:
                     bgColor = 0x00000000;

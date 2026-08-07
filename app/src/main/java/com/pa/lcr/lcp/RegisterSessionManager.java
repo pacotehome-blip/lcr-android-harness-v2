@@ -2,7 +2,7 @@ package com.pa.lcr.lcp;
 
 import android.content.Context;
 
-import com.hoho.android.usbserial.driver.UsbSerialPort ;
+import com.hoho.android.usbserial.driver.UsbSerialPort;
 import com.pa.lcr.lcp.log.LogBus;
 import com.pa.lcr.lcp.storage.DeliveryLogStore;
 import com.pa.lcr.lcp.transport.MediaTransportManager;
@@ -1100,7 +1100,24 @@ public final class RegisterSessionManager {
         }
 
         @Override public void onStateChanged(DeliveryState state) {
-            LogBus.ui(node, "STATE=" + (state != null ? state.name() : "null"));
+            // ✅ FIX (7 août 2026, demande Paul — "je veux voir de manière
+            // évidente dans l'onglet Support les connexions et
+            // déconnexions") — avant ce fix, "STATE=CONNECTED"/
+            // "STATE=DISCONNECTED" étaient du texte brut, noyés parmi tout
+            // le reste, sans aucune distinction visuelle. Un marqueur texte
+            // clair + une couleur dédiée dans Support (voir
+            // DeliveryDb.createDiagnosticEventsView + MainActivity) rendent
+            // maintenant ces transitions immédiatement repérables d'un coup
+            // d'œil, sans avoir à lire chaque ligne. Remplace l'ancienne
+            // ligne "STATE=..." — rien d'autre dans le code n'en dépendait
+            // (vérifié), donc pas de doublon inutile.
+            if (state == DeliveryState.CONNECTED) {
+                LogBus.ui(node, "[CONNEXION] Registre connecté (node=" + node + ")");
+            } else if (state == DeliveryState.DISCONNECTED) {
+                LogBus.ui(node, "[DÉCONNEXION] Registre déconnecté (node=" + node + ")");
+            } else {
+                LogBus.ui(node, "STATE=" + (state != null ? state.name() : "null"));
+            }
         }
 
         @Override public void onProductsUpdated(List<ProductUiItem> products, int activeIndex0) { }
