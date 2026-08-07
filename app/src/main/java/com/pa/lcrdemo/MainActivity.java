@@ -4183,21 +4183,35 @@ private void scanUsb() {
         try { UsbSession.clear(); } catch (Exception ignore) {}
         //stopApiServer("USB detached");
 
-        // ✅ Multi-média: ne pas détruire les tabs BT.
-        // Retirer uniquement les tabs USB (et leurs fragments) de manière explicite (A1).
-        // ✅ FIX (6 août 2026, concurrence)
+        // ✅ FIX (7 août 2026, demande Paul — "je pars du BT pour arriver
+        // avec USB [fluide], si je pars du USB pour BT, j'ai le tab par
+        // défaut qui arrive") — trouvé l'asymétrie exacte : btDisconnect()
+        // (juste en dessous) ne détruit JAMAIS le tab BT à la déconnexion —
+        // il le marque juste "(OFF)", données et fragment intacts, prêt à
+        // être migré en douceur dès qu'un autre transport arrive. Ici,
+        // onUsbDetached() détruisait le tab USB IMMÉDIATEMENT — laissant une
+        // fenêtre sans aucun tab, où la reconnexion auto pouvait tomber sur
+        // le placeholder générique "unknown" si la sonde BT n'avait pas
+        // encore fini. Corrigé pour suivre EXACTEMENT le même patron que
+        // btDisconnect() — marquer "(OFF)", jamais détruire ici.
         try {
-            ArrayList<String> toRemove = new ArrayList<>();
+            ArrayList<String> toMarkOff = new ArrayList<>();
             synchronized (tabsByKey) {
                 for (Map.Entry<String, TabSpec> e : tabsByKey.entrySet()) {
                     if (e == null) continue;
                     TabSpec s = e.getValue();
                     if (s == null) continue;
                     String mShort = (s.mediaShort != null) ? s.mediaShort : mediaShortFromTransportKey(s.transportKey);
-                    if ("USB".equalsIgnoreCase(mShort)) toRemove.add(e.getKey());
+                    if ("USB".equalsIgnoreCase(mShort)) toMarkOff.add(e.getKey());
                 }
             }
-            for (String k : toRemove) removeTabAndFragment(k, "USB detached");
+            for (String k : toMarkOff) {
+                TabSpec s = tabsByKey.get(k);
+                if (s == null) continue;
+                updateRegisterTabLabel(k,
+                    tabLabelOf("USB(OFF)", s.node, s.serialId, s.isLc3)
+                    + (s.qtySuffix != null ? s.qtySuffix : ""));
+            }
         } catch (Exception ignored) {}
 
         usbPort = null;
