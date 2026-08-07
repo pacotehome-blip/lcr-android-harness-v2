@@ -1257,6 +1257,16 @@ tabRegisters = findViewById(R.id.tabRegisters);
             }
             scanUsb();
         });
+        // ✅ FIX (7 août 2026, demande Paul — "mais c'est où pour USB et
+        // TCP" — j'avais oublié ces deux, seulement mis sur BT) — même
+        // diagnostic de vitesse, réutilise showBaudDiagnosticDialog() tel
+        // quel (résout déjà le registre actif via currentRegNode + le
+        // transport actif, peu importe lequel des trois boutons a déclenché
+        // l'appui long).
+        if (btnScanUsb != null) btnScanUsb.setOnLongClickListener(v -> {
+            showBaudDiagnosticDialog();
+            return true;
+        });
         if (btnPingUsb != null) btnPingUsb.setOnClickListener(v -> openSelectedUsb());
         if (btnQuit != null) btnQuit.setOnClickListener(v -> confirmQuit());
 
@@ -1410,6 +1420,12 @@ tabRegisters = findViewById(R.id.tabRegisters);
         if (btnScanBtRegs != null) btnScanBtRegs.setOnClickListener(v -> scanRegistersBtOnly());
         if (btnScanWifiRegs != null) btnScanWifiRegs.setOnClickListener(v -> scanWifiRegisters());
         if (btnTcpConnect != null) btnTcpConnect.setOnClickListener(v -> connectTcpManual());
+        // ✅ FIX (7 août 2026, demande Paul) — même diagnostic, voir
+        // commentaire sur btnScanUsb.
+        if (btnTcpConnect != null) btnTcpConnect.setOnLongClickListener(v -> {
+            showBaudDiagnosticDialog();
+            return true;
+        });
 
         // CONFIGURE: ajout manuel (2 slots / média)
         if (btnUsbConnect1 != null) btnUsbConnect1.setOnClickListener(v -> connectManualUsbSlot(1));
@@ -5097,32 +5113,84 @@ private boolean ensureBtConnectPermission() {
         }
         final String finalTransportKey = activeTransportKey;
         final int finalNode = targetNode;
-        final String[] labels = {"19200 (défaut)", "9600", "4800"};
+        // ✅ FIX (7 août 2026, demande Paul — "aucun endroit pour sélectionner
+        // ou écrire, je veux des espaces distincts pour sélectionner la
+        // vitesse") — .setItems() ne rendait apparemment pas des lignes
+        // clairement cliquables à l'écran. Remplacé par de vrais boutons
+        // individuels, un par vitesse — visuellement distincts, sans
+        // ambiguïté. Couvre maintenant les 5 valeurs documentées par le
+        // protocole (2400 à 57600), pas seulement 3.
+        // ✅ FIX (7 août 2026, demande Paul — "c'est plus un standard série
+        // qu'on veut utiliser") — 115200 est un standard série courant, mais
+        // la doc officielle confirme deux choses : (1) la commande "Set
+        // Baud" (0x7C) qu'on utilise n'a PAS d'index défini au-delà de 57600
+        // (table 0-4 seulement), et (2) "the LCR-II boards do not support
+        // 115200 baud" — donc envoyer une commande LCP à cette vitesse au
+        // REGISTRE n'a pas de sens ici. Ajouté comme option de test du PORT
+        // LOCAL seulement (adaptateur USB/série) — index LCP = -1 (sentinel),
+        // aucune commande Set Baud envoyée au registre pour cette entrée
+        // précise, voir applyBaudChange().
+        final String[] labels = {"115200 (test port local seulement — LCR-II ne le supporte pas)",
+            "57600", "19200 (défaut)", "9600", "4800", "2400"};
         final int[] indices = {
+            -1,
+            com.pa.lcr.lcp.LcpLink.BAUD_IDX_57600,
             com.pa.lcr.lcp.LcpLink.BAUD_IDX_19200,
             com.pa.lcr.lcp.LcpLink.BAUD_IDX_9600,
-            com.pa.lcr.lcp.LcpLink.BAUD_IDX_4800
+            com.pa.lcr.lcp.LcpLink.BAUD_IDX_4800,
+            com.pa.lcr.lcp.LcpLink.BAUD_IDX_2400
         };
-        final int[] usbBauds = {19200, 9600, 4800};
+        final int[] usbBauds = {115200, 57600, 19200, 9600, 4800, 2400};
 
-        new android.app.AlertDialog.Builder(this)
-            .setTitle("⚠️ Diagnostic — Vitesse de transmission")
-            .setMessage("Change la vitesse DU REGISTRE lui-même (node=" + finalNode + "). Si la "
-                + "reconfiguration locale échoue après ce changement, la communication sera "
-                + "perdue jusqu'à un cycle d'alimentation du registre.\n\n"
-                + "Sur BT, l'effet réel n'est pas garanti (le lien radio SPP n'a pas de "
-                + "\"vitesse\" au sens câblé) — à valider sur le terrain.\n\n"
-                + "Choisir une vitesse :")
-            .setItems(labels, (dlg, which) -> {
-                logMedia1("[ACTION-CLIC] SET_BAUD_DIAGNOSTIC (" + labels[which] + ") node=" + finalNode);
+        String mediaActuel = mediaShortFromTransportKey(finalTransportKey);
+        String avertissementMedia = "BT".equalsIgnoreCase(mediaActuel)
+            ? "Sur BT, l'effet réel n'est pas garanti (le lien radio SPP n'a pas de "
+              + "\"vitesse\" au sens câblé) — à valider sur le terrain.\n\n"
+            : "";
+
+        android.widget.TextView txtWarning = new android.widget.TextView(this);
+        txtWarning.setPadding(48, 32, 48, 16);
+        txtWarning.setTextSize(13f);
+        txtWarning.setText("Change la vitesse DU REGISTRE lui-même (node=" + finalNode + ", média="
+            + mediaActuel + "). Si la reconfiguration locale échoue après ce changement, la "
+            + "communication sera perdue jusqu'à un cycle d'alimentation du registre.\n\n"
+            + avertissementMedia
+            + "Choisir une vitesse :");
+
+        android.widget.LinearLayout container = new android.widget.LinearLayout(this);
+        container.setOrientation(android.widget.LinearLayout.VERTICAL);
+        container.addView(txtWarning);
+
+        final android.app.AlertDialog[] mainDlg = {null};
+        for (int i = 0; i < labels.length; i++) {
+            final int idx = i;
+            android.widget.Button btnVitesse = new android.widget.Button(this);
+            btnVitesse.setText(labels[idx]);
+            android.widget.LinearLayout.LayoutParams lp = new android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
+            lp.setMargins(32, 8, 32, 8);
+            btnVitesse.setLayoutParams(lp);
+            btnVitesse.setOnClickListener(v -> {
+                logMedia1("[ACTION-CLIC] SET_BAUD_DIAGNOSTIC (" + labels[idx] + ") node=" + finalNode);
+                if (mainDlg[0] != null) mainDlg[0].dismiss();
                 new android.app.AlertDialog.Builder(this)
                     .setTitle("Confirmer le changement de vitesse")
-                    .setMessage("Vitesse choisie : " + labels[which] + " pour node=" + finalNode + ". Continuer?")
+                    .setMessage("Vitesse choisie : " + labels[idx] + " pour node=" + finalNode + ". Continuer?")
                     .setPositiveButton("Confirmer", (d2, w2) ->
-                        applyBaudChange(c, finalTransportKey, indices[which], usbBauds[which], labels[which]))
+                        applyBaudChange(c, finalTransportKey, indices[idx], usbBauds[idx], labels[idx]))
                     .setNegativeButton("Annuler", null)
                     .show();
-            })
+            });
+            container.addView(btnVitesse);
+        }
+
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        scroll.addView(container);
+
+        mainDlg[0] = new android.app.AlertDialog.Builder(this)
+            .setTitle("⚠️ Diagnostic — Vitesse de transmission")
+            .setView(scroll)
             .setNegativeButton("Annuler", null)
             .show();
     }
@@ -5131,12 +5199,29 @@ private boolean ensureBtConnectPermission() {
             int lcpBaudIndex, int usbBaud, String label) {
         new Thread(() -> {
             try {
-                c.setBaud(lcpBaudIndex);
-                logMedia1("[BAUD] Registre confirmé à " + label + " (Set Baud LCP OK)");
+                // ✅ FIX (7 août 2026, demande Paul — "standard série qu'on
+                // veut utiliser") — index sentinel -1 = 115200, test du PORT
+                // LOCAL seulement. Aucune commande "Set Baud" envoyée au
+                // registre (LCR-II ne supporte pas cette vitesse selon la
+                // doc officielle — aucun index défini pour ça dans cette
+                // commande) — seul le port physique local est reconfiguré,
+                // pour tester la capacité de l'adaptateur/pilote série.
+                if (lcpBaudIndex < 0) {
+                    logMedia1("[BAUD] 115200 — test port local UNIQUEMENT, aucune commande "
+                        + "Set Baud envoyée au registre (LCR-II ne le supporte pas)");
+                } else {
+                    c.setBaud(lcpBaudIndex);
+                    logMedia1("[BAUD] Registre confirmé à " + label + " (Set Baud LCP OK)");
+                }
 
                 // Reconfiguration IMMÉDIATE du port local pour matcher — sinon
                 // perte de communication garantie dès la prochaine trame.
-                if ("USB".equalsIgnoreCase(mediaShortFromTransportKey(transportKey))) {
+                // ✅ FIX (7 août 2026, demande Paul — accessible aussi depuis
+                // USB et TCP) — le message de repli disait "Transport BT"
+                // même quand c'était en fait TCP — corrigé pour distinguer
+                // les trois cas.
+                String mediaBaud = mediaShortFromTransportKey(transportKey);
+                if ("USB".equalsIgnoreCase(mediaBaud)) {
                     try {
                         UsbSerialPort port = UsbSession.getPort();
                         if (port != null) {
@@ -5150,6 +5235,9 @@ private boolean ensureBtConnectPermission() {
                         logMedia1("[BAUD] ⚠ Reconfiguration USB locale ERR: " + e.getMessage()
                             + " — communication probablement perdue");
                     }
+                } else if ("TCP".equalsIgnoreCase(mediaBaud)) {
+                    logMedia1("[BAUD] Transport TCP — aucune reconfiguration locale applicable "
+                        + "(connexion IP, pas de notion de vitesse série côté app)");
                 } else {
                     logMedia1("[BAUD] Transport BT — aucune reconfiguration locale applicable "
                         + "(SPP n'expose pas de paramètre de vitesse côté app)");
