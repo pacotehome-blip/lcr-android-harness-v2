@@ -2,7 +2,7 @@ package com.pa.lcr.lcp;
 
 import android.content.Context;
 
-import com.hoho.android.usbserial.driver.UsbSerialPort;
+import com.hoho.android.usbserial.driver.UsbSerialPort ;
 import com.pa.lcr.lcp.log.LogBus;
 import com.pa.lcr.lcp.storage.DeliveryLogStore;
 import com.pa.lcr.lcp.transport.MediaTransportManager;
