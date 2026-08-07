@@ -49,6 +49,13 @@ public class DeliveryLogStore {
         this.io = Executors.newSingleThreadExecutor();
     }
 
+    /** ✅ AJOUTÉ (7 août 2026) — ferme la connexion SQLite sous-jacente. Nécessaire avant
+     *  de restaurer un backup (voir restoreFromBackupAsync) — le fichier .db ne peut pas
+     *  être écrasé proprement pendant qu'une connexion est ouverte dessus. */
+    public void close() {
+        try { helper.close(); } catch (Exception ignored) {}
+    }
+
     // ----------------------------
     // Purge / rotation
     // ----------------------------
@@ -96,69 +103,40 @@ public class DeliveryLogStore {
     }
 
     // =========================================================
-    // ✅ AJOUTÉ (7 août 2026, demande Paul — "un bouton pour vider l'écran
-    // support et repartir en neuf, mais avant il doit faire un backup, qui
-    // lui aussi après 7 jours est supprimé") — sauvegarde intégrale de
-    // log_bus_event dans un fichier JSON horodaté dans Téléchargements
-    // (même mécanisme que LocalDeliveryBackup — survit à une désinstallation),
-    // PUIS vidage réel de la table. Le backup lui-même est purgé après 7
-    // jours par purgeOldSupportBackups(), appelée automatiquement au
-    // démarrage (voir RegisterSessionManager) — cohérent avec la politique
-    // de rétention déjà en place pour les backups de livraison.
+    // ✅ RÉVISÉ (7 août 2026, demande Paul — "qu'est-ce que tu prends en
+    // backup, il y a deux BD") — la sauvegarde des DEUX bases de données
+    // (lcr_delivery.db ET filgo_delivery_status.db) est maintenant
+    // coordonnée depuis MainActivity (voir bouton "Vider (avec backup)"),
+    // qui appelle backupDbToDownloadsAsync() pour la première et
+    // backupRawDbToDownloadsQ/Legacy() (déjà existantes, mécanisme du
+    // bouton "Backup DB (Downloads)") pour la seconde, AVANT d'appeler
+    // cette méthode. Cette méthode-ci ne fait donc plus QUE le vidage —
+    // le backup complet des deux BD est garanti fait avant qu'elle soit
+    // appelée. Le backup lui-même est purgé après 7 jours par
+    // purgeOldSupportBackupsAsync(), appelée automatiquement au démarrage.
     // =========================================================
     public interface ClearCallback {
-        void onDone(boolean success, int rowsBackedUp, String errorMessage);
+        void onDone(boolean success, int rowsCleared, String errorMessage);
     }
 
-    public void backupAndClearAllAsync(ClearCallback cb) {
+    /** ⚠️ Ne fait QUE vider log_bus_event — appelant responsable d'avoir déjà fait
+     *  le backup des DEUX bases de données avant d'appeler ceci (voir MainActivity). */
+    public void clearLogBusEventOnlyAsync(ClearCallback cb) {
         io.execute(() -> {
-            int rowsBackedUp = 0;
+            int rowCount = 0;
             try {
                 SQLiteDatabase db = helper.getWritableDatabase();
-
-                // 1) Export intégral vers JSON
-                org.json.JSONArray arr = new org.json.JSONArray();
-                try (Cursor c = db.rawQuery(
-                        "SELECT id, ts, node, src, msg FROM log_bus_event ORDER BY ts ASC", null)) {
-                    while (c.moveToNext()) {
-                        JSONObject o = new JSONObject();
-                        o.put("id", c.getLong(0));
-                        o.put("ts", c.getLong(1));
-                        o.put("node", c.isNull(2) ? JSONObject.NULL : (Object) c.getInt(2));
-                        o.put("src", c.isNull(3) ? JSONObject.NULL : c.getString(3));
-                        o.put("msg", c.isNull(4) ? JSONObject.NULL : c.getString(4));
-                        arr.put(o);
-                        rowsBackedUp++;
-                    }
+                try (Cursor c = db.rawQuery("SELECT COUNT(*) FROM log_bus_event", null)) {
+                    if (c.moveToFirst()) rowCount = c.getInt(0);
                 }
-
-                JSONObject root = new JSONObject();
-                root.put("backup_ts", System.currentTimeMillis());
-                root.put("row_count", rowsBackedUp);
-                root.put("events", arr);
-
-                String fileName = "filgo_support_backup_" + System.currentTimeMillis() + ".json";
-                byte[] bytes = root.toString(2).getBytes(StandardCharsets.UTF_8);
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    LocalDeliveryBackup.backupViaMediaStore(appCtx, fileName, bytes);
-                } else {
-                    LocalDeliveryBackup.backupViaLegacyFile(appCtx, fileName, bytes);
-                }
-
-                // 2) Vidage réel — seulement après que le backup ait réussi (pas d'exception
-                // levée avant ce point). log_bus_event est la table qui fait vraiment grossir
-                // l'écran Support (voir fix du 6 août) — c'est elle qu'on vide pour "repartir
-                // en neuf". Les tables liées à un ticket (delivery_event, api_trace, etc.) ne
-                // sont PAS touchées ici — elles ont leur propre cycle de vie lié aux livraisons
-                // réelles, pas au confort d'affichage de Support.
                 db.delete("log_bus_event", null, null);
-
-                android.util.Log.i("DeliveryLogStore", "backupAndClearAllAsync: " + rowsBackedUp
-                        + " événements sauvegardés dans " + fileName + " puis log_bus_event vidée");
-                if (cb != null) cb.onDone(true, rowsBackedUp, null);
+                android.util.Log.i("DeliveryLogStore", "clearLogBusEventOnlyAsync: "
+                        + rowCount + " événements vidés de log_bus_event");
+                final int fRowCount = rowCount;
+                if (cb != null) cb.onDone(true, fRowCount, null);
             } catch (Exception e) {
-                android.util.Log.w("DeliveryLogStore", "backupAndClearAllAsync ERR: " + e.getMessage());
-                if (cb != null) cb.onDone(false, rowsBackedUp, e.getMessage());
+                android.util.Log.w("DeliveryLogStore", "clearLogBusEventOnlyAsync ERR: " + e.getMessage());
+                if (cb != null) cb.onDone(false, rowCount, e.getMessage());
             }
         });
     }
@@ -176,7 +154,7 @@ public class DeliveryLogStore {
                     String[] projection = { MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DISPLAY_NAME,
                             MediaStore.MediaColumns.DATE_ADDED };
                     String selection = MediaStore.MediaColumns.DISPLAY_NAME + " LIKE ?";
-                    String[] selectionArgs = { "filgo_support_backup_%.json" };
+                    String[] selectionArgs = { "filgo_support_backup_%.db" };
                     try (Cursor c = ctx.getContentResolver().query(
                             MediaStore.Downloads.EXTERNAL_CONTENT_URI, projection, selection, selectionArgs, null)) {
                         if (c == null) return;
@@ -198,7 +176,7 @@ public class DeliveryLogStore {
                     }
                     File downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
                     File[] matches = downloads.listFiles((dir, name) ->
-                            name.startsWith("filgo_support_backup_") && name.endsWith(".json"));
+                            name.startsWith("filgo_support_backup_") && name.endsWith(".db"));
                     if (matches == null) return;
                     for (File f : matches) {
                         if (f.lastModified() >= cutoffMs) continue;
@@ -210,6 +188,185 @@ public class DeliveryLogStore {
             }
             android.util.Log.i("DeliveryLogStore", "purgeOldSupportBackupsAsync: supprimés=" + deleted + " erreurs=" + errors);
         }, "SupportBackupPurge").start();
+    }
+
+    // =========================================================
+    // ✅ AJOUTÉ (7 août 2026, demande Paul — "oui" à l'ajout d'une vraie
+    // restauration) — liste les backups Support disponibles, puis permet
+    // d'en restaurer un : ferme la BD ouverte, écrase le fichier .db vivant
+    // par le contenu du backup choisi. Un redémarrage de l'app est requis
+    // après coup — une connexion SQLite déjà ouverte (WAL, cache) ne peut
+    // pas être remplacée proprement à chaud sans le fermer complètement au
+    // niveau processus.
+    // =========================================================
+    public static final class BackupInfo {
+        public final String displayLabel;
+        public final long dateAddedMs;
+        public final Object lcrHandle;    // Uri (Q+) ou File (legacy) — peut être null si manquant
+        public final Object statusHandle; // Uri (Q+) ou File (legacy) — peut être null si manquant
+        public BackupInfo(String displayLabel, long dateAddedMs, Object lcrHandle, Object statusHandle) {
+            this.displayLabel = displayLabel;
+            this.dateAddedMs = dateAddedMs;
+            this.lcrHandle = lcrHandle;
+            this.statusHandle = statusHandle;
+        }
+    }
+
+    public interface ListBackupsCallback {
+        void onDone(java.util.List<BackupInfo> backups);
+    }
+
+    /** ✅ RÉVISÉ (7 août 2026) — les deux BD (lcr_delivery.db et
+     *  filgo_delivery_status.db) sont sauvegardées en PAIRE, sous le même
+     *  horodatage (filgo_support_backup_lcr_<ts>.db / _status_<ts>.db). Cette
+     *  liste regroupe les fichiers par horodatage pour présenter UNE seule
+     *  entrée par sauvegarde, pas deux fichiers séparés à choisir un par un. */
+    public static void listSupportBackupsAsync(Context ctx, ListBackupsCallback cb) {
+        new Thread(() -> {
+            // ts (String) -> [lcrHandle, statusHandle, dateAddedMs]
+            java.util.Map<String, Object[]> byTimestamp = new java.util.LinkedHashMap<>();
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    String[] projection = { MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DISPLAY_NAME,
+                            MediaStore.MediaColumns.DATE_ADDED };
+                    String selection = MediaStore.MediaColumns.DISPLAY_NAME + " LIKE ?";
+                    String[] selectionArgs = { "filgo_support_backup_%.db" };
+                    try (Cursor c = ctx.getContentResolver().query(
+                            MediaStore.Downloads.EXTERNAL_CONTENT_URI, projection, selection, selectionArgs,
+                            MediaStore.MediaColumns.DATE_ADDED + " DESC")) {
+                        if (c != null) {
+                            int idCol = c.getColumnIndexOrThrow(MediaStore.MediaColumns._ID);
+                            int nameCol = c.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME);
+                            int dateCol = c.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_ADDED);
+                            while (c.moveToNext()) {
+                                long id = c.getLong(idCol);
+                                String name = c.getString(nameCol);
+                                long dateMs = c.getLong(dateCol) * 1000L;
+                                Uri fileUri = Uri.withAppendedPath(MediaStore.Downloads.EXTERNAL_CONTENT_URI, String.valueOf(id));
+                                groupBackupFile(byTimestamp, name, dateMs, fileUri);
+                            }
+                        }
+                    }
+                } else {
+                    File downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+                    File[] matches = downloads.listFiles((dir, name) ->
+                            name.startsWith("filgo_support_backup_") && name.endsWith(".db"));
+                    if (matches != null) {
+                        java.util.Arrays.sort(matches, (a, b) -> Long.compare(b.lastModified(), a.lastModified()));
+                        for (File f : matches) groupBackupFile(byTimestamp, f.getName(), f.lastModified(), f);
+                    }
+                }
+            } catch (Exception e) {
+                android.util.Log.w("DeliveryLogStore", "listSupportBackupsAsync ERR: " + e.getMessage());
+            }
+
+            java.util.List<BackupInfo> out = new java.util.ArrayList<>();
+            for (Object[] v : byTimestamp.values()) {
+                Object lcrH = v[0];
+                Object statusH = v[1];
+                long dateMs = (long) v[2];
+                String label = (lcrH != null && statusH != null) ? "Complet (2 BD)"
+                        : (lcrH != null ? "⚠ lcr_delivery.db seulement" : "⚠ filgo_delivery_status.db seulement");
+                out.add(new BackupInfo(label, dateMs, lcrH, statusH));
+            }
+            out.sort((a, b) -> Long.compare(b.dateAddedMs, a.dateAddedMs));
+            if (cb != null) cb.onDone(out);
+        }, "SupportBackupList").start();
+    }
+
+    private static void groupBackupFile(java.util.Map<String, Object[]> byTimestamp,
+            String fileName, long dateMs, Object handle) {
+        String ts;
+        boolean isLcr;
+        if (fileName.startsWith("filgo_support_backup_lcr_")) {
+            ts = fileName.substring("filgo_support_backup_lcr_".length()).replace(".db", "");
+            isLcr = true;
+        } else if (fileName.startsWith("filgo_support_backup_status_")) {
+            ts = fileName.substring("filgo_support_backup_status_".length()).replace(".db", "");
+            isLcr = false;
+        } else {
+            return; // ancien format (avant ce fix) — ignoré, pas de paire fiable à reconstruire
+        }
+        Object[] entry = byTimestamp.computeIfAbsent(ts, k -> new Object[]{null, null, dateMs});
+        if (isLcr) entry[0] = handle; else entry[1] = handle;
+    }
+
+    public interface RestoreDbCallback {
+        void onDone(boolean success, String errorMessage);
+    }
+
+    /** ⚠️ Remplace les DEUX fichiers .db vivants (lcr_delivery.db et
+     *  filgo_delivery_status.db) par la paire de backup choisie. Doit être appelée avec
+     *  TOUTE référence DeliveryDb/DeliveryLogStore/LcrDeliveryStatusDb déjà fermée dans le
+     *  processus courant — voir MainActivity, qui ferme les deux avant d'appeler ceci et
+     *  force un redémarrage de l'app juste après (nécessaire : SQLite garde un état
+     *  WAL/cache qui ne peut pas être invalidé proprement sans redémarrage complet du
+     *  processus). Si un des deux fichiers manque dans la paire (backup partiel), l'autre
+     *  est quand même restauré — signalé dans le message d'erreur/succès. */
+    public static void restoreFromBackupAsync(Context ctx, BackupInfo backup, RestoreDbCallback cb) {
+        new Thread(() -> {
+            java.util.List<String> warnings = new java.util.ArrayList<>();
+            try {
+                boolean anyRestored = false;
+                if (backup.lcrHandle != null) {
+                    restoreOneFile(ctx, backup.lcrHandle, ctx.getDatabasePath(DeliveryDb.DB_NAME));
+                    anyRestored = true;
+                } else {
+                    warnings.add("lcr_delivery.db absent de cette sauvegarde — non restauré");
+                }
+                if (backup.statusHandle != null) {
+                    restoreOneFile(ctx, backup.statusHandle, ctx.getDatabasePath(LcrDeliveryStatusDb.DB_NAME));
+                    anyRestored = true;
+                } else {
+                    warnings.add("filgo_delivery_status.db absent de cette sauvegarde — non restauré");
+                }
+
+                if (!anyRestored) {
+                    if (cb != null) cb.onDone(false, "Aucun fichier valide dans cette sauvegarde");
+                    return;
+                }
+                android.util.Log.i("DeliveryLogStore", "restoreFromBackupAsync: restauré ("
+                        + backup.displayLabel + ")" + (warnings.isEmpty() ? "" : " — " + warnings));
+                if (cb != null) cb.onDone(true, warnings.isEmpty() ? null : String.join("; ", warnings));
+            } catch (Exception e) {
+                android.util.Log.w("DeliveryLogStore", "restoreFromBackupAsync ERR: " + e.getMessage());
+                if (cb != null) cb.onDone(false, e.getMessage());
+            }
+        }, "SupportBackupRestore").start();
+    }
+
+    private static void restoreOneFile(Context ctx, Object handle, java.io.File liveDb) throws Exception {
+        byte[] bytes;
+        if (handle instanceof Uri) {
+            try (InputStream in = ctx.getContentResolver().openInputStream((Uri) handle)) {
+                if (in == null) throw new java.io.IOException("Impossible d'ouvrir le backup: " + handle);
+                java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
+                byte[] chunk = new byte[8192];
+                int n;
+                while ((n = in.read(chunk)) != -1) buf.write(chunk, 0, n);
+                bytes = buf.toByteArray();
+            }
+        } else {
+            File f = (File) handle;
+            try (FileInputStream in = new FileInputStream(f)) {
+                bytes = new byte[(int) f.length()];
+                int off = 0, n;
+                while (off < bytes.length && (n = in.read(bytes, off, bytes.length - off)) != -1) off += n;
+            }
+        }
+
+        java.io.File liveDir = liveDb.getParentFile();
+        if (liveDir != null && !liveDir.exists()) liveDir.mkdirs();
+        try (FileOutputStream out = new FileOutputStream(liveDb)) {
+            out.write(bytes);
+            out.flush();
+        }
+        // ✅ Retire les fichiers annexes WAL/SHM du fichier live précédent — sinon
+        // SQLite tenterait de rejouer un journal qui ne correspond plus au fichier
+        // qu'on vient de remplacer.
+        try { new java.io.File(liveDb.getPath() + "-wal").delete(); } catch (Exception ignored) {}
+        try { new java.io.File(liveDb.getPath() + "-shm").delete(); } catch (Exception ignored) {}
+        try { new java.io.File(liveDb.getPath() + "-journal").delete(); } catch (Exception ignored) {}
     }
 
     // ----------------------------

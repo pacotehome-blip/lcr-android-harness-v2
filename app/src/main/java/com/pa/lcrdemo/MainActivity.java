@@ -964,24 +964,141 @@ public class MainActivity extends AppCompatActivity {
             btnSupportClearAll.setOnClickListener(v -> {
                 new android.app.AlertDialog.Builder(this)
                     .setTitle("Vider l'écran Support")
-                    .setMessage("Tous les événements seront d'abord sauvegardés dans un fichier "
-                        + "JSON (Téléchargements, conservé 7 jours), puis l'écran Support repartira "
-                        + "à zéro. Continuer?")
+                    .setMessage("Une copie complète de la base de données sera d'abord sauvegardée "
+                        + "(Téléchargements, fichier .db restaurable, conservé 7 jours), puis les "
+                        + "événements de l'écran Support seront vidés. Continuer?")
                     .setPositiveButton("Vider", (dlg, which) -> {
-                        com.pa.lcr.lcp.storage.DeliveryLogStore store =
+                        // ✅ FIX (7 août 2026, demande Paul — "qu'est-ce que tu
+                        // prends en backup, il y a deux BD") — trouvé : le
+                        // backup ne prenait QUE lcr_delivery.db, jamais
+                        // filgo_delivery_status.db (les vraies données de
+                        // livraison — ticket_no, net_l, gross_l, sync_status).
+                        // Corrigé : les DEUX sont maintenant sauvegardées,
+                        // même timestamp partagé pour les regrouper facilement,
+                        // même mécanisme déjà éprouvé que le bouton "Backup DB
+                        // (Downloads)" existant (backupRawDbToDownloadsQ/
+                        // Legacy). Le vidage de log_bus_event n'a lieu
+                        // qu'après le succès des DEUX sauvegardes.
+                        final String stamp = String.valueOf(System.currentTimeMillis());
+                        final String lcrBackupName = "filgo_support_backup_lcr_" + stamp + ".db";
+                        final String statusBackupName = "filgo_support_backup_status_" + stamp + ".db";
+                        final boolean[] lcrOk = {false};
+                        final boolean[] statusOk = {false};
+                        final String[] statusDetail = {""};
+
+                        Runnable proceedIfBothDone = () -> {
+                            if (!lcrOk[0] || !statusOk[0]) return; // attend les deux
+                            com.pa.lcr.lcp.storage.DeliveryLogStore store =
+                                new com.pa.lcr.lcp.storage.DeliveryLogStore(getApplicationContext());
+                            store.clearLogBusEventOnlyAsync((success, rowsCleared, errorMessage) -> runOnUiThread(() -> {
+                                if (success) {
+                                    Toast.makeText(this, "Backup complet (2 BD) effectué, "
+                                        + rowsCleared + " événements vidés — écran Support réinitialisé", Toast.LENGTH_LONG).show();
+                                    refreshSupportEvents();
+                                } else {
+                                    Toast.makeText(this, "Backup OK mais échec du vidage : " + errorMessage, Toast.LENGTH_LONG).show();
+                                }
+                            }));
+                        };
+
+                        com.pa.lcr.lcp.storage.DeliveryLogStore storeForBackup =
                             new com.pa.lcr.lcp.storage.DeliveryLogStore(getApplicationContext());
-                        store.backupAndClearAllAsync((success, rowsBackedUp, errorMessage) -> runOnUiThread(() -> {
-                            if (success) {
-                                Toast.makeText(this, rowsBackedUp + " événements sauvegardés — "
-                                    + "écran Support vidé", Toast.LENGTH_LONG).show();
-                                refreshSupportEvents();
-                            } else {
-                                Toast.makeText(this, "Échec du vidage : " + errorMessage, Toast.LENGTH_LONG).show();
+                        storeForBackup.backupDbToDownloadsAsync(getApplicationContext(), lcrBackupName, (ok1, name1, detail1) -> {
+                            lcrOk[0] = ok1;
+                            if (!ok1) {
+                                runOnUiThread(() -> Toast.makeText(this,
+                                    "Échec backup lcr_delivery.db — écran NON vidé : " + detail1, Toast.LENGTH_LONG).show());
+                                return;
                             }
-                        }));
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                backupRawDbToDownloadsQ(LcrDeliveryStatusDb.DB_NAME, statusBackupName, (ok2, name2, detail2) -> {
+                                    statusOk[0] = ok2;
+                                    statusDetail[0] = detail2;
+                                    if (!ok2) {
+                                        runOnUiThread(() -> Toast.makeText(this,
+                                            "Échec backup filgo_delivery_status.db — écran NON vidé : " + detail2, Toast.LENGTH_LONG).show());
+                                        return;
+                                    }
+                                    proceedIfBothDone.run();
+                                });
+                            } else {
+                                backupRawDbToDownloadsLegacy(LcrDeliveryStatusDb.DB_NAME, statusBackupName, (ok2, name2, detail2) -> {
+                                    statusOk[0] = ok2;
+                                    statusDetail[0] = detail2;
+                                    if (!ok2) {
+                                        runOnUiThread(() -> Toast.makeText(this,
+                                            "Échec backup filgo_delivery_status.db — écran NON vidé : " + detail2, Toast.LENGTH_LONG).show());
+                                        return;
+                                    }
+                                    proceedIfBothDone.run();
+                                });
+                            }
+                        });
                     })
                     .setNegativeButton("Annuler", null)
                     .show();
+            });
+        }
+        // ✅ AJOUTÉ (7 août 2026, demande Paul — "oui" à l'ajout d'une vraie
+        // restauration) — liste les backups disponibles (les plus récents en
+        // premier), choix explicite, confirmation, puis restauration +
+        // redémarrage forcé (nécessaire pour repartir sur une connexion
+        // SQLite propre après avoir remplacé le fichier .db vivant).
+        Button btnSupportRestore = findViewById(R.id.btnSupportRestore);
+        if (btnSupportRestore != null) {
+            btnSupportRestore.setOnClickListener(v -> {
+                com.pa.lcr.lcp.storage.DeliveryLogStore.listSupportBackupsAsync(getApplicationContext(), backups -> runOnUiThread(() -> {
+                    if (backups.isEmpty()) {
+                        Toast.makeText(this, "Aucun backup disponible dans Téléchargements", Toast.LENGTH_LONG).show();
+                        return;
+                    }
+                    String[] labels = new String[backups.size()];
+                    for (int i = 0; i < backups.size(); i++) {
+                        com.pa.lcr.lcp.storage.DeliveryLogStore.BackupInfo b = backups.get(i);
+                        String dateStr = android.text.format.DateFormat.format("yyyy-MM-dd HH:mm:ss", b.dateAddedMs).toString();
+                        labels[i] = dateStr + "  —  " + b.displayLabel;
+                    }
+                    new android.app.AlertDialog.Builder(this)
+                        .setTitle("Restaurer depuis un backup")
+                        .setItems(labels, (dlg, which) -> {
+                            com.pa.lcr.lcp.storage.DeliveryLogStore.BackupInfo chosen = backups.get(which);
+                            new android.app.AlertDialog.Builder(this)
+                                .setTitle("Confirmer la restauration")
+                                .setMessage("Ceci va REMPLACER complètement les données Support actuelles "
+                                    + "par le contenu de :\n\n" + chosen.displayLabel
+                                    + "\n\nL'app redémarrera automatiquement juste après. Continuer?")
+                                .setPositiveButton("Restaurer", (d2, w2) -> {
+                                    // Fermer toute connexion SQLite ouverte avant d'écraser le fichier.
+                                    try { if (deliveryStore != null) deliveryStore.close(); } catch (Exception ignored) {}
+                                    com.pa.lcr.lcp.storage.DeliveryLogStore.restoreFromBackupAsync(
+                                        getApplicationContext(), chosen, (success, errorMessage) -> runOnUiThread(() -> {
+                                        if (success) {
+                                            Toast.makeText(this, "Restauration réussie — redémarrage...", Toast.LENGTH_LONG).show();
+                                            ui.postDelayed(() -> {
+                                                try {
+                                                    android.content.Intent intent = getPackageManager()
+                                                        .getLaunchIntentForPackage(getPackageName());
+                                                    if (intent != null) {
+                                                        intent.addFlags(android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
+                                                            | android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                                                        startActivity(intent);
+                                                    }
+                                                    android.os.Process.killProcess(android.os.Process.myPid());
+                                                } catch (Exception e) {
+                                                    android.util.Log.e("MainActivity", "Restart après restauration ERR: " + e.getMessage());
+                                                }
+                                            }, 1200);
+                                        } else {
+                                            Toast.makeText(this, "Échec de la restauration : " + errorMessage, Toast.LENGTH_LONG).show();
+                                        }
+                                    }));
+                                })
+                                .setNegativeButton("Annuler", null)
+                                .show();
+                        })
+                        .setNegativeButton("Annuler", null)
+                        .show();
+                }));
             });
         }
         edtSupportValidatedBy = findViewById(R.id.edtSupportValidatedBy);
