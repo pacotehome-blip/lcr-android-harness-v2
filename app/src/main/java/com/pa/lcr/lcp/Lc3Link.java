@@ -182,6 +182,26 @@ public class Lc3Link extends LcpLink {
     @Override public long getTransportGenerationId() { return lc3io != null ? lc3io.getGenerationId() : 0L; }
     @Override public void setTraceSink(TraceSink sink) { /* NO-OP */ }
 
+    // ✅ AJOUTÉ (7 août 2026, demande Paul — "il faut que ce soit générique
+    // comme demande de firmware dans DeliveryController") — sans cet
+    // override, un appel sur un vrai LC3 utiliserait SILENCIEUSEMENT les
+    // numéros de champ LCR-II hérités (Field #60, msgID Get Product ID
+    // 0x00) — presque certainement faux, puisque LC3 n'est pas le protocole
+    // Liquid Controls. DeliveryController reste générique (appelle
+    // link.opGetFirmwareVersion() par polymorphisme, sans savoir si c'est
+    // un LcpLink ou un Lc3Link) — c'est ICI, dans la classe concrète, que
+    // la bonne réponse (ou l'absence honnête de réponse) doit être fournie.
+    // Une exception claire vaut mieux qu'une valeur silencieusement fausse.
+    @Override public String opGetFirmwareVersion() throws java.io.IOException {
+        throw new java.io.IOException("opGetFirmwareVersion() non implémenté pour LC3 — "
+            + "numéro de champ/message pas encore documenté pour ce protocole");
+    }
+
+    @Override public String opGetProductIdRevision() throws java.io.IOException {
+        throw new java.io.IOException("opGetProductIdRevision() non implémenté pour LC3 — "
+            + "numéro de champ/message pas encore documenté pour ce protocole");
+    }
+
     // ── opGetMachineStatus ────────────────────────────────────────────────
     @Override
     public MachineStatus opGetMachineStatus() throws IOException {
