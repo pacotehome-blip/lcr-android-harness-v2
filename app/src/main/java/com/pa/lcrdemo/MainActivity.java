@@ -108,6 +108,10 @@ public class MainActivity extends AppCompatActivity {
     private EditText edtSupportTicketFilter;
     private EditText edtSupportSerialFilter;
     private EditText edtSupportNodeFilter;
+    // ✅ AJOUTÉ (7 août 2026, demande Paul — "un espace pour chercher par
+    // mot-clé genre firmware") — recherche libre sur le texte complet de
+    // chaque événement Support.
+    private EditText edtSupportKeywordFilter;
     private TextView txtSupportCount;
     private CheckBox chkSupportErrorsOnly;
     // ✅ (ajouté 3 août 2026, demande Paul : "copier-coller l'ensemble des lignes") —
@@ -924,6 +928,7 @@ public class MainActivity extends AppCompatActivity {
         edtSupportTicketFilter = findViewById(R.id.edtSupportTicketFilter);
         edtSupportSerialFilter = findViewById(R.id.edtSupportSerialFilter);
         edtSupportNodeFilter = findViewById(R.id.edtSupportNodeFilter);
+        edtSupportKeywordFilter = findViewById(R.id.edtSupportKeywordFilter);
         // ✅ FIX (6 août 2026, demande Paul — "permettre une recherche de
         // type google") — les résultats se rafraîchissent maintenant
         // automatiquement pendant la frappe (avec un court délai pour ne pas
@@ -941,6 +946,7 @@ public class MainActivity extends AppCompatActivity {
         if (edtSupportTicketFilter != null) edtSupportTicketFilter.addTextChangedListener(supportLiveSearchWatcher);
         if (edtSupportSerialFilter != null) edtSupportSerialFilter.addTextChangedListener(supportLiveSearchWatcher);
         if (edtSupportNodeFilter != null) edtSupportNodeFilter.addTextChangedListener(supportLiveSearchWatcher);
+        if (edtSupportKeywordFilter != null) edtSupportKeywordFilter.addTextChangedListener(supportLiveSearchWatcher);
         txtSupportCount = findViewById(R.id.txtSupportCount);
         chkSupportErrorsOnly = findViewById(R.id.chkSupportErrorsOnly);
         if (chkSupportErrorsOnly != null) {
@@ -1906,6 +1912,11 @@ private void setupTabsTop() {
                 ? edtSupportSerialFilter.getText().toString().trim() : "";
         final String nodeFilter = (edtSupportNodeFilter != null)
                 ? edtSupportNodeFilter.getText().toString().trim() : "";
+        // ✅ AJOUTÉ (7 août 2026, demande Paul — "un espace pour chercher par
+        // mot-clé genre firmware") — recherche libre, appliquée en plus des
+        // autres filtres, sur le texte complet de chaque événement.
+        final String keywordFilter = (edtSupportKeywordFilter != null)
+                ? edtSupportKeywordFilter.getText().toString().trim() : "";
 
         new Thread(() -> {
             // Chaque entrée : {ts, header, detail} — fusionné ensuite avec log_bus_event et trié
@@ -1966,6 +1977,17 @@ private void setupTabsTop() {
                 if (!serialFilter.isEmpty()) {
                     sql.append("AND serial_id = ? ");
                     args.add(serialFilter);
+                }
+                // ✅ AJOUTÉ (7 août 2026, demande Paul — "un espace pour
+                // chercher par mot-clé genre firmware") — recherche libre
+                // sur le texte complet (event_code, event_where,
+                // detail_short) — insensible à la casse via LIKE + %...%.
+                if (!keywordFilter.isEmpty()) {
+                    sql.append("AND (detail_short LIKE ? OR event_code LIKE ? OR event_where LIKE ?) ");
+                    String kw = "%" + keywordFilter + "%";
+                    args.add(kw);
+                    args.add(kw);
+                    args.add(kw);
                 }
                 sql.append("ORDER BY ts DESC LIMIT 300");
 
