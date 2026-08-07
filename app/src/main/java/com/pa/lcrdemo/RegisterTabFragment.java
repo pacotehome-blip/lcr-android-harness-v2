@@ -385,6 +385,9 @@ public class RegisterTabFragment extends Fragment {
     // sur la première valeur trouvée (deep link, bouton C annulé, ActiveDeliveryStore)
     // pour toute la durée de vie du tab, bloquant la détection de tout ticket suivant.
     private volatile String lastTicketDetected = "";
+    // ✅ FIX (7 août 2026, demande Paul) — évite de reconstruire delivery_uid
+    // en boucle pour le même ticket déjà résolu (voir onTicketInfo).
+    private volatile String lastUidReconstructedForTicket = "";
     // ✅ FIX (4 août 2026, demande Paul — "j'ai commencé le logcat... tout est
     // présent dans ça", en creusant pourquoi l'export Support de 300 lignes
     // ne remontait pas jusqu'à l'échec réel) — un ticket qui échoue en
@@ -751,6 +754,18 @@ public class RegisterTabFragment extends Fragment {
                     // La donnée est pourtant entièrement reconstructible : la BD locale
                     // associe déjà ticket_no → wo_num. On refait donc le même calcul.
                     if (deliveryUid != null && !deliveryUid.trim().isEmpty()) return;
+                    // ✅ FIX (7 août 2026, demande Paul — "le tab a vu le
+                    // registre mais n'a pas terminé sa validation") — trouvé
+                    // en creusant : ce bloc de repli se relance à CHAQUE
+                    // requestStatus() (toutes les 5s au minimum, via le
+                    // keep-alive), pour toujours le MÊME ticket déjà terminé
+                    // — puisque lastNumeroLivraison ne se repeuple jamais
+                    // pour un ticket qui n'est pas UNE NOUVELLE livraison en
+                    // cours. Avant ce fix : re-frappe la BD SQLite depuis le
+                    // disque à chaque cycle, indéfiniment, pour un résultat
+                    // qui ne changera jamais. Mis en cache une fois résolu —
+                    // ne relance la reconstruction que si le ticket change.
+                    if (ticketNo.equals(lastUidReconstructedForTicket)) return;
                     String uidRecupere = null;
                     String origine = "";
                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbUid = null;
@@ -787,6 +802,7 @@ public class RegisterTabFragment extends Fragment {
                     }
                     final String fUid = uidRecupere;
                     final String fOrigine = origine;
+                    lastUidReconstructedForTicket = ticketNo;
                     LogBus.api(node, "[UID] delivery_uid reconstruit=" + fUid + " (" + fOrigine + ")");
                     ui.post(() -> {
                         if (!isAdded() || getView() == null) return;
@@ -1287,6 +1303,50 @@ public class RegisterTabFragment extends Fragment {
     private void runStatusBLikeButton(String reason) {
         try {
             if (controller == null) return;
+            // ✅ FIX CRITIQUE (6 août 2026, demande Paul — "j'ai récupéré le
+            // #série, le node, mais rien d'autre, j'avais que des erreurs")
+            // — confirmé par log terrain : "Status(B) ERR: Task ... rejected
+            // from ThreadPoolExecutor[Terminated...]" se répétait à CHAQUE
+            // cycle CONNECTED, avec le MÊME executor (jamais renouvelé,
+            // "completed tasks" figé). Cause : controller (le champ de ce
+            // fragment) ne se rafraîchit QUE dans connectThisRegister() —
+            // mais quand RegisterSessionManager migre/recrée une session
+            // (ex. [RSM-MIGRATE] BT↔USB, très fréquent sur ce camion précis
+            // vu le log), rien ne prévient ce fragment que sa référence
+            // controller en cache pointe maintenant vers un
+            // DeliveryController déjà arrêté (executor interne Terminated).
+            // Chaque appel à requestStatus() dessus échouait donc
+            // immédiatement, systématiquement, peu importe combien de fois
+            // on réessayait — exactement "que des erreurs". Ici : avant
+            // d'utiliser controller, on vérifie qu'il est encore vivant, et
+            // sinon on va chercher la session RÉELLE et à jour directement
+            // auprès de RegisterSessionManager plutôt que de faire confiance
+            // à la référence en cache.
+            if (controller.isStopped()) {
+                android.util.Log.w("RegisterTabFragment", "runStatusBLikeButton: controller en cache est ARRÊTÉ "
+                    + "(executor Terminated) — rafraîchissement depuis RegisterSessionManager");
+                LogBus.api(node, "[STATUS-B-REFRESH] controller en cache périmé — recherche de la session à jour");
+                com.pa.lcr.lcp.DeliveryController fresh = null;
+                try {
+                    RegisterSessionManager smRefresh = RegisterSessionManager.get(requireContext());
+                    if (tabTransportKey != null) fresh = smRefresh.getController(tabTransportKey, node);
+                    if (fresh == null) {
+                        // Le node a peut-être migré de transport — chercher peu importe lequel.
+                        fresh = smRefresh.findTransportKeyForNode(node) != null
+                            ? smRefresh.getController(smRefresh.findTransportKeyForNode(node), node) : null;
+                    }
+                } catch (Exception ignored) {}
+                if (fresh != null && !fresh.isStopped()) {
+                    controller = fresh;
+                    LogBus.api(node, "[STATUS-B-REFRESH] session à jour retrouvée — controller rafraîchi");
+                } else {
+                    LogBus.api(node, "[STATUS-B-REFRESH] aucune session vivante trouvée — déclenchement diagnostic");
+                    surErreurConnexion(
+                        new java.io.IOException("runStatusBLikeButton: controller en cache mort et aucune session de remplacement"),
+                        "STATUS_B_STALE_CONTROLLER");
+                    return;
+                }
+            }
             if (!verifierIoAvantAction("STATUS_B")) return;
             try {
                 if (tabTransportKey != null)
