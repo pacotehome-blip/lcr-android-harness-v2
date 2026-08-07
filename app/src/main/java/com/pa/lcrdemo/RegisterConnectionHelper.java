@@ -324,6 +324,22 @@ public class RegisterConnectionHelper {
         }
     }
 
+    /** ✅ AJOUTÉ (7 août 2026, demande Paul — "bouton cancel sur l'écran
+     *  diagnostique les phases un à 3") — fermeture propre du dialogue et
+     *  log clair quand l'utilisateur annule entre deux étapes. Ne relance
+     *  rien — l'utilisateur devra redéclencher le diagnostic manuellement
+     *  s'il le souhaite. Le verrou diagnostic est déjà libéré par le
+     *  finally de l'appelant (lancerDiagnosticForce) — rien à faire ici. */
+    private void fermerDialogueAnnule(android.app.AlertDialog[] dlg) {
+        Log.w(TAG, "Diagnostic interrompu par annulation utilisateur");
+        try {
+            activity.runOnUiThread(() -> {
+                if (dlg[0] != null && dlg[0].isShowing()) dlg[0].dismiss();
+                try { android.widget.Toast.makeText(activity, "Diagnostic annulé", android.widget.Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
+            });
+        } catch (Exception ignored) {}
+    }
+
     private void diagnostic(String transportKey, int node, String serialId, String woNum) {
         diagnostic(transportKey, node, serialId, woNum, null, null, null, null, null);
     }
@@ -357,10 +373,22 @@ public class RegisterConnectionHelper {
         final String[] erreurDetail = {""};
 
         // Dialog progressif
+        // ✅ FIX (7 août 2026, demande Paul — "un bouton cancel sur l'écran
+        // diagnostique les phases un à 3") — avant ce fix, setCancelable(false)
+        // sans aucun bouton, impossible d'interrompre un diagnostic en cours
+        // même si l'utilisateur voulait reprendre le contrôle manuellement.
+        // Le drapeau est vérifié au DÉBUT de chaque étape (1, 2, 3) — une
+        // étape déjà en vol (ex. un Thread.sleep() ou un appel LCP bloquant)
+        // continue jusqu'à sa fin naturelle, mais la SUIVANTE ne démarre pas.
+        final boolean[] annule = {false};
         final android.app.AlertDialog.Builder dlgBuilder =
             new android.app.AlertDialog.Builder(activity);
         dlgBuilder.setTitle("🔄 Connexion au registre...");
         dlgBuilder.setCancelable(false);
+        dlgBuilder.setNegativeButton("Annuler", (d, w) -> {
+            annule[0] = true;
+            Log.w(TAG, "Diagnostic annulé par l'utilisateur");
+        });
         final android.widget.TextView txtProgress = new android.widget.TextView(activity);
         txtProgress.setPadding(40, 20, 40, 20);
         txtProgress.setTextSize(13f);
@@ -429,6 +457,7 @@ public class RegisterConnectionHelper {
         }
 
         // ÉTAPE 1 — Fermeture connexion existante
+        if (annule[0]) { fermerDialogueAnnule(dlg); return; }
         etapes[0] = (livraisonActive || usbDevicePresent) ? "Fermeture connexion — ignorée ("
                 + (livraisonActive ? "livraison active" : "USB détecté") + ")" : "Fermeture connexion existante";
         updateDlg.run();
@@ -439,6 +468,7 @@ public class RegisterConnectionHelper {
         updateDlg.run();
 
         // ÉTAPE 2 — Réinitialisation Bluetooth
+        if (annule[0]) { fermerDialogueAnnule(dlg); return; }
         etapes[1] = (livraisonActive || usbDevicePresent) ? "Réinitialisation BT — ignorée ("
                 + (livraisonActive ? "livraison active" : "USB détecté") + ")" : "Réinitialisation Bluetooth";
         updateDlg.run();
@@ -477,6 +507,7 @@ public class RegisterConnectionHelper {
             new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(activity);
 
         for (int attempt = 1; attempt <= 3 && !btConnecte; attempt++) {
+            if (annule[0]) { fermerDialogueAnnule(dlg); return; }
             etapes[2] = "Recherche registre... (" + attempt + "/3)";
             updateDlg.run();
 
