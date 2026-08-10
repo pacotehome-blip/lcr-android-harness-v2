@@ -137,6 +137,10 @@ public class MainActivity extends AppCompatActivity {
     private Spinner spnBtBonded;
     private Button btnBtRefresh;
     private Button btnBtConnect;
+    // ✅ AJOUTÉ (7 août 2026, demande Paul — "un emplacement visible" pour
+    // le diagnostic de vitesse, remplace l'appui long caché précédent.
+    private android.widget.Spinner spnBaudDiagnostic;
+    private Button btnBaudDiagnosticTester;
     private Button btnBtDisconnect;
     private TextView txtBtStatus;
 
@@ -1257,16 +1261,6 @@ tabRegisters = findViewById(R.id.tabRegisters);
             }
             scanUsb();
         });
-        // ✅ FIX (7 août 2026, demande Paul — "mais c'est où pour USB et
-        // TCP" — j'avais oublié ces deux, seulement mis sur BT) — même
-        // diagnostic de vitesse, réutilise showBaudDiagnosticDialog() tel
-        // quel (résout déjà le registre actif via currentRegNode + le
-        // transport actif, peu importe lequel des trois boutons a déclenché
-        // l'appui long).
-        if (btnScanUsb != null) btnScanUsb.setOnLongClickListener(v -> {
-            showBaudDiagnosticDialog();
-            return true;
-        });
         if (btnPingUsb != null) btnPingUsb.setOnClickListener(v -> openSelectedUsb());
         if (btnQuit != null) btnQuit.setOnClickListener(v -> confirmQuit());
 
@@ -1352,18 +1346,6 @@ tabRegisters = findViewById(R.id.tabRegisters);
         // BT
         if (btnBtRefresh != null) btnBtRefresh.setOnClickListener(v -> refreshBondedBtList());
         if (btnBtConnect != null) btnBtConnect.setOnClickListener(v -> btConnectSelected());
-        // ✅ AJOUTÉ (7 août 2026, demande Paul — "réduire la vitesse de
-        // transmission entre 19200 et 4800 dans les tests de diagnostic,
-        // autant pour BT que USB" — précisé ensuite : "pas à l'intérieur du
-        // tab, le média est supporté par le tab mais pas à l'intérieur" —
-        // donc placé ici, dans CONFIGURE (zone média), pas dans
-        // RegisterTabFragment (zone communication directe avec le
-        // registre). Appui long, pas un nouveau bouton (évite de modifier
-        // le layout XML en aveugle sans vérification visuelle).
-        if (btnBtConnect != null) btnBtConnect.setOnLongClickListener(v -> {
-            showBaudDiagnosticDialog();
-            return true;
-        });
         if (btnBtDisconnect != null) btnBtDisconnect.setOnClickListener(v -> btDisconnect());
         // ✅ BT Signal scan
         if (btnBtSignalScan != null) {
@@ -1420,12 +1402,32 @@ tabRegisters = findViewById(R.id.tabRegisters);
         if (btnScanBtRegs != null) btnScanBtRegs.setOnClickListener(v -> scanRegistersBtOnly());
         if (btnScanWifiRegs != null) btnScanWifiRegs.setOnClickListener(v -> scanWifiRegisters());
         if (btnTcpConnect != null) btnTcpConnect.setOnClickListener(v -> connectTcpManual());
-        // ✅ FIX (7 août 2026, demande Paul) — même diagnostic, voir
-        // commentaire sur btnScanUsb.
-        if (btnTcpConnect != null) btnTcpConnect.setOnLongClickListener(v -> {
-            showBaudDiagnosticDialog();
-            return true;
-        });
+
+        // ✅ AJOUTÉ (7 août 2026, demande Paul — "un emplacement visible",
+        // remplace les trois appuis longs cachés précédents par UN seul
+        // contrôle visible : Spinner + bouton "Tester", dans la section BT.
+        // Fonctionne peu importe le transport réellement actif au moment du
+        // clic (BT/USB/TCP) — showBaudDiagnosticDialog2() le détecte tout
+        // seul via mediaTransportManager.getActiveKey().
+        spnBaudDiagnostic = findViewById(R.id.spnBaudDiagnostic);
+        btnBaudDiagnosticTester = findViewById(R.id.btnBaudDiagnosticTester);
+        if (spnBaudDiagnostic != null) {
+            String[] baudLabels = {
+                "115200 (test port local — LCR-II ne le supporte pas)",
+                "57600", "19200 (défaut)", "9600", "4800", "2400"
+            };
+            ArrayAdapter<String> baudAdapter = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item, baudLabels);
+            baudAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+            spnBaudDiagnostic.setAdapter(baudAdapter);
+            spnBaudDiagnostic.setSelection(2); // 19200 par défaut
+        }
+        if (btnBaudDiagnosticTester != null) {
+            btnBaudDiagnosticTester.setOnClickListener(v -> {
+                int selected = (spnBaudDiagnostic != null) ? spnBaudDiagnostic.getSelectedItemPosition() : 2;
+                showBaudDiagnosticDialog2(selected);
+            });
+        }
 
         // CONFIGURE: ajout manuel (2 slots / média)
         if (btnUsbConnect1 != null) btnUsbConnect1.setOnClickListener(v -> connectManualUsbSlot(1));
@@ -5094,7 +5096,12 @@ private boolean ensureBtConnectPermission() {
      *  dans RegisterTabFragment (zone communication directe registre) —
      *  précision de Paul : le média est "supporté par" le tab mais la
      *  configuration média elle-même n'appartient pas à l'intérieur du tab. */
-    private void showBaudDiagnosticDialog() {
+    /** ✅ AJOUTÉ (7 août 2026, demande Paul — "un emplacement visible" pour
+     *  le diagnostic de vitesse) — remplace showBaudDiagnosticDialog() (liste
+     *  de boutons dans un dialogue) par un flux plus direct : la vitesse est
+     *  déjà choisie dans le Spinner visible avant même de cliquer "Tester" —
+     *  ne reste qu'à confirmer et valider le registre/transport actif. */
+    private void showBaudDiagnosticDialog2(int selectedIndex) {
         int targetNode = currentRegNode;
         if (targetNode <= 0) {
             Toast.makeText(this, "Aucun registre actif — sélectionne d'abord un tab", Toast.LENGTH_SHORT).show();
@@ -5113,24 +5120,10 @@ private boolean ensureBtConnectPermission() {
         }
         final String finalTransportKey = activeTransportKey;
         final int finalNode = targetNode;
-        // ✅ FIX (7 août 2026, demande Paul — "aucun endroit pour sélectionner
-        // ou écrire, je veux des espaces distincts pour sélectionner la
-        // vitesse") — .setItems() ne rendait apparemment pas des lignes
-        // clairement cliquables à l'écran. Remplacé par de vrais boutons
-        // individuels, un par vitesse — visuellement distincts, sans
-        // ambiguïté. Couvre maintenant les 5 valeurs documentées par le
-        // protocole (2400 à 57600), pas seulement 3.
-        // ✅ FIX (7 août 2026, demande Paul — "c'est plus un standard série
-        // qu'on veut utiliser") — 115200 est un standard série courant, mais
-        // la doc officielle confirme deux choses : (1) la commande "Set
-        // Baud" (0x7C) qu'on utilise n'a PAS d'index défini au-delà de 57600
-        // (table 0-4 seulement), et (2) "the LCR-II boards do not support
-        // 115200 baud" — donc envoyer une commande LCP à cette vitesse au
-        // REGISTRE n'a pas de sens ici. Ajouté comme option de test du PORT
-        // LOCAL seulement (adaptateur USB/série) — index LCP = -1 (sentinel),
-        // aucune commande Set Baud envoyée au registre pour cette entrée
-        // précise, voir applyBaudChange().
-        final String[] labels = {"115200 (test port local seulement — LCR-II ne le supporte pas)",
+
+        // ✅ Doit rester dans le même ordre que le Spinner (voir baudLabels dans
+        // wireUi()) : index 0 = 115200 (test port local), puis 57600...2400.
+        final String[] labels = {"115200 (test port local — LCR-II ne le supporte pas)",
             "57600", "19200 (défaut)", "9600", "4800", "2400"};
         final int[] indices = {
             -1,
@@ -5142,55 +5135,25 @@ private boolean ensureBtConnectPermission() {
         };
         final int[] usbBauds = {115200, 57600, 19200, 9600, 4800, 2400};
 
+        if (selectedIndex < 0 || selectedIndex >= labels.length) selectedIndex = 2; // repli 19200
+        final int idx = selectedIndex;
+
         String mediaActuel = mediaShortFromTransportKey(finalTransportKey);
         String avertissementMedia = "BT".equalsIgnoreCase(mediaActuel)
-            ? "Sur BT, l'effet réel n'est pas garanti (le lien radio SPP n'a pas de "
-              + "\"vitesse\" au sens câblé) — à valider sur le terrain.\n\n"
+            ? "\n\nSur BT, l'effet réel n'est pas garanti (le lien radio SPP n'a pas de "
+              + "\"vitesse\" au sens câblé) — à valider sur le terrain."
             : "";
 
-        android.widget.TextView txtWarning = new android.widget.TextView(this);
-        txtWarning.setPadding(48, 32, 48, 16);
-        txtWarning.setTextSize(13f);
-        txtWarning.setText("Change la vitesse DU REGISTRE lui-même (node=" + finalNode + ", média="
-            + mediaActuel + "). Si la reconfiguration locale échoue après ce changement, la "
-            + "communication sera perdue jusqu'à un cycle d'alimentation du registre.\n\n"
-            + avertissementMedia
-            + "Choisir une vitesse :");
-
-        android.widget.LinearLayout container = new android.widget.LinearLayout(this);
-        container.setOrientation(android.widget.LinearLayout.VERTICAL);
-        container.addView(txtWarning);
-
-        final android.app.AlertDialog[] mainDlg = {null};
-        for (int i = 0; i < labels.length; i++) {
-            final int idx = i;
-            android.widget.Button btnVitesse = new android.widget.Button(this);
-            btnVitesse.setText(labels[idx]);
-            android.widget.LinearLayout.LayoutParams lp = new android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
-            lp.setMargins(32, 8, 32, 8);
-            btnVitesse.setLayoutParams(lp);
-            btnVitesse.setOnClickListener(v -> {
-                logMedia1("[ACTION-CLIC] SET_BAUD_DIAGNOSTIC (" + labels[idx] + ") node=" + finalNode);
-                if (mainDlg[0] != null) mainDlg[0].dismiss();
-                new android.app.AlertDialog.Builder(this)
-                    .setTitle("Confirmer le changement de vitesse")
-                    .setMessage("Vitesse choisie : " + labels[idx] + " pour node=" + finalNode + ". Continuer?")
-                    .setPositiveButton("Confirmer", (d2, w2) ->
-                        applyBaudChange(c, finalTransportKey, indices[idx], usbBauds[idx], labels[idx]))
-                    .setNegativeButton("Annuler", null)
-                    .show();
-            });
-            container.addView(btnVitesse);
-        }
-
-        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
-        scroll.addView(container);
-
-        mainDlg[0] = new android.app.AlertDialog.Builder(this)
-            .setTitle("⚠️ Diagnostic — Vitesse de transmission")
-            .setView(scroll)
+        logMedia1("[ACTION-CLIC] SET_BAUD_DIAGNOSTIC (" + labels[idx] + ") node=" + finalNode);
+        new android.app.AlertDialog.Builder(this)
+            .setTitle("⚠️ Confirmer le changement de vitesse")
+            .setMessage("Vitesse choisie : " + labels[idx] + " pour node=" + finalNode
+                + " (média=" + mediaActuel + ").\n\n"
+                + "Si la reconfiguration locale échoue après ce changement, la communication "
+                + "sera perdue jusqu'à un cycle d'alimentation du registre."
+                + avertissementMedia)
+            .setPositiveButton("Confirmer", (d2, w2) ->
+                applyBaudChange(c, finalTransportKey, indices[idx], usbBauds[idx], labels[idx]))
             .setNegativeButton("Annuler", null)
             .show();
     }

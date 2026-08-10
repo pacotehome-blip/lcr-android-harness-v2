@@ -256,6 +256,51 @@
                 android:orientation="vertical"
                 android:padding="10dp">
 
+                <!-- ✅ AJOUTÉ (7 août 2026, demande Paul — "un emplacement
+                     visible" pour le diagnostic de vitesse — "mais pour USB
+                     aussi") — placé ici, TOUT EN HAUT de Configure, avant
+                     USB et BT, pour être visible peu importe quelle section
+                     on regarde. Fonctionne pour n'importe lequel des trois
+                     médias (BT/USB/TCP) — détecte automatiquement lequel
+                     est réellement actif au moment du clic "Tester". -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:background="@drawable/bg_support_search_field"
+                    android:layout_marginBottom="10dp"
+                    android:padding="8dp">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="⚠️ Diagnostic — Vitesse de transmission (tous médias)"
+                        android:textStyle="bold"
+                        android:textSize="13sp"/>
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical">
+
+                        <Spinner
+                            android:id="@+id/spnBaudDiagnostic"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"/>
+
+                        <Button
+                            android:id="@+id/btnBaudDiagnosticTester"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="8dp"
+                            android:backgroundTint="#E65100"
+                            android:text="Tester"/>
+                    </LinearLayout>
+                </LinearLayout>
+
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
