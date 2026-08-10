@@ -593,12 +593,20 @@ public class LcpLink {
     public String opGetProductIdRevision() throws IOException {
         Response r = sendRecv(buildPayload(MSG_GET_PRODUCT_ID, null), 5000);
         ensureOk(r, "GET_PRODUCT_ID");
-        // ✅ FIX (vérifié contre opGetMachineStatus) — r.payload exclut déjà rc
-        // (extrait séparément dans r.rc par le framework) — donc payload[0] =
-        // productID, PAS rc. Mon premier jet supposait à tort payload[0]=rc.
-        if (r.payload == null || r.payload.length < 1) return "";
-        byte[] nameBytes = new byte[r.payload.length - 1];
-        System.arraycopy(r.payload, 1, nameBytes, 0, nameBytes.length);
+        // ✅ FIX CRITIQUE (10 août 2026, audit complet contre la doc
+        // officielle) — CORRECTION D'UNE ERREUR PRÉCÉDENTE : vérifié de
+        // façon décisive dans sendRecv() (ligne ~800 : "int rc =
+        // f.payload[0]..." puis "return new Response(rc, f.payload)" — le
+        // payload n'est JAMAIS tronqué, rc reste à payload[0]) que
+        // r.payload[0] = rc, PAS le premier octet de données. Mon fix
+        // précédent ("r.payload exclut déjà rc") était FAUX — basé sur une
+        // fausse prémisse, jamais vérifié contre le vrai code de parsing.
+        // Structure réelle confirmée contre la doc (Get Product ID) :
+        // payload[0]=rc, payload[1]=productID, payload[2..n]=nom ASCIIZ.
+        // Il faut donc sauter DEUX octets (rc ET productID), pas un seul.
+        if (r.payload == null || r.payload.length < 2) return "";
+        byte[] nameBytes = new byte[r.payload.length - 2];
+        System.arraycopy(r.payload, 2, nameBytes, 0, nameBytes.length);
         String s = new String(nameBytes, java.nio.charset.StandardCharsets.UTF_8);
         int nul = s.indexOf('\0');
         if (nul >= 0) s = s.substring(0, nul);
