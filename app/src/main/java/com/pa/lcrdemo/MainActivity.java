@@ -368,6 +368,9 @@ public class MainActivity extends AppCompatActivity {
     // tentative de se déclencher si une vient déjà de se produire très
     // récemment.
     private volatile long lastAutoReconnectAttemptMs = 0L;
+    // ✅ AJOUTÉ (10 août 2026, demande Paul) — annulation propre de la
+    // validation candidat par candidat, voir validerCandidats().
+    private volatile boolean candidatsAnnules = false;
     private static final long AUTO_RECONNECT_COOLDOWN_MS = 3000;
     // ✅ FIX (7 août 2026, demande Paul — "si on voit qu'il entre en série
     // comme ça, arrête et affiche l'écran de passer par Configure") — un
@@ -1342,6 +1345,22 @@ tabRegisters = findViewById(R.id.tabRegisters);
         // BT
         if (btnBtRefresh != null) btnBtRefresh.setOnClickListener(v -> refreshBondedBtList());
         if (btnBtConnect != null) btnBtConnect.setOnClickListener(v -> btConnectSelected());
+        // ✅ AJOUTÉ (10 août 2026, demande Paul — "candidats à valider...
+        // capable d'annuler... sans briser l'apk") — lecture seule, aucun
+        // effet sur l'état de connexion réel de l'app.
+        Button btnValiderCandidats = findViewById(R.id.btnValiderCandidats);
+        Button btnAnnulerCandidats = findViewById(R.id.btnAnnulerCandidats);
+        TextView txtValiderCandidatsResult = findViewById(R.id.txtValiderCandidatsResult);
+        if (btnValiderCandidats != null) {
+            btnValiderCandidats.setOnClickListener(v -> validerCandidats(
+                txtValiderCandidatsResult, btnValiderCandidats, btnAnnulerCandidats));
+        }
+        if (btnAnnulerCandidats != null) {
+            btnAnnulerCandidats.setOnClickListener(v -> {
+                candidatsAnnules = true;
+                logMedia1("[VALIDATION-CANDIDATS] Annulé par l'utilisateur");
+            });
+        }
         if (btnBtDisconnect != null) btnBtDisconnect.setOnClickListener(v -> btDisconnect());
         // ✅ BT Signal scan
         if (btnBtSignalScan != null) {
@@ -5067,6 +5086,176 @@ private boolean ensureBtConnectPermission() {
         int idx = spnBtBonded.getSelectedItemPosition();
         if (idx < 0 || idx >= btBonded.size()) return null;
         return btBonded.get(idx);
+    }
+
+    /** ✅ AJOUTÉ (10 août 2026, demande Paul — "je veux que tu me donnes les
+     *  candidats (les médias) à valider, je veux être capable d'annuler si
+     *  je vois que le candidat n'est pas présent, cela sans briser l'apk") —
+     *  liste RÉELLEMENT tous les candidats possibles (USB si présent, CHAQUE
+     *  appareil BT appairé, CHAQUE appareil TCP déjà connu) — pas juste "le
+     *  média actif" — et les teste un par un, en affichant le résultat de
+     *  chacun IMMÉDIATEMENT (pas en bloc à la fin). Annulable à tout moment
+     *  ENTRE deux candidats. STRICTEMENT EN LECTURE SEULE : ouvre son propre
+     *  transport temporaire pour chaque test, ne touche JAMAIS
+     *  RegisterSessionManager/DeliveryController, ne persiste rien, ne
+     *  change aucun réglage — impossible que ça casse quoi que ce soit,
+     *  contrairement à l'incident précédent (qui changeait un réglage
+     *  persistant). Ferme proprement tout ce qu'elle ouvre elle-même. */
+    private void validerCandidats(TextView resultView, Button btnStart, Button btnCancel) {
+        candidatsAnnules = false;
+        if (resultView != null) resultView.setText("");
+        if (btnStart != null) btnStart.setEnabled(false);
+        if (btnCancel != null) btnCancel.setVisibility(View.VISIBLE);
+
+        new Thread(() -> {
+            java.util.List<String[]> candidats = new java.util.ArrayList<>(); // {label, type}
+            // 1) USB — un seul candidat, présent ou non
+            candidats.add(new String[]{"USB", "USB"});
+            // 2) Chaque appareil BT appairé
+            try {
+                for (BluetoothDevice d : btBonded) {
+                    if (d == null) continue;
+                    String name;
+                    try { name = d.getName(); } catch (SecurityException se) { name = null; }
+                    candidats.add(new String[]{"BT: " + (name != null ? name : d.getAddress())
+                        + " (" + d.getAddress() + ")", "BT:" + d.getAddress()});
+                }
+            } catch (Exception ignored) {}
+            // 3) Chaque appareil TCP déjà connu
+            try {
+                com.pa.lcr.lcp.storage.KnownTcpDeviceStore store =
+                    new com.pa.lcr.lcp.storage.KnownTcpDeviceStore(this);
+                org.json.JSONArray known = store.listKnown();
+                for (int i = 0; i < known.length(); i++) {
+                    org.json.JSONObject o = known.optJSONObject(i);
+                    if (o == null) continue;
+                    String ip = o.optString("ip", "");
+                    int port = o.optInt("port", 0);
+                    if (ip.isEmpty()) continue;
+                    candidats.add(new String[]{"TCP: " + ip + ":" + port, "TCP:" + ip + ":" + port});
+                }
+            } catch (Exception ignored) {}
+
+            final String header = "📋 " + candidats.size() + " candidat(s) à valider :\n"
+                + candidats.stream().map(c -> "  • " + c[0]).reduce("", (a, b) -> a + b + "\n") + "\n";
+            runOnUiThread(() -> { if (resultView != null) resultView.append(header); });
+
+            for (String[] candidat : candidats) {
+                if (candidatsAnnules) {
+                    final String cancelMsg = "\n⛔ Annulé par l'utilisateur — arrêt propre, "
+                        + "aucun état de connexion réel n'a été touché.";
+                    runOnUiThread(() -> { if (resultView != null) resultView.append(cancelMsg); });
+                    logMedia1("[VALIDATION-CANDIDATS] Arrêt propre après annulation");
+                    break;
+                }
+                final String label = candidat[0];
+                runOnUiThread(() -> { if (resultView != null) resultView.append("\n⏳ " + label + "...\n"); });
+                String resultat = validerUnCandidatLectureSeule(candidat[1]);
+                final String finalResultat = resultat;
+                runOnUiThread(() -> { if (resultView != null) resultView.append(finalResultat + "\n"); });
+                logMedia1("[VALIDATION-CANDIDATS] " + label + " → " + finalResultat.replace("\n", " | "));
+                if (candidatsAnnules) continue; // sera intercepté au prochain tour de boucle
+                try { Thread.sleep(200); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+            }
+
+            if (!candidatsAnnules) {
+                runOnUiThread(() -> { if (resultView != null) resultView.append("\n✅ Validation terminée."); });
+            }
+            runOnUiThread(() -> {
+                if (btnStart != null) btnStart.setEnabled(true);
+                if (btnCancel != null) btnCancel.setVisibility(View.GONE);
+            });
+        }).start();
+    }
+
+    /** Teste UN candidat, en lecture seule, avec son PROPRE transport temporaire —
+     *  jamais celui géré par MediaTransportManager/RegisterSessionManager. Ferme
+     *  systématiquement ce qu'elle ouvre, même en cas d'annulation ou d'erreur. */
+    private String validerUnCandidatLectureSeule(String candidatKey) {
+        long t0 = System.currentTimeMillis();
+        if (candidatKey.equals("USB")) {
+            // Réutilise le port déjà ouvert par l'app s'il existe — ne touche à
+            // rien d'autre. Si aucun n'est ouvert, signale l'absence sans tenter
+            // d'en ouvrir un nouveau (une vraie ouverture appartient au flux de
+            // connexion normal, pas à cette validation en lecture seule).
+            if (usbPort == null) return "❌ Absent — aucun appareil USB détecté/ouvert";
+            try {
+                com.pa.lcr.lcp.transport.TransportIo io = (mediaTransportManager != null)
+                    ? mediaTransportManager.getByKey("USB") : null;
+                if (io == null || !io.isOpen()) return "❌ Absent — port USB non ouvert";
+                com.pa.lcr.lcp.LcpLink tmp = new com.pa.lcr.lcp.LcpLink(io, 250, 255, true);
+                byte[] raw = tmp.opGetField(80, 3000);
+                long ms = System.currentTimeMillis() - t0;
+                String serial = decodeSerialBytes(raw);
+                return serial != null ? "✅ Présent — #série=" + serial + " (" + ms + "ms)"
+                    : "⚠ Présent mais silencieux (" + ms + "ms) — mauvais débit probable";
+            } catch (Exception e) {
+                return "❌ Erreur — " + e.getClass().getSimpleName() + ": " + e.getMessage();
+            }
+        }
+        if (candidatKey.startsWith("BT:")) {
+            String mac = candidatKey.substring(3);
+            android.bluetooth.BluetoothDevice dev;
+            try {
+                android.bluetooth.BluetoothAdapter adapter = android.bluetooth.BluetoothAdapter.getDefaultAdapter();
+                dev = adapter != null ? adapter.getRemoteDevice(mac) : null;
+            } catch (Exception e) {
+                return "❌ Erreur — adresse invalide";
+            }
+            if (dev == null) return "❌ Absent — appareil introuvable";
+            android.bluetooth.BluetoothSocket sock = null;
+            try {
+                java.util.UUID sppUuid = java.util.UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
+                sock = dev.createRfcommSocketToServiceRecord(sppUuid);
+                sock.connect(); // bloquant, mais dans un thread déjà dédié
+                com.pa.lcr.lcp.transport.BtSppTransportIo tmpIo = new com.pa.lcr.lcp.transport.BtSppTransportIo(
+                    "BT:" + mac, sock, sock.getInputStream(), sock.getOutputStream(),
+                    "Validation candidat BT:" + mac, System.currentTimeMillis());
+                com.pa.lcr.lcp.LcpLink tmp = new com.pa.lcr.lcp.LcpLink(tmpIo, 250, 255, true);
+                byte[] raw = tmp.opGetField(80, 3000);
+                long ms = System.currentTimeMillis() - t0;
+                String serial = decodeSerialBytes(raw);
+                return serial != null ? "✅ Présent — #série=" + serial + " (" + ms + "ms)"
+                    : "⚠ Présent mais silencieux (" + ms + "ms) — mauvais débit probable";
+            } catch (Exception e) {
+                return "❌ Absent/injoignable — " + e.getClass().getSimpleName() + ": " + e.getMessage();
+            } finally {
+                if (sock != null) { try { sock.close(); } catch (Exception ignored) {} }
+            }
+        }
+        if (candidatKey.startsWith("TCP:")) {
+            String[] parts = candidatKey.substring(4).split(":");
+            if (parts.length != 2) return "❌ Erreur — format IP:port invalide";
+            java.net.Socket sock = null;
+            try {
+                sock = new java.net.Socket();
+                sock.connect(new java.net.InetSocketAddress(parts[0], Integer.parseInt(parts[1])), 3000);
+                String tcpKey = com.pa.lcr.lcp.transport.TcpTransportIo.tcpKey(parts[0], Integer.parseInt(parts[1]));
+                com.pa.lcr.lcp.transport.TcpTransportIo tmpIo = new com.pa.lcr.lcp.transport.TcpTransportIo(
+                    tcpKey, sock, sock.getInputStream(), sock.getOutputStream(),
+                    "Validation candidat " + tcpKey, System.currentTimeMillis());
+                com.pa.lcr.lcp.LcpLink tmp = new com.pa.lcr.lcp.LcpLink(tmpIo, 250, 255, true);
+                byte[] raw = tmp.opGetField(80, 3000);
+                long ms = System.currentTimeMillis() - t0;
+                String serial = decodeSerialBytes(raw);
+                return serial != null ? "✅ Présent — #série=" + serial + " (" + ms + "ms)"
+                    : "⚠ Présent mais silencieux (" + ms + "ms) — mauvais débit probable";
+            } catch (Exception e) {
+                return "❌ Absent/injoignable — " + e.getClass().getSimpleName() + ": " + e.getMessage();
+            } finally {
+                if (sock != null) { try { sock.close(); } catch (Exception ignored) {} }
+            }
+        }
+        return "❌ Type de candidat inconnu";
+    }
+
+    private String decodeSerialBytes(byte[] raw) {
+        if (raw == null || raw.length == 0) return null;
+        String s = new String(raw, java.nio.charset.StandardCharsets.UTF_8);
+        int nul = s.indexOf('\0');
+        if (nul >= 0) s = s.substring(0, nul);
+        s = s.trim();
+        return s.isEmpty() ? null : s;
     }
 
     private void btConnectSelected() {

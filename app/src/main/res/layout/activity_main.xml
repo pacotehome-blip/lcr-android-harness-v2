@@ -256,6 +256,72 @@
                 android:orientation="vertical"
                 android:padding="10dp">
 
+                <!-- ✅ AJOUTÉ (10 août 2026, demande Paul — "je veux que tu me
+                     donnes les candidats (les médias) à valider... je veux
+                     être capable d'annuler si je vois que le candidat n'est
+                     pas présent, cela sans briser l'apk") — validation EN
+                     LECTURE SEULE des candidats (USB, chaque BT appairé,
+                     chaque TCP connu), un par un en direct, annulable à tout
+                     moment entre deux candidats sans jamais toucher à l'état
+                     de connexion réel de l'app (aucune session créée, aucun
+                     réglage changé, aucune persistance). -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:background="@drawable/bg_support_search_field"
+                    android:layout_marginBottom="10dp"
+                    android:padding="8dp">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="🔍 Valider les candidats (lecture seule, sans danger)"
+                        android:textStyle="bold"
+                        android:textSize="13sp"/>
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:orientation="horizontal">
+
+                        <Button
+                            android:id="@+id/btnValiderCandidats"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:backgroundTint="#00695C"
+                            android:text="Démarrer la validation"/>
+
+                        <Button
+                            android:id="@+id/btnAnnulerCandidats"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:layout_marginStart="8dp"
+                            android:backgroundTint="#B71C1C"
+                            android:text="Annuler"
+                            android:visibility="gone"/>
+                    </LinearLayout>
+
+                    <ScrollView
+                        android:layout_width="match_parent"
+                        android:layout_height="220dp"
+                        android:layout_marginTop="6dp"
+                        android:background="#FFFFFFFF">
+
+                        <TextView
+                            android:id="@+id/txtValiderCandidatsResult"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:padding="4dp"
+                            android:textSize="11sp"
+                            android:fontFamily="monospace"
+                            android:text=""/>
+                    </ScrollView>
+                </LinearLayout>
+
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
