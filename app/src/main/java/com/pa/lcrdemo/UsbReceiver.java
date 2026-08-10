@@ -111,15 +111,11 @@ public class UsbReceiver extends BroadcastReceiver {
  return;
  }
  port.open(conn);
- // ✅ FIX (7 août 2026, demande Paul) — utilise la vitesse initiale choisie
- // par l'utilisateur au lieu de 19200 codé en dur.
- port.setParameters(MainActivity.getInitialUsbBaud(context), 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
- // ✅ FIX (10 août 2026) — log manquant ajouté : la vraie vitesse utilisée
- // à l'ouverture doit TOUJOURS être visible, jamais silencieuse.
- android.util.Log.i("UsbReceiver", "[BAUD] Port USB ouvert (attache auto) à "
-     + MainActivity.getInitialUsbBaud(context) + " bauds");
- // ✅ FIX (7 août 2026, demande Paul — "trop de collision sur une
- // communication dès le départ") — même purge que dans MainActivity.
+ // ✅ FIX CRITIQUE (10 août 2026, demande Paul — "tu remets ça comme
+ // avant") — retour à une valeur simple codée en dur, comme c'était avant
+ // toute la couche de diagnostic de vitesse — mais avec la bonne valeur
+ // (9600, pas l'ancien 19200 erroné).
+ port.setParameters(9600, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
  try { port.purgeHwBuffers(true, true); } catch (Exception ignoredPurge) {}
  // ✅ stocker la session + notifier l'app
  UsbSession.set(device, port);
