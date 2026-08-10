@@ -43,7 +43,7 @@ public class DeliveryDb extends SQLiteOpenHelper {
     //      chaque soir) + diagnostic_match_history (persiste chaque résultat de
     //      DiagnosticRuleEngine, jusqu'ici calculé à la volée et jamais stocké — nécessaire
     //      pour calibrer les règles / futur agent IA, demande Paul 31 juillet 2026).
-    public static final int DB_VERSION = 23;
+    public static final int DB_VERSION = 24;
 
     private static final String TAG = "DeliveryDb";
 
@@ -216,6 +216,12 @@ public class DeliveryDb extends SQLiteOpenHelper {
         // un code couleur dédié côté UI, distinct des ERROR/WARN/INFO. DROP+CREATE d'une
         // vue est toujours sans risque de perte de données.
         if (oldVersion < 23) {
+            createDiagnosticEventsView(db);
+        }
+        // v24 (demande Paul, 10 août 2026 — "grosse évidence que c'est un test") : niveau
+        // TEST ajouté, priorité maximale dans la classification, pour un code couleur
+        // dédié distinguant clairement un test manuel d'un vrai événement de livraison.
+        if (oldVersion < 24) {
             createDiagnosticEventsView(db);
         }
     }
@@ -533,6 +539,7 @@ public class DeliveryDb extends SQLiteOpenHelper {
             "  NULL                 AS job_id, " +
             "  'LOG_BUS'             AS attempt_source, " +
             "  CASE " +
+            "    WHEN b.msg LIKE '%TEST-COMMUNICATION-MANUEL%' THEN 'TEST' " +
             "    WHEN b.msg LIKE '[ERR]%' OR b.msg LIKE '%] ERR %' OR b.msg LIKE '%ERR ticket=%' " +
             "         OR b.msg LIKE '%Unable to resolve host%' OR b.msg LIKE '%DATAVERSE-PUSH] ERR%' " +
             "         THEN 'ERROR' " +

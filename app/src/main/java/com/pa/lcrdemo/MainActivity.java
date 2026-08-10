@@ -1411,22 +1411,58 @@ tabRegisters = findViewById(R.id.tabRegisters);
         // seul via mediaTransportManager.getActiveKey().
         spnBaudDiagnostic = findViewById(R.id.spnBaudDiagnostic);
         btnBaudDiagnosticTester = findViewById(R.id.btnBaudDiagnosticTester);
+        final int[] baudValues = {115200, 57600, 19200, 9600, 4800, 2400};
         if (spnBaudDiagnostic != null) {
             String[] baudLabels = {
-                "115200 (test port local — LCR-II ne le supporte pas)",
+                "115200 (port local seulement — LCR-II ne le supporte pas)",
                 "57600", "19200 (défaut)", "9600", "4800", "2400"
             };
             ArrayAdapter<String> baudAdapter = new ArrayAdapter<>(this,
                 android.R.layout.simple_spinner_item, baudLabels);
             baudAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
             spnBaudDiagnostic.setAdapter(baudAdapter);
-            spnBaudDiagnostic.setSelection(2); // 19200 par défaut
+            // ✅ FIX (7 août 2026) — présélectionne la vitesse déjà persistée,
+            // pour que l'écran reflète l'état réel, pas juste 19200 par défaut.
+            int savedBaud = getInitialUsbBaud(this);
+            int savedIdx = 2;
+            for (int i = 0; i < baudValues.length; i++) { if (baudValues[i] == savedBaud) { savedIdx = i; break; } }
+            spnBaudDiagnostic.setSelection(savedIdx);
         }
         if (btnBaudDiagnosticTester != null) {
             btnBaudDiagnosticTester.setOnClickListener(v -> {
                 int selected = (spnBaudDiagnostic != null) ? spnBaudDiagnostic.getSelectedItemPosition() : 2;
-                showBaudDiagnosticDialog2(selected);
+                if (selected < 0 || selected >= baudValues.length) selected = 2;
+                // ✅ FIX CRITIQUE (7 août 2026, demande Paul — "il faut initier
+                // la communication avec le bon baud rate dès le départ") —
+                // règle D'ABORD la vitesse pour la PROCHAINE ouverture USB —
+                // ça fonctionne même si AUCUN registre n'est encore connecté,
+                // contrairement à l'ancien comportement qui l'exigeait.
+                setInitialUsbBaud(baudValues[selected]);
+                Toast.makeText(this, "Vitesse initiale réglée à " + baudValues[selected]
+                    + " — reconnecte/rebranche l'USB pour l'appliquer", Toast.LENGTH_LONG).show();
+                // Si un registre est DÉJÀ connecté, offrir en plus le test LCP
+                // en direct (l'ancien comportement) — utile pour tester un
+                // changement de vitesse SANS débrancher/rebrancher.
+                if (currentRegNode > 0) {
+                    showBaudDiagnosticDialog2(selected);
+                }
             });
+        }
+        // ✅ AJOUTÉ (10 août 2026, demande Paul — "il faut une vraie façon
+        // de tester la communication... communication directe avec le
+        // registre") — bypass COMPLET de RegisterSessionManager/
+        // DeliveryController/tabs. Ouvre le transport actif directement,
+        // envoie UNE commande LCP simple (Get Field #80, #série), mesure le
+        // temps de réponse, rapporte le résultat brut. Isolé de toute la
+        // machinerie de session — sert précisément à distinguer "la
+        // communication brute est cassée" de "quelque chose dans la couche
+        // session est cassé", exactement ce qui a causé la confusion sur
+        // l'incident du 10 août.
+        Button btnTesterCommunication = findViewById(R.id.btnTesterCommunication);
+        TextView txtTesterCommunicationResult = findViewById(R.id.txtTesterCommunicationResult);
+        if (btnTesterCommunication != null) {
+            btnTesterCommunication.setOnClickListener(v ->
+                testerCommunicationDirecte(txtTesterCommunicationResult));
         }
 
         // CONFIGURE: ajout manuel (2 slots / média)
@@ -2532,6 +2568,14 @@ private void setupTabsTop() {
                 case "DISCONNECT":
                     bgColor = 0x33607D8B;      // bleu-gris translucide
                     headerColor = 0xFF37474F;  // bleu-gris foncé
+                    break;
+                // ✅ AJOUTÉ (10 août 2026, demande Paul — "grosse évidence
+                // que c'est un test") — violet vif, ne ressemble à aucune
+                // autre couleur déjà utilisée, pour qu'un test manuel ne
+                // soit jamais confondu avec un vrai événement de livraison.
+                case "TEST":
+                    bgColor = 0x668E24AA;      // violet vif, bien plus opaque que les autres
+                    headerColor = 0xFF4A148C;  // violet très foncé
                     break;
                 default:
                     bgColor = 0x00000000;
@@ -4301,7 +4345,17 @@ private void scanUsb() {
             UsbDeviceConnection conn = usbManager.openDevice(dev);
             UsbSerialPort port = driver.getPorts().get(0);
             port.open(conn);
-            port.setParameters(19200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
+            // ✅ FIX (7 août 2026, demande Paul) — utilise la vitesse initiale
+            // choisie par l'utilisateur au lieu de 19200 codé en dur.
+            port.setParameters(getInitialUsbBaud(this), 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
+            // ✅ FIX (10 août 2026) — log manquant ajouté : la vraie vitesse
+            // utilisée à l'ouverture doit TOUJOURS être visible, jamais silencieuse.
+            logMedia1("[BAUD] Port USB ouvert (openSelectedUsb) à " + getInitialUsbBaud(this) + " bauds");
+            // ✅ FIX (7 août 2026, demande Paul — "trop de collision sur une
+            // communication dès le départ") — vide le tampon matériel avant
+            // toute communication, au cas où le port a hérité de bruit
+            // résiduel d'une session précédente à une autre vitesse.
+            try { port.purgeHwBuffers(true, true); } catch (Exception ignoredPurge) {}
             usbPort = port;
             UsbSession.set(dev, port);
             // ✅ Publish USB ready (requis pour Scan registres USB via MediaTransportManager)
@@ -5101,6 +5155,133 @@ private boolean ensureBtConnectPermission() {
      *  de boutons dans un dialogue) par un flux plus direct : la vitesse est
      *  déjà choisie dans le Spinner visible avant même de cliquer "Tester" —
      *  ne reste qu'à confirmer et valider le registre/transport actif. */
+    // ✅ FIX CRITIQUE (7 août 2026, demande Paul — "il faut initier la
+    // communication avec le bon baud rate dès le départ... c'est le baud
+    // rate qui va permettre au registre de permettre la première ouverture
+    // correcte") — trouvé le vrai problème : ma fonctionnalité précédente
+    // exigeait une connexion DÉJÀ établie, mais si le registre parle
+    // réellement à une autre vitesse que 19200 (codé en dur à l'ouverture
+    // du port), la connexion initiale échoue AVANT même d'atteindre le
+    // diagnostic — rendant la fonctionnalité inutile dans exactement le cas
+    // où elle serait nécessaire. La vitesse choisie dans le Spinner sert
+    // maintenant à la PREMIÈRE ouverture du port USB, persistée pour
+    // survivre entre les tentatives, lue directement par UsbReceiver aussi.
+    // ✅ FIX CRITIQUE (10 août 2026, demande Paul — "on est sur le point de
+    // partir en production... tu viens de briser la communication avec le
+    // registre en USB") — preuve trouvée : chaque sonde retournait
+    // "serial= (vide) node=0" — signature exacte d'un mauvais débit. Cause
+    // racine confirmée : ce réglage était persisté de façon PERMANENTE via
+    // SharedPreferences (MODE_PRIVATE + .apply()) — si testé UNE FOIS avec
+    // autre chose que 19200, ÇA CASSAIT TOUTE CONNEXION USB FUTURE sur
+    // cette tablette, silencieusement, sans aucune indication visible nulle
+    // part. Risque structurel inacceptable pour une flotte de 500 camions.
+    // Corrigé : maintenant en mémoire SEULEMENT (jamais persisté) — remis à
+    // 19200 par défaut à chaque redémarrage de l'app, ne peut plus jamais
+    // casser une session future silencieusement.
+    private static volatile int sessionUsbBaud = 19200;
+
+    public static int getInitialUsbBaud(android.content.Context ctx) {
+        return sessionUsbBaud;
+    }
+
+    private void setInitialUsbBaud(int baud) {
+        sessionUsbBaud = baud;
+        logMedia1("[BAUD] Vitesse initiale USB réglée à " + baud + " bauds pour la prochaine ouverture "
+            + "(session actuelle SEULEMENT — revient à 19200 au prochain redémarrage de l'app)");
+    }
+
+    /** ✅ AJOUTÉ (10 août 2026, demande Paul — "il faut une vraie façon de
+     *  tester la communication") — test DIRECT, isolé de toute la couche
+     *  session (RegisterSessionManager/DeliveryController/tabs). Ouvre le
+     *  transport actif, envoie UNE seule commande LCP (Get Field #80), et
+     *  rapporte le résultat brut avec le temps de réponse — pour distinguer
+     *  "la communication physique/protocolaire fonctionne" de "quelque
+     *  chose de plus haut dans l'app est cassé". Node par défaut = 250
+     *  (celui utilisé partout ailleurs dans l'app) sauf si un tab est déjà
+     *  actif, auquel cas son node est réutilisé. */
+    private void testerCommunicationDirecte(TextView resultView) {
+        String activeKey = (mediaTransportManager != null) ? mediaTransportManager.getActiveKey() : null;
+        if (activeKey == null || activeKey.trim().isEmpty()) {
+            if (resultView != null) resultView.setText("❌ Aucun transport actif (USB/BT/TCP) — connecte d'abord un média");
+            return;
+        }
+        com.pa.lcr.lcp.transport.TransportIo io = mediaTransportManager.getByKey(activeKey);
+        if (io == null || !io.isOpen()) {
+            if (resultView != null) resultView.setText("❌ Transport '" + activeKey + "' non ouvert");
+            return;
+        }
+        final int testNode = (currentRegNode > 0) ? currentRegNode : 250;
+        final String testMedia = mediaShortFromTransportKey(activeKey);
+        final int testBaud = getInitialUsbBaud(this);
+
+        if (resultView != null) resultView.setText("⏳ Test en cours — média=" + testMedia
+            + (("USB".equalsIgnoreCase(testMedia)) ? " (" + testBaud + " bauds)" : "")
+            + " node=" + testNode + "...");
+        logMedia1("[TEST-COMM] Démarrage — média=" + testMedia + " node=" + testNode
+            + (("USB".equalsIgnoreCase(testMedia)) ? " baud=" + testBaud : ""));
+
+        new Thread(() -> {
+            long t0 = System.currentTimeMillis();
+            String resultText;
+            boolean success = false;
+            try {
+                com.pa.lcr.lcp.LcpLink tmp = new com.pa.lcr.lcp.LcpLink(io, testNode, 255, true);
+                byte[] raw = tmp.opGetField(80, 3000);
+                long elapsedMs = System.currentTimeMillis() - t0;
+                if (raw != null && raw.length > 0) {
+                    String serial = new String(raw, java.nio.charset.StandardCharsets.UTF_8);
+                    int nul = serial.indexOf('\0');
+                    if (nul >= 0) serial = serial.substring(0, nul);
+                    serial = serial.trim();
+                    StringBuilder hexDump = new StringBuilder();
+                    for (byte b : raw) hexDump.append(String.format("%02X ", b));
+                    // ✅ AJOUTÉ (10 août 2026, demande Paul — "je veux que tu
+                    // me récupères le firmware") — réutilise le MÊME LcpLink
+                    // déjà ouvert pour le #série, pas de sonde séparée.
+                    String firmwareTest = null;
+                    try { firmwareTest = tmp.opGetFirmwareVersion(); } catch (Exception ignoredFw) {}
+                    final String fwSafe = (firmwareTest != null && !firmwareTest.isEmpty()) ? firmwareTest : "(vide/non lu)";
+                    if (!serial.isEmpty()) {
+                        success = true;
+                        resultText = "✅ SUCCÈS — " + elapsedMs + "ms\n"
+                            + "média=" + testMedia + " node=" + testNode
+                            + (("USB".equalsIgnoreCase(testMedia)) ? " baud=" + testBaud : "") + "\n"
+                            + "#série lu=" + serial + "\n"
+                            + "firmware=" + fwSafe + "\n"
+                            + "bytes bruts=" + hexDump.toString().trim();
+                    } else {
+                        resultText = "⚠ RÉPONSE VIDE — " + elapsedMs + "ms\n"
+                            + "média=" + testMedia + " node=" + testNode
+                            + (("USB".equalsIgnoreCase(testMedia)) ? " baud=" + testBaud : "") + "\n"
+                            + "firmware=" + fwSafe + "\n"
+                            + "Communication établie mais aucune donnée cohérente — "
+                            + "signature typique d'un débit incorrect.\n"
+                            + "bytes bruts=" + hexDump.toString().trim();
+                    }
+                } else {
+                    resultText = "⚠ AUCUNE RÉPONSE — " + elapsedMs + "ms\n"
+                        + "média=" + testMedia + " node=" + testNode
+                        + (("USB".equalsIgnoreCase(testMedia)) ? " baud=" + testBaud : "");
+                }
+            } catch (Exception e) {
+                long elapsedMs = System.currentTimeMillis() - t0;
+                resultText = "❌ ÉCHEC — " + elapsedMs + "ms\n"
+                    + "média=" + testMedia + " node=" + testNode
+                    + (("USB".equalsIgnoreCase(testMedia)) ? " baud=" + testBaud : "") + "\n"
+                    + "erreur=" + e.getClass().getSimpleName() + ": " + e.getMessage();
+            }
+            final String finalResult = resultText;
+            final boolean finalSuccess = success;
+            // ✅ AJOUTÉ (10 août 2026, demande Paul — "grosse évidence que
+            // c'est un test") — marqueur très visible, distinct de tout
+            // autre message, pour ne jamais confondre ce test manuel avec
+            // un vrai événement de livraison en le relisant plus tard.
+            logMedia1("🧪🧪🧪 [TEST-COMMUNICATION-MANUEL] " + (finalSuccess ? "SUCCÈS" : "ÉCHEC/VIDE")
+                + " 🧪🧪🧪 — " + finalResult.replace("\n", " | "));
+            runOnUiThread(() -> { if (resultView != null) resultView.setText(finalResult); });
+        }).start();
+    }
+
     private void showBaudDiagnosticDialog2(int selectedIndex) {
         int targetNode = currentRegNode;
         if (targetNode <= 0) {
@@ -5183,13 +5364,30 @@ private boolean ensureBtConnectPermission() {
                 // USB et TCP) — le message de repli disait "Transport BT"
                 // même quand c'était en fait TCP — corrigé pour distinguer
                 // les trois cas.
+                // ✅ FIX CRITIQUE (7 août 2026, demande Paul — "qu'est-ce qui
+                // arrive si j'ai trop de collision sur une communication dès
+                // le départ") — RS-232 est point-à-point (TX/RX dédiés, pas
+                // de collision électrique comme sur un bus partagé), mais un
+                // changement de vitesse SANS vider le tampon de lecture
+                // laisse les octets mal interprétés de la tentative
+                // précédente (à la mauvaise vitesse) traîner dans le
+                // tampon — se mélangeant avec la nouvelle tentative et
+                // créant exactement ce genre d'empilement confus, même sans
+                // collision électrique au sens strict. purgeHwBuffers() vide
+                // le tampon matériel, et un court délai de stabilisation
+                // (200ms) laisse le temps au registre lui-même de finir de
+                // traiter tout ce qu'il avait en cours avant qu'on lui
+                // reparle à la nouvelle vitesse.
                 String mediaBaud = mediaShortFromTransportKey(transportKey);
                 if ("USB".equalsIgnoreCase(mediaBaud)) {
                     try {
                         UsbSerialPort port = UsbSession.getPort();
                         if (port != null) {
                             port.setParameters(usbBaud, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
-                            logMedia1("[BAUD] Port USB local reconfiguré à " + usbBaud + " bauds pour matcher");
+                            try { port.purgeHwBuffers(true, true); } catch (Exception ignoredPurge) {}
+                            try { Thread.sleep(200); } catch (InterruptedException ignoredSleep) { Thread.currentThread().interrupt(); }
+                            logMedia1("[BAUD] Port USB local reconfiguré à " + usbBaud
+                                + " bauds pour matcher — tampon vidé, 200ms de stabilisation");
                         } else {
                             logMedia1("[BAUD] ⚠ Port USB introuvable pour reconfiguration locale — "
                                 + "communication probablement perdue, cycle d'alimentation du registre requis");
