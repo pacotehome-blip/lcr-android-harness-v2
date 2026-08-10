@@ -297,8 +297,30 @@
                             android:layout_height="wrap_content"
                             android:layout_marginStart="8dp"
                             android:backgroundTint="#E65100"
-                            android:text="Tester"/>
+                            android:text="Appliquer"/>
                     </LinearLayout>
+
+                    <!-- ✅ AJOUTÉ (10 août 2026, demande Paul — "il faut une
+                         vraie façon de tester la communication" — pas juste
+                         appliquer une vitesse, un vrai test direct avec le
+                         registre, isolé de toute la machinerie de session.
+                         Fonctionne peu importe le média actif (USB/BT/TCP). -->
+                    <Button
+                        android:id="@+id/btnTesterCommunication"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:backgroundTint="#1565C0"
+                        android:text="🔧 Tester la communication (direct, sans session)"/>
+
+                    <TextView
+                        android:id="@+id/txtTesterCommunicationResult"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:textSize="12sp"
+                        android:fontFamily="monospace"
+                        android:text=""/>
                 </LinearLayout>
 
                 <LinearLayout
