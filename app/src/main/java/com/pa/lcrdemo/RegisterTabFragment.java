@@ -93,6 +93,27 @@ public class RegisterTabFragment extends Fragment {
             android.content.Context ctx = getContext();
             if (ctx == null) return;
 
+            // ✅ FIX CRITIQUE (11 août 2026, demande Paul — "j'ai un lag
+            // vraiment énorme dans le tab... le live ne suivait pas
+            // pentoute") — trouvé via logcat : cette méthode se
+            // reprogramme elle-même toutes les 1.5s (voir
+            // onTabMediaStatusChanged, ligne ~1966) — INDÉFINIMENT, dès
+            // qu'un changement de média se produit UNE SEULE fois. L'ancien
+            // anti-rebond (1500ms) ne protégeait rien puisque la fenêtre de
+            // reprogrammation correspond EXACTEMENT à la fenêtre de
+            // throttle — chaque cycle passait à travers. Résultat :
+            // getOrCreate() martelé en boucle même pendant une livraison
+            // RUNNING_FLOWING active, en compétition directe avec le vrai
+            // sondage live pour le même verrou partagé. Corrigé : sauté
+            // complètement pendant une livraison active.
+            if (controller != null) {
+                com.pa.lcr.lcp.DeliveryState stCourant = controller.getState();
+                if (stCourant == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
+                        || stCourant == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED) {
+                    return;
+                }
+            }
+
             // ✅ FIX lag : cette méthode est appelée 3 fois en rafale (600/800/1500ms)
             // à chaque retour dans le tab (onTabActivated + onResume x2), chacune
             // refaisant ActiveDeliveryStore.load() sur le thread UI. Anti-rebond pour
@@ -1963,6 +1984,11 @@ public class RegisterTabFragment extends Fragment {
             }
             if (pendingReconnect) { pendingReconnect = false; reconnectThisRegister(false); }
             // ✅ Toujours vérifier PENDING quand le média devient disponible
+            // ✅ FIX (11 août 2026) — n'arrête PAS la boucle elle-même,
+            // seulement pendant une livraison active — sinon, une fois
+            // relâchée, plus rien ne relancerait jamais la vérification
+            // (voir garde ajoutée au début de checkPendingDeliveryForThisRegister()
+            // qui gère déjà le "sauter le travail réel").
             ui.postDelayed(() -> checkPendingDeliveryForThisRegister(), 1500);
         });
     }

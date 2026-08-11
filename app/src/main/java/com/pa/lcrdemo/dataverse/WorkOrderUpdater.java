@@ -138,6 +138,8 @@ public class WorkOrderUpdater {
             org.json.JSONArray merged = mergeLivraisons(existingLivraisons, deliveries);
 
             // Dernière livraison non-annulée — pour les champs "courants" pratiques
+            // (calculé AVANT troncature — voir plus bas — pour rester exact peu
+            // importe combien de livraisons ont été accumulées au total).
             double lastNet = 0, lastGross = 0;
             String lastTicket = "";
             for (int i = merged.length() - 1; i >= 0; i--) {
@@ -151,7 +153,9 @@ public class WorkOrderUpdater {
                 break;
             }
 
-            // Calculer le total cumulatif de toutes les livraisons non-annulées
+            // Calculer le total cumulatif de TOUTES les livraisons non-annulées
+            // (avant troncature — le vrai total, peu importe combien de détails
+            // seront gardés dans le champ résumé envoyé).
             double totalNet = 0, totalGross = 0;
             for (int i = 0; i < merged.length(); i++) {
                 JSONObject d = merged.optJSONObject(i);
@@ -159,6 +163,38 @@ public class WorkOrderUpdater {
                 if ("ANNULATION".equals(d.optString("type", ""))) continue;
                 totalNet   += d.optDouble("net_l",   0);
                 totalGross += d.optDouble("gross_l", 0);
+            }
+            final int totalLivraisonsReel = merged.length();
+
+            // ✅ FIX CRITIQUE (11 août 2026, demande Paul — "les livraisons
+            // se rendent dans Dataverse mais pas en retour sur le bon de
+            // travail") — trouvé via logcat : PATCH HTTP 400, "the length
+            // of the 'msdyn_workordersummary' attribute..." — ce champ
+            // ACCUMULE toutes les livraisons de ce WO depuis toujours, sans
+            // aucune limite, jusqu'à dépasser la longueur maximale
+            // acceptée par Dataverse pour ce champ texte. Résultat : le
+            // PATCH échoue silencieusement (juste loggé en erreur), donc
+            // AUCUNE mise à jour n'atteint jamais le bon de travail — pas
+            // seulement la plus récente, TOUTES les livraisons en attente
+            // pour ce WO. Corrigé en gardant seulement les N livraisons les
+            // plus RÉCENTES dans le tableau DÉTAILLÉ envoyé — les totaux
+            // cumulatifs (totalNet/totalGross, calculés ci-dessus AVANT
+            // cette troncature) restent exacts sur l'historique complet.
+            // Les livraisons plus anciennes restent dans LcrDeliveryStatusDb
+            // (BD locale, jamais purgée par ce correctif) et dans Dataverse
+            // lui-même (déjà enregistrées lors d'un PATCH précédent
+            // réussi) — seul ce champ résumé/affichage est borné.
+            final int MAX_LIVRAISONS_DANS_RESUME = 20;
+            if (merged.length() > MAX_LIVRAISONS_DANS_RESUME) {
+                org.json.JSONArray tronque = new org.json.JSONArray();
+                int debut = merged.length() - MAX_LIVRAISONS_DANS_RESUME;
+                for (int i = debut; i < merged.length(); i++) {
+                    tronque.put(merged.get(i));
+                }
+                Log.w(TAG, "patchSummaryConsolidated: " + merged.length()
+                    + " livraisons — tronqué aux " + MAX_LIVRAISONS_DANS_RESUME
+                    + " plus récentes pour rester sous la limite de longueur Dataverse");
+                merged = tronque;
             }
 
             JSONObject summary = new JSONObject();
@@ -172,7 +208,7 @@ public class WorkOrderUpdater {
             summary.put("source",           "LCR");
             summary.put("ts",               new java.util.Date().toString());
             summary.put("livraisons",       merged);
-            summary.put("livraisons_count", merged.length());
+            summary.put("livraisons_count", totalLivraisonsReel);
 
             JSONObject body = new JSONObject();
             body.put("msdyn_workordersummary", summary.toString());
