@@ -2006,6 +2006,17 @@ try {
         if (isTicketRequiredNeverPrint()) {
             emitLog("[TICKET] TicketRequired=2 (jamais imprimer) — attente de 30s sautée, "
                 + "impression désactivée par conception (ctx=" + ctx + ")");
+            // ✅ FIX CRITIQUE (11 août 2026, demande Paul — "je voulais
+            // l'implémenter pour le trouble de l'impression, as-tu fait
+            // ça") — branché ici, exactement là où le problème
+            // d'impression se manifeste. Avant de simplement contourner
+            // l'attente, on tente une vraie annulation de la requête
+            // coincée en file (probablement liée à l'impression, vu le
+            // contexte) — le résultat est loggé en clair dans Support,
+            // avec le rc décodé ET l'état de TicketRequired pour permettre
+            // une vraie corrélation.
+            try { tenterAbortRequestAvecContexte("waitTicketPendingClearedOrTimeout/" + ctx); }
+            catch (Exception ignored) {}
             ticketPrintInFlight.set(false);
             ticketPrintStartMs = 0L;
             return true;
@@ -2081,6 +2092,39 @@ try {
             }
         }
         return cachedTicketRequired == 2;
+    }
+
+    /** ✅ AJOUTÉ (11 août 2026, demande Paul — "on veut le savoir dans le
+     *  log que ça a été annulé, et si c'est lié à l'impression, si l'option
+     *  d'impression est toujours 2") — tente Abort Request (0x7E) sur la
+     *  requête actuellement en file, logue le résultat en clair dans
+     *  Support avec le contexte complet : le code de retour décodé, ET
+     *  l'état actuel de TicketRequired (#37) pour pouvoir corréler
+     *  directement si le blocage est bien lié à l'impression désactivée. */
+    public void tenterAbortRequestAvecContexte(String ctx) {
+        boolean ticketRequiredNeverPrint = false;
+        try { ticketRequiredNeverPrint = isTicketRequiredNeverPrint(); } catch (Exception ignored) {}
+        final boolean printDisabled = ticketRequiredNeverPrint;
+        try {
+            int rc = withLcpLock(() -> ((com.pa.lcr.lcp.LcpLink) link).opAbortRequest());
+            String rcDecode;
+            switch (rc) {
+                case 0x28: rcDecode = "ANNULÉE AVEC SUCCÈS"; break; // 40 déc
+                case 0x29: rcDecode = "annulation encore en cours de traitement"; break; // 41 déc
+                case 0x2A: rcDecode = "TROP AVANCÉE POUR ÊTRE ANNULÉE"; break; // 42 déc
+                case 0x27: rcDecode = "aucune requête en file à annuler"; break; // 39 déc
+                case 0x00: rcDecode = "OK (aucune file active)"; break;
+                default: rcDecode = "code non documenté";
+            }
+            emitLog("[ABORT-REQUEST] ctx=" + ctx + " rc=0x" + Integer.toHexString(rc)
+                + " (" + rcDecode + ") | TicketRequired=2 (jamais imprimer)="
+                + printDisabled + (printDisabled
+                    ? " — si annulée avec succès, ça confirme le lien direct avec l'impression désactivée"
+                    : " — impression toujours active/requise, interprétation différente"));
+        } catch (Exception e) {
+            emitLog("[ABORT-REQUEST] ctx=" + ctx + " ERR: " + e.getMessage()
+                + " | TicketRequired=2 (jamais imprimer)=" + printDisabled);
+        }
     }
 
     private void clearTicketPendingLoop() {
@@ -3533,12 +3577,31 @@ job.presetNetL_requested = presetNetL;
                     int delCode = ds[1];
                     if ((delCode & DC_DELIVERY_ACTIVE) != 0)
                         throw new java.io.IOException("api_scanProductNames: livraison active");
+                    // ✅ FIX CRITIQUE (11 août 2026, demande Paul — trouvé en
+                    // traçant une collision TX/TX dans un vrai log de tab) —
+                    // cette boucle est une DEUXIÈME occurrence du même
+                    // problème déjà corrigé dans
+                    // waitTicketPendingClearedOrTimeout() (voir
+                    // isTicketRequiredNeverPrint()) — mais JAMAIS mise à
+                    // jour ici. Elle tenait le VERROU PARTAGÉ (withLcpLock)
+                    // jusqu'à 15 SECONDES complètes en attendant un
+                    // ticketPending qui ne se videra jamais si
+                    // TicketRequired=2 — bloquant TOUT le reste (sondage
+                    // périodique, WO-DETECT, etc.) pendant ce temps. À la
+                    // libération du verrou, tout ce qui s'était accumulé en
+                    // attente démarrait d'un coup — expliquant la rafale
+                    // TX/TX désordonnée observée en fin de log.
                     if ((delCode & DC_TICKET_PENDING) != 0) {
-                        link.opIssueCommand(CMD_PRINT_LAST_TICKET);
-                        long deadline = System.currentTimeMillis() + 15_000;
-                        while (System.currentTimeMillis() < deadline) {
-                            try { Thread.sleep(300); } catch (Exception ignored) {}
-                            if ((link.opDeliveryStatus()[1] & DC_TICKET_PENDING) == 0) break;
+                        if (isTicketRequiredNeverPrint()) {
+                            emitLog("[SCAN] TicketRequired=2 (jamais imprimer) — attente de 15s sautée "
+                                + "(ticketPending ne se videra jamais par conception)");
+                        } else {
+                            link.opIssueCommand(CMD_PRINT_LAST_TICKET);
+                            long deadline = System.currentTimeMillis() + 15_000;
+                            while (System.currentTimeMillis() < deadline) {
+                                try { Thread.sleep(300); } catch (Exception ignored) {}
+                                if ((link.opDeliveryStatus()[1] & DC_TICKET_PENDING) == 0) break;
+                            }
                         }
                     }
                 } catch (java.io.IOException e) { throw e; }

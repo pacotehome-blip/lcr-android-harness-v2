@@ -85,6 +85,10 @@ public class LcpLink {
     // SOURCE SÉPARÉE du Field #60, pour comparer.
     private static final byte MSG_GET_PRODUCT_ID = 0x00;
     private static final byte MSG_CHECK_REQUEST = 0x7D;
+    // ✅ AJOUTÉ (11 août 2026, demande Paul) — "Abort Request" (0x7E),
+    // documenté comme complément de Check Request depuis ce matin, jamais
+    // implémenté jusqu'ici.
+    private static final byte MSG_ABORT_REQUEST = 0x7E;
     // ✅ AJOUTÉ (7 août 2026, demande Paul — "réduire la vitesse de
     // transmission entre 19200 et 4800 dans les tests de diagnostic") —
     // message générique LCP "Set Baud" (msgID=0x7C), sourcé de la doc
@@ -643,6 +647,21 @@ public class LcpLink {
         ensureOk(r, "SET_BAUD idx=" + baudIndex);
     }
 
+    /** ✅ AJOUTÉ (11 août 2026, demande Paul) — "Abort Request" (0x7E),
+     *  tente d'annuler une requête actuellement en file d'attente dans le
+     *  registre. Structure confirmée dans la doc officielle : aucun
+     *  paramètre, réponse d'un seul octet (rc). Codes de retour pertinents
+     *  (voir REGISTRE_ETATS_REFERENCE.md) : 40=annulée avec succès,
+     *  41=annulation encore en cours de traitement, 42=trop avancée pour
+     *  être annulée, 39=aucune requête en file à annuler. Retourne le rc
+     *  brut plutôt que de lever une exception sur un rc non-zéro — TOUS
+     *  les codes ci-dessus sont des réponses valides et informatives, pas
+     *  des échecs de communication. */
+    public int opAbortRequest() throws IOException {
+        Response r = sendRecv(buildPayload(MSG_ABORT_REQUEST, null), 5000);
+        return r.rc;
+    }
+
 
     // =========================================================
     // ✅ Précision décimale NET/GROSS — responsabilité du protocole,
@@ -791,6 +810,20 @@ public class LcpLink {
         boolean queued = false;
         int lastQueued = -1;
         long nextCheck = 0L;
+        // ✅ FIX CRITIQUE (11 août 2026, demande Paul — "ça ramasse en peu
+        // de temps... c'est malade") — trouvé via un vrai log de tab :
+        // certains cycles prennent 10-15 échanges 0x7D avant de se
+        // résoudre, TOUJOURS espacés du même QP_MS=200ms fixe, peu importe
+        // combien de tentatives ont déjà échoué — générant un volume de
+        // trafic/logs énorme sur 5 minutes. Ralentissement progressif
+        // ajouté : reste à 200ms pour les toutes premières tentatives
+        // (cas normal, résolution rapide), puis double jusqu'à un plafond
+        // de 2s après plusieurs échecs consécutifs — la file finit quand
+        // même par se résoudre (le comportement fonctionnel ne change
+        // pas), mais avec beaucoup moins de trafic/bruit pendant qu'elle
+        // prend son temps.
+        int checkAttempts = 0;
+        long checkIntervalMs = QP_MS;
 
         while (System.currentTimeMillis() < deadline) {
 
@@ -805,7 +838,11 @@ public class LcpLink {
                         throw new TransportException("Error writing", e);
                     }
                 }
-                nextCheck = System.currentTimeMillis() + QP_MS;
+                checkAttempts++;
+                if (checkAttempts >= 5) {
+                    checkIntervalMs = Math.min(checkIntervalMs * 2, 2000);
+                }
+                nextCheck = System.currentTimeMillis() + checkIntervalMs;
             }
 
             // 2) Lire en tranches courtes pour ne pas bloquer l’envoi des 0x7D
