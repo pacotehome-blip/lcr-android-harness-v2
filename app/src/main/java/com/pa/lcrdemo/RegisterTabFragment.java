@@ -2120,9 +2120,19 @@ public class RegisterTabFragment extends Fragment {
                 // (tabTransportKey est presque toujours déjà défini pour un
                 // onglet existant), donc probablement la cause principale du
                 // "aucune réaction" sur long-press Reconnect / Status.
-                surErreurConnexion(
-                    new java.io.IOException("connectThisRegister: transport pinné fermé — " + tkPinned),
-                    "CONNECT_THIS_REGISTER_PINNED");
+                // ✅ FIX CRITIQUE (11 août 2026, demande Paul — même
+                // correctif que juste en dessous : ne déclenche le vrai
+                // dialogue de diagnostic que sur un vrai geste utilisateur,
+                // jamais pendant un appel automatique de création/lifecycle
+                // de tab.
+                if (userInitiated) {
+                    surErreurConnexion(
+                        new java.io.IOException("connectThisRegister: transport pinné fermé — " + tkPinned),
+                        "CONNECT_THIS_REGISTER_PINNED");
+                } else {
+                    android.util.Log.i("RegisterTabFragment", "connectThisRegister: transport pinné fermé "
+                        + "(appel automatique, userInitiated=false) — diagnostic forcé SAUTÉ");
+                }
                 return;
             }
             // ✅ Si le controller du session manager est aussi mort — le retirer avant getOrCreate
@@ -2156,12 +2166,30 @@ public class RegisterTabFragment extends Fragment {
             // pendant la création normale d'un tab (pas seulement sur un
             // vrai clic utilisateur), court-circuitant le flux normal de
             // découverte (upsertRegisterTabFromScan/probe) avant même qu'il
-            // ait eu la chance de faire son travail. Le Toast retiré —
-            // surErreurConnexion() reste appelée pour ne pas perdre la
-            // détection de vraie panne, mais sans notification prématurée.
-            surErreurConnexion(
-                new java.io.IOException("connectThisRegister: aucun média prêt/registre introuvable"),
-                "CONNECT_THIS_REGISTER");
+            // ✅ FIX CRITIQUE (11 août 2026, demande Paul — "j'ai encore des
+            // écrans de diagnostique, regarde dans la couche transport") —
+            // confirmé par logcat : ce chemin se déclenchait à la MÊME
+            // milliseconde que la création du tab elle-même
+            // (upsertRegisterTabFromScan), avec userInitiated=false —
+            // court-circuitant le flux normal de découverte AVANT même
+            // qu'il ait pu se terminer. Retirer le Toast (fait plus tôt)
+            // n'était pas suffisant — surErreurConnexion() déclenchait
+            // quand même le VRAI dialogue de diagnostic (4 étapes) en
+            // arrière-plan. Corrigé pour de bon : le diagnostic forcé ne se
+            // déclenche maintenant QUE sur un vrai geste utilisateur
+            // (userInitiated=true) — un appel automatique pendant la
+            // création du tab se contente de logger et laisse le flux
+            // normal (upsertRegisterTabFromScan/probe) faire son travail
+            // sans interférence.
+            if (userInitiated) {
+                surErreurConnexion(
+                    new java.io.IOException("connectThisRegister: aucun média prêt/registre introuvable"),
+                    "CONNECT_THIS_REGISTER");
+            } else {
+                android.util.Log.i("RegisterTabFragment", "connectThisRegister: appel automatique "
+                    + "(userInitiated=false) — diagnostic forcé SAUTÉ, le flux normal de découverte "
+                    + "prend le relais sans interférence");
+            }
             return;
         }
 
