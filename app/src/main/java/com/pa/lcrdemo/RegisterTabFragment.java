@@ -3188,6 +3188,20 @@ public class RegisterTabFragment extends Fragment {
     private void surErreurConnexion(Exception e, String contexte) {
         android.util.Log.w("RegisterTabFragment", "surErreurConnexion [" + contexte + "]: "
             + (e != null ? e.getMessage() : "null"));
+        // ✅ FIX (11 août 2026, demande Paul — "je te demande d'enlever le
+        // diagnostic sur STATUS_B, ça obstrue ce qu'on cherche") — un échec
+        // sur un clic manuel STATUS_B déclenchait tout le diagnostic forcé
+        // (validerConnexion + lancerDiagnosticForce), ajoutant une rafale de
+        // trafic et de bruit supplémentaire exactement pendant les périodes
+        // où on essaie d'observer ce qui se passe réellement — contribuant
+        // potentiellement lui-même à la collision qu'on essaie de
+        // diagnostiquer. L'échec reste loggé (ligne ci-dessus), mais ne
+        // déclenche plus de diagnostic en cascade pour ce contexte précis.
+        // Le diagnostic automatique sur vraie déconnexion (AUTO_DISCONNECTED)
+        // n'est PAS affecté — seulement ce contexte spécifique.
+        if ("STATUS_B".equals(contexte)) {
+            return;
+        }
         if (com.pa.lcrdemo.RegisterConnectionHelper.estErreurConnexion(e)) {
             // ✅ FIX (bétonnage définitif) : validerConnexion() était appelée
             // SYNCHRONE sur le thread UI (puisque surErreurConnexion est
