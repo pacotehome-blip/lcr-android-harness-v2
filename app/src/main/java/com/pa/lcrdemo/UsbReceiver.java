@@ -111,11 +111,16 @@ public class UsbReceiver extends BroadcastReceiver {
  return;
  }
  port.open(conn);
- // ✅ FIX CRITIQUE (10 août 2026, demande Paul — "tu remets ça comme
- // avant") — retour à une valeur simple codée en dur, comme c'était avant
- // toute la couche de diagnostic de vitesse — mais avec la bonne valeur
- // (9600, pas l'ancien 19200 erroné).
- port.setParameters(9600, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
+ // ✅ FIX CRITIQUE (10 août 2026, demande Paul — confirmé par les bancs
+ // d'essai Python indépendants (lcr_bench.py) faits plus tôt aujourd'hui :
+ // 19200 bauds, validé empiriquement, PAS 9600.
+ // 🔧 TODO (10 août 2026, demande Paul) — dette technique : cette valeur
+ // est codée en dur ICI et séparément dans MainActivity.java (deux points
+ // d'entrée d'ouverture USB, aucune source partagée). Amélioration à
+ // faire : centraliser en une seule constante partagée pour qu'un futur
+ // changement de vitesse ne puisse plus désynchroniser les deux chemins
+ // par oubli.
+ port.setParameters(19200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
  try { port.purgeHwBuffers(true, true); } catch (Exception ignoredPurge) {}
  // ✅ stocker la session + notifier l'app
  UsbSession.set(device, port);

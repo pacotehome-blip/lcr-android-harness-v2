@@ -343,6 +343,9 @@ public class MainActivity extends AppCompatActivity {
     // onDestroyView) — anti-rebond pour upsertRegisterTabFromScan(), voir
     // commentaire complet sur son utilisation.
     private final Map<String, Long> upsertTabDebounceMap = new java.util.concurrent.ConcurrentHashMap<>();
+    // ✅ AJOUTÉ (10 août 2026) — voir commentaire complet sur son utilisation
+    // dans upsertRegisterTabFromScan() et removeTabAndFragment().
+    private volatile long lastSuccessfulTabCreationMs = 0L;
 
     // ✅ (4 août 2026) — accesseur read-only pour DeepLinkHandler : permet de
     // savoir, AVANT upsertRegisterTabFromScan(), si un tab existait déjà pour
@@ -2967,6 +2970,17 @@ private void setupTabsTop() {
             tabsByKey.put(newTabKey, spec);
             addRegisterTabUi(spec);
             logUi(null, "TAB registre ajouté: " + tabLabelOf(mediaShort, node, serial, isLc3));
+            // ✅ FIX CRITIQUE (10 août 2026, demande Paul — "pourquoi
+            // Reconnexion auto se déclenche alors qu'un tab vient d'être
+            // créé") — trouvé : plusieurs flux indépendants (diagnostic,
+            // onConfigureMediaActivated, removeTabAndFragment) réagissent
+            // chacun séparément au même événement de reconnexion, espacés
+            // de plusieurs SECONDES (pas assez rapprochés pour l'anti-rebond
+            // de 200ms). Horodatage d'une création de tab réussie, vérifié
+            // avant de déclencher "Reconnexion auto" — si un tab vient
+            // d'être créé très récemment, ce déclenchement est sauté même
+            // si le compte de tabs a transitoirement affiché zéro.
+            lastSuccessfulTabCreationMs = System.currentTimeMillis();
         } else {
             TabSpec spec = new TabSpec(newTabKey, mediaShort, transportKey, node, from, serial, isLc3);
             tabsByKey.put(newTabKey, spec);
@@ -3275,6 +3289,22 @@ private void setupTabsTop() {
                 if (nowCooldown - lastAutoReconnectAttemptMs < AUTO_RECONNECT_COOLDOWN_MS) {
                     logUi(null, "Plus aucun tab (transitoire, probablement pendant une migration) — "
                         + "reconnexion auto sautée, une tentative vient déjà de se produire");
+                    return;
+                }
+                // ✅ FIX CRITIQUE (10 août 2026, demande Paul — "pourquoi
+                // Reconnexion auto se déclenche alors qu'un tab vient d'être
+                // créé") — un tab créé avec succès très récemment (moins de
+                // 3s) signifie presque certainement que le compte de tabs à
+                // zéro observé ici est transitoire (un AUTRE tab est en train
+                // d'être créé par un flux séparé au même moment), pas une
+                // vraie perte de connexion — sauter cette tentative plutôt
+                // que de lancer une reconnexion redondante qui vient ajouter
+                // du trafic LCP sur un registre déjà en train de se
+                // reconnecter ailleurs.
+                if (nowCooldown - lastSuccessfulTabCreationMs < AUTO_RECONNECT_COOLDOWN_MS) {
+                    logUi(null, "Plus aucun tab (mais un tab vient d'être créé avec succès il y a "
+                        + (nowCooldown - lastSuccessfulTabCreationMs) + "ms) — reconnexion auto sautée, "
+                        + "probablement un flux séparé déjà en train de gérer la reconnexion");
                     return;
                 }
                 lastAutoReconnectAttemptMs = nowCooldown;
@@ -4298,11 +4328,17 @@ private void scanUsb() {
             UsbDeviceConnection conn = usbManager.openDevice(dev);
             UsbSerialPort port = driver.getPorts().get(0);
             port.open(conn);
-            // ✅ FIX CRITIQUE (10 août 2026, demande Paul — "tu remets ça
-            // comme avant") — retour à une valeur simple codée en dur,
-            // comme c'était avant toute la couche de diagnostic de vitesse
-            // — mais avec la bonne valeur (9600, pas l'ancien 19200 erroné).
-            port.setParameters(9600, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
+            // ✅ FIX CRITIQUE (10 août 2026, demande Paul — confirmé par les
+            // bancs d'essai Python indépendants (lcr_bench.py) faits plus tôt
+            // aujourd'hui : 19200 bauds, validé empiriquement, PAS 9600.
+            // 🔧 TODO (10 août 2026, demande Paul) — dette technique : cette
+            // valeur est codée en dur ICI et séparément dans UsbReceiver.java
+            // (deux points d'entrée d'ouverture USB, aucune source partagée).
+            // Amélioration à faire : centraliser en une seule constante
+            // partagée (ex. une méthode statique commune) pour qu'un futur
+            // changement de vitesse ne puisse plus désynchroniser les deux
+            // chemins par oubli.
+            port.setParameters(19200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
             try { port.purgeHwBuffers(true, true); } catch (Exception ignoredPurge) {}
             usbPort = port;
             UsbSession.set(dev, port);
