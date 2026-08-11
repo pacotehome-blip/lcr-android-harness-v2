@@ -1197,18 +1197,7 @@ public final class RegisterSessionManager {
 
         @Override public void onProductsUpdated(List<ProductUiItem> products, int activeIndex0) { }
         @Override public void onLog(String message) { }
-        @Override public void onError(String context, Throwable error) {
-            // ✅ AJOUTÉ (11 août 2026) — capture la dernière erreur connue,
-            // pour l'attacher à la prochaine [DÉCONNEXION]/[CONNEXION] —
-            // voir lastErrorMessage plus haut. onError() est appelé AVANT
-            // le vrai shutdown() dans la séquence d'échec réelle, donc
-            // cette valeur est déjà disponible au moment où
-            // onStateChanged(DISCONNECTED) se déclenche juste après.
-            if (error != null) {
-                lastErrorMessage = (context != null ? "[" + context + "] " : "")
-                    + (error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName());
-            }
-        }
+        @Override public void onError(String context, Throwable error) { }
         @Override public void onLiveQty(double net, double gross) { }
         @Override public void onLiveStatus(String liveText) { }
         @Override public void onTicketInfo(String ticketNo, String deliveryUid) { }
