@@ -1188,6 +1188,33 @@
                 android:text="Mode sélection"/>
         </LinearLayout>
 
+        <!-- ✅ AJOUTÉ (11 août 2026, demande Paul — "je veux être capable de
+             filtrer par ERROR/WARN/CONNECT/DISCONNECT/TEST/INFO") — filtre
+             dédié par niveau, en plus de "Erreurs seulement" (gardé tel
+             quel, complémentaire). -->
+        <Spinner
+            android:id="@+id/spnSupportLevelFilter"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"/>
+
+        <!-- ✅ AJOUTÉ (11 août 2026, demande Paul — "une note dynamique du
+             niveau de support") — calculée à partir des niveaux
+             ERROR/WARN/CONNECT/DISCONNECT/TEST/INFO déjà en place, sur les
+             événements visibles à l'écran (donc réactive aux filtres actifs). -->
+        <TextView
+            android:id="@+id/txtSupportNote"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            android:paddingTop="6dp"
+            android:paddingBottom="6dp"
+            android:textSize="15sp"
+            android:textStyle="bold"
+            android:gravity="center"
+            android:text="Note support : —"/>
+
         <TextView
             android:id="@+id/txtSupportCount"
             android:layout_width="match_parent"

@@ -674,6 +674,7 @@ public class Lc3Link extends LcpLink {
                 Thread.sleep(300);
             } catch (Exception e) {
                 android.util.Log.w("Lc3Link", "probe ex: " + e.getMessage());
+                try { com.pa.lcr.lcp.log.LogBus.err(0, "Lc3Link.probe", e); } catch (Exception ignored) {}
                 return false;
             }
         }
@@ -739,6 +740,7 @@ public class Lc3Link extends LcpLink {
             lc3.backToMode1();
         } catch (Exception e) {
             android.util.Log.w("Lc3Link", "probeAndIdentify: " + e.getMessage());
+            try { com.pa.lcr.lcp.log.LogBus.err(0, "Lc3Link.probeAndIdentify", e); } catch (Exception ignored) {}
         }
         android.util.Log.i("Lc3Link", "identity=" + nodeId
                 + " truck=" + truckNo + " serial=" + serialId);

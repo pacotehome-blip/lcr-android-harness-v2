@@ -2913,7 +2913,7 @@ public class RegisterTabFragment extends Fragment {
                     com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
                         requireContext().getApplicationContext(), woNum, ticketNo, backupPayload);
                 } catch (Exception e) {
-                    android.util.Log.w("RetourWO", "Backup local ERR (non-bloquant): " + e.getMessage());
+                    android.util.Log.w("RetourWO", "Backup local ERR (non-bloquant): " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(node, "RegisterTabFragment.Backup", e); } catch (Exception ignored) {}
                 }
 
                 // 3. Tenter push MSAL vers Dataverse
@@ -2945,13 +2945,13 @@ public class RegisterTabFragment extends Fragment {
                                         latch.countDown();
                                     }
                                     @Override public void onError(Exception e) {
-                                        android.util.Log.w("RetourWO", "Token silent ERR: " + e.getMessage());
+                                        android.util.Log.w("RetourWO", "Token silent ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(node, "RegisterTabFragment.Token", e); } catch (Exception ignored) {}
                                         latch.countDown();
                                     }
                                 });
                         }
                         @Override public void onError(Exception e) {
-                            android.util.Log.w("RetourWO", "MSAL init ERR: " + e.getMessage());
+                            android.util.Log.w("RetourWO", "MSAL init ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(node, "RegisterTabFragment.MSAL", e); } catch (Exception ignored) {}
                             latch.countDown();
                         }
                     });
@@ -3039,14 +3039,14 @@ public class RegisterTabFragment extends Fragment {
                                 com.pa.lcrdemo.dataverse.DeliverySyncScheduler.triggerNow(requireContext());
                                 android.util.Log.i("RetourWO", "Mise en file OK — retry via DeliverySyncWorker dès réseau dispo");
                             } catch (Exception eQueue) {
-                                android.util.Log.w("RetourWO", "Mise en file ERR: " + eQueue.getMessage());
+                                android.util.Log.w("RetourWO", "Mise en file ERR: " + eQueue.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(node, "RegisterTabFragment.Mise", eQueue); } catch (Exception ignored) {}
                             }
                         }
                     } else {
                         android.util.Log.w("RetourWO", "Pas de token — données en PENDING local");
                     }
                 } catch (Exception e) {
-                    android.util.Log.w("RetourWO", "Push Dataverse ERR: " + e.getMessage());
+                    android.util.Log.w("RetourWO", "Push Dataverse ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(node, "RegisterTabFragment.Push", e); } catch (Exception ignored) {}
                 } finally {
                     com.pa.lcrdemo.auth.MsalTokenProvider.MSAL_SERIAL_LOCK.release();
                 } // fin verrou MSAL_SERIAL_LOCK
@@ -3098,7 +3098,7 @@ public class RegisterTabFragment extends Fragment {
                             android.util.Log.i("RetourWO", "finish() → FSM woId=" + fWoIdGuid);
                             if (getActivity() != null) getActivity().finish();
                         } catch (Exception e) {
-                            android.util.Log.e("RetourWO", "finish() ERR: " + e.getMessage());
+                            android.util.Log.e("RetourWO", "finish() ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(node, "RegisterTabFragment.finish", e); } catch (Exception ignored) {}
                         } finally {
                             if (btnRetourWO != null) btnRetourWO.setEnabled(true);
                         }
@@ -3106,7 +3106,7 @@ public class RegisterTabFragment extends Fragment {
                 });
 
             } catch (Exception e) {
-                android.util.Log.e("RetourWO", "retournerAuWorkOrder ERR: " + e.getMessage());
+                android.util.Log.e("RetourWO", "retournerAuWorkOrder ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(node, "RegisterTabFragment.retournerAuWorkOrder", e); } catch (Exception ignored) {}
                 ui.post(() -> {
                     android.widget.Toast.makeText(requireContext(),
                         "Erreur retour WO: " + e.getMessage(),
@@ -3646,7 +3646,7 @@ public class RegisterTabFragment extends Fragment {
                     }
                     android.util.Log.i("Annuler", "Annulation loggée wo=" + woNum + " ticket=" + ticketNo);
                 } catch (Exception e) {
-                    android.util.Log.w("Annuler", "Insert ERR: " + e.getMessage());
+                    android.util.Log.w("Annuler", "Insert ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(node, "RegisterTabFragment.Insert", e); } catch (Exception ignored) {}
                 }
 
                 // 7. Marquer CANCELLED dans ActiveDeliveryStore — garder le contexte WO
@@ -3708,6 +3708,7 @@ public class RegisterTabFragment extends Fragment {
             } catch (Exception e) {
                 cancelInProgress = false;
                 android.util.Log.e("Annuler", "ERR: " + e.getMessage());
+                try { com.pa.lcr.lcp.log.LogBus.err(node, "RegisterTabFragment.Annuler", e); } catch (Exception ignored) {}
                 ui.post(() -> {
                     if (btnAnnuler  != null) btnAnnuler.setEnabled(true);
                     if (btnConnect  != null) btnConnect.setEnabled(true);
@@ -3763,6 +3764,7 @@ public class RegisterTabFragment extends Fragment {
                 cacheDisponible = !rows.isEmpty();
             } catch (Exception e) {
                 android.util.Log.w("RegisterTabFragment", "autoScanProduitsSiNecessaire: lecture cache ERR: " + e.getMessage());
+                try { com.pa.lcr.lcp.log.LogBus.err(node, "RegisterTabFragment.autoScanProduitsSiNecessaire", e); } catch (Exception ignored) {}
             }
 
             if (cacheDisponible) {
@@ -3873,7 +3875,7 @@ public class RegisterTabFragment extends Fragment {
                     try { Thread.sleep(500); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
                     continue; // relance le while — pas un vrai échec, le registre était juste occupé
                 }
-                android.util.Log.e("RegisterTabFragment", "lancerScanProduits ERR: " + e.getMessage());
+                android.util.Log.e("RegisterTabFragment", "lancerScanProduits ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(node, "RegisterTabFragment.lancerScanProduits", e); } catch (Exception ignored) {}
                 ui.post(() -> {
                     if (txtLive != null) txtLive.setText("❌ Scan ERR: " + e.getMessage());
                     if (btnScanProducts != null) { btnScanProducts.setEnabled(true); btnScanProducts.setText("🔍 Scan produits"); }
@@ -3906,7 +3908,7 @@ public class RegisterTabFragment extends Fragment {
                     if (!cur.isEmpty()) spnProduct.setText(cur, false);
                 });
             } catch (Exception e) {
-                android.util.Log.w("RegisterTabFragment", "applierDescriptions ERR: " + e.getMessage());
+                android.util.Log.w("RegisterTabFragment", "applierDescriptions ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(node, "RegisterTabFragment.applierDescriptions", e); } catch (Exception ignored) {}
             }
         });
     }
@@ -4177,6 +4179,20 @@ public class RegisterTabFragment extends Fragment {
                 if (snap == null || snap.data == null) return;
                 String ticketNo = snap.data.optString("ticket_no", "");
                 if (ticketNo.isEmpty()) return;
+                // ✅ FIX CRITIQUE (11 août 2026, demande Paul — "j'ai
+                // plusieurs lignes qui sont inutiles si j'ai déjà mon
+                // wo-detect, on a une boucle sans fin de status") — trouvé
+                // via logcat : une fois delivery_uid reconstruit avec
+                // succès (via lastUidReconstructedForTicket/Value, déjà
+                // suivis ailleurs), cette méthode continuait quand même à
+                // relancer toute la cascade DB→Dataverse (appel réseau!)
+                // →backup, à CHAQUE cycle de statut (~2s), pour rien —
+                // triggerWoDetectionThrottled() ne limite que par le TEMPS,
+                // jamais par "est-ce déjà résolu". Corrigé ici, à la
+                // source, pour protéger tous les appelants d'un coup.
+                if (ticketNo.equals(lastUidReconstructedForTicket) && lastUidReconstructedValue != null) {
+                    return; // déjà résolu pour ce ticket précis — rien à refaire
+                }
                 // ✅ (ajouté 3 août 2026) — cascade complète toujours autorisée ici
                 // (appel explicite/throttlé à 2s), mais isolée sur remoteSearchExecutor,
                 // jamais sur bg (voir commentaire sur le champ remoteSearchExecutor).

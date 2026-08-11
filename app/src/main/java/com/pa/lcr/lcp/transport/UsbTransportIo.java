@@ -65,7 +65,18 @@ public final class UsbTransportIo implements TransportIo {
         synchronized (ioLock) {
             if (closed || port == null) return -1;
             try {
-                port.write(data, Math.max(0, timeoutMs));
+                // ✅ FIX CRITIQUE (11 août 2026, demande Paul — même famille
+                // de bug que celui corrigé côté BT : Math.max(0, timeoutMs)
+                // ramenait un délai négatif à 0 — et en convention USB-série,
+                // 0 signifie souvent "attendre indéfiniment", pas "ne pas
+                // attendre". Corrigé pour clamper vers une valeur positive
+                // bornée (60s) au lieu de 0, cohérent avec le traitement déjà
+                // fait pour read() juste en dessous (ligne 88). Même note
+                // honnête que côté BT : aucun appelant actuel trouvé passant
+                // explicitement un délai négatif à write(), corrigé par
+                // précaution, pas confirmé comme LE déclencheur exact.
+                int toWrite = (timeoutMs < 0) ? 60_000 : timeoutMs;
+                port.write(data, toWrite);
                 consecutiveFailures.set(0);
                 return data.length;
             } catch (Exception e) {

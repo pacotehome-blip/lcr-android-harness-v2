@@ -1703,6 +1703,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                     store.close();
                 } catch (Exception e) {
                     android.util.Log.w("ApiFacade", "api_scanProductNames: écriture cache ERR: " + e.getMessage());
+                    try { com.pa.lcr.lcp.log.LogBus.err(node, "MultiRegisterApiFacadeImpl.api_scanProductNames", e); } catch (Exception ignored) {}
                 }
             }
 

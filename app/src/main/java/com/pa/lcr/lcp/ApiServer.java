@@ -98,6 +98,7 @@ public synchronized void start() throws Exception {
         android.util.Log.e("LCRDEMO", "Step 3: KeyStore BKS/BC ok");
     } catch (Exception e) {
         android.util.Log.e("LCRDEMO", "Step 3 FAIL BKS/BC, essai BKS seul: " + e.getMessage());
+        try { com.pa.lcr.lcp.log.LogBus.err(0, "ApiServer.start.KeyStore", e); } catch (Exception ignored) {}
         ks = KeyStore.getInstance("BKS");
         android.util.Log.e("LCRDEMO", "Step 3b: KeyStore BKS (sans provider) ok");
     }

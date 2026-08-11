@@ -247,6 +247,7 @@ public class DeepLinkHandler {
                                 + (rtcp != null ? rtcp.msg : "null"));
                         } catch (Exception e) {
                             android.util.Log.w(TAG, "Deep link: connexion N-Port directe échouée: " + e.getMessage());
+                            try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.nPortDirect", e); } catch (Exception ignored) {}
                         }
                     } else if (btIsTarget && fNportIp != null && !fNportIp.trim().isEmpty()) {
                         android.util.Log.i(TAG, "Deep link: nportip fourni mais btmac aussi présent — "
@@ -399,7 +400,7 @@ public class DeepLinkHandler {
                         }
                     }
                 } catch (Exception e) {
-                    android.util.Log.e(TAG, "Résolution transport ERR: " + e.getMessage());
+                    android.util.Log.e(TAG, "Résolution transport ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.Résolution", e); } catch (Exception ignored) {}
                     if (fBtMac != null && !fBtMac.trim().isEmpty()) {
                         connectBtByMacAndOpenTab(fBtMac, fNode, serialId, woNum, woIdGuid,
                             fProduit, fPresetStr);
@@ -469,6 +470,7 @@ public class DeepLinkHandler {
                 }
             } catch (Exception e) {
                 android.util.Log.w(TAG, "lancerLivraison: vérif connexion ERR: " + e.getMessage());
+                try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.lancerLivraison.verifConnexion", e); } catch (Exception ignored) {}
             }
 
             if (!connexionOk) {
@@ -689,6 +691,7 @@ public class DeepLinkHandler {
             }
         } catch (Exception e) {
             android.util.Log.w(TAG, "lancerLivraison: erreur vérif bon complété — " + e.getMessage());
+            try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.lancerLivraison.verifBonComplete", e); } catch (Exception ignored) {}
         }
 
         try {
@@ -873,7 +876,7 @@ public class DeepLinkHandler {
                 }
             }
         } catch (Exception e) {
-            android.util.Log.e(TAG, "lancerLivraison ERR: " + e.getMessage());
+            android.util.Log.e(TAG, "lancerLivraison ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.lancerLivraison", e); } catch (Exception ignored) {}
             logError(fSerialId, woNum, "ONESHOT_EXCEPTION", e.getMessage());
             retournerFieldService(woNum, woIdGuid, "erreur",
                 buildErrorJson("ONESHOT_EXCEPTION", e.getMessage()));
@@ -969,7 +972,7 @@ public class DeepLinkHandler {
                             }
                         }
                     } catch (Exception e) {
-                        android.util.Log.w(TAG, "Validation état registre ERR: " + e.getMessage());
+                        android.util.Log.w(TAG, "Validation état registre ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.Validation", e); } catch (Exception ignored) {}
                         // BT zombi probable — restart
                         android.util.Log.w(TAG, "Possible BT zombi — restart BT");
                         activity.btDisconnect();
@@ -1061,7 +1064,7 @@ public class DeepLinkHandler {
                     logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
                         "REGISTER_OK", "Registre validé node=" + node, null);
                 } catch (Exception e) {
-                    android.util.Log.w(TAG, "register/validate ERR (ignoré): " + e.getMessage());
+                    android.util.Log.w(TAG, "register/validate ERR (ignoré): " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.register", e); } catch (Exception ignored) {}
                 }
 
                 final String fProduit      = produit;
@@ -1198,7 +1201,7 @@ public class DeepLinkHandler {
                         }
 
                     } catch (Exception e) {
-                        android.util.Log.e(TAG, "oneshot/start ERR: " + e.getMessage());
+                        android.util.Log.e(TAG, "oneshot/start ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.oneshot", e); } catch (Exception ignored) {}
                         logError(fSerialId, woNum, "ONESHOT_EXCEPTION", e.getMessage());
                         retournerFieldService(woNum, woIdGuid, "erreur",
                             buildErrorJson("ONESHOT_EXCEPTION", e.getMessage()));
@@ -1218,7 +1221,7 @@ public class DeepLinkHandler {
                 }
 
             } catch (Exception e) {
-                android.util.Log.e(TAG, "BT connect ERR: " + e.getMessage());
+                android.util.Log.e(TAG, "BT connect ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.BT", e); } catch (Exception ignored) {}
                 activity.runOnUiThread(() -> activity.toast("BT ERR: " + e.getMessage()));
                 logError(serialId != null ? serialId : "", woNum,
                     "BT_CONNECT_ERROR", e.getMessage());
@@ -1538,7 +1541,7 @@ public class DeepLinkHandler {
                         }
                     }
                 } catch (Exception e) {
-                    android.util.Log.e(TAG, "job/continue ERR: " + e.getMessage());
+                    android.util.Log.e(TAG, "job/continue ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.job", e); } catch (Exception ignored) {}
                     logError(serialId, woNum, "JOB_CONTINUE_ERROR", e.getMessage());
                 }
 
@@ -1636,7 +1639,7 @@ public class DeepLinkHandler {
                     buildErrorJson("POLL_TIMEOUT", "Timeout 10 minutes"));
 
             } catch (Exception e) {
-                android.util.Log.e(TAG, "pollJob ERR: " + e.getMessage());
+                android.util.Log.e(TAG, "pollJob ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.pollJob", e); } catch (Exception ignored) {}
                 logError(serialId, woNum, "POLL_EXCEPTION", e.getMessage());
                 retournerFieldService(woNum, woIdGuid, "erreur",
                     buildErrorJson("POLL_EXCEPTION", e.getMessage()));
@@ -1750,7 +1753,7 @@ public class DeepLinkHandler {
                 mettreAJourFieldService(woNum, woIdGuid, "termine", extraJson);
 
             } catch (Exception e) {
-                android.util.Log.e(TAG, "LcrDeliveryStatusDb ERR: " + e.getMessage());
+                android.util.Log.e(TAG, "LcrDeliveryStatusDb ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.LcrDeliveryStatusDb", e); } catch (Exception ignored) {}
             }
         });
     }
@@ -1878,20 +1881,21 @@ public class DeepLinkHandler {
                         android.util.Log.w(TAG, "WebView non disponible — localStorage ignoré");
                     }
                 } catch (Exception e) {
-                    android.util.Log.e(TAG, "localStorage ERR: " + e.getMessage());
+                    android.util.Log.e(TAG, "localStorage ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.localStorage", e); } catch (Exception ignored) {}
                 }
 
                 android.util.Log.i(TAG, "Retour FS — finish()");
                 try {
                     activity.finish();
                 } catch (Exception e) {
-                    android.util.Log.e(TAG, "finish() ERR: " + e.getMessage());
+                    android.util.Log.e(TAG, "finish() ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.finish()", e); } catch (Exception ignored) {}
                     activity.moveTaskToBack(true);
                 }
             });
 
         } catch (Exception e) {
             android.util.Log.e(TAG, "Retour FS failed: " + e.getMessage());
+            try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.retourFS", e); } catch (Exception ignored) {}
             activity.moveTaskToBack(true);
         }
     }
@@ -1957,7 +1961,7 @@ public class DeepLinkHandler {
             patchDataverse(fGuid, fWoNum, fNet, fGross, fTicket, fStatus);
 
         } catch (Exception e) {
-            android.util.Log.e(TAG, "mettreAJourFieldService ERR: " + e.getMessage());
+            android.util.Log.e(TAG, "mettreAJourFieldService ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.mettreAJourFieldService", e); } catch (Exception ignored) {}
         }
     }
 
@@ -2083,7 +2087,7 @@ public class DeepLinkHandler {
             android.util.Log.i(TAG, "patchDataverse: ajouté à la queue offline (consolidated)");
             com.pa.lcrdemo.dataverse.DeliverySyncScheduler.triggerNow(activity);
         } catch (Exception e) {
-            android.util.Log.e(TAG, "Queue ERR: " + e.getMessage());
+            android.util.Log.e(TAG, "Queue ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.Queue", e); } catch (Exception ignored) {}
         }
 
         // ✅ (fix 31 juillet 2026, découvert en validant l'exhaustivité du verrou global
@@ -2161,21 +2165,21 @@ public class DeepLinkHandler {
                                     }
                                 } catch (Exception ignored) {}
                             } catch (Exception e) {
-                                android.util.Log.w(TAG, "patchDataverse PATCH ERR: " + e.getMessage());
+                                android.util.Log.w(TAG, "patchDataverse PATCH ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.patchDataverse", e); } catch (Exception ignored) {}
                             }
                         });
                     }
                     @Override
                     public void onError(Exception e) {
                         MsalTokenProvider.MSAL_SERIAL_LOCK.release();
-                        android.util.Log.w(TAG, "patchDataverse token ERR: " + e.getMessage());
+                        android.util.Log.w(TAG, "patchDataverse token ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.patchDataverse", e); } catch (Exception ignored) {}
                     }
                 });
             }
             @Override
             public void onError(Exception e) {
                 MsalTokenProvider.MSAL_SERIAL_LOCK.release();
-                android.util.Log.w(TAG, "patchDataverse MSAL init ERR: " + e.getMessage());
+                android.util.Log.w(TAG, "patchDataverse MSAL init ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.patchDataverse", e); } catch (Exception ignored) {}
             }
         });
     }

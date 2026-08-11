@@ -113,7 +113,13 @@ public class MainActivity extends AppCompatActivity {
     // chaque événement Support.
     private EditText edtSupportKeywordFilter;
     private TextView txtSupportCount;
+    // ✅ AJOUTÉ (11 août 2026, demande Paul — "une note dynamique du niveau
+    // de support")
+    private TextView txtSupportNote;
     private CheckBox chkSupportErrorsOnly;
+    // ✅ AJOUTÉ (11 août 2026, demande Paul — "filtrer par
+    // ERROR/WARN/CONNECT/DISCONNECT/TEST/INFO")
+    private android.widget.Spinner spnSupportLevelFilter;
     // ✅ (ajouté 3 août 2026, demande Paul : "copier-coller l'ensemble des lignes") —
     // conserve la dernière liste chargée pour que le bouton Copier puisse la sérialiser
     // en texte, sans avoir à re-requêter la BD.
@@ -244,7 +250,7 @@ public class MainActivity extends AppCompatActivity {
             // Fallback — chercher dans la vue principale
             return findWebView(getWindow().getDecorView());
         } catch (Exception e) {
-            android.util.Log.w("MainActivity", "getFieldServiceWebView ERR: " + e.getMessage());
+            android.util.Log.w("MainActivity", "getFieldServiceWebView ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "MainActivity.getFieldServiceWebView", e); } catch (Exception ignored) {}
             return null;
         }
     }
@@ -636,7 +642,7 @@ public class MainActivity extends AppCompatActivity {
                 });
             }
         } catch (Exception e) {
-            android.util.Log.w("NetworkSync", "registerNetworkCallback ERR (non-bloquant): " + e.getMessage());
+            android.util.Log.w("NetworkSync", "registerNetworkCallback ERR (non-bloquant): " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "MainActivity.registerNetworkCallback", e); } catch (Exception ignored) {}
         }
 
         // ✅ (demande Paul 31 juillet 2026 : "tout persister") — LogBus était jusqu'ici un
@@ -668,13 +674,13 @@ public class MainActivity extends AppCompatActivity {
                     }
                     @Override
                     public void onError(Exception e) {
-                        android.util.Log.w("MSAL", "Token ERR: " + e.getMessage());
+                        android.util.Log.w("MSAL", "Token ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "MainActivity.Token", e); } catch (Exception ignored) {}
                     }
                 });
             }
             @Override
             public void onError(Exception e) {
-                android.util.Log.e("MSAL", "Init ERR: " + e.getMessage());
+                android.util.Log.e("MSAL", "Init ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "MainActivity.Init", e); } catch (Exception ignored) {}
             }
         });
 
@@ -958,9 +964,24 @@ public class MainActivity extends AppCompatActivity {
         if (edtSupportNodeFilter != null) edtSupportNodeFilter.addTextChangedListener(supportLiveSearchWatcher);
         if (edtSupportKeywordFilter != null) edtSupportKeywordFilter.addTextChangedListener(supportLiveSearchWatcher);
         txtSupportCount = findViewById(R.id.txtSupportCount);
+        txtSupportNote = findViewById(R.id.txtSupportNote);
         chkSupportErrorsOnly = findViewById(R.id.chkSupportErrorsOnly);
         if (chkSupportErrorsOnly != null) {
             chkSupportErrorsOnly.setOnCheckedChangeListener((btn, checked) -> refreshSupportEvents());
+        }
+        spnSupportLevelFilter = findViewById(R.id.spnSupportLevelFilter);
+        if (spnSupportLevelFilter != null) {
+            String[] niveaux = {"Tous les niveaux", "ERROR", "WARN", "CONNECT", "DISCONNECT", "TEST", "INFO"};
+            ArrayAdapter<String> adapterNiveaux = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item, niveaux);
+            adapterNiveaux.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+            spnSupportLevelFilter.setAdapter(adapterNiveaux);
+            spnSupportLevelFilter.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+                @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
+                    refreshSupportEvents();
+                }
+                @Override public void onNothingSelected(android.widget.AdapterView<?> parent) {}
+            });
         }
         CheckBox chkSupportSelectionMode = findViewById(R.id.chkSupportSelectionMode);
         if (chkSupportSelectionMode != null) {
@@ -1129,7 +1150,7 @@ public class MainActivity extends AppCompatActivity {
                                                     }
                                                     android.os.Process.killProcess(android.os.Process.myPid());
                                                 } catch (Exception e) {
-                                                    android.util.Log.e("MainActivity", "Restart après restauration ERR: " + e.getMessage());
+                                                    android.util.Log.e("MainActivity", "Restart après restauration ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "MainActivity.Restart", e); } catch (Exception ignored) {}
                                                 }
                                             }, 1200);
                                         } else {
@@ -2090,17 +2111,35 @@ private void setupTabsTop() {
                 filteredRows = rows;
             }
 
+            // ✅ AJOUTÉ (11 août 2026, demande Paul — "filtrer par
+            // ERROR/WARN/CONNECT/DISCONNECT/TEST/INFO") — appliqué APRÈS le
+            // filtre "erreurs seulement" existant, sur le même index de
+            // colonne (level, index 4) — les deux filtres se combinent
+            // plutôt que de s'exclure.
+            final String niveauChoisi = (spnSupportLevelFilter != null && spnSupportLevelFilter.getSelectedItemPosition() > 0)
+                    ? String.valueOf(spnSupportLevelFilter.getSelectedItem()) : null;
+            final java.util.List<Object[]> filteredRowsNiveau;
+            if (niveauChoisi != null) {
+                filteredRowsNiveau = new java.util.ArrayList<>();
+                for (Object[] r : filteredRows) {
+                    String lvl = String.valueOf(r[4]).toUpperCase(java.util.Locale.ROOT);
+                    if (niveauChoisi.equals(lvl)) filteredRowsNiveau.add(r);
+                }
+            } else {
+                filteredRowsNiveau = filteredRows;
+            }
+
             final java.util.List<String> headers = new java.util.ArrayList<>();
             final java.util.List<String> details = new java.util.ArrayList<>();
             final java.util.List<Long> attemptIds = new java.util.ArrayList<>();
             final java.util.List<String> levels = new java.util.ArrayList<>();
-            for (Object[] r : filteredRows) {
+            for (Object[] r : filteredRowsNiveau) {
                 headers.add((String) r[1]);
                 details.add((String) r[2]);
                 attemptIds.add(r.length > 3 ? (Long) r[3] : null);
                 levels.add(r.length > 4 ? (String) r[4] : "INFO");
             }
-            int count = filteredRows.size();
+            int count = filteredRowsNiveau.size();
 
             // ✅ (demandé 31 juillet 2026) : si un ticket est filtré et que la BD locale
             // est vide pour lui, OU qu'il n'a pas de #delivery-uid/#wo, avertir et tenter
@@ -2110,9 +2149,43 @@ private void setupTabsTop() {
             }
 
             final int finalCount = count;
+            // ✅ AJOUTÉ (11 août 2026, demande Paul — "une note dynamique du
+            // niveau de support") — calculée sur les mêmes lignes que celles
+            // affichées à l'écran (donc réactive aux filtres ticket/serial/
+            // node/mot-clé/erreurs-seulement déjà actifs). Compte simple par
+            // niveau, sur les 300 événements les plus récents (déjà la
+            // limite de la requête).
+            int nbErrors = 0, nbWarns = 0;
+            for (String lvl : levels) {
+                if ("ERROR".equals(lvl)) nbErrors++;
+                else if ("WARN".equals(lvl)) nbWarns++;
+            }
+            final String noteTexte;
+            final int noteCouleur;
+            if (nbErrors == 0 && nbWarns == 0) {
+                noteTexte = "🟢 Note support : A — Excellent (aucune erreur/avertissement)";
+                noteCouleur = 0xFF2E7D32;
+            } else if (nbErrors == 0 && nbWarns <= 3) {
+                noteTexte = "🟢 Note support : B — Bon (" + nbWarns + " avertissement" + (nbWarns > 1 ? "s" : "") + ")";
+                noteCouleur = 0xFF558B2F;
+            } else if (nbErrors <= 3) {
+                noteTexte = "🟡 Note support : C — Attention (" + nbErrors + " erreur" + (nbErrors > 1 ? "s" : "")
+                    + ", " + nbWarns + " avertissement" + (nbWarns > 1 ? "s" : "") + ")";
+                noteCouleur = 0xFFF9A825;
+            } else if (nbErrors <= 10) {
+                noteTexte = "🟠 Note support : D — Problématique (" + nbErrors + " erreurs, " + nbWarns + " avertissements)";
+                noteCouleur = 0xFFE65100;
+            } else {
+                noteTexte = "🔴 Note support : F — Critique (" + nbErrors + " erreurs, " + nbWarns + " avertissements)";
+                noteCouleur = 0xFFC62828;
+            }
             runOnUiThread(() -> {
                 if (txtSupportCount != null) {
                     txtSupportCount.setText(finalCount + " événement" + (finalCount > 1 ? "s" : ""));
+                }
+                if (txtSupportNote != null) {
+                    txtSupportNote.setText(noteTexte);
+                    txtSupportNote.setTextColor(noteCouleur);
                 }
                 if (listSupportEvents != null) {
                     lastSupportHeaders.clear();
@@ -4885,7 +4958,7 @@ private void scanUsb() {
             }
             return true;
         } catch (Exception e) {
-            android.util.Log.w("MainActivity", "copyRawDbToDir(" + dbName + ") ERR: " + e.getMessage());
+            android.util.Log.w("MainActivity", "copyRawDbToDir(" + dbName + ") ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "MainActivity.copyRawDbToDir", e); } catch (Exception ignored) {}
             return false;
         }
     }

@@ -36,6 +36,7 @@ public class SyncWatermarkStore {
             }
         } catch (Exception e) {
             Log.w(TAG, "get(" + tableName + ") ERR: " + e.getMessage());
+            try { com.pa.lcr.lcp.log.LogBus.err(0, "SyncWatermarkStore.get", e); } catch (Exception ignored) {}
         }
         return 0L;
     }
@@ -52,6 +53,7 @@ public class SyncWatermarkStore {
             db.insertWithOnConflict("sync_watermark", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
         } catch (Exception e) {
             Log.w(TAG, "set(" + tableName + ", " + lastSyncedId + ") ERR: " + e.getMessage());
+            try { com.pa.lcr.lcp.log.LogBus.err(0, "SyncWatermarkStore.set", e); } catch (Exception ignored) {}
         }
     }
 }

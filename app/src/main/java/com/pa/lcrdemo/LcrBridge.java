@@ -68,6 +68,7 @@ public class LcrBridge {
             android.util.Log.d("LCRDEMO_SSL", "SSLSocketFactory créé avec lcr_local.crt");
         } catch (Exception e) {
             android.util.Log.e("LCRDEMO_SSL", "SSLSocketFactory FAIL: " + e.getMessage(), e);
+            try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrBridge.sslSocketFactory", e); } catch (Exception ignored) {}
         }
         return sslSocketFactory;
     }

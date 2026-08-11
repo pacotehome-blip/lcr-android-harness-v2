@@ -66,6 +66,7 @@ public class LocalDeliveryBackup {
         } catch (Exception e) {
             // Best-effort seulement — jamais bloquant pour la livraison elle-même.
             Log.w(TAG, "backupDelivery ERR (ticket=" + ticketNo + "): " + e.getMessage());
+            try { com.pa.lcr.lcp.log.LogBus.err(0, "LocalDeliveryBackup.backupDelivery", e); } catch (Exception ignored) {}
         }
     }
 
@@ -93,7 +94,7 @@ public class LocalDeliveryBackup {
             }
             Log.i(TAG, "backupViaMediaStore: OK — " + fileName);
         } catch (Exception e) {
-            Log.w(TAG, "backupViaMediaStore ERR: " + e.getMessage());
+            Log.w(TAG, "backupViaMediaStore ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LocalDeliveryBackup.backupViaMediaStore", e); } catch (Exception ignored) {}
         }
     }
 
@@ -119,7 +120,7 @@ public class LocalDeliveryBackup {
             }
             Log.i(TAG, "backupViaLegacyFile: OK — " + fileName);
         } catch (Exception e) {
-            Log.w(TAG, "backupViaLegacyFile ERR: " + e.getMessage());
+            Log.w(TAG, "backupViaLegacyFile ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LocalDeliveryBackup.backupViaLegacyFile", e); } catch (Exception ignored) {}
         }
     }
 
@@ -172,7 +173,7 @@ public class LocalDeliveryBackup {
             }
             return bestWoNum;
         } catch (Exception e) {
-            Log.w(TAG, "findMostRecentWoForSerialFromJsonBackups ERR: " + e.getMessage());
+            Log.w(TAG, "findMostRecentWoForSerialFromJsonBackups ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LocalDeliveryBackup.findMostRecentWoForSerialFromJsonBackups", e); } catch (Exception ignored) {}
             return null;
         }
     }
@@ -231,6 +232,7 @@ public class LocalDeliveryBackup {
                         failed++;
                         messages.add("Erreur sur un fichier : " + e.getMessage());
                         Log.w(TAG, "restoreAllAsync: erreur parsing fichier: " + e.getMessage());
+                        try { com.pa.lcr.lcp.log.LogBus.err(0, "LocalDeliveryBackup.restoreAllAsync", e); } catch (Exception ignored) {}
                     }
                 }
             } finally {
@@ -269,7 +271,7 @@ public class LocalDeliveryBackup {
             }
         } catch (Exception e) {
             messages.add("listBackupFilesMediaStore ERR: " + e.getMessage());
-            Log.w(TAG, "listBackupFilesMediaStore ERR: " + e.getMessage());
+            Log.w(TAG, "listBackupFilesMediaStore ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LocalDeliveryBackup.listBackupFilesMediaStore", e); } catch (Exception ignored) {}
         }
         return out;
     }
@@ -297,7 +299,7 @@ public class LocalDeliveryBackup {
             }
         } catch (Exception e) {
             messages.add("listBackupFilesLegacy ERR: " + e.getMessage());
-            Log.w(TAG, "listBackupFilesLegacy ERR: " + e.getMessage());
+            Log.w(TAG, "listBackupFilesLegacy ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LocalDeliveryBackup.listBackupFilesLegacy", e); } catch (Exception ignored) {}
         }
         return out;
     }
@@ -370,7 +372,7 @@ public class LocalDeliveryBackup {
                         }
                     }
                 } catch (Exception e) {
-                    Log.w(TAG, "purgeOldSyncedBackups (MediaStore) ERR: " + e.getMessage());
+                    Log.w(TAG, "purgeOldSyncedBackups (MediaStore) ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LocalDeliveryBackup.purgeOldSyncedBackups", e); } catch (Exception ignored) {}
                 }
             } else {
                 try {
@@ -403,7 +405,7 @@ public class LocalDeliveryBackup {
                         }
                     }
                 } catch (Exception e) {
-                    Log.w(TAG, "purgeOldSyncedBackups (legacy) ERR: " + e.getMessage());
+                    Log.w(TAG, "purgeOldSyncedBackups (legacy) ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LocalDeliveryBackup.purgeOldSyncedBackups", e); } catch (Exception ignored) {}
                 }
             }
         } finally {
@@ -461,6 +463,7 @@ public class LocalDeliveryBackup {
                 }
             } catch (Exception e) {
                 Log.w(TAG, "findLatestByTicketNo: fichier ignoré (parsing) — " + e.getMessage());
+                try { com.pa.lcr.lcp.log.LogBus.err(0, "LocalDeliveryBackup.findLatestByTicketNo", e); } catch (Exception ignored) {}
             }
         }
 

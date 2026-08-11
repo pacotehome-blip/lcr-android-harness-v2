@@ -397,6 +397,16 @@ private void reproEvent(String level, String type, String message, JSONObject da
     // pour éviter de relire Field #37 à chaque appel. -1 = jamais lu,
     // sinon la vraie valeur (0/1/2) une fois connue pour cette session.
     private volatile int cachedTicketRequired = -1;
+    // ✅ AJOUTÉ (11 août 2026, demande Paul — "cherche pourquoi ça nous
+    // revient dans le tab") — [STATUS]/[STATUS-HEX] se réaffichait de façon
+    // inconditionnelle à CHAQUE cycle, même quand rien n'avait changé
+    // (confirmé sur 6+ minutes consécutives dans une BD réelle : même
+    // dev/prn/ds/dc, répété sans arrêt). -1 = jamais logué encore, sinon
+    // les dernières valeurs affichées avec succès.
+    private volatile int lastLoggedStatusDev = -1;
+    private volatile int lastLoggedStatusPrn = -1;
+    private volatile int lastLoggedStatusDs = -1;
+    private volatile int lastLoggedStatusDc = -1;
 
     // ✅ Cumul logiciel — survit à travers plusieurs resets diagnostic dans la
     // MÊME livraison. Chaque reset remet le compteur du REGISTRE à zéro, mais on
@@ -1186,10 +1196,45 @@ FullStatus fs = readFullStatus("status/full");
                 // LC3/Modbus/VT100 plus tard), le hex brut original reste
                 // toujours visible pour vérification/comparaison, avec la
                 // traduction humaine juste au-dessus.
-                emitLog(String.format("[STATUS] %s | %s | %s",
-                        devDecoded, LcpLink.describeDelCode(fs.delCode), LcpLink.describeDelStatus(fs.delStatus)));
-                emitLog(String.format("[STATUS-HEX] dev=0x%02X prn=0x%02X ds=0x%04X dc=0x%04X",
-                        fs.devStatus, fs.prnStatus, fs.delStatus, fs.delCode));
+                // ✅ FIX CRITIQUE (11 août 2026, demande Paul — "si l'option
+                // est 0 ou 1 on revient avec le normal, on doit bloquer; si
+                // on est sur l'option 2 on passe par-dessus, pas de garbage
+                // dans le tab") — comportement maintenant conditionnel sur
+                // TicketRequired (#37), pas juste "est-ce que ça a changé" :
+                // - TicketRequired 0/1 : comportement NORMAL, complet —
+                //   prnStatus/delStatus comptent pleinement, une erreur
+                //   d'imprimante DOIT rester visible (elle bloque vraiment
+                //   une livraison dans ce cas, per la doc officielle).
+                // - TicketRequired 2 : prnStatus et le bit "fin de livraison
+                //   demandée" (delStatus 0x0400) sont exclus de la
+                //   comparaison — l'impression étant désactivée par
+                //   conception, ce bruit n'a plus aucune valeur informative
+                //   et ne doit plus jamais réapparaître dans le tab.
+                boolean printDisabled = isTicketRequiredNeverPrint();
+                boolean statusChanged;
+                if (printDisabled) {
+                    int dsFiltered = fs.delStatus & ~0x0400; // masque le bit "fin de livraison demandée"
+                    int dsLastFiltered = lastLoggedStatusDs & ~0x0400;
+                    statusChanged = (fs.devStatus != lastLoggedStatusDev)
+                            || (dsFiltered != dsLastFiltered)
+                            || (fs.delCode != lastLoggedStatusDc);
+                    // prnStatus volontairement exclu de la comparaison ici
+                } else {
+                    statusChanged = (fs.devStatus != lastLoggedStatusDev)
+                            || (fs.prnStatus != lastLoggedStatusPrn)
+                            || (fs.delStatus != lastLoggedStatusDs)
+                            || (fs.delCode != lastLoggedStatusDc);
+                }
+                if (statusChanged) {
+                    emitLog(String.format("[STATUS] %s | %s | %s",
+                            devDecoded, LcpLink.describeDelCode(fs.delCode), LcpLink.describeDelStatus(fs.delStatus)));
+                    emitLog(String.format("[STATUS-HEX] dev=0x%02X prn=0x%02X ds=0x%04X dc=0x%04X",
+                            fs.devStatus, fs.prnStatus, fs.delStatus, fs.delCode));
+                    lastLoggedStatusDev = fs.devStatus;
+                    lastLoggedStatusPrn = fs.prnStatus;
+                    lastLoggedStatusDs = fs.delStatus;
+                    lastLoggedStatusDc = fs.delCode;
+                }
 
                 // ✅ (4 août 2026, demande Paul) — un changement de devStatus pendant
                 // une fenêtre affichée comme stable (ex. RUNNING_FLOWING continu)
@@ -2196,6 +2241,7 @@ softResync("retry/" + step);
                 // Repli impossible à vérifier — retourne le "0" original plutôt
                 // que de risquer une valeur incorrecte sur une supposition.
                 android.util.Log.w("DeliveryController", "readTicketNo23: vérification du repli SaleNumber ERR: " + e.getMessage());
+                try { com.pa.lcr.lcp.log.LogBus.err(resolveLcpNode(), "DeliveryController.readTicketNo23", e); } catch (Exception ignored) {}
             }
         }
         return tno;

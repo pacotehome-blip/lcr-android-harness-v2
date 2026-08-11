@@ -80,7 +80,7 @@ public class ActiveDeliveryStore {
                     SQLiteDatabase.CONFLICT_REPLACE);
             Log.i(TAG, "save: woNum=" + woNum + " jobId=" + jobId + " status=" + status);
         } catch (Exception e) {
-            Log.e(TAG, "save ERR: " + e.getMessage());
+            Log.e(TAG, "save ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "ActiveDeliveryStore.save", e); } catch (Exception ignored) {}
         }
     }
 
@@ -99,7 +99,7 @@ public class ActiveDeliveryStore {
                 new String[]{String.valueOf(ROW_ID)});
             Log.i(TAG, "updateStatus: " + status);
         } catch (Exception e) {
-            Log.e(TAG, "updateStatus ERR: " + e.getMessage());
+            Log.e(TAG, "updateStatus ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "ActiveDeliveryStore.updateStatus", e); } catch (Exception ignored) {}
         }
     }
 
@@ -130,7 +130,7 @@ public class ActiveDeliveryStore {
                 }
             }
         } catch (Exception e) {
-            Log.e(TAG, "load ERR: " + e.getMessage());
+            Log.e(TAG, "load ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "ActiveDeliveryStore.load", e); } catch (Exception ignored) {}
         }
         return null;
     }
@@ -146,7 +146,7 @@ public class ActiveDeliveryStore {
                     new String[]{String.valueOf(ROW_ID)});
             Log.i(TAG, "clear: " + rows + " row(s) deleted");
         } catch (Exception e) {
-            Log.e(TAG, "clear ERR: " + e.getMessage());
+            Log.e(TAG, "clear ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "ActiveDeliveryStore.clear", e); } catch (Exception ignored) {}
         }
     }
 

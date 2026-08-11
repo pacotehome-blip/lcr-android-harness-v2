@@ -182,6 +182,7 @@ public class LcrHttpService extends Service {
                 sHttpsRunning = false;
                 sHttpRunning = false;
                 Log.e(TAG, "ApiServer FAIL: " + e.getMessage());
+                try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrHttpService.apiServerStart", e); } catch (Exception ignored) {}
             }
         }
         updateNotification("APK Filgo — HTTPS:" + API_PORT + " HTTP:" + HTTP_PORT);

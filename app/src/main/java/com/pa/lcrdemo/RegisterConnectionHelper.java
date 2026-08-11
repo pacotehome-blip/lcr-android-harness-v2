@@ -146,6 +146,7 @@ public class RegisterConnectionHelper {
             ioOk = (io != null && io.isOpen());
         } catch (Exception e) {
             Log.w(TAG, "isOpen check ERR: " + e.getMessage());
+            try { com.pa.lcr.lcp.log.LogBus.err(node, "RegisterConnectionHelper.isOpenCheck", e); } catch (Exception ignored) {}
         }
 
         if (!ioOk) {
@@ -220,6 +221,7 @@ public class RegisterConnectionHelper {
             // Une exception ici est elle-même un signal de panne — on ne
             // l'avale pas en concluant OK.
             Log.w(TAG, "validerConnexion: registerValidate EXCEPTION: " + e.getMessage());
+            try { com.pa.lcr.lcp.log.LogBus.err(node, "RegisterConnectionHelper.validerConnexion", e); } catch (Exception ignored) {}
             tickOk = false;
         }
 
@@ -363,6 +365,7 @@ public class RegisterConnectionHelper {
             }
         } catch (Exception e) {
             Log.w(TAG, "DB read ERR: " + e.getMessage());
+            try { com.pa.lcr.lcp.log.LogBus.err(node, "RegisterConnectionHelper.dbRead", e); } catch (Exception ignored) {}
         }
 
         final String fTicketNo = ticketNo;
@@ -458,8 +461,13 @@ public class RegisterConnectionHelper {
 
         // ÉTAPE 1 — Fermeture connexion existante
         if (annule[0]) { fermerDialogueAnnule(dlg); return; }
-        etapes[0] = (livraisonActive || usbDevicePresent) ? "Fermeture connexion — ignorée ("
-                + (livraisonActive ? "livraison active" : "USB détecté") + ")" : "Fermeture connexion existante";
+        // ✅ FIX (10 août 2026, demande Paul — "je vois toujours que le USB
+        // est ignoré, ça fait peur") — formulation corrigée : c'est un
+        // comportement NORMAL et VOULU (les étapes spécifiques au BT n'ont
+        // pas de sens quand USB est déjà branché), mais "ignorée" sonnait
+        // comme un problème plutôt qu'un simple saut logique attendu.
+        etapes[0] = (livraisonActive || usbDevicePresent) ? "Fermeture connexion — non nécessaire ("
+                + (livraisonActive ? "livraison active" : "USB déjà branché, étape BT non applicable") + ")" : "Fermeture connexion existante";
         updateDlg.run();
         if (!livraisonActive && !usbDevicePresent) {
             try { activity.btDisconnect(); Thread.sleep(800); } catch (Exception ignored) {}
@@ -469,8 +477,8 @@ public class RegisterConnectionHelper {
 
         // ÉTAPE 2 — Réinitialisation Bluetooth
         if (annule[0]) { fermerDialogueAnnule(dlg); return; }
-        etapes[1] = (livraisonActive || usbDevicePresent) ? "Réinitialisation BT — ignorée ("
-                + (livraisonActive ? "livraison active" : "USB détecté") + ")" : "Réinitialisation Bluetooth";
+        etapes[1] = (livraisonActive || usbDevicePresent) ? "Réinitialisation BT — non nécessaire ("
+                + (livraisonActive ? "livraison active" : "USB déjà branché, étape BT non applicable") + ")" : "Réinitialisation Bluetooth";
         updateDlg.run();
         if (!livraisonActive && !usbDevicePresent) {
             try {
@@ -717,6 +725,7 @@ public class RegisterConnectionHelper {
                 }
             } catch (Exception e) {
                 Log.w(TAG, "diagnostic succès — check net/gross avant relance ERR: " + e.getMessage());
+                try { com.pa.lcr.lcp.log.LogBus.err(node, "RegisterConnectionHelper.checkNetGrossAvantRelance", e); } catch (Exception ignored) {}
             }
 
             if (!dejaLivre && deepLinkHandler != null && woNum != null && !woNum.isEmpty()) {
@@ -808,6 +817,7 @@ public class RegisterConnectionHelper {
                         android.os.Process.killProcess(android.os.Process.myPid());
                     } catch (Exception e) {
                         Log.e(TAG, "Restart ERR: " + e.getMessage());
+                        try { com.pa.lcr.lcp.log.LogBus.err(node, "RegisterConnectionHelper.restart", e); } catch (Exception ignored) {}
                     }
                 })
                 .setNegativeButton("📧 Envoyer courriel", (d, w) -> {
@@ -823,6 +833,7 @@ public class RegisterConnectionHelper {
                             email, "Envoyer courriel support"));
                     } catch (Exception e) {
                         Log.e(TAG, "Email ERR: " + e.getMessage());
+                        try { com.pa.lcr.lcp.log.LogBus.err(node, "RegisterConnectionHelper.emailSupport", e); } catch (Exception ignored) {}
                     }
                     d.dismiss();
                 })

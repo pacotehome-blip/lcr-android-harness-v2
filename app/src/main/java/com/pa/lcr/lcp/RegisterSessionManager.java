@@ -276,6 +276,8 @@ public final class RegisterSessionManager {
         if (lock == null) {
             android.util.Log.w("RSM", "probeSerial: timeout verrou LCP (node=" + nodeDec
                 + ") — probablement une session morte bloquée, sonde abandonnée");
+            try { com.pa.lcr.lcp.log.LogBus.err(nodeDec, "RegisterSessionManager.probeSerial",
+                new java.io.IOException("timeout verrou LCP")); } catch (Exception ignored) {}
             return null;
         }
         try {
@@ -594,6 +596,7 @@ public final class RegisterSessionManager {
                 identity = Lc3Link.probeAndIdentify(io);
             } catch (Exception probeEx) {
                 android.util.Log.w("RSM", "probeAndIdentify exception: " + probeEx.getMessage());
+                try { com.pa.lcr.lcp.log.LogBus.err(node, "RegisterSessionManager.probeAndIdentify", probeEx); } catch (Exception ignored) {}
             }
         } else {
             // Sur UI thread — vérifier si le transport est BT ou TCP (LC3 probable)

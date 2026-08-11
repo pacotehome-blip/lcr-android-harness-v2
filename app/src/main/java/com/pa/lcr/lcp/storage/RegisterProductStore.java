@@ -96,7 +96,16 @@ public class RegisterProductStore {
             }
             db.setTransactionSuccessful();
         } catch (Exception e) {
+            // ✅ FIX CRITIQUE (11 août 2026, demande Paul — "si ça doit être
+            // dans le log Support, qu'est-ce que t'attends pour le mettre")
+            // — cette exception était avalée en silence (Log.e brut,
+            // invisible dans Support/LogBus) — un vrai échec de sauvegarde
+            // du scan produits aurait pu passer complètement inaperçu.
+            // Maintenant visible dans Support, avec le node concerné.
             Log.e(TAG, "upsertAll ERR: " + e.getMessage());
+            try {
+                com.pa.lcr.lcp.log.LogBus.err(lcrNode, "RegisterProductStore.upsertAll", e);
+            } catch (Exception ignored) {}
         } finally {
             db.endTransaction();
         }
@@ -116,7 +125,7 @@ public class RegisterProductStore {
                     null, null, COL_NOTE_IDX + " ASC")) {
                 while (c != null && c.moveToNext()) rows.add(map(c, serialId));
             }
-        } catch (Exception e) { Log.e(TAG, "getAll ERR: " + e.getMessage()); }
+        } catch (Exception e) { Log.e(TAG, "getAll ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(lcrNode, "RegisterProductStore.getAll", e); } catch (Exception ignored) {} }
         return rows;
     }
 
@@ -131,7 +140,7 @@ public class RegisterProductStore {
                     null, null, COL_NOTE_IDX + " ASC")) {
                 while (c != null && c.moveToNext()) rows.add(map(c, serialId));
             }
-        } catch (Exception e) { Log.e(TAG, "getAll ERR: " + e.getMessage()); }
+        } catch (Exception e) { Log.e(TAG, "getAll ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "RegisterProductStore.getAll(sansNode)", e); } catch (Exception ignored) {} }
         return rows;
     }
 
@@ -145,7 +154,7 @@ public class RegisterProductStore {
                     null, null, null)) {
                 if (c != null && c.moveToFirst()) return c.getString(0);
             }
-        } catch (Exception e) { Log.e(TAG, "getDescription ERR: " + e.getMessage()); }
+        } catch (Exception e) { Log.e(TAG, "getDescription ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "RegisterProductStore.getDescription", e); } catch (Exception ignored) {} }
         return null;
     }
 
@@ -159,7 +168,7 @@ public class RegisterProductStore {
                     null, null, null, "1")) {
                 if (c != null && c.moveToFirst()) return map(c, serialId);
             }
-        } catch (Exception e) { Log.e(TAG, "findByNoteIdx ERR: " + e.getMessage()); }
+        } catch (Exception e) { Log.e(TAG, "findByNoteIdx ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "RegisterProductStore.findByNoteIdx", e); } catch (Exception ignored) {} }
         return null;
     }
 
@@ -206,7 +215,7 @@ public class RegisterProductStore {
                     + " WHERE " + COL_SERIAL + "=?", new String[]{serialId})) {
                 if (c != null && c.moveToFirst()) return c.getInt(0) > 0;
             }
-        } catch (Exception e) { Log.e(TAG, "hasProducts ERR: " + e.getMessage()); }
+        } catch (Exception e) { Log.e(TAG, "hasProducts ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "RegisterProductStore.hasProducts", e); } catch (Exception ignored) {} }
         return false;
     }
 
@@ -220,7 +229,7 @@ public class RegisterProductStore {
                 while (c != null && c.moveToNext())
                     rows.add(map(c, c.getString(c.getColumnIndexOrThrow(COL_SERIAL))));
             }
-        } catch (Exception e) { Log.e(TAG, "getPending ERR: " + e.getMessage()); }
+        } catch (Exception e) { Log.e(TAG, "getPending ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "RegisterProductStore.getPending", e); } catch (Exception ignored) {} }
         return rows;
     }
 
@@ -232,7 +241,7 @@ public class RegisterProductStore {
             helper.getWritableDatabase().update(TABLE, cv,
                 COL_SERIAL + "=? AND " + COL_NOTE_IDX + "=?",
                 new String[]{serialId, String.valueOf(noteIdx)});
-        } catch (Exception e) { Log.e(TAG, "markSynced ERR: " + e.getMessage()); }
+        } catch (Exception e) { Log.e(TAG, "markSynced ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "RegisterProductStore.markSynced", e); } catch (Exception ignored) {} }
     }
 
     public void close() { try { helper.close(); } catch (Exception ignored) {} }

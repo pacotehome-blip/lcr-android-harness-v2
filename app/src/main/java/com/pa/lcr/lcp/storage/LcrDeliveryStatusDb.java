@@ -384,7 +384,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
                 + " net=" + cv.getAsDouble(COL_NET_L));
             return id;
         } catch (Exception e) {
-            Log.e(TAG, "insertDelivery ERR: " + e.getMessage());
+            Log.e(TAG, "insertDelivery ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.insertDelivery", e); } catch (Exception ignored) {}
             return -1;
         }
     }
@@ -401,7 +401,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
                 null, null,
                 COL_TRANSACTION_NO + " DESC", "1")) {
             if (c.moveToFirst()) return DeliveryRow.fromCursor(c);
-        } catch (Exception e) { Log.e(TAG, "getByTicketNo ERR: " + e.getMessage()); }
+        } catch (Exception e) { Log.e(TAG, "getByTicketNo ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.getByTicketNo", e); } catch (Exception ignored) {} }
         return null;
     }
 
@@ -411,7 +411,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
             return getWritableDatabase().update(TABLE_DELIVERY, cv,
                 COL_ID + "=?", new String[]{String.valueOf(id)});
         } catch (Exception e) {
-            Log.e(TAG, "updateDelivery ERR: " + e.getMessage());
+            Log.e(TAG, "updateDelivery ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.updateDelivery", e); } catch (Exception ignored) {}
             return 0;
         }
     }
@@ -428,7 +428,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
             getWritableDatabase().update(TABLE_DELIVERY, cv,
                 COL_ID + "=?", new String[]{String.valueOf(id)});
         } catch (Exception e) {
-            Log.e(TAG, "markSynced ERR: " + e.getMessage());
+            Log.e(TAG, "markSynced ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.markSynced", e); } catch (Exception ignored) {}
         }
     }
 
@@ -444,7 +444,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
                 COL_ID + "=?", new String[]{String.valueOf(id)});
             Log.w(TAG, "markError id=" + id + " msg=" + errorMsg);
         } catch (Exception e) {
-            Log.e(TAG, "markError ERR: " + e.getMessage());
+            Log.e(TAG, "markError ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.markError", e); } catch (Exception ignored) {}
         }
     }
 
@@ -473,7 +473,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
                 list.add(DeliveryRow.fromCursor(c));
             }
         } catch (Exception e) {
-            Log.e(TAG, "getPendingDeliveries ERR: " + e.getMessage());
+            Log.e(TAG, "getPendingDeliveries ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.getPendingDeliveries", e); } catch (Exception ignored) {}
         }
         return list;
     }
@@ -488,7 +488,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
                 new String[]{SYNC_PENDING})) {
             if (c.moveToFirst()) return c.getInt(0);
         } catch (Exception e) {
-            Log.e(TAG, "getPendingCount ERR: " + e.getMessage());
+            Log.e(TAG, "getPendingCount ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.getPendingCount", e); } catch (Exception ignored) {}
         }
         return 0;
     }
@@ -508,7 +508,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
                 new String[]{SYNC_PENDING, currentWoNum != null ? currentWoNum : ""})) {
             if (c.moveToFirst()) return c.getString(0);
         } catch (Exception e) {
-            Log.e(TAG, "getActiveConflictWo ERR: " + e.getMessage());
+            Log.e(TAG, "getActiveConflictWo ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.getActiveConflictWo", e); } catch (Exception ignored) {}
         }
         return null;
     }
@@ -524,7 +524,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
                 COL_TRANSACTION_NO + " DESC", "1")) {
             if (c.moveToFirst()) return DeliveryRow.fromCursor(c);
         } catch (Exception e) {
-            Log.e(TAG, "getLatestForWo ERR: " + e.getMessage());
+            Log.e(TAG, "getLatestForWo ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.getLatestForWo", e); } catch (Exception ignored) {}
         }
         return null;
     }
@@ -541,7 +541,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
                 COL_TRANSACTION_NO + " DESC", "1")) {
             if (c.moveToFirst()) return DeliveryRow.fromCursor(c);
         } catch (Exception e) {
-            Log.e(TAG, "getLastDelivery ERR: " + e.getMessage());
+            Log.e(TAG, "getLastDelivery ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.getLastDelivery", e); } catch (Exception ignored) {}
         }
         return null;
     }
@@ -563,7 +563,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
                 COL_TRANSACTION_NO + " DESC", "1")) {
             if (c.moveToFirst()) return DeliveryRow.fromCursor(c);
         } catch (Exception e) {
-            Log.e(TAG, "getLastDeliveryForSerial ERR: " + e.getMessage());
+            Log.e(TAG, "getLastDeliveryForSerial ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.getLastDeliveryForSerial", e); } catch (Exception ignored) {}
         }
         return null;
     }
@@ -582,7 +582,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
                 list.add(DeliveryRow.fromCursor(c));
             }
         } catch (Exception e) {
-            Log.e(TAG, "getAllForWo ERR: " + e.getMessage());
+            Log.e(TAG, "getAllForWo ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.getAllForWo", e); } catch (Exception ignored) {}
         }
         return list;
     }
@@ -600,7 +600,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
                 list.add(DeliveryRow.fromCursor(c));
             }
         } catch (Exception e) {
-            Log.e(TAG, "getDeliveriesForTournee ERR: " + e.getMessage());
+            Log.e(TAG, "getDeliveriesForTournee ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.getDeliveriesForTournee", e); } catch (Exception ignored) {}
         }
         return list;
     }
@@ -622,7 +622,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
             }
             db.setTransactionSuccessful();
         } catch (Exception e) {
-            Log.e(TAG, "replaceAllNotes ERR: " + e.getMessage());
+            Log.e(TAG, "replaceAllNotes ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.replaceAllNotes", e); } catch (Exception ignored) {}
         } finally {
             db.endTransaction();
         }
@@ -641,7 +641,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
                 list.add(NoteRow.fromCursor(c));
             }
         } catch (Exception e) {
-            Log.e(TAG, "getActiveNotes ERR: " + e.getMessage());
+            Log.e(TAG, "getActiveNotes ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.getActiveNotes", e); } catch (Exception ignored) {}
         }
         return list;
     }
@@ -842,7 +842,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
             try {
                 db.execSQL("ALTER TABLE " + table + " ADD COLUMN " + col + " " + type);
             } catch (Exception e) {
-                Log.e(TAG, "addColumnIfMissing ERR: " + e.getMessage());
+                Log.e(TAG, "addColumnIfMissing ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.addColumnIfMissing", e); } catch (Exception ignored) {}
             }
         }
     }

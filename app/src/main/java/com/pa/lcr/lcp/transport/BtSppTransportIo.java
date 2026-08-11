@@ -216,17 +216,20 @@ public final class BtSppTransportIo implements TransportIo {
 
         // bloquant
         if (timeoutMs < 0) {
-            try {
-                long t0 = System.currentTimeMillis();
-                int n = in.read(buffer);
-                long lat = System.currentTimeMillis() - t0;
-                ioSamples.incrementAndGet();
-                ioLatencySum.addAndGet(lat);
-                return n;
-            } catch (Exception e) {
-                ioErrors.incrementAndGet();
-                throw e;
-            }
+            // ✅ FIX CRITIQUE (11 août 2026, demande Paul — trouvé en
+            // cherchant la cause d'un verrou LCP bloqué une minute complète
+            // sans jamais se relâcher) — ce chemin appelait in.read(buffer)
+            // SANS AUCUNE limite de temps. Corrigé en réutilisant le MÊME
+            // patron de sondage sûr que le reste de cette méthode
+            // (available() + boucle avec délai) au lieu d'un vrai blocage
+            // infini — plafonné à 60s. Note honnête : je n'ai pas pu
+            // confirmer que ce chemin précis est LA cause exacte de
+            // l'incident observé (aucun appelant trouvé passant
+            // explicitement un délai négatif), mais c'est un vrai risque
+            // qui méritait d'être fermé par précaution. BluetoothSocket
+            // n'expose pas setSoTimeout() publiquement — impossible
+            // d'utiliser cette approche, d'où la réutilisation du sondage.
+            timeoutMs = 60_000;
         }
 
         final long deadline = System.currentTimeMillis() + timeoutMs;
