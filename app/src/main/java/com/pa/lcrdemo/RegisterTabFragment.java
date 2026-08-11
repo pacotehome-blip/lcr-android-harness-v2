@@ -611,9 +611,19 @@ public class RegisterTabFragment extends Fragment {
 
 
                 // ✅ Si pas de WO préfillé — chercher via ticket_no du registre
+                // ✅ FIX (11 août 2026, demande Paul — "si j'ai tout
+                // l'information [dans la validation] c'est que tu as merdé
+                // qq part dans l'apk") — trouvé : cette méthode fait une
+                // VRAIE communication LCP (api_registerValidate) à 800ms
+                // après CONNECTED — bien avant que le sondage automatique
+                // n'ait fini de se stabiliser, et bien avant mon délai de
+                // 3000ms sur Auto-scan. Un déclencheur de collision de plus
+                // que je n'avais pas fermé. Décalé à 3500ms (après
+                // Auto-scan) pour étaler les déclencheurs plutôt que de les
+                // faire tous converger vers le même instant.
                 if (state == DeliveryState.CONNECTED
                         && (currentWoNum == null || currentWoNum.isEmpty())) {
-                    ui.postDelayed(() -> rechercherWoDepuisRegistre(), 800);
+                    ui.postDelayed(() -> rechercherWoDepuisRegistre(), 3500);
                 }
 
                 // ✅ Scan auto produits (4 août 2026, demande Paul : "après
