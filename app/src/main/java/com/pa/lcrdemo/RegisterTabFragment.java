@@ -2307,6 +2307,13 @@ public class RegisterTabFragment extends Fragment {
     }
 
     private volatile long lastWoDetectTriggerMs = 0;
+    // ✅ AJOUTÉ (11 août 2026, demande Paul — "j'ai toujours le lag, trouve
+    // l'erreur") — trouvé via logcat : rafraichirCumulWo() n'avait AUCUN
+    // anti-rebond, appelée depuis 7 endroits séparés dans ce fichier, dont
+    // au moins un self-perpétuant. Chaque appel refait un vrai scan BD
+    // complet (getAllForWo, 54-56+ lignes et grandissant) — répété
+    // plusieurs fois d'affilée sans rien entre les deux dans le log.
+    private volatile long lastCumulWoRefreshMs = 0;
     // ✅ (ajouté 3 août 2026) — armé juste avant un déclenchement explicite (entrée tab
     // ou clic Status(B)), consommé une seule fois par onTicketInfo() pour autoriser la
     // recherche complète (Dataverse + backup). Voir lookupWoForTicket(ticketNo, allowFullSearch).
@@ -4187,6 +4194,27 @@ public class RegisterTabFragment extends Fragment {
             // Ne pas cacher le panel — il doit toujours etre visible
             return;
         }
+        // ✅ FIX CRITIQUE (11 août 2026, demande Paul — "j'ai toujours le
+        // lag, trouve l'erreur") — cette méthode n'avait AUCUN anti-rebond,
+        // appelée depuis 7 endroits séparés (dont au moins un
+        // self-perpétuant, onTabMediaStatusChanged) — chaque appel refait
+        // un vrai scan BD complet (getAllForWo), répété plusieurs fois
+        // d'affilée sans rien entre les deux, confirmé dans le log. Même
+        // principe que le throttle déjà appliqué à
+        // checkPendingDeliveryForThisRegister() et rechercherWoDepuisRegistre()
+        // aujourd'hui : anti-rebond de 2s + saut complet pendant une
+        // livraison active (RUNNING_FLOWING/RUNNING_PAUSED — le panel de
+        // cumul n'a aucune raison de se rafraîchir en boucle pendant que
+        // le vrai sondage live devrait avoir la priorité).
+        if (controller != null) {
+            DeliveryState stCumul = controller.getState();
+            if (stCumul == DeliveryState.RUNNING_FLOWING || stCumul == DeliveryState.RUNNING_PAUSED) {
+                return;
+            }
+        }
+        long nowCumul = System.currentTimeMillis();
+        if (nowCumul - lastCumulWoRefreshMs < 2000) return;
+        lastCumulWoRefreshMs = nowCumul;
         final String wo = currentWoNum;
         LogBus.api(node, "[CUMUL-WO] recherche pour wo=" + wo);
         bg.execute(() -> {
