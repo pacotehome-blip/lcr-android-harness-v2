@@ -2125,6 +2125,20 @@ softResync("retry/" + step);
         // usages de ticketNo dans ce seul fichier) en hérite automatiquement
         // sans avoir à toucher chaque site d'utilisation individuellement.
         if ("0".equals(tno)) {
+            // ✅ FIX (11 août 2026, demande Paul — "il ne faut pas oublier
+            // qu'actuellement il y aura le LC3 aussi") — Field #22/#37 sont
+            // des numéros de champ LCR-II (Liquid Controls), PAS des
+            // constantes universelles LCP. Sur un vrai LC3, ces mêmes
+            // numéros pourraient désigner autre chose ou rien du tout —
+            // tenter ce repli aveuglément risquerait une valeur
+            // silencieusement fausse plutôt qu'un "0" honnête. Repli
+            // désactivé tant qu'on n'a pas la doc protocole LC3 confirmant
+            // les bons numéros de champ pour cet appareil.
+            if (link instanceof Lc3Link) {
+                android.util.Log.i("DeliveryController", "readTicketNo23: champ #23=0 sur LC3 — "
+                    + "repli SaleNumber désactivé (numéros de champ LCR-II non confirmés pour LC3)");
+                return tno;
+            }
             try {
                 int ticketRequired = lcpGetField(37)[0] & 0xFF;
                 if (ticketRequired == 2) {

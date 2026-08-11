@@ -362,6 +362,18 @@ public class RegisterTabFragment extends Fragment {
     // ✅ Scan auto produits (4 août 2026, demande Paul) — évite un déclenchement
     // en boucle si l'état oscille CONNECTED/DISCONNECTED/CONNECTED rapidement.
     private volatile boolean autoProductScanInFlight = false;
+    // ✅ FIX CRITIQUE (10 août 2026, demande Paul — "pourquoi Auto-scan
+    // produits se déclenche deux fois") — trouvé : le drapeau ci-dessus est
+    // propre à CHAQUE INSTANCE de fragment. Si deux instances existent
+    // brièvement pour le même tab (le même genre de duplication qu'on a
+    // chassée toute la journée — FragmentTransaction asynchrone), chacune a
+    // son propre drapeau à false et lance indépendamment son propre scan.
+    // Ce verrou statique, partagé entre TOUTES les instances et indexé par
+    // "node:serial", garantit qu'un seul scan matériel se produit pour un
+    // registre donné, peu importe combien d'instances de fragment existent
+    // momentanément.
+    private static final java.util.Set<String> autoProductScanInFlightGlobal =
+        java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
     // "Armé" à l'activation du tab, consommé au premier CONNECTED qui suit —
     // garantit un déclenchement unique par activation de tab, au vrai moment
     // où le registre devient CONNECTED READY (pas sur un délai fixe arbitraire).
@@ -2726,8 +2738,18 @@ public class RegisterTabFragment extends Fragment {
                 payloadJson = snap.toString();
 
                 // 2. Écrire dans LcrDeliveryStatusDb — vérifier si ticket déjà enregistré
+                // ✅ FIX CRITIQUE (11 août 2026, demande Paul — fuite de
+                // connexion SQLite confirmée dans un vrai logcat, "was
+                // leaked! Please fix your application...") — rien
+                // n'entourait ce bloc entre la création et le close() plus
+                // bas (ligne d'origine ~2779) : si getLatestForWo,
+                // updateDelivery ou insertDelivery levait une exception,
+                // close() ne se déclenchait jamais. Ce bloc s'exécute à
+                // CHAQUE fin de livraison (retournerAuWorkOrder) — le
+                // risque était réel, pas théorique.
                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
                     new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                try {
                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow existing =
                     lcrDb.getLatestForWo(woNum);
                 if (existing != null && !ticketNo.isEmpty() && ticketNo.equals(existing.ticketNo)) {
@@ -2764,7 +2786,9 @@ public class RegisterTabFragment extends Fragment {
                     android.util.Log.i("RetourWO", "Delivery sauvegardée localId=" + localId
                         + " wo=" + woNum + " net=" + netL + " gross=" + grossL);
                 }
-                try { lcrDb.close(); } catch (Exception ignored) {}
+                } finally {
+                    try { lcrDb.close(); } catch (Exception ignored) {}
+                }
 
                 // ✅ (demandé 31 juillet 2026, suite à la perte du ticket 10898) : backup
                 // JSON durable dans Téléchargements — survit à une désinstallation, contrairement
@@ -3598,8 +3622,21 @@ public class RegisterTabFragment extends Fragment {
                 ? serialFromArgs.trim() : null;
         if (serialId == null) return;
 
+        // ✅ FIX CRITIQUE (10 août 2026) — verrou GLOBAL, partagé entre
+        // toutes les instances de fragment pour ce registre précis — voir
+        // commentaire complet sur autoProductScanInFlightGlobal. Si une
+        // AUTRE instance a déjà ce registre en cours de scan, on abandonne
+        // ici, avant même de lancer quoi que ce soit.
+        final String globalKey = node + ":" + serialId;
+        if (!autoProductScanInFlightGlobal.add(globalKey)) {
+            android.util.Log.i("RegisterTabFragment", "Auto-scan produits — déjà en cours pour "
+                + globalKey + " (autre instance de fragment) — abandon");
+            return;
+        }
+
         autoProductScanInFlight = true;
-        bg.execute(() -> {
+        try {
+            bg.execute(() -> {
             boolean cacheDisponible = false;
             try {
                 com.pa.lcr.lcp.storage.RegisterProductStore store =
@@ -3616,6 +3653,7 @@ public class RegisterTabFragment extends Fragment {
                         + serialId + " node=" + node + ", pas de re-scan matériel");
                 applierDescriptionsProduits(serialId, node);
                 autoProductScanInFlight = false;
+                autoProductScanInFlightGlobal.remove(globalKey);
             } else {
                 android.util.Log.i("RegisterTabFragment", "Auto-scan produits — aucun cache pour serial="
                         + serialId + " node=" + node + ", lancement scan matériel");
@@ -3624,10 +3662,20 @@ public class RegisterTabFragment extends Fragment {
                         lancerScanProduits();
                     } finally {
                         autoProductScanInFlight = false;
+                        autoProductScanInFlightGlobal.remove(globalKey);
                     }
                 });
             }
-        });
+            });
+        } catch (Exception schedulingErr) {
+            // ✅ FIX (10 août 2026) — si bg.execute() lui-même échoue à
+            // planifier (ex. executor fermé), le verrou global doit quand
+            // même se libérer — sinon il resterait bloqué pour toujours,
+            // empêchant tout futur scan pour ce registre.
+            autoProductScanInFlight = false;
+            autoProductScanInFlightGlobal.remove(globalKey);
+            android.util.Log.w("RegisterTabFragment", "autoScanProduitsSiNecessaire: échec de planification: " + schedulingErr.getMessage());
+        }
     }
 
     private void lancerScanProduits() {
