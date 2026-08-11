@@ -92,6 +92,19 @@ public final class LogBus {
         String msg = (e != null)
             ? (e.getClass().getSimpleName() + ": " + e.getMessage())
             : "erreur inconnue";
+        // ✅ FIX CRITIQUE (11 août 2026, demande Paul — même trou que celui
+        // corrigé dans RegisterSessionManager.onError(), mais ICI, à la
+        // source de LogBus.err() elle-même — trouvé un DEUXIÈME point
+        // d'émission séparé (RegisterSessionManager.getOrCreateLocked)
+        // utilisant LogBus.err() directement, jamais couvert par mon
+        // premier correctif. Corrigé une fois pour toutes ici : couvre
+        // TOUS les appelants actuels et futurs de LogBus.err(), pas
+        // seulement celui déjà trouvé.
+        Throwable cause = (e != null) ? e.getCause() : null;
+        if (cause != null) {
+            msg = msg + " [cause réelle: " + cause.getClass().getSimpleName()
+                + (cause.getMessage() != null ? ": " + cause.getMessage() : "") + "]";
+        }
         try { android.util.Log.e(tag, msg, e); } catch (Exception ignored) {}
         emit(node, Src.API, "[ERR][" + tag + "] " + msg);
     }
