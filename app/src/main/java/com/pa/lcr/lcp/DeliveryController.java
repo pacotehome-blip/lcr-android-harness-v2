@@ -2111,7 +2111,36 @@ softResync("retry/" + step);
         return String.valueOf(u);
     }
 
-    private String readTicketNo23() throws Exception { return readU32FieldAsDecString(FIELD_TICKET_NUMBER); }
+    private String readTicketNo23() throws Exception {
+        String tno = readU32FieldAsDecString(FIELD_TICKET_NUMBER);
+        // ✅ AJOUTÉ (11 août 2026, demande Paul — "si le champ 23 = 0 et que
+        // le champ 37 = 2, on utilise sale number") — TicketNumber_WM (#23)
+        // ne s'incrémente QU'APRÈS une impression réussie (documenté). Si
+        // TicketRequired_WM (#37) = 2 ("jamais imprimé"), ce champ restera
+        // à 0 POUR TOUJOURS par conception du registre — pas un pépin
+        // temporaire d'imprimante, un état permanent tant que ce réglage
+        // tient. SaleNumber_WM (#22), lui, s'incrémente au DÉBUT de chaque
+        // livraison, peu importe l'impression — repli logique et fiable.
+        // Corrigé ICI, à la source, pour que tout le reste de l'app (66+
+        // usages de ticketNo dans ce seul fichier) en hérite automatiquement
+        // sans avoir à toucher chaque site d'utilisation individuellement.
+        if ("0".equals(tno)) {
+            try {
+                int ticketRequired = lcpGetField(37)[0] & 0xFF;
+                if (ticketRequired == 2) {
+                    String saleNo = readSaleNo22();
+                    android.util.Log.i("DeliveryController", "readTicketNo23: champ #23=0 et TicketRequired(#37)=2 "
+                        + "(jamais imprimé) — repli sur SaleNumber(#22)=" + saleNo);
+                    return saleNo;
+                }
+            } catch (Exception e) {
+                // Repli impossible à vérifier — retourne le "0" original plutôt
+                // que de risquer une valeur incorrecte sur une supposition.
+                android.util.Log.w("DeliveryController", "readTicketNo23: vérification du repli SaleNumber ERR: " + e.getMessage());
+            }
+        }
+        return tno;
+    }
     private String readSaleNo22() throws Exception { return readU32FieldAsDecString(FIELD_SALE_NUMBER); }
 
     // =========================
