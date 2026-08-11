@@ -2206,6 +2206,47 @@ private void setupTabsTop() {
                             adapter.notifyDataSetChanged();
                             return;
                         }
+                        // ✅ AJOUTÉ (11 août 2026, demande Paul — "on pourrait
+                        // indiquer pas encore résolu dynamiquement en
+                        // faisant la recherche BD en cliquant dessus") —
+                        // pour une ligne [WO-DETECT], un clic déclenche une
+                        // vraie recherche BD EN DIRECT (pas juste l'ancien
+                        // texte figé du log) pour dire clairement si ce
+                        // ticket est résolu MAINTENANT ou toujours pas.
+                        String detailClique = (position < lastSupportDetails.size())
+                            ? lastSupportDetails.get(position) : "";
+                        String headerClique = (position < lastSupportHeaders.size())
+                            ? lastSupportHeaders.get(position) : "";
+                        if ((headerClique + detailClique).contains("WO-DETECT")) {
+                            java.util.regex.Matcher m = java.util.regex.Pattern
+                                .compile("ticket=(\\S+)").matcher(headerClique + " " + detailClique);
+                            if (m.find()) {
+                                final String ticketClique = m.group(1);
+                                Toast.makeText(this, "Vérification en direct pour ticket=" + ticketClique + "...",
+                                    Toast.LENGTH_SHORT).show();
+                                new Thread(() -> {
+                                    String resultat;
+                                    try {
+                                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbLive =
+                                            new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(getApplicationContext());
+                                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow rowLive;
+                                        try { rowLive = dbLive.getByTicketNo(ticketClique); }
+                                        finally { try { dbLive.close(); } catch (Exception ignored) {} }
+                                        if (rowLive != null && rowLive.woNum != null && !rowLive.woNum.isEmpty()) {
+                                            resultat = "✅ RÉSOLU maintenant — WO=" + rowLive.woNum
+                                                + " (source=" + rowLive.source + ")";
+                                        } else {
+                                            resultat = "❌ Toujours NON résolu pour ticket=" + ticketClique;
+                                        }
+                                    } catch (Exception e) {
+                                        resultat = "Vérification échouée: " + e.getMessage();
+                                    }
+                                    final String fResultat = resultat;
+                                    runOnUiThread(() -> Toast.makeText(this, fResultat, Toast.LENGTH_LONG).show());
+                                }, "WoDetectLiveCheck").start();
+                                return;
+                            }
+                        }
                         Long attemptId = (position < attemptIds.size()) ? attemptIds.get(position) : null;
                         if (attemptId == null) {
                             Toast.makeText(this,

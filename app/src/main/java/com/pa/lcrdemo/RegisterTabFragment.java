@@ -437,6 +437,14 @@ public class RegisterTabFragment extends Fragment {
     private volatile String lastFailedTicket = "";
     private volatile long lastFailedAttemptMs = 0L;
     private static final long WO_DETECT_RETRY_COOLDOWN_MS = 3000L;
+    // ✅ AJOUTÉ (11 août 2026, demande Paul — "si on l'a, on veut aussi
+    // voir qu'il a été traité comme il faut, inutile de l'avoir 200 fois")
+    // — le mécanisme de retry lui-même reste inchangé (légitime de
+    // réessayer un ticket qui échoue), mais le LOG "recherche dans DB" ne
+    // s'affiche maintenant qu'à la PREMIÈRE tentative pour ce ticket —
+    // les répétitions silencieuses en arrière-plan n'ajoutent rien de
+    // nouveau à l'écran tant que rien ne change.
+    private volatile String dernierTicketWoDetectLogue = null;
     // ✅ (fix 31 juillet 2026) Limite les appels MSAL — checkAndPullMissingDeliveryDetail()
     // est maintenant appelée à chaque activation d'onglet (pas seulement Status(B)), ce qui
     // pouvait spammer des demandes de token concurrentes et interférer avec d'autres flux
@@ -4468,7 +4476,26 @@ public class RegisterTabFragment extends Fragment {
             return;
         }
 
-        LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — recherche dans DB");
+        // ✅ (11 août 2026) — log "recherche dans DB" seulement à la
+        // première tentative pour ce ticket précis — évite la répétition
+        // de la même ligne à chaque retry silencieux en arrière-plan.
+        // ✅ FIX CRITIQUE (11 août 2026, demande Paul — "on veut voir que
+        // c'est traité, inutile de l'avoir 200 fois") — trouvé la vraie
+        // cause : lastFailedTicket/lastFailedAttemptMs ne se marquaient
+        // qu'APRÈS toute la cascade (DB+Dataverse+backup), jamais au
+        // début. Si plusieurs appels arrivaient en rafale rapprochée
+        // (ex. plusieurs événements UI quasi simultanés), chacun passait
+        // le verrou de recul avant que le premier n'ait fini — produisant
+        // la ligne "recherche dans DB" plusieurs fois d'affilée. Marqué
+        // maintenant DÈS le début de la tentative, pas seulement après un
+        // échec confirmé — bloque immédiatement tout appel concurrent pour
+        // le même ticket pendant la fenêtre de recul.
+        lastFailedTicket = ticketNo;
+        lastFailedAttemptMs = System.currentTimeMillis();
+        if (!ticketNo.equals(dernierTicketWoDetectLogue)) {
+            LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — recherche dans DB");
+            dernierTicketWoDetectLogue = ticketNo;
+        }
 
         // Chercher ce ticket dans LcrDeliveryStatusDb
         com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db =
@@ -4551,7 +4578,12 @@ public class RegisterTabFragment extends Fragment {
                     // bloque tout nouvel essai pour ce ticket, même si rechercherWoDepuisRegistre()
                     // repolle toutes les 800ms. On ne verrouille lastTicketDetected qu'après un
                     // SUCCÈS réel (voir plus bas), pour permettre les tentatives suivantes.
-                    LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — introuvable (local + Dataverse + backup), nouvel essai au prochain poll");
+                    // ✅ (11 août 2026) — même principe : logué une seule
+                    // fois par ticket, pas à chaque nouvel essai silencieux.
+                    if (!ticketNo.equals(dernierTicketWoDetectLogue + ":echec")) {
+                        LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo + " — introuvable (local + Dataverse + backup), nouvel essai au prochain poll");
+                        dernierTicketWoDetectLogue = ticketNo + ":echec";
+                    }
                     lastFailedTicket = ticketNo;
                     lastFailedAttemptMs = System.currentTimeMillis();
                     return;

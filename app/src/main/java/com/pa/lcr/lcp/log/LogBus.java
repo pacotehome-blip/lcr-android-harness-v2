@@ -4,6 +4,35 @@ import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
 
+// 📝 NOTE POUR AMÉLIORATION FUTURE (11 août 2026, demande Paul —
+// "garde une note dans le code pour amélioration de prendre en note des
+// messages du log qui sont répétitifs et cesser de les prendre en
+// attendant la résolution et afficher la résolution")
+//
+// Aujourd'hui, ce même patron a été corrigé À LA MAIN, séparément, dans au
+// moins trois endroits différents (RegisterTabFragment.lookupWoForTicket
+// avec dernierTicketWoDetectLogue/lastFailedTicket ; DeliveryController
+// avec lastLoggedStatusDev/Prn/Ds/Dc pour [STATUS]/[STATUS-HEX] ; et le
+// throttle sur lastWoDetectTriggerMs) — chacun avec ses propres champs de
+// suivi ad hoc, jamais de mécanisme réutilisable.
+//
+// Idée pour un futur mécanisme central, ici même dans LogBus : une méthode
+// du genre `emitUntilChanged(node, src, clé, msg)` qui :
+//   1) mémorise le dernier message logué pour cette CLÉ (pas juste le node)
+//   2) si le NOUVEAU message est identique au dernier pour cette clé,
+//      incrémente un compteur interne SANS émettre de nouvelle ligne
+//   3) dès que le message change (une vraie résolution, ou un nouvel
+//      état), émet le nouveau message ET, si le compteur était > 0,
+//      ajoute quelque chose comme " (répété Nx depuis le dernier
+//      changement)" pour ne jamais perdre l'information de fréquence,
+//      juste le volume brut de lignes identiques.
+//
+// Ça éliminerait le besoin de réinventer ce patron à chaque nouvel endroit
+// du code qui sonde/répète un statut périodiquement — un seul point
+// central à maintenir plutôt que plusieurs implémentations parallèles
+// (avec le risque que l'une d'elles ait un bug, comme celui trouvé
+// aujourd'hui dans lookupWoForTicket où le marquage du recul arrivait
+// trop tard dans le flux).
 public final class LogBus {
 
     public enum Src {
