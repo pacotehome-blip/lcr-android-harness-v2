@@ -2149,9 +2149,16 @@ public class RegisterTabFragment extends Fragment {
             // cliquait. C'est une fonction séparée de verifierIoAvantAction/
             // Status(B), avec sa propre logique d'abandon silencieux jamais
             // corrigée jusqu'ici.
-            if (userInitiated) {
-                try { Toast.makeText(requireContext(), "Aucun média prêt (USB/BT) — diagnostic en cours...", Toast.LENGTH_SHORT).show(); } catch (Exception ignored) {}
-            }
+            // ✅ FIX (11 août 2026, demande Paul — "enlève les tous, juste
+            // le garder dans l'onglet du tab, il faut laisser l'apk d'abord
+            // faire son travail d'ajouter un tab s'il y a un nouveau
+            // transport") — ce chemin se déclenchait aussi automatiquement
+            // pendant la création normale d'un tab (pas seulement sur un
+            // vrai clic utilisateur), court-circuitant le flux normal de
+            // découverte (upsertRegisterTabFromScan/probe) avant même qu'il
+            // ait eu la chance de faire son travail. Le Toast retiré —
+            // surErreurConnexion() reste appelée pour ne pas perdre la
+            // détection de vraie panne, mais sans notification prématurée.
             surErreurConnexion(
                 new java.io.IOException("connectThisRegister: aucun média prêt/registre introuvable"),
                 "CONNECT_THIS_REGISTER");
