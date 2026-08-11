@@ -2130,8 +2130,27 @@ public class RegisterTabFragment extends Fragment {
                         new java.io.IOException("connectThisRegister: transport pinné fermé — " + tkPinned),
                         "CONNECT_THIS_REGISTER_PINNED");
                 } else {
+                    // ✅ FIX CRITIQUE (11 août 2026, demande Paul — même
+                    // correctif que plus bas : reconnexion silencieuse au
+                    // lieu d'abandonner complètement.
                     android.util.Log.i("RegisterTabFragment", "connectThisRegister: transport pinné fermé "
-                        + "(appel automatique, userInitiated=false) — diagnostic forcé SAUTÉ");
+                        + "(appel automatique, userInitiated=false) — dialogue sauté, tentative silencieuse");
+                    final String tkPinnedFinal = tkPinned;
+                    bg.execute(() -> {
+                        try {
+                            com.pa.lcr.lcp.MultiRegisterApiFacadeImpl facadeAuto =
+                                new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(requireActivity());
+                            String serialForAuto = (serialFromArgs != null && !serialFromArgs.trim().isEmpty())
+                                ? serialFromArgs.trim() : null;
+                            com.pa.lcr.lcp.ApiResult r = facadeAuto.api_registerConnectAuto(serialForAuto, node);
+                            android.util.Log.i("RegisterTabFragment", "connectThisRegister: reconnexion silencieuse "
+                                + "(transport pinné " + tkPinnedFinal + ") résultat code="
+                                + (r != null ? r.code : "null"));
+                        } catch (Exception e) {
+                            android.util.Log.w("RegisterTabFragment", "connectThisRegister: reconnexion silencieuse ERR: "
+                                + e.getMessage());
+                        }
+                    });
                 }
                 return;
             }
@@ -2186,9 +2205,35 @@ public class RegisterTabFragment extends Fragment {
                     new java.io.IOException("connectThisRegister: aucun média prêt/registre introuvable"),
                     "CONNECT_THIS_REGISTER");
             } else {
+                // ✅ FIX CRITIQUE (11 août 2026, demande Paul — "si je ne le
+                // fais pas [CONNECT_LCP] je n'ai pas la connexion au
+                // registre") — trouvé : mon fix précédent bloquait TOUTE
+                // escalade automatique, y compris la vraie logique de
+                // connexion (api_registerConnectAuto), pas seulement le
+                // dialogue intrusif. Résultat : sans clic manuel, plus rien
+                // ne relançait la connexion tout seul. Corrigé : tente
+                // maintenant une reconnexion SILENCIEUSE (même mécanisme
+                // que "Reconnexion auto" dans MainActivity — pas de
+                // dialogue, pas d'interruption visuelle) au lieu d'abandonner
+                // complètement. Le dialogue de diagnostic reste réservé au
+                // vrai clic utilisateur.
                 android.util.Log.i("RegisterTabFragment", "connectThisRegister: appel automatique "
-                    + "(userInitiated=false) — diagnostic forcé SAUTÉ, le flux normal de découverte "
-                    + "prend le relais sans interférence");
+                    + "(userInitiated=false) — dialogue de diagnostic sauté, mais tentative de "
+                    + "reconnexion silencieuse en arrière-plan (sans interférence visuelle)");
+                bg.execute(() -> {
+                    try {
+                        com.pa.lcr.lcp.MultiRegisterApiFacadeImpl facadeAuto =
+                            new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(requireActivity());
+                        String serialForAuto = (serialFromArgs != null && !serialFromArgs.trim().isEmpty())
+                            ? serialFromArgs.trim() : null;
+                        com.pa.lcr.lcp.ApiResult r = facadeAuto.api_registerConnectAuto(serialForAuto, node);
+                        android.util.Log.i("RegisterTabFragment", "connectThisRegister: reconnexion silencieuse "
+                            + "résultat code=" + (r != null ? r.code : "null") + " msg=" + (r != null ? r.msg : "null"));
+                    } catch (Exception e) {
+                        android.util.Log.w("RegisterTabFragment", "connectThisRegister: reconnexion silencieuse ERR: "
+                            + e.getMessage());
+                    }
+                });
             }
             return;
         }
