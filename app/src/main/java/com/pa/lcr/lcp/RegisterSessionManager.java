@@ -1097,7 +1097,22 @@ public final class RegisterSessionManager {
         }
 
         @Override public void onStateChanged(DeliveryState state) {
-            if (state == DeliveryState.CONNECTED) resetBackoff();
+            if (state == DeliveryState.CONNECTED) {
+                resetBackoff();
+                // ✅ FIX CRITIQUE (11 août 2026, demande Paul — "si j'ai
+                // tout l'information [dans la validation] c'est que tu as
+                // merdé qq part dans l'apk") — trouvé la dernière pièce :
+                // lastKeepAliveMs démarrait à 0L, donc le TOUT PREMIER
+                // sondage automatique se déclenchait dès le premier tick du
+                // planificateur après connexion — AUCUN délai de
+                // stabilisation, contrairement à tout ce qu'on vient de
+                // corriger ailleurs (Auto-scan à 3000ms, recherche WO à
+                // 3500ms). Semé ICI, à l'instant précis de la transition
+                // CONNECTED — le premier vrai sondage n'aura lieu qu'après
+                // un plein KEEP_ALIVE_MS (5s) d'attente, cohérent avec le
+                // reste des délais de stabilisation ajoutés aujourd'hui.
+                lastKeepAliveMs = System.currentTimeMillis();
+            }
         }
 
         @Override public void onProductsUpdated(List<ProductUiItem> products, int activeIndex0) { }
