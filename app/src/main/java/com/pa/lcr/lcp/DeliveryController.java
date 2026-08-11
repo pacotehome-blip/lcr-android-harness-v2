@@ -946,9 +946,22 @@ private void reproEvent(String level, String type, String message, JSONObject da
             if (listener != null) listener.onLiveStatus("LIVE: CONNECTED - (pret)");
 
             // ✅ Sync date/heure tablette → registre à chaque connexion
+            // ✅ FIX CRITIQUE (11 août 2026, demande Paul — trouvé en
+            // traçant précisément l'horodatage d'un verrou LCP bloqué : le
+            // début du blocage correspondait à 4ms près à la fin de CET
+            // appel) — opSyncDateTime() était le SEUL appel LCP de toute
+            // cette classe à contourner withLcpLock() — tous les autres
+            // (opGetField, opGetMachineStatus, etc.) passent par le verrou
+            // partagé, mais celui-ci accédait au transport directement.
+            // Résultat : rien n'empêchait cet appel d'entrer en collision
+            // avec un autre appel verrouillé (ex. le sondage périodique)
+            // sur le MÊME transport physique — le verrou protège seulement
+            // contre d'autres appelants verrouillés, pas contre un
+            // appelant qui le contourne complètement. Corrigé pour utiliser
+            // le même verrou que tout le reste.
             try {
                 if (link instanceof com.pa.lcr.lcp.LcpLink) {
-                    ((com.pa.lcr.lcp.LcpLink) link).opSyncDateTime();
+                    withLcpLockVoid(() -> { ((com.pa.lcr.lcp.LcpLink) link).opSyncDateTime(); return null; });
                     emitLog("[DATETIME] Sync date/heure OK");
                 }
             } catch (Exception e) {

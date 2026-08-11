@@ -776,17 +776,23 @@ public final class RegisterSessionManager {
 
     public synchronized void attachUiListener(String transportKey, int nodeDec, DeliveryControllerPort.Listener uiListener) {
         if (uiListener == null) return;
-        NodeSession s = sessions.get(key(transportKey, nodeDec));
+        String k = key(transportKey, nodeDec);
+        NodeSession s = sessions.get(k);
         if (s == null) return;
-        s.mux.addListener(uiListener);
+        // ✅ FIX (11 août 2026, demande Paul) — remplace par clé logique
+        // plutôt qu'ajouter par identité d'objet, pour éviter les
+        // écouteurs dupliqués si deux instances de fragment existent
+        // brièvement pour le même tab.
+        s.mux.replaceListenerForKey(k, uiListener);
         s.scheduler.setUiSubscribed(true);
     }
 
     public synchronized void detachUiListener(String transportKey, int nodeDec, DeliveryControllerPort.Listener uiListener) {
         if (uiListener == null) return;
-        NodeSession s = sessions.get(key(transportKey, nodeDec));
+        String k = key(transportKey, nodeDec);
+        NodeSession s = sessions.get(k);
         if (s == null) return;
-        s.mux.removeListener(uiListener);
+        s.mux.removeListenerForKey(k);
         s.scheduler.setUiSubscribed(false);
     }
 
@@ -818,7 +824,9 @@ public final class RegisterSessionManager {
             if (!k.endsWith(":" + node)) continue;
             NodeSession s = e.getValue();
             if (s == null) continue;
-            s.mux.addListener(uiListener);
+            // ✅ FIX (11 août 2026, demande Paul) — même correctif que la
+            // version avec transportKey : remplace par clé logique.
+            s.mux.replaceListenerForKey(k, uiListener);
             s.scheduler.setUiSubscribed(true);
         }
     }
@@ -834,7 +842,7 @@ public final class RegisterSessionManager {
             if (!k.endsWith(":" + node)) continue;
             NodeSession s = e.getValue();
             if (s == null) continue;
-            s.mux.removeListener(uiListener);
+            s.mux.removeListenerForKey(k);
             s.scheduler.setUiSubscribed(false);
         }
     }
@@ -879,10 +887,41 @@ public final class RegisterSessionManager {
     private static final class MuxListener implements DeliveryControllerPort.Listener {
         private final CopyOnWriteArrayList<DeliveryControllerPort.Listener> listeners =
                 new CopyOnWriteArrayList<>();
+        // ✅ AJOUTÉ (11 août 2026, demande Paul — "le script n'a pas tout ce
+        // garbage... on peut-tu ajuster ça") — trouvé la vraie cause des
+        // logs de statut/erreur dupliqués : addIfAbsent() empêche un
+        // doublon du MÊME objet, mais si deux INSTANCES de fragment
+        // existent brièvement pour le même tab (le genre de bug déjà
+        // chassé aujourd'hui), chacune a son propre objet uiListener —
+        // différent en mémoire, donc addIfAbsent() ne les reconnaît pas
+        // comme doublons, et chaque événement se logge deux fois. Corrigé
+        // en identifiant les écouteurs par une CLÉ LOGIQUE (le tab
+        // précis), pas par identité d'objet — un nouveau fragment
+        // remplace proprement l'ancien plutôt que de s'ajouter à côté.
+        private final java.util.Map<String, DeliveryControllerPort.Listener> listenersByKey =
+                new java.util.concurrent.ConcurrentHashMap<>();
 
         void addListener(DeliveryControllerPort.Listener l) {
             if (l == null) return;
             listeners.addIfAbsent(l);
+        }
+
+        /** Remplace tout écouteur précédemment enregistré sous CETTE clé —
+         *  garantit un seul écouteur actif par tab logique, peu importe
+         *  combien d'instances de fragment ont existé pour ce même tab. */
+        void replaceListenerForKey(String key, DeliveryControllerPort.Listener l) {
+            if (l == null || key == null) return;
+            DeliveryControllerPort.Listener ancien = listenersByKey.put(key, l);
+            if (ancien != null && ancien != l) {
+                listeners.remove(ancien);
+            }
+            listeners.addIfAbsent(l);
+        }
+
+        void removeListenerForKey(String key) {
+            if (key == null) return;
+            DeliveryControllerPort.Listener ancien = listenersByKey.remove(key);
+            if (ancien != null) listeners.remove(ancien);
         }
 
         void removeListener(DeliveryControllerPort.Listener l) {
