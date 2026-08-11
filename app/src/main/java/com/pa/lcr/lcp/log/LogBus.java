@@ -120,6 +120,24 @@ public final class LogBus {
         for (Listener l : LISTENERS) {
             try { l.onLog(e); } catch (Exception ignored) {}
         }
+
+        // ✅ AJOUTÉ (11 août 2026, demande Paul — "assure-toi qu'on est
+        // capable de le voir dans logcat") — jusqu'ici, LogBus n'écrivait
+        // JAMAIS dans logcat (sauf err(), ajouté le 4 août) — un logcat, peu
+        // importe combien on le fouille, ne pouvait structurellement PAS
+        // montrer les événements [CONNEXION]/[DÉCONNEXION] vus dans l'onglet
+        // Support, puisqu'ils ne passent que par ce buffer + la BD SQLite.
+        // Écrire ICI, à ce choke point unique, couvre TOUS les emitters
+        // (ui/api/ioTx/ioRx) d'un coup. Filtré aux événements à forte valeur
+        // seulement (connexion, erreur, action) — écrire CHAQUE message
+        // (y compris le sondage [STATUS] répété toutes les ~5s) noierait le
+        // signal utile dans un volume énorme, contre-productif pour ce
+        // qu'on cherche à voir précisément.
+        if (msg.startsWith("[CONNEXION]") || msg.startsWith("[DÉCONNEXION]")
+                || msg.startsWith("[ERR]") || msg.startsWith("[ACTION-CLIC]")
+                || msg.startsWith("[ÉTAT]") || msg.contains("STATE=")) {
+            try { android.util.Log.i("LogBus", "node=" + node + " src=" + src + " | " + msg); } catch (Exception ignored) {}
+        }
     }
 
     // -------------------------
