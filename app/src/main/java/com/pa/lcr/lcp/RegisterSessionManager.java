@@ -1155,7 +1155,23 @@ public final class RegisterSessionManager {
 
         @Override public void onError(String context, Throwable error) {
             String msg = (error != null && error.getMessage() != null) ? error.getMessage() : "";
-            LogBus.api(node, "[ERR][" + context + "] " + msg);
+            // ✅ FIX CRITIQUE (11 août 2026, demande Paul — "on a besoin de
+            // trouver pourquoi et quoi") — TransportException("Error
+            // writing", e) enveloppe la VRAIE cause dans .getCause(), mais
+            // rien n'allait jamais la chercher — le texte affiché dans
+            // LogBus/logcat était juste "Error writing", sans jamais dire
+            // POURQUOI l'écriture avait échoué (socket fermé par le système,
+            // connexion réinitialisée, timeout bas niveau, etc.). Ajoutée
+            // ICI, à la source — le préfixe "msg" original reste intact
+            // (donc "rc=0x26" et hardFatal continuent de fonctionner
+            // exactement pareil), la vraie cause s'ajoute seulement en plus.
+            Throwable cause = (error != null) ? error.getCause() : null;
+            String msgComplet = msg;
+            if (cause != null) {
+                msgComplet = msg + " [cause réelle: " + cause.getClass().getSimpleName()
+                    + (cause.getMessage() != null ? ": " + cause.getMessage() : "") + "]";
+            }
+            LogBus.api(node, "[ERR][" + context + "] " + msgComplet);
             if (msg.contains("rc=0x26") || msg.contains("rc=0X26")) {
                 if (scheduler != null) scheduler.noteBusyRc26();
             }
