@@ -392,6 +392,11 @@ private void reproEvent(String level, String type, String message, JSONObject da
     
  // ✅ Cache du dernier NUM reçu via API (numero_livraison) pour reconstruire delivery_uid côté UI
  private volatile String lastNumeroLivraison = null;
+    // ✅ AJOUTÉ (11 août 2026, demande Paul — "si on a l'option 2 [jamais
+    // imprimer], on doit ignorer ce statut d'impression") — mis en cache
+    // pour éviter de relire Field #37 à chaque appel. -1 = jamais lu,
+    // sinon la vraie valeur (0/1/2) une fois connue pour cette session.
+    private volatile int cachedTicketRequired = -1;
 
     // ✅ Cumul logiciel — survit à travers plusieurs resets diagnostic dans la
     // MÊME livraison. Chaque reset remet le compteur du REGISTRE à zéro, mais on
@@ -1929,6 +1934,25 @@ try {
     private boolean waitTicketPendingClearedOrTimeout(String ctx) {
         if (isStopped()) return false;
 
+        // ✅ FIX CRITIQUE (11 août 2026, demande Paul — "si on a l'option 2
+        // [TicketRequired=2, jamais imprimer], on doit ignorer ce statut
+        // d'impression") — sans ce contrôle, cette méthode envoie
+        // CMD_PRINT_LAST_TICKET puis attend jusqu'à 30 SECONDES que
+        // ticketPending se vide — ce qui n'arrivera JAMAIS si l'impression
+        // est désactivée par conception (confirmé aujourd'hui : 4 tests
+        // séparés, prnStatus=0x40 permanent, aucune impression possible).
+        // Chaque appel interne à lcpMachineStatus() profite aussi du
+        // nouveau sondage 0x7D, ajoutant encore plus de délai réel par
+        // itération — cette boucle inutile était probablement une grande
+        // partie du lag observé pendant une vraie livraison.
+        if (isTicketRequiredNeverPrint()) {
+            emitLog("[TICKET] TicketRequired=2 (jamais imprimer) — attente de 30s sautée, "
+                + "impression désactivée par conception (ctx=" + ctx + ")");
+            ticketPrintInFlight.set(false);
+            ticketPrintStartMs = 0L;
+            return true;
+        }
+
         // 0) Déjà clean ?
         try {
             LcpLink.MachineStatus ms0 = lcpMachineStatus();
@@ -1981,6 +2005,25 @@ try {
         return false;
     }
 
+
+    /** Lit Field #37 (TicketRequired_WM) une seule fois par session, mise
+     *  en cache. Retourne true si valeur=2 ("jamais imprimer"). Best-effort
+     *  — si la lecture échoue, retourne false (comportement d'avant,
+     *  prudent : ne suppose jamais que l'impression est désactivée sans
+     *  confirmation réelle). */
+    private boolean isTicketRequiredNeverPrint() {
+        if (cachedTicketRequired < 0) {
+            try {
+                byte[] raw = lcpGetField(37);
+                if (raw != null && raw.length >= 1) {
+                    cachedTicketRequired = raw[0] & 0xFF;
+                }
+            } catch (Exception ignored) {
+                return false; // lecture échouée — ne pas supposer, comportement prudent d'avant
+            }
+        }
+        return cachedTicketRequired == 2;
+    }
 
     private void clearTicketPendingLoop() {
         // ✅ SAFE: PRINT ONCE then WAIT for register confirmation
@@ -2140,8 +2183,10 @@ softResync("retry/" + step);
                 return tno;
             }
             try {
-                int ticketRequired = lcpGetField(37)[0] & 0xFF;
-                if (ticketRequired == 2) {
+                // ✅ FIX (11 août 2026) — réutilise maintenant isTicketRequiredNeverPrint()
+                // (mis en cache) au lieu de relire Field #37 séparément ici — une seule
+                // vraie source de vérité pour toute la classe.
+                if (isTicketRequiredNeverPrint()) {
                     String saleNo = readSaleNo22();
                     android.util.Log.i("DeliveryController", "readTicketNo23: champ #23=0 et TicketRequired(#37)=2 "
                         + "(jamais imprimé) — repli sur SaleNumber(#22)=" + saleNo);
