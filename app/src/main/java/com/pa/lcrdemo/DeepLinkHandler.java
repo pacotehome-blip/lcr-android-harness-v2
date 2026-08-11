@@ -2037,6 +2037,36 @@ public class DeepLinkHandler {
     // Patch Dataverse
     // =========================================================
 
+    // 📝 NOTE POUR FUTUR CHANTIER (11 août 2026, demande Paul — "dans
+    // Dataverse on enverra que les choses principales et les
+    // particularités car on veut intégrer l'IA dans la lecture des logs")
+    //
+    // Idée validée avec Paul, PAS ENCORE implémentée — juste notée ici pour
+    // ne pas l'oublier :
+    //
+    // Plutôt que d'envoyer le bruit brut complet, envoyer vers Dataverse un
+    // RÉSUMÉ STRUCTURÉ par livraison/session, dans une NOUVELLE TABLE
+    // DATAVERSE DÉDIÉE (pas un champ JSON ajouté à une table existante) :
+    //   - Les infos essentielles (ticket, WO, net/gross, timestamps, etc.)
+    //   - Les "particularités" — définies avec Paul comme : niveau ERROR +
+    //     WARN + changements d'état inhabituels (ex. déconnexions) — PAS le
+    //     bruit de routine (STATUS répété, CUMUL-WO vide, etc.)
+    //
+    // Déclencheur : configurable, les trois options suivantes doivent être
+    // possibles selon le besoin :
+    //   1) À la fin de chaque livraison complétée
+    //   2) Périodiquement pendant la session (ex. toutes les X minutes)
+    //   3) Sur demande manuelle (bouton)
+    //
+    // But final : que ce résumé structuré (et non le log brut complet)
+    // serve de base à une future lecture/analyse par IA — donc le format
+    // doit rester assez condensé et structuré pour être digeste, plutôt
+    // que de reproduire des milliers de lignes répétitives.
+    //
+    // Points à trancher avant de commencer l'implémentation : le schéma
+    // exact de la nouvelle table Dataverse, et où précisément dans le code
+    // brancher chacun des trois déclencheurs.
+
     private void patchDataverse(String woGuid, String woNum,
                                  String net, String gross, String ticket,
                                  String status) {

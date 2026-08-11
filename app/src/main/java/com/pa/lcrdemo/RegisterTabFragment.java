@@ -2506,6 +2506,7 @@ public class RegisterTabFragment extends Fragment {
             // WO livré pour CE #série précis (pas tous registres confondus).
             bg.execute(() -> {
                 String woCheck = woForCheck;
+                String syncStatusTrouve = null;
                 if ((woCheck == null || woCheck.isEmpty()) && serialForFallback != null && !serialForFallback.isEmpty()) {
                     try {
                         com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbFallback =
@@ -2515,6 +2516,7 @@ public class RegisterTabFragment extends Fragment {
                                     dbFallback.getLastDeliveryForSerial(serialForFallback);
                             if (lastRow != null && lastRow.woNum != null && !lastRow.woNum.isEmpty()) {
                                 woCheck = lastRow.woNum;
+                                syncStatusTrouve = lastRow.syncStatus;
                                 final String fWoRecovered = woCheck;
                                 final String fWoIdRecovered = lastRow.woIdGuid;
                                 android.util.Log.i("RegisterTabFragment", "btnRetourWO: currentWoNum vide — WO récupéré depuis dernière livraison serial="
@@ -2529,6 +2531,30 @@ public class RegisterTabFragment extends Fragment {
                         }
                     } catch (Exception ignored) {}
                 }
+                // ✅ AJOUTÉ (11 août 2026, demande Paul — "je veux le repli
+                // car dans la BD locale et JSON on sait si c'est pending ou
+                // pas") — deuxième étage de la cascade : si la BD locale
+                // n'a toujours rien pour ce #série, chercher dans le backup
+                // JSON (Téléchargements) — méthode déjà existante et
+                // utilisée ailleurs dans ce fichier (reconstruction
+                // delivery_uid). Le vrai statut "pending ou pas" reste
+                // visible via sync_status quand la BD locale trouve
+                // quelque chose (JSON backup seul ne porte pas ce champ,
+                // c'est un simple fichier de secours, pas une BD de sync).
+                if ((woCheck == null || woCheck.isEmpty()) && serialForFallback != null && !serialForFallback.isEmpty()) {
+                    try {
+                        String woJson = com.pa.lcr.lcp.storage.LocalDeliveryBackup
+                            .findMostRecentWoForSerialFromJsonBackups(requireContext(), serialForFallback.trim());
+                        if (woJson != null && !woJson.isEmpty()) {
+                            woCheck = woJson;
+                            android.util.Log.i("RegisterTabFragment", "btnRetourWO: WO récupéré depuis backup JSON serial="
+                                + serialForFallback + " -> wo=" + woJson);
+                            final String fWoJson = woJson;
+                            ui.post(() -> currentWoNum = fWoJson);
+                        }
+                    } catch (Exception ignored) {}
+                }
+                final String fSyncStatusTrouve = syncStatusTrouve;
 
                 boolean hasData = false;
                 if (woCheck != null && !woCheck.isEmpty()) {
@@ -2557,7 +2583,21 @@ public class RegisterTabFragment extends Fragment {
                     if (show) {
                         btnRetourWO.setVisibility(android.view.View.VISIBLE);
                         btnRetourWO.setEnabled(true);
-                        btnRetourWO.setText("Retour au Bon de livraison");
+                        // ✅ AJOUTÉ (11 août 2026, demande Paul — "dans la BD
+                        // locale et JSON on sait si c'est pending ou pas")
+                        // — statut de synchronisation affiché directement
+                        // sur le bouton quand connu (via la BD locale
+                        // seulement — le backup JSON seul ne porte pas ce
+                        // champ, voir commentaire plus haut).
+                        String texteBouton = "Retour au Bon de livraison";
+                        if ("PENDING".equals(fSyncStatusTrouve)) {
+                            texteBouton += " (⏳ pas encore synchronisé)";
+                        } else if ("SYNCED".equals(fSyncStatusTrouve)) {
+                            texteBouton += " (✅ synchronisé)";
+                        } else if ("ERROR".equals(fSyncStatusTrouve)) {
+                            texteBouton += " (⚠ échec de sync)";
+                        }
+                        btnRetourWO.setText(texteBouton);
                         btnRetourWO.setBackgroundColor(android.graphics.Color.parseColor("#185FA5"));
                         btnRetourWO.setOnClickListener(v -> { LogBus.api(node, "[ACTION-CLIC] RETOUR_WO"); retournerAuWorkOrder(); });
                     } else {
@@ -2918,6 +2958,16 @@ public class RegisterTabFragment extends Fragment {
                     backupPayload.put("lcrnode", node);
                     backupPayload.put("backup_ts", System.currentTimeMillis());
                     backupPayload.put("payload_complet", payloadJson != null ? payloadJson : "");
+                    // ✅ AJOUTÉ (11 août 2026, demande Paul — "ajoute-le au
+                    // JSON aussi, ça fait pas de mal") — même valeur que
+                    // celle mise en BD locale juste au-dessus
+                    // (SYNC_PENDING à l'écriture) — permet de savoir si
+                    // c'est pending ou pas directement depuis le JSON,
+                    // sans avoir à recroiser avec la BD locale (utile
+                    // puisque le JSON survit à une désinstallation, pas la
+                    // BD locale — mais s'efface lui-même après 7 jours).
+                    backupPayload.put("sync_status",
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
                     com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
                         requireContext().getApplicationContext(), woNum, ticketNo, backupPayload);
                 } catch (Exception e) {
@@ -3241,6 +3291,14 @@ public class RegisterTabFragment extends Fragment {
     }
 
     private boolean verifierIoAvantAction(String contexte) {
+        // ✅ AJOUTÉ (11 août 2026, demande Paul — "si je clique on revient
+        // à la normal") — point d'entrée commun à la plupart des actions
+        // du tab (boutons) — remet immédiatement le keep-alive à son délai
+        // normal, peu importe combien de temps il avait étiré pendant
+        // l'inactivité.
+        try {
+            RegisterSessionManager.get(requireContext()).notifierInteractionUtilisateur(tabTransportKey, node);
+        } catch (Exception ignored) {}
         try {
             // ✅ FIX (bétonnage) : si tabTransportKey est null/vide, l'ancien code
             // sautait la vérification ENTIÈREMENT et retournait true par défaut —
@@ -4173,6 +4231,19 @@ public class RegisterTabFragment extends Fragment {
     // en attente de confirmation du besoin exact avec Paul.
     private void rechercherWoDepuisRegistre() {
         if (controller == null) return;
+        // ✅ FIX CRITIQUE (11 août 2026, demande Paul — "dès que j'ai le
+        // live RUNNING_FLOWING, il a la priorité sur tout le tab, il ne
+        // devrait pas avoir rien d'autres") — pendant une livraison
+        // ACTIVEMENT en train de couler, la détection de WO n'a plus
+        // aucune raison de tourner (elle ne sert qu'à démarrer une
+        // NOUVELLE livraison) — mais rien ne l'empêchait de se déclencher
+        // quand même et d'entrer en compétition avec le sondage live
+        // net/gross pour le même verrou partagé, causant exactement le lag
+        // observé une fois le flow démarré.
+        DeliveryState stActuel = controller.getState();
+        if (stActuel == DeliveryState.RUNNING_FLOWING || stActuel == DeliveryState.RUNNING_PAUSED) {
+            return;
+        }
         bg.execute(() -> {
             try {
                 // ✅ FIX MAJEUR : api_tickSnapshot() ne contient JAMAIS de champ

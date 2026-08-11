@@ -796,6 +796,17 @@ public final class RegisterSessionManager {
         s.scheduler.setUiSubscribed(false);
     }
 
+    /** ✅ AJOUTÉ (11 août 2026, demande Paul — "si je clique on revient à
+     *  la normal") — à appeler dès qu'un vrai geste utilisateur se produit
+     *  dans le tab (clic bouton), pour remettre immédiatement le keep-alive
+     *  à son délai normal plutôt que de rester étiré par le doublement
+     *  progressif d'inactivité. Best-effort — aucune session trouvée =
+     *  simplement ignoré. */
+    public synchronized void notifierInteractionUtilisateur(String transportKey, int nodeDec) {
+        NodeSession s = sessions.get(key(transportKey, nodeDec));
+        if (s != null) s.scheduler.notifierInteractionUtilisateur();
+    }
+
     // =========================================================
     // ✅ LEGACY COMPAT (UI/RegisterTabFragment) — fallback READY
     // =========================================================
@@ -1037,6 +1048,18 @@ public final class RegisterSessionManager {
         // jamais laisser le port rester totalement silencieux.
         private volatile long lastKeepAliveMs = 0L;
         private static final long KEEP_ALIVE_MS = 5000;
+        // ✅ AJOUTÉ (11 août 2026, demande Paul — "j'espacerais le temps en
+        // doublant... si on a 5 secondes ça s'étire à 10, mais si je
+        // clique on revient à la normal, le tick live lui on ne le touche
+        // pas, je veux le plus réel possible du registre") — délai actuel
+        // du keep-alive, double à chaque cycle d'inactivité (5→10→20→40...)
+        // jusqu'à un plafond raisonnable, remis à KEEP_ALIVE_MS
+        // immédiatement sur toute interaction utilisateur détectée (voir
+        // notifierInteractionUtilisateur()). Ne touche JAMAIS au chemin
+        // RUNNING_FLOWING/RUNNING_PAUSED plus bas — celui-là reste
+        // exactement comme avant, aussi réel que possible.
+        private volatile long currentKeepAliveIntervalMs = KEEP_ALIVE_MS;
+        private static final long KEEP_ALIVE_MAX_MS = 60_000;
 
         private static final long LIVE_MS = 350;
         private static final long STATUS_MS = 2500;
@@ -1057,6 +1080,14 @@ public final class RegisterSessionManager {
         }
 
         void setUiSubscribed(boolean v) { this.uiSubscribed = v; }
+
+        /** ✅ AJOUTÉ (11 août 2026, demande Paul) — remet le délai du
+         *  keep-alive à sa valeur normale (5s), à appeler dès qu'un vrai
+         *  geste utilisateur se produit (clic bouton) — le sondage
+         *  redevient immédiatement réactif plutôt que de rester étiré. */
+        void notifierInteractionUtilisateur() {
+            currentKeepAliveIntervalMs = KEEP_ALIVE_MS;
+        }
 
         void noteBusyRc26() {
             liveBackoffMs = Math.min(2000, Math.max(liveBackoffMs * 2, 400));
@@ -1080,9 +1111,12 @@ public final class RegisterSessionManager {
                 // léger périodique pour empêcher le port de rester totalement
                 // silencieux entre deux livraisons.
                 long now0 = System.currentTimeMillis();
-                if (now0 - lastKeepAliveMs >= KEEP_ALIVE_MS) {
+                if (now0 - lastKeepAliveMs >= currentKeepAliveIntervalMs) {
                     lastKeepAliveMs = now0;
                     try { c.requestStatusKeepAlive(); } catch (Exception ignored) {}
+                    // Double APRÈS avoir sondé — le tout premier ping après
+                    // connexion/interaction reste à l'intervalle normal.
+                    currentKeepAliveIntervalMs = Math.min(currentKeepAliveIntervalMs * 2, KEEP_ALIVE_MAX_MS);
                 }
                 return;
             }
@@ -1154,12 +1188,27 @@ public final class RegisterSessionManager {
                 // un plein KEEP_ALIVE_MS (5s) d'attente, cohérent avec le
                 // reste des délais de stabilisation ajoutés aujourd'hui.
                 lastKeepAliveMs = System.currentTimeMillis();
+                // ✅ AJOUTÉ (11 août 2026) — une nouvelle connexion redémarre
+                // aussi le doublement progressif à zéro (pas seulement un
+                // vrai clic utilisateur).
+                currentKeepAliveIntervalMs = KEEP_ALIVE_MS;
             }
         }
 
         @Override public void onProductsUpdated(List<ProductUiItem> products, int activeIndex0) { }
         @Override public void onLog(String message) { }
-        @Override public void onError(String context, Throwable error) { }
+        @Override public void onError(String context, Throwable error) {
+            // ✅ AJOUTÉ (11 août 2026) — capture la dernière erreur connue,
+            // pour l'attacher à la prochaine [DÉCONNEXION]/[CONNEXION] —
+            // voir lastErrorMessage plus haut. onError() est appelé AVANT
+            // le vrai shutdown() dans la séquence d'échec réelle, donc
+            // cette valeur est déjà disponible au moment où
+            // onStateChanged(DISCONNECTED) se déclenche juste après.
+            if (error != null) {
+                lastErrorMessage = (context != null ? "[" + context + "] " : "")
+                    + (error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName());
+            }
+        }
         @Override public void onLiveQty(double net, double gross) { }
         @Override public void onLiveStatus(String liveText) { }
         @Override public void onTicketInfo(String ticketNo, String deliveryUid) { }
@@ -1172,6 +1221,24 @@ public final class RegisterSessionManager {
     private static final class LogBusSink implements DeliveryControllerPort.Listener {
         private final int node;
         private final NodeScheduler scheduler;
+        // ✅ AJOUTÉ (11 août 2026, demande Paul — "si on est connected on
+        // veut la source de quand il est arrivé si c'est sur un
+        // disconnected... si on a un disconnected on veut le connected
+        // après") — relie les événements [CONNEXION]/[DÉCONNEXION] entre
+        // eux : quand une déconnexion survient, on retient son horodatage
+        // et la dernière erreur connue (via onError, déjà appelé juste
+        // avant dans la vraie séquence d'échec) ; la PROCHAINE connexion
+        // référence directement cette info — "après déconnexion il y a
+        // Xs (cause: ...)" — au lieu de deux lignes isolées sans lien
+        // visible entre elles.
+        private volatile long lastDisconnectTs = 0L;
+        private volatile String lastErrorMessage = null;
+        // ✅ AJOUTÉ (11 août 2026, demande Paul — "on veut aussi voir dans
+        // Support nouvelle livraison et fin de livraison lié, oui, était à
+        // la source") — même principe que CONNEXION/DÉCONNEXION : relie
+        // début et fin de livraison entre eux.
+        private volatile DeliveryState lastKnownState = null;
+        private volatile long lastDeliveryStartTs = 0L;
 
         LogBusSink(int node, NodeScheduler scheduler) {
             this.node = node;
@@ -1191,12 +1258,32 @@ public final class RegisterSessionManager {
             // ligne "STATE=..." — rien d'autre dans le code n'en dépendait
             // (vérifié), donc pas de doublon inutile.
             if (state == DeliveryState.CONNECTED) {
-                LogBus.ui(node, "[CONNEXION] Registre connecté (node=" + node + ")");
+                String source;
+                if (lastDisconnectTs > 0) {
+                    long ecouleMs = System.currentTimeMillis() - lastDisconnectTs;
+                    source = " — après déconnexion il y a " + (ecouleMs / 1000) + "s"
+                        + (lastErrorMessage != null ? " (cause: " + lastErrorMessage + ")" : "");
+                    lastDisconnectTs = 0L; // consommé — ne s'applique qu'à la toute prochaine connexion
+                    lastErrorMessage = null;
+                } else {
+                    source = " — première connexion de cette session";
+                }
+                LogBus.ui(node, "[CONNEXION] Registre connecté (node=" + node + ")" + source);
             } else if (state == DeliveryState.DISCONNECTED) {
-                LogBus.ui(node, "[DÉCONNEXION] Registre déconnecté (node=" + node + ")");
+                lastDisconnectTs = System.currentTimeMillis();
+                LogBus.ui(node, "[DÉCONNEXION] Registre déconnecté (node=" + node + ")"
+                    + (lastErrorMessage != null ? " — cause probable: " + lastErrorMessage : ""));
+            } else if (state == DeliveryState.RUNNING_FLOWING
+                    && lastKnownState != DeliveryState.RUNNING_FLOWING
+                    && lastKnownState != DeliveryState.RUNNING_PAUSED) {
+                // ✅ AJOUTÉ (11 août 2026) — vraie ENTRÉE dans RUNNING_FLOWING
+                // (pas juste "on y est encore") — marque le début réel.
+                lastDeliveryStartTs = System.currentTimeMillis();
+                LogBus.ui(node, "[DÉBUT-LIVRAISON] Écoulement démarré (node=" + node + ")");
             } else {
                 LogBus.ui(node, "STATE=" + (state != null ? state.name() : "null"));
             }
+            lastKnownState = state;
         }
 
         @Override public void onProductsUpdated(List<ProductUiItem> products, int activeIndex0) { }
@@ -1237,6 +1324,23 @@ public final class RegisterSessionManager {
         @Override public void onLiveQty(double net, double gross) { }
         @Override public void onLiveStatus(String liveText) { }
         @Override public void onTicketInfo(String ticketNo, String deliveryUid) { }
+
+        @Override public void onDeliveryFinished(String serialId, String ticketNo, String saleNo,
+                                                    double netL, double grossL) {
+            // ✅ AJOUTÉ (11 août 2026, demande Paul — "on veut aussi voir
+            // dans Support nouvelle livraison et fin de livraison lié")
+            // — point de fin RÉEL (pas deviné via une transition d'état),
+            // avec les vrais totaux et la durée reliée directement au
+            // [DÉBUT-LIVRAISON] correspondant.
+            String duree = "";
+            if (lastDeliveryStartTs > 0) {
+                long ecouleMs = System.currentTimeMillis() - lastDeliveryStartTs;
+                duree = " — durée " + (ecouleMs / 1000) + "s";
+                lastDeliveryStartTs = 0L; // consommé
+            }
+            LogBus.ui(node, "[FIN-LIVRAISON] ticket=" + ticketNo + " sale=" + saleNo
+                + " net=" + netL + "L gross=" + grossL + "L" + duree);
+        }
     }
     public synchronized void markAsLc3Transport(String transportKey) {
         markAsLc3Transport(transportKey, null);
