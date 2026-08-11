@@ -5207,6 +5207,29 @@ private boolean ensureBtConnectPermission() {
     /** Teste UN candidat, en lecture seule, avec son PROPRE transport temporaire —
      *  jamais celui géré par MediaTransportManager/RegisterSessionManager. Ferme
      *  systématiquement ce qu'elle ouvre, même en cas d'annulation ou d'erreur. */
+    /** ✅ AJOUTÉ (11 août 2026, demande Paul — "afficher le #ticket number
+     *  et le firmware et le lcrnode") — lit le firmware (Field #60 via
+     *  opGetFirmwareVersion) et le #ticket (Field #23, TicketNumber_WM) sur
+     *  un LcpLink déjà connecté. Reste strictement en lecture, best-effort
+     *  — une lecture qui échoue n'empêche pas d'afficher les autres.
+     *  Note : lit Field #23 directement, SANS le repli SaleNumber utilisé
+     *  ailleurs dans l'app pour l'affichage normal (celui-ci est un
+     *  diagnostic brut, pas l'affichage métier). */
+    private String infosSupplementaires(com.pa.lcr.lcp.LcpLink tmp, int node) {
+        String firmware = "?";
+        try { firmware = tmp.opGetFirmwareVersion(); } catch (Exception ignored) {}
+        String ticketNo = "?";
+        try {
+            byte[] raw = tmp.opGetField(23, 3000);
+            if (raw != null && raw.length >= 4) {
+                long u = ((raw[0] & 0xFFL) << 24) | ((raw[1] & 0xFFL) << 16)
+                       | ((raw[2] & 0xFFL) << 8) | (raw[3] & 0xFFL);
+                ticketNo = String.valueOf(u);
+            }
+        } catch (Exception ignored) {}
+        return " | node=" + node + " | ticket=" + ticketNo + " | firmware=" + firmware;
+    }
+
     private String validerUnCandidatLectureSeule(String candidatKey) {
         long t0 = System.currentTimeMillis();
         if (candidatKey.equals("USB")) {
@@ -5223,7 +5246,7 @@ private boolean ensureBtConnectPermission() {
                 byte[] raw = tmp.opGetField(80, 3000);
                 long ms = System.currentTimeMillis() - t0;
                 String serial = decodeSerialBytes(raw);
-                return serial != null ? "✅ Présent — #série=" + serial + " (" + ms + "ms)"
+                return serial != null ? "✅ Présent — #série=" + serial + " (" + ms + "ms)" + infosSupplementaires(tmp, 250)
                     : "⚠ Présent mais silencieux (" + ms + "ms) — mauvais débit probable";
             } catch (Exception e) {
                 return "❌ Erreur — " + e.getClass().getSimpleName() + ": " + e.getMessage();
@@ -5251,7 +5274,7 @@ private boolean ensureBtConnectPermission() {
                 byte[] raw = tmp.opGetField(80, 3000);
                 long ms = System.currentTimeMillis() - t0;
                 String serial = decodeSerialBytes(raw);
-                return serial != null ? "✅ Présent — #série=" + serial + " (" + ms + "ms)"
+                return serial != null ? "✅ Présent — #série=" + serial + " (" + ms + "ms)" + infosSupplementaires(tmp, 250)
                     : "⚠ Présent mais silencieux (" + ms + "ms) — mauvais débit probable";
             } catch (Exception e) {
                 return "❌ Absent/injoignable — " + e.getClass().getSimpleName() + ": " + e.getMessage();
@@ -5274,7 +5297,7 @@ private boolean ensureBtConnectPermission() {
                 byte[] raw = tmp.opGetField(80, 3000);
                 long ms = System.currentTimeMillis() - t0;
                 String serial = decodeSerialBytes(raw);
-                return serial != null ? "✅ Présent — #série=" + serial + " (" + ms + "ms)"
+                return serial != null ? "✅ Présent — #série=" + serial + " (" + ms + "ms)" + infosSupplementaires(tmp, 250)
                     : "⚠ Présent mais silencieux (" + ms + "ms) — mauvais débit probable";
             } catch (Exception e) {
                 return "❌ Absent/injoignable — " + e.getClass().getSimpleName() + ": " + e.getMessage();
