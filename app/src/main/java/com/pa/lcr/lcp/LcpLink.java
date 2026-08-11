@@ -39,8 +39,14 @@ import java.util.Locale;
  *
  * Correctifs conservés:
  * 1) CRC/RX: CRC calculé sur la partie variable RAW (incluant ESC), comme Python et doc LCP
- * 2) RC=0x26/0x27: queued via 0x7D UNIQUEMENT pour commandes modifiantes (0x21/0x24)
- *    Sur GET_* (0x20/0x23/0x28): RC=0x26/0x27 = busy/skip -> pas de 0x7D
+ * 2) RC=0x26/0x27: queued via 0x7D. ✅ FIX (11 août 2026, demande Paul) —
+ *    preuve directe par trace TX/RX brute que RC=0x26 sur Get Machine
+ *    Status/Get Delivery Status (0x23/0x28) restait bloqué EN BOUCLE
+ *    INFINIE sans jamais se résoudre, alors que Check Request (0x7D)
+ *    résolvait ces mêmes files d'attente avec succès pour Set Field dans
+ *    le même log. Étendu à Get Machine Status/Get Delivery Status — SEUL
+ *    Get Field (0x20) reste "busy/skip" sans 0x7D (jamais observé bloqué,
+ *    contrairement aux deux autres).
  * 3) Timeouts queueables: opSetField/opIssueCommand -> 30s
  * 4) sendRecv(): lecture en tranches (slice) pour ne pas bloquer l’envoi des 0x7D
  * 5) 0x7D immédiat après RC=0x26 sur commande queueable (comme Python)
@@ -754,8 +760,21 @@ public class LcpLink {
 
         final byte msg = (payload != null && payload.length > 0) ? payload[0] : 0;
 
-        // queued via 0x7D uniquement pour commandes modifiantes
-        final boolean queueable = (msg == MSG_SET_FIELD) || (msg == MSG_ISSUE_COMMAND);
+        // ✅ FIX CRITIQUE (11 août 2026, demande Paul — trouvé via trace
+        // TX/RX brute directement dans le tab) — preuve DIRECTE que cette
+        // règle était fausse en pratique : Get Machine Status (0x23)
+        // recevait rc=0x26 de façon PERMANENTE, en boucle infinie, toutes
+        // les ~5s, sans jamais se résoudre — alors que le MÊME mécanisme
+        // (Check Request 0x7D) résolvait avec succès les rc=0x26 sur
+        // Set Field pendant le scan produits, dans le MÊME log, quelques
+        // secondes plus tôt. La requête en file pour un GET_* ne se
+        // résolvait jamais simplement parce que personne ne la sondait —
+        // pas parce que le registre restait "occupé" indéfiniment. Ajouté
+        // Get Machine Status et Get Delivery Status à la liste des
+        // commandes "queueable" — même traitement que Set Field/Issue
+        // Command, qui fonctionne de façon prouvée.
+        final boolean queueable = (msg == MSG_SET_FIELD) || (msg == MSG_ISSUE_COMMAND)
+                || (msg == MSG_GET_MACHINE_STATUS) || (msg == MSG_GET_DELIVERY_STATUS);
 
         byte[] frame = encodeFrame(payload);
 
