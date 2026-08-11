@@ -68,6 +68,10 @@ public class RegisterTabFragment extends Fragment {
         // (voir uiListener). Si le registre est déjà CONNECTED au moment de
         // cette activation (pas de nouvelle transition à venir), on vérifie
         // aussi directement l'état courant en filet de sécurité.
+        // ✅ FIX (11 août 2026, demande Paul) — même ajustement que le
+        // déclencheur principal (voir onStateChanged) : délai augmenté à
+        // 3000ms pour laisser le sondage live se stabiliser, cohérent des
+        // deux côtés.
         autoScanArmedForThisActivation = true;
         ui.postDelayed(() -> {
             if (autoScanArmedForThisActivation && controller != null
@@ -75,7 +79,7 @@ public class RegisterTabFragment extends Fragment {
                 autoScanArmedForThisActivation = false;
                 autoScanProduitsSiNecessaire();
             }
-        }, 1200);
+        }, 3000);
     }
 
     /**
@@ -612,14 +616,23 @@ public class RegisterTabFragment extends Fragment {
                     ui.postDelayed(() -> rechercherWoDepuisRegistre(), 800);
                 }
 
-                // ✅ Scan auto produits (4 août 2026, demande Paul) — se déclenche
-                // uniquement si armé par onTabActivated() (une activation de tab =
-                // un déclenchement max). "Consommé" immédiatement pour qu'une
-                // reconnexion CONNECTED ultérieure dans la même activation ne
-                // relance rien.
+                // ✅ Scan auto produits (4 août 2026, demande Paul : "après
+                // connected ready") — se déclenche uniquement si armé par
+                // onTabActivated() (une activation de tab = un déclenchement
+                // max). "Consommé" immédiatement pour qu'une reconnexion
+                // CONNECTED ultérieure dans la même activation ne relance rien.
+                // ✅ FIX (11 août 2026, demande Paul — même principe qu'avant,
+                // délai ajusté) — 300ms était insuffisant en pratique : le
+                // sondage live démarre dès CONNECTED mais n'a pas fini de se
+                // stabiliser à 300ms, causant une collision confirmée par
+                // logcat (rc=0x26 en cascade, risque réel d'escalade vers une
+                // déconnexion forcée via le compteur liveSoftSkip séparé).
+                // 3000ms laisse largement le temps aux premiers cycles de
+                // sondage live de se stabiliser avant que le scan ne
+                // commence à se disputer le registre.
                 if (state == DeliveryState.CONNECTED && autoScanArmedForThisActivation) {
                     autoScanArmedForThisActivation = false;
-                    ui.postDelayed(RegisterTabFragment.this::autoScanProduitsSiNecessaire, 300);
+                    ui.postDelayed(RegisterTabFragment.this::autoScanProduitsSiNecessaire, 3000);
                 }
 
                 // ✅ Retour Field Service quand livraison terminée
@@ -3695,7 +3708,19 @@ public class RegisterTabFragment extends Fragment {
         final String serialId = (serialFromArgs != null && !serialFromArgs.trim().isEmpty()) ? serialFromArgs.trim() : null;
         ui.post(() -> { if (txtLive != null) txtLive.setText("🔍 Scan produits 1 / 16..."); });
         bg.execute(() -> {
-            try {
+            // ✅ FIX CRITIQUE (11 août 2026, demande Paul — trouvé via
+            // logcat : "Auto-scan produits" abandonnait complètement dès le
+            // premier rc=0x26, alors que LcpLink documente explicitement
+            // que rc=0x26 sur un GET_* est un "busy/skip" volontaire, PAS
+            // une erreur définitive (voir en-tête de LcpLink.java) —
+            // spécialement probable juste après une reconnexion, quand le
+            // scan et le sondage live se disputent le registre en même
+            // temps. Réessaie jusqu'à 3 fois avec un court délai avant
+            // d'abandonner pour de vrai.
+            int tentativesRestantes = 3;
+            while (tentativesRestantes > 0) {
+                tentativesRestantes--;
+                try {
                 if (tabTransportKey != null)
                     com.pa.lcr.lcp.transport.MediaTransportManager.get(requireContext()).activateExclusive(tabTransportKey, "SCAN_PRODUITS");
                 java.util.List<com.pa.lcr.lcp.LcpLink.ProductScanResult> results =
@@ -3735,12 +3760,22 @@ public class RegisterTabFragment extends Fragment {
                         if (btnScanProducts != null) { btnScanProducts.setEnabled(true); btnScanProducts.setText("🔍 Scan produits"); }
                     }
                 });
+                return; // succès — sort complètement, pas besoin de réessayer
             } catch (Exception e) {
+                boolean busy = e.getMessage() != null && e.getMessage().contains("rc=0x26");
+                if (busy && tentativesRestantes > 0) {
+                    android.util.Log.w("RegisterTabFragment", "lancerScanProduits: rc=0x26 (occupé) — "
+                        + "nouvel essai dans 500ms, " + tentativesRestantes + " tentative(s) restante(s)");
+                    try { Thread.sleep(500); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                    continue; // relance le while — pas un vrai échec, le registre était juste occupé
+                }
                 android.util.Log.e("RegisterTabFragment", "lancerScanProduits ERR: " + e.getMessage());
                 ui.post(() -> {
                     if (txtLive != null) txtLive.setText("❌ Scan ERR: " + e.getMessage());
                     if (btnScanProducts != null) { btnScanProducts.setEnabled(true); btnScanProducts.setText("🔍 Scan produits"); }
                 });
+                return;
+            }
             }
         });
     }
