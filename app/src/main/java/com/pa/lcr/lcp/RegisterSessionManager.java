@@ -161,6 +161,38 @@ public final class RegisterSessionManager {
         }
         return result;
     }
+
+    /** ✅ AJOUTÉ (12 août 2026, demande Paul — "la session doit valider le
+     *  #série et le node, le transport peut changer, s'il change c'est là
+     *  qu'on fait un nouveau tab et supprime l'ancien") — contrairement à
+     *  listKnownRegisters() (qui retourne le DERNIER transport ÉPINGLÉ,
+     *  potentiellement périmé si une migration a déjà eu lieu ailleurs
+     *  dans le code), cette méthode cherche directement dans les VRAIES
+     *  sessions vivantes (this.sessions), en comparant le #série et le
+     *  node RÉELS de chaque session — peu importe sur quel transport
+     *  cette session se trouve actuellement. Retourne le premier match
+     *  vivant trouvé, ou null si aucune session vivante ne correspond
+     *  (le registre n'est vraiment plus disponible — la découverte
+     *  complète doit alors se faire, et créera un nouveau tab si le
+     *  transport a changé).
+     */
+    public synchronized DeliveryController findLiveControllerByNodeAndSerial(int node, String serialId) {
+        if (serialId == null || serialId.trim().isEmpty()) return null;
+        String wanted = serialId.trim();
+        String suffixAttendu = ":" + node;
+        for (Map.Entry<String, NodeSession> entry : sessions.entrySet()) {
+            String k = entry.getKey();
+            NodeSession s = entry.getValue();
+            if (k == null || s == null || s.dc == null) continue;
+            if (!k.endsWith(suffixAttendu)) continue; // mauvais node
+            if (s.serialId == null || !wanted.equalsIgnoreCase(s.serialId.trim())) continue;
+            try {
+                if (s.dc.isStopped()) continue;
+            } catch (Exception ignored) { continue; }
+            return s.dc;
+        }
+        return null;
+    }
     private static String key(String transportKey, int nodeDec) {
         int node = nodeDec;
         String k = (transportKey == null || transportKey.trim().isEmpty()) ? "?" : transportKey.trim();

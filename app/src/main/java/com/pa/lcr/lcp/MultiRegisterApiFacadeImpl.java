@@ -855,6 +855,38 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         }
 
         ArrayList<String> tried = new ArrayList<>();
+        // ✅ FIX CRITIQUE (12 août 2026, demande Paul — "si l'apk a un tab
+        // déjà présent, on n'a pas besoin de repasser la connexion au
+        // complet, juste dans la condition que le registre n'est plus
+        // disponible" — précisé ensuite : "la session doit valider le
+        // #série et le node, le transport peut changer, s'il change c'est
+        // là qu'on fait un nouveau tab et supprime l'ancien") — trouvé :
+        // cette méthode sautait DIRECTEMENT dans la boucle complète de
+        // découverte SANS JAMAIS vérifier d'abord si une session valide
+        // existait déjà. Corrigé avec findLiveControllerByNodeAndSerial()
+        // — cherche une VRAIE session vivante par #série+node, peu importe
+        // le transport ACTUEL (pas le dernier transport épinglé,
+        // potentiellement périmé) — si le transport a changé depuis,
+        // cette recherche le trouve quand même correctement, puisqu'elle
+        // compare le node+#série réels de chaque session vivante, pas un
+        // mapping externe. La découverte complète (et la migration de tab
+        // qui s'ensuit ailleurs dans le code si le transport diffère) ne
+        // se déclenche maintenant que si aucune session vivante ne
+        // correspond — le registre est alors vraiment plus disponible.
+        if (hasSerial) {
+            try {
+                DeliveryController dcExistant = sessions.findLiveControllerByNodeAndSerial(node, serialId);
+                if (dcExistant != null) {
+                    JSONObject dReuse = new JSONObject();
+                    try {
+                        dReuse.put("reused_existing_session", true);
+                        dReuse.put("node", node);
+                        dReuse.put("serial", serialId);
+                    } catch (Exception ignored) {}
+                    return ApiResult.ok("Register connect-auto: 1 - Session existante réutilisée", dReuse);
+                }
+            } catch (Exception ignored) {}
+        }
         // ✅ FIX (4 août 2026, demande Paul — "je veux le détail complet de
         // chaque tentative de connexion sur chaque transport") — trace
         // maintenant, pour CHAQUE candidat essayé, ce qui s'est réellement
