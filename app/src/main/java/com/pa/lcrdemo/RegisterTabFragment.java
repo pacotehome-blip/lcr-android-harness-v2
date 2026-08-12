@@ -4253,7 +4253,13 @@ public class RegisterTabFragment extends Fragment {
         // le vrai sondage live devrait avoir la priorité).
         if (controller != null) {
             DeliveryState stCumul = controller.getState();
-            if (stCumul == DeliveryState.RUNNING_FLOWING || stCumul == DeliveryState.RUNNING_PAUSED) {
+            // ✅ ÉLARGI (12 août 2026, même principe que les correctifs
+            // d'aujourd'hui sur connectThisRegister) — couvre maintenant
+            // toute la fenêtre active d'une livraison (PRESTART/STARTING
+            // inclus), pas seulement RUNNING_FLOWING/RUNNING_PAUSED.
+            if (stCumul == DeliveryState.PRESTART || stCumul == DeliveryState.STARTING
+                    || stCumul == DeliveryState.RUNNING_FLOWING || stCumul == DeliveryState.RUNNING_PAUSED
+                    || stCumul == DeliveryState.ENDING) {
                 return;
             }
         }
@@ -4340,7 +4346,11 @@ public class RegisterTabFragment extends Fragment {
         // net/gross pour le même verrou partagé, causant exactement le lag
         // observé une fois le flow démarré.
         DeliveryState stActuel = controller.getState();
-        if (stActuel == DeliveryState.RUNNING_FLOWING || stActuel == DeliveryState.RUNNING_PAUSED) {
+        // ✅ ÉLARGI (12 août 2026, même principe) — couvre maintenant toute
+        // la fenêtre active, pas seulement RUNNING_FLOWING/RUNNING_PAUSED.
+        if (stActuel == DeliveryState.PRESTART || stActuel == DeliveryState.STARTING
+                || stActuel == DeliveryState.RUNNING_FLOWING || stActuel == DeliveryState.RUNNING_PAUSED
+                || stActuel == DeliveryState.ENDING) {
             return;
         }
         bg.execute(() -> {
