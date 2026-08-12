@@ -53,6 +53,7 @@ import com.pa.lcr.lcp.LcpLink;
 import com.pa.lcr.lcp.Lc3Link;
 import com.pa.lcr.lcp.MultiRegisterApiFacadeImpl;
 import com.pa.lcr.lcp.RegisterSessionManager;
+import com.pa.lcr.lcp.DeliveryController;
 import com.pa.lcr.lcp.log.LogBus;
 import com.pa.lcr.lcp.storage.DeliveryDb;
 import com.pa.lcr.lcp.storage.LcrDeliveryStatusDb;
@@ -3677,7 +3678,7 @@ private void setupTabsTop() {
         try {
             String tk = io.getKey();
             if (tk != null && !tk.trim().isEmpty()) {
-                com.pa.lcr.lcp.DeliveryController dcExistant =
+                DeliveryController dcExistant =
                     com.pa.lcr.lcp.RegisterSessionManager.get(this).getController(tk, node);
                 if (dcExistant != null && !dcExistant.isStopped()) {
                     // Session vivante déjà confirmée pour ce transport+node —
@@ -3692,7 +3693,7 @@ private void setupTabsTop() {
                                     && !expectedSerial.trim().equalsIgnoreCase(serialConnu)) {
                                 return ProbeResult.fail("serial_mismatch(" + expectedSerial + " != " + serialConnu + ")");
                             }
-                            android.util.Log.i(TAG, "probeRegisterReadable: session déjà active pour " + tk
+                            android.util.Log.i("MainActivity", "probeRegisterReadable: session déjà active pour " + tk
                                 + " node=" + node + " — sonde brute évitée, #série réutilisé=" + serialConnu);
                             return ProbeResult.ok(serialConnu);
                         }
@@ -6179,7 +6180,7 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
                 boolean sessionDejaActive = false;
                 try {
                     RegisterSessionManager smCheck = RegisterSessionManager.get(this);
-                    com.pa.lcr.lcp.DeliveryController dcExistant = smCheck.getController(tk, node);
+                    DeliveryController dcExistant = smCheck.getController(tk, node);
                     if (dcExistant != null && !dcExistant.isStopped()) {
                         sessionDejaActive = true;
                         android.util.Log.i("MainActivity", "onConfigureMediaActivated: session déjà active "
