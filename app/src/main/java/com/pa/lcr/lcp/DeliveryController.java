@@ -1054,12 +1054,22 @@ catch (Exception ignored) {}
     }
 
     private void setState(DeliveryState s) {
-        if (state == s) return;
-        DeliveryState prevState = state;
-        state = s;
-
-        // ✅ Live tick automatique — seulement pendant RUNNING_FLOWING (flow ON)
-        // Arrêt sur RUNNING_PAUSED, CONNECTED, ENDING, etc.
+        // ✅ FIX CRITIQUE (12 août 2026, demande Paul — "je n'ai pas de
+        // changement dans le tab") — trouvé : le retour anticipé
+        // "if (state == s) return;" ci-dessous piégeait aussi la
+        // planification du tick live (200ms) à l'intérieur du même bloc.
+        // Si l'état était DÉJÀ RUNNING_FLOWING (via un autre chemin
+        // atteignant la même conclusion avant), le VRAI setState(RUNNING_
+        // FLOWING) — celui d'api_deliveryContinue(), après le vrai CMD_RUN
+        // — devenait un no-op silencieux, et le tick rapide n'était JAMAIS
+        // planifié. Résultat confirmé dans les logs : seul le cycle lent
+        // de statut (~4-5s) tournait, jamais le vrai tick 200ms — d'où
+        // "pas de changement visible dans le tab" pendant tout l'écoulement.
+        // Corrigé : la planification du tick se fait maintenant AVANT le
+        // retour anticipé, indépendamment de si state change vraiment —
+        // ne replanifie que si le tick n'est pas déjà actif, donc aucun
+        // risque de double-planification, mais ne dépend plus jamais de
+        // "state == s" pour décider si le tick doit démarrer.
         if (s == DeliveryState.RUNNING_FLOWING) {
             if (liveTickFuture == null || liveTickFuture.isDone()) {
                 liveTickFuture = liveTickScheduler.scheduleWithFixedDelay(
@@ -1070,7 +1080,15 @@ catch (Exception ignored) {}
                     },
                     0, liveTickIntervalMs, java.util.concurrent.TimeUnit.MILLISECONDS);
             }
-        } else {
+        }
+
+        if (state == s) return;
+        DeliveryState prevState = state;
+        state = s;
+
+        // ✅ Arrêt du tick automatique — seulement en quittant RUNNING_FLOWING
+        // (le démarrage se fait maintenant plus haut, avant le retour anticipé).
+        if (s != DeliveryState.RUNNING_FLOWING) {
             if (liveTickFuture != null) {
                 liveTickFuture.cancel(false);
                 liveTickFuture = null;
