@@ -3661,6 +3661,45 @@ private void setupTabsTop() {
         if (io == null || !io.isOpen()) return ProbeResult.fail("transport_not_ready");
         if (node < 1 || node > 250) return ProbeResult.fail("node_invalid");
         if (from < 0 || from > 255) from = 255;
+        // ✅ FIX CRITIQUE (12 août 2026, demande Paul — "bon tu fais quoi
+        // avec ça" — après avoir confirmé avec lcr_resolve_diagnostic.py
+        // que le registre reste propre même à un rythme soutenu, la vraie
+        // cause des tempêtes rc=0x26 dans l'app se trouvait ici : cette
+        // fonction créait un LcpLink NEUF, non protégé par le verrou
+        // partagé, à CHAQUE appel — même si une vraie session vivante
+        // existait déjà pour ce transport+node. Plus tôt aujourd'hui,
+        // j'avais ajouté une garde chez UN SEUL appelant
+        // (onConfigureMediaActivated) — mais cette fonction a plusieurs
+        // autres appelants (finalizeTcpRegisterTab, boucles de scan
+        // node 1-250, etc.) qui restaient tous exposés au même risque.
+        // Corrigé ICI, à la source — protège maintenant TOUS les
+        // appelants d'un coup, peu importe lesquels.
+        try {
+            String tk = io.getKey();
+            if (tk != null && !tk.trim().isEmpty()) {
+                com.pa.lcr.lcp.DeliveryController dcExistant =
+                    com.pa.lcr.lcp.RegisterSessionManager.get(this).getController(tk, node);
+                if (dcExistant != null && !dcExistant.isStopped()) {
+                    // Session vivante déjà confirmée pour ce transport+node —
+                    // réutilise le #série déjà connu plutôt que de créer un
+                    // deuxième LcpLink concurrent sur le même transport.
+                    for (String[] known : com.pa.lcr.lcp.RegisterSessionManager.get(this).listKnownRegisters()) {
+                        if (known == null || known.length < 3) continue;
+                        if (!String.valueOf(node).equals(known[0])) continue;
+                        if (tk.equals(known[2])) {
+                            String serialConnu = known[1];
+                            if (expectedSerial != null && !expectedSerial.trim().isEmpty()
+                                    && !expectedSerial.trim().equalsIgnoreCase(serialConnu)) {
+                                return ProbeResult.fail("serial_mismatch(" + expectedSerial + " != " + serialConnu + ")");
+                            }
+                            android.util.Log.i(TAG, "probeRegisterReadable: session déjà active pour " + tk
+                                + " node=" + node + " — sonde brute évitée, #série réutilisé=" + serialConnu);
+                            return ProbeResult.ok(serialConnu);
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
         try {
             LcpLink tmp = new LcpLink(io, node, from, true);
             try { tmp.opGetMachineStatus(); } catch (Exception ignored) {}
@@ -3874,6 +3913,15 @@ private void setupTabsTop() {
         // ✅ Node explicite fourni : connexion directe, pas de détection.
         if (expectedNode > 0) {
             try {
+                // ✅ FIX (12 août 2026, demande Paul — "applique, on perd du
+                // temps") — même garde que probeRegisterReadable() : évite un
+                // deuxième LcpLink concurrent si une session vit déjà ici.
+                DeliveryController dcTcpExistant = RegisterSessionManager.get(this).getController(transportKey, expectedNode);
+                if (dcTcpExistant != null && !dcTcpExistant.isStopped()) {
+                    android.util.Log.i(TAG, "finalizeTcpRegisterTab: session déjà active pour "
+                        + transportKey + " node=" + expectedNode + " — sonde évitée");
+                    return;
+                }
                 LcpLink tmp = new LcpLink(io, expectedNode, 255, true);
                 String serial = decodeAz(tmp.opGetField(80, 600));
                 if (serial != null && !serial.trim().isEmpty()) {
@@ -3977,6 +4025,11 @@ private void setupTabsTop() {
             // au premier node valide trouvé pour finaliser l'onglet.
             for (int node = 1; node <= 250; node++) {
                 try {
+                    // ✅ FIX (12 août 2026) — saute directement les nodes
+                    // ayant déjà une session vivante, sans créer de LcpLink
+                    // concurrent inutile pendant le balayage.
+                    DeliveryController dcScanExistant = RegisterSessionManager.get(this).getController(transportKey, node);
+                    if (dcScanExistant != null && !dcScanExistant.isStopped()) continue;
                     LcpLink tmp = new LcpLink(io, node, 255, true);
                     String serial = decodeAz(tmp.opGetField(80, 300));
                     if (serial != null && !serial.trim().isEmpty()) {
@@ -4239,6 +4292,10 @@ private void setupTabsTop() {
                 // LCR-II — boucle classique
                 for (int node = 1; node <= 250; node++) {
                     try {
+                        // ✅ FIX (12 août 2026) — même garde, saute les nodes
+                        // ayant déjà une session vivante.
+                        DeliveryController dcScanExistant2 = RegisterSessionManager.get(this).getController(tk, node);
+                        if (dcScanExistant2 != null && !dcScanExistant2.isStopped()) continue;
                         LcpLink tmp = new LcpLink(ioFinal, node, 255, true);
                         int[] ds = tmp.opDeliveryStatus(T28);
                         int delCode = ds[1];

@@ -1512,6 +1512,23 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     }
 
     private String probeSerial(TransportIo io, int nodeDec, int fromDec) {
+        // ✅ FIX (12 août 2026, demande Paul) — même garde que
+        // probeRegisterReadable() côté UI : évite un LcpLink concurrent
+        // si une session vit déjà pour ce transport+node.
+        try {
+            String tkExistant = (io != null) ? io.getKey() : null;
+            if (tkExistant != null && !tkExistant.trim().isEmpty()) {
+                DeliveryController dcExistant = sessions.getController(tkExistant, nodeDec);
+                if (dcExistant != null && !dcExistant.isStopped()) {
+                    for (String[] known : sessions.listKnownRegisters()) {
+                        if (known == null || known.length < 3) continue;
+                        if (String.valueOf(nodeDec).equals(known[0]) && tkExistant.equals(known[2])) {
+                            return known[1];
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
         try {
             LcpLink tmp = new LcpLink(io, nodeDec, fromDec, true);
             byte[] b = tmp.opGetField(80, 500);
