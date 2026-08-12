@@ -1269,6 +1269,37 @@ public final class RegisterSessionManager {
                 // (pas juste "on y est encore") — marque le début réel.
                 lastDeliveryStartTs = System.currentTimeMillis();
                 LogBus.ui(node, "[DÉBUT-LIVRAISON] Écoulement démarré (node=" + node + ")");
+                // ✅ AJOUTÉ (11 août 2026, demande Paul — "on a déjà début
+                // livraison quelque part, pour le flowing je garderais
+                // running_flowing start - end") — paire SÉPARÉE et
+                // DISTINCTE de [DÉBUT-LIVRAISON]/[FIN-LIVRAISON] (niveau
+                // métier, déjà existant) — celle-ci confirme précisément
+                // la transition d'état brute RUNNING_FLOWING elle-même,
+                // avec sa propre étiquette claire.
+                LogBus.ui(node, "[RUNNING_FLOWING-DÉBUT] node=" + node);
+            } else if (state != DeliveryState.RUNNING_FLOWING
+                    && state != DeliveryState.RUNNING_PAUSED
+                    && (lastKnownState == DeliveryState.RUNNING_FLOWING
+                        || lastKnownState == DeliveryState.RUNNING_PAUSED)) {
+                // ✅ AJOUTÉ (11 août 2026, demande Paul — "je veux avoir les
+                // RUNNING_FLOWING de départ et de fin confirmés") — vraie
+                // SORTIE de RUNNING_FLOWING/RUNNING_PAUSED, symétrique au
+                // [RUNNING_FLOWING-DÉBUT] ci-dessus. Basé directement sur
+                // la transition d'état (pas sur onDeliveryFinished(), qui
+                // est un événement de niveau métier pouvant se déclencher à
+                // un moment légèrement différent) — donne une confirmation
+                // pure, indépendante, du vrai moment où l'écoulement
+                // physique s'est réellement arrêté. Ne consomme PAS
+                // lastDeliveryStartTs (contrairement à onDeliveryFinished()
+                // plus bas, qui calcule sa propre durée) — les deux paires
+                // restent indépendantes et se corroborent.
+                String dureeFlow = "";
+                if (lastDeliveryStartTs > 0) {
+                    long ecouleMs = System.currentTimeMillis() - lastDeliveryStartTs;
+                    dureeFlow = " — durée " + (ecouleMs / 1000) + "s";
+                }
+                LogBus.ui(node, "[RUNNING_FLOWING-FIN] node=" + node
+                    + " → " + state.name() + dureeFlow);
             } else {
                 LogBus.ui(node, "STATE=" + (state != null ? state.name() : "null"));
             }

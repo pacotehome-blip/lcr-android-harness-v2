@@ -4033,6 +4033,23 @@ public class RegisterTabFragment extends Fragment {
     private void demarrerPollPostLivraison(double netRef, double grossRef, String ticketNo) {
         if (postDeliveryPollActive) return;
         postDeliveryPollActive = true;
+        // 📝 NOTE POUR AMÉLIORATION FUTURE (11 août 2026, demande Paul —
+        // "on s'en tient aux paires, la fuite sera intéressant, ajoute-le
+        // dans le code comme amélioration") — [POST-LIVRAISON] Poll
+        // demarré existe DÉJÀ comme marqueur de début, mais n'est
+        // actuellement PAS relié à [FUITE-VANNE] (qui ne se logue que
+        // lors d'un vrai incident, sans référencer ce début). Idée
+        // validée : même principe que [CONNEXION]/[DÉCONNEXION] —
+        //   1) Retenir l'horodatage de CE début (déjà loggé ici) dans un
+        //      champ dédié (ex. lastPostLivraisonStartTs).
+        //   2) Si [FUITE-VANNE] se déclenche (voir arreterPollPostLivraison()
+        //      / le point d'incident plus bas dans ce fichier), référencer
+        //      ce début — "détecté après Xs de surveillance".
+        //   3) Ajouter aussi un marqueur de FIN propre quand la surveillance
+        //      se termine SANS incident (actuellement arreterPollPostLivraison()
+        //      remet juste le drapeau à false, sans jamais logger la fin) —
+        //      pour voir que la surveillance a bien tourné même quand rien
+        //      n'est trouvé, pas seulement les incidents isolés.
         LogBus.api(node, "[POST-LIVRAISON] Poll demarré netRef=" + netRef + "L ticket=" + ticketNo);
         Runnable pollRunnable = new Runnable() {
             @Override public void run() {

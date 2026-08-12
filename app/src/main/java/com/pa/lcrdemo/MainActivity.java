@@ -395,6 +395,23 @@ public class MainActivity extends AppCompatActivity {
     private static final int AUTO_RECONNECT_STREAK_LIMIT = 4;
     private static final long AUTO_RECONNECT_STREAK_WINDOW_MS = 30000;
     private volatile boolean autoReconnectCircuitBroken = false;
+    // ✅ AJOUTÉ (11 août 2026, demande Paul — "continue à analyser le tab
+    // pour voir pourquoi j'ai un refresh") — trouvé via logcat :
+    // "syncTabs: 1 session(s) connue(s)" dupliqué au même instant. Tracé
+    // jusqu'à onStart() — un vrai cas limite Android (onStart() peut se
+    // déclencher deux fois de suite sans onStop() entre les deux, dans
+    // certains scénarios de lien profond/multi-fenêtres, particulièrement
+    // documenté sur Samsung) — registerReceiver(usbUiReceiver) s'ajoutait
+    // alors une deuxième fois, sans jamais être nettoyé si onStop() ne
+    // se déclenche qu'une seule fois derrière, causant potentiellement
+    // CHAQUE diffusion USB/BT reçue en double. Cette garde rend
+    // onStart()/onStop() idempotents face à un double appel.
+    // ✅ AJOUTÉ (11 août 2026, demande Paul — "voir dans Support un lien
+    // entre onStart et onStop, comme on a fait avec d'autres") — même
+    // principe que [CONNEXION]/[DÉCONNEXION] et [DÉBUT-LIVRAISON]/
+    // [FIN-LIVRAISON] : relie les deux événements entre eux.
+    private volatile long lastOnStopTs = 0L;
+    private volatile boolean usbUiReceiverRegistered = false;
     private String visibleRegFragmentTag = null; // fragment visible dans registerContainer
 
     private int currentRegNode = -1; // node actif (fallback pour logs API)
@@ -701,6 +718,16 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onStart() {
         super.onStart();
+        // ✅ AJOUTÉ (11 août 2026) — [DÉBUT-SESSION] lié au [FIN-SESSION]
+        // précédent, même principe que CONNEXION/DÉCONNEXION.
+        String sourceStart;
+        if (lastOnStopTs > 0) {
+            long ecouleMs = System.currentTimeMillis() - lastOnStopTs;
+            sourceStart = " — après " + (ecouleMs / 1000) + "s en arrière-plan";
+        } else {
+            sourceStart = " — premier démarrage de cette instance";
+        }
+        LogBus.ui(0, "[DÉBUT-SESSION] App visible" + sourceStart);
         IntentFilter f = new IntentFilter();
         f.addAction(UsbReceiver.ACTION_USB_READY);
         f.addAction(UsbReceiver.ACTION_USB_DETACHED);
@@ -711,10 +738,17 @@ public class MainActivity extends AppCompatActivity {
         f.addAction(ACTION_NODE_SEEN);
         // Android 9-13 : registerReceiver(receiver, filter) — sans flag
         // Android 14+  : registerReceiver(receiver, filter, RECEIVER_NOT_EXPORTED)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            registerReceiver(usbUiReceiver, f, Context.RECEIVER_NOT_EXPORTED);
-        } else {
-            registerReceiver(usbUiReceiver, f);
+        // ✅ FIX CRITIQUE (11 août 2026) — garde contre le double
+        // enregistrement si onStart() se déclenche deux fois de suite sans
+        // onStop() entre les deux (voir commentaire du champ
+        // usbUiReceiverRegistered plus haut).
+        if (!usbUiReceiverRegistered) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                registerReceiver(usbUiReceiver, f, Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                registerReceiver(usbUiReceiver, f);
+            }
+            usbUiReceiverRegistered = true;
         }
 
         LogBus.addListener(mainLogListener);
@@ -814,7 +848,12 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onStop() {
+        // ✅ AJOUTÉ (11 août 2026) — [FIN-SESSION], enregistre l'horodatage
+        // pour le lier au prochain [DÉBUT-SESSION].
+        lastOnStopTs = System.currentTimeMillis();
+        LogBus.ui(0, "[FIN-SESSION] App plus visible (arrière-plan)");
         try { unregisterReceiver(usbUiReceiver); } catch (Exception ignored) {}
+        usbUiReceiverRegistered = false;
         LogBus.removeListener(mainLogListener);
         super.onStop();
     }
