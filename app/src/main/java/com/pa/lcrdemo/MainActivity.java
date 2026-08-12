@@ -1700,7 +1700,22 @@ private void setupTabsTop() {
                                     String src2 = c2.getString(1);
                                     String msg2 = c2.getString(2);
                                     String tsFmt2 = android.text.format.DateFormat.format("HH:mm:ss", ts2).toString();
-                                    lines.add(tsFmt2 + "  [" + src2 + "]\n    " + (msg2 != null ? msg2 : "") + "\n");
+                                    // ✅ AJOUTÉ (11 août 2026, demande Paul —
+                                    // "il faut que dans le support qu'on
+                                    // puisse dynamiquement traduire les tx
+                                    // et rx") — décodage best-effort ajouté
+                                    // en plus du hex brut, jamais en
+                                    // remplacement (le hex reste toujours
+                                    // visible pour vérification).
+                                    String traduction = "";
+                                    if (("IO_TX".equals(src2) || "IO_RX".equals(src2)) && msg2 != null) {
+                                        String hexOnly = msg2.replaceFirst("^(TX|RX):\\s*", "");
+                                        String dir = "IO_TX".equals(src2) ? "TX" : "RX";
+                                        com.pa.lcr.lcp.LcpFrameDecoder.DecodedFrame df =
+                                            com.pa.lcr.lcp.LcpFrameDecoder.decode(hexOnly, dir);
+                                        if (df != null) traduction = "\n    → " + df.resume;
+                                    }
+                                    lines.add(tsFmt2 + "  [" + src2 + "]\n    " + (msg2 != null ? msg2 : "") + traduction + "\n");
                                     tsOrder.add(new long[]{ts2});
                                 }
                             }
@@ -2195,6 +2210,16 @@ private void setupTabsTop() {
                     supportSelectedPositions.clear(); // ✅ nouvelle liste = sélection réinitialisée
                     SupportEventAdapter adapter = new SupportEventAdapter(this, headers, details, levels, supportSelectedPositions);
                     listSupportEvents.setAdapter(adapter);
+                    // ✅ AJOUTÉ (11 août 2026, demande Paul — "Support devrait
+                    // se rafraîchir tout seul et montrer un badge ✅, mais on
+                    // a besoin de voir aussi le détail du log") — passe
+                    // automatique en arrière-plan, sans clic requis : pour
+                    // chaque ticket [WO-DETECT] UNIQUE actuellement affiché,
+                    // une vraie recherche BD en direct détermine s'il est
+                    // résolu MAINTENANT — le badge s'AJOUTE au détail
+                    // existant (jamais en remplacement), donc le contexte
+                    // complet du log reste toujours visible.
+                    verifierResolutionWoDetectEnArrierePlan(headers, details, adapter);
                     // ✅ (ajouté 3 août 2026, demande Paul : "voir tout le processus lié" /
                     // "je veux faire une sélection") — en mode sélection, taper une ligne
                     // la coche/décoche au lieu d'ouvrir le dialogue "processus lié".
@@ -2259,6 +2284,73 @@ private void setupTabsTop() {
                 }
             });
         }, "SupportEventsLoader").start();
+    }
+
+    /** ✅ AJOUTÉ (11 août 2026, demande Paul) — passe automatique en
+     *  arrière-plan : pour chaque ticket [WO-DETECT] unique visible à
+     *  l'écran, une vraie recherche BD en direct détermine s'il est résolu
+     *  MAINTENANT. Regroupe par ticket unique pour éviter une requête
+     *  redondante par ligne répétée. Le badge s'AJOUTE au détail existant
+     *  (jamais en remplacement) — le contexte du log original reste
+     *  toujours visible en plus du statut en direct. */
+    private void verifierResolutionWoDetectEnArrierePlan(java.util.List<String> headersSnapshot,
+            java.util.List<String> detailsSnapshot, SupportEventAdapter adapterCible) {
+        new Thread(() -> {
+            try {
+                // 1) Regrouper les positions par ticket unique
+                java.util.Map<String, java.util.List<Integer>> positionsParTicket = new java.util.HashMap<>();
+                java.util.regex.Pattern p = java.util.regex.Pattern.compile("ticket=(\\S+)");
+                for (int i = 0; i < headersSnapshot.size(); i++) {
+                    String combine = headersSnapshot.get(i) + " " + detailsSnapshot.get(i);
+                    if (!combine.contains("WO-DETECT")) continue;
+                    java.util.regex.Matcher m = p.matcher(combine);
+                    if (!m.find()) continue;
+                    String ticket = m.group(1);
+                    positionsParTicket.computeIfAbsent(ticket, k -> new java.util.ArrayList<>()).add(i);
+                }
+                if (positionsParTicket.isEmpty()) return;
+
+                // 2) Une seule vraie requête BD par ticket unique
+                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbLive =
+                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(getApplicationContext());
+                java.util.Map<String, String> badgeParTicket = new java.util.HashMap<>();
+                try {
+                    for (String ticket : positionsParTicket.keySet()) {
+                        try {
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow row = dbLive.getByTicketNo(ticket);
+                            if (row != null && row.woNum != null && !row.woNum.isEmpty()) {
+                                badgeParTicket.put(ticket, "  ✅ Résolu maintenant — WO=" + row.woNum);
+                            } else {
+                                badgeParTicket.put(ticket, "  ❌ Toujours non résolu");
+                            }
+                        } catch (Exception e) {
+                            badgeParTicket.put(ticket, "  ⚠ Vérification échouée");
+                        }
+                    }
+                } finally {
+                    try { dbLive.close(); } catch (Exception ignored) {}
+                }
+
+                // 3) Appliquer le badge à TOUTES les lignes de ce ticket, en AJOUT
+                for (Map.Entry<String, java.util.List<Integer>> e : positionsParTicket.entrySet()) {
+                    String badge = badgeParTicket.get(e.getKey());
+                    if (badge == null) continue;
+                    for (int pos : e.getValue()) {
+                        if (pos < detailsSnapshot.size()) {
+                            detailsSnapshot.set(pos, detailsSnapshot.get(pos) + badge);
+                        }
+                    }
+                }
+
+                runOnUiThread(() -> {
+                    // Ne rafraîchit que si l'adaptateur affiché est toujours le même
+                    // (évite d'écraser un refresh plus récent lancé entre-temps).
+                    if (listSupportEvents != null && listSupportEvents.getAdapter() == adapterCible) {
+                        adapterCible.notifyDataSetChanged();
+                    }
+                });
+            } catch (Exception ignored) {}
+        }, "WoDetectAutoResolveCheck").start();
     }
 
     // =========================================================
@@ -5954,6 +6046,42 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
         try {
             TransportIo ioT = (mediaTransportManager != null) ? mediaTransportManager.getByKey(tk) : null;
             if (ioT != null && ioT.isOpen()) {
+                // ✅ FIX CRITIQUE (11 août 2026, demande Paul — "on est
+                // revenu avec timeout verrou, cherche encore") — trouvé en
+                // retraçant l'horodatage exact d'un vrai incident : cette
+                // sonde crée un DEUXIÈME LcpLink indépendant, directement
+                // sur le MÊME transport physique qu'une vraie session
+                // active utilise déjà — complètement en dehors du verrou
+                // partagé (LcpNodeLocks). Deux instances LcpLink écrivant/
+                // lisant sur le même socket sans coordination = collision
+                // au niveau du flux physique — exactement le même
+                // phénomène documenté le 25 juin (jamais fermé pour ce
+                // chemin précis). La vraie session, elle, attend
+                // correctement son tour via le verrou, mais n'obtient
+                // jamais de réponse cohérente puisque cette sonde
+                // désynchronise le flux en parallèle. Corrigé : si une
+                // vraie session existe déjà pour ce node sur CE transport,
+                // on réutilise directement son identité connue au lieu de
+                // sonder à nouveau avec un LcpLink concurrent — la sonde
+                // brute ne sert que quand AUCUNE session n'existe encore.
+                boolean sessionDejaActive = false;
+                try {
+                    RegisterSessionManager smCheck = RegisterSessionManager.get(this);
+                    com.pa.lcr.lcp.DeliveryController dcExistant = smCheck.getController(tk, node);
+                    if (dcExistant != null && !dcExistant.isStopped()) {
+                        sessionDejaActive = true;
+                        android.util.Log.i("MainActivity", "onConfigureMediaActivated: session déjà active "
+                            + "pour " + tk + " node=" + node + " — sonde brute évitée (pas de LcpLink concurrent)");
+                    }
+                } catch (Exception ignored) {}
+                if (sessionDejaActive) {
+                    // Une vraie session existe déjà sur ce transport — rien de
+                    // plus à faire ici (la gestion du tab pour cette session
+                    // est déjà couverte ailleurs). Juste rafraîchir l'affichage,
+                    // jamais créer de LcpLink concurrent sur ce transport.
+                    ui.post(this::refreshAllTabsMediaStatus);
+                    return;
+                }
                 ProbeResult pr = probeRegisterReadable(ioT, node, 255, null);
                 if (pr != null && pr.ok && pr.serial != null && isPlausibleSerial(pr.serial)) {
                     serial = safeSerial(pr.serial);
