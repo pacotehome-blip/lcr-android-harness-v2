@@ -3496,7 +3496,22 @@ private void setupTabsTop() {
         // utilise — le résultat est le même que si l'utilisateur avait pu
         // cliquer "Reconnecter", sans dépendre d'un bouton qui n'existe pas
         // dans cet état.
-        try {
+        // ✅ FIX CRITIQUE (12 août 2026, demande Paul — retracé un vrai
+        // délai de 19s dans le démarrage d'une livraison) — trouvé : cette
+        // vérification se déclenchait IMMÉDIATEMENT, sans aucun délai de
+        // grâce. Pendant une migration légitime (removeTabAndFragment
+        // appelée avec "migrated to..." — l'ancien tab est retiré, un
+        // nouveau est sur le point d'apparaître juste après), cette
+        // vérification tombait sur la fenêtre transitoire à zéro tab et
+        // déclenchait TOUTE la cascade de reconnexion automatique
+        // (martèlement getOrCreate, re-scan, etc.) même si un nouveau tab
+        // allait apparaître dans les millisecondes suivantes — retardant
+        // directement le démarrage réel de la livraison. Corrigé : un
+        // court délai de grâce avant de conclure "vraiment plus rien" —
+        // si un nouveau tab est apparu entre-temps (migration normale),
+        // rien ne se déclenche.
+        ui.postDelayed(() -> {
+            try {
             if (tabRegisters == null || tabRegisters.getTabCount() == 0) {
                 // ✅ FIX (7 août 2026, demande Paul — coupe-circuit) — vérifié
                 // AVANT le refroidissement simple : si le circuit est déjà
@@ -3600,7 +3615,8 @@ private void setupTabsTop() {
                     } catch (Exception ignored) {}
                 }).start();
             }
-        } catch (Exception ignored) {}
+            } catch (Exception ignored) {}
+        }, 800);
     }
 
     // =========================

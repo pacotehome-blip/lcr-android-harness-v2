@@ -2057,25 +2057,30 @@ public class RegisterTabFragment extends Fragment {
 
     private void connectThisRegister(boolean userInitiated) {
         // ✅ FIX CRITIQUE (12 août 2026, demande Paul — "j'ai un lag sur le
-        // tick durant le running_flowing") — trouvé via logcat :
-        // getOrCreate() martelé toutes les 1-1.5s PENDANT TOUTE la durée de
-        // RUNNING_FLOWING, alors que le registre coule normalement (net/gross
-        // progressent correctement dans le même log). Tracé jusqu'à MON
-        // PROPRE correctif d'aujourd'hui (la reconnexion silencieuse
-        // ajoutée pour éviter le dialogue de diagnostic intrusif) —
-        // connectThisRegister() n'avait JAMAIS reçu la même garde
-        // RUNNING_FLOWING que les trois autres méthodes déjà corrigées
-        // aujourd'hui (rechercherWoDepuisRegistre, rafraichirCumulWo,
-        // checkPendingDeliveryForThisRegister). Si un événement automatique
-        // (changement de statut média, etc.) redéclenchait cette méthode
-        // pendant un écoulement actif, la reconnexion silencieuse
-        // repartait à chaque fois, même si le controller était déjà
-        // parfaitement vivant. Corrigé : sauté complètement pour les
-        // appels automatiques pendant RUNNING_FLOWING/RUNNING_PAUSED — un
-        // vrai clic utilisateur reste toujours traité normalement.
+        // tick durant le running_flowing", puis "corrige-moi le
+        // getOrCreate") — trouvé via logcat : getOrCreate() martelé
+        // toutes les 1-1.5s PENDANT TOUTE la durée de RUNNING_FLOWING,
+        // alors que le registre coule normalement (net/gross progressent
+        // correctement dans le même log). Tracé jusqu'à MON PROPRE
+        // correctif d'aujourd'hui (la reconnexion silencieuse ajoutée
+        // pour éviter le dialogue de diagnostic intrusif) —
+        // connectThisRegister() n'avait JAMAIS reçu la même garde que les
+        // trois autres méthodes déjà corrigées aujourd'hui. Première
+        // correction : sauté pendant RUNNING_FLOWING/RUNNING_PAUSED.
+        // ✅ ÉLARGI (même jour) — un deuxième log a montré le MÊME
+        // martèlement (4 appels getOrCreate) pendant PRESTART, entre
+        // "ARMED" et l'envoi réel de "RUN" — la garde précédente ne
+        // couvrait pas cette fenêtre puisque l'état n'est pas encore
+        // RUNNING_FLOWING à ce moment. Élargi pour couvrir TOUTE la
+        // fenêtre active d'une livraison (PRESTART → STARTING →
+        // RUNNING_FLOWING → RUNNING_PAUSED → ENDING) — un vrai clic
+        // utilisateur reste toujours traité normalement, peu importe
+        // l'état.
         if (!userInitiated && controller != null) {
             DeliveryState stConnect = controller.getState();
-            if (stConnect == DeliveryState.RUNNING_FLOWING || stConnect == DeliveryState.RUNNING_PAUSED) {
+            if (stConnect == DeliveryState.PRESTART || stConnect == DeliveryState.STARTING
+                    || stConnect == DeliveryState.RUNNING_FLOWING || stConnect == DeliveryState.RUNNING_PAUSED
+                    || stConnect == DeliveryState.ENDING) {
                 return;
             }
         }
