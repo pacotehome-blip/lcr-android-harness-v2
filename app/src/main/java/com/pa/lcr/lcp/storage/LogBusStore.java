@@ -23,6 +23,14 @@ import java.util.concurrent.atomic.AtomicInteger;
  * les 7 derniers jours") est plus utile pour le RCA qu'une limite par comptage, qui aurait
  * représenté une durée variable selon l'activité. MAX_ROWS_SAFETY_NET reste en garde-fou
  * seulement (cas anormal : volume explosif qui remplirait le disque avant 7 jours).
+ *
+ * ⚠️ NE PAS isoler cette table dans un fichier SQLite séparé — piste explorée puis
+ * ANNULÉE (12 août 2026) : log_bus_event est lue directement par DeliveryDb
+ * (vue v_diagnostic_events, moteur de règles), DeliveryLogStore, SyncWatermarkStore
+ * et MainActivity (dialogue "Processus lié", RCA). La déplacer casserait
+ * silencieusement toutes ces fonctionnalités existantes. Le vrai problème de
+ * contention doit se régler autrement (ex: transactions groupées) — pas en isolant
+ * la table.
  */
 public class LogBusStore {
 
@@ -35,32 +43,71 @@ public class LogBusStore {
     private final DeliveryDb helper;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final AtomicInteger writeCounter = new AtomicInteger(0);
+    // ✅ FIX CRITIQUE (12 août 2026, demande Paul — "il y a qq chose qui
+    // ralentit le tab", confirmé même log fermé) — trouvé : chaque
+    // événement déclenchait sa PROPRE insertion + validation (commit)
+    // SQLite séparée, sur le MÊME fichier physique (lcr_delivery.db) que
+    // 10 autres magasins critiques (ActiveDeliveryStore, etc.). Avec des
+    // dizaines d'événements/seconde pendant une livraison active — peu
+    // importe si un tab affiche son log, puisque l'écouteur est
+    // enregistré sans condition — chaque commit séparé (coût réel
+    // fsync/journal à chaque fois) créait une vraie contention avec les
+    // opérations critiques sur ce même fichier. Isoler la table dans un
+    // fichier séparé a été essayé puis ANNULÉ (casse plusieurs lecteurs
+    // existants — voir note de classe). Corrigé autrement : les
+    // événements s'accumulent maintenant dans une file en mémoire,
+    // vidée en UNE SEULE transaction toutes les 250ms — même table,
+    // mêmes lecteurs, mais un seul commit au lieu de dizaines.
+    private final java.util.concurrent.ConcurrentLinkedQueue<Object[]> pendingEvents =
+        new java.util.concurrent.ConcurrentLinkedQueue<>();
+    private final java.util.concurrent.atomic.AtomicBoolean flushScheduled =
+        new java.util.concurrent.atomic.AtomicBoolean(false);
+    private static final long FLUSH_INTERVAL_MS = 250;
 
     public LogBusStore(Context context) {
         this.helper = new DeliveryDb(context.getApplicationContext());
     }
 
     public void addEventAsync(int node, String src, String msg) {
-        io.execute(() -> addEvent(node, src, msg));
+        pendingEvents.add(new Object[]{System.currentTimeMillis(), node, src != null ? src : "", msg != null ? msg : ""});
+        if (flushScheduled.compareAndSet(false, true)) {
+            io.execute(() -> {
+                try { Thread.sleep(FLUSH_INTERVAL_MS); } catch (InterruptedException ignored) {}
+                flushScheduled.set(false);
+                flushPending();
+            });
+        }
     }
 
-    private void addEvent(int node, String src, String msg) {
+    private void flushPending() {
+        java.util.ArrayList<Object[]> batch = new java.util.ArrayList<>();
+        Object[] e;
+        while ((e = pendingEvents.poll()) != null) batch.add(e);
+        if (batch.isEmpty()) return;
         try {
             SQLiteDatabase db = helper.getWritableDatabase();
-            ContentValues cv = new ContentValues();
-            cv.put("ts", System.currentTimeMillis());
-            cv.put("node", node);
-            cv.put("src", src != null ? src : "");
-            cv.put("msg", msg != null ? msg : "");
-            db.insert("log_bus_event", null, cv);
-
-            if (writeCounter.incrementAndGet() % PRUNE_CHECK_EVERY_N_WRITES == 0) {
+            db.beginTransaction();
+            try {
+                for (Object[] row : batch) {
+                    ContentValues cv = new ContentValues();
+                    cv.put("ts", (Long) row[0]);
+                    cv.put("node", (Integer) row[1]);
+                    cv.put("src", (String) row[2]);
+                    cv.put("msg", (String) row[3]);
+                    db.insert("log_bus_event", null, cv);
+                }
+                db.setTransactionSuccessful();
+            } finally {
+                db.endTransaction();
+            }
+            if (writeCounter.addAndGet(batch.size()) >= PRUNE_CHECK_EVERY_N_WRITES) {
+                writeCounter.set(0);
                 pruneIfNeeded(db);
             }
-        } catch (Exception e) {
-            // Best-effort seulement — une ligne de log perdue ne doit jamais faire
+        } catch (Exception ex) {
+            // Best-effort seulement — des lignes de log perdues ne doivent jamais faire
             // échouer quoi que ce soit d'autre dans l'app.
-            Log.w(TAG, "addEvent ERR: " + e.getMessage());
+            Log.w(TAG, "flushPending ERR: " + ex.getMessage());
         }
     }
 

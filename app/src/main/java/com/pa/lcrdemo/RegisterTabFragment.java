@@ -1,7 +1,7 @@
 package com.pa.lcrdemo;
 
 // ═══════════════════════════════════════════════════════════════
-//  COMPATIBILITÉ ANDROID : API 28 (Android 9) → API 35 (Android 15)
+// COMPATIBILITÉ ANDROID : API 28 (Android 9) → API 35 (Android 15)
 // Tester sur Android 9 (192.168.134.105) ET Android 15 (R52X508K2DR)
 // ═══════════════════════════════════════════════════════════════
 
@@ -362,6 +362,24 @@ public class RegisterTabFragment extends Fragment {
 
     private boolean logTsEnabled = false;
     private long logViewSinceMs = 0L;
+    // ✅ AJOUTÉ (12 août 2026, demande Paul — "il y a qq chose qui ralentit
+    // le tab") — trouvé : refreshLogView() reconstruisait TOUJOURS le texte
+    // COMPLET (jusqu'à 400 lignes) et le remplaçait au complet via
+    // setText() — toutes les 800ms tant que le log est visible. Un
+    // setText() complet force Android à tout re-mesurer/re-disposer le
+    // TextView à chaque fois, même si une seule ligne a changé. Avec les
+    // dizaines de lignes/seconde générées pendant une livraison active
+    // (documenté toute la journée), c'est un vrai coût UI répété, distinct
+    // de tout ce qu'on a corrigé côté LCP aujourd'hui. Ce filigrane
+    // (horodatage du dernier événement déjà affiché) permet maintenant de
+    // n'ajouter (append) que les lignes VRAIMENT nouvelles, au lieu de
+    // tout reconstruire.
+    private long lastRenderedLogTs = 0L;
+    // ✅ AJOUTÉ (12 août 2026) — vrai si au moins un événement a été généré
+    // pendant RUNNING_FLOWING sans être affiché (voir scheduleLogRefresh).
+    // Sert à déclencher le rattrapage exactement une fois à la sortie de
+    // l'écoulement, plutôt que de continuer à vérifier en boucle.
+    private volatile boolean logRefreshDeferredByFlowing = false;
     private int ticketPendingFlag = -1;
     private volatile String lastLiveText = null;
     private volatile int lastDigits = 3;
@@ -508,6 +526,20 @@ public class RegisterTabFragment extends Fragment {
     private void scheduleLogRefresh() {
         if (txtLog == null) return;
         if (cbShowLog == null || !cbShowLog.isChecked()) return;
+        // ✅ AJOUTÉ (12 août 2026, demande Paul — "quand j'ai le running_
+        // flowing, garde le log du support en attente") — aucun
+        // rafraîchissement visuel pendant l'écoulement actif, moment où le
+        // tick a le plus besoin de priorité. Rien n'est perdu : les
+        // événements continuent de s'accumuler normalement dans LogBus
+        // (et sur disque via LogBusStore) — seul l'AFFICHAGE est différé.
+        // Un rattrapage automatique se déclenche dès la sortie de
+        // RUNNING_FLOWING (voir onStateChanged plus bas).
+        try {
+            if (controller != null && controller.getState() == DeliveryState.RUNNING_FLOWING) {
+                logRefreshDeferredByFlowing = true;
+                return;
+            }
+        } catch (Exception ignored) {}
         long now0 = System.currentTimeMillis();
         if (logUserScrolling && now0 < logUserScrollUntilMs) return;
         if (Looper.myLooper() != Looper.getMainLooper()) { ui.post(this::scheduleLogRefresh); return; }
@@ -608,6 +640,16 @@ public class RegisterTabFragment extends Fragment {
                 refreshDelCodeFromTickSnapshotThrottled();
                 updateButtons(state);
                 scheduleLogRefresh();
+                // ✅ AJOUTÉ (12 août 2026) — rattrapage : si des événements se
+                // sont accumulés pendant RUNNING_FLOWING sans être affichés
+                // (log mis en attente exprès, voir scheduleLogRefresh), et
+                // qu'on vient de SORTIR de cet état, forcer un vrai
+                // rafraîchissement maintenant — rien n'est perdu, juste
+                // rattrapé au bon moment.
+                if (state != DeliveryState.RUNNING_FLOWING && logRefreshDeferredByFlowing) {
+                    logRefreshDeferredByFlowing = false;
+                    refreshLogView();
+                }
 
                 // ✅ FIX (LE chaînon manquant) : DeliveryState.DISCONNECTED n'était
                 // JAMAIS traité spécifiquement ici — même après l'escalade
@@ -3249,7 +3291,27 @@ public class RegisterTabFragment extends Fragment {
             for (LogBus.LogEvent e : events) { if (e.ts >= logViewSinceMs) filtered.add(e); }
             events = filtered;
         }
-        txtLog.setText(LogBus.buildText(events));
+        // ✅ FIX CRITIQUE (12 août 2026, demande Paul — voir commentaire sur
+        // lastRenderedLogTs) — si le filigrane a changé (nouveau "depuis" /
+        // premier affichage / TextView vidé ailleurs), reconstruction
+        // complète nécessaire UNE fois. Sinon, n'ajoute que les événements
+        // strictement plus récents que la dernière ligne déjà affichée —
+        // append() au lieu de setText(), évitant un re-layout complet du
+        // TextView à chaque rafraîchissement.
+        boolean rebuildComplet = (lastRenderedLogTs == 0L) || (logViewSinceMs > lastRenderedLogTs);
+        if (rebuildComplet) {
+            txtLog.setText(LogBus.buildText(events));
+        } else {
+            ArrayList<LogBus.LogEvent> nouveaux = new ArrayList<>();
+            for (LogBus.LogEvent e : events) { if (e.ts > lastRenderedLogTs) nouveaux.add(e); }
+            if (!nouveaux.isEmpty()) {
+                String texteAjoute = LogBus.buildText(nouveaux);
+                if (!texteAjoute.isEmpty()) txtLog.append(texteAjoute);
+            }
+        }
+        if (!events.isEmpty()) {
+            lastRenderedLogTs = events.get(events.size() - 1).ts;
+        }
     }
 
     private String ts(String msg) { if (!logTsEnabled) return msg; return uiTs() + " " + msg; }

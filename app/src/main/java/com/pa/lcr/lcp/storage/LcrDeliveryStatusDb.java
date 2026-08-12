@@ -382,6 +382,11 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
                 + " type=" + cv.getAsString(COL_TYPE)
                 + " ticket=" + cv.getAsString(COL_TICKET_NO)
                 + " net=" + cv.getAsDouble(COL_NET_L));
+            // ✅ FIX (12 août 2026) — invalide le cache getAllForWo() pour ce
+            // WO précis : une vraie écriture vient de se produire, le cache
+            // de 3s pourrait sinon servir des données périmées à un
+            // appelant suivant dans cette même fenêtre.
+            if (woNum != null) ALL_FOR_WO_CACHE.remove(woNum);
             return id;
         } catch (Exception e) {
             Log.e(TAG, "insertDelivery ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.insertDelivery", e); } catch (Exception ignored) {}
@@ -572,7 +577,33 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
      * Retourne toutes les livraisons/annulations pour un WO donné,
      * triées par transaction_no ASC. Utilisé pour le payload consolidé Dataverse.
      */
+    // ✅ FIX CRITIQUE (12 août 2026, demande Paul — "corrige-moi les 4
+    // trous", trou #4 : getAllForWo() refait 3 fois séparément (panneau UI,
+    // WorkOrderUpdater, patchDataverse) autour de la même fin de livraison,
+    // chacun recréant sa propre instance de LcrDeliveryStatusDb) — cache
+    // STATIQUE (partagé entre toutes les instances) de très courte durée
+    // (3s), par woNum. Les 3 appelants qui interrogent le même WO à
+    // quelques secondes d'intervalle réutilisent maintenant le même
+    // résultat au lieu de refaire 3 scans BD complets. Toujours une COPIE
+    // défensive retournée — jamais la même instance de liste partagée
+    // entre appelants (évite qu'un appelant mutant la liste affecte les
+    // autres).
+    private static final java.util.Map<String, Object[]> ALL_FOR_WO_CACHE =
+        new java.util.concurrent.ConcurrentHashMap<>();
+    private static final long ALL_FOR_WO_CACHE_TTL_MS = 3000;
+
     public List<DeliveryRow> getAllForWo(String woNum) {
+        if (woNum != null) {
+            Object[] cached = ALL_FOR_WO_CACHE.get(woNum);
+            if (cached != null) {
+                long ts = (Long) cached[0];
+                if (System.currentTimeMillis() - ts < ALL_FOR_WO_CACHE_TTL_MS) {
+                    @SuppressWarnings("unchecked")
+                    List<DeliveryRow> cachedList = (List<DeliveryRow>) cached[1];
+                    return new ArrayList<>(cachedList);
+                }
+            }
+        }
         List<DeliveryRow> list = new ArrayList<>();
         try (Cursor c = getReadableDatabase().query(
                 TABLE_DELIVERY, null,
@@ -583,6 +614,9 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
             }
         } catch (Exception e) {
             Log.e(TAG, "getAllForWo ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.getAllForWo", e); } catch (Exception ignored) {}
+        }
+        if (woNum != null) {
+            ALL_FOR_WO_CACHE.put(woNum, new Object[]{System.currentTimeMillis(), new ArrayList<>(list)});
         }
         return list;
     }

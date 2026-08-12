@@ -500,7 +500,31 @@ public class DeepLinkHandler {
         try {
             String mediaShortCheck = activity.mediaShortFromTransportKey(transportKey);
             String tabKeyCheck = activity.tabKeyOf(mediaShortCheck, node, fSerialId);
-            tabWasNewBeforeThisCall = !activity.tabExists(tabKeyCheck);
+            boolean tabExistsInMap = activity.tabExists(tabKeyCheck);
+            // ✅ FIX CRITIQUE (12 août 2026, demande Paul — "corrige-moi les 4
+            // trous", trou #2 : "tab neuf" apparaissait même sur une 2e
+            // livraison) — même cause de fond que resolveIfActiveMatches
+            // (MainActivity.java) : tabsByKey est en mémoire seulement, vide
+            // après une recréation d'Activity. Avant de conclure "tab neuf",
+            // vérifier aussi si une vraie session vivante existe déjà pour ce
+            // node+#série dans RegisterSessionManager (singleton applicatif,
+            // survit à la recréation) — si oui, ce n'est PAS un tab neuf,
+            // même si tabsByKey (cette instance) ne le connaît pas encore.
+            boolean sessionSurvivante = false;
+            if (!tabExistsInMap && fSerialId != null && !fSerialId.isEmpty()) {
+                try {
+                    com.pa.lcr.lcp.DeliveryController dcSurv =
+                        com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                            .findLiveControllerByNodeAndSerial(node, fSerialId);
+                    sessionSurvivante = (dcSurv != null);
+                } catch (Exception ignoredSurv) {}
+            }
+            tabWasNewBeforeThisCall = !tabExistsInMap && !sessionSurvivante;
+            android.util.Log.i(TAG, "lancerLivraison: vérif tab existant — transportKey(reçu)=\"" + transportKey
+                + "\" mediaShortCheck=\"" + mediaShortCheck + "\" tabKeyCheck=\"" + tabKeyCheck
+                + "\" tabExistsInMap=" + tabExistsInMap + " sessionSurvivante=" + sessionSurvivante
+                + " tabWasNew=" + tabWasNewBeforeThisCall
+                + " tabsByKey.keys=" + activity.debugDumpTabKeys());
         } catch (Exception e) {
             tabWasNewBeforeThisCall = false;
         }
@@ -768,6 +792,25 @@ public class DeepLinkHandler {
                 android.util.Log.w(TAG, "oneshot/start: activateExclusive() a échoué après 3 tentatives"
                     + " pour transportKey=" + transportKey + " — l'oneshot va probablement échouer"
                     + " (transport pas encore armé)");
+            }
+
+            // ✅ FIX CRITIQUE (12 août 2026, demande Paul — "corrige-moi les 4
+            // trous", trou #3 : registre occupé (rc=0x26 en boucle) au moment
+            // d'ARMED, confirmé PAS causé par le registre lui-même — ton propre
+            // script isolé reste rapide sur le même matériel) — trouvé : des
+            // activités de fond (scan produits, WO-DETECT, CUMUL-WO) ont déjà pu
+            // mettre des commandes dans la file du registre juste AVANT ce point
+            // — le registre les traite encore quand ARMED arrive une fraction de
+            // seconde plus tard. Les gardes d'état existantes (PRESTART/
+            // RUNNING_FLOWING) ne couvrent pas cette fenêtre puisqu'on n'est PAS
+            // encore en PRESTART à ce moment précis — c'est une question de
+            // séquencement, pas d'état. Corrigé : attente courte et bornée (max
+            // 2s) si un scan produits est en vol (scanInProgress, ajouté plus tôt
+            // aujourd'hui) — laisse sa file se vider avant d'ajouter le vrai
+            // démarrage par-dessus, au lieu de les faire compétitionner.
+            for (int waitScan = 0; waitScan < 20; waitScan++) {
+                if (!controllerOneshot.scanInProgress) break;
+                try { Thread.sleep(100); } catch (Exception ignored) {}
             }
 
             com.pa.lcr.lcp.ApiResult r = controllerOneshot.api_deliveryOneShotStart(

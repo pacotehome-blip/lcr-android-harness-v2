@@ -360,6 +360,14 @@ public class MainActivity extends AppCompatActivity {
     public boolean tabExists(String tabKey) {
         return tabsByKey.containsKey(tabKey);
     }
+    // ✅ AJOUTÉ (12 août 2026) — diagnostic pour tracer un vrai
+    // mésappariement de clé, plutôt que de deviner. Retourne les clés
+    // RÉELLEMENT présentes dans tabsByKey au moment de l'appel.
+    public String debugDumpTabKeys() {
+        try {
+            synchronized (tabsByKey) { return tabsByKey.keySet().toString(); }
+        } catch (Exception e) { return "?"; }
+    }
     // regKey(node#serial) -> tabKey courant (clear ciblé si migre de média)
     // ✅ FIX (6 août 2026) — même raison que tabsByKey ci-dessus.
     private final Map<String, String> regKeyToTabKey = Collections.synchronizedMap(new LinkedHashMap<>());
@@ -3059,6 +3067,53 @@ private void setupTabsTop() {
             // qu'on ne veut pas exécuter en tenant le verrou de tabsByKey.
             java.util.List<TabSpec> specsSnapshot;
             synchronized (tabsByKey) { specsSnapshot = new ArrayList<>(tabsByKey.values()); }
+            // ✅ FIX CRITIQUE (12 août 2026, demande Paul — "corrige-moi les 4
+            // trous", trou #1 : jamais de correspondance sur une 2e livraison,
+            // confirmé sur un vrai test à deux livraisons) — trouvé : tabsByKey
+            // est un champ D'INSTANCE pur, en mémoire seulement, aucune
+            // persistance. Si MainActivity se fait recréer entre deux
+            // livraisons (confirmé aujourd'hui dans un autre log —
+            // "Destroying surface... Remove Window" juste après une fin de
+            // livraison, comportement Android normal en arrière-plan), cette
+            // carte redevient VIDE dans la nouvelle instance.
+            // RegisterSessionManager, lui, est un singleton lié au contexte
+            // applicatif — il survit à cette recréation. Repli : si aucune
+            // correspondance dans tabsByKey, vérifier directement une vraie
+            // session vivante par #série+node (findLiveControllerByNodeAndSerial,
+            // ajoutée plus tôt aujourd'hui pour la même raison de fond).
+            boolean trouveDansTabs = false;
+            for (TabSpec s0 : specsSnapshot) {
+                if (s0 != null && s0.node == node && s0.serialId != null
+                        && serialId.trim().equalsIgnoreCase(s0.serialId.trim())) {
+                    trouveDansTabs = true; break;
+                }
+            }
+            if (!trouveDansTabs) {
+                try {
+                    com.pa.lcr.lcp.DeliveryController dcSurvivant =
+                        com.pa.lcr.lcp.RegisterSessionManager.get(this)
+                            .findLiveControllerByNodeAndSerial(node, serialId);
+                    if (dcSurvivant != null) {
+                        String tkSurvivant = com.pa.lcr.lcp.RegisterSessionManager.get(this)
+                            .findTransportKeyForController(dcSurvivant);
+                        if (tkSurvivant != null && !tkSurvivant.trim().isEmpty()) {
+                            TransportIo ioSurvivant = (mediaTransportManager != null)
+                                ? mediaTransportManager.getByKey(tkSurvivant) : null;
+                            boolean ouvert = false;
+                            try { ouvert = (ioSurvivant != null && ioSurvivant.isOpen()); } catch (Exception ignoredO) {}
+                            if (ouvert) {
+                                android.util.Log.i("MainActivity", "resolveIfActiveMatches: session survivante "
+                                    + "trouvée (tabsByKey vide — probable recréation d'Activity) pour node=" + node
+                                    + " serial=" + serialId + " sur " + tkSurvivant);
+                                try {
+                                    upsertRegisterTabFromScan(tkSurvivant, node, 255, serialId, true, false);
+                                } catch (Exception ignoredU) {}
+                                return tkSurvivant;
+                            }
+                        }
+                    }
+                } catch (Exception ignoredS) {}
+            }
             for (TabSpec spec : specsSnapshot) {
                 if (spec == null) continue;
                 if (spec.node != node) continue;
