@@ -392,6 +392,15 @@ private void reproEvent(String level, String type, String message, JSONObject da
     
  // ✅ Cache du dernier NUM reçu via API (numero_livraison) pour reconstruire delivery_uid côté UI
  private volatile String lastNumeroLivraison = null;
+    // ✅ AJOUTÉ (12 août 2026, demande Paul — "oui pas utilisé autrement")
+    // — cache pour readTicketNo23() : le champ #23 (et son repli #22) ne
+    // change JAMAIS pendant qu'une livraison coule, seulement au début
+    // d'une NOUVELLE livraison — mais était relu par une vraie
+    // communication LCP à chaque cycle de statut (~2.5s), sans raison.
+    // Invalidé explicitement au vrai point de démarrage d'une nouvelle
+    // livraison (voir plus bas, api_deliveryOneShotStart), jamais par un
+    // simple minuteur.
+    private volatile String cachedTicketNo23 = null;
     // ✅ AJOUTÉ (11 août 2026, demande Paul — "si on a l'option 2 [jamais
     // imprimer], on doit ignorer ce statut d'impression") — mis en cache
     // pour éviter de relire Field #37 à chaque appel. -1 = jamais lu,
@@ -2257,6 +2266,19 @@ softResync("retry/" + step);
     }
 
     private String readTicketNo23() throws Exception {
+        // ✅ AJOUTÉ (12 août 2026, demande Paul — "oui pas utilisé
+        // autrement") — court-circuite toute communication LCP si déjà
+        // connu pour cette livraison. Voir cachedTicketNo23 (déclaration)
+        // et son invalidation (api_deliveryOneShotStart, nouvelle
+        // livraison) pour le vrai cycle de vie de ce cache.
+        String cached = cachedTicketNo23;
+        if (cached != null) return cached;
+        String result = readTicketNo23Uncached();
+        cachedTicketNo23 = result;
+        return result;
+    }
+
+    private String readTicketNo23Uncached() throws Exception {
         String tno = readU32FieldAsDecString(FIELD_TICKET_NUMBER);
         // ✅ AJOUTÉ (11 août 2026, demande Paul — "si le champ 23 = 0 et que
         // le champ 37 = 2, on utilise sale number") — TicketNumber_WM (#23)
@@ -3110,6 +3132,11 @@ public ApiResult api_registerValidate(
  cumulativeCorrectedNetL = 0.0;
  cumulativeCorrectedGrossL = 0.0;
  pulserResetCount = 0;
+ // ✅ AJOUTÉ (12 août 2026) — invalide le cache du ticket# pour cette
+ // NOUVELLE livraison — sera relu une seule fois au prochain appel,
+ // puis réutilisé sans nouvelle communication tant que la livraison
+ // coule.
+ cachedTicketNo23 = null;
 try {
             int[] ds0 = lcpDeliveryStatus();
             int delStatus0 = ds0[0];
@@ -3346,7 +3373,7 @@ job.presetNetL_requested = presetNetL;
             // et qui s'applique peu importe le moment où le retour d'air survient
             // (pas seulement au clic du bouton Continue).
 
-            try { job.ticketNo = readTicketNo23(); } catch (Exception ignored) {}
+            try { job.ticketNo = readTicketNo23Uncached(); } catch (Exception ignored) {}
             try { job.saleNo = readSaleNo22(); } catch (Exception ignored) {}
 
             // Mettre à jour le cache JobGet immédiatement
@@ -3426,7 +3453,7 @@ job.presetNetL_requested = presetNetL;
 
         try { lcpIssueCommand(CMD_END); } catch (Exception ignore) {}
 
-        try { job.ticketNo = readTicketNo23(); } catch (Exception ignored) {}
+        try { job.ticketNo = readTicketNo23Uncached(); } catch (Exception ignored) {}
         try { job.saleNo = readSaleNo22(); } catch (Exception ignored) {}
 
         // Cache "ENDING" immédiat
@@ -3571,43 +3598,83 @@ job.presetNetL_requested = presetNetL;
     public java.util.List<LcpLink.ProductScanResult> api_scanProductNames(
             LcpLink.ScanProgressCallback progressLog) throws java.io.IOException {
         try {
-            return withLcpLock(() -> {
-                try {
-                    int[] ds = link.opDeliveryStatus();
-                    int delCode = ds[1];
-                    if ((delCode & DC_DELIVERY_ACTIVE) != 0)
-                        throw new java.io.IOException("api_scanProductNames: livraison active");
-                    // ✅ FIX CRITIQUE (11 août 2026, demande Paul — trouvé en
-                    // traçant une collision TX/TX dans un vrai log de tab) —
-                    // cette boucle est une DEUXIÈME occurrence du même
-                    // problème déjà corrigé dans
-                    // waitTicketPendingClearedOrTimeout() (voir
-                    // isTicketRequiredNeverPrint()) — mais JAMAIS mise à
-                    // jour ici. Elle tenait le VERROU PARTAGÉ (withLcpLock)
-                    // jusqu'à 15 SECONDES complètes en attendant un
-                    // ticketPending qui ne se videra jamais si
-                    // TicketRequired=2 — bloquant TOUT le reste (sondage
-                    // périodique, WO-DETECT, etc.) pendant ce temps. À la
-                    // libération du verrou, tout ce qui s'était accumulé en
-                    // attente démarrait d'un coup — expliquant la rafale
-                    // TX/TX désordonnée observée en fin de log.
-                    if ((delCode & DC_TICKET_PENDING) != 0) {
-                        if (isTicketRequiredNeverPrint()) {
-                            emitLog("[SCAN] TicketRequired=2 (jamais imprimer) — attente de 15s sautée "
-                                + "(ticketPending ne se videra jamais par conception)");
-                        } else {
-                            link.opIssueCommand(CMD_PRINT_LAST_TICKET);
-                            long deadline = System.currentTimeMillis() + 15_000;
-                            while (System.currentTimeMillis() < deadline) {
-                                try { Thread.sleep(300); } catch (Exception ignored) {}
-                                if ((link.opDeliveryStatus()[1] & DC_TICKET_PENDING) == 0) break;
-                            }
+            withLcpLock(() -> {
+                int[] ds = link.opDeliveryStatus();
+                int delCode = ds[1];
+                if ((delCode & DC_DELIVERY_ACTIVE) != 0)
+                    throw new java.io.IOException("api_scanProductNames: livraison active");
+                if ((delCode & DC_TICKET_PENDING) != 0) {
+                    if (isTicketRequiredNeverPrint()) {
+                        emitLog("[SCAN] TicketRequired=2 (jamais imprimer) — attente de 15s sautée "
+                            + "(ticketPending ne se videra jamais par conception)");
+                    } else {
+                        link.opIssueCommand(CMD_PRINT_LAST_TICKET);
+                        long deadline = System.currentTimeMillis() + 15_000;
+                        while (System.currentTimeMillis() < deadline) {
+                            try { Thread.sleep(300); } catch (Exception ignored) {}
+                            if ((link.opDeliveryStatus()[1] & DC_TICKET_PENDING) == 0) break;
                         }
                     }
-                } catch (java.io.IOException e) { throw e; }
-                catch (Exception ignored) {}
-                return link.opScanAllProductNames(progressLog);
+                }
+                return null;
             });
+        } catch (java.io.IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new java.io.IOException("api_scanProductNames: pré-vérification ERR: " + e.getMessage(), e);
+        }
+
+        // ✅ FIX CRITIQUE (11 août 2026, demande Paul — "on est revenu avec
+        // timeout verrou, la je vais te faire chercher longtemps") — trouvé
+        // en traçant l'horodatage exact : le scan des 16 produits tenait le
+        // VERROU PARTAGÉ en continu pendant TOUTE sa durée (une seule
+        // grande section withLcpLock, comme avant ce fix). Si le registre
+        // est lent à répondre (confirmé toute la journée — plusieurs
+        // allers-retours 0x7D par lecture), un scan de 16 produits peut
+        // légitimement dépasser 15 secondes — et TOUT le reste (sondage
+        // périodique, CUMUL-WO, pré-vérification de démarrage de
+        // livraison) qui a besoin du même verrou pendant ce temps expirait
+        // réellement, pas à cause d'une fuite, mais parce qu'une opération
+        // légitime le tenait trop longtemps d'un coup. Corrigé : chaque
+        // produit obtient maintenant son PROPRE verrou court (pris et
+        // relâché individuellement), laissant le reste de l'app s'intercaler
+        // entre chaque lecture plutôt que d'attendre la fin du scan complet.
+        try {
+            Integer originalIdxObj = withLcpLock(() -> {
+                byte[] curRaw = link.opGetField(0);
+                return (curRaw != null && curRaw.length > 0) ? (curRaw[0] & 0xFF) : 0;
+            });
+            int originalIdx = originalIdxObj != null ? originalIdxObj : 0;
+            java.util.List<LcpLink.ProductScanResult> result = new java.util.ArrayList<>();
+            try {
+                for (int idx = 0; idx < 16; idx++) {
+                    final int fIdx = idx;
+                    String desc;
+                    try {
+                        desc = withLcpLock(() -> {
+                            link.opSetField(0, new byte[]{(byte) fIdx});
+                            try { Thread.sleep(80); } catch (Exception ignored) {}
+                            String d = "";
+                            try {
+                                byte[] f11 = link.opGetField(11);
+                                if (f11 != null && f11.length > 0)
+                                    d = new String(f11, java.nio.charset.StandardCharsets.US_ASCII)
+                                            .replace("\0", "").trim();
+                            } catch (Exception ignored) {}
+                            return d;
+                        });
+                    } catch (Exception e) {
+                        desc = "";
+                    }
+                    result.add(new LcpLink.ProductScanResult(idx + 1, desc));
+                    if (progressLog != null) progressLog.onProduct("Produit " + (idx + 1) + ": " + desc);
+                }
+            } finally {
+                try {
+                    withLcpLockVoid(() -> { link.opSetField(0, new byte[]{(byte) originalIdx}); return null; });
+                } catch (Exception ignored) {}
+            }
+            return result;
         } catch (java.io.IOException e) {
             throw e;
         } catch (Exception e) {
@@ -3700,7 +3767,7 @@ job.presetNetL_requested = presetNetL;
 
         // ensure ticket/sale always present (best-effort)
         if (job.ticketNo == null || job.ticketNo.trim().isEmpty()) {
-            try { job.ticketNo = readTicketNo23(); } catch (Exception ignored) {}
+            try { job.ticketNo = readTicketNo23Uncached(); } catch (Exception ignored) {}
         }
         if (job.saleNo == null || job.saleNo.trim().isEmpty()) {
             try { job.saleNo = readSaleNo22(); } catch (Exception ignored) {}
@@ -3921,7 +3988,7 @@ if (deliveryActive && !job.baselineCaptured) {
                 ticketPending = false;
             }
 
-                try { job.ticketNo = readTicketNo23(); } catch (Exception ignored) {}
+                try { job.ticketNo = readTicketNo23Uncached(); } catch (Exception ignored) {}
                 try { job.saleNo = readSaleNo22(); } catch (Exception ignored) {}
 
                 job.state = "DONE";

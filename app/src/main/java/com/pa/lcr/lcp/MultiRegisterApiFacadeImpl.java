@@ -1583,6 +1583,24 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                 : (mappedNode != null ? normNode(mappedNode) : lastNodeHint);
         int from = normFrom(mappedFrom != null ? mappedFrom : lastFromHint);
 
+        // ✅ FIX CRITIQUE (12 août 2026, demande Paul — "pourquoi j'ai
+        // l'impression dans le log que j'ai des lignes en double, en
+        // triple") — trouvé en traçant deux threads séparés dans un vrai
+        // log : cette méthode appelait getOrCreate() SANS CONDITION à
+        // chaque appel, même si le même contrôleur avait déjà été trouvé
+        // à peine 1-2 secondes plus tôt (le sondage pollJobUntilDone()
+        // l'appelle en boucle tout au long de RUNNING_FLOWING). Corrigé :
+        // vérifie d'abord si une vraie session existe déjà via
+        // getController() (lecture seule, aucun effet de bord) — ne
+        // tombe sur getOrCreate() que si aucune session n'a encore été
+        // établie.
+        if (mappedKey != null && !mappedKey.trim().isEmpty()) {
+            try {
+                DeliveryController dcExistant = sessions.getController(mappedKey, node);
+                if (dcExistant != null && !dcExistant.isStopped()) return dcExistant;
+            } catch (Exception ignored) {}
+        }
+
         // ✅ 1) Transport du job (média-aware)
         if (mappedKey != null && !mappedKey.trim().isEmpty() && mediaMgr != null) {
             try {
@@ -1598,6 +1616,8 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         try {
             String activeKey = MediaTransportManager.getActiveKeyStatic();
             if (activeKey != null && mediaMgr != null) {
+                DeliveryController dcExistant2 = sessions.getController(activeKey, node);
+                if (dcExistant2 != null && !dcExistant2.isStopped()) return dcExistant2;
                 TransportIo io = mediaMgr.getByKey(activeKey);
                 if (io != null && io.isOpen()) {
                     DeliveryController dc = sessions.getOrCreate(activeKey, node, from, io);

@@ -376,6 +376,29 @@ public final class RegisterSessionManager {
         return null;
     }
 
+    // 📝 NOTE POUR AMÉLIORATION FUTURE (12 août 2026, demande Paul —
+    // "pourquoi on a des getOrCreate() à répétition, c'est arrivé
+    // comment dans le code") — trouvé aujourd'hui TROIS endroits
+    // séparés (connectThisRegister() côté UI x2, resolveJobController()
+    // côté sondage du lien profond) qui appelaient cette méthode sans
+    // jamais vérifier d'abord si une session existait déjà — chacun
+    // écrit indépendamment, avec le même raisonnement raisonnable : le
+    // nom "getOrCreate" sonne comme une opération sûre et bon marché à
+    // répéter, alors qu'elle fait un vrai travail (verrou par clé,
+    // recherche dans la table de sessions) à CHAQUE appel, même quand la
+    // session existe déjà.
+    //
+    // Idée pour régler ça à la source, une fois pour toutes, plutôt que
+    // de compter sur chaque futur appelant pour y penser séparément :
+    // ajouter ICI, au tout début de cette méthode (avant le synchronized
+    // plus bas), une vérification rapide non-bloquante — si une session
+    // vivante existe déjà pour cette clé (getController(tk, node) !=
+    // null && !isStopped()), la retourner directement sans jamais entrer
+    // dans la section verrouillée. Ça rendrait TOUT appelant futur
+    // automatiquement sûr, sans devoir se souvenir d'appeler
+    // getController() en premier à chaque nouvel endroit du code —
+    // exactement le genre d'endroit où le bug de fond continue de
+    // réapparaître sous des formes différentes.
     public DeliveryController getOrCreate(String transportKey, int nodeDec, int fromDec, TransportIo io) {
         int node = nodeDec;
         int from = fromDec & 0xFF;
