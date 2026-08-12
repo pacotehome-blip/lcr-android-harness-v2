@@ -388,6 +388,18 @@ private void reproEvent(String level, String type, String message, JSONObject da
 
     private volatile DeliveryState state = DeliveryState.DISCONNECTED;
     private volatile int cachedDigits = -1;
+    // ✅ AJOUTÉ (12 août 2026, demande Paul — "le scan produit prend un
+    // temps énorme et même lagué, avant c'était très rapide 1s pas plus")
+    // — trouvé : le scan (depuis le 11 août) prend un verrou COURT et
+    // séparé par produit (16 fois), exprès pour laisser le reste de l'app
+    // s'intercaler entre chaque lecture — mais ça expose maintenant le
+    // scan à une vraie contention avec le keep-alive périodique, qui
+    // tourne plus activement depuis les correctifs d'aujourd'hui (tick
+    // live et martèlement getOrCreate réparés). Ce drapeau permet au
+    // keep-alive de sauter son propre tour pendant qu'un scan est
+    // réellement en cours, plutôt que de se battre pour le même verrou
+    // partagé à chaque produit.
+    public volatile boolean scanInProgress = false;
 
     
  // ✅ Cache du dernier NUM reçu via API (numero_livraison) pour reconstruire delivery_uid côté UI
@@ -1071,6 +1083,22 @@ catch (Exception ignored) {}
         // risque de double-planification, mais ne dépend plus jamais de
         // "state == s" pour décider si le tick doit démarrer.
         if (s == DeliveryState.RUNNING_FLOWING) {
+            // ✅ FIX CRITIQUE (12 août 2026, demande Paul — "il faut que ça
+            // marche, tout le tab est lent") — trouvé le vrai dernier
+            // morceau : liveNextAllowedMs est une variable UNIQUE, PARTAGÉE
+            // entre le keep-alive lent (délai croissant 5s->60s pendant
+            // l'inactivité) et le vrai tick rapide (200ms). Même avec le
+            // tick correctement planifié toutes les 200ms (correctif
+            // précédent), CHAQUE exécution vérifie cette même limite — si
+            // le keep-alive avait grandi à 20-40s pendant l'attente avant
+            // l'écoulement, le tick rapide restait bloqué par cette
+            // ANCIENNE limite jusqu'à son expiration naturelle, malgré
+            // d'être bien planifié. Confirmé : délai de ~15s observé entre
+            // RUN envoyé et le vrai démarrage du tick rapide, correspondant
+            // exactement à un reste de backoff lent. Corrigé : remise à
+            // zéro explicite ICI, au vrai moment d'entrée en écoulement —
+            // le tick rapide peut agir dès son tout premier appel.
+            liveNextAllowedMs = 0L;
             if (liveTickFuture == null || liveTickFuture.isDone()) {
                 liveTickFuture = liveTickScheduler.scheduleWithFixedDelay(
                     () -> {
@@ -1641,8 +1669,19 @@ try {
         io.execute(() -> {
             if (isStopped()) return;
             if (state != DeliveryState.RUNNING_FLOWING) return;
-            long now = System.currentTimeMillis();
-            if (now < liveNextAllowedMs) return;
+            // ✅ FIX CRITIQUE (12 août 2026, demande Paul — "je t'ai dit que
+            // je ne veux AUCUNE mémoire pendant le live") — retiré
+            // complètement la vérification liveNextAllowedMs ici. Cette
+            // variable appartient au mécanisme LENT (keep-alive à délai
+            // croissant pendant l'inactivité) — elle n'a AUCUNE raison
+            // d'exister dans le chemin rapide, puisque le PLANIFICATEUR
+            // (liveTickScheduler, cadence fixe liveTickIntervalMs) contrôle
+            // déjà le rythme à lui seul. La garder ici était une double
+            // limite redondante qui ne pouvait que nuire — exactement la
+            // cause du délai de ~15s trouvé plus tôt (remise à zéro
+            // ponctuelle), et qui referait surface au moindre autre endroit
+            // du code touchant cette même variable partagée. Supprimée
+            // pour de bon plutôt que rafistolée.
             if (!liveInFlight.compareAndSet(false, true)) return;
             inLiveSample.set(true);
             try {
@@ -3664,6 +3703,7 @@ job.presetNetL_requested = presetNetL;
             });
             int originalIdx = originalIdxObj != null ? originalIdxObj : 0;
             java.util.List<LcpLink.ProductScanResult> result = new java.util.ArrayList<>();
+            scanInProgress = true;
             try {
                 for (int idx = 0; idx < 16; idx++) {
                     final int fIdx = idx;
@@ -3688,6 +3728,7 @@ job.presetNetL_requested = presetNetL;
                     if (progressLog != null) progressLog.onProduct("Produit " + (idx + 1) + ": " + desc);
                 }
             } finally {
+                scanInProgress = false;
                 try {
                     withLcpLockVoid(() -> { link.opSetField(0, new byte[]{(byte) originalIdx}); return null; });
                 } catch (Exception ignored) {}

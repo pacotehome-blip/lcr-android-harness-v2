@@ -1162,6 +1162,11 @@ public final class RegisterSessionManager {
             if (st == DeliveryState.DISCONNECTED) return;
 
             if (st == DeliveryState.CONNECTED || st == DeliveryState.PRESTART || st == DeliveryState.ENDING) {
+                // ✅ FIX (12 août 2026, demande Paul — scan produits ralenti
+                // par contention avec ce keep-alive) — saute complètement ce
+                // tour si un scan est réellement en cours, plutôt que de se
+                // battre pour le même verrou partagé entre chaque produit.
+                if (c.scanInProgress) return;
                 // ✅ FIX (voir commentaire du champ lastKeepAliveMs) — ping
                 // léger périodique pour empêcher le port de rester totalement
                 // silencieux entre deux livraisons.
