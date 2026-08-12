@@ -1210,14 +1210,24 @@ public final class RegisterSessionManager {
 
             long now = System.currentTimeMillis();
 
-            long liveInterval = LIVE_MS + liveBackoffMs;
-            if (now - lastLiveMs >= liveInterval) {
-                lastLiveMs = now;
-                try {
-                    c.requestLiveSample();
-                    if (liveBackoffMs > 0 && noChangeCount == 0) liveBackoffMs = Math.max(0, liveBackoffMs - 200);
-                } catch (Exception ignored) {}
-            }
+            // ✅ FIX CRITIQUE (12 août 2026, demande Paul — "le running_
+            // flowing ne suit pas pendant, on est loin en criss" — trouvé
+            // après plusieurs fausses pistes, confirmé cette fois : DEUX
+            // mécanismes de recul INDÉPENDANTS s'empilaient. Celui-ci
+            // (NodeScheduler.liveBackoffMs, jusqu'à 2000ms) ET celui interne
+            // de requestLiveSample() (DeliveryController.liveNextAllowedMs
+            // via liveBackoffStep(), jusqu'à 2000ms aussi) — tous deux
+            // déclenchés par les mêmes réponses rc=0x26 documentées toute
+            // la journée. Empilés, ça expliquait les trous de 4-6s observés.
+            // Plus fondamentalement : requestLiveSample() ici est REDONDANT
+            // — DeliveryController a SON PROPRE tick rapide interne
+            // (liveTickScheduler/requestLiveSampleFast(), corrigé plus tôt
+            // aujourd'hui, sans ce problème de recul) qui couvre déjà
+            // exactement ce rôle pendant RUNNING_FLOWING. Appel retiré —
+            // le tick interne du contrôleur reste la seule source pendant
+            // l'écoulement actif. liveBackoffMs/lastLiveMs restent déclarés
+            // (utilisés ailleurs dans cette classe pour d'autres états) mais
+            // ne pilotent plus cet appel ici.
 
             // ✅ FIX (7 août 2026, demande Paul — "quand on a le running
             // flowing, on n'a pas besoin du status, on est en plein
