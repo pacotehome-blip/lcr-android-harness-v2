@@ -2056,6 +2056,29 @@ public class RegisterTabFragment extends Fragment {
 
 
     private void connectThisRegister(boolean userInitiated) {
+        // ✅ FIX CRITIQUE (12 août 2026, demande Paul — "j'ai un lag sur le
+        // tick durant le running_flowing") — trouvé via logcat :
+        // getOrCreate() martelé toutes les 1-1.5s PENDANT TOUTE la durée de
+        // RUNNING_FLOWING, alors que le registre coule normalement (net/gross
+        // progressent correctement dans le même log). Tracé jusqu'à MON
+        // PROPRE correctif d'aujourd'hui (la reconnexion silencieuse
+        // ajoutée pour éviter le dialogue de diagnostic intrusif) —
+        // connectThisRegister() n'avait JAMAIS reçu la même garde
+        // RUNNING_FLOWING que les trois autres méthodes déjà corrigées
+        // aujourd'hui (rechercherWoDepuisRegistre, rafraichirCumulWo,
+        // checkPendingDeliveryForThisRegister). Si un événement automatique
+        // (changement de statut média, etc.) redéclenchait cette méthode
+        // pendant un écoulement actif, la reconnexion silencieuse
+        // repartait à chaque fois, même si le controller était déjà
+        // parfaitement vivant. Corrigé : sauté complètement pour les
+        // appels automatiques pendant RUNNING_FLOWING/RUNNING_PAUSED — un
+        // vrai clic utilisateur reste toujours traité normalement.
+        if (!userInitiated && controller != null) {
+            DeliveryState stConnect = controller.getState();
+            if (stConnect == DeliveryState.RUNNING_FLOWING || stConnect == DeliveryState.RUNNING_PAUSED) {
+                return;
+            }
+        }
         // ✅ Si le controller existant est mort (shutdown après erreur BT "Error writing"
         // par exemple) — forcer la recréation au lieu de continuer à l'utiliser
         if (controller != null && controller.isStopped()) {
