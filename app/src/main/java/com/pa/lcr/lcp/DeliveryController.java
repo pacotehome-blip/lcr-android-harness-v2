@@ -2157,6 +2157,26 @@ try {
     }
 
     private void clearTicketPendingSafeForAlign() throws Exception {
+        // ✅ FIX (13 août 2026, demande Paul — "tu as réintroduit des
+        // blocages pourquoi") — trouvé : cette méthode n'avait jamais reçu
+        // le bypass "TicketRequired=2" ajouté le 11 août à sa méthode sœur
+        // waitTicketPendingClearedOrTimeout(). Sur un registre où
+        // TicketRequired(#37)=2 (jamais imprimer — confirmé sur CE
+        // registre), ticketPending ne se vide JAMAIS par impression — donc
+        // la boucle plus bas tournait le plein TICKET_DEVICE_LOOP_MS (30s),
+        // martelant GET_MACHINE_STATUS toutes les 200ms, à CHAQUE armement
+        // de livraison (doAlignOrRecoverFull() est appelée automatiquement
+        // dès que ticketPending0 est vrai — ligne ~3402). Invisible avant
+        // le logging du 13 août — maintenant visible et corrigée, même
+        // logique que le bypass existant.
+        if (isTicketRequiredNeverPrint()) {
+            emitLog("[ALIGN-A] TicketRequired=2 (jamais imprimer) — attente de 30s sautée "
+                + "(ticketPending ne se videra jamais par conception)");
+            ticketPrintInFlight.set(false);
+            ticketPrintStartMs = 0L;
+            return;
+        }
+
         try {
             LcpLink.MachineStatus ms0 = lcpMachineStatus();
             if ((ms0.delCode & DC_TICKET_PENDING) == 0) {
