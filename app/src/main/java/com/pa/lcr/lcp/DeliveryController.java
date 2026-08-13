@@ -375,6 +375,40 @@ private void reproEvent(String level, String type, String message, JSONObject da
     // vraie source du 0x23 (voir stack trace ajoutée dans LcpLink.sendRecv),
     // on coupe ce superviseur pour l'instant. Remettre à true une fois la
     // vraie cause confirmée et le tick stable en conditions réelles.
+    // ✅ RÉACTIVÉ (13 août 2026, demande Paul — "les ticks sont super mais
+    // ils ne s'arrêtent plus car il ne valide plus si le net et gross et
+    // flowing est en transition off confirmation") — trouvé : requestLiveSample()
+    // n'est pas qu'une lecture net/gross, c'est la SEULE méthode qui contient
+    // la détection flow-off/flowOffStable, la transition vers RUNNING_PAUSED,
+    // et l'auto-terminaison sur preset atteint. Le tick rapide (200ms) ne lit
+    // que net/gross — il ne valide jamais l'arrêt du flow. En désactivant
+    // supervisionFuture plus tôt aujourd'hui pour régler le doublon avec le
+    // poll du deep link, j'ai éteint la SEULE source qui appelait
+    // requestLiveSample() automatiquement — plus rien ne validait jamais la
+    // transition flow-off, donc RUNNING_FLOWING ne se refermait plus jamais
+    // tout seul. Le garde anti-doublon (nextAllowedReadMs) reste actif —
+    // seule l'I/O redondante est évitée, pas la logique de validation.
+    // ✅ RETIRÉ POUR DE BON (13 août 2026, demande Paul — "je veux juste que
+    // ça marche, regarde les impacts") — trouvé la vraie raison d'être de ce
+    // superviseur : combler un "trou" de supervision pour les livraisons
+    // démarrées via le bouton local (sans deep link). Ce trou n'a JAMAIS
+    // existé — confirmé dans le code : startNewDeliveryC() (bouton NEW_C)
+    // appelle main.lancerLivraisonDepuisTab() → deepLinkHandler.
+    // lancerLivraison() → pollJobUntilDone() — EXACTEMENT le même chemin
+    // qu'un vrai lien profond. Il n'existe aucune livraison, tab ou deep
+    // link, qui échappe à pollJobUntilDone(). supervisionFuture dupliquait
+    // donc GET_DELIVERY_STATUS sur CHAQUE livraison, pas un cas limite —
+    // confirmé par log réel : 94.83s pour un preset de 10L au lieu de la
+    // base saine 35-48s. Preuve que ce n'est pas nécessaire : la MÊME
+    // livraison s'est terminée correctement toute seule (pollJobUntilDone
+    // a son propre suivi flow-off/preset, indépendant de requestLiveSample()
+    // du controller) — sans supervisionFuture, la livraison aboutit quand
+    // même. Coût accepté : l'affichage du tab (LIVE:, boutons CONTINUER/
+    // TERMINER) ne se resynchronise plus automatiquement — un clic
+    // STATUS_B suffit pour rafraîchir. Piste de consolidation propre
+    // (brancher la validation directement dans api_deliveryJobGet(), sans
+    // deuxième lecture) documentée plus bas, pas implémentée — touche au
+    // bit retour d'air, mérite un test dédié avant d'y toucher.
     private static final boolean SUPERVISION_ENABLED = false;
 
     // ✅ Intervalle live tick — configurable selon profil registre
@@ -1217,13 +1251,30 @@ catch (Exception ignored) {}
                             // le doublon avec pollJobUntilDone, réglé juste
                             // au-dessus. Même garde ici, par cohérence.
                             if (scanInProgress) return;
-                            ApiJob extJob = (lastActiveJobId != null) ? apiJobs.get(lastActiveJobId) : null;
-                            if (extJob != null && extJob.nextAllowedReadMs > 0) {
-                                long lastExternalReadMs = extJob.nextAllowedReadMs - API_JOB_MIN_POLL_MS;
-                                if (System.currentTimeMillis() - lastExternalReadMs < (SUPERVISION_INTERVAL_MS * 2)) {
-                                    return; // poller externe actif — on ne duplique pas
-                                }
-                            }
+                            // ✅ RETIRÉ (13 août 2026, demande Paul — "les
+                            // ticks sont super mais ils ne s'arrêtent plus
+                            // car il ne valide plus si le flow est en
+                            // transition off confirmation") — le garde
+                            // anti-doublon ci-dessous (basé sur
+                            // job.nextAllowedReadMs) sautait l'appel à
+                            // requestLiveSample() AU COMPLET dès qu'un poller
+                            // externe (pollJobUntilDone) était actif — ce qui
+                            // est le cas pour QUASIMENT TOUTE livraison
+                            // démarrée par deep link. Résultat : la logique
+                            // de validation flow-off/RUNNING_PAUSED/auto-
+                            // terminaison (qui vit UNIQUEMENT dans
+                            // requestLiveSample(), pas dans le tick rapide
+                            // ni dans api_deliveryJobGet()) ne s'exécutait
+                            // plus jamais pour ces livraisons-là — le tick
+                            // continuait de tourner indéfiniment sans que
+                            // rien ne détecte l'arrêt du flow. La
+                            // correction du doublon d'I/O ne doit jamais
+                            // supprimer la validation elle-même — retiré.
+                            // L'overlap d'I/O avec pollJobUntilDone reste
+                            // possible mais son coût est maintenant borné
+                            // par le timeout adaptatif STATUS (~3-4s max au
+                            // lieu de 6-8s) — la correction prime sur la
+                            // contention.
                             requestLiveSample();
                         } catch (Exception ignored) {}
                     },
