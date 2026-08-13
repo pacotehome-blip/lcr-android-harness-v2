@@ -498,6 +498,21 @@ private void reproEvent(String level, String type, String message, JSONObject da
     private volatile int lastNetRaw = -1;
     private volatile boolean stopped = false;
     private volatile boolean txRxEnabled = false;
+    // ✅ AJOUTÉ (13 août 2026, demande Paul — "rien a sorti") — trouvé : les
+    // trames TX/RX du tick live (inLiveSample) étaient TOUJOURS supprimées
+    // du log (ligne ~953), même avec "Afficher TX/RX" activé — exactement
+    // la fenêtre qu'il fallait observer pour diagnostiquer le lag du tick.
+    // Interrupteur séparé, désactivé par défaut (comportement normal
+    // inchangé — le tick à 200ms inonderait sinon le log en usage
+    // quotidien), à activer explicitement seulement pour ce diagnostic
+    // précis via setLiveSampleTraceEnabled(true).
+    private volatile boolean liveSampleTraceEnabled = false;
+
+    public void setLiveSampleTraceEnabled(boolean enabled) {
+        liveSampleTraceEnabled = enabled;
+        emitLog("[LOG] Trace TX/RX du tick live " + (enabled ? "ON (diagnostic)" : "OFF (normal)"));
+    }
+
     private volatile boolean logTsEnabled = false;
     private volatile long lastResyncMs = 0L;
     // ✅ FIX (la vraie cause du "aucune réaction du diagnostic") : rien ne
@@ -950,7 +965,7 @@ private void reproEvent(String level, String type, String message, JSONObject da
         link.setTraceSink(line -> {
             String raw = stripIoPrefix(line);
             if (!txRxEnabled && isTxRxLine(raw)) return;
-            if (Boolean.TRUE.equals(inLiveSample.get()) && isTxRxLine(raw)) return;
+            if (!liveSampleTraceEnabled && Boolean.TRUE.equals(inLiveSample.get()) && isTxRxLine(raw)) return;
             emitLog(line);
         });
     }
@@ -962,6 +977,10 @@ private void reproEvent(String level, String type, String message, JSONObject da
             io.execute(() -> {
                 if (isStopped()) return;
                 txRxEnabled = enabled;
+                // ✅ AJOUTÉ (13 août 2026) — même bouton "Afficher TX/RX" active
+                // maintenant aussi les trames du tick live, plutôt que d'exiger
+                // un deuxième interrupteur séparé pour ce diagnostic.
+                liveSampleTraceEnabled = enabled;
                 emitLog("[LOG] TX/RX " + (enabled ? "ON" : "OFF"));
             });
         } catch (java.util.concurrent.RejectedExecutionException ignored) {
