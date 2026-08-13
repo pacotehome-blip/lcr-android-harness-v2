@@ -133,6 +133,27 @@ public class LcpLink {
         OpClass(boolean queueable, int timeoutMs) { this.queueable = queueable; this.timeoutMs = timeoutMs; }
     }
 
+    // ✅ AJOUTÉ (13 août 2026, demande Paul — "augmenter et noter le temps
+    // nécessaire et faire une moyenne par la suite") — le plafond STATUS
+    // fixe de 2.5s ci-dessus s'est révélé insuffisant sur le terrain le
+    // jour même (deux busy consécutifs sur GET_MACHINE_STATUS non résolus
+    // dans les 2.5s, compteur d'échec de DeliveryController rendu à 4/5 —
+    // à un cheveu d'une déconnexion forcée). Remplacé par un timeout
+    // ADAPTATIF par registre (par instance LcpLink) : démarre au plancher
+    // (OpClass.STATUS.timeoutMs), puis s'ajuste selon le temps RÉELLEMENT
+    // observé pour résoudre un busy — moyenne mobile (EMA) + marge de
+    // sécurité. Sur timeout franc (le plafond actuel n'a pas suffi), on
+    // relève immédiatement plutôt que d'attendre que la moyenne rattrape —
+    // on sait déjà que c'est insuffisant pour CE registre.
+    private static final long STATUS_TIMEOUT_FLOOR_MS = OpClass.STATUS.timeoutMs;
+    private static final long STATUS_TIMEOUT_CEILING_MS = 8_000; // jamais pire qu'avant le 13 août
+    private static final double STATUS_TIMEOUT_MARGIN = 1.4;     // 40% au-dessus de la moyenne observée
+    private static final double STATUS_EMA_ALPHA = 0.25;         // poids du dernier échantillon
+    private static final long STATUS_TIMEOUT_BUMP_MS = 1_500;    // relève immédiate sur timeout franc
+
+    private volatile long statusTimeoutMs = STATUS_TIMEOUT_FLOOR_MS;
+    private volatile double statusResolveEmaMs = -1; // -1 = aucun échantillon encore
+
     // Slice de lecture pour permettre l'interleaving TX 0x7D / RX
     private static final int RX_SLICE_MS = 250;
 
@@ -809,17 +830,54 @@ public class LcpLink {
      *  (queueable ou non, timeout) vienne d'un seul endroit (OpClass) et
      *  pas d'une décision au cas par cas dans chaque méthode op*(). */
     private Response sendRecv(byte[] payload, OpClass cls) throws IOException {
-        return sendRecv(payload, cls.queueable, cls.timeoutMs);
+        if (cls == OpClass.STATUS) {
+            // ✅ Timeout adaptatif — voir statusTimeoutMs. isStatusClass=true
+            // active l'apprentissage (moyenne + relève sur timeout) dans la
+            // boucle sendRecv ci-dessous.
+            return sendRecv(payload, true, (int) statusTimeoutMs, true);
+        }
+        return sendRecv(payload, cls.queueable, cls.timeoutMs, false);
     }
 
     // Conservé pour opGetField(field, timeoutMs) — poll rapide, jamais
     // queueable, mais avec un timeout ajustable au cas par cas (ex: scan,
     // lecture décimales) plutôt que la valeur fixe d'OpClass.FAST.
     private Response sendRecv(byte[] payload, int timeoutMs) throws IOException {
-        return sendRecv(payload, false, timeoutMs);
+        return sendRecv(payload, false, timeoutMs, false);
     }
 
-    private synchronized Response sendRecv(byte[] payload, boolean queueable, int timeoutMs) throws IOException {
+    /** Nourrit la moyenne mobile après une résolution réussie en file. */
+    private void onStatusResolved(long elapsedMs) {
+        statusResolveEmaMs = (statusResolveEmaMs < 0)
+            ? elapsedMs
+            : (statusResolveEmaMs * (1 - STATUS_EMA_ALPHA) + elapsedMs * STATUS_EMA_ALPHA);
+        long candidate = (long) (statusResolveEmaMs * STATUS_TIMEOUT_MARGIN);
+        long newTimeout = Math.min(STATUS_TIMEOUT_CEILING_MS, Math.max(STATUS_TIMEOUT_FLOOR_MS, candidate));
+        if (newTimeout != statusTimeoutMs) {
+            android.util.Log.i("LcpLink", "STATUS adaptatif: moyenne=" + Math.round(statusResolveEmaMs)
+                + "ms → nouveau plafond=" + newTimeout + "ms (était " + statusTimeoutMs + "ms)");
+            statusTimeoutMs = newTimeout;
+        }
+    }
+
+    /** Sur timeout franc : le plafond actuel est prouvé insuffisant — on le
+     *  relève tout de suite plutôt que d'attendre que la moyenne rattrape. */
+    private void onStatusTimedOut(long elapsedMs) {
+        long bumped = Math.min(STATUS_TIMEOUT_CEILING_MS, statusTimeoutMs + STATUS_TIMEOUT_BUMP_MS);
+        if (bumped != statusTimeoutMs) {
+            android.util.Log.w("LcpLink", "STATUS timeout insuffisant (" + statusTimeoutMs
+                + "ms, réel >= " + elapsedMs + "ms) — relevé à " + bumped + "ms");
+            statusTimeoutMs = bumped;
+        }
+        // Nourrit quand même la moyenne avec ce plancher connu (elapsedMs
+        // sous-estime le vrai temps de résolution puisqu'on a coupé avant,
+        // mais c'est un signal valide : "au moins elapsedMs").
+        statusResolveEmaMs = (statusResolveEmaMs < 0)
+            ? elapsedMs
+            : (statusResolveEmaMs * (1 - STATUS_EMA_ALPHA) + elapsedMs * STATUS_EMA_ALPHA);
+    }
+
+    private synchronized Response sendRecv(byte[] payload, boolean queueable, int timeoutMs, boolean isStatusClass) throws IOException {
         if (closed) throw new TransportException("Transport closed");
         if (io == null) throw new TransportException("Transport null");
         if (!io.isOpen()) throw new TransportException("Transport not open");
@@ -939,22 +997,28 @@ public class LcpLink {
             if (queued && rc == RC_OK && f.payload.length >= 2 && (f.payload[1] & 0xFF) == RC_OK) {
                 byte[] norm = new byte[f.payload.length - 1];
                 System.arraycopy(f.payload, 1, norm, 0, norm.length);
+                long elapsed = System.currentTimeMillis() - startMs;
                 android.util.Log.w("LcpLink", "sendRecv: msg=0x" + hex2(msg)
-                    + " → résolu après " + (System.currentTimeMillis() - startMs) + "ms en file");
+                    + " → résolu après " + elapsed + "ms en file");
+                if (isStatusClass) onStatusResolved(elapsed);
                 return new Response(norm[0] & 0xFF, norm);
             }
 
             if (queued) {
+                long elapsed = System.currentTimeMillis() - startMs;
                 android.util.Log.w("LcpLink", "sendRecv: msg=0x" + hex2(msg)
-                    + " → résolu après " + (System.currentTimeMillis() - startMs) + "ms en file (rc direct)");
+                    + " → résolu après " + elapsed + "ms en file (rc direct)");
+                if (isStatusClass) onStatusResolved(elapsed);
             }
             return new Response(rc, f.payload);
         }
 
         if (queued) {
+            long elapsed = System.currentTimeMillis() - startMs;
             android.util.Log.e("LcpLink", "sendRecv: msg=0x" + hex2(msg)
-                + " → TIMEOUT après " + (System.currentTimeMillis() - startMs) + "ms en file (dernier rc=0x"
+                + " → TIMEOUT après " + elapsed + "ms en file (dernier rc=0x"
                 + hex2(lastQueued) + ", timeoutMs=" + timeoutMs + ")");
+            if (isStatusClass) onStatusTimedOut(elapsed);
             throw new IOException("Queued timeout last=0x" + hex2(lastQueued));
         }
         throw new IOException("Timeout waiting LCP response");

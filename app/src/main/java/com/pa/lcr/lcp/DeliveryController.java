@@ -362,6 +362,14 @@ private void reproEvent(String level, String type, String message, JSONObject da
 
     // LIVE backoff
     private static final long LIVE_BASE_MS = 300;
+    // ✅ AJOUTÉ (13 août 2026, demande Paul — "il faut une supervision
+    // automatique dans tous les cas quand on est en running_flowing") —
+    // cadence du superviseur RUNNING_FLOWING/RUNNING_PAUSED. Plus lent que
+    // le tick live (200-800ms selon registre) parce qu'il fait un vrai
+    // GET_DELIVERY_STATUS complet (via requestLiveSample), pas juste
+    // net/gross — pas besoin d'une cadence aussi agressive pour détecter
+    // "flow arrêté depuis Xs" ou "preset atteint".
+    private static final long SUPERVISION_INTERVAL_MS = 2_500;
 
     // ✅ Intervalle live tick — configurable selon profil registre
     // LCR-II (19200 baud): 200ms, LC3 (9600 baud): 800ms
@@ -398,6 +406,8 @@ private void reproEvent(String level, String type, String message, JSONObject da
     private volatile java.util.concurrent.ScheduledExecutorService liveTickScheduler =
         java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
     private volatile java.util.concurrent.ScheduledFuture<?> liveTickFuture = null;
+    // ✅ AJOUTÉ (13 août 2026) — future du superviseur (voir SUPERVISION_INTERVAL_MS).
+    private volatile java.util.concurrent.ScheduledFuture<?> supervisionFuture = null;
     private Listener listener;
 
     /** ✅ AJOUTÉ (12 août 2026) — recrée le planificateur s'il a été fermé
@@ -1056,6 +1066,7 @@ try {
         // ✅ Arrêter la boucle live tick
         try {
             if (liveTickFuture != null) { liveTickFuture.cancel(false); liveTickFuture = null; }
+            if (supervisionFuture != null) { supervisionFuture.cancel(false); supervisionFuture = null; }
             liveTickScheduler.shutdownNow();
         } catch (Exception ignored) {}
 
@@ -1153,6 +1164,26 @@ catch (Exception ignored) {}
                     },
                     0, liveTickIntervalMs, java.util.concurrent.TimeUnit.MILLISECONDS);
             }
+            // ✅ AJOUTÉ (13 août 2026, demande Paul — "une supervision
+            // automatique dans tous les cas quand on est en running_flowing")
+            // — jusqu'ici, la logique flow-off-confirmé/preset-atteint dans
+            // requestLiveSample() ne tournait que sur clic UI ou via
+            // DeepLinkHandler.pollJobUntilDone(). Une livraison démarrée
+            // directement par les boutons du tab (api_deliveryStartC, sans
+            // lien profond) n'avait donc AUCUNE supervision automatique —
+            // confirmé sur le terrain le 13 août : flow arrêté, personne
+            // pour le détecter, opérateur obligé de forcer un STATUS_B pour
+            // sortir. Ce scheduler tourne maintenant systématiquement dès
+            // l'entrée en RUNNING_FLOWING, peu importe qui l'a démarrée.
+            if (supervisionFuture == null || supervisionFuture.isDone()) {
+                supervisionFuture = liveTickScheduler.scheduleWithFixedDelay(
+                    () -> {
+                        try {
+                            if (!isStopped()) requestLiveSample();
+                        } catch (Exception ignored) {}
+                    },
+                    SUPERVISION_INTERVAL_MS, SUPERVISION_INTERVAL_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
+            }
         }
 
         if (state == s) return;
@@ -1165,6 +1196,13 @@ catch (Exception ignored) {}
             if (liveTickFuture != null) {
                 liveTickFuture.cancel(false);
                 liveTickFuture = null;
+            }
+            // ✅ AJOUTÉ (13 août 2026) — arrêt symétrique du superviseur.
+            // Redémarre automatiquement si l'écoulement reprend (RUNNING_
+            // FLOWING revisité), même logique que le tick live ci-dessus.
+            if (supervisionFuture != null) {
+                supervisionFuture.cancel(false);
+                supervisionFuture = null;
             }
         }
  // Auto close delivery on end-of-delivery transitions
@@ -1902,6 +1940,33 @@ try {
 
                 if (flowOffStable) setState(DeliveryState.RUNNING_PAUSED);
                 else setState(DeliveryState.RUNNING_FLOWING);
+
+                // ✅ AJOUTÉ (13 août 2026, demande Paul — "si le preset est
+                // atteint il doit terminer automatiquement sinon permettre
+                // par le bouton continuer") — même logique que celle déjà
+                // utilisée dans api_deliveryJobGet()/DeepLinkHandler
+                // (presetReached), appliquée ici universellement puisque
+                // cette méthode tourne maintenant systématiquement pendant
+                // RUNNING_FLOWING (voir supervisionFuture dans setState),
+                // peu importe si la livraison vient du deep link ou des
+                // boutons locaux du tab.
+                if (flowOffStable) {
+                    ApiJob curJob = (lastActiveJobId != null) ? apiJobs.get(lastActiveJobId) : null;
+                    if (curJob != null) {
+                        double tol = 1.0 / scale;
+                        boolean presetReached = (netL >= (curJob.presetNetL_applied - tol));
+                        if (presetReached) {
+                            emitLog("[AUTO] Flow arrêté + preset atteint ("
+                                + String.format(java.util.Locale.ROOT, "%.2f/%.2f", netL, curJob.presetNetL_applied)
+                                + "L) — fin automatique de livraison");
+                            endDelivery();
+                        } else if (listener != null) {
+                            listener.onLog("[AUTO] Flow arrêté, preset NON atteint ("
+                                + String.format(java.util.Locale.ROOT, "%.2f/%.2f", netL, curJob.presetNetL_applied)
+                                + "L) — en attente de CONTINUER ou TERMINER (opérateur)");
+                        }
+                    }
+                }
 
                 lastGrossRaw = g;
                 lastNetRaw = n;
