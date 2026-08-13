@@ -98,8 +98,40 @@ public class LcpLink {
     // Cadence du CHECK_REQUEST
     private static final int QP_MS = 200;
 
-    // Timeout "queued long" pour opérations modifiantes (SET_FIELD / ISSUE_COMMAND)
-    private static final int OP_QUEUEABLE_TIMEOUT_MS = 30_000;
+    // ✅ AJOUTÉ (13 août 2026, demande Paul — "il y a un effet de bord
+    // partout") — classification UNIFIÉE des commandes LCP. Remplace les
+    // timeouts/booléens "queueable" épars introduits au fil des fixes du
+    // 6/7/11 août, chacun réglant un cas précis sans politique commune.
+    // AVANT ce fix : un simple GET de statut (poll UI, reconnect, vérif de
+    // job) pouvait, sur RC=0x26 busy, retenir sendRecv() — donc le verrou
+    // LcpNodeLocks partagé par node — jusqu'à 8000ms. Pendant ce temps,
+    // TOUT le reste sur ce node (scan produits, tick live, boutons) restait
+    // bloqué derrière, avec effet domino visible partout (tick figé, scan
+    // "gelé puis rattrape", boutons qui ne répondent pas).
+    //
+    // Trois classes, un seul endroit pour décider "combien de temps une
+    // commande a le droit de retenir le registre avant d'abandonner" :
+    //   FAST   : poll haute fréquence (tick live net/gross). Jamais mis en
+    //            file — busy = retour immédiat, on retentera au prochain
+    //            cycle (200ms plus tard). Rien à gagner à attendre ici.
+    //   STATUS : vérification ponctuelle (GET_MACHINE_STATUS,
+    //            GET_DELIVERY_STATUS — utilisées par STATUS_B, reconnect,
+    //            poll de job). Peut se mettre en file, mais PLAFONNÉE —
+    //            2.5s au lieu de 6-8s. Un statut n'a pas besoin d'attendre
+    //            aussi longtemps qu'une action réelle.
+    //   ACTION : intention utilisateur qui DOIT aboutir (SET_FIELD,
+    //            ISSUE_COMMAND, PRINT_TEXT — preset, armement, scan,
+    //            impression). Timeout long inchangé (30s) — c'est
+    //            légitime, ce n'est pas un poll silencieux.
+    enum OpClass {
+        FAST(false, 800),
+        STATUS(true, 2_500),
+        ACTION(true, 30_000);
+
+        final boolean queueable;
+        final int timeoutMs;
+        OpClass(boolean queueable, int timeoutMs) { this.queueable = queueable; this.timeoutMs = timeoutMs; }
+    }
 
     // Slice de lecture pour permettre l'interleaving TX 0x7D / RX
     private static final int RX_SLICE_MS = 250;
@@ -428,7 +460,7 @@ public class LcpLink {
 
     // ===================== OPS PUBLIQUES =====================
     public MachineStatus opGetMachineStatus() throws IOException {
-        Response r = sendRecv(buildPayload(MSG_GET_MACHINE_STATUS, null), 8000);
+        Response r = sendRecv(buildPayload(MSG_GET_MACHINE_STATUS, null), OpClass.STATUS);
         ensureOk(r, "GET_MACHINE_STATUS");
         return new MachineStatus(
                 r.payload[0] & 0xFF,
@@ -441,7 +473,7 @@ public class LcpLink {
 
     /** Timeout 30s pour commande queueable */
     public void opIssueCommand(int cmd) throws IOException {
-        Response r = sendRecv(buildPayload(MSG_ISSUE_COMMAND, new byte[]{(byte) cmd}), OP_QUEUEABLE_TIMEOUT_MS);
+        Response r = sendRecv(buildPayload(MSG_ISSUE_COMMAND, new byte[]{(byte) cmd}), OpClass.ACTION);
         ensureOk(r, "ISSUE_COMMAND 0x" + hex2(cmd));
     }
 
@@ -454,7 +486,7 @@ public class LcpLink {
         byte[] pl = new byte[1 + data.length];
         pl[0] = MSG_PRINT_TEXT;
         System.arraycopy(data, 0, pl, 1, data.length);
-        Response r = sendRecv(pl, OP_QUEUEABLE_TIMEOUT_MS);
+        Response r = sendRecv(pl, OpClass.ACTION);
         ensureOk(r, "PRINT_TEXT");
     }
 
@@ -703,7 +735,7 @@ public class LcpLink {
         pl[0] = MSG_SET_FIELD;
         pl[1] = (byte) field;
         if (value != null) System.arraycopy(value, 0, pl, 2, value.length);
-        Response r = sendRecv(pl, OP_QUEUEABLE_TIMEOUT_MS);
+        Response r = sendRecv(pl, OpClass.ACTION);
         ensureOk(r, "SET_FIELD #" + field);
     }
 
@@ -740,7 +772,7 @@ public class LcpLink {
     }
 
     public int[] opDeliveryStatus() throws IOException {
-        Response r = sendRecv(buildPayload(MSG_GET_DELIVERY_STATUS, null), 6000);
+        Response r = sendRecv(buildPayload(MSG_GET_DELIVERY_STATUS, null), OpClass.STATUS);
         ensureOk(r, "GET_DELIVERY_STATUS");
         return new int[]{
                 u16be(r.payload[2], r.payload[3]),
@@ -772,30 +804,42 @@ public class LcpLink {
     }
 
     // ===================== SEND / RECV =====================
-    private synchronized Response sendRecv(byte[] payload, int timeoutMs) throws IOException {
+    /** Point d'entrée classifié — TOUJOURS préférer cette forme à
+     *  sendRecv(payload, timeoutMs) directement, pour que le comportement
+     *  (queueable ou non, timeout) vienne d'un seul endroit (OpClass) et
+     *  pas d'une décision au cas par cas dans chaque méthode op*(). */
+    private Response sendRecv(byte[] payload, OpClass cls) throws IOException {
+        return sendRecv(payload, cls.queueable, cls.timeoutMs);
+    }
+
+    // Conservé pour opGetField(field, timeoutMs) — poll rapide, jamais
+    // queueable, mais avec un timeout ajustable au cas par cas (ex: scan,
+    // lecture décimales) plutôt que la valeur fixe d'OpClass.FAST.
+    private Response sendRecv(byte[] payload, int timeoutMs) throws IOException {
+        return sendRecv(payload, false, timeoutMs);
+    }
+
+    private synchronized Response sendRecv(byte[] payload, boolean queueable, int timeoutMs) throws IOException {
         if (closed) throw new TransportException("Transport closed");
         if (io == null) throw new TransportException("Transport null");
         if (!io.isOpen()) throw new TransportException("Transport not open");
 
-        final byte msg = (payload != null && payload.length > 0) ? payload[0] : 0;
-
         // ✅ FIX CRITIQUE (11 août 2026, demande Paul — trouvé via trace
-        // TX/RX brute directement dans le tab) — preuve DIRECTE que cette
-        // règle était fausse en pratique : Get Machine Status (0x23)
-        // recevait rc=0x26 de façon PERMANENTE, en boucle infinie, toutes
-        // les ~5s, sans jamais se résoudre — alors que le MÊME mécanisme
-        // (Check Request 0x7D) résolvait avec succès les rc=0x26 sur
-        // Set Field pendant le scan produits, dans le MÊME log, quelques
-        // secondes plus tôt. La requête en file pour un GET_* ne se
-        // résolvait jamais simplement parce que personne ne la sondait —
-        // pas parce que le registre restait "occupé" indéfiniment. Ajouté
-        // Get Machine Status et Get Delivery Status à la liste des
-        // commandes "queueable" — même traitement que Set Field/Issue
-        // Command, qui fonctionne de façon prouvée.
-        final boolean queueable = (msg == MSG_SET_FIELD) || (msg == MSG_ISSUE_COMMAND)
-                || (msg == MSG_GET_MACHINE_STATUS) || (msg == MSG_GET_DELIVERY_STATUS);
+        // TX/RX brute directement dans le tab) — preuve DIRECTE que Get
+        // Machine Status (0x23) pouvait rester bloqué en RC=0x26 EN BOUCLE
+        // INFINIE sans jamais se résoudre, alors que le même mécanisme
+        // (Check Request 0x7D) résolvait avec succès les RC=0x26 sur Set
+        // Field. D'où l'ajout de Get Machine Status/Get Delivery Status au
+        // comportement "queueable" (0x7D).
+        // ✅ REVU (13 août 2026) — ce "queueable" est maintenant décidé par
+        // OpClass, pas déduit du type de message ici. Voir OpClass pour la
+        // politique complète (FAST/STATUS/ACTION) et pourquoi GET_MACHINE_
+        // STATUS/GET_DELIVERY_STATUS sont "queueable" mais PLAFONNÉS à
+        // 2.5s au lieu de 6-8s — un GET busy ne doit plus pouvoir geler
+        // tout le node derrière lui.
 
         byte[] frame = encodeFrame(payload);
+        final byte msg = (payload != null && payload.length > 0) ? payload[0] : 0;
 
         t("TX: " + hexDump(frame));
         synchronized (ioLock) {
@@ -807,6 +851,7 @@ public class LcpLink {
         }
 
         long deadline = System.currentTimeMillis() + timeoutMs;
+        long startMs = System.currentTimeMillis();
         boolean queued = false;
         int lastQueued = -1;
         long nextCheck = 0L;
@@ -869,6 +914,16 @@ public class LcpLink {
                     // GET_* : busy/skip, pas de 0x7D
                     return new Response(rc, f.payload);
                 }
+                // ✅ AJOUTÉ (13 août 2026, demande Paul — "dans logcat on est
+                // en mesure de voir les appels ?") — jusqu'ici, seul t()
+                // (TraceSink "Afficher TX/RX") voyait ce moment. On logue
+                // aussi via android.util.Log, tag LcpLink — visible dans
+                // logcat même sans le trace sink, pour corréler avec les
+                // attentes LcpNodeLocks.
+                if (!queued) {
+                    android.util.Log.w("LcpLink", "sendRecv: msg=0x" + hex2(msg)
+                        + " → BUSY (rc=0x" + hex2(rc) + "), entrée en file (0x7D), timeoutMs=" + timeoutMs);
+                }
                 // Commande queueable : on passe en mode queued + 0x7D ASAP
                 queued = true;
                 lastQueued = rc;
@@ -884,13 +939,24 @@ public class LcpLink {
             if (queued && rc == RC_OK && f.payload.length >= 2 && (f.payload[1] & 0xFF) == RC_OK) {
                 byte[] norm = new byte[f.payload.length - 1];
                 System.arraycopy(f.payload, 1, norm, 0, norm.length);
+                android.util.Log.w("LcpLink", "sendRecv: msg=0x" + hex2(msg)
+                    + " → résolu après " + (System.currentTimeMillis() - startMs) + "ms en file");
                 return new Response(norm[0] & 0xFF, norm);
             }
 
+            if (queued) {
+                android.util.Log.w("LcpLink", "sendRecv: msg=0x" + hex2(msg)
+                    + " → résolu après " + (System.currentTimeMillis() - startMs) + "ms en file (rc direct)");
+            }
             return new Response(rc, f.payload);
         }
 
-        if (queued) throw new IOException("Queued timeout last=0x" + hex2(lastQueued));
+        if (queued) {
+            android.util.Log.e("LcpLink", "sendRecv: msg=0x" + hex2(msg)
+                + " → TIMEOUT après " + (System.currentTimeMillis() - startMs) + "ms en file (dernier rc=0x"
+                + hex2(lastQueued) + ", timeoutMs=" + timeoutMs + ")");
+            throw new IOException("Queued timeout last=0x" + hex2(lastQueued));
+        }
         throw new IOException("Timeout waiting LCP response");
     }
 
