@@ -1179,7 +1179,46 @@ catch (Exception ignored) {}
                 supervisionFuture = liveTickScheduler.scheduleWithFixedDelay(
                     () -> {
                         try {
-                            if (!isStopped()) requestLiveSample();
+                            if (isStopped()) return;
+                            // ✅ FIX (13 août 2026, demande Paul — "ce n'est pas
+                            // propre... le scan a été bloqué, le running flowing
+                            // aussi") — trouvé : ce superviseur faisait doublon
+                            // avec DeepLinkHandler.pollJobUntilDone(), qui sonde
+                            // déjà le statut à cadence similaire pour toute
+                            // livraison démarrée via deep link. Deux pollers
+                            // indépendants tapant le même registre = exactement
+                            // le problème déjà réglé le 7/12 août pour NodeScheduler
+                            // (voir RegisterSessionManager.tick()), réintroduit ici
+                            // par un chemin différent. Corrigé : si job.
+                            // nextAllowedReadMs a été posé récemment (signe qu'un
+                            // poller externe — api_deliveryJobGet()/pollJobUntilDone
+                            // — vient de lire le statut), on se retire ce tour-ci.
+                            // Ne s'active donc que pour les livraisons SANS poller
+                            // externe (boutons locaux du tab, sans deep link) —
+                            // exactement le trou qu'on voulait combler, sans dupliquer
+                            // le travail déjà fait ailleurs.
+                            // ✅ FIX (13 août 2026, demande Paul — "le scan
+                            // product aussi a lagué, scope plus large") —
+                            // trouvé : ce superviseur ne respectait pas
+                            // scanInProgress, contrairement au keep-alive de
+                            // NodeScheduler (RegisterSessionManager.tick(),
+                            // ligne ~1169) qui saute son tour pour la même
+                            // raison. Un scan matériel (16 slots × SET_FIELD/
+                            // GET_FIELD, chacun via le même verrou partagé)
+                            // qui tombe pendant que ce superviseur tourne
+                            // aurait ajouté un troisième contendant sur le
+                            // même verrou — même catégorie de problème que
+                            // le doublon avec pollJobUntilDone, réglé juste
+                            // au-dessus. Même garde ici, par cohérence.
+                            if (scanInProgress) return;
+                            ApiJob extJob = (lastActiveJobId != null) ? apiJobs.get(lastActiveJobId) : null;
+                            if (extJob != null && extJob.nextAllowedReadMs > 0) {
+                                long lastExternalReadMs = extJob.nextAllowedReadMs - API_JOB_MIN_POLL_MS;
+                                if (System.currentTimeMillis() - lastExternalReadMs < (SUPERVISION_INTERVAL_MS * 2)) {
+                                    return; // poller externe actif — on ne duplique pas
+                                }
+                            }
+                            requestLiveSample();
                         } catch (Exception ignored) {}
                     },
                     SUPERVISION_INTERVAL_MS, SUPERVISION_INTERVAL_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
