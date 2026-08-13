@@ -388,28 +388,22 @@ private void reproEvent(String level, String type, String message, JSONObject da
     // transition flow-off, donc RUNNING_FLOWING ne se refermait plus jamais
     // tout seul. Le garde anti-doublon (nextAllowedReadMs) reste actif —
     // seule l'I/O redondante est évitée, pas la logique de validation.
-    // ✅ RETIRÉ POUR DE BON (13 août 2026, demande Paul — "je veux juste que
-    // ça marche, regarde les impacts") — trouvé la vraie raison d'être de ce
-    // superviseur : combler un "trou" de supervision pour les livraisons
-    // démarrées via le bouton local (sans deep link). Ce trou n'a JAMAIS
-    // existé — confirmé dans le code : startNewDeliveryC() (bouton NEW_C)
-    // appelle main.lancerLivraisonDepuisTab() → deepLinkHandler.
-    // lancerLivraison() → pollJobUntilDone() — EXACTEMENT le même chemin
-    // qu'un vrai lien profond. Il n'existe aucune livraison, tab ou deep
-    // link, qui échappe à pollJobUntilDone(). supervisionFuture dupliquait
-    // donc GET_DELIVERY_STATUS sur CHAQUE livraison, pas un cas limite —
-    // confirmé par log réel : 94.83s pour un preset de 10L au lieu de la
-    // base saine 35-48s. Preuve que ce n'est pas nécessaire : la MÊME
-    // livraison s'est terminée correctement toute seule (pollJobUntilDone
-    // a son propre suivi flow-off/preset, indépendant de requestLiveSample()
-    // du controller) — sans supervisionFuture, la livraison aboutit quand
-    // même. Coût accepté : l'affichage du tab (LIVE:, boutons CONTINUER/
-    // TERMINER) ne se resynchronise plus automatiquement — un clic
-    // STATUS_B suffit pour rafraîchir. Piste de consolidation propre
-    // (brancher la validation directement dans api_deliveryJobGet(), sans
-    // deuxième lecture) documentée plus bas, pas implémentée — touche au
-    // bit retour d'air, mérite un test dédié avant d'y toucher.
-    private static final boolean SUPERVISION_ENABLED = false;
+    // ✅ RÉTABLI (13 août 2026, demande Paul — "le chemin a vraiment été
+    // brisé pour le running_flowing") — l'option A (tout retirer) était
+    // fausse. Preuve par log réel : sans supervisionFuture, TROIS clics
+    // TERMINER espacés sur plus de 2 minutes ont été nécessaires avant que
+    // la livraison réagisse, et la durée finale (230s) était PIRE que le
+    // 94.83s observé avec supervisionFuture actif. Cause : flowOffStable
+    // (qui débloque TERMINER et l'auto-terminaison) a besoin de PLUSIEURS
+    // appels de requestLiveSample() espacés de NO_FLOW_CONFIRM_MS=10s pour
+    // s'accumuler — pollJobUntilDone() seul ne fait jamais progresser ce
+    // flag côté DeliveryController, peu importe combien de temps il tourne.
+    // Sans un appelant périodique dédié, l'opérateur devient lui-même le
+    // seul générateur d'échantillons, un par clic — ingérable. La
+    // supervision automatique reste nécessaire ; la vraie consolidation
+    // (éliminer la double lecture proprement) reste à faire plus tard,
+    // documentée plus bas — pas en la retirant purement et simplement.
+    private static final boolean SUPERVISION_ENABLED = true;
 
     // ✅ Intervalle live tick — configurable selon profil registre
     // LCR-II (19200 baud): 200ms, LC3 (9600 baud): 800ms
@@ -1900,13 +1894,32 @@ try {
             try {
                 int delStatus;
                 int delCode;
-                try {
-                    int[] ds = lcpDeliveryStatus();
-                    delStatus = ds[0];
-                    delCode = ds[1];
-                } catch (Exception e) {
-                    liveSoftSkip("GET_DELIVERY_STATUS", e);
-                    return;
+                // ✅ AJOUTÉ (13 août 2026, demande Paul — consolidation)
+                // — si api_deliveryJobGet() vient de publier une lecture
+                // fraîche dans lastTick (elle tourne à ~900ms via
+                // pollJobUntilDone, déjà à jour pour toute livraison), on
+                // la réutilise au lieu de refaire notre propre
+                // GET_DELIVERY_STATUS quelques centaines de ms plus tard —
+                // même verrou, même registre, donnée qui n'a pas eu le
+                // temps de changer entre les deux. Fenêtre de fraîcheur
+                // (800ms) volontairement plus courte que API_JOB_MIN_POLL_MS
+                // (900ms) — si aucune lecture récente n'existe (livraison
+                // qui vient de démarrer, ou pollJobUntilDone en retard),
+                // on retombe sur notre propre lecture, sans jamais rester
+                // sans donnée.
+                LastTick freshTick = lastTick;
+                if (freshTick != null && (now - freshTick.tsMs) < 800) {
+                    delStatus = freshTick.delStatus;
+                    delCode = freshTick.delCode;
+                } else {
+                    try {
+                        int[] ds = lcpDeliveryStatus();
+                        delStatus = ds[0];
+                        delCode = ds[1];
+                    } catch (Exception e) {
+                        liveSoftSkip("GET_DELIVERY_STATUS", e);
+                        return;
+                    }
                 }
 
                 boolean ticket = (delCode & DC_TICKET_PENDING) != 0;
@@ -4208,6 +4221,21 @@ job.presetNetL_requested = presetNetL;
             // détection de négatif (et donc la correction) fonctionne correctement.
             double netL = n / scale;
             double grossL = g / scale;
+
+            // ✅ AJOUTÉ (13 août 2026, demande Paul — consolidation du
+            // chemin, confirmé sûr pour le retour d'air qui reste géré
+            // juste au-dessus, indépendamment) — publie cette lecture
+            // fraîche (delStatus/delCode/net/gross) dans lastTick, pour que
+            // requestLiveSample() (appelée par supervisionFuture) puisse la
+            // réutiliser au lieu de refaire sa propre lecture GET_DELIVERY_
+            // STATUS quelques centaines de ms plus tard. Élimine le doublon
+            // d'I/O à la source, sans toucher à la logique métier de ce job
+            // (retour d'air, ticket, cumul — tout ça reste inchangé,
+            // juste en dessous).
+            try {
+                publishTickIfChanged(netL, grossL,
+                    lastDevStatusKnown, lastPrnStatusKnown, ds[0], delCode, state);
+            } catch (Exception ignored) {}
 
             
 if (deliveryActive && !job.baselineCaptured) {
