@@ -381,10 +381,35 @@ private void reproEvent(String level, String type, String message, JSONObject da
     private final ExecutorService io = Executors.newSingleThreadExecutor();
 
     // ✅ Live tick automatique pendant RUNNING_FLOWING/PAUSED
-    private final java.util.concurrent.ScheduledExecutorService liveTickScheduler =
+    // ✅ FIX CRITIQUE (12 août 2026, demande Paul — "le running_flowing ne
+    // suit pas pendant, on est loin en criss") — trouvé, lié directement au
+    // correctif de réutilisation de session livré plus tôt aujourd'hui
+    // (trous #1/#2) : shutdown() (ligne ~1015) appelle
+    // liveTickScheduler.shutdownNow() — un ScheduledExecutorService FERMÉ
+    // ne peut JAMAIS être réutilisé, tout scheduleWithFixedDelay() futur
+    // échoue silencieusement. Avant aujourd'hui, chaque livraison recevait
+    // un DeliveryController neuf (scheduler jamais fermé) — mais la
+    // réutilisation de session (trous #1/#2) fait maintenant survivre le
+    // MÊME contrôleur entre deliveries, et si shutdown() a déjà été
+    // appelé une fois dans son cycle de vie, le tick rapide ne peut plus
+    // JAMAIS redémarrer pour ce contrôleur, malgré une planification
+    // par ailleurs correcte. Retiré "final" pour permettre la recréation
+    // — voir ensureLiveTickSchedulerAlive() ci-dessous.
+    private volatile java.util.concurrent.ScheduledExecutorService liveTickScheduler =
         java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
     private volatile java.util.concurrent.ScheduledFuture<?> liveTickFuture = null;
     private Listener listener;
+
+    /** ✅ AJOUTÉ (12 août 2026) — recrée le planificateur s'il a été fermé
+     *  par un shutdown() précédent sur ce même contrôleur (réutilisation de
+     *  session). Appelé juste avant toute tentative de planification du
+     *  tick rapide. */
+    private void ensureLiveTickSchedulerAlive() {
+        if (liveTickScheduler.isShutdown() || liveTickScheduler.isTerminated()) {
+            liveTickScheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+            liveTickFuture = null; // l'ancien future appartient à l'ancien scheduler — invalide ici
+        }
+    }
 
     private volatile DeliveryState state = DeliveryState.DISCONNECTED;
     private volatile int cachedDigits = -1;
@@ -1099,6 +1124,7 @@ catch (Exception ignored) {}
             // zéro explicite ICI, au vrai moment d'entrée en écoulement —
             // le tick rapide peut agir dès son tout premier appel.
             liveNextAllowedMs = 0L;
+            ensureLiveTickSchedulerAlive();
             if (liveTickFuture == null || liveTickFuture.isDone()) {
                 liveTickFuture = liveTickScheduler.scheduleWithFixedDelay(
                     () -> {
