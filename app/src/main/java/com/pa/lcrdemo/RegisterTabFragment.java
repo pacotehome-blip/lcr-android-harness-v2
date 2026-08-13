@@ -512,6 +512,24 @@ public class RegisterTabFragment extends Fragment {
     private boolean logRefreshPending = false;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService bg = Executors.newSingleThreadExecutor();
+
+    /** ✅ FIX (13 août 2026, demande Paul — inventaire complet suite au vrai
+     *  crash trouvé dans DeepLinkHandler/btExec, même patron ici) — bg se
+     *  ferme dans onDestroyView() (voir plus bas), et 23 usages répartis
+     *  dans ce fragment pourraient recevoir un RejectedExecutionException
+     *  si le Fragment est détruit pendant qu'une tâche est encore en vol
+     *  (rotation d'écran, tab fermé, navigation). Enveloppe unique —
+     *  capture spécifiquement cette exception, log plutôt que de planter
+     *  toute l'app. */
+    private void safeBg(Runnable task) {
+        try {
+            bg.execute(task);
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            android.util.Log.w("RegisterTabFragment", "safeBg: bg déjà fermé (Fragment probablement détruit "
+                + "pendant une tâche en vol) — tâche abandonnée proprement au lieu de planter l'app");
+        }
+    }
+
     // ✅ (ajouté 3 août 2026, suite ratés démarrage livraison / RUNNING_FLOWING absent sur
     // BD vierge) — thread dédié SÉPARÉ de bg pour la cascade complète de recherche de ticket
     // (Dataverse + scan backup). Le fix précédent (fullTicketSearchArmed) limite la FRÉQUENCE
@@ -812,7 +830,7 @@ public class RegisterTabFragment extends Fragment {
             // du controller le reflète aussi (bornée, best-effort) avant
             // d'appeler retournerAuWorkOrder(), pour que SA propre lecture
             // cache ne tombe plus sur un ticket_no vide.
-            bg.execute(() -> {
+            safeBg(() -> {
                 if (ticketNo != null && !ticketNo.trim().isEmpty() && controller != null) {
                     for (int i = 0; i < 6; i++) {
                         try {
@@ -1010,7 +1028,7 @@ public class RegisterTabFragment extends Fragment {
             // — ne doit JAMAIS s'additionner au total cumulé du WO dans
             // rafraichirCumulWo()). Les vraies valeurs résiduelles vont dans
             // delta_net_l/delta_gross_l, à des fins d'audit uniquement.
-            bg.execute(() -> {
+            safeBg(() -> {
                 try {
                     android.content.Context ctx = getContext();
                     if (ctx == null) return;
@@ -1458,7 +1476,7 @@ public class RegisterTabFragment extends Fragment {
             final String fTicketNo = ticketNo;
             final double fNet      = net;
             final double fGross    = gross;
-            bg.execute(() -> {
+            safeBg(() -> {
                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb = null;
                 try {
                     lcrDb = new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
@@ -1590,7 +1608,7 @@ public class RegisterTabFragment extends Fragment {
             // d'avoir interféré avec le push Dataverse existant. Réactiver une fois confirmé
             // que ce n'était pas la cause (ou corrigé autrement).
             if ("STATUS_B".equals(reason)) {
-                bg.execute(() -> checkAndPullMissingDeliveryDetail(reason));
+                safeBg(() -> checkAndPullMissingDeliveryDetail(reason));
             }
         } catch (Exception ignored) {}
     }
@@ -1663,7 +1681,7 @@ public class RegisterTabFragment extends Fragment {
                 // le thread UI), résultat logué clairement dans Support.
                 DeliveryController cFw = controller;
                 if (cFw != null) {
-                    bg.execute(() -> {
+                    safeBg(() -> {
                         String fw = null, productRev = null;
                         try { fw = cFw.getFirmwareVersion(); }
                         catch (Exception e) { LogBus.api(node, "[FIRMWARE] Lecture Field #60 ERR: " + safeMsg(e)); }
@@ -1747,7 +1765,7 @@ public class RegisterTabFragment extends Fragment {
                 // d'autres accès DB en cours (plusieurs mécanismes de reconnexion
                 // tournent en parallèle dans cette app), ce clic restait bloqué en
                 // silence — bouton visuellement enfoncé, aucune réaction, comme un gel.
-                bg.execute(() -> {
+                safeBg(() -> {
                     boolean showDialog = false;
                     String curWoNumBg = "";
                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow existingBg = null;
@@ -1844,7 +1862,7 @@ public class RegisterTabFragment extends Fragment {
                 // ✅ FIX (audit complet) : Reprint n'avait AUCUNE vérification IO
                 // avant d'agir. Ajouté pour cohérence.
                 if (!verifierIoAvantAction("REPRINT")) return;
-                bg.execute(() -> {
+                safeBg(() -> {
                     try {
                         if (tabTransportKey != null) {
                             MediaTransportManager.get(requireContext())
@@ -2240,7 +2258,7 @@ public class RegisterTabFragment extends Fragment {
                     android.util.Log.i("RegisterTabFragment", "connectThisRegister: transport pinné fermé "
                         + "(appel automatique, userInitiated=false) — dialogue sauté, tentative silencieuse");
                     final String tkPinnedFinal = tkPinned;
-                    bg.execute(() -> {
+                    safeBg(() -> {
                         try {
                             com.pa.lcr.lcp.MultiRegisterApiFacadeImpl facadeAuto =
                                 new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(requireActivity());
@@ -2324,7 +2342,7 @@ public class RegisterTabFragment extends Fragment {
                 android.util.Log.i("RegisterTabFragment", "connectThisRegister: appel automatique "
                     + "(userInitiated=false) — dialogue de diagnostic sauté, mais tentative de "
                     + "reconnexion silencieuse en arrière-plan (sans interférence visuelle)");
-                bg.execute(() -> {
+                safeBg(() -> {
                     try {
                         com.pa.lcr.lcp.MultiRegisterApiFacadeImpl facadeAuto =
                             new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(requireActivity());
@@ -2453,7 +2471,7 @@ public class RegisterTabFragment extends Fragment {
     private void validateHeaderAsync() {
         try { if (bg.isShutdown() || bg.isTerminated()) return; } catch (Exception ignored) {}
         try {
-            bg.execute(() -> {
+            safeBg(() -> {
                 try {
                     DeliveryController c = controller;
                     if (c == null) return;
@@ -2607,7 +2625,7 @@ public class RegisterTabFragment extends Fragment {
             // si un ticket parfaitement valide existe déjà dans la DB locale.
             // Filet de secours : si currentWoNum est vide, retrouver le dernier
             // WO livré pour CE #série précis (pas tous registres confondus).
-            bg.execute(() -> {
+            safeBg(() -> {
                 String woCheck = woForCheck;
                 String syncStatusTrouve = null;
                 if ((woCheck == null || woCheck.isEmpty()) && serialForFallback != null && !serialForFallback.isEmpty()) {
@@ -2724,7 +2742,7 @@ public class RegisterTabFragment extends Fragment {
 
         if (btnCustomPrint != null) btnCustomPrint.setEnabled(false);
 
-        bg.execute(() -> {
+        safeBg(() -> {
             try {
                 // Lire données depuis lastResultJson
                 String ticketNo = "", saleNo = "", serialId = "", woNum = "";
@@ -2840,7 +2858,7 @@ public class RegisterTabFragment extends Fragment {
         // Désactiver le bouton pendant le traitement
         if (btnRetourWO != null) btnRetourWO.setEnabled(false);
 
-        bg.execute(() -> {
+        safeBg(() -> {
             try {
                 // 1. Compiler le payload complet
                 String ticketNo   = "";
@@ -3359,7 +3377,7 @@ public class RegisterTabFragment extends Fragment {
     // supposition basée sur un compteur de timeouts passifs.
     // Tourne TOUJOURS en arrière-plan (jamais sur le thread UI).
     private void validerTransportEtRegistrePuis(String contexte, Runnable onSuccess) {
-        bg.execute(() -> {
+        safeBg(() -> {
             boolean ok = false;
             String raison = "";
             try {
@@ -3752,7 +3770,7 @@ public class RegisterTabFragment extends Fragment {
         if (btnRetourWO != null) btnRetourWO.setEnabled(false);
         // ✅ Poser le flag AVANT bg.execute — évite race avec onStateChanged(ENDED)
         cancelInProgress = true;
-        bg.execute(() -> {
+        safeBg(() -> {
             try {
                 // 1. Terminer la livraison ET confirmer via lecture réelle du registre
                 // (deliveryActive == false) — évite état transitoire au redémarrage
@@ -4002,7 +4020,7 @@ public class RegisterTabFragment extends Fragment {
         if (btnScanProducts != null) { btnScanProducts.setEnabled(false); btnScanProducts.setText("⏳ Scan..."); }
         final String serialId = (serialFromArgs != null && !serialFromArgs.trim().isEmpty()) ? serialFromArgs.trim() : null;
         ui.post(() -> { if (txtLive != null) txtLive.setText("🔍 Scan produits 1 / 16..."); });
-        bg.execute(() -> {
+        safeBg(() -> {
             // ✅ FIX CRITIQUE (11 août 2026, demande Paul — trouvé via
             // logcat : "Auto-scan produits" abandonnait complètement dès le
             // premier rc=0x26, alors que LcpLink documente explicitement
@@ -4077,7 +4095,7 @@ public class RegisterTabFragment extends Fragment {
 
     public void applierDescriptionsProduits(String serialId, int lcrNode) {
         if (serialId == null || serialId.isEmpty()) return;
-        bg.execute(() -> {
+        safeBg(() -> {
             try {
                 com.pa.lcr.lcp.storage.RegisterProductStore store = new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
                 java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> rows = store.getAll(serialId, lcrNode);
@@ -4151,7 +4169,7 @@ public class RegisterTabFragment extends Fragment {
                     postDeliveryPollActive = false;
                     return;
                 }
-                bg.execute(() -> {
+                safeBg(() -> {
                     double netCourant = -1.0, grossCourant = -1.0;
                     try {
                         if (controller != null) {
@@ -4207,7 +4225,7 @@ public class RegisterTabFragment extends Fragment {
     private void terminerPostLivraisonAvecVolumesReels(double netFinal, double grossFinal,
             String ticketNoOriginal) {
         if (controller == null) return;
-        bg.execute(() -> {
+        safeBg(() -> {
             try {
                 double netRef   = controller.netAtDeliveryEnd;
                 double grossRef = controller.grossAtDeliveryEnd;
@@ -4330,7 +4348,7 @@ public class RegisterTabFragment extends Fragment {
         lastCumulWoRefreshMs = nowCumul;
         final String wo = currentWoNum;
         LogBus.api(node, "[CUMUL-WO] recherche pour wo=" + wo);
-        bg.execute(() -> {
+        safeBg(() -> {
             double totalNet = 0, totalGross = 0;
             int count = 0;
             try {
@@ -4415,7 +4433,7 @@ public class RegisterTabFragment extends Fragment {
                 || stActuel == DeliveryState.ENDING) {
             return;
         }
-        bg.execute(() -> {
+        safeBg(() -> {
             try {
                 // ✅ FIX MAJEUR : api_tickSnapshot() ne contient JAMAIS de champ
                 // "ticket_no" (buildTickJsonSnapshot() expose seulement seq/net/gross/
@@ -4446,7 +4464,16 @@ public class RegisterTabFragment extends Fragment {
                 // ✅ (ajouté 3 août 2026) — cascade complète toujours autorisée ici
                 // (appel explicite/throttlé à 2s), mais isolée sur remoteSearchExecutor,
                 // jamais sur bg (voir commentaire sur le champ remoteSearchExecutor).
-                remoteSearchExecutor.execute(() -> lookupWoForTicket(ticketNo, true));
+                // ✅ FIX (13 août 2026, même raison que DeepLinkHandler.safeExecute) —
+                // remoteSearchExecutor fait une vraie recherche Dataverse (réseau),
+                // et se ferme dans onDestroyView() — même risque de plantage que
+                // btExec si le Fragment se détruit pendant que cette recherche est
+                // en vol.
+                try {
+                    remoteSearchExecutor.execute(() -> lookupWoForTicket(ticketNo, true));
+                } catch (java.util.concurrent.RejectedExecutionException rex) {
+                    android.util.Log.w("RegisterTabFragment", "WO-DETECT: remoteSearchExecutor déjà fermé — recherche abandonnée proprement");
+                }
             } catch (Exception e) {
                 LogBus.api(node, "[WO-DETECT] ERR: " + safeMsg(e));
             }
@@ -4903,7 +4930,7 @@ public class RegisterTabFragment extends Fragment {
     // ✅ Dialog liste de toutes les livraisons du WO
     private void afficherDetailLivraisonsWo() {
         if (currentWoNum == null || currentWoNum.isEmpty()) return;
-        bg.execute(() -> {
+        safeBg(() -> {
             try {
                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db =
                     new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());

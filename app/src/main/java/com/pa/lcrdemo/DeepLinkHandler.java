@@ -60,6 +60,33 @@ public class DeepLinkHandler {
         this.btExec        = btExec;
     }
 
+    /**
+     * ✅ FIX CRITIQUE (13 août 2026, demande Paul — crash réel confirmé dans
+     * un vrai logcat : "FATAL EXCEPTION: main —
+     * java.util.concurrent.RejectedExecutionException... rejected from
+     * ThreadPoolExecutor@...[Terminated...]" à DeepLinkHandler.java:2189,
+     * dans un callback MSAL onSuccess) — trouvé : MainActivity.onDestroy()
+     * appelle btExec.shutdownNow() (correctif du 6 août pour une vraie fuite
+     * de threads sur recréation d'Activity) — mais un callback asynchrone
+     * MSAL (vrai appel réseau, peut prendre plusieurs secondes) peut encore
+     * être EN VOL au moment où l'Activity se détruit (confirmé aujourd'hui :
+     * recréation d'Activity fréquente en arrière-plan). Quand ce callback
+     * revient et essaie safeExecute(), l'exécuteur est déjà fermé —
+     * crash complet de l'app au lieu d'un échec silencieux et géré.
+     * Enveloppe unique : tous les appels safeExecute() du fichier
+     * passent maintenant par ici — capture RejectedExecutionException
+     * spécifiquement, log un avertissement au lieu de planter, protège
+     * automatiquement tout futur appel ajouté à ce fichier aussi.
+     */
+    private void safeExecute(Runnable task) {
+        try {
+            btExec.execute(task);
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            android.util.Log.w(TAG, "safeExecute: btExec déjà fermé (Activity probablement recréée/détruite "
+                + "pendant un appel asynchrone en vol) — tâche abandonnée proprement au lieu de planter l'app");
+        }
+    }
+
     // =========================================================
     // Point d'entrée principal
     // =========================================================
@@ -191,7 +218,7 @@ public class DeepLinkHandler {
             // ✅ Résolution transport universel: USB / BT / TCP
             // Chercher d'abord un transport actif pour ce node/serial via RSM.
             // Si trouvé → utiliser directement. Si non → fallback BT si MAC fourni.
-            btExec.execute(() -> {
+            safeExecute(() -> {
                 try {
                     com.pa.lcr.lcp.RegisterSessionManager rsm =
                         com.pa.lcr.lcp.RegisterSessionManager.get(activity);
@@ -940,7 +967,7 @@ public class DeepLinkHandler {
         }
         final String mac = btMac.toUpperCase().trim();
 
-        btExec.execute(() -> {
+        safeExecute(() -> {
             try {
                 String transportKey = MediaTransportManager.btKey(mac);
                 MediaTransportManager mtm = activity.getMediaTransportManager();
@@ -1316,7 +1343,7 @@ public class DeepLinkHandler {
             com.pa.lcr.lcp.log.LogBus.err(node, "DeepLinkHandler.ActiveDeliveryStore.save[STARTED]", e);
         }
 
-        btExec.execute(() -> {
+        safeExecute(() -> {
             try {
                 final boolean[] deliveryDone = {false};
 
@@ -1439,7 +1466,7 @@ public class DeepLinkHandler {
                                 });
 
                                 // Logger dans SQLite + Dataverse
-                                btExec.execute(() -> {
+                                safeExecute(() -> {
                                     try {
                                         android.content.ContentValues cv =
                                             new android.content.ContentValues();
@@ -1539,7 +1566,7 @@ public class DeepLinkHandler {
                                 activity.showPage(0);
                             });
 
-                            btExec.execute(() -> {
+                            safeExecute(() -> {
                                 try {
                                     android.content.ContentValues cv =
                                         new android.content.ContentValues();
@@ -1708,7 +1735,7 @@ public class DeepLinkHandler {
             "Livraison terminée — WO=" + woNum + " extra=" + extraJson);
 
         // ✅ Écrire dans LcrDeliveryStatusDb (offline safe) avant retour FSM
-        btExec.execute(() -> {
+        safeExecute(() -> {
             try {
                 JSONObject d      = new JSONObject(extraJson != null ? extraJson : "{}");
                 JSONObject result = d.optJSONObject("result");
@@ -2186,7 +2213,7 @@ public class DeepLinkHandler {
                         // Token obtenu — l'état MSAL n'est plus en jeu, libérer le verrou
                         // avant l'envoi HTTP (qui peut prendre plusieurs secondes).
                         MsalTokenProvider.MSAL_SERIAL_LOCK.release();
-                        btExec.execute(() -> {
+                        safeExecute(() -> {
                             try {
                                 // ✅ FIX : patchSummaryConsolidated() au lieu de patchSummary()
                                 // — lit d'abord les livraisons locales fraîches (pas juste

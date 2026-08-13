@@ -5718,7 +5718,12 @@ private boolean ensureBtConnectPermission() {
 
         if (txtBtStatus != null) txtBtStatus.setText("BT : connecting…");
 
-        btExec.execute(() -> {
+        // ✅ FIX (13 août 2026, même raison que DeepLinkHandler.safeExecute —
+        // voir ce fichier) — protection identique par cohérence, même si le
+        // risque est plus faible ici (pas d'attente réseau entre le clic et
+        // cet appel).
+        try {
+            btExec.execute(() -> {
             BluetoothSocket s = null;
             try {
                 btDisconnect();
@@ -5788,6 +5793,9 @@ private boolean ensureBtConnectPermission() {
                 logMedia1("BT Connect: ÉCHEC " + dev.getAddress());
             }
         });
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            android.util.Log.w("MainActivity", "connectBt: btExec déjà fermé — tâche abandonnée proprement");
+        }
     }
 
     public synchronized void btDisconnect() {
