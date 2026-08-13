@@ -87,6 +87,10 @@ public class RegisterTabFragment extends Fragment {
      * Si serial + node correspondent → valider + afficher infos + bouton Lancer.
      */
     private volatile long lastCheckPendingMs = 0;
+    // ✅ AJOUTÉ (13 août 2026, demande Paul — "juste une fois est suffisant
+    // si on revient avec l'information") — même principe que
+    // lastCheckPendingMs ci-dessus, pour rechercherWoDepuisRegistre().
+    private volatile long lastWoLookupMs = 0;
 
     private void checkPendingDeliveryForThisRegister() {
         try {
@@ -1594,9 +1598,15 @@ public class RegisterTabFragment extends Fragment {
                 return;
             }
             ui.postDelayed(() -> {
-
-                  try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
-
+                // ✅ FIX (13 août 2026, demande Paul — "accélérer la
+                // validation... serial, lcrnode, ticket, status,
+                // ticket_pending, net, gross") — trouvé : requestLiveSample()
+                // était appelée deux fois de suite ici, collée par accident
+                // (copier-coller), juste après que requestStatus() (ligne
+                // ~1590) ait déjà lu delStatus/delCode/net/gross. Trois
+                // allers-retours quasi identiques au registre pour UNE
+                // activation de tab ou UN clic Status(B) — chacun en attente
+                // du même verrou partagé. Retiré le doublon.
                 try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
             }, 200);
 
@@ -2153,6 +2163,20 @@ public class RegisterTabFragment extends Fragment {
         // Si controller existe et transport prêt — pas besoin de recréer
         if (controller != null && tabMediaReady) {
             syncUiFromController();
+            // 🔜 AMÉLIORATION FUTURE (13 août 2026, discutée avec Paul —
+            // "continue à valider le tab") — les trois appels ci-dessous
+            // (validateHeaderAsync, runStatusBLikeButton, triggerWoDetection
+            // Throttled) déclenchent chacun leur propre séquence complète de
+            // lecture registre, tous convergeant sur CE même instant
+            // (TAB_REACTIVATED). Chacun a son propre anti-rebond individuel
+            // (empêche la répétition sur activations rapprochées), mais rien
+            // n'empêche les trois de partir ENSEMBLE sur une seule
+            // activation — trois lectures quasi simultanées au lieu d'une
+            // consolidée. Ajoutés à des moments différents du projet, chacun
+            // pour une bonne raison propre — pas un doublon accidentel comme
+            // ceux corrigés plus tôt aujourd'hui, donc pas fusionné ici sans
+            // un vrai log qui montre l'impact réel et confirme qu'aucune
+            // des trois ne dépend d'un effet de bord des deux autres.
             validateHeaderAsync();
             ui.postDelayed(() -> runStatusBLikeButton("TAB_REACTIVATED"), 250);
             triggerWoDetectionThrottled();
@@ -4433,6 +4457,18 @@ public class RegisterTabFragment extends Fragment {
                 || stActuel == DeliveryState.ENDING) {
             return;
         }
+        // ✅ AJOUTÉ (13 août 2026, demande Paul — "juste une fois est
+        // suffisant si on revient avec l'information") — onResume() (1200ms)
+        // ET onTabActivated() (3500ms) programment toutes les deux cet
+        // appel à l'ouverture du tab. Sans garde temporelle, les deux
+        // refaisaient la lecture registre complète (api_registerValidate,
+        // 5 lectures) à 2.3s d'écart pour arriver la plupart du temps à la
+        // même conclusion — le ticket_no n'a pas pu changer entre les deux
+        // si aucune livraison n'a démarré. Anti-rebond simple, même
+        // principe que lastCheckPendingMs plus haut.
+        long nowWo = System.currentTimeMillis();
+        if (nowWo - lastWoLookupMs < 2500) return;
+        lastWoLookupMs = nowWo;
         safeBg(() -> {
             try {
                 // ✅ FIX MAJEUR : api_tickSnapshot() ne contient JAMAIS de champ

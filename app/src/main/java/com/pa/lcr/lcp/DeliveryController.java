@@ -362,14 +362,20 @@ private void reproEvent(String level, String type, String message, JSONObject da
 
     // LIVE backoff
     private static final long LIVE_BASE_MS = 300;
-    // ✅ AJOUTÉ (13 août 2026, demande Paul — "il faut une supervision
-    // automatique dans tous les cas quand on est en running_flowing") —
-    // cadence du superviseur RUNNING_FLOWING/RUNNING_PAUSED. Plus lent que
-    // le tick live (200-800ms selon registre) parce qu'il fait un vrai
-    // GET_DELIVERY_STATUS complet (via requestLiveSample), pas juste
-    // net/gross — pas besoin d'une cadence aussi agressive pour détecter
-    // "flow arrêté depuis Xs" ou "preset atteint".
+    // ✅ AJOUTÉ (13 août 2026) — cadence du superviseur RUNNING_FLOWING/
+    // RUNNING_PAUSED (voir supervisionFuture plus bas).
     private static final long SUPERVISION_INTERVAL_MS = 2_500;
+    // ✅ DÉSACTIVÉ TEMPORAIREMENT (13 août 2026, demande Paul — "le tick est
+    // embrouillé encore, tu brises l'ensemble") — preuve dans le log de
+    // 15h53 : le martelage réel était sur msg=0x23 (GET_MACHINE_STATUS, 24
+    // occurrences), alors que supervisionFuture n'appelle que msg=0x28
+    // (GET_DELIVERY_STATUS, 2 occurrences, résolu en 238ms sans bloquer
+    // personne) — donc les chiffres ne l'incriminent pas directement. Mais
+    // par prudence, et pour retirer une variable pendant qu'on trace la
+    // vraie source du 0x23 (voir stack trace ajoutée dans LcpLink.sendRecv),
+    // on coupe ce superviseur pour l'instant. Remettre à true une fois la
+    // vraie cause confirmée et le tick stable en conditions réelles.
+    private static final boolean SUPERVISION_ENABLED = false;
 
     // ✅ Intervalle live tick — configurable selon profil registre
     // LCR-II (19200 baud): 200ms, LC3 (9600 baud): 800ms
@@ -1175,7 +1181,7 @@ catch (Exception ignored) {}
             // pour le détecter, opérateur obligé de forcer un STATUS_B pour
             // sortir. Ce scheduler tourne maintenant systématiquement dès
             // l'entrée en RUNNING_FLOWING, peu importe qui l'a démarrée.
-            if (supervisionFuture == null || supervisionFuture.isDone()) {
+            if (SUPERVISION_ENABLED && (supervisionFuture == null || supervisionFuture.isDone())) {
                 supervisionFuture = liveTickScheduler.scheduleWithFixedDelay(
                     () -> {
                         try {
@@ -2095,8 +2101,15 @@ try {
         final boolean deliveryActive;
 
         FullStatus(LcpLink.MachineStatus ms, int delStatus, int delCode) {
-            this.devStatus = ms.devStatus;
-            this.prnStatus = ms.prnStatus;
+            this(ms.devStatus, ms.prnStatus, delStatus, delCode);
+        }
+
+        // ✅ AJOUTÉ (13 août 2026) — variante sans appel GET_MACHINE_STATUS,
+        // pour readFullStatus() pendant RUNNING_FLOWING/RUNNING_PAUSED
+        // (voir commentaire dans readFullStatus()).
+        FullStatus(int devStatus, int prnStatus, int delStatus, int delCode) {
+            this.devStatus = devStatus;
+            this.prnStatus = prnStatus;
             this.delStatus = delStatus;
             this.delCode = delCode;
             this.ticketPending = (delCode & DC_TICKET_PENDING) != 0;
@@ -2106,6 +2119,27 @@ try {
     }
 
     private FullStatus readFullStatus(String ctx) throws Exception {
+        // ✅ FIX (13 août 2026, demande Paul — "il n'est pas nécessaire
+        // pendant le running_flowing") — confirmé : le script Python de
+        // référence (lcr_bench.py) suit une livraison complète sur ce même
+        // registre avec seulement GET_DELIVERY_STATUS + GET_FIELD, JAMAIS
+        // GET_MACHINE_STATUS — et n'a aucun trouble. Dans tous les logs
+        // d'aujourd'hui, sans exception, msg=0x23 (GET_MACHINE_STATUS) est
+        // la seule commande qui traîne systématiquement 2.5-4s — jamais
+        // 0x28/0x20. Pendant RUNNING_FLOWING/RUNNING_PAUSED, on n'a plus
+        // besoin d'interroger le registre pour devStatus/prnStatus : on
+        // réutilise la dernière valeur connue (lastDevStatusKnown/
+        // lastPrnStatusKnown, déjà mis à jour partout où readFullStatus()
+        // est appelée). delStatus/delCode restent lus en direct via
+        // GET_DELIVERY_STATUS — c'est ce champ, pas devStatus/prnStatus,
+        // qui porte la vraie logique de flow (retour d'air, ticket pending,
+        // deliveryActive/flowActive).
+        if (state == DeliveryState.RUNNING_FLOWING || state == DeliveryState.RUNNING_PAUSED) {
+            int[] ds = lcpDeliveryStatus();
+            int dev = (lastDevStatusKnown >= 0) ? lastDevStatusKnown : 0;
+            int prn = (lastPrnStatusKnown >= 0) ? lastPrnStatusKnown : 0;
+            return new FullStatus(dev, prn, ds[0], ds[1]);
+        }
         LcpLink.MachineStatus ms = lcpMachineStatus();
         int[] ds = lcpDeliveryStatus();
         return new FullStatus(ms, ds[0], ds[1]);
@@ -2117,7 +2151,18 @@ try {
     }
 
     private void doAlignOrRecoverFull() throws Exception {
-        FullStatus fs = readFullStatus("A/full");
+        // ✅ FIX (13 août 2026, demande Paul — "resolve doit nous ramener à
+        // l'état actuel du registre") — readFullStatus() saute
+        // GET_MACHINE_STATUS et réutilise le cache dès que l'état interne
+        // dit déjà RUNNING_FLOWING/RUNNING_PAUSED (fix du 13 août pour le
+        // tick/poll normal). Mais RESOLVE existe précisément pour les cas
+        // où l'état interne pourrait être FAUX — c'est tout son but,
+        // ramener la vraie vérité du registre. Utiliser le cache ici irait
+        // à l'encontre de sa raison d'être. Lecture forcée, toujours
+        // fraîche, peu importe l'état courant.
+        LcpLink.MachineStatus msForced = lcpMachineStatus();
+        int[] dsForced = lcpDeliveryStatus();
+        FullStatus fs = new FullStatus(msForced, dsForced[0], dsForced[1]);
 
         // keep last known dev/prn for B+ tick bus
         lastDevStatusKnown = fs.devStatus;
@@ -2133,7 +2178,13 @@ try {
 
         if (fs.ticketPending) {
             clearTicketPendingSafeForAlign();
-            fs = readFullStatus("A/full-after-ticket");
+            // ✅ FIX (13 août 2026) — même raison que plus haut : après
+            // résolution du ticket, RESOLVE doit revalider contre la vraie
+            // réponse du registre, pas contre un cache potentiellement
+            // périmé de l'état qu'on vient tout juste de corriger.
+            LcpLink.MachineStatus msForced2 = lcpMachineStatus();
+            int[] dsForced2 = lcpDeliveryStatus();
+            fs = new FullStatus(msForced2, dsForced2[0], dsForced2[1]);
 
             lastDevStatusKnown = fs.devStatus;
             lastPrnStatusKnown = fs.prnStatus;
@@ -3725,6 +3776,51 @@ job.presetNetL_requested = presetNetL;
         return ApiResult.ok("Terminate: 1 - END sent", data);
     }
     public ApiResult api_deliveryStatusB() {
+        // ✅ FIX (13 août 2026, demande Paul — "dans deliveryB sur ServerAPI,
+        // il a le devoir de valider s'il y a une opération en cours pour ne
+        // pas la courcircuiter") — trouvé : cette méthode faisait TOUJOURS
+        // sa propre séquence complète d'I/O (GET_DELIVERY_STATUS + 2x
+        // GET_FIELD + GET_MACHINE_STATUS via readFullStatus), peu importe si
+        // une livraison RUNNING_FLOWING/RUNNING_PAUSED était déjà activement
+        // suivie par le tick interne — en concurrence directe pour le même
+        // verrou, exactement l'isolation que RUNNING_FLOWING est censé
+        // avoir. Accessible via bouton STATUS_B ET via la route HTTP
+        // POST /v1/delivery/B (ApiServer) — donc n'importe quel appelant
+        // externe (FSM/PCF) pouvait aussi court-circuiter le flow.
+        // Corrigé : si une livraison est déjà en cours, on sert directement
+        // le dernier tick connu (lastTick, déjà publié par le tick interne
+        // 200ms) — ZÉRO appel au registre. Le tick reste la seule source
+        // pendant l'écoulement, comme demandé — ce court-circuit ne fait
+        // que LIRE ce qu'il a déjà produit, jamais l'interrompre.
+        if (state == DeliveryState.RUNNING_FLOWING || state == DeliveryState.RUNNING_PAUSED) {
+            LastTick t = lastTick;
+            if (t != null) {
+                JSONObject data = new JSONObject();
+                int delCode = t.delCode;
+                boolean deliveryActive = (delCode & DC_DELIVERY_ACTIVE) != 0;
+                boolean flowActive     = (delCode & DC_FLOW_ACTIVE) != 0;
+                boolean ticketPending  = (delCode & DC_TICKET_PENDING) != 0;
+
+                safeJsonPut(data, "deliveryActive", deliveryActive ? 1 : 0);
+                safeJsonPut(data, "flowActive",     flowActive ? 1 : 0);
+                safeJsonPut(data, "ticketPending",  ticketPending ? 1 : 0);
+                safeJsonPut(data, "net",            t.net);
+                safeJsonPut(data, "gross",           t.gross);
+                safeJsonPut(data, "net_l",           t.net);
+                safeJsonPut(data, "gross_l",         t.gross);
+                safeJsonPut(data, "decimals",        cachedDigits);
+                safeJsonPut(data, "delCode",         delCode);
+                safeJsonPut(data, "state",           state.name());
+                safeJsonPut(data, "ts_ms",           System.currentTimeMillis());
+                safeJsonPut(data, "source",          "cached_tick_no_io");
+                if (lastActiveJobId != null) safeJsonPut(data, "jobId", lastActiveJobId);
+                try {
+                    JSONObject tick = buildTickJsonSnapshot();
+                    safeJsonPut(data, "tick", tick);
+                } catch (Exception ignored2) {}
+                return ApiResult.ok("StatusB: 1 - OK (cached, livraison en cours)", data);
+            }
+        }
         try {
             // ✅ Lecture directe via withLcpLock (verrou partagé par node) — même verrou que UI
             // PAS de requestStatus()/requestLiveSample() qui lancent des threads async
@@ -3968,6 +4064,31 @@ job.presetNetL_requested = presetNetL;
         }
     }
     
+    // 🔜 AMÉLIORATION FUTURE (13 août 2026, discutée avec Paul — "un seul
+    // chemin pour une livraison") — cette méthode fait sa propre lecture
+    // GET_DELIVERY_STATUS (via lcpDeliveryStatus() plus bas), séparée du
+    // tick interne 200ms (liveTickScheduler/requestLiveSampleFast) qui ne
+    // lit que net/gross. Deux threads indépendants (celui-ci via
+    // DeepLinkHandler.pollJobUntilDone(), et le tick) tapent donc la même
+    // instance LcpLink pendant RUNNING_FLOWING — la seule source de
+    // contention automatique restante après les fixes du 13 août
+    // (GET_MACHINE_STATUS retiré du flow, api_deliveryStatusB() servie
+    // depuis lastTick, boucle clearTicketPendingSafeForAlign() bypassée,
+    // supervisionFuture désactivé).
+    //
+    // Piste envisagée, PAS implémentée — nécessite un test dédié avec une
+    // vraie livraison qui coule, car ça touche au bit retour d'air
+    // (delStatus & 0x0040, DS_TOO_MANY_PULSER_REVERSALS) : faire du tick
+    // interne la SEULE source qui lit GET_DELIVERY_STATUS pendant
+    // RUNNING_FLOWING/RUNNING_PAUSED (à sa cadence, publié dans lastTick),
+    // et faire lire api_deliveryJobGet()/pollJobUntilDone() depuis lastTick
+    // au lieu de refaire leur propre lecture — même principe déjà appliqué
+    // à api_deliveryStatusB() le 13 août. Bénéfice attendu : élimine le
+    // deuxième thread compétiteur pour le verrou LcpLink pendant le flow,
+    // et rafraîchirait probablement le bit retour d'air PLUS vite (cadence
+    // du tick) plutôt que moins vite. Ne réglerait PAS l'attente elle-même
+    // quand le registre répond busy — juste le nombre de compétiteurs qui
+    // attendent.
     public ApiResult api_deliveryJobGet(String jobId) {
         ApiJob job;
         synchronized (apiJobs) { job = apiJobs.get(jobId); }
