@@ -3974,6 +3974,11 @@ private void setupTabsTop() {
     // explorée aujourd'hui — à faire en prochaine incrémentation plutôt que
     // deviner à l'aveugle en fin de session.
     private volatile long lastWatchdogProbeMs = 0L;
+    // ✅ AJOUTÉ (14 août 2026) — dernier #série/node connu sur USB, capturé
+    // au moment du détachement, pour permettre au Snackbar "Connecter" de
+    // chercher CE registre précis à travers tous les médias candidats.
+    private volatile String lastKnownSerialUsb = null;
+    private volatile int lastKnownNodeUsb = 250;
     private static final long WATCHDOG_PROBE_COOLDOWN_MS = 15_000;
 
     /** Appelée quand un DeliveryController signale une vraie déconnexion
@@ -5033,6 +5038,40 @@ private void scanUsb() {
                 updateRegisterTabLabel(k,
                     tabLabelOf("USB(OFF)", s.node, s.serialId, s.isLc3)
                     + (s.qtySuffix != null ? s.qtySuffix : ""));
+                if (s.serialId != null && !s.serialId.trim().isEmpty()) {
+                    lastKnownSerialUsb = s.serialId;
+                    lastKnownNodeUsb = s.node;
+                }
+            }
+        } catch (Exception ignored) {}
+
+        // ✅ CORRIGÉ (14 août 2026, demande Paul — "on doit chercher le
+        // registre au travers de tous les média candidats") — sondait
+        // seulement USB. Réutilise probeKnownTransportsForLostRegister()
+        // (déjà construite plus tôt aujourd'hui) — couvre USB + tous les BT
+        // appairés + tous les TCP connus, pas juste le transport qui vient
+        // de se détacher. Le fait de partir précisément de "média détaché"
+        // (peu importe lequel) plutôt que "USB détaché" a du sens
+        // seulement si la recherche qui suit couvre vraiment tous les
+        // candidats, pas un seul.
+        try {
+            android.view.View root = findViewById(android.R.id.content);
+            if (root != null) {
+                final String serialPourRecherche = lastKnownSerialUsb;
+                final int nodePourRecherche = lastKnownNodeUsb;
+                com.google.android.material.snackbar.Snackbar.make(root,
+                        "Média détaché ou non-disponible — reconnecter le registre?",
+                        com.google.android.material.snackbar.Snackbar.LENGTH_LONG)
+                    .setAction("Connecter", v -> {
+                        if (serialPourRecherche == null || serialPourRecherche.trim().isEmpty()) {
+                            android.widget.Toast.makeText(this,
+                                    "#série inconnu — impossible de chercher automatiquement",
+                                    android.widget.Toast.LENGTH_SHORT).show();
+                            return;
+                        }
+                        probeKnownTransportsForLostRegister(serialPourRecherche, nodePourRecherche, "USB");
+                    })
+                    .show();
             }
         } catch (Exception ignored) {}
 
