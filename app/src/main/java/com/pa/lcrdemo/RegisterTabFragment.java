@@ -501,6 +501,7 @@ public class RegisterTabFragment extends Fragment {
                 if (Boolean.TRUE.equals(step.call())) {
                     initSectionStatus.put(section, InitSectionStatus.OK);
                     initSectionLog(section, idx, "OK (tentative " + attempt + "/" + INIT_MAX_RETRIES + ")");
+                    pauseLisibiliteGuide();
                     return true;
                 }
             } catch (Exception e) {
@@ -514,7 +515,23 @@ public class RegisterTabFragment extends Fragment {
             initSectionStatus.put(section, InitSectionStatus.ECHEC);
             initSectionLog(section, idx, "ÉCHEC après " + INIT_MAX_RETRIES + " tentatives");
         }
+        pauseLisibiliteGuide();
         return false;
+    }
+
+    // ✅ AJOUTÉ (14 août 2026, demande Paul — "je ne vois pas les écrans
+    // pour la transition entre les étapes") — les sections 2 à 5 ne font
+    // que DÉCLENCHER du travail async (autoScanProduitsSiNecessaire,
+    // requestLiveSample, rechercherWoDepuisRegistre — toutes fire-and-
+    // forget, retournent true immédiatement sans attendre la vraie
+    // réponse). Une fois REGISTRE connecté, toute la séquence défilait en
+    // moins de 50ms — le texte du guide changeait trop vite pour être lu,
+    // même si le mécanisme fonctionnait correctement. Pause de lisibilité
+    // pure, SANS ralentir le vrai travail (déjà lancé en async au moment
+    // où cette pause commence) — on est déjà sur le thread dédié
+    // (safeBg), jamais l'UI, donc sans risque de geler l'affichage.
+    private void pauseLisibiliteGuide() {
+        try { Thread.sleep(500); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
     }
 
     /** Point d'entrée unique — remplace les postDelayed dispersés de
