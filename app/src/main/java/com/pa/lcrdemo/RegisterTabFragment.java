@@ -1021,6 +1021,20 @@ public class RegisterTabFragment extends Fragment {
         public void onLiveStatus(String liveText) {
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
+                // ✅ AJOUTÉ (14 août 2026, demande Paul — "valider les
+                // connexions au média... sonder les autres transports") —
+                // sur une vraie déconnexion (shutdown réel du controller,
+                // pas juste un changement d'état normal), déclenche le
+                // chien de garde côté MainActivity.
+                if (liveText != null && liveText.contains("DISCONNECTED")) {
+                    try {
+                        MainActivity main = (MainActivity) getActivity();
+                        if (main != null && serialFromArgs != null && controller != null) {
+                            main.probeKnownTransportsForLostRegister(
+                                    serialFromArgs, getNodeFromArgs(), tabTransportKey);
+                        }
+                    } catch (Exception ignored) {}
+                }
                 // ✅ AJOUTÉ (14 août 2026, demande Paul — "il faut voir qu'il
                 // y a un démarrage de livraison quand on arrive à
                 // running_flowing"). Bref réaffichage, seulement sur la
