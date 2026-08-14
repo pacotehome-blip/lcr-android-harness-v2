@@ -2893,6 +2893,44 @@ private void setupTabsTop() {
         } catch (Exception ignored) {}
     }
 
+    // ✅ AJOUTÉ (14 août 2026, demande Paul — "faire un reset média dans le
+    // cas que transport est en mode zombie afin de reconnecter dessus") —
+    // dispatcher générique de reset selon le type de transport. Réutilise
+    // les mécanismes de nettoyage déjà existants (resetUsbState pour USB,
+    // MediaTransportManager.onBtDisconnected/onTcpDisconnected pour BT/TCP)
+    // — pas de nouvelle logique de fermeture de socket, juste le bon
+    // déclencheur selon le préfixe de la clé de transport.
+    // ✅ AJOUTÉ (14 août 2026) — cooldown par transport pour éviter de
+    // réinitialiser en boucle un même transport zombie à chaque
+    // rafraîchissement (refreshOneTabMediaStatus peut être appelée souvent).
+    private final java.util.Map<String, Long> zombieResetCooldown = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final long ZOMBIE_RESET_COOLDOWN_MS = 20_000;
+
+    private void resetZombieTransport(String transportKey, String reason) {
+        if (transportKey == null || transportKey.isEmpty()) return;
+        long now = System.currentTimeMillis();
+        Long last = zombieResetCooldown.get(transportKey);
+        if (last != null && (now - last) < ZOMBIE_RESET_COOLDOWN_MS) return;
+        zombieResetCooldown.put(transportKey, now);
+        android.util.Log.w("MainActivity", "resetZombieTransport: " + transportKey + " — " + reason);
+        try { com.pa.lcr.lcp.log.LogBus.ui(0, "[MEDIA][RESET-ZOMBIE] " + transportKey + " — " + reason); } catch (Exception ignored) {}
+        try {
+            if (transportKey.startsWith("USB")) {
+                resetUsbState("ZOMBIE:" + reason);
+            } else if (transportKey.startsWith("BT:")) {
+                String mac = transportKey.substring(3);
+                mediaTransportManager.onBtDisconnected(mac, "ZOMBIE:" + reason);
+            } else if (transportKey.startsWith("TCP:")) {
+                String[] parts = transportKey.substring(4).split(":");
+                if (parts.length == 2) {
+                    mediaTransportManager.onTcpDisconnected(parts[0], Integer.parseInt(parts[1]), "ZOMBIE:" + reason);
+                }
+            }
+        } catch (Exception e) {
+            android.util.Log.w("MainActivity", "resetZombieTransport: échec — " + e.getMessage());
+        }
+    }
+
     private void refreshOneTabMediaStatus(String tabKey) {
         if (tabKey == null) return;
         TabSpec spec = tabsByKey.get(tabKey);
@@ -2922,6 +2960,20 @@ private void setupTabsTop() {
             }
         } catch (Exception ignored) {}
         updateTabRefreshIconTint(tabKey, registreOk);
+
+        // ✅ AJOUTÉ (14 août 2026, demande Paul — "reset média en mode
+        // zombie") — signature exacte du zombie : le transport se dit
+        // "ready" (le port/socket existe encore, isTransportReady()==true)
+        // MAIS le registre ne répond plus (DISCONNECTED). C'est précisément
+        // le cas du "port périmé" déjà documenté ailleurs (5 août,
+        // api_openPingUsb) — une référence en mémoire qui survit à une
+        // connexion réellement morte. Reset immédiat pour libérer la
+        // référence et permettre une vraie reconnexion au prochain essai —
+        // sans ça, tout nouvel essai réutiliserait aveuglément la même
+        // référence morte.
+        if (ready && !registreOk) {
+            resetZombieTransport(spec.transportKey, "ready=true mais registre DISCONNECTED (tabKey=" + tabKey + ")");
+        }
 
         try {
             Fragment f = getSupportFragmentManager().findFragmentByTag("regtab_" + tabKey);
@@ -3252,6 +3304,30 @@ private void setupTabsTop() {
                 // exigeait oldSpec.isLc3 == isLc3 — les deux onglets
                 // persistaient indéfiniment côte à côte pour LE MÊME registre.
                 android.util.Log.i("MainActivity", "upsertRegisterTabFromScan: MIGRATION — suppression de " + oldTabKey);
+                // 🔜 AMÉLIORATION FUTURE (14 août 2026, discutée avec Paul —
+                // "si on perd la communication... sans oublier la livraison
+                // du deeplink") — la migration ci-dessous (suppression de
+                // l'ancien tab + création d'un nouveau) fonctionne déjà
+                // correctement pour REPEUPLER l'affichage (onTabActivated()
+                // relance runInitSequence() sur le nouveau tab — voir
+                // RegisterTabFragment). MAIS deux trous restent, pas encore
+                // comblés :
+                // 1) RIEN ne détecte activement une perte de communication
+                //    pour déclencher cette migration — elle dépend d'un
+                //    événement passif (USB branché, sonde BT) qui dit "ce
+                //    registre est ici maintenant". Sans chien de garde qui
+                //    sonde les autres transports connus sur perte de comm
+                //    confirmée (handleIoFailure), le tab reste figé, affiché,
+                //    avec Live bloqué en attente et aucun ticket_number.
+                // 2) Si une livraison deep link est en cours (pollJobUntilDone
+                //    tourne sur l'ANCIEN controller/transport), rien ne
+                //    garantit aujourd'hui que cette livraison est reprise ou
+                //    reconnectée sur le NOUVEAU transport après migration —
+                //    le thread de poll pourrait rester accroché à une
+                //    instance morte pendant que le nouveau tab repart à zéro,
+                //    sans savoir qu'un job était en vol. Il faut transférer
+                //    le jobId/l'état actif (ActiveDeliveryStore) vers le
+                //    nouveau tab, pas juste recréer l'affichage.
                 removeTabAndFragment(oldTabKey, "migrated to " + newTabKey);
             }
         }
@@ -3886,6 +3962,108 @@ private void setupTabsTop() {
     // connexion directe à ce node précis (comme connectManualWithIo pour BT).
     private void connectTcpTo(final String ip, final int port) {
         connectTcpTo(ip, port, -1);
+    }
+
+    // ✅ AJOUTÉ (14 août 2026, demande Paul — "valider les connexions au
+    // média... on doit sonder les autres transports disponibles") — chien de
+    // garde sur perte de communication confirmée. Volet TCP construit,
+    // réutilise connectTcpTo() déjà existante et testée (pas de nouvelle
+    // logique de socket). Volet BT/USB PAS construit ici — nécessite
+    // l'énumération des appareils appairés (BluetoothAdapter) et des
+    // périphériques USB attachés, une surface différente que je n'ai pas
+    // explorée aujourd'hui — à faire en prochaine incrémentation plutôt que
+    // deviner à l'aveugle en fin de session.
+    private volatile long lastWatchdogProbeMs = 0L;
+    private static final long WATCHDOG_PROBE_COOLDOWN_MS = 15_000;
+
+    /** Appelée quand un DeliveryController signale une vraie déconnexion
+     *  (shutdown réel, pas juste un changement d'état normal). Sonde les
+     *  transports disponibles pour retrouver le même registre (#série)
+     *  ailleurs, et déclenche la migration existante (upsertRegisterTabFromScan)
+     *  si trouvé. */
+    // ✅ RÉÉCRIT (14 août 2026, demande Paul — "elle s'appelle démarrer la
+    // validation") — la première version ne couvrait que TCP. Trouvé la
+    // vraie fonction déjà existante dans Configure ("Démarrer la
+    // validation" / validerCandidats() + validerUnCandidatLectureSeule()) —
+    // elle énumère DÉJÀ USB + tous les BT appairés + tous les TCP connus,
+    // et fait une VRAIE sonde (connexion réelle, lecture du #série),
+    // lecture seule et sécuritaire. Réutilisée ici telle quelle plutôt que
+    // de réinventer une deuxième énumération partielle.
+    public void probeKnownTransportsForLostRegister(String serial, int node, String deadTransportKey) {
+        if (serial == null || serial.trim().isEmpty()) return;
+        long now = System.currentTimeMillis();
+        if (now - lastWatchdogProbeMs < WATCHDOG_PROBE_COOLDOWN_MS) {
+            android.util.Log.i("MainActivity", "probeKnownTransportsForLostRegister: cooldown actif, ignoré");
+            return;
+        }
+        lastWatchdogProbeMs = now;
+        android.util.Log.i("MainActivity", "probeKnownTransportsForLostRegister: recherche de #série=" + serial
+                + " node=" + node + " ailleurs que " + deadTransportKey);
+        try { com.pa.lcr.lcp.log.LogBus.ui(0, "[MEDIA][TENTATIVE] Recherche #série=" + serial
+                + " sur un autre transport que " + deadTransportKey); } catch (Exception ignored) {}
+        scanExec.execute(() -> {
+            java.util.List<String> candidats = new java.util.ArrayList<>();
+            candidats.add("USB");
+            try {
+                for (BluetoothDevice d : btBonded) {
+                    if (d == null) continue;
+                    candidats.add("BT:" + d.getAddress());
+                }
+            } catch (Exception ignored) {}
+            try {
+                com.pa.lcr.lcp.storage.KnownTcpDeviceStore store =
+                        new com.pa.lcr.lcp.storage.KnownTcpDeviceStore(this);
+                org.json.JSONArray known = store.listKnown();
+                for (int i = 0; i < known.length(); i++) {
+                    org.json.JSONObject o = known.optJSONObject(i);
+                    if (o == null) continue;
+                    String ip = o.optString("ip", "");
+                    int port = o.optInt("port", 0);
+                    if (!ip.isEmpty()) candidats.add("TCP:" + ip + ":" + port);
+                }
+            } catch (Exception ignored) {}
+
+            for (String candidatKey : candidats) {
+                if (candidatKey.equals(deadTransportKey)) continue; // même transport mort, pas la peine
+                String resultat;
+                try {
+                    resultat = validerUnCandidatLectureSeule(candidatKey);
+                } catch (Exception e) {
+                    try { com.pa.lcr.lcp.log.LogBus.err(0, "MainActivity.probeKnownTransportsForLostRegister",
+                            new Exception(candidatKey + " — " + e.getMessage())); } catch (Exception ignored) {}
+                    continue;
+                }
+                try { com.pa.lcr.lcp.log.LogBus.ui(0, "[MEDIA][TENTATIVE] " + candidatKey + " — "
+                        + (resultat != null ? resultat.replace("\n", " ") : "aucun résultat")); } catch (Exception ignored) {}
+                if (resultat == null || !resultat.startsWith("✅")) continue;
+                int idx = resultat.indexOf("#série=");
+                if (idx < 0) continue;
+                String foundSerial = resultat.substring(idx + 7).split("[ (]")[0].trim();
+                if (!serial.trim().equalsIgnoreCase(foundSerial)) continue;
+
+                android.util.Log.i("MainActivity", "probeKnownTransportsForLostRegister: trouvé #série=" + serial
+                        + " sur " + candidatKey + " — déclenchement de la migration");
+                try { com.pa.lcr.lcp.log.LogBus.ui(0, "[MEDIA][CONNEXION] #série=" + serial
+                        + " retrouvé sur " + candidatKey + " — migration en cours"); } catch (Exception ignored) {}
+                runOnUiThread(() -> {
+                    if (candidatKey.startsWith("TCP:")) {
+                        String[] parts = candidatKey.substring(4).split(":");
+                        if (parts.length == 2) connectTcpTo(parts[0], Integer.parseInt(parts[1]), node);
+                    } else if (candidatKey.startsWith("BT:")) {
+                        String mac = candidatKey.substring(3);
+                        try { onConfigureMediaActivated(MediaTransportManager.btKey(mac), "WATCHDOG_FOUND_ELSEWHERE"); }
+                        catch (Exception ignored) {}
+                    } else if (candidatKey.equals("USB")) {
+                        try { onConfigureMediaActivated(MediaTransportManager.KEY_USB, "WATCHDOG_FOUND_ELSEWHERE"); }
+                        catch (Exception ignored) {}
+                    }
+                });
+                return; // un seul candidat à la fois
+            }
+            android.util.Log.i("MainActivity", "probeKnownTransportsForLostRegister: aucun candidat trouvé pour #série=" + serial);
+            try { com.pa.lcr.lcp.log.LogBus.ui(0, "[MEDIA][ÉCHEC] #série=" + serial
+                    + " introuvable sur les transports disponibles"); } catch (Exception ignored) {}
+        });
     }
 
     private void connectTcpTo(final String ip, final int port, final int expectedNode) {

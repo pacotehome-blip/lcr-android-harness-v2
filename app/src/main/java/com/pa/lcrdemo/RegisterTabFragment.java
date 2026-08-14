@@ -398,6 +398,36 @@ public class RegisterTabFragment extends Fragment {
     private UsbManager usbManager;
     private DeliveryController controller;
 
+    // ✅ AJOUTÉ (14 août 2026, demande Paul — "un guide pour le livreur pour
+    // pas qu'il se demande qu'est-ce qui arrive") — léger, volontairement :
+    // un seul TextView, pas de librairie d'animation, juste .animate().alpha()
+    // natif (quasi gratuit). Réutilise les points de sortie déjà en place
+    // (initSectionLog) — pas un système séparé, juste un deuxième récepteur
+    // du même signal.
+    private android.widget.TextView txtInitGuide;
+
+    private void showInitGuide(String texteAmical) {
+        if (ui == null) return;
+        ui.post(() -> {
+            if (txtInitGuide == null || !isAdded()) return;
+            txtInitGuide.setText(texteAmical);
+            txtInitGuide.animate().cancel();
+            txtInitGuide.setVisibility(View.VISIBLE);
+            txtInitGuide.animate().alpha(1f).setDuration(150).start();
+        });
+    }
+
+    private void fadeOutInitGuide() {
+        if (ui == null) return;
+        ui.postDelayed(() -> {
+            if (txtInitGuide == null || !isAdded()) return;
+            txtInitGuide.animate().cancel();
+            txtInitGuide.animate().alpha(0f).setDuration(400)
+                    .withEndAction(() -> { if (txtInitGuide != null) txtInitGuide.setVisibility(View.GONE); })
+                    .start();
+        }, 600); // petite pause pour que le dernier message soit lisible avant de s'effacer
+    }
+
     // ✅ AJOUTÉ (13 août 2026, demande Paul — "on fait les sections") —
     // séquence d'initialisation en cascade : 6 sections, dans l'ordre,
     // chacune avec retry (3 tentatives) avant d'avancer, remplace les
@@ -425,6 +455,24 @@ public class RegisterTabFragment extends Fragment {
         InitSectionStatus st = initSectionStatus.get(section);
         android.util.Log.i("InitSeq", "[INIT " + idx + "/6] " + section.name() + " — " + result
                 + " (statut=" + (st != null ? st.name() : "?") + ")");
+        // ✅ AJOUTÉ (14 août 2026) — même signal, texte amical pour le
+        // chauffeur au lieu du format technique du log.
+        String amical;
+        switch (section) {
+            case REGISTRE: amical = "Connexion au registre..."; break;
+            case PRODUIT: amical = "Vérification du produit..."; break;
+            case PRESET: amical = "Préparation du preset..."; break;
+            case LIVE: amical = "Lecture des données en direct..."; break;
+            case RETOUR_WO: amical = "Recherche du bon de travail..."; break;
+            case ACTION: amical = "Prêt."; break;
+            default: amical = "Préparation..."; break;
+        }
+        if (st == InitSectionStatus.OK || st == InitSectionStatus.DEGRADE) {
+            showInitGuide(amical);
+        }
+        if (section == InitSection.ACTION && st == InitSectionStatus.OK) {
+            fadeOutInitGuide(); // CONNECTED READY — on efface pour laisser la place au démarrage
+        }
     }
 
     /** true si TOUTES les sections requises sont approuvées (PRODUIT/PRESET
@@ -471,8 +519,23 @@ public class RegisterTabFragment extends Fragment {
 
     /** Point d'entrée unique — remplace les postDelayed dispersés de
      *  onTabActivated(). Tourne sur un thread dédié (safeBg), jamais l'UI. */
+    // ✅ AJOUTÉ (14 août 2026, demande Paul — trouvé par log réel : la
+    // séquence tournait DEUX FOIS coup sur coup, 09:50:16.741 puis
+    // 09:50:18.771, déclenchée par deux événements d'activation du tab
+    // distincts (resolveIfActiveMatches + onConfigureMediaActivated). Même
+    // catégorie de doublon que ceux réglés ailleurs aujourd'hui — un simple
+    // flag empêche une deuxième exécution de partir tant que la première
+    // n'est pas terminée.
+    private final java.util.concurrent.atomic.AtomicBoolean initSequenceRunning =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
     private void runInitSequence() {
+        if (!initSequenceRunning.compareAndSet(false, true)) {
+            android.util.Log.i("InitSeq", "runInitSequence: déjà en cours, appel ignoré");
+            return;
+        }
         safeBg(() -> {
+          try {
             // 1) REGISTRE — connecté, accessible. Dépendance : rien après ne
             // doit avancer si ça échoue (pas de allowDegraded).
             boolean registreOk = runSectionWithRetry(InitSection.REGISTRE, 1, false, () -> {
@@ -498,6 +561,24 @@ public class RegisterTabFragment extends Fragment {
                             new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
                     try {
                         resolved = store.resolveProduct(serial, null, produitDeepLink);
+                        // ✅ FIX (14 août 2026, demande Paul — "le scan produit
+                        // est important") — resolveProduct() ne fait qu'une
+                        // comparaison de texte exacte (insensible à la casse,
+                        // déjà le cas via norm()) entre le nom du deep link et
+                        // la description stockée. Si la description réelle du
+                        // registre n'est pas littéralement "propane" (un code,
+                        // un libellé différent), ça échoue même si le produit
+                        // EST du propane. findPropaneNoteIdx() existe
+                        // justement pour ce cas — il utilise le flag isPropane
+                        // (déterminé autrement lors du scan), pas le texte.
+                        // Utilisé en repli quand le nom du deep link mentionne
+                        // le propane et que la correspondance textuelle a
+                        // échoué.
+                        if (resolved == null && produitDeepLink != null
+                                && produitDeepLink.trim().toLowerCase(java.util.Locale.ROOT).contains("propane")) {
+                            int propaneIdx = store.findPropaneNoteIdx(serial);
+                            if (propaneIdx >= 0) resolved = store.findByNoteIdx(serial, propaneIdx);
+                        }
                     } catch (Exception ignored) {
                     } finally {
                         try { store.close(); } catch (Exception ignored) {}
@@ -538,6 +619,9 @@ public class RegisterTabFragment extends Fragment {
             // 5) ACTION — activée seulement après affichage de LIVE
             initSectionStatus.put(InitSection.ACTION, InitSectionStatus.OK);
             initSectionLog(InitSection.ACTION, 5, "activée");
+          } finally {
+            initSequenceRunning.set(false);
+          }
         });
     }
 
@@ -937,6 +1021,16 @@ public class RegisterTabFragment extends Fragment {
         public void onLiveStatus(String liveText) {
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
+                // ✅ AJOUTÉ (14 août 2026, demande Paul — "il faut voir qu'il
+                // y a un démarrage de livraison quand on arrive à
+                // running_flowing"). Bref réaffichage, seulement sur la
+                // transition (pas à chaque tick — lastLiveText le garantit).
+                boolean venaitDeDemarrer = liveText != null && liveText.contains("RUNNING_FLOWING")
+                        && (lastLiveText == null || !lastLiveText.contains("RUNNING_FLOWING"));
+                if (venaitDeDemarrer) {
+                    showInitGuide("Livraison démarrée...");
+                    fadeOutInitGuide();
+                }
                 lastLiveText = liveText;
                 if (txtLive != null) txtLive.setText(liveText);
                 ensureSerialVisibleThrottled();
@@ -1393,6 +1487,22 @@ public class RegisterTabFragment extends Fragment {
         initUi();
         wireUi();
         installLogScrollInterceptionFix();
+        // ✅ AJOUTÉ (14 août 2026) — guide léger, créé par code, sans
+        // toucher au XML. Ajouté en premier enfant si la racine est un
+        // ViewGroup — visible en haut, pousse le contenu au lieu de le
+        // recouvrir (pas de dépendance à FrameLayout/ConstraintLayout).
+        if (v instanceof ViewGroup) {
+            txtInitGuide = new android.widget.TextView(requireContext());
+            txtInitGuide.setPadding(24, 16, 24, 16);
+            txtInitGuide.setTextColor(0xFFFFFFFF);
+            txtInitGuide.setBackgroundColor(0xCC024C3D); // vert Filgo, semi-transparent
+            txtInitGuide.setTextSize(14f);
+            txtInitGuide.setVisibility(View.GONE);
+            txtInitGuide.setAlpha(0f);
+            ((ViewGroup) v).addView(txtInitGuide, 0,
+                    new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT));
+        }
         return v;
     }
 

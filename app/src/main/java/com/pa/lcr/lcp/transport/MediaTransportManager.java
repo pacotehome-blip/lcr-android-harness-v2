@@ -7,6 +7,7 @@ import android.hardware.usb.UsbDevice;
 import com.hoho.android.usbserial.driver.UsbSerialPort;
 
 import com.pa.lcr.lcp.storage.BtSignalStore;
+import com.pa.lcr.lcp.log.LogBus;
 
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -97,6 +98,12 @@ public final class MediaTransportManager {
                 nextGen
         );
         h.setConnected(io, io.describe());
+        // ✅ AJOUTÉ (14 août 2026, demande Paul — "ajouter le résultant dans
+        // le support pour chaque connexion déconnexion et tentative de
+        // connexion sur un média quelconque") — node=0 en marqueur média
+        // (pas de node spécifique à ce stade), même convention que
+        // [DÉBUT-SESSION].
+        try { LogBus.ui(0, "[MEDIA][CONNEXION] USB — " + io.describe()); } catch (Exception ignored) {}
     }
 
     public synchronized void onUsbDetached(String reason) {
@@ -104,6 +111,7 @@ public final class MediaTransportManager {
         if (h == null) return;
         h.setDisconnected(reason != null ? reason : "USB detached");
         clearActiveIfMatches(KEY_USB);
+        try { LogBus.ui(0, "[MEDIA][DÉCONNEXION] USB — " + (reason != null ? reason : "raison inconnue")); } catch (Exception ignored) {}
     }
 
     // ---------------------------------------------------------
@@ -145,6 +153,7 @@ public final class MediaTransportManager {
 
         // ✅ Démarrer le sampler IO périodique pour ce transport BT
         startIoSampler(key);
+        try { LogBus.ui(0, "[MEDIA][CONNEXION] " + key + " — " + io.describe()); } catch (Exception ignored) {}
     }
 
     public synchronized void onBtDisconnected(String mac, String reason) {
@@ -160,6 +169,7 @@ public final class MediaTransportManager {
         if (h == null) return;
         h.setDisconnected(reason != null ? reason : "BT disconnected");
         clearActiveIfMatches(key);
+        try { LogBus.ui(0, "[MEDIA][DÉCONNEXION] " + key + " — " + (reason != null ? reason : "raison inconnue")); } catch (Exception ignored) {}
     }
 
     public synchronized void onBtError(String mac, String err) {
@@ -170,6 +180,7 @@ public final class MediaTransportManager {
             handles.put(key, h);
         }
         h.setError(h.getDescription(), err);
+        try { LogBus.err(0, "MediaTransportManager.onBtError", new Exception(key + " — " + err)); } catch (Exception ignored) {}
     }
 
     // ---------------------------------------------------------
@@ -201,6 +212,7 @@ public final class MediaTransportManager {
 
         TransportIo io = new TcpTransportIo(key, socket, in, out, desc, nextGen);
         h.setConnected(io, io.describe());
+        try { LogBus.ui(0, "[MEDIA][CONNEXION] " + key + " — " + io.describe()); } catch (Exception ignored) {}
     }
 
     public synchronized void onTcpDisconnected(String ip, int port, String reason) {
@@ -209,6 +221,7 @@ public final class MediaTransportManager {
         if (h == null) return;
         h.setDisconnected(reason != null ? reason : "TCP disconnected");
         clearActiveIfMatches(key);
+        try { LogBus.ui(0, "[MEDIA][DÉCONNEXION] " + key + " — " + (reason != null ? reason : "raison inconnue")); } catch (Exception ignored) {}
     }
 
     public synchronized void onTcpError(String ip, int port, String err) {
@@ -219,6 +232,7 @@ public final class MediaTransportManager {
             handles.put(key, h);
         }
         h.setError(h.getDescription(), err);
+        try { LogBus.err(0, "MediaTransportManager.onTcpError", new Exception(key + " — " + err)); } catch (Exception ignored) {}
     }
 
     // ---------------------------------------------------------
