@@ -4461,6 +4461,35 @@ if (deliveryActive && !job.baselineCaptured) {
                 try { job.ticketNo = readTicketNo23Uncached(); } catch (Exception ignored) {}
                 try { job.saleNo = readSaleNo22(); } catch (Exception ignored) {}
 
+                // ✅ FIX (14 août 2026, demande Paul — "ce qui est affiché
+                // est ce qui est facturé") — trouvé un écart réel en test
+                // terrain : FSM recevait net=10.1L alors que l'écran
+                // physique du registre affichait déjà 10.2L. g/n ci-dessus
+                // ont été capturés AU MOMENT PRÉCIS où deliveryActive passe
+                // à faux — mais un reliquat de débit peut continuer de
+                // s'accumuler sur l'affichage physique un court instant de
+                // plus (fermeture progressive du solénoïde S1 en mode
+                // dwell, documentée dans le PDF Liquid Controls, Field
+                // #26/#200). Court délai de stabilisation, puis RELECTURE
+                // de confirmation avant de figer les chiffres finaux — si
+                // le compteur a encore bougé, c'est LA relecture qui fait
+                // foi, jamais la première capture.
+                try {
+                    Thread.sleep(400);
+                    int gConfirm = beI32(lcpGetField(FIELD_GROSS_COUNT));
+                    int nConfirm = beI32(lcpGetField(FIELD_NET_COUNT));
+                    if (gConfirm != g || nConfirm != n) {
+                        emitLog("[FIN-LIVRAISON] Reliquat de débit détecté après arrêt — "
+                                + "gross " + g + "→" + gConfirm + ", net " + n + "→" + nConfirm
+                                + " (valeur confirmée retenue)");
+                    }
+                    g = gConfirm;
+                    n = nConfirm;
+                } catch (Exception e) {
+                    // relecture échouée — on garde la première capture plutôt que de bloquer la fin de livraison
+                    emitLog("[FIN-LIVRAISON] Relecture de confirmation échouée (" + e.getMessage() + ") — valeur initiale conservée");
+                }
+
                 job.state = "DONE";
                 job.done = true;
                 job.endMs = now;
