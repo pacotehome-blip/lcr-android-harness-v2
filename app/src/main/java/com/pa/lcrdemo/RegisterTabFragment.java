@@ -1501,23 +1501,36 @@ public class RegisterTabFragment extends Fragment {
         initUi();
         wireUi();
         installLogScrollInterceptionFix();
-        // ✅ AJOUTÉ (14 août 2026) — guide léger, créé par code, sans
-        // toucher au XML. Ajouté en premier enfant si la racine est un
-        // ViewGroup — visible en haut, pousse le contenu au lieu de le
-        // recouvrir (pas de dépendance à FrameLayout/ConstraintLayout).
-        if (v instanceof ViewGroup) {
-            txtInitGuide = new android.widget.TextView(requireContext());
-            txtInitGuide.setPadding(24, 16, 24, 16);
-            txtInitGuide.setTextColor(0xFFFFFFFF);
-            txtInitGuide.setBackgroundColor(0xCC024C3D); // vert Filgo, semi-transparent
-            txtInitGuide.setTextSize(14f);
-            txtInitGuide.setVisibility(View.GONE);
-            txtInitGuide.setAlpha(0f);
-            ((ViewGroup) v).addView(txtInitGuide, 0,
-                    new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.WRAP_CONTENT));
-        }
-        return v;
+        // ✅ CORRIGÉ POUR DE BON (14 août 2026) — deux tentatives précédentes
+        // ont toutes les deux planté avec "ScrollView can host only one
+        // direct child", à des profondeurs différentes dans la hiérarchie —
+        // deviner la structure interne du layout n'est pas fiable. Approche
+        // robuste : n'y touche plus DU TOUT. On enveloppe le contenu
+        // original (v, peu importe sa structure interne) dans un NOUVEAU
+        // FrameLayout créé ici, et le guide devient un simple enfant
+        // supplémentaire de CE wrapper — jamais inséré dans le ScrollView
+        // lui-même. Garanti de ne jamais entrer en conflit avec la règle
+        // "un seul enfant direct" d'un ScrollView, peu importe ce qu'il y a
+        // dedans.
+        android.widget.FrameLayout wrapper = new android.widget.FrameLayout(requireContext());
+        wrapper.addView(v, new android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT));
+
+        txtInitGuide = new android.widget.TextView(requireContext());
+        txtInitGuide.setPadding(24, 16, 24, 16);
+        txtInitGuide.setTextColor(0xFFFFFFFF);
+        txtInitGuide.setBackgroundColor(0xCC024C3D); // vert Filgo, semi-transparent
+        txtInitGuide.setTextSize(14f);
+        txtInitGuide.setVisibility(View.GONE);
+        txtInitGuide.setAlpha(0f);
+        android.widget.FrameLayout.LayoutParams guideParams = new android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.WRAP_CONTENT);
+        guideParams.gravity = android.view.Gravity.TOP;
+        wrapper.addView(txtInitGuide, guideParams);
+
+        return wrapper;
     }
 
     private void bindUi(View v) {
