@@ -4045,6 +4045,40 @@ private void setupTabsTop() {
                         + " sur " + candidatKey + " — déclenchement de la migration");
                 try { com.pa.lcr.lcp.log.LogBus.ui(0, "[MEDIA][CONNEXION] #série=" + serial
                         + " retrouvé sur " + candidatKey + " — migration en cours"); } catch (Exception ignored) {}
+
+                // ✅ AJOUTÉ (14 août 2026, demande Paul — "garder en mémoire
+                // la livraison à faire qui arrive du deeplink") — le #mac
+                // (transport) déjà persisté dans ActiveDeliveryStore (dès la
+                // réception du deep link, PENDING puis STARTED) devient
+                // périmé si le média change en cours de route — rien ne le
+                // mettait à jour jusqu'ici. Corrigé ici, au moment précis où
+                // le registre est retrouvé sur un autre transport : on
+                // réécrit l'entrée avec le NOUVEAU transport, en conservant
+                // tout le reste (WO, jobId, produit, preset, statut) tel
+                // quel — pour que le nouveau tab, une fois créé, retrouve la
+                // bonne livraison en vol au lieu d'un transport mort.
+                try {
+                    com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
+                            new com.pa.lcr.lcp.storage.ActiveDeliveryStore(this);
+                    com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery existing = ads.load();
+                    if (existing != null && serial.trim().equalsIgnoreCase(existing.serialId)) {
+                        String newMac = candidatKey.startsWith("BT:") ? candidatKey.substring(3)
+                                : candidatKey.equals("USB") ? "USB" : candidatKey;
+                        ads.save(existing.woNum, existing.woIdGuid, existing.jobId,
+                                newMac, node, existing.serialId,
+                                existing.produit, existing.preset, existing.status);
+                        android.util.Log.i("MainActivity", "probeKnownTransportsForLostRegister: "
+                                + "ActiveDeliveryStore mis à jour — transport " + existing.mac + " → " + newMac
+                                + " (jobId=" + existing.jobId + ", status=" + existing.status + ")");
+                        try { com.pa.lcr.lcp.log.LogBus.ui(0, "[MEDIA][CONTINUITÉ] Livraison en vol "
+                                + "(WO=" + existing.woNum + ", jobId=" + existing.jobId
+                                + ") transférée vers " + candidatKey); } catch (Exception ignored) {}
+                    }
+                } catch (Exception e) {
+                    android.util.Log.w("MainActivity", "probeKnownTransportsForLostRegister: "
+                            + "échec mise à jour ActiveDeliveryStore — " + e.getMessage());
+                }
+
                 runOnUiThread(() -> {
                     if (candidatKey.startsWith("TCP:")) {
                         String[] parts = candidatKey.substring(4).split(":");
