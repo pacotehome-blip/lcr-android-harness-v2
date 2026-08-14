@@ -301,7 +301,32 @@ private void reproEvent(String level, String type, String message, JSONObject da
 
     // Wrappers LCP
     private int[] lcpDeliveryStatus() throws Exception { return withLcpLock(() -> link.opDeliveryStatus()); }
-    private LcpLink.MachineStatus lcpMachineStatus() throws Exception { return withLcpLock(() -> link.opGetMachineStatus()); }
+    private LcpLink.MachineStatus lcpMachineStatus() throws Exception {
+        // ✅ FIX (13 août 2026, demande Paul — "si Field #37 = 2, on n'a pas
+        // besoin de GET_MACHINE_STATUS du tout") — confirmé dans la doc
+        // officielle Liquid Controls (page 19) : "if the printer if off-line,
+        // a two second delay will occur during the Get Machine Status
+        // request... If the printer status is not needed, use the Get
+        // Delivery Status message." GET_MACHINE_STATUS ne rapporte qu'UNE
+        // chose que GET_DELIVERY_STATUS n'a pas : prnStatus. Si
+        // TicketRequired(#37)=2 (jamais imprimer), prnStatus n'a plus aucune
+        // utilité — l'imprimante ne sera jamais sollicitée. On construit donc
+        // la réponse à partir de GET_DELIVERY_STATUS (jamais pénalisé, jamais
+        // queueable de façon prolongée) + le dernier devStatus/prnStatus
+        // connus en cache, sans jamais toucher au registre pour le statut
+        // imprimante. Ce fix couvre TOUS les appelants d'un coup — readFullStatus,
+        // clearTicketPendingSafeForAlign, waitTicketPendingClearedOrTimeout,
+        // et la lecture forcée de doAlignOrRecoverFull (RESOLVE) — puisque
+        // prnStatus n'a de toute façon aucune valeur informative sur ce
+        // registre, peu importe le contexte.
+        if (isTicketRequiredNeverPrint()) {
+            int[] ds = lcpDeliveryStatus();
+            int dev = (lastDevStatusKnown >= 0) ? lastDevStatusKnown : 0;
+            int prn = (lastPrnStatusKnown >= 0) ? lastPrnStatusKnown : 0;
+            return new LcpLink.MachineStatus(0, dev, prn, ds[0], ds[1]);
+        }
+        return withLcpLock(() -> link.opGetMachineStatus());
+    }
     private byte[] lcpGetField(int field) throws Exception { return withLcpLock(() -> link.opGetField(field)); }
     // ✅ AJOUTÉ (7 août 2026, demande Paul — "récupérer le firmware du
     // registre... dans le log du support") — passe par le même verrou LCP
@@ -3394,6 +3419,23 @@ public ApiResult api_registerValidate(
              | ((b[2] & 0xFF) << 8)  |  (b[3] & 0xFF);
     }
 
+    // 🔜 AMÉLIORATION FUTURE (13 août 2026, discutée avec Paul — séquence
+    // d'initialisation en 6 sections dans RegisterTabFragment) — product1to16
+    // et presetNetL viennent actuellement de 4 appelants différents
+    // (3 dans DeepLinkHandler.java, 1 dans RegisterTabFragment.lancerDepuisStore),
+    // chacun dérivant ces valeurs à sa façon. RegisterTabFragment valide
+    // maintenant produit + preset dès la section 2 de sa séquence d'init
+    // (initValidatedProductIdx / initValidatedPresetL, voir runInitSequence())
+    // — mais rien ne branche encore CES valeurs validées vers les 3 appels
+    // dans DeepLinkHandler.java. Pas bloquant : cette méthode écrit déjà
+    // produit et preset ENSEMBLE, au bon moment (à l'armement, pas avant) —
+    // exactement le comportement voulu. Reste à faire : passer
+    // initValidatedProductIdx+1/initValidatedPresetL depuis RegisterTabFragment
+    // à travers DeepLinkHandler.lancerLivraison() jusqu'ici, pour que
+    // l'armement utilise les valeurs déjà validées par la séquence plutôt que
+    // de les re-dériver à ce moment précis. Nécessite d'examiner les 3 sites
+    // d'appel dans DeepLinkHandler.java un par un — pas fait aujourd'hui pour
+    // éviter de casser le chemin déjà fonctionnel du deep link réel sans test.
     public ApiResult api_deliveryOneShotStart(String numero_livraison, int product1to16, double presetNetL, String compartment) {
         if (link == null || link.isClosed()) {
             return ApiResult.fail("Delivery OneShot: 0 - USB not ready.", "USB_NOT_READY");

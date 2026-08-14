@@ -54,24 +54,21 @@ public class RegisterTabFragment extends Fragment {
     }
 
     public void onTabActivated() {
+        // ✅ REMPLACÉ (13 août 2026, demande Paul — "on fait les sections")
+        // — l'ancienne cascade de postDelayed (runStatusBLikeButton à 300ms,
+        // checkPendingDeliveryForThisRegister à 600ms, autoScanProduitsSiNecessaire
+        // à 3000ms) tirait sur le registre à des moments différents, sans
+        // ordre garanti ni dépendance entre eux. Remplacée par runInitSequence()
+        // — une seule cascade séquentielle, chaque section attend la
+        // précédente. Ancien code laissé plus bas en commentaire, pas
+        // supprimé, au cas où il faille revenir en arrière rapidement.
+        runInitSequence();
+
+        /* ANCIEN CODE (13 août 2026) — désactivé, conservé pour rollback rapide :
         ui.postDelayed(() -> {
             try { runStatusBLikeButton("TAB_ACTIVATED"); } catch (Exception ignored) {}
         }, 300);
-
-        // ✅ Vérifier si une livraison PENDING attend ce registre
-        // Si oui → pré-remplir le tab et proposer de reprendre
         ui.postDelayed(() -> checkPendingDeliveryForThisRegister(), 600);
-
-        // ✅ Scan auto produits (4 août 2026, demande Paul : "après l'activation
-        // du tab, après connected ready") — armé ici, mais le scan ne se
-        // déclenche réellement qu'au moment où onStateChanged reçoit CONNECTED
-        // (voir uiListener). Si le registre est déjà CONNECTED au moment de
-        // cette activation (pas de nouvelle transition à venir), on vérifie
-        // aussi directement l'état courant en filet de sécurité.
-        // ✅ FIX (11 août 2026, demande Paul) — même ajustement que le
-        // déclencheur principal (voir onStateChanged) : délai augmenté à
-        // 3000ms pour laisser le sondage live se stabiliser, cohérent des
-        // deux côtés.
         autoScanArmedForThisActivation = true;
         ui.postDelayed(() -> {
             if (autoScanArmedForThisActivation && controller != null
@@ -80,6 +77,7 @@ public class RegisterTabFragment extends Fragment {
                 autoScanProduitsSiNecessaire();
             }
         }, 3000);
+        */
     }
 
     /**
@@ -399,6 +397,151 @@ public class RegisterTabFragment extends Fragment {
     private boolean uiListenerAttached = false;
     private UsbManager usbManager;
     private DeliveryController controller;
+
+    // ✅ AJOUTÉ (13 août 2026, demande Paul — "on fait les sections") —
+    // séquence d'initialisation en cascade : 6 sections, dans l'ordre,
+    // chacune avec retry (3 tentatives) avant d'avancer, remplace les
+    // mécanismes parallèles (validateHeaderAsync, runStatusBLikeButton,
+    // triggerWoDetectionThrottled, l'auto-scan) qui tiraient tous sur le
+    // registre à peu près en même temps sans ordre garanti. Une livraison
+    // (bouton C ou deep link) exige l'approbation de TOUTES les sections
+    // via peutDemarrerLivraison() — sauf PRODUIT_PRESET, qui peut être en
+    // mode DÉGRADÉ (produit par défaut, pas de vrai scan) et compter quand
+    // même comme approuvée.
+    private enum InitSectionStatus { EN_ATTENTE, EN_COURS, OK, DEGRADE, ECHEC }
+    private enum InitSection { REGISTRE, PRODUIT, PRESET, LIVE, RETOUR_WO, ACTION }
+    private final java.util.Map<InitSection, InitSectionStatus> initSectionStatus =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private static final int INIT_MAX_RETRIES = 3;
+
+    // ✅ AJOUTÉ (13 août 2026) — valeurs validées par la séquence d'init,
+    // déposées ici (pas écrites au registre tout de suite) — l'écriture
+    // réelle (produit + preset ENSEMBLE) se fait au moment de l'armement,
+    // comme c'était déjà le cas pour le preset seul.
+    private volatile Integer initValidatedProductIdx = null; // 0-based (LCP List 0 : 0 = produit 1)
+    private volatile Double initValidatedPresetL = null;
+
+    private void initSectionLog(InitSection section, int idx, String result) {
+        InitSectionStatus st = initSectionStatus.get(section);
+        android.util.Log.i("InitSeq", "[INIT " + idx + "/6] " + section.name() + " — " + result
+                + " (statut=" + (st != null ? st.name() : "?") + ")");
+    }
+
+    /** true si TOUTES les sections requises sont approuvées (PRODUIT/PRESET
+     *  peuvent être DEGRADE et compter comme approuvées quand même). */
+    private boolean peutDemarrerLivraison() {
+        for (InitSection s : new InitSection[]{InitSection.REGISTRE, InitSection.LIVE, InitSection.RETOUR_WO}) {
+            InitSectionStatus st = initSectionStatus.get(s);
+            if (st != InitSectionStatus.OK) return false;
+        }
+        InitSectionStatus produit = initSectionStatus.get(InitSection.PRODUIT);
+        InitSectionStatus preset = initSectionStatus.get(InitSection.PRESET);
+        boolean produitOk = produit == InitSectionStatus.OK || produit == InitSectionStatus.DEGRADE;
+        boolean presetOk = preset == InitSectionStatus.OK || preset == InitSectionStatus.DEGRADE;
+        return produitOk && presetOk;
+    }
+
+    /** Enveloppe générique : jusqu'à 3 tentatives avant d'abandonner (ECHEC),
+     *  ou DEGRADE si allowDegraded=true. step doit retourner true en cas de
+     *  succès. Bloquant volontairement — appelé depuis safeBg()/un thread
+     *  dédié, jamais depuis le thread UI. */
+    private boolean runSectionWithRetry(InitSection section, int idx, boolean allowDegraded,
+                                          java.util.concurrent.Callable<Boolean> step) {
+        initSectionStatus.put(section, InitSectionStatus.EN_COURS);
+        for (int attempt = 1; attempt <= INIT_MAX_RETRIES; attempt++) {
+            try {
+                if (Boolean.TRUE.equals(step.call())) {
+                    initSectionStatus.put(section, InitSectionStatus.OK);
+                    initSectionLog(section, idx, "OK (tentative " + attempt + "/" + INIT_MAX_RETRIES + ")");
+                    return true;
+                }
+            } catch (Exception e) {
+                initSectionLog(section, idx, "tentative " + attempt + "/" + INIT_MAX_RETRIES + " échouée: " + e.getMessage());
+            }
+        }
+        if (allowDegraded) {
+            initSectionStatus.put(section, InitSectionStatus.DEGRADE);
+            initSectionLog(section, idx, "DÉGRADÉ après " + INIT_MAX_RETRIES + " tentatives — valeur par défaut utilisée");
+        } else {
+            initSectionStatus.put(section, InitSectionStatus.ECHEC);
+            initSectionLog(section, idx, "ÉCHEC après " + INIT_MAX_RETRIES + " tentatives");
+        }
+        return false;
+    }
+
+    /** Point d'entrée unique — remplace les postDelayed dispersés de
+     *  onTabActivated(). Tourne sur un thread dédié (safeBg), jamais l'UI. */
+    private void runInitSequence() {
+        safeBg(() -> {
+            // 1) REGISTRE — connecté, accessible. Dépendance : rien après ne
+            // doit avancer si ça échoue (pas de allowDegraded).
+            boolean registreOk = runSectionWithRetry(InitSection.REGISTRE, 1, false, () -> {
+                if (controller == null) return false;
+                controller.requestStatus();
+                return controller.getState() == DeliveryState.CONNECTED
+                        || controller.getState() == DeliveryState.RUNNING_FLOWING
+                        || controller.getState() == DeliveryState.RUNNING_PAUSED;
+            });
+            if (!registreOk) return; // dépendance dure : le reste ne peut pas continuer
+
+            // 2) PRODUIT — scan, puis VALIDATION contre le deep link (s'il y
+            // en a un), sinon défaut = produit 1 (index 0). Dégradé possible
+            // : si la validation échoue 3 fois, on utilise le défaut et on
+            // continue — ne bloque jamais l'armement à lui seul.
+            runSectionWithRetry(InitSection.PRODUIT, 2, true, () -> {
+                autoScanProduitsSiNecessaire();
+                String serial = serialFromArgs;
+                String produitDeepLink = (getArguments() != null) ? getArguments().getString("produit") : null;
+                com.pa.lcr.lcp.storage.RegisterProductStore.Row resolved = null;
+                if (serial != null && !serial.trim().isEmpty()) {
+                    com.pa.lcr.lcp.storage.RegisterProductStore store =
+                            new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
+                    try {
+                        resolved = store.resolveProduct(serial, null, produitDeepLink);
+                    } catch (Exception ignored) {
+                    } finally {
+                        try { store.close(); } catch (Exception ignored) {}
+                    }
+                }
+                initValidatedProductIdx = (resolved != null) ? resolved.noteIdx : 0; // défaut produit 1
+                return resolved != null; // false => tentera encore, puis dégradé (défaut déjà posé)
+            });
+
+            // 2) PRESET — VALIDÉ et affiché, pas écrit au registre ici.
+            runSectionWithRetry(InitSection.PRESET, 2, true, () -> {
+                String presetStr = (getArguments() != null) ? getArguments().getString("preset") : null;
+                double presetL = 0.0;
+                try { if (presetStr != null && !presetStr.isEmpty()) presetL = Double.parseDouble(presetStr); }
+                catch (NumberFormatException ignored) {}
+                initValidatedPresetL = presetL;
+                final double presetLFinal = presetL;
+                if (ui != null && edtPreset != null) {
+                    ui.post(() -> edtPreset.setText(presetLFinal > 0
+                            ? String.valueOf(presetLFinal) : edtPreset.getText().toString()));
+                }
+                return controller != null;
+            });
+
+            // 3) LIVE — net/gross, tickets liés, CONNECTED READY
+            runSectionWithRetry(InitSection.LIVE, 3, false, () -> {
+                if (controller == null) return false;
+                controller.requestLiveSample();
+                return true;
+            });
+
+            // 4) RETOUR_WO — WO lié au ticket_number/sale_number
+            runSectionWithRetry(InitSection.RETOUR_WO, 4, false, () -> {
+                rechercherWoDepuisRegistre();
+                return true;
+            });
+
+            // 5) ACTION — activée seulement après affichage de LIVE
+            initSectionStatus.put(InitSection.ACTION, InitSectionStatus.OK);
+            initSectionLog(InitSection.ACTION, 5, "activée");
+        });
+    }
+
+
     private String tabTransportKey = null;
     private volatile boolean tabMediaReady = true;
     private volatile boolean pendingReconnect = false;
@@ -3628,6 +3771,20 @@ public class RegisterTabFragment extends Fragment {
 
     private void startNewDeliveryC() {
         if (controller == null) return;
+        // ✅ AJOUTÉ (13 août 2026, demande Paul — "running_flowing doit
+        // avoir l'approbation de toutes les sections") — garde commune,
+        // peu importe si le démarrage vient du bouton C ou du deep link
+        // (voir aussi lancerLivraisonDepuisTab dans MainActivity, même
+        // vérification à ajouter côté deep link).
+        if (!peutDemarrerLivraison()) {
+            android.util.Log.w("InitSeq", "startNewDeliveryC: refusé — toutes les sections ne sont pas approuvées ("
+                    + initSectionStatus.toString() + ")");
+            if (ui != null) {
+                ui.post(() -> android.widget.Toast.makeText(getContext(),
+                        "Initialisation en cours — patiente un instant", android.widget.Toast.LENGTH_SHORT).show());
+            }
+            return;
+        }
         refreshDelCodeFromTickSnapshotThrottled();
         int dc = lastDelCode;
         boolean tp = (dc & 0x0001) != 0;

@@ -981,6 +981,31 @@ public class LcpLink {
                 if (!queued) {
                     android.util.Log.w("LcpLink", "sendRecv: msg=0x" + hex2(msg)
                         + " → BUSY (rc=0x" + hex2(rc) + "), entrée en file (0x7D), timeoutMs=" + timeoutMs);
+                    // ✅ AJOUTÉ (13 août 2026, demande Paul — "le tick est
+                    // embrouillé encore, c'est quoi l'affaire") — deux
+                    // hypothèses de suite (doublon supervisionFuture, boucle
+                    // clearTicketPendingSafeForAlign) n'expliquaient PAS le
+                    // martelage continu de GET_MACHINE_STATUS (0x23) observé
+                    // le 13 août en après-midi. Plutôt que deviner un
+                    // troisième appelant depuis la lecture du code, on capture
+                    // maintenant la VRAIE trace d'appel Java au moment précis
+                    // où 0x23 (ou tout autre message queueable) entre en
+                    // file — le prochain log dira exactement quelle méthode,
+                    // quelle ligne, sans ambiguïté.
+                    if (msg == MSG_GET_MACHINE_STATUS) {
+                        StringBuilder st = new StringBuilder("sendRecv: msg=0x23 (GET_MACHINE_STATUS) appelé depuis:");
+                        StackTraceElement[] trace = Thread.currentThread().getStackTrace();
+                        int shown = 0;
+                        for (StackTraceElement e : trace) {
+                            String cn = e.getClassName();
+                            if (cn.contains("Thread") || cn.contains("LcpLink")) continue;
+                            st.append("\n    at ").append(cn).append(".").append(e.getMethodName())
+                              .append("(").append(e.getFileName()).append(":").append(e.getLineNumber()).append(")");
+                            shown++;
+                            if (shown >= 8) break;
+                        }
+                        android.util.Log.w("LcpLink", st.toString());
+                    }
                 }
                 // Commande queueable : on passe en mode queued + 0x7D ASAP
                 queued = true;
