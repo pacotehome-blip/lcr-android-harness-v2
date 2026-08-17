@@ -86,6 +86,51 @@ public class RegisterConnectionHelper {
     // Point d'entrée principal — valider avant toute communication
     // =========================================================
 
+    // ✅ AJOUTÉ (14 août 2026, demande Paul — "la connexion avec le
+    // registre a été faite, il devrait donc le redétecter et le remettre
+    // le tab dans l'état qu'il était avant") — trouvé : validerConnexion()
+    // ne vérifiait QUE le transportKey précis passé en paramètre. Si ce
+    // transportKey est périmé (l'ancien transport, mort, alors que le
+    // chien de garde a déjà retrouvé et reconnecté le même #série sur un
+    // AUTRE transport ailleurs), cette méthode déclenchait le diagnostic
+    // d'échec complet ("réessayer, redémarrer l'apk") sans jamais vérifier
+    // si le registre répondait déjà ailleurs. Cette méthode comble ce
+    // trou : sonde tous les transports actuellement ouverts, et pour
+    // chacun (sauf celui à exclure), interroge son DeliveryController
+    // déjà vivant via api_registerValidate() (déjà utilisée ailleurs dans
+    // ce fichier, coût faible — GET_DELIVERY_STATUS + GET_FIELD, jamais
+    // GET_MACHINE_STATUS) pour comparer le #série. Retourne la clé du
+    // transport trouvé, ou null si vraiment introuvable ailleurs.
+    private String findAliveTransportForSerial(String serialId, int node, String excludeTransportKey) {
+        if (serialId == null || serialId.trim().isEmpty()) return null;
+        try {
+            java.util.List<com.pa.lcr.lcp.transport.TransportSnapshot> snaps =
+                    activity.getMediaTransportManager().listSnapshots();
+            if (snaps == null) return null;
+            for (com.pa.lcr.lcp.transport.TransportSnapshot s : snaps) {
+                if (s == null || s.key == null || s.key.equals(excludeTransportKey)) continue;
+                com.pa.lcr.lcp.DeliveryController dc =
+                        RegisterSessionManager.get(activity).getController(s.key, node);
+                if (dc == null || dc.isStopped()) continue;
+                try {
+                    com.pa.lcr.lcp.ApiResult r = dc.api_registerValidate(
+                            null, node > 0 ? Integer.valueOf(node) : null, null, null, null, false);
+                    if (r != null && r.data != null) {
+                        String foundSerial = r.data.optString("serial_id", "");
+                        if (serialId.trim().equalsIgnoreCase(foundSerial.trim())) {
+                            Log.i(TAG, "findAliveTransportForSerial: #série=" + serialId
+                                    + " trouvé sur transport=" + s.key + " (excluait " + excludeTransportKey + ")");
+                            return s.key;
+                        }
+                    }
+                } catch (Exception ignored) {}
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "findAliveTransportForSerial: erreur — " + e.getMessage());
+        }
+        return null;
+    }
+
     /**
      * Valide que le registre est joignable.
      * Si non joignable → déclenche le diagnostic en background.
@@ -151,6 +196,24 @@ public class RegisterConnectionHelper {
 
         if (!ioOk) {
             Log.w(TAG, "validerConnexion: io mort — transport=" + tkFinal);
+            // ✅ AJOUTÉ (14 août 2026) — avant de lancer le diagnostic
+            // d'échec, vérifier si ce même #série répond déjà ailleurs
+            // (le chien de garde a peut-être déjà reconnecté sur un autre
+            // transport pendant que ce tab-ci tenait encore l'ancien).
+            String transportAilleurs = findAliveTransportForSerial(serialId, node, tkFinal);
+            if (transportAilleurs != null) {
+                Log.i(TAG, "validerConnexion: registre déjà reconnecté ailleurs ("
+                        + transportAilleurs + ") — pas un échec, mise à jour du tab au lieu du diagnostic");
+                try { com.pa.lcr.lcp.log.LogBus.ui(node, "[MEDIA][CONTINUITÉ] #série=" + serialId
+                        + " déjà actif sur " + transportAilleurs + " — tab redirigé au lieu d'un diagnostic d'échec"); } catch (Exception ignored) {}
+                try {
+                    activity.runOnUiThread(() -> {
+                        try { activity.onConfigureMediaActivated(transportAilleurs, "REDIRECT_ALREADY_ALIVE"); }
+                        catch (Exception ignored) {}
+                    });
+                } catch (Exception ignored) {}
+                return true;
+            }
             // ✅ FIX : lancerDiagnostic() s'auto-ignore silencieusement si
             // diagnosticEnCours est resté bloqué à true (ex: tentative
             // antérieure qui n'a pas remis le drapeau à false proprement) —
@@ -227,6 +290,23 @@ public class RegisterConnectionHelper {
 
         if (!tickOk) {
             Log.w(TAG, "validerConnexion: registre ne répond pas — transport=" + tkFinal);
+            // ✅ AJOUTÉ (14 août 2026) — même vérification que la branche
+            // "io mort" ci-dessus : avant de conclure à un vrai échec,
+            // vérifier si ce #série répond déjà ailleurs.
+            String transportAilleurs2 = findAliveTransportForSerial(serialId, node, tkFinal);
+            if (transportAilleurs2 != null) {
+                Log.i(TAG, "validerConnexion: registre déjà reconnecté ailleurs ("
+                        + transportAilleurs2 + ") — pas un échec, mise à jour du tab au lieu du diagnostic");
+                try { com.pa.lcr.lcp.log.LogBus.ui(node, "[MEDIA][CONTINUITÉ] #série=" + serialId
+                        + " déjà actif sur " + transportAilleurs2 + " — tab redirigé au lieu d'un diagnostic d'échec"); } catch (Exception ignored) {}
+                try {
+                    activity.runOnUiThread(() -> {
+                        try { activity.onConfigureMediaActivated(transportAilleurs2, "REDIRECT_ALREADY_ALIVE"); }
+                        catch (Exception ignored) {}
+                    });
+                } catch (Exception ignored) {}
+                return true;
+            }
             // ✅ FIX : même traitement que la branche "io mort" ci-dessus.
             // lancerDiagnostic() (non-force) retourne SILENCIEUSEMENT si
             // diagnosticEnCours est resté bloqué à true — et resetDiagnostic()
