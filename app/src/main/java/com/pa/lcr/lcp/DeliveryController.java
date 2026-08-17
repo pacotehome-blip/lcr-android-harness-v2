@@ -597,6 +597,16 @@ private void reproEvent(String level, String type, String message, JSONObject da
     // Pas de chevauchement LIVE
     private final AtomicBoolean liveInFlight = new AtomicBoolean(false);
     private final ThreadLocal<Boolean> inLiveSample = new ThreadLocal<>();
+    // ✅ AJOUTÉ (14 août 2026, demande Paul — "je ne sais pas si c'est le
+    // retour du registre qui est lent ou le UI") — publishTickIfChanged()
+    // ne rappelle onLiveStatus() QUE si une valeur change. Tant que le
+    // débit reste à zéro (en attente d'ouverture de la vanne), rien ne
+    // confirme visuellement que la dernière lecture au registre vient de
+    // réussir — un tick qui fonctionne et un tick mort ont l'air
+    // identiques à l'écran. Battement de cœur périodique, indépendant du
+    // changement de valeur, pour lever le doute.
+    private volatile long lastHeartbeatMs = 0L;
+    private static final long HEARTBEAT_INTERVAL_MS = 2_000;
 
     // Ticket pending: anti-réimpression
     private final java.util.concurrent.atomic.AtomicBoolean ticketPrintInFlight =
@@ -1895,6 +1905,25 @@ try {
                 double gross = g / scale;
                 double net   = n / scale;
                 if (listener != null) listener.onLiveQty(net, gross);
+
+                // ✅ AJOUTÉ (14 août 2026) — battement de cœur, indépendant
+                // de publishTickIfChanged() (qui ne rappelle que sur
+                // changement). Confirme au chauffeur, toutes les 2s même si
+                // net/gross restent à zéro, que le registre vient tout juste
+                // de répondre avec succès — distingue "en attente normale"
+                // de "connexion morte", ce qui était impossible à l'œil
+                // avant ce fix.
+                long nowHb = System.currentTimeMillis();
+                if (nowHb - lastHeartbeatMs >= HEARTBEAT_INTERVAL_MS) {
+                    lastHeartbeatMs = nowHb;
+                    if (listener != null) {
+                        String etat = (net > 0.0001 || gross > 0.0001)
+                                ? "LIVE: " + state.name() + " (net=" + net + " gross=" + gross + ")"
+                                : "LIVE: " + state.name() + " — en attente d'ouverture de la vanne (confirmé à l'instant)";
+                        listener.onLiveStatus(etat);
+                    }
+                }
+
                 publishTickIfChanged(net, gross,
                     lastDevStatusKnown, lastPrnStatusKnown,
                     (lastTick != null ? lastTick.delStatus : 0),
