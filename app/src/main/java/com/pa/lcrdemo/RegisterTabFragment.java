@@ -353,6 +353,7 @@ public class RegisterTabFragment extends Fragment {
     private Button btnReprintTicket;
     private Button btnRetourWO;
     private Button btnCustomPrint;
+    private Button btnTestPrinter;
     private Button btnAnnuler;
     private Button btnScanProducts;
     private NestedScrollView regRootScroll;
@@ -1605,6 +1606,7 @@ public class RegisterTabFragment extends Fragment {
         if (txtWoCumulGross != null) txtWoCumulGross.setText("Total GROSS: 0.0 L");
         if (txtWoCumulCount != null) txtWoCumulCount.setText("Aucune livraison");
         btnCustomPrint   = v.findViewById(R.id.btnCustomPrint);
+        btnTestPrinter   = v.findViewById(R.id.btnTestPrinter);
         btnAnnuler       = v.findViewById(R.id.btnAnnuler);
         btnScanProducts  = v.findViewById(R.id.btnScanProducts);
         cbShowLog = v.findViewById(R.id.cbShowLog);
@@ -2183,6 +2185,7 @@ public class RegisterTabFragment extends Fragment {
                 // avant d'agir. Ajouté pour cohérence.
                 if (!verifierIoAvantAction("REPRINT")) return;
                 safeBg(() -> {
+                    c.printInProgress = true;
                     try {
                         if (tabTransportKey != null) {
                             MediaTransportManager.get(requireContext())
@@ -2315,6 +2318,8 @@ public class RegisterTabFragment extends Fragment {
                     } catch (Exception e) {
                         LogBus.api(node, "[REPRINT] ERR: " + safeMsg(e));
                         surErreurConnexion(e, "REPRINT");
+                    } finally {
+                        c.printInProgress = false;
                     }
                 });
             });
@@ -2328,6 +2333,39 @@ public class RegisterTabFragment extends Fragment {
         // ✅ Custom print — impression ligne par ligne via opPrintText
         if (btnCustomPrint != null) {
             btnCustomPrint.setOnClickListener(v -> lancerImpressionCustom());
+        }
+
+        // ✅ AJOUTÉ (14 août 2026, demande Paul — section Ticket, sous
+        // Reprint/Custom Print, "l'imprimante est associée au registre") —
+        // test isolé, lecture seule, sur demande explicite uniquement.
+        if (btnTestPrinter != null) {
+            btnTestPrinter.setOnClickListener(v -> {
+                LogBus.api(node, "[ACTION-CLIC] TEST_IMPRIMANTE");
+                DeliveryController c = controller;
+                if (c == null) return;
+                if (!verifierIoAvantAction("TEST_IMPRIMANTE")) return;
+                btnTestPrinter.setEnabled(false);
+                safeBg(() -> {
+                    try {
+                        com.pa.lcr.lcp.ApiResult r = c.api_testImprimante();
+                        String verdict = (r != null && r.data != null)
+                                ? r.data.optString("verdict", r.msg) : "Résultat inconnu";
+                        ui.post(() -> {
+                            android.widget.Toast.makeText(requireContext(), verdict,
+                                    android.widget.Toast.LENGTH_LONG).show();
+                            btnTestPrinter.setEnabled(true);
+                        });
+                    } catch (Exception e) {
+                        LogBus.api(node, "[TEST_IMPRIMANTE] ERR: " + safeMsg(e));
+                        ui.post(() -> {
+                            android.widget.Toast.makeText(requireContext(),
+                                    "Erreur test imprimante: " + safeMsg(e),
+                                    android.widget.Toast.LENGTH_SHORT).show();
+                            btnTestPrinter.setEnabled(true);
+                        });
+                    }
+                });
+            });
         }
         if (btnScanProducts != null) {
             btnScanProducts.setOnClickListener(v -> {
@@ -3077,6 +3115,7 @@ public class RegisterTabFragment extends Fragment {
         if (btnCustomPrint != null) btnCustomPrint.setEnabled(false);
 
         safeBg(() -> {
+            if (c != null) c.printInProgress = true;
             try {
                 // Lire données depuis lastResultJson
                 String ticketNo = "", saleNo = "", serialId = "", woNum = "";
@@ -3161,6 +3200,8 @@ public class RegisterTabFragment extends Fragment {
                         "Erreur impression: " + safeMsg(e), android.widget.Toast.LENGTH_SHORT).show();
                     if (btnCustomPrint != null) btnCustomPrint.setEnabled(true);
                 });
+            } finally {
+                if (c != null) c.printInProgress = false;
             }
         });
     }

@@ -472,6 +472,18 @@
                     android:text="🖨️ Impression custom"
                     android:visibility="gone" />
 
+                <!-- ✅ NOUVEAU (14 août 2026, demande Paul — "l'imprimante
+                     est associée au registre", placé sous Reprint/Custom
+                     Print) : test isolé, lecture seule, ne déclenche jamais
+                     GET_MACHINE_STATUS ailleurs que sur demande explicite. -->
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnTestPrinter"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="🖨️ Vérifier l'imprimante" />
+
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 

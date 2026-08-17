@@ -494,6 +494,19 @@ private void reproEvent(String level, String type, String message, JSONObject da
     // réellement en cours, plutôt que de se battre pour le même verrou
     // partagé à chaque produit.
     public volatile boolean scanInProgress = false;
+    // ✅ AJOUTÉ (14 août 2026, demande Paul — "il faut trouver pourquoi ça
+    // reste bloqué" — CUSTOM_PRINT/REPRINT) — même principe que
+    // scanInProgress ci-dessus. Trouvé par trace TX/RX réelle : le
+    // keep-alive de NodeScheduler (GET_MACHINE_STATUS, actif pendant
+    // CONNECTED) tourne EN PARALLÈLE d'une impression en cours, se battant
+    // pour le même verrou partagé — chaque ligne imprimée devait attendre
+    // derrière une boucle de sondage 0x7D qui pouvait durer très
+    // longtemps. Les lignes finissaient par réussir (rc=0x00 confirmé
+    // dans la trace), mais l'attente donnait l'impression que rien ne se
+    // passait. Public — accessible depuis le bouton "Vérifier
+    // l'imprimante" à venir dans Configure, et depuis n'importe quel appel
+    // externe qui a besoin de savoir qu'une impression est en cours.
+    public volatile boolean printInProgress = false;
 
     
  // ✅ Cache du dernier NUM reçu via API (numero_livraison) pour reconstruire delivery_uid côté UI
@@ -4029,6 +4042,46 @@ job.presetNetL_requested = presetNetL;
      * LCR-II : envoie la ligne à l'imprimante série du registre.
      * LC3    : NO-OP (opPrintText est NO-OP dans Lc3Link).
      */
+    // ✅ AJOUTÉ (14 août 2026, demande Paul — bouton "Vérifier l'imprimante"
+    // dans la section Ticket du tab, "l'imprimante est associée au
+    // registre") — fonction PUBLIQUE, dédiée, pour que GET_MACHINE_STATUS
+    // (devStatus/prnStatus) reste disponible sur demande explicite,
+    // diagnosticable depuis un autre processus si besoin — sans jamais
+    // faire partie d'un chemin automatique (tick, keep-alive, flux
+    // d'impression). Confirmé aujourd'hui : aucune décision métier ne
+    // dépend de devStatus/prnStatus — seule leur AFFICHAGE compte, donc
+    // cette lecture reste volontairement isolée, jamais répétée en
+    // arrière-plan.
+    public ApiResult api_testImprimante() {
+        JSONObject d = new JSONObject();
+        try {
+            LcpLink.MachineStatus ms = withLcpLock(() -> link.opGetMachineStatus());
+            boolean prnOffline = (ms.prnStatus & 0x20) != 0;
+            boolean prnError   = (ms.prnStatus & 0x40) != 0;
+            boolean prnNoPaper = (ms.prnStatus & 0x10) != 0;
+            boolean prnBusy    = (ms.prnStatus & 0x80) != 0;
+            safeJsonPut(d, "prnStatus", ms.prnStatus);
+            safeJsonPut(d, "prnStatus_hex", String.format("0x%02X", ms.prnStatus));
+            safeJsonPut(d, "offline", prnOffline);
+            safeJsonPut(d, "error", prnError);
+            safeJsonPut(d, "noPaper", prnNoPaper);
+            safeJsonPut(d, "busy", prnBusy);
+            String verdict;
+            if (prnError) verdict = "❌ Erreur détectée avec le processeur d'impression — vérification physique nécessaire";
+            else if (prnOffline) verdict = "❌ Imprimante hors ligne";
+            else if (prnNoPaper) verdict = "⚠️ Imprimante à court de papier";
+            else if (prnBusy) verdict = "⏳ Imprimante occupée — en train d'imprimer";
+            else verdict = "✅ Imprimante disponible";
+            safeJsonPut(d, "verdict", verdict);
+            emitLog("[TEST-IMPRIMANTE] prnStatus=0x" + String.format("%02X", ms.prnStatus) + " — " + verdict);
+            return ApiResult.ok(verdict, d);
+        } catch (Exception e) {
+            safeJsonPut(d, "error_msg", e.getMessage());
+            emitLog("[TEST-IMPRIMANTE] ERR: " + e.getMessage());
+            return ApiResult.fail("Test imprimante ERR: " + e.getMessage(), "PRINTER_TEST_ERR", d);
+        }
+    }
+
     public ApiResult api_printTextLine(String line) {
         JSONObject d = new JSONObject();
         try {
