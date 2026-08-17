@@ -477,16 +477,29 @@ public class RegisterTabFragment extends Fragment {
 
     /** true si TOUTES les sections requises sont approuvées (PRODUIT/PRESET
      *  peuvent être DEGRADE et compter comme approuvées quand même). */
+    // ✅ CORRIGÉ (14 août 2026, demande Paul — "je ne suis pas en ticket
+    // pending, j'ai le net et gross, mais si je fais new C, rien ne se
+    // passe") — trouvé un vrai bug bloquant : un statut jamais suivi
+    // (initSectionStatus.get() retourne null — tab qui n'est jamais passé
+    // par runInitSequence(), ex: tab déjà ouvert avant ce changement, ou
+    // activé par un autre chemin) était traité comme un ÉCHEC PERMANENT
+    // ("null != OK" est vrai), bloquant silencieusement le bouton pour
+    // toujours, même sur un tab visiblement fonctionnel (net/gross
+    // affichés, preuve que la connexion marche). Corrigé : null (jamais
+    // suivi) n'est plus un blocage — seul un statut EXPLICITEMENT
+    // EN_COURS ou ÉCHEC bloque vraiment. Ça préserve l'intention d'origine
+    // (attendre pendant une vraie initialisation en cours) sans jamais
+    // condamner un tab dont le suivi n'a simplement jamais démarré.
     private boolean peutDemarrerLivraison() {
         for (InitSection s : new InitSection[]{InitSection.REGISTRE, InitSection.LIVE, InitSection.RETOUR_WO}) {
             InitSectionStatus st = initSectionStatus.get(s);
-            if (st != InitSectionStatus.OK) return false;
+            if (st == InitSectionStatus.EN_COURS || st == InitSectionStatus.ECHEC) return false;
         }
         InitSectionStatus produit = initSectionStatus.get(InitSection.PRODUIT);
         InitSectionStatus preset = initSectionStatus.get(InitSection.PRESET);
-        boolean produitOk = produit == InitSectionStatus.OK || produit == InitSectionStatus.DEGRADE;
-        boolean presetOk = preset == InitSectionStatus.OK || preset == InitSectionStatus.DEGRADE;
-        return produitOk && presetOk;
+        if (produit == InitSectionStatus.EN_COURS || produit == InitSectionStatus.ECHEC) return false;
+        if (preset == InitSectionStatus.EN_COURS || preset == InitSectionStatus.ECHEC) return false;
+        return true;
     }
 
     /** Enveloppe générique : jusqu'à 3 tentatives avant d'abandonner (ECHEC),
