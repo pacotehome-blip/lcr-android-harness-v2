@@ -322,6 +322,85 @@
                     </ScrollView>
                 </LinearLayout>
 
+                <!-- ✅ AJOUTÉ (20 août 2026, demande Paul — "gérer le baud
+                     rate dans le registre à partir de l'apk") — backend
+                     déjà construit le 7 août (DeliveryController.setBaud())
+                     mais jamais branché à un bouton. Confirmé aujourd'hui,
+                     par test réel : Set Baud (0x7C) ne nécessite PAS la
+                     calibration (contrairement à TicketRequired/#56) — mais
+                     reste risqué pour une autre raison : l'app doit
+                     rouvrir sa propre connexion au nouveau débit juste
+                     après avoir envoyé la commande, sinon perte de
+                     communication. Filet de sécurité intégré : si la
+                     reconnexion au nouveau débit échoue, retente
+                     automatiquement l'ancien débit pour récupérer. -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:background="@drawable/bg_support_search_field"
+                    android:layout_marginBottom="10dp"
+                    android:padding="8dp">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="⚠️ Forcer la vitesse (débit) du registre"
+                        android:textStyle="bold"
+                        android:textSize="13sp"/>
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Risqué — l'app se reconnecte automatiquement au nouveau débit après l'envoi"
+                        android:textSize="10sp"
+                        android:textColor="#B71C1C"/>
+
+                    <!-- ✅ AJOUTÉ (20 août 2026, demande Paul — "moyen de
+                         savoir quel est la vitesse du registre au départ")
+                         — sonde chaque débit candidat jusqu'à trouver le
+                         bon, USB seulement. -->
+                    <Button
+                        android:id="@+id/btnDetecterVitesse"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:backgroundTint="#00695C"
+                        android:text="🔍 Détecter la vitesse actuelle (USB)"/>
+
+                    <TextView
+                        android:id="@+id/txtDetecterVitesseResult"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:textSize="11sp"
+                        android:fontFamily="monospace"
+                        android:text=""/>
+
+                    <Spinner
+                        android:id="@+id/spnForcerVitesse"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"/>
+
+                    <Button
+                        android:id="@+id/btnForcerVitesse"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:backgroundTint="#B71C1C"
+                        android:text="Forcer la vitesse"/>
+
+                    <TextView
+                        android:id="@+id/txtForcerVitesseResult"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:textSize="11sp"
+                        android:fontFamily="monospace"
+                        android:text=""/>
+                </LinearLayout>
+
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"

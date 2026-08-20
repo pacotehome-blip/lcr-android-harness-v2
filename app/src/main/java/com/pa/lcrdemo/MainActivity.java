@@ -1433,6 +1433,34 @@ tabRegisters = findViewById(R.id.tabRegisters);
                 logMedia1("[VALIDATION-CANDIDATS] Annulé par l'utilisateur");
             });
         }
+
+        // ✅ AJOUTÉ (20 août 2026, demande Paul — "gérer le baud rate dans
+        // le registre à partir de l'apk") — voir DeliveryController.setBaud()
+        // (backend déjà construit le 7 août, jamais branché avant
+        // aujourd'hui). Confirmé par test réel : Set Baud (0x7C) ne
+        // nécessite PAS la calibration. Scopé à USB uniquement — BT SPP et
+        // TCP n'ont pas de vrai débit UART physique ajustable de la même
+        // façon dans ce contexte, contrairement à la connexion série USB.
+        Spinner spnForcerVitesse = findViewById(R.id.spnForcerVitesse);
+        Button btnForcerVitesse = findViewById(R.id.btnForcerVitesse);
+        TextView txtForcerVitesseResult = findViewById(R.id.txtForcerVitesseResult);
+        if (spnForcerVitesse != null) {
+            String[] baudLabels = {"57600 (index 0)", "19200 (index 1) — actuel confirmé", "9600 (index 2)", "4800 (index 3)", "2400 (index 4)"};
+            spnForcerVitesse.setAdapter(new android.widget.ArrayAdapter<>(this,
+                    android.R.layout.simple_spinner_dropdown_item, baudLabels));
+            spnForcerVitesse.setSelection(1); // 19200 par défaut, le débit confirmé fonctionnel
+        }
+        if (btnForcerVitesse != null) {
+            btnForcerVitesse.setOnClickListener(v -> forcerVitesseRegistre(
+                    spnForcerVitesse != null ? spnForcerVitesse.getSelectedItemPosition() : 1,
+                    txtForcerVitesseResult, btnForcerVitesse));
+        }
+        Button btnDetecterVitesse = findViewById(R.id.btnDetecterVitesse);
+        TextView txtDetecterVitesseResult = findViewById(R.id.txtDetecterVitesseResult);
+        if (btnDetecterVitesse != null) {
+            btnDetecterVitesse.setOnClickListener(v ->
+                    detecterVitesseUsb(txtDetecterVitesseResult, btnDetecterVitesse));
+        }
         if (btnBtDisconnect != null) btnBtDisconnect.setOnClickListener(v -> btDisconnect());
         // ✅ BT Signal scan
         if (btnBtSignalScan != null) {
@@ -5762,6 +5790,172 @@ private boolean ensureBtConnectPermission() {
      *  change aucun réglage — impossible que ça casse quoi que ce soit,
      *  contrairement à l'incident précédent (qui changeait un réglage
      *  persistant). Ferme proprement tout ce qu'elle ouvre elle-même. */
+    private static final int[] BAUD_VALUES = {57600, 19200, 9600, 4800, 2400};
+
+    // ⚠️ IMPORTANT (20 août 2026, demande Paul — "on a trois possibilités
+    // le usb, le bt, le tcp Nport... ils doivent tous eux aussi être
+    // programmé pour communiquer en 19200") — TOUT ce qui suit (Forcer la
+    // vitesse, Détecter la vitesse, l'intégration dans "Démarrer la
+    // validation") est VOLONTAIREMENT scopé à USB seulement. Pour BT et
+    // TCP N-Port, il y a un appareil intermédiaire (le pont Bluetooth-
+    // série, ou le boîtier N-Port) qui a SA PROPRE configuration de débit,
+    // séparée du registre — changer le débit du LCR-II sans reconfigurer
+    // aussi ce pont/N-Port casse la communication même si le registre et
+    // l'app seraient d'accord entre eux. Reconfigurer ces appareils
+    // intermédiaires n'est PAS fait ici — méthode propre à chaque
+    // fabricant (souvent web/Telnet), hors du protocole LCP. Voir
+    // guide_support_terrain.md, section "PLAN D'ACTION DÉPLOIEMENT" pour
+    // la checklist complète de synchronisation des trois points.
+    //
+    // ✅ AJOUTÉ (20 août 2026, demande Paul — "moyen de savoir quel est la
+    // vitesse du registre au départ") — USB seulement, confirmé par Paul.
+    // Essaie chaque débit candidat, dans l'ordre du plus probable au moins
+    // probable (19200 confirmé fonctionnel sur cette flotte, en premier),
+    // via une sonde légère (GET_FIELD #80, le #série) sur un LcpLink
+    // TEMPORAIRE lié au port déjà ouvert — jamais de session enregistrée
+    // dans RegisterSessionManager pendant la détection, pour ne rien
+    // perturber d'actif. Hypothèse posée : node=250 (adresse d'usine par
+    // défaut Liquid Controls, confirmée dans le PDF) — pas garanti sur
+    // toute la flotte, mais la meilleure supposition de départ.
+    private static final int[] BAUD_DETECT_ORDER = {19200, 9600, 57600, 4800, 2400};
+
+    // ✅ AJOUTÉ (20 août 2026, demande Paul — "ajouter dans la validation la
+    // détection du baud rate") — factorisé depuis detecterVitesseUsb() pour
+    // être réutilisable ici ET par le bouton dédié. Retourne le débit
+    // trouvé, ou -1 si aucun candidat ne répond. Remet le port au débit
+    // trouvé avant de retourner (laisse la connexion utilisable ensuite).
+    private int detecterBaudSurPort(UsbSerialPort port, int node) {
+        for (int candidat : BAUD_DETECT_ORDER) {
+            try {
+                port.setParameters(candidat, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
+                Thread.sleep(150);
+                com.pa.lcr.lcp.transport.UsbTransportIo io =
+                        new com.pa.lcr.lcp.transport.UsbTransportIo(
+                                com.pa.lcr.lcp.transport.MediaTransportManager.KEY_USB + ":DETECT",
+                                port, "Détection débit (temporaire)", 0);
+                com.pa.lcr.lcp.LcpLink probe = new com.pa.lcr.lcp.LcpLink(io, node, 255, true);
+                byte[] serial = probe.opGetField(80, 1500);
+                if (serial != null && serial.length > 0) return candidat;
+            } catch (Exception ignored) {}
+        }
+        return -1;
+    }
+
+    private void detecterVitesseUsb(TextView resultView, Button btn) {
+        UsbSerialPort port = UsbSession.getPort();
+        if (port == null || usbPort == null) {
+            if (resultView != null) resultView.setText("❌ Aucun port USB ouvert — connecte d'abord via USB");
+            return;
+        }
+        btn.setEnabled(false);
+        if (resultView != null) resultView.setText("⏳ Détection en cours...");
+        int nodeHypothese = 250; // adresse d'usine par défaut Liquid Controls
+        scanExec.execute(() -> {
+            int trouve = detecterBaudSurPort(port, nodeHypothese);
+            String log = trouve > 0
+                ? "✅ Débit détecté : " + trouve + " bauds (node=" + nodeHypothese + " supposé)"
+                : "❌ Aucun débit trouvé parmi " + java.util.Arrays.toString(BAUD_DETECT_ORDER)
+                    + " (node=" + nodeHypothese + " supposé — essaie un autre node si connu)";
+            if (trouve > 0) LogBus.ui(nodeHypothese, "[BAUD-DETECT] Trouvé : " + trouve + " bauds (node=" + nodeHypothese + ")");
+            final String finalLog = log;
+            runOnUiThread(() -> {
+                if (resultView != null) resultView.setText(finalLog);
+                btn.setEnabled(true);
+            });
+        });
+    }
+
+    // ✅ AJOUTÉ (20 août 2026, demande Paul — "gérer le baud rate dans le
+    // registre à partir de l'apk") — envoie Set Baud (0x7C) au registre
+    // via le controller actif du tab USB, PUIS reconfigure IMMÉDIATEMENT
+    // le port USB déjà ouvert (usbPort.setParameters — pas de fermeture/
+    // réouverture, juste un changement de paramètres sur la même
+    // connexion) au même nouveau débit. Vérifie ensuite que la
+    // communication fonctionne réellement (une vraie lecture GET_FIELD) —
+    // si ça échoue, retente automatiquement l'ancien débit pour récupérer,
+    // au lieu de laisser l'app déconnectée sans recours.
+    private void forcerVitesseRegistre(int baudIdx, TextView resultView, Button btn) {
+        if (baudIdx < 0 || baudIdx >= BAUD_VALUES.length) return;
+        int nouveauBaud = BAUD_VALUES[baudIdx];
+        UsbSerialPort port = UsbSession.getPort();
+        if (port == null || usbPort == null) {
+            if (resultView != null) resultView.setText("❌ Aucun port USB ouvert — connecte d'abord via USB");
+            return;
+        }
+        // ✅ CORRIGÉ (20 août 2026) — node retrouvé dynamiquement depuis le
+        // tab USB actif, au lieu d'un 250 codé en dur (valide seulement
+        // pour le banc de test — sur la vraie flotte, chaque camion a
+        // potentiellement un node différent selon sa config LCR).
+        int nodeUsb = -1;
+        synchronized (tabsByKey) {
+            for (TabSpec s : tabsByKey.values()) {
+                if (s != null && com.pa.lcr.lcp.transport.MediaTransportManager.KEY_USB.equals(s.transportKey)) {
+                    nodeUsb = s.node;
+                    break;
+                }
+            }
+        }
+        if (nodeUsb < 0) {
+            if (resultView != null) resultView.setText("❌ Aucun tab USB actif trouvé — node introuvable");
+            return;
+        }
+        final int nodeFinal = nodeUsb;
+        com.pa.lcr.lcp.DeliveryController dc =
+                com.pa.lcr.lcp.RegisterSessionManager.get(this)
+                        .getController(com.pa.lcr.lcp.transport.MediaTransportManager.KEY_USB, nodeFinal);
+        if (dc == null) {
+            if (resultView != null) resultView.setText("❌ Aucune session registre USB active");
+            return;
+        }
+        btn.setEnabled(false);
+        if (resultView != null) resultView.setText("⏳ Envoi Set Baud (" + nouveauBaud + ")...");
+        int ancienBaud = 19200; // débit courant confirmé sur ce parc — voir commentaire d'origine ligne ~4924
+        scanExec.execute(() -> {
+            String log;
+            try {
+                dc.setBaud(baudIdx);
+                LogBus.ui(nodeFinal, "[BAUD] Set Baud envoyé — index=" + baudIdx + " (" + nouveauBaud + ")");
+                Thread.sleep(300); // laisse le registre appliquer avant de changer notre propre port
+
+                port.setParameters(nouveauBaud, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
+                LogBus.ui(nodeFinal, "[BAUD] Port USB reconfiguré localement à " + nouveauBaud);
+
+                boolean ok = false;
+                try {
+                    dc.requestStatus();
+                    ok = true;
+                } catch (Exception ignored) {}
+
+                if (ok) {
+                    log = "✅ Débit changé avec succès — registre et app à " + nouveauBaud + " bauds";
+                    LogBus.ui(nodeFinal, "[BAUD] " + log);
+                } else {
+                    // ✅ Filet de sécurité — retour automatique à l'ancien débit
+                    LogBus.err(nodeFinal, "MainActivity.forcerVitesseRegistre",
+                            new Exception("Communication perdue après changement à " + nouveauBaud + " — retour à " + ancienBaud));
+                    try {
+                        port.setParameters(ancienBaud, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
+                        Thread.sleep(300);
+                        dc.requestStatus();
+                        log = "⚠️ Échec au nouveau débit — récupéré automatiquement à " + ancienBaud + " bauds (registre probablement resté à l'ancien débit aussi)";
+                    } catch (Exception e2) {
+                        log = "❌ ÉCHEC CRITIQUE — communication perdue, même après retour à " + ancienBaud
+                                + ". Reconnexion manuelle requise (débrancher/rebrancher USB).";
+                    }
+                    LogBus.err(nodeFinal, "MainActivity.forcerVitesseRegistre", new Exception(log));
+                }
+            } catch (Exception e) {
+                log = "❌ Erreur: " + e.getMessage();
+                LogBus.err(nodeFinal, "MainActivity.forcerVitesseRegistre", e);
+            }
+            final String finalLog = log;
+            runOnUiThread(() -> {
+                if (resultView != null) resultView.setText(finalLog);
+                btn.setEnabled(true);
+            });
+        });
+    }
+
     private void validerCandidats(TextView resultView, Button btnStart, Button btnCancel) {
         candidatsAnnules = false;
         if (resultView != null) resultView.setText("");
@@ -5871,8 +6065,23 @@ private boolean ensureBtConnectPermission() {
                 byte[] raw = tmp.opGetField(80, 3000);
                 long ms = System.currentTimeMillis() - t0;
                 String serial = decodeSerialBytes(raw);
-                return serial != null ? "✅ Présent — #série=" + serial + " (" + ms + "ms)" + infosSupplementaires(tmp, 250)
-                    : "⚠ Présent mais silencieux (" + ms + "ms) — mauvais débit probable";
+                if (serial != null) {
+                    return "✅ Présent — #série=" + serial + " (" + ms + "ms)" + infosSupplementaires(tmp, 250);
+                }
+                // ✅ AJOUTÉ (20 août 2026, demande Paul — "ajouter dans la
+                // validation la détection du baud rate") — au lieu de
+                // deviner "mauvais débit probable", cherche VRAIMENT via
+                // detecterBaudSurPort(). USB seulement — le seul transport
+                // où le débit peut être vérifié/changé de cette façon.
+                if (usbPort != null) {
+                    int trouve = detecterBaudSurPort(usbPort, 250);
+                    if (trouve > 0) {
+                        return "⚠ Présent mais débit incorrect (" + ms + "ms) — détecté à " + trouve
+                                + " bauds (attendu 19200) — utilise \"Forcer la vitesse\" pour corriger";
+                    }
+                }
+                return "⚠ Présent mais silencieux (" + ms + "ms) — débit introuvable parmi "
+                        + java.util.Arrays.toString(BAUD_DETECT_ORDER);
             } catch (Exception e) {
                 return "❌ Erreur — " + e.getClass().getSimpleName() + ": " + e.getMessage();
             }
