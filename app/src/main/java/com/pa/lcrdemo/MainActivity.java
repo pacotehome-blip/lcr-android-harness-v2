@@ -1434,27 +1434,12 @@ tabRegisters = findViewById(R.id.tabRegisters);
             });
         }
 
-        // ✅ AJOUTÉ (20 août 2026, demande Paul — "gérer le baud rate dans
-        // le registre à partir de l'apk") — voir DeliveryController.setBaud()
-        // (backend déjà construit le 7 août, jamais branché avant
-        // aujourd'hui). Confirmé par test réel : Set Baud (0x7C) ne
-        // nécessite PAS la calibration. Scopé à USB uniquement — BT SPP et
-        // TCP n'ont pas de vrai débit UART physique ajustable de la même
-        // façon dans ce contexte, contrairement à la connexion série USB.
-        Spinner spnForcerVitesse = findViewById(R.id.spnForcerVitesse);
-        Button btnForcerVitesse = findViewById(R.id.btnForcerVitesse);
-        TextView txtForcerVitesseResult = findViewById(R.id.txtForcerVitesseResult);
-        if (spnForcerVitesse != null) {
-            String[] baudLabels = {"57600 (index 0)", "19200 (index 1) — actuel confirmé", "9600 (index 2)", "4800 (index 3)", "2400 (index 4)"};
-            spnForcerVitesse.setAdapter(new android.widget.ArrayAdapter<>(this,
-                    android.R.layout.simple_spinner_dropdown_item, baudLabels));
-            spnForcerVitesse.setSelection(1); // 19200 par défaut, le débit confirmé fonctionnel
-        }
-        if (btnForcerVitesse != null) {
-            btnForcerVitesse.setOnClickListener(v -> forcerVitesseRegistre(
-                    spnForcerVitesse != null ? spnForcerVitesse.getSelectedItemPosition() : 1,
-                    txtForcerVitesseResult, btnForcerVitesse));
-        }
+        // ✅ RETIRÉ (20 août 2026, demande Paul — section "Forcer la
+        // vitesse" séparée retirée, remplacée par l'ajustement par
+        // registre détecté, directement dans "Démarrer la validation".
+        // Voir ouvrirFenetreChangementDebit() plus bas, appelée depuis
+        // ajouterLigneCandidatCliquable()). forcerVitesseRegistre() reste
+        // utilisée, mais appelée depuis là maintenant, pas d'ici.
         // ✅ RETIRÉ (20 août 2026, demande Paul — "la section détecter la
         // vitesse n'est plus utile") — bouton séparé retiré, la détection
         // vit maintenant dans validerUnCandidatLectureSeule() (intégrée à
@@ -5991,12 +5976,14 @@ private boolean ensureBtConnectPermission() {
                 final String finalResultat = resultat;
                 runOnUiThread(() -> { if (resultView != null) resultView.append(finalResultat + "\n"); });
                 logMedia1("[VALIDATION-CANDIDATS] " + label + " → " + finalResultat.replace("\n", " | "));
-                // ✅ AJOUTÉ (20 août 2026, demande Paul — "capable de
-                // changer la vitesse en cliquant sur le registre détecté")
-                // — pour tout candidat confirmé (#série trouvé), ajoute
-                // une ligne cliquable ouvrant une fenêtre de changement de
-                // débit.
-                if (finalResultat.startsWith("✅") && containerCliquables != null) {
+                // ✅ ÉLARGI (20 août 2026, demande Paul — "je veux être
+                // capable de cliquer sur ça pour voir le détail et ajuster
+                // dans le cas qu'il trouve un registre") — TOUS les
+                // candidats deviennent cliquables maintenant, pas juste
+                // ceux confirmés (✅). Cliquer montre toujours le détail;
+                // l'ajustement de vitesse n'apparaît QUE si un registre a
+                // vraiment été trouvé (voir ouvrirFenetreChangementDebit).
+                if (containerCliquables != null) {
                     runOnUiThread(() -> ajouterLigneCandidatCliquable(containerCliquables, label, candidatKey, finalResultat));
                 }
                 if (candidatsAnnules) continue; // sera intercepté au prochain tour de boucle
@@ -6013,32 +6000,42 @@ private boolean ensureBtConnectPermission() {
         }).start();
     }
 
-    // ✅ AJOUTÉ (20 août 2026, demande Paul — "capable de changer la
-    // vitesse en cliquant sur le registre détecté") — une ligne cliquable
-    // par candidat confirmé. USB : ouvre un vrai sélecteur de débit,
-    // réutilise forcerVitesseRegistre() déjà construit. BT/TCP : le débit
-    // appartient au registre, mais le CHANGER depuis l'app nécessite aussi
-    // de reconfigurer le pont BT/le N-Port séparément (voir
-    // guide_support_terrain.md, section déploiement) — affiche une
-    // information claire plutôt qu'une action qui ne fonctionnerait pas
-    // vraiment.
+    // ✅ ÉLARGI (20 août 2026, demande Paul — "je veux être capable de
+    // cliquer sur ça pour voir le détail et ajuster dans le cas qu'il
+    // trouve un registre") — une ligne cliquable par candidat, TOUS les
+    // résultats (pas juste confirmés) — couleur selon succès/échec pour
+    // rester lisible d'un coup d'œil. Le détail s'affiche toujours au
+    // clic; l'ajustement de vitesse n'apparaît que si un registre a
+    // vraiment été trouvé (voir ouvrirFenetreChangementDebit).
     private void ajouterLigneCandidatCliquable(android.widget.LinearLayout container,
                                                  String label, String candidatKey, String resultat) {
+        boolean trouve = resultat.startsWith("✅");
         TextView row = new TextView(this);
-        row.setText("⚙️ " + label + "  —  " + resultat.replace("\n", " "));
+        row.setText((trouve ? "⚙️ " : "ℹ️ ") + label + "  —  " + resultat.replace("\n", " "));
         row.setTextSize(11f);
         row.setPadding(8, 10, 8, 10);
-        row.setBackgroundColor(0xFFE8F5E9);
+        row.setBackgroundColor(trouve ? 0xFFE8F5E9 : 0xFFF5F5F5);
         android.widget.LinearLayout.LayoutParams lp = new android.widget.LinearLayout.LayoutParams(
                 android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
                 android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
         lp.setMargins(0, 4, 0, 0);
         row.setLayoutParams(lp);
-        row.setOnClickListener(v -> ouvrirFenetreChangementDebit(candidatKey, resultat));
+        row.setOnClickListener(v -> ouvrirFenetreChangementDebit(label, candidatKey, resultat));
         container.addView(row);
     }
 
-    private void ouvrirFenetreChangementDebit(String candidatKey, String resultatValidation) {
+    private void ouvrirFenetreChangementDebit(String label, String candidatKey, String resultatValidation) {
+        // ✅ AJOUTÉ (20 août 2026) — candidat non confirmé (absent, timeout,
+        // erreur) : montre juste le détail, jamais l'ajustement de vitesse
+        // — il n'y a pas de registre réel à ajuster ici.
+        if (!resultatValidation.startsWith("✅")) {
+            new android.app.AlertDialog.Builder(this)
+                .setTitle(label)
+                .setMessage(resultatValidation)
+                .setPositiveButton("Fermer", null)
+                .show();
+            return;
+        }
         if (!candidatKey.equals("USB")) {
             new android.app.AlertDialog.Builder(this)
                 .setTitle("Changement de débit — " + candidatKey)
