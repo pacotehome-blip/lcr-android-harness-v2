@@ -497,8 +497,17 @@ public class LcpLink {
         }
 
         public String toSpinnerLabel() {
-            if (description.isEmpty()) return String.valueOf(noteIdx);
-            return noteIdx + " - " + description;
+            // ✅ ENRICHI (20 août 2026, demande Paul — "on a le produit,
+            // slot, code produit, la description, le type de produit")
+            // — affiche maintenant code + type en plus de la description,
+            // dans le menu déroulant de sélection lui-même — pas besoin
+            // d'un écran séparé pour voir ces informations.
+            StringBuilder sb = new StringBuilder(String.valueOf(noteIdx));
+            boolean any = false;
+            if (!description.isEmpty()) { sb.append(" - ").append(description); any = true; }
+            if (!productCode.isEmpty()) { sb.append(any ? " (" : " — code:(").append(productCode).append(")"); any = true; }
+            if (productType >= 0) { sb.append(" [").append(LcpLink.decodeProductType(productType)).append("]"); }
+            return sb.toString();
         }
     }
 

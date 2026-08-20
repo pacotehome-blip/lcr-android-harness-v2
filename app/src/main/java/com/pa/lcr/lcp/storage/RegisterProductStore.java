@@ -75,8 +75,16 @@ public class RegisterProductStore {
         }
 
         public String toSpinnerLabel() {
-            if (description.isEmpty()) return String.valueOf(noteIdx);
-            return noteIdx + " - " + description;
+            // ✅ ENRICHI (20 août 2026) — même logique que
+            // LcpLink.ProductScanResult.toSpinnerLabel(), pour que
+            // l'affichage reste cohérent peu importe si les données
+            // viennent d'un scan frais ou du cache local (ce chemin-ci).
+            StringBuilder sb = new StringBuilder(String.valueOf(noteIdx));
+            boolean any = false;
+            if (!description.isEmpty()) { sb.append(" - ").append(description); any = true; }
+            if (!productCode.isEmpty()) { sb.append(any ? " (" : " — code:(").append(productCode).append(")"); any = true; }
+            if (productType >= 0) { sb.append(" [").append(productTypeLabel()).append("]"); }
+            return sb.toString();
         }
 
         public boolean matchesName(String name) {

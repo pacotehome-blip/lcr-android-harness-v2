@@ -150,10 +150,18 @@
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
                             android:layout_marginTop="2dp"
-                            android:inputType="number"
+                            android:inputType="none"
+                            android:focusable="false"
                             android:hint="Produit (1-16)"
                             android:textSize="12sp"
                             android:completionThreshold="1" />
+                        <!-- ✅ CORRIGÉ (20 août 2026, demande Paul — "si on
+                             clique dedans on ne doit plus être capable
+                             d'éditer") — inputType="number" permettait de
+                             taper du texte libre, indépendamment du menu
+                             déroulant. inputType="none" + focusable="false"
+                             force la sélection UNIQUEMENT via le menu
+                             déroulant — plus de saisie manuelle possible. -->
                     </LinearLayout>
 
                     <!-- Preset -->
