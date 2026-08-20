@@ -305,7 +305,17 @@
                             android:visibility="gone"/>
                     </LinearLayout>
 
+                    <!-- ✅ AJOUTÉ (20 août 2026, demande Paul — "le scroll
+                         l'espace démarrer la validation il faut que je
+                         puisse scroller facilement dedans, il y a un
+                         scroll déjà pour l'onglet configure, pas facile à
+                         gérer") — id ajouté pour cibler ce ScrollView
+                         précis en Java et corriger le conflit de gestes
+                         avec le ScrollView externe de Configure (voir
+                         requestDisallowInterceptTouchEvent dans
+                         MainActivity.onCreate()). -->
                     <ScrollView
+                        android:id="@+id/scrollValiderCandidatsResult"
                         android:layout_width="match_parent"
                         android:layout_height="220dp"
                         android:layout_marginTop="6dp"
