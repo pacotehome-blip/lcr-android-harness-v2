@@ -3680,6 +3680,18 @@ private void setupTabsTop() {
         ui.postDelayed(() -> {
             try {
             if (tabRegisters == null || tabRegisters.getTabCount() == 0) {
+                // ✅ AJOUTÉ (20 août 2026, demande Paul — "je supprime le
+                // tab, je fais la validation, je reviens dans main le tab
+                // est de nouveau présent") — trouvé : ce mécanisme
+                // (séparé du chien de garde probeKnownTransportsForLostRegister,
+                // déjà protégé) recréait le tab automatiquement PENDANT
+                // qu'une validation manuelle tournait, causant exactement
+                // le conflit (deux connexions simultanées au même
+                // appareil → IOException). Suspendu ici aussi.
+                if (validationEnCours) {
+                    logUi(null, "Plus aucun tab — reconnexion auto suspendue (validation manuelle en cours)");
+                    return;
+                }
                 // ✅ FIX (7 août 2026, demande Paul — coupe-circuit) — vérifié
                 // AVANT le refroidissement simple : si le circuit est déjà
                 // ouvert (boucle détectée précédemment), on n'essaie même
@@ -5991,17 +6003,16 @@ private boolean ensureBtConnectPermission() {
                 }
             } catch (Exception ignored) {}
 
-            // ✅ CORRIGÉ (20 août 2026, demande Paul — "le résultat de la
-            // validation doit être ajouté en dessous de chaque candidat
-            // pas après") — retiré l'ancienne liste de tête ("📋 N
-            // candidat(s) à valider") suivie d'un journal texte séparé,
-            // qui affichait tous les candidats D'ABORD puis tous les
-            // résultats APRÈS, dans un bloc à part. Les lignes cliquables
-            // ci-dessous (ajouterLigneCandidatCliquable) portent déjà
-            // candidat + résultat ensemble, ajoutées une à la fois au fur
-            // et à mesure — c'est la seule représentation maintenant.
-            runOnUiThread(() -> { if (resultView != null) resultView.setText(
-                "📋 " + candidats.size() + " candidat(s) à valider — résultat sous chacun ci-dessous :\n"); });
+            // ✅ RÉTABLI (20 août 2026, demande Paul — "j'aimais voir la
+            // liste des candidats avant, je veux voir chacun des tests par
+            // la suite") — la liste complète des candidats réapparaît
+            // d'abord, PUIS chaque ligne cliquable (candidat+résultat,
+            // mise à jour en direct) s'ajoute en dessous au fur et à
+            // mesure — les deux ensemble, pas l'un ou l'autre.
+            final String header = "📋 " + candidats.size() + " candidat(s) à valider :\n"
+                + candidats.stream().map(c -> "  • " + c[0]).reduce("", (a, b) -> a + b + "\n")
+                + "\nRésultat de chaque test ci-dessous :\n";
+            runOnUiThread(() -> { if (resultView != null) resultView.setText(header); });
 
             for (String[] candidat : candidats) {
                 if (candidatsAnnules) {
@@ -6070,7 +6081,21 @@ private boolean ensureBtConnectPermission() {
         lp.setMargins(0, 4, 0, 0);
         row.setLayoutParams(lp);
         appliquerContenuLigneCandidat(row, label, candidatKey, resultat);
+        // ✅ AJOUTÉ (20 août 2026, demande Paul — "je perds le début et je
+        // n'arrive plus à remonter") — le contenu grandit dynamiquement
+        // pendant que l'utilisateur défile (une ligne ajoutée toutes les
+        // quelques secondes) — Android recalcule la mise en page à chaque
+        // ajout, ce qui peut faire perdre la position de scroll en plein
+        // milieu d'un geste. Fixe explicitement la position avant/après
+        // l'ajout pour qu'elle ne bouge jamais toute seule.
+        android.widget.ScrollView scroll = findViewById(R.id.scrollValiderCandidatsResult);
+        int scrollYAvant = scroll != null ? scroll.getScrollY() : -1;
         container.addView(row);
+        if (scroll != null && scrollYAvant >= 0) {
+            final android.widget.ScrollView scrollFinal = scroll;
+            final int scrollYFinal = scrollYAvant;
+            scrollFinal.post(() -> scrollFinal.scrollTo(0, scrollYFinal));
+        }
         return row;
     }
 
@@ -6080,7 +6105,17 @@ private boolean ensureBtConnectPermission() {
     // reste au même endroit visuellement, juste son contenu change.
     private void mettreAJourLigneCandidat(TextView row, String label, String candidatKey, String resultat) {
         if (row == null) return; // filet de sécurité — ne devrait pas arriver (voir ordre FIFO de runOnUiThread)
+        // ✅ AJOUTÉ (20 août 2026) — même fixation de scroll que
+        // ajouterLigneCandidatCliquable — le texte change de longueur
+        // ("⏳ en cours..." → résultat final), donc la hauteur aussi.
+        android.widget.ScrollView scroll = findViewById(R.id.scrollValiderCandidatsResult);
+        int scrollYAvant = scroll != null ? scroll.getScrollY() : -1;
         appliquerContenuLigneCandidat(row, label, candidatKey, resultat);
+        if (scroll != null && scrollYAvant >= 0) {
+            final android.widget.ScrollView scrollFinal = scroll;
+            final int scrollYFinal = scrollYAvant;
+            scrollFinal.post(() -> scrollFinal.scrollTo(0, scrollYFinal));
+        }
     }
 
     private void appliquerContenuLigneCandidat(TextView row, String label, String candidatKey, String resultat) {
