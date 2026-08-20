@@ -2688,42 +2688,47 @@ softResync("retry/" + step);
 
     private String readTicketNo23Uncached() throws Exception {
         String tno = readU32FieldAsDecString(FIELD_TICKET_NUMBER);
-        // ✅ AJOUTÉ (11 août 2026, demande Paul — "si le champ 23 = 0 et que
-        // le champ 37 = 2, on utilise sale number") — TicketNumber_WM (#23)
-        // ne s'incrémente QU'APRÈS une impression réussie (documenté). Si
-        // TicketRequired_WM (#37) = 2 ("jamais imprimé"), ce champ restera
-        // à 0 POUR TOUJOURS par conception du registre — pas un pépin
-        // temporaire d'imprimante, un état permanent tant que ce réglage
-        // tient. SaleNumber_WM (#22), lui, s'incrémente au DÉBUT de chaque
-        // livraison, peu importe l'impression — repli logique et fiable.
-        // Corrigé ICI, à la source, pour que tout le reste de l'app (66+
-        // usages de ticketNo dans ce seul fichier) en hérite automatiquement
-        // sans avoir à toucher chaque site d'utilisation individuellement.
+        // ✅ ÉLARGI (20 août 2026, demande Paul — précisé en 3 cas) :
+        // 1) ticket=0, sale≠0 → repli sur sale_number (identifiant valide)
+        // 2) ticket=0, sale=0, TicketRequired≠2 → REGISTRE RÉINITIALISÉ
+        //    (les deux compteurs à zéro en même temps, alors que
+        //    l'impression est censée être active, n'est pas normal — ça
+        //    indique un reset récent du registre). Ne JAMAIS retourner "0"
+        //    dans ce cas — produirait un delivery_uid dégénéré du genre
+        //    "...-0" en aval, inutile pour identifier la livraison. Repli
+        //    sur un horodatage (secondes epoch) comme identifiant unique
+        //    de repli, clairement journalisé pour rester traçable.
+        // 3) ticket=0, sale=0, TicketRequired=2 → comportement du 11 août
+        //    (jamais imprimer, ticket toujours à 0 par conception) — même
+        //    protection anti-zéro appliquée ici aussi, par cohérence.
         if ("0".equals(tno)) {
-            // ✅ FIX (11 août 2026, demande Paul — "il ne faut pas oublier
-            // qu'actuellement il y aura le LC3 aussi") — Field #22/#37 sont
-            // des numéros de champ LCR-II (Liquid Controls), PAS des
-            // constantes universelles LCP. Sur un vrai LC3, ces mêmes
-            // numéros pourraient désigner autre chose ou rien du tout —
-            // tenter ce repli aveuglément risquerait une valeur
-            // silencieusement fausse plutôt qu'un "0" honnête. Repli
-            // désactivé tant qu'on n'a pas la doc protocole LC3 confirmant
-            // les bons numéros de champ pour cet appareil.
             if (link instanceof Lc3Link) {
                 android.util.Log.i("DeliveryController", "readTicketNo23: champ #23=0 sur LC3 — "
                     + "repli SaleNumber désactivé (numéros de champ LCR-II non confirmés pour LC3)");
                 return tno;
             }
             try {
-                // ✅ FIX (11 août 2026) — réutilise maintenant isTicketRequiredNeverPrint()
-                // (mis en cache) au lieu de relire Field #37 séparément ici — une seule
-                // vraie source de vérité pour toute la classe.
-                if (isTicketRequiredNeverPrint()) {
-                    String saleNo = readSaleNo22();
-                    android.util.Log.i("DeliveryController", "readTicketNo23: champ #23=0 et TicketRequired(#37)=2 "
-                        + "(jamais imprimé) — repli sur SaleNumber(#22)=" + saleNo);
+                String saleNo = readSaleNo22();
+                if (!"0".equals(saleNo)) {
+                    android.util.Log.i("DeliveryController", "readTicketNo23: champ #23=0 "
+                        + "— repli sur SaleNumber(#22)=" + saleNo);
                     return saleNo;
                 }
+                // Cas 2/3 — les deux compteurs sont à zéro.
+                boolean ticketRequiredNeverPrint = false;
+                try { ticketRequiredNeverPrint = isTicketRequiredNeverPrint(); } catch (Exception ignored) {}
+                String horodatageFallback = String.valueOf(System.currentTimeMillis() / 1000L);
+                if (!ticketRequiredNeverPrint) {
+                    android.util.Log.w("DeliveryController", "readTicketNo23: ticket=0 ET sale=0 avec "
+                        + "TicketRequired≠2 — REGISTRE RÉINITIALISÉ probable. Repli horodatage="
+                        + horodatageFallback + " (jamais 0, pour éviter un delivery_uid dégénéré)");
+                    try { com.pa.lcr.lcp.log.LogBus.err(resolveLcpNode(), "DeliveryController.readTicketNo23",
+                            new Exception("Registre réinitialisé probable — ticket=0 et sale=0 simultanément")); } catch (Exception ignored) {}
+                } else {
+                    android.util.Log.i("DeliveryController", "readTicketNo23: ticket=0 et sale=0 "
+                        + "(TicketRequired=2, comportement attendu) — repli horodatage=" + horodatageFallback);
+                }
+                return horodatageFallback;
             } catch (Exception e) {
                 // Repli impossible à vérifier — retourne le "0" original plutôt
                 // que de risquer une valeur incorrecte sur une supposition.
@@ -3020,6 +3025,25 @@ public ApiResult api_registerValidate(
                 }
             } catch (Exception ignored) {}
 
+            // ✅ AJOUTÉ (20 août 2026, demande Paul — "récupérer le produit
+            // et le preset si on trouve le ticket_number ou sale_number")
+            // — le produit était déjà lu ici, jamais le preset. Ajouté aux
+            // côtés du produit, même appel, même échelle (cachedDigits)
+            // que readNetGrossL()/writePresetNet_WithCacheOrFallback()
+            // ailleurs dans ce fichier — corrélé avec ticketNo/saleNo déjà
+            // résolus ci-dessus (incluant le fix anti-"0" d'aujourd'hui).
+            Double presetGrossL = null, presetNetL = null;
+            try {
+                ensureDigits();
+                double scalePreset = Math.pow(10, cachedDigits);
+                byte[] pg = lcpGetField(5); // GrossPreset_PL
+                if (pg != null) presetGrossL = (beI32(pg) & 0xFFFFFFFFL) / scalePreset;
+                byte[] pn = lcpGetField(FIELD_PRESET_NET); // #6, NetPreset_PL
+                if (pn != null) presetNetL = (beI32(pn) & 0xFFFFFFFFL) / scalePreset;
+            } catch (Exception ignored) {
+                // Lecture best-effort — ne bloque jamais le reste de la validation.
+            }
+
             // delivery_uid (peut être null)
             String deliveryUid = null;
             if (numero_livraison != null && !numero_livraison.trim().isEmpty()
@@ -3058,6 +3082,9 @@ public ApiResult api_registerValidate(
             safeJsonPut(data, "serial_id", serialId);
             safeJsonPut(data, "delivery_uid", deliveryUid == null ? JSONObject.NULL : deliveryUid);
             safeJsonPut(data, "active_product", activeProduct1to16 == null ? JSONObject.NULL : activeProduct1to16);
+            // ✅ AJOUTÉ (20 août 2026) — voir commentaire à la lecture, plus haut.
+            safeJsonPut(data, "preset_gross_l", presetGrossL == null ? JSONObject.NULL : presetGrossL);
+            safeJsonPut(data, "preset_net_l", presetNetL == null ? JSONObject.NULL : presetNetL);
             safeJsonPut(data, "expected_product_number", expected_product_number == null ? JSONObject.NULL : expected_product_number);
             safeJsonPut(data, "expected_compartment", expected_compartment == null ? JSONObject.NULL : expected_compartment);
             safeJsonPut(data, "serial_match", serialMatch ? 1 : 0);
