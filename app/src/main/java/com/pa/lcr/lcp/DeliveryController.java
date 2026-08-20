@@ -4110,8 +4110,13 @@ job.presetNetL_requested = presetNetL;
     }
 
     /**
-     * Scanne les 16 descriptions produit depuis le registre LCR-II.
-     * Délègue à LcpLink.opScanAllProductNames() via withLcpLock.
+     * Scanne les 16 produits (description, code, type) depuis le registre LCR-II.
+     * ✅ CORRIGÉ (20 août 2026) — l'ancien commentaire disait "délègue à
+     * LcpLink.opScanAllProductNames()" mais c'était faux — cette méthode
+     * réimplémente sa propre boucle inline (avec scanInProgress, withLcpLock,
+     * activateExclusive). LcpLink.opScanAllProductNames() existe en
+     * parallèle mais n'est appelée nulle part — code mort, laissé tel quel
+     * comme utilitaire disponible, pas supprimé.
      *
      * Le callback progressLog est appelé à chaque produit lu, depuis le thread BT.
      * Format : "Produit N: description" (N = 1..16).
@@ -4176,6 +4181,15 @@ job.presetNetL_requested = presetNetL;
                 for (int idx = 0; idx < 16; idx++) {
                     final int fIdx = idx;
                     String desc;
+                    // ✅ CORRIGÉ (20 août 2026, demande Paul — "assure-toi
+                    // que tout est OK") — trouvé : c'est CE scan-ci, pas
+                    // celui de LcpLink.opScanAllProductNames(), qui est
+                    // réellement appelé par le tab (api_scanProductNames()).
+                    // Mon ajout plus tôt aujourd'hui du code (#1) et du type
+                    // (#94) dans LcpLink n'était donc jamais exécuté en
+                    // pratique — corrigé ici, au vrai point d'entrée.
+                    String[] codeHolder = {""};
+                    int[] typeHolder = {-1};
                     try {
                         desc = withLcpLock(() -> {
                             link.opSetField(0, new byte[]{(byte) fIdx});
@@ -4187,12 +4201,22 @@ job.presetNetL_requested = presetNetL;
                                     d = new String(f11, java.nio.charset.StandardCharsets.US_ASCII)
                                             .replace("\0", "").trim();
                             } catch (Exception ignored) {}
+                            try {
+                                byte[] f1 = link.opGetField(1);
+                                if (f1 != null && f1.length > 0)
+                                    codeHolder[0] = new String(f1, java.nio.charset.StandardCharsets.US_ASCII)
+                                            .replace("\0", "").trim();
+                            } catch (Exception ignored) {}
+                            try {
+                                byte[] f94 = link.opGetField(94);
+                                if (f94 != null && f94.length > 0) typeHolder[0] = f94[0] & 0xFF;
+                            } catch (Exception ignored) {}
                             return d;
                         });
                     } catch (Exception e) {
                         desc = "";
                     }
-                    result.add(new LcpLink.ProductScanResult(idx + 1, desc));
+                    result.add(new LcpLink.ProductScanResult(idx + 1, desc, codeHolder[0], typeHolder[0]));
                     if (progressLog != null) progressLog.onProduct("Produit " + (idx + 1) + ": " + desc);
                 }
             } finally {
