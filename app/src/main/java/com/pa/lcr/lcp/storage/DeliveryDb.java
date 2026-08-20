@@ -43,7 +43,7 @@ public class DeliveryDb extends SQLiteOpenHelper {
     //      chaque soir) + diagnostic_match_history (persiste chaque résultat de
     //      DiagnosticRuleEngine, jusqu'ici calculé à la volée et jamais stocké — nécessaire
     //      pour calibrer les règles / futur agent IA, demande Paul 31 juillet 2026).
-    public static final int DB_VERSION = 24;
+    public static final int DB_VERSION = 25;
 
     private static final String TAG = "DeliveryDb";
 
@@ -223,6 +223,19 @@ public class DeliveryDb extends SQLiteOpenHelper {
         // dédié distinguant clairement un test manuel d'un vrai événement de livraison.
         if (oldVersion < 24) {
             createDiagnosticEventsView(db);
+        }
+        // v25 (demande Paul, 20 août 2026 — "on devra aussi ajouter le code FSM et
+        // Produit_description FSM") — register_products captait déjà description (#11)
+        // et is_propane (dérivé), mais jamais le code produit (#1) ni le type brut (#94)
+        // eux-mêmes — seulement leur usage interne. Ajoutés ici pour affichage complet
+        // dans la section Produit & Preset du tab. fsm_code/fsm_description ajoutés en
+        // réservation pour plus tard (confirmé par Paul : "pour le moment... c'est pour
+        // le futur") — colonnes présentes, jamais peuplées ni consultées pour l'instant.
+        if (oldVersion < 25) {
+            addColumnIfMissing(db, "register_products", "product_code",     "TEXT NOT NULL DEFAULT ''");
+            addColumnIfMissing(db, "register_products", "product_type",    "INTEGER NOT NULL DEFAULT -1");
+            addColumnIfMissing(db, "register_products", "fsm_code",        "TEXT");
+            addColumnIfMissing(db, "register_products", "fsm_description", "TEXT");
         }
     }
 
@@ -769,13 +782,18 @@ public class DeliveryDb extends SQLiteOpenHelper {
     private static void createRegisterProductsTable(SQLiteDatabase db) {
         db.execSQL(
             "CREATE TABLE IF NOT EXISTS register_products (" +
-            "serial_id   TEXT    NOT NULL," +
-            "note_idx    INTEGER NOT NULL," +
-            "description TEXT    NOT NULL DEFAULT ''," +
-            "lcr_node    INTEGER NOT NULL DEFAULT 0," +
-            "is_propane  INTEGER NOT NULL DEFAULT 0," +
-            "updated_at  INTEGER NOT NULL DEFAULT 0," +
-            "sync_status TEXT    NOT NULL DEFAULT 'PENDING'," +
+            "serial_id       TEXT    NOT NULL," +
+            "note_idx        INTEGER NOT NULL," +
+            "description     TEXT    NOT NULL DEFAULT ''," +
+            "lcr_node        INTEGER NOT NULL DEFAULT 0," +
+            "is_propane      INTEGER NOT NULL DEFAULT 0," +
+            "updated_at      INTEGER NOT NULL DEFAULT 0," +
+            "sync_status     TEXT    NOT NULL DEFAULT 'PENDING'," +
+            // ✅ AJOUTÉ v25 (20 août 2026) — voir onUpgrade() pour le détail.
+            "product_code    TEXT    NOT NULL DEFAULT ''," +
+            "product_type    INTEGER NOT NULL DEFAULT -1," +
+            "fsm_code        TEXT," +
+            "fsm_description TEXT," +
             "PRIMARY KEY (serial_id, note_idx)" +
             ");"
         );

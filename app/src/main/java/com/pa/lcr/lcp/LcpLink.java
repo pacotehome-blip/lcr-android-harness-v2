@@ -468,14 +468,53 @@ public class LcpLink {
         public final int     noteIdx;
         public final String  description;
         public final boolean isPropane;
+        // ✅ AJOUTÉ (20 août 2026, demande Paul — "on a le produit, slot,
+        // code produit, la description, le type de produit") — code (#1)
+        // et type brut (#94) captés en plus de la description (#11), qui
+        // seule était lue jusqu'ici.
+        public final String  productCode;
+        public final int     productType; // -1 si absent/illisible, sinon 0-7 (List 2 du PDF)
+
         public ProductScanResult(int noteIdx, String description) {
+            this(noteIdx, description, "", -1);
+        }
+
+        public ProductScanResult(int noteIdx, String description, String productCode, int productType) {
             this.noteIdx     = noteIdx;
             this.description = description != null ? description.trim() : "";
-            this.isPropane   = this.description.toLowerCase(java.util.Locale.ROOT).contains("propane");
+            this.productCode = productCode != null ? productCode.trim() : "";
+            this.productType = productType;
+            // ✅ CORRIGÉ (20 août 2026) — isPropane se basait UNIQUEMENT sur
+            // un match texte dans la description ("contient propane") — le
+            // même problème de fiabilité identifié plus tôt aujourd'hui
+            // (le nom peut être vide ou différent, jamais garanti). Priorité
+            // maintenant au vrai type (#94=5, LPG selon List 2 du PDF
+            // Liquid Controls) — repli sur le texte seulement si le type
+            // est absent/illisible (-1), pour rester compatible avec les
+            // scans faits avant ce fix.
+            this.isPropane = (productType == 5)
+                    || (productType < 0 && this.description.toLowerCase(java.util.Locale.ROOT).contains("propane"));
         }
+
         public String toSpinnerLabel() {
             if (description.isEmpty()) return String.valueOf(noteIdx);
             return noteIdx + " - " + description;
+        }
+    }
+
+    // ✅ AJOUTÉ (20 août 2026) — décodage List 2 du PDF Liquid Controls
+    // (Field #94, ProductType_WM), pour affichage lisible dans le tab.
+    public static String decodeProductType(int type) {
+        switch (type) {
+            case 0: return "Ammonia";
+            case 1: return "Aviation";
+            case 2: return "Distillate";
+            case 3: return "Gasoline";
+            case 4: return "Methanol";
+            case 5: return "LPG";
+            case 6: return "Lube Oil";
+            case 7: return "Aucun";
+            default: return "?";
         }
     }
 
@@ -783,7 +822,23 @@ public class LcpLink {
                         desc = new String(f11, java.nio.charset.StandardCharsets.US_ASCII)
                                    .replace("\0", "").trim();
                 } catch (Exception ignored) {}
-                result.add(new ProductScanResult(idx + 1, desc));
+                // ✅ AJOUTÉ (20 août 2026) — code (#1) et type (#94), en plus
+                // de la description. Échecs de lecture individuels ignorés
+                // (rc=0x23 possible si champ non applicable à ce slot) —
+                // ne bloque jamais le reste du scan.
+                String code = "";
+                try {
+                    byte[] f1 = opGetField(1);
+                    if (f1 != null && f1.length > 0)
+                        code = new String(f1, java.nio.charset.StandardCharsets.US_ASCII)
+                                   .replace("\0", "").trim();
+                } catch (Exception ignored) {}
+                int type = -1;
+                try {
+                    byte[] f94 = opGetField(94);
+                    if (f94 != null && f94.length > 0) type = f94[0] & 0xFF;
+                } catch (Exception ignored) {}
+                result.add(new ProductScanResult(idx + 1, desc, code, type));
                 if (progressLog != null) progressLog.onProduct("Produit " + (idx + 1) + ": " + desc);
             }
         } finally {

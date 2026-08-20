@@ -23,6 +23,11 @@ public class RegisterProductStore {
     public static final String COL_IS_PROPANE  = "is_propane";
     public static final String COL_UPDATED     = "updated_at";
     public static final String COL_SYNC_STATUS = "sync_status";
+    // ✅ AJOUTÉ (20 août 2026, demande Paul) — voir DeliveryDb v25.
+    public static final String COL_PRODUCT_CODE = "product_code";
+    public static final String COL_PRODUCT_TYPE = "product_type";
+    public static final String COL_FSM_CODE     = "fsm_code";        // réservé pour le futur, jamais peuplé pour l'instant
+    public static final String COL_FSM_DESC     = "fsm_description"; // réservé pour le futur, jamais peuplé pour l'instant
 
     public static final String SYNC_PENDING = "PENDING";
     public static final String SYNC_SYNCED  = "SYNCED";
@@ -43,9 +48,15 @@ public class RegisterProductStore {
         public final boolean isPropane;
         public final long    updatedAt;
         public final String  syncStatus;
+        // ✅ AJOUTÉ (20 août 2026, demande Paul)
+        public final String  productCode;
+        public final int     productType;   // -1 = absent, sinon 0-7 (List 2 du PDF)
+        public final String  fsmCode;        // réservé futur — toujours null pour l'instant
+        public final String  fsmDescription; // réservé futur — toujours null pour l'instant
 
         public Row(String serialId, int noteIdx, String description,
-                   int lcrNode, boolean isPropane, long updatedAt, String syncStatus) {
+                   int lcrNode, boolean isPropane, long updatedAt, String syncStatus,
+                   String productCode, int productType, String fsmCode, String fsmDescription) {
             this.serialId    = serialId;
             this.noteIdx     = noteIdx;
             this.description = description != null ? description : "";
@@ -53,6 +64,14 @@ public class RegisterProductStore {
             this.isPropane   = isPropane;
             this.updatedAt   = updatedAt;
             this.syncStatus  = syncStatus != null ? syncStatus : SYNC_PENDING;
+            this.productCode = productCode != null ? productCode : "";
+            this.productType = productType;
+            this.fsmCode        = fsmCode;
+            this.fsmDescription = fsmDescription;
+        }
+
+        public String productTypeLabel() {
+            return com.pa.lcr.lcp.LcpLink.decodeProductType(productType);
         }
 
         public String toSpinnerLabel() {
@@ -92,6 +111,11 @@ public class RegisterProductStore {
                 cv.put(COL_IS_PROPANE,  r.isPropane ? 1 : 0);
                 cv.put(COL_UPDATED,     now);
                 cv.put(COL_SYNC_STATUS, SYNC_PENDING);
+                // ✅ AJOUTÉ (20 août 2026) — fsm_code/fsm_description ne
+                // sont volontairement PAS écrits ici (null par défaut) —
+                // réservés pour le futur, jamais peuplés par le scan.
+                cv.put(COL_PRODUCT_CODE, r.productCode != null ? r.productCode : "");
+                cv.put(COL_PRODUCT_TYPE, r.productType);
                 db.insertWithOnConflict(TABLE, null, cv, SQLiteDatabase.CONFLICT_REPLACE);
             }
             db.setTransactionSuccessful();
@@ -249,6 +273,15 @@ public class RegisterProductStore {
     // ── Map ───────────────────────────────────────────────────
 
     private static Row map(Cursor c, String serialId) {
+        // ✅ AJOUTÉ (20 août 2026) — lecture défensive des nouvelles
+        // colonnes (getColumnIndex, pas getColumnIndexOrThrow) pour ne
+        // jamais planter sur une base pas encore migrée en v25 — ne
+        // devrait pas arriver (onUpgrade s'en charge), mais coût nul à
+        // être prudent sur une PRIMARY KEY aussi fréquemment lue.
+        int idxCode = c.getColumnIndex(COL_PRODUCT_CODE);
+        int idxType = c.getColumnIndex(COL_PRODUCT_TYPE);
+        int idxFsmCode = c.getColumnIndex(COL_FSM_CODE);
+        int idxFsmDesc = c.getColumnIndex(COL_FSM_DESC);
         return new Row(
             serialId,
             c.getInt(c.getColumnIndexOrThrow(COL_NOTE_IDX)),
@@ -256,7 +289,11 @@ public class RegisterProductStore {
             c.getInt(c.getColumnIndexOrThrow(COL_LCR_NODE)),
             c.getInt(c.getColumnIndexOrThrow(COL_IS_PROPANE)) != 0,
             c.getLong(c.getColumnIndexOrThrow(COL_UPDATED)),
-            c.getString(c.getColumnIndexOrThrow(COL_SYNC_STATUS))
+            c.getString(c.getColumnIndexOrThrow(COL_SYNC_STATUS)),
+            idxCode >= 0 ? c.getString(idxCode) : "",
+            idxType >= 0 ? c.getInt(idxType) : -1,
+            idxFsmCode >= 0 ? c.getString(idxFsmCode) : null,
+            idxFsmDesc >= 0 ? c.getString(idxFsmDesc) : null
         );
     }
 }
