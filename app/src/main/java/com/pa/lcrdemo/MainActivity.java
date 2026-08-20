@@ -1455,12 +1455,10 @@ tabRegisters = findViewById(R.id.tabRegisters);
                     spnForcerVitesse != null ? spnForcerVitesse.getSelectedItemPosition() : 1,
                     txtForcerVitesseResult, btnForcerVitesse));
         }
-        Button btnDetecterVitesse = findViewById(R.id.btnDetecterVitesse);
-        TextView txtDetecterVitesseResult = findViewById(R.id.txtDetecterVitesseResult);
-        if (btnDetecterVitesse != null) {
-            btnDetecterVitesse.setOnClickListener(v ->
-                    detecterVitesseUsb(txtDetecterVitesseResult, btnDetecterVitesse));
-        }
+        // ✅ RETIRÉ (20 août 2026, demande Paul — "la section détecter la
+        // vitesse n'est plus utile") — bouton séparé retiré, la détection
+        // vit maintenant dans validerUnCandidatLectureSeule() (intégrée à
+        // "Démarrer la validation").
         if (btnBtDisconnect != null) btnBtDisconnect.setOnClickListener(v -> btDisconnect());
         // ✅ BT Signal scan
         if (btnBtSignalScan != null) {
@@ -5841,29 +5839,10 @@ private boolean ensureBtConnectPermission() {
         return -1;
     }
 
-    private void detecterVitesseUsb(TextView resultView, Button btn) {
-        UsbSerialPort port = UsbSession.getPort();
-        if (port == null || usbPort == null) {
-            if (resultView != null) resultView.setText("❌ Aucun port USB ouvert — connecte d'abord via USB");
-            return;
-        }
-        btn.setEnabled(false);
-        if (resultView != null) resultView.setText("⏳ Détection en cours...");
-        int nodeHypothese = 250; // adresse d'usine par défaut Liquid Controls
-        scanExec.execute(() -> {
-            int trouve = detecterBaudSurPort(port, nodeHypothese);
-            String log = trouve > 0
-                ? "✅ Débit détecté : " + trouve + " bauds (node=" + nodeHypothese + " supposé)"
-                : "❌ Aucun débit trouvé parmi " + java.util.Arrays.toString(BAUD_DETECT_ORDER)
-                    + " (node=" + nodeHypothese + " supposé — essaie un autre node si connu)";
-            if (trouve > 0) LogBus.ui(nodeHypothese, "[BAUD-DETECT] Trouvé : " + trouve + " bauds (node=" + nodeHypothese + ")");
-            final String finalLog = log;
-            runOnUiThread(() -> {
-                if (resultView != null) resultView.setText(finalLog);
-                btn.setEnabled(true);
-            });
-        });
-    }
+    // ✅ RETIRÉ (20 août 2026, demande Paul — "la section détecter la
+    // vitesse n'est plus utile") — detecterVitesseUsb() (bouton séparé)
+    // supprimée. detecterBaudSurPort() ci-dessus reste utilisée, appelée
+    // directement depuis validerUnCandidatLectureSeule().
 
     // ✅ AJOUTÉ (20 août 2026, demande Paul — "gérer le baud rate dans le
     // registre à partir de l'apk") — envoie Set Baud (0x7C) au registre
@@ -5959,6 +5938,8 @@ private boolean ensureBtConnectPermission() {
     private void validerCandidats(TextView resultView, Button btnStart, Button btnCancel) {
         candidatsAnnules = false;
         if (resultView != null) resultView.setText("");
+        android.widget.LinearLayout containerCliquables = findViewById(R.id.containerCandidatsCliquables);
+        if (containerCliquables != null) containerCliquables.removeAllViews();
         if (btnStart != null) btnStart.setEnabled(false);
         if (btnCancel != null) btnCancel.setVisibility(View.VISIBLE);
 
@@ -6004,11 +5985,20 @@ private boolean ensureBtConnectPermission() {
                     break;
                 }
                 final String label = candidat[0];
+                final String candidatKey = candidat[1];
                 runOnUiThread(() -> { if (resultView != null) resultView.append("\n⏳ " + label + "...\n"); });
-                String resultat = validerUnCandidatLectureSeule(candidat[1]);
+                String resultat = validerUnCandidatLectureSeule(candidatKey);
                 final String finalResultat = resultat;
                 runOnUiThread(() -> { if (resultView != null) resultView.append(finalResultat + "\n"); });
                 logMedia1("[VALIDATION-CANDIDATS] " + label + " → " + finalResultat.replace("\n", " | "));
+                // ✅ AJOUTÉ (20 août 2026, demande Paul — "capable de
+                // changer la vitesse en cliquant sur le registre détecté")
+                // — pour tout candidat confirmé (#série trouvé), ajoute
+                // une ligne cliquable ouvrant une fenêtre de changement de
+                // débit.
+                if (finalResultat.startsWith("✅") && containerCliquables != null) {
+                    runOnUiThread(() -> ajouterLigneCandidatCliquable(containerCliquables, label, candidatKey, finalResultat));
+                }
                 if (candidatsAnnules) continue; // sera intercepté au prochain tour de boucle
                 try { Thread.sleep(200); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
             }
@@ -6021,6 +6011,87 @@ private boolean ensureBtConnectPermission() {
                 if (btnCancel != null) btnCancel.setVisibility(View.GONE);
             });
         }).start();
+    }
+
+    // ✅ AJOUTÉ (20 août 2026, demande Paul — "capable de changer la
+    // vitesse en cliquant sur le registre détecté") — une ligne cliquable
+    // par candidat confirmé. USB : ouvre un vrai sélecteur de débit,
+    // réutilise forcerVitesseRegistre() déjà construit. BT/TCP : le débit
+    // appartient au registre, mais le CHANGER depuis l'app nécessite aussi
+    // de reconfigurer le pont BT/le N-Port séparément (voir
+    // guide_support_terrain.md, section déploiement) — affiche une
+    // information claire plutôt qu'une action qui ne fonctionnerait pas
+    // vraiment.
+    private void ajouterLigneCandidatCliquable(android.widget.LinearLayout container,
+                                                 String label, String candidatKey, String resultat) {
+        TextView row = new TextView(this);
+        row.setText("⚙️ " + label + "  —  " + resultat.replace("\n", " "));
+        row.setTextSize(11f);
+        row.setPadding(8, 10, 8, 10);
+        row.setBackgroundColor(0xFFE8F5E9);
+        android.widget.LinearLayout.LayoutParams lp = new android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(0, 4, 0, 0);
+        row.setLayoutParams(lp);
+        row.setOnClickListener(v -> ouvrirFenetreChangementDebit(candidatKey, resultat));
+        container.addView(row);
+    }
+
+    private void ouvrirFenetreChangementDebit(String candidatKey, String resultatValidation) {
+        if (!candidatKey.equals("USB")) {
+            new android.app.AlertDialog.Builder(this)
+                .setTitle("Changement de débit — " + candidatKey)
+                .setMessage("Le débit appartient au registre, mais le changer pour ce transport "
+                    + "nécessite aussi de reconfigurer le pont BT ou le N-Port séparément "
+                    + "(chaque a sa propre configuration, hors du protocole LCP). "
+                    + "Voir guide_support_terrain.md, section \"Plan d'action déploiement\".")
+                .setPositiveButton("Compris", null)
+                .show();
+            return;
+        }
+        // Extrait le débit détecté depuis le texte du résultat, s'il y en a un
+        int debitActuel = 19200;
+        try {
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("(\\d{4,6})\\s*baud").matcher(resultatValidation);
+            if (m.find()) debitActuel = Integer.parseInt(m.group(1));
+        } catch (Exception ignored) {}
+
+        android.widget.LinearLayout layout = new android.widget.LinearLayout(this);
+        layout.setOrientation(android.widget.LinearLayout.VERTICAL);
+        layout.setPadding(40, 20, 40, 20);
+
+        TextView txtActuel = new TextView(this);
+        txtActuel.setText("Débit actuel : " + debitActuel + " bauds");
+        txtActuel.setTextSize(14f);
+        layout.addView(txtActuel);
+
+        android.widget.Spinner spn = new android.widget.Spinner(this);
+        String[] labels = {"57600", "19200", "9600", "4800", "2400"};
+        spn.setAdapter(new android.widget.ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, labels));
+        int preselect = 1;
+        for (int i = 0; i < BAUD_VALUES.length; i++) if (BAUD_VALUES[i] == debitActuel) preselect = i;
+        spn.setSelection(preselect);
+        android.widget.LinearLayout.LayoutParams lpSpn = new android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
+        lpSpn.topMargin = 20;
+        spn.setLayoutParams(lpSpn);
+        layout.addView(spn);
+
+        TextView txtResult = new TextView(this);
+        txtResult.setTextSize(11f);
+        txtResult.setPadding(0, 20, 0, 0);
+        layout.addView(txtResult);
+
+        android.app.AlertDialog dialog = new android.app.AlertDialog.Builder(this)
+            .setTitle("Changer le débit — Registre (USB)")
+            .setView(layout)
+            .setPositiveButton("Appliquer", null) // listener custom ci-dessous pour ne pas fermer avant la fin
+            .setNegativeButton("Annuler", null)
+            .create();
+        dialog.show();
+        dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener(v ->
+            forcerVitesseRegistre(spn.getSelectedItemPosition(), txtResult, dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE)));
     }
 
     /** Teste UN candidat, en lecture seule, avec son PROPRE transport temporaire —
@@ -6096,11 +6167,33 @@ private boolean ensureBtConnectPermission() {
                 return "❌ Erreur — adresse invalide";
             }
             if (dev == null) return "❌ Absent — appareil introuvable";
-            android.bluetooth.BluetoothSocket sock = null;
+            final android.bluetooth.BluetoothSocket[] sockHolder = {null};
             try {
                 java.util.UUID sppUuid = java.util.UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
-                sock = dev.createRfcommSocketToServiceRecord(sppUuid);
-                sock.connect(); // bloquant, mais dans un thread déjà dédié
+                sockHolder[0] = dev.createRfcommSocketToServiceRecord(sppUuid);
+                // ✅ CORRIGÉ (20 août 2026, demande Paul — "il arrête au
+                // premier bt pourquoi ne continue-t-il pas") — trouvé :
+                // BluetoothSocket.connect() n'a AUCUNE limite de temps
+                // intégrée. Un appareil appairé mais hors portée/éteint
+                // bloque cet appel INDÉFINIMENT, sans jamais lancer
+                // d'exception — la boucle de validation n'avançait donc
+                // jamais au candidat suivant, pas un crash, un vrai blocage
+                // silencieux. Timeout forcé ici : connect() dans un thread
+                // séparé, join() limité à 4s, fermeture forcée du socket
+                // si ça dépasse (interrompt le connect() bloqué).
+                final Exception[] connectErr = {null};
+                Thread connectThread = new Thread(() -> {
+                    try { sockHolder[0].connect(); }
+                    catch (Exception e) { connectErr[0] = e; }
+                });
+                connectThread.start();
+                connectThread.join(4000);
+                if (connectThread.isAlive()) {
+                    try { sockHolder[0].close(); } catch (Exception ignored) {}
+                    return "❌ Absent/injoignable — timeout connexion (4s, appairé mais hors portée probable)";
+                }
+                if (connectErr[0] != null) throw connectErr[0];
+                android.bluetooth.BluetoothSocket sock = sockHolder[0];
                 com.pa.lcr.lcp.transport.BtSppTransportIo tmpIo = new com.pa.lcr.lcp.transport.BtSppTransportIo(
                     "BT:" + mac, sock, sock.getInputStream(), sock.getOutputStream(),
                     "Validation candidat BT:" + mac, System.currentTimeMillis());
@@ -6108,12 +6201,12 @@ private boolean ensureBtConnectPermission() {
                 byte[] raw = tmp.opGetField(80, 3000);
                 long ms = System.currentTimeMillis() - t0;
                 String serial = decodeSerialBytes(raw);
-                return serial != null ? "✅ Présent — #série=" + serial + " (" + ms + "ms)" + infosSupplementaires(tmp, 250)
-                    : "⚠ Présent mais silencieux (" + ms + "ms) — mauvais débit probable";
+                return serial != null ? "✅ Présent — #série=" + serial + " (" + ms + "ms) @19200" + infosSupplementaires(tmp, 250)
+                    : "⚠ Présent mais silencieux (" + ms + "ms) — débit du pont BT à vérifier séparément (voir guide)";
             } catch (Exception e) {
                 return "❌ Absent/injoignable — " + e.getClass().getSimpleName() + ": " + e.getMessage();
             } finally {
-                if (sock != null) { try { sock.close(); } catch (Exception ignored) {} }
+                if (sockHolder[0] != null) { try { sockHolder[0].close(); } catch (Exception ignored) {} }
             }
         }
         if (candidatKey.startsWith("TCP:")) {

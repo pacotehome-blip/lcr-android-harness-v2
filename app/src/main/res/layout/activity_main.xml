@@ -311,14 +311,32 @@
                         android:layout_marginTop="6dp"
                         android:background="#FFFFFFFF">
 
-                        <TextView
-                            android:id="@+id/txtValiderCandidatsResult"
+                        <LinearLayout
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:padding="4dp"
-                            android:textSize="11sp"
-                            android:fontFamily="monospace"
-                            android:text=""/>
+                            android:orientation="vertical">
+
+                            <TextView
+                                android:id="@+id/txtValiderCandidatsResult"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:padding="4dp"
+                                android:textSize="11sp"
+                                android:fontFamily="monospace"
+                                android:text=""/>
+
+                            <!-- ✅ AJOUTÉ (20 août 2026, demande Paul —
+                                 "capable de changer la vitesse en cliquant
+                                 sur le registre détecté") — lignes
+                                 cliquables ajoutées dynamiquement ici, une
+                                 par candidat confirmé (#série trouvé),
+                                 séparées du journal texte ci-dessus. -->
+                            <LinearLayout
+                                android:id="@+id/containerCandidatsCliquables"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:orientation="vertical"/>
+                        </LinearLayout>
                     </ScrollView>
                 </LinearLayout>
 
@@ -356,26 +374,13 @@
                         android:textSize="10sp"
                         android:textColor="#B71C1C"/>
 
-                    <!-- ✅ AJOUTÉ (20 août 2026, demande Paul — "moyen de
-                         savoir quel est la vitesse du registre au départ")
-                         — sonde chaque débit candidat jusqu'à trouver le
-                         bon, USB seulement. -->
-                    <Button
-                        android:id="@+id/btnDetecterVitesse"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="6dp"
-                        android:backgroundTint="#00695C"
-                        android:text="🔍 Détecter la vitesse actuelle (USB)"/>
-
-                    <TextView
-                        android:id="@+id/txtDetecterVitesseResult"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="4dp"
-                        android:textSize="11sp"
-                        android:fontFamily="monospace"
-                        android:text=""/>
+                    <!-- ✅ RETIRÉ (20 août 2026, demande Paul — "la section
+                         détecter la vitesse n'est plus utile") — le bouton
+                         "Détecter la vitesse actuelle" séparé est retiré.
+                         La détection vit maintenant DANS "Démarrer la
+                         validation" — inline, par candidat (USB/BT/TCP),
+                         pas dans une section à part. Voir
+                         validerUnCandidatLectureSeule() dans MainActivity.java. -->
 
                     <Spinner
                         android:id="@+id/spnForcerVitesse"
