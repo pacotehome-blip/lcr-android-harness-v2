@@ -6120,6 +6120,11 @@ private boolean ensureBtConnectPermission() {
             java.util.regex.Matcher m = java.util.regex.Pattern.compile("(\\d{4,6})\\s*baud").matcher(resultatValidation);
             if (m.find()) debitActuel = Integer.parseInt(m.group(1));
         } catch (Exception ignored) {}
+        // ✅ CORRIGÉ (build GitHub Actions) — debitActuel est réassigné
+        // ci-dessus, donc pas "effectively final" — impossible à référencer
+        // directement dans une lambda. Copie finale dédiée pour les lambdas
+        // plus bas (bouton Tester).
+        final int debitActuelFinal = debitActuel;
 
         android.widget.LinearLayout layout = new android.widget.LinearLayout(this);
         layout.setOrientation(android.widget.LinearLayout.VERTICAL);
@@ -6167,7 +6172,7 @@ private boolean ensureBtConnectPermission() {
             int idxChoisi = spn.getSelectedItemPosition();
             if (idxChoisi < 0 || idxChoisi >= BAUD_VALUES.length) return;
             int debitChoisi = BAUD_VALUES[idxChoisi];
-            int debitOrigine = debitActuel;
+            int debitOrigine = debitActuelFinal;
             UsbSerialPort port = UsbSession.getPort();
             if (port == null) { txtResult.setText("❌ Aucun port USB ouvert"); return; }
             android.widget.Button btnTester = dialog.getButton(android.app.AlertDialog.BUTTON_NEUTRAL);
