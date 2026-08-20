@@ -389,6 +389,15 @@ public class MainActivity extends AppCompatActivity {
     // ✅ AJOUTÉ (10 août 2026, demande Paul) — annulation propre de la
     // validation candidat par candidat, voir validerCandidats().
     private volatile boolean candidatsAnnules = false;
+    // ✅ AJOUTÉ (20 août 2026, demande Paul — "suspendre la détection
+    // automatique du registre le temps de valider... pour pas entrer en
+    // conflit avec la création du tab") — le chien de garde média
+    // (probeKnownTransportsForLostRegister) sonde les mêmes candidats
+    // BT/USB/TCP que "Démarrer la validation" teste manuellement — deux
+    // tentatives de connexion simultanées au même appareil BT causent des
+    // conflits. Ce flag suspend le chien de garde pendant qu'une
+    // validation manuelle est en cours.
+    private volatile boolean validationEnCours = false;
     private static final long AUTO_RECONNECT_COOLDOWN_MS = 3000;
     // ✅ FIX (7 août 2026, demande Paul — "si on voit qu'il entre en série
     // comme ça, arrête et affiche l'écran de passer par Configure") — un
@@ -1420,6 +1429,21 @@ tabRegisters = findViewById(R.id.tabRegisters);
         // ✅ AJOUTÉ (10 août 2026, demande Paul — "candidats à valider...
         // capable d'annuler... sans briser l'apk") — lecture seule, aucun
         // effet sur l'état de connexion réel de l'app.
+        // ✅ AJOUTÉ (20 août 2026, demande Paul — "le scroll... pas facile à
+        // gérer") — un ScrollView imbriqué dans un autre ScrollView cause
+        // un conflit de gestes classique sur Android : le ScrollView
+        // externe (celui de tout l'onglet Configure) capte le geste avant
+        // que celui-ci, plus petit, ne puisse défiler son propre contenu.
+        // Correctif standard : demander explicitement au parent de ne pas
+        // intercepter le geste tant que le doigt touche à l'intérieur de
+        // CE ScrollView précis.
+        android.widget.ScrollView scrollValiderCandidatsResult = findViewById(R.id.scrollValiderCandidatsResult);
+        if (scrollValiderCandidatsResult != null) {
+            scrollValiderCandidatsResult.setOnTouchListener((v, event) -> {
+                v.getParent().requestDisallowInterceptTouchEvent(true);
+                return false;
+            });
+        }
         Button btnValiderCandidats = findViewById(R.id.btnValiderCandidats);
         Button btnAnnulerCandidats = findViewById(R.id.btnAnnulerCandidats);
         TextView txtValiderCandidatsResult = findViewById(R.id.txtValiderCandidatsResult);
@@ -4007,6 +4031,14 @@ private void setupTabsTop() {
     // de réinventer une deuxième énumération partielle.
     public void probeKnownTransportsForLostRegister(String serial, int node, String deadTransportKey) {
         if (serial == null || serial.trim().isEmpty()) return;
+        // ✅ AJOUTÉ (20 août 2026) — suspend le chien de garde pendant
+        // qu'une validation manuelle est en cours (voir déclaration de
+        // validationEnCours) — évite deux connexions simultanées au même
+        // appareil BT.
+        if (validationEnCours) {
+            android.util.Log.i("MainActivity", "probeKnownTransportsForLostRegister: validation manuelle en cours, suspendu");
+            return;
+        }
         long now = System.currentTimeMillis();
         if (now - lastWatchdogProbeMs < WATCHDOG_PROBE_COOLDOWN_MS) {
             android.util.Log.i("MainActivity", "probeKnownTransportsForLostRegister: cooldown actif, ignoré");
@@ -5922,6 +5954,7 @@ private boolean ensureBtConnectPermission() {
 
     private void validerCandidats(TextView resultView, Button btnStart, Button btnCancel) {
         candidatsAnnules = false;
+        validationEnCours = true; // ✅ suspend le chien de garde pendant la validation
         if (resultView != null) resultView.setText("");
         android.widget.LinearLayout containerCliquables = findViewById(R.id.containerCandidatsCliquables);
         if (containerCliquables != null) containerCliquables.removeAllViews();
@@ -5929,6 +5962,7 @@ private boolean ensureBtConnectPermission() {
         if (btnCancel != null) btnCancel.setVisibility(View.VISIBLE);
 
         new Thread(() -> {
+          try {
             java.util.List<String[]> candidats = new java.util.ArrayList<>(); // {label, type}
             // 1) USB — un seul candidat, présent ou non
             candidats.add(new String[]{"USB", "USB"});
@@ -5957,9 +5991,17 @@ private boolean ensureBtConnectPermission() {
                 }
             } catch (Exception ignored) {}
 
-            final String header = "📋 " + candidats.size() + " candidat(s) à valider :\n"
-                + candidats.stream().map(c -> "  • " + c[0]).reduce("", (a, b) -> a + b + "\n") + "\n";
-            runOnUiThread(() -> { if (resultView != null) resultView.append(header); });
+            // ✅ CORRIGÉ (20 août 2026, demande Paul — "le résultat de la
+            // validation doit être ajouté en dessous de chaque candidat
+            // pas après") — retiré l'ancienne liste de tête ("📋 N
+            // candidat(s) à valider") suivie d'un journal texte séparé,
+            // qui affichait tous les candidats D'ABORD puis tous les
+            // résultats APRÈS, dans un bloc à part. Les lignes cliquables
+            // ci-dessous (ajouterLigneCandidatCliquable) portent déjà
+            // candidat + résultat ensemble, ajoutées une à la fois au fur
+            // et à mesure — c'est la seule représentation maintenant.
+            runOnUiThread(() -> { if (resultView != null) resultView.setText(
+                "📋 " + candidats.size() + " candidat(s) à valider — résultat sous chacun ci-dessous :\n"); });
 
             for (String[] candidat : candidats) {
                 if (candidatsAnnules) {
@@ -5971,10 +6013,17 @@ private boolean ensureBtConnectPermission() {
                 }
                 final String label = candidat[0];
                 final String candidatKey = candidat[1];
-                runOnUiThread(() -> { if (resultView != null) resultView.append("\n⏳ " + label + "...\n"); });
+                // ✅ AJOUTÉ (20 août 2026) — ligne "en cours" affichée
+                // immédiatement (retour visuel pendant l'attente, jusqu'à
+                // 4s pour un timeout BT), puis mise à jour en place avec
+                // le vrai résultat — jamais une ligne qui apparaît de
+                // nulle part seulement à la fin.
+                final TextView[] rowRef = {null};
+                if (containerCliquables != null) {
+                    runOnUiThread(() -> rowRef[0] = ajouterLigneCandidatCliquable(containerCliquables, label, candidatKey, "⏳ en cours..."));
+                }
                 String resultat = validerUnCandidatLectureSeule(candidatKey);
                 final String finalResultat = resultat;
-                runOnUiThread(() -> { if (resultView != null) resultView.append(finalResultat + "\n"); });
                 logMedia1("[VALIDATION-CANDIDATS] " + label + " → " + finalResultat.replace("\n", " | "));
                 // ✅ ÉLARGI (20 août 2026, demande Paul — "je veux être
                 // capable de cliquer sur ça pour voir le détail et ajuster
@@ -5983,9 +6032,7 @@ private boolean ensureBtConnectPermission() {
                 // ceux confirmés (✅). Cliquer montre toujours le détail;
                 // l'ajustement de vitesse n'apparaît QUE si un registre a
                 // vraiment été trouvé (voir ouvrirFenetreChangementDebit).
-                if (containerCliquables != null) {
-                    runOnUiThread(() -> ajouterLigneCandidatCliquable(containerCliquables, label, candidatKey, finalResultat));
-                }
+                runOnUiThread(() -> mettreAJourLigneCandidat(rowRef[0], label, candidatKey, finalResultat));
                 if (candidatsAnnules) continue; // sera intercepté au prochain tour de boucle
                 try { Thread.sleep(200); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
             }
@@ -5997,6 +6044,9 @@ private boolean ensureBtConnectPermission() {
                 if (btnStart != null) btnStart.setEnabled(true);
                 if (btnCancel != null) btnCancel.setVisibility(View.GONE);
             });
+          } finally {
+              validationEnCours = false; // ✅ garanti, même en cas d'exception imprévue
+          }
         }).start();
     }
 
@@ -6006,22 +6056,39 @@ private boolean ensureBtConnectPermission() {
     // résultats (pas juste confirmés) — couleur selon succès/échec pour
     // rester lisible d'un coup d'œil. Le détail s'affiche toujours au
     // clic; l'ajustement de vitesse n'apparaît que si un registre a
-    // vraiment été trouvé (voir ouvrirFenetreChangementDebit).
-    private void ajouterLigneCandidatCliquable(android.widget.LinearLayout container,
+    // vraiment été trouvé (voir ouvrirFenetreChangementDebit). Retourne le
+    // TextView créé pour permettre une mise à jour en place ensuite (voir
+    // mettreAJourLigneCandidat).
+    private TextView ajouterLigneCandidatCliquable(android.widget.LinearLayout container,
                                                  String label, String candidatKey, String resultat) {
-        boolean trouve = resultat.startsWith("✅");
         TextView row = new TextView(this);
-        row.setText((trouve ? "⚙️ " : "ℹ️ ") + label + "  —  " + resultat.replace("\n", " "));
         row.setTextSize(11f);
         row.setPadding(8, 10, 8, 10);
-        row.setBackgroundColor(trouve ? 0xFFE8F5E9 : 0xFFF5F5F5);
         android.widget.LinearLayout.LayoutParams lp = new android.widget.LinearLayout.LayoutParams(
                 android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
                 android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
         lp.setMargins(0, 4, 0, 0);
         row.setLayoutParams(lp);
-        row.setOnClickListener(v -> ouvrirFenetreChangementDebit(label, candidatKey, resultat));
+        appliquerContenuLigneCandidat(row, label, candidatKey, resultat);
         container.addView(row);
+        return row;
+    }
+
+    // ✅ AJOUTÉ (20 août 2026) — met à jour EN PLACE une ligne déjà créée
+    // (passe de "⏳ en cours..." au vrai résultat), au lieu d'ajouter une
+    // deuxième ligne — la ligne apparaît immédiatement au début du test,
+    // reste au même endroit visuellement, juste son contenu change.
+    private void mettreAJourLigneCandidat(TextView row, String label, String candidatKey, String resultat) {
+        if (row == null) return; // filet de sécurité — ne devrait pas arriver (voir ordre FIFO de runOnUiThread)
+        appliquerContenuLigneCandidat(row, label, candidatKey, resultat);
+    }
+
+    private void appliquerContenuLigneCandidat(TextView row, String label, String candidatKey, String resultat) {
+        boolean enCours = resultat.startsWith("⏳");
+        boolean trouve = resultat.startsWith("✅");
+        row.setText((enCours ? "⏳ " : trouve ? "⚙️ " : "ℹ️ ") + label + "  —  " + resultat.replace("\n", " "));
+        row.setBackgroundColor(enCours ? 0xFFFFF9C4 : trouve ? 0xFFE8F5E9 : 0xFFF5F5F5);
+        row.setOnClickListener(enCours ? null : v -> ouvrirFenetreChangementDebit(label, candidatKey, resultat));
     }
 
     private void ouvrirFenetreChangementDebit(String label, String candidatKey, String resultatValidation) {
@@ -6083,12 +6150,56 @@ private boolean ensureBtConnectPermission() {
         android.app.AlertDialog dialog = new android.app.AlertDialog.Builder(this)
             .setTitle("Changer le débit — Registre (USB)")
             .setView(layout)
+            .setNeutralButton("Tester", null)  // listener custom ci-dessous — lecture seule
             .setPositiveButton("Appliquer", null) // listener custom ci-dessous pour ne pas fermer avant la fin
             .setNegativeButton("Annuler", null)
             .create();
         dialog.show();
         dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener(v ->
             forcerVitesseRegistre(spn.getSelectedItemPosition(), txtResult, dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE)));
+        // ✅ AJOUTÉ (20 août 2026, demande Paul — "même tester le nouveau
+        // baud c'est possible?") — teste le débit choisi SANS envoyer Set
+        // Baud au registre — jamais d'écriture réelle. Reconfigure le port
+        // local au débit choisi, tente une lecture, remet le port à son
+        // débit d'origine ensuite dans TOUS les cas — un vrai test
+        // non-destructif, distinct d'"Appliquer" qui écrit pour de vrai.
+        dialog.getButton(android.app.AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> {
+            int idxChoisi = spn.getSelectedItemPosition();
+            if (idxChoisi < 0 || idxChoisi >= BAUD_VALUES.length) return;
+            int debitChoisi = BAUD_VALUES[idxChoisi];
+            int debitOrigine = debitActuel;
+            UsbSerialPort port = UsbSession.getPort();
+            if (port == null) { txtResult.setText("❌ Aucun port USB ouvert"); return; }
+            android.widget.Button btnTester = dialog.getButton(android.app.AlertDialog.BUTTON_NEUTRAL);
+            btnTester.setEnabled(false);
+            txtResult.setText("⏳ Test du débit " + debitChoisi + " (lecture seule, rien n'est écrit au registre)...");
+            scanExec.execute(() -> {
+                String resFinal;
+                try {
+                    port.setParameters(debitChoisi, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
+                    Thread.sleep(150);
+                    com.pa.lcr.lcp.transport.UsbTransportIo io = new com.pa.lcr.lcp.transport.UsbTransportIo(
+                            com.pa.lcr.lcp.transport.MediaTransportManager.KEY_USB + ":TEST", port,
+                            "Test débit (lecture seule)", 0);
+                    com.pa.lcr.lcp.LcpLink probe = new com.pa.lcr.lcp.LcpLink(io, 250, 255, true);
+                    byte[] serial = probe.opGetField(80, 1500);
+                    resFinal = (serial != null && serial.length > 0)
+                        ? "✅ " + debitChoisi + " bauds répond (registre déjà à ce débit, ou compatible)"
+                        : "❌ " + debitChoisi + " bauds — aucune réponse";
+                } catch (Exception e) {
+                    resFinal = "❌ " + debitChoisi + " bauds — " + e.getClass().getSimpleName();
+                } finally {
+                    // Remet TOUJOURS le port à son débit d'origine — un test ne doit jamais laisser
+                    // la connexion dans un état différent de celui d'avant, contrairement à "Appliquer".
+                    try { port.setParameters(debitOrigine, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE); } catch (Exception ignored) {}
+                }
+                final String finalRes = resFinal;
+                runOnUiThread(() -> {
+                    txtResult.setText(finalRes + "\n(port remis à " + debitOrigine + " — aucune écriture faite au registre)");
+                    btnTester.setEnabled(true);
+                });
+            });
+        });
     }
 
     /** Teste UN candidat, en lecture seule, avec son PROPRE transport temporaire —
