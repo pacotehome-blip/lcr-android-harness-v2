@@ -3386,6 +3386,42 @@ private void setupTabsTop() {
                 // exigeait oldSpec.isLc3 == isLc3 — les deux onglets
                 // persistaient indéfiniment côte à côte pour LE MÊME registre.
                 android.util.Log.i("MainActivity", "upsertRegisterTabFromScan: MIGRATION — suppression de " + oldTabKey);
+                // ✅ AJOUTÉ (21 août 2026, demande Paul — "dans la condition
+                // du même #série et node mais changement de transport
+                // provoquer un genre de refresh au registre en demandant
+                // une reconnexion") — trouvé par log réel : la migration
+                // basculait le tab dès que le port s'ouvre AU NIVEAU
+                // SYSTÈME (ex: "USB Open/Ping: OK"), sans jamais confirmer
+                // que le registre RÉPOND VRAIMENT sur ce nouveau transport.
+                // Résultat observé : le registre a besoin d'un court délai
+                // pour basculer en interne (BT → USB), et la première vraie
+                // lecture LCP échouait en timeout juste après la migration.
+                // Correctif : quelques tentatives de lecture légère
+                // (requestStatus) sur le NOUVEAU transport, avec pause
+                // entre chacune, AVANT de compléter la migration — un vrai
+                // cycle de reconnexion forcé, pas une supposition optimiste.
+                boolean refreshOk = false;
+                for (int tentative = 1; tentative <= 3 && !refreshOk; tentative++) {
+                    try {
+                        com.pa.lcr.lcp.DeliveryController dcNouveau =
+                                RegisterSessionManager.get(this).getController(transportKey, node);
+                        if (dcNouveau != null) {
+                            dcNouveau.requestStatus();
+                            refreshOk = true;
+                            android.util.Log.i("MainActivity", "upsertRegisterTabFromScan: refresh reconnexion OK "
+                                    + "sur " + transportKey + " (tentative " + tentative + "/3)");
+                        }
+                    } catch (Exception e) {
+                        android.util.Log.i("MainActivity", "upsertRegisterTabFromScan: refresh reconnexion tentative "
+                                + tentative + "/3 échouée sur " + transportKey + " — " + e.getMessage());
+                        try { Thread.sleep(600); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                    }
+                }
+                if (!refreshOk) {
+                    android.util.Log.w("MainActivity", "upsertRegisterTabFromScan: refresh reconnexion échoué après 3 "
+                            + "tentatives sur " + transportKey + " — migration complétée quand même (best-effort, "
+                            + "le backoff normal de GET_DELIVERY_STATUS prendra le relais)");
+                }
                 // 🔜 AMÉLIORATION FUTURE (14 août 2026, discutée avec Paul —
                 // "si on perd la communication... sans oublier la livraison
                 // du deeplink") — la migration ci-dessous (suppression de
