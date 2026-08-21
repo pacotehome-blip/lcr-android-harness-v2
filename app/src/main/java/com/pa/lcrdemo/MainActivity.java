@@ -87,6 +87,29 @@ import java.util.concurrent.Executors;
  * - Log global MAIN (LogBus)
  *
  * API-Face => Start/Stop + Backup DB
+ *
+ * ⚠️ PRINCIPE ARCHITECTURAL (confirmé 21 août 2026, demande Paul —
+ * "l'apk ne doit en aucun cas être dépendant d'internet") : TOUTE la
+ * chaîne registre — connexion, livraison, impression, scan produits,
+ * tous les tabs — DOIT fonctionner intégralement SANS connexion internet,
+ * en tout temps, sans exception. Confirmé par test terrain réel (21 août
+ * 2026) : session complète (connexions, scan produits, réimpression) avec
+ * ZÉRO réseau disponible toute la durée — aucun blocage, aucun gel,
+ * aucune dégradation du cœur de l'app.
+ *
+ * Ce qui PEUT dépendre du réseau (Dataverse, MSAL/token, WO-DETECT) :
+ *   - Doit TOUJOURS s'exécuter sur un thread séparé (jamais le thread UI)
+ *   - Doit TOUJOURS échouer proprement et silencieusement en cas d'absence
+ *     réseau (log + repli local, jamais une exception qui remonte)
+ *   - Ne doit JAMAIS être sur le chemin critique d'aucune action registre
+ *     (connexion, armement, livraison, impression) — ces actions ne
+ *     doivent jamais attendre après un appel réseau pour progresser
+ *
+ * Voir MsalTokenProvider.acquireTokenSilentFromWorker() — déjà conforme
+ * (thread de travail séparé, callbacks, jamais de blocage). Toute
+ * NOUVELLE fonctionnalité touchant Dataverse/réseau doit suivre le même
+ * patron — vérifier ce principe avant d'ajouter un appel réseau
+ * quelconque n'importe où dans le chemin de connexion/livraison.
  */
 
 public class MainActivity extends AppCompatActivity {
@@ -389,15 +412,30 @@ public class MainActivity extends AppCompatActivity {
     // ✅ AJOUTÉ (10 août 2026, demande Paul) — annulation propre de la
     // validation candidat par candidat, voir validerCandidats().
     private volatile boolean candidatsAnnules = false;
-    // ✅ AJOUTÉ (20 août 2026, demande Paul — "suspendre la détection
-    // automatique du registre le temps de valider... pour pas entrer en
-    // conflit avec la création du tab") — le chien de garde média
-    // (probeKnownTransportsForLostRegister) sonde les mêmes candidats
-    // BT/USB/TCP que "Démarrer la validation" teste manuellement — deux
-    // tentatives de connexion simultanées au même appareil BT causent des
-    // conflits. Ce flag suspend le chien de garde pendant qu'une
-    // validation manuelle est en cours.
-    private volatile boolean validationEnCours = false;
+    // ✅ CORRIGÉ (21 août 2026, demande Paul — "à l'ouverture de l'apk...
+    // je suis obligé d'aller dans configure... connect lcp") — un simple
+    // booléen qui reste coincé à true POUR TOUJOURS si un seul chemin de
+    // code oublie de le remettre à false est un mauvais design — impossible
+    // à garantir sans faille sur un fichier de cette taille. Remplacé par
+    // un horodatage avec EXPIRATION AUTOMATIQUE : même si quelque chose
+    // empêche le reset explicite (bug futur, chemin d'exception imprévu),
+    // ça se répare tout seul après 60 secondes maximum — jamais bloqué
+    // "pour toujours" comme un booléen pourrait l'être.
+    private volatile long validationEnCoursDepuisMs = 0L;
+    private static final long VALIDATION_EN_COURS_EXPIRATION_MS = 60_000;
+
+    private boolean isValidationEnCours() {
+        long depuis = validationEnCoursDepuisMs;
+        if (depuis == 0L) return false;
+        if (System.currentTimeMillis() - depuis > VALIDATION_EN_COURS_EXPIRATION_MS) {
+            android.util.Log.w("MainActivity", "isValidationEnCours: expiré après "
+                + VALIDATION_EN_COURS_EXPIRATION_MS + "ms — traité comme false, "
+                + "peu importe la cause du blocage (filet de sécurité auto-réparant)");
+            validationEnCoursDepuisMs = 0L; // se nettoie lui-même
+            return false;
+        }
+        return true;
+    }
     private static final long AUTO_RECONNECT_COOLDOWN_MS = 3000;
     // ✅ FIX (7 août 2026, demande Paul — "si on voit qu'il entre en série
     // comme ça, arrête et affiche l'écran de passer par Configure") — un
@@ -1554,6 +1592,15 @@ private void setupTabsTop() {
         if (pageApiFace != null) pageApiFace.setVisibility(index == 1 ? View.VISIBLE : View.GONE);
         if (pageConfigure != null) pageConfigure.setVisibility(index == 2 ? View.VISIBLE : View.GONE);
         if (pageSupport != null) pageSupport.setVisibility(index == 3 ? View.VISIBLE : View.GONE);
+        // ✅ AJOUTÉ (20 août 2026, demande Paul — "la connexion au registre
+        // ne se fait plus automatiquement" après une validation) — filet
+        // de sécurité : revenir sur Main force toujours l'expiration
+        // immédiate (en plus de l'expiration automatique à 60s, ceinture
+        // et bretelles).
+        if (index == 0 && validationEnCoursDepuisMs != 0L) {
+            android.util.Log.w("MainActivity", "showPage(Main): validationEnCoursDepuisMs était actif — forcé à expiré (filet de sécurité)");
+            validationEnCoursDepuisMs = 0L;
+        }
         if (index == 1) refreshApiStatus();
         if (index == 2) {
             updateMediaStatusUi();
@@ -3688,7 +3735,7 @@ private void setupTabsTop() {
                 // qu'une validation manuelle tournait, causant exactement
                 // le conflit (deux connexions simultanées au même
                 // appareil → IOException). Suspendu ici aussi.
-                if (validationEnCours) {
+                if (isValidationEnCours()) {
                     logUi(null, "Plus aucun tab — reconnexion auto suspendue (validation manuelle en cours)");
                     return;
                 }
@@ -4047,7 +4094,7 @@ private void setupTabsTop() {
         // qu'une validation manuelle est en cours (voir déclaration de
         // validationEnCours) — évite deux connexions simultanées au même
         // appareil BT.
-        if (validationEnCours) {
+        if (isValidationEnCours()) {
             android.util.Log.i("MainActivity", "probeKnownTransportsForLostRegister: validation manuelle en cours, suspendu");
             return;
         }
@@ -5966,7 +6013,7 @@ private boolean ensureBtConnectPermission() {
 
     private void validerCandidats(TextView resultView, Button btnStart, Button btnCancel) {
         candidatsAnnules = false;
-        validationEnCours = true; // ✅ suspend le chien de garde pendant la validation
+        validationEnCoursDepuisMs = System.currentTimeMillis(); // ✅ suspend le chien de garde pendant la validation (expire seul après 60s max)
         if (resultView != null) resultView.setText("");
         android.widget.LinearLayout containerCliquables = findViewById(R.id.containerCandidatsCliquables);
         if (containerCliquables != null) containerCliquables.removeAllViews();
@@ -6056,7 +6103,7 @@ private boolean ensureBtConnectPermission() {
                 if (btnCancel != null) btnCancel.setVisibility(View.GONE);
             });
           } finally {
-              validationEnCours = false; // ✅ garanti, même en cas d'exception imprévue
+              validationEnCoursDepuisMs = 0L; // ✅ garanti, même en cas d'exception imprévue
           }
         }).start();
     }
