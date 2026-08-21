@@ -3400,6 +3400,11 @@ private void setupTabsTop() {
                 // (requestStatus) sur le NOUVEAU transport, avec pause
                 // entre chacune, AVANT de compléter la migration — un vrai
                 // cycle de reconnexion forcé, pas une supposition optimiste.
+                // ✅ CORRIGÉ (21 août 2026) — android.util.Log va au logcat
+                // SEULEMENT, jamais à Support (LogBus) — invisible dans les
+                // exports de log_bus_event que Paul m'envoie. logUi() est
+                // le bon appel, déjà utilisé partout ailleurs (ex: "TAB
+                // registre supprimé" juste au-dessus).
                 boolean refreshOk = false;
                 for (int tentative = 1; tentative <= 3 && !refreshOk; tentative++) {
                     try {
@@ -3408,17 +3413,17 @@ private void setupTabsTop() {
                         if (dcNouveau != null) {
                             dcNouveau.requestStatus();
                             refreshOk = true;
-                            android.util.Log.i("MainActivity", "upsertRegisterTabFromScan: refresh reconnexion OK "
+                            logUi(null, "upsertRegisterTabFromScan: refresh reconnexion OK "
                                     + "sur " + transportKey + " (tentative " + tentative + "/3)");
                         }
                     } catch (Exception e) {
-                        android.util.Log.i("MainActivity", "upsertRegisterTabFromScan: refresh reconnexion tentative "
+                        logUi(null, "upsertRegisterTabFromScan: refresh reconnexion tentative "
                                 + tentative + "/3 échouée sur " + transportKey + " — " + e.getMessage());
                         try { Thread.sleep(600); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
                     }
                 }
                 if (!refreshOk) {
-                    android.util.Log.w("MainActivity", "upsertRegisterTabFromScan: refresh reconnexion échoué après 3 "
+                    logUi(null, "upsertRegisterTabFromScan: refresh reconnexion échoué après 3 "
                             + "tentatives sur " + transportKey + " — migration complétée quand même (best-effort, "
                             + "le backoff normal de GET_DELIVERY_STATUS prendra le relais)");
                 }
