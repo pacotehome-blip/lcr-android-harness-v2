@@ -677,8 +677,30 @@ public class RegisterTabFragment extends Fragment {
     // "node:serial", garantit qu'un seul scan matériel se produit pour un
     // registre donné, peu importe combien d'instances de fragment existent
     // momentanément.
-    private static final java.util.Set<String> autoProductScanInFlightGlobal =
-        java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<>());
+    private static final java.util.concurrent.ConcurrentHashMap<String, Long> autoProductScanInFlightGlobal =
+        new java.util.concurrent.ConcurrentHashMap<>();
+    // ✅ CORRIGÉ (24 août 2026, demande Paul — même principe que
+    // validationEnCours plus tôt aujourd'hui) — un simple Set qui reste
+    // coincé pour toujours si un seul chemin de code oublie de le
+    // retirer est un risque réel, déjà rencontré aujourd'hui ailleurs.
+    // Remplacé par une Map horodatée — une entrée plus vieille que 30s est
+    // traitée comme expirée, peu importe pourquoi elle n'a jamais été
+    // retirée explicitement.
+    private static final long AUTO_SCAN_LOCK_EXPIRATION_MS = 30_000;
+    private static boolean autoScanLockAcquire(String key) {
+        long now = System.currentTimeMillis();
+        Long existant = autoProductScanInFlightGlobal.putIfAbsent(key, now);
+        if (existant == null) return true; // acquis, personne d'autre ne le tenait
+        if (now - existant > AUTO_SCAN_LOCK_EXPIRATION_MS) {
+            // expiré — on force l'acquisition malgré tout
+            autoProductScanInFlightGlobal.put(key, now);
+            return true;
+        }
+        return false; // vraiment tenu par quelqu'un d'autre, récemment
+    }
+    private static void autoScanLockRelease(String key) {
+        autoProductScanInFlightGlobal.remove(key);
+    }
     // "Armé" à l'activation du tab, consommé au premier CONNECTED qui suit —
     // garantit un déclenchement unique par activation de tab, au vrai moment
     // où le registre devient CONNECTED READY (pas sur un délai fixe arbitraire).
@@ -4362,12 +4384,33 @@ public class RegisterTabFragment extends Fragment {
     // on réapplique juste le cache (rapide, pas d'IO registre). Sinon on lance
     // lancerScanProduits() (le même scan que le bouton manuel "🔍 Scan produits").
     private void autoScanProduitsSiNecessaire() {
-        if (!isAdded() || getView() == null || controller == null) return;
-        if (autoProductScanInFlight) return;
-        if (controller.getState() != DeliveryState.CONNECTED) return; // état a pu changer entretemps
+        // ✅ AJOUTÉ (24 août 2026, demande Paul — "je ne vois pas le scan de
+        // produit... je ne vois pas que le scan en premier") — trouvé :
+        // TOUTES les sorties anticipées de cette méthode étaient
+        // complètement silencieuses, aucun log nulle part — impossible de
+        // savoir laquelle se déclenchait sans deviner. Journalisées ici,
+        // une par une, pour que la prochaine session de test le confirme.
+        if (!isAdded() || getView() == null || controller == null) {
+            android.util.Log.i("RegisterTabFragment", "autoScanProduitsSiNecessaire: abandon — "
+                + "isAdded=" + isAdded() + " getView()=" + (getView() != null) + " controller=" + (controller != null));
+            return;
+        }
+        if (autoProductScanInFlight) {
+            android.util.Log.i("RegisterTabFragment", "autoScanProduitsSiNecessaire: abandon — "
+                + "autoProductScanInFlight déjà true (cette instance)");
+            return;
+        }
+        if (controller.getState() != DeliveryState.CONNECTED) {
+            LogBus.api(node, "[SCAN-AUTO] abandon — état=" + controller.getState()
+                + " (attendu CONNECTED) — la section PRODUIT a tourné avant que l'état soit stabilisé");
+            return; // état a pu changer entretemps
+        }
         final String serialId = (serialFromArgs != null && !serialFromArgs.trim().isEmpty())
                 ? serialFromArgs.trim() : null;
-        if (serialId == null) return;
+        if (serialId == null) {
+            LogBus.api(node, "[SCAN-AUTO] abandon — serialFromArgs vide/null");
+            return;
+        }
 
         // ✅ FIX CRITIQUE (10 août 2026) — verrou GLOBAL, partagé entre
         // toutes les instances de fragment pour ce registre précis — voir
@@ -4375,11 +4418,12 @@ public class RegisterTabFragment extends Fragment {
         // AUTRE instance a déjà ce registre en cours de scan, on abandonne
         // ici, avant même de lancer quoi que ce soit.
         final String globalKey = node + ":" + serialId;
-        if (!autoProductScanInFlightGlobal.add(globalKey)) {
-            android.util.Log.i("RegisterTabFragment", "Auto-scan produits — déjà en cours pour "
-                + globalKey + " (autre instance de fragment) — abandon");
+        if (!autoScanLockAcquire(globalKey)) {
+            LogBus.api(node, "[SCAN-AUTO] abandon — déjà en cours pour " + globalKey
+                + " (autre instance de fragment, OU verrou resté coincé d'un essai précédent)");
             return;
         }
+        LogBus.api(node, "[SCAN-AUTO] démarrage — serial=" + serialId + " node=" + node);
 
         autoProductScanInFlight = true;
         try {
@@ -4401,7 +4445,7 @@ public class RegisterTabFragment extends Fragment {
                         + serialId + " node=" + node + ", pas de re-scan matériel");
                 applierDescriptionsProduits(serialId, node);
                 autoProductScanInFlight = false;
-                autoProductScanInFlightGlobal.remove(globalKey);
+                autoScanLockRelease(globalKey);
             } else {
                 android.util.Log.i("RegisterTabFragment", "Auto-scan produits — aucun cache pour serial="
                         + serialId + " node=" + node + ", lancement scan matériel");
@@ -4410,7 +4454,7 @@ public class RegisterTabFragment extends Fragment {
                         lancerScanProduits();
                     } finally {
                         autoProductScanInFlight = false;
-                        autoProductScanInFlightGlobal.remove(globalKey);
+                        autoScanLockRelease(globalKey);
                     }
                 });
             }
@@ -4421,7 +4465,7 @@ public class RegisterTabFragment extends Fragment {
             // même se libérer — sinon il resterait bloqué pour toujours,
             // empêchant tout futur scan pour ce registre.
             autoProductScanInFlight = false;
-            autoProductScanInFlightGlobal.remove(globalKey);
+            autoScanLockRelease(globalKey);
             android.util.Log.w("RegisterTabFragment", "autoScanProduitsSiNecessaire: échec de planification: " + schedulingErr.getMessage());
         }
     }
