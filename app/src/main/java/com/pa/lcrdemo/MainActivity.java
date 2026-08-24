@@ -7093,6 +7093,39 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
                     }
                 } catch (Exception ignored) {}
                 if (sessionDejaActive) {
+                    // ✅ CORRIGÉ (24 août 2026, demande Paul — "je suis
+                    // obligé de débrancher et rebrancher le câble... pour
+                    // voir le tab avec toutes les informations") — trouvé :
+                    // ce chemin supposait que "la gestion du tab est déjà
+                    // couverte ailleurs" et se contentait de rafraîchir le
+                    // statut sans JAMAIS afficher le tab — une supposition
+                    // qui ne tient pas toujours (ex: session créée mais
+                    // tab jamais montré à cause d'un focus=false ailleurs).
+                    // Corrigé : cherche un spec connu pour ce transport
+                    // (même pattern que la recherche en haut de cette
+                    // méthode) et force l'affichage si trouvé, au lieu de
+                    // supposer que c'est déjà fait.
+                    try {
+                        java.util.List<TabSpec> snap2;
+                        synchronized (tabsByKey) { snap2 = new ArrayList<>(tabsByKey.values()); }
+                        for (TabSpec spec2 : snap2) {
+                            if (spec2 != null && tk.equalsIgnoreCase(spec2.transportKey)
+                                    && spec2.serialId != null && !spec2.serialId.trim().isEmpty()) {
+                                final int kNode = spec2.node;
+                                final String kSerial = spec2.serialId;
+                                final boolean kLc3 = spec2.isLc3;
+                                android.util.Log.i("MainActivity", "onConfigureMediaActivated: session déjà active "
+                                    + "ET spec connu pour " + tk + " — affichage forcé du tab (correctif débranchement/rebranchement)");
+                                ui.post(() -> {
+                                    try {
+                                        upsertRegisterTabFromScan(tk, kNode, 255, kSerial, true, kLc3);
+                                        refreshAllTabsMediaStatus();
+                                    } catch (Exception ignored) {}
+                                });
+                                return;
+                            }
+                        }
+                    } catch (Exception ignored) {}
                     // Une vraie session existe déjà sur ce transport — rien de
                     // plus à faire ici (la gestion du tab pour cette session
                     // est déjà couverte ailleurs). Juste rafraîchir l'affichage,

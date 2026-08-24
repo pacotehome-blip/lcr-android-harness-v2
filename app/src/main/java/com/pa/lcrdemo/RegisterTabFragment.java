@@ -4746,11 +4746,63 @@ public class RegisterTabFragment extends Fragment {
                     int idx = r.noteIdx - 1;
                     if (idx >= 0 && idx < 16) labels[idx] = r.toSpinnerLabel();
                 }
+                // ✅ AJOUTÉ (24 août 2026, demande Paul — "à l'ouverture du
+                // tab, je n'ai toujours pas le produit appliqué selon le
+                // dernier ticket") — trouvé : cette branche (cache déjà
+                // présent — le cas COURANT après le tout premier scan)
+                // n'appliquait JAMAIS aucune sélection intelligente,
+                // contrairement à lancerScanProduits() (le scan frais).
+                // Même logique à trois niveaux ajoutée ici : deep link →
+                // propane → dernier ticket connu (lastResultJson).
+                final String produitDeepLinkPourCache = (getArguments() != null) ? getArguments().getString("produit") : null;
+                String produitNormCache = (produitDeepLinkPourCache != null)
+                        ? produitDeepLinkPourCache.trim().toLowerCase(java.util.Locale.ROOT)
+                                .replace("-", " ").replace("_", " ").replaceAll("\\s+", " ")
+                        : null;
+                int matchIdx = -1, propaneIdx = -1;
+                for (com.pa.lcr.lcp.storage.RegisterProductStore.Row r : rows) {
+                    if (r.isPropane && propaneIdx == -1) propaneIdx = r.noteIdx;
+                    if (produitNormCache != null && !produitNormCache.isEmpty() && !r.description.isEmpty()) {
+                        String descNorm = r.description.trim().toLowerCase(java.util.Locale.ROOT)
+                                .replace("-", " ").replace("_", " ").replaceAll("\\s+", " ");
+                        if (matchIdx == -1 && (descNorm.equals(produitNormCache)
+                                || descNorm.contains(produitNormCache) || produitNormCache.contains(descNorm))) {
+                            matchIdx = r.noteIdx;
+                        }
+                    }
+                }
+                int lastTicketIdxCache = -1;
+                if (matchIdx == -1 && propaneIdx == -1) {
+                    try {
+                        String lrj = com.pa.lcrdemo.DeepLinkHandler.lastResultJson;
+                        if (lrj != null) {
+                            org.json.JSONObject j = new org.json.JSONObject(lrj);
+                            org.json.JSONObject payload = j.optJSONObject("payload");
+                            if (payload != null && payload.has("active_product") && !payload.isNull("active_product")) {
+                                int idx2 = payload.optInt("active_product", -1);
+                                if (idx2 > 0 && idx2 <= 16) lastTicketIdxCache = idx2;
+                            }
+                        }
+                    } catch (Exception ignored) {}
+                }
+                final int matchIdxF = matchIdx, propaneIdxF = propaneIdx, lastTicketIdxCacheF = lastTicketIdxCache;
+                final int idxASelectionner = matchIdxF > 0 ? matchIdxF : (propaneIdxF > 0 ? propaneIdxF : lastTicketIdxCacheF);
                 ui.post(() -> {
                     if (!isAdded() || getView() == null || spnProduct == null) return;
                     String cur = spnProduct.getText().toString();
                     spnProduct.setAdapter(new android.widget.ArrayAdapter<>(requireContext(), android.R.layout.simple_dropdown_item_1line, labels));
-                    if (!cur.isEmpty()) spnProduct.setText(cur, false);
+                    if (!cur.isEmpty()) {
+                        spnProduct.setText(cur, false);
+                    } else if (idxASelectionner > 0 && idxASelectionner <= 16) {
+                        spnProduct.setText(labels[idxASelectionner - 1], false);
+                        initValidatedProductIdx = idxASelectionner;
+                        String quoi = matchIdxF > 0 ? "produit du ticket (\"" + produitDeepLinkPourCache + "\")"
+                                : propaneIdxF > 0 ? "Propane" : "dernier ticket connu";
+                        if (txtLive != null) txtLive.setText("✅ Produit — " + quoi + " — produit " + idxASelectionner);
+                        LogBus.api(node, "[PRODUIT-CACHE] sélection auto (depuis cache existant) — produit="
+                                + idxASelectionner + " (" + (matchIdxF > 0 ? "correspondance texte deep link"
+                                : propaneIdxF > 0 ? "repli propane" : "repli dernier ticket connu (lastResultJson)") + ")");
+                    }
                 });
             } catch (Exception e) {
                 android.util.Log.w("RegisterTabFragment", "applierDescriptions ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(node, "RegisterTabFragment.applierDescriptions", e); } catch (Exception ignored) {}
