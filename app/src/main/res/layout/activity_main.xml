@@ -61,6 +61,20 @@
         android:layout_weight="1"
         android:orientation="vertical">
 
+        <!-- ✅ AJOUTÉ (24 août 2026, demande Paul — visible ici aussi, pas
+             juste dans Support, puisque Main est l'onglet par défaut. -->
+        <TextView
+            android:id="@+id/txtVersionBuildMain"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="#212121"
+            android:textColor="#FFFFFF"
+            android:textSize="10sp"
+            android:fontFamily="monospace"
+            android:padding="4dp"
+            android:gravity="center"
+            android:text="build: —"/>
+
         <LinearLayout
             android:id="@+id/root"
             android:layout_width="match_parent"
@@ -1006,6 +1020,24 @@
         android:layout_weight="1"
         android:orientation="vertical"
         android:visibility="gone">
+
+        <!-- ✅ AJOUTÉ (24 août 2026, demande Paul — "un moyen pour savoir
+             quel version nous sommes rendu dans l'apk après chaque commit")
+             — hash git court + horodatage du build, capturés directement
+             au moment de la compilation (voir app/build.gradle,
+             buildConfigField GIT_COMMIT/BUILD_TIMESTAMP). Impossible de se
+             tromper sur quel build est réellement installé. -->
+        <TextView
+            android:id="@+id/txtVersionBuild"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="#212121"
+            android:textColor="#FFFFFF"
+            android:textSize="10sp"
+            android:fontFamily="monospace"
+            android:padding="4dp"
+            android:gravity="center"
+            android:text="build: —"/>
 
         <!-- ✅ FIX (6 août 2026, demande Paul — "j'ai perdu les champs de
              recherche... déposer les boutons en bas des champs et encadrer

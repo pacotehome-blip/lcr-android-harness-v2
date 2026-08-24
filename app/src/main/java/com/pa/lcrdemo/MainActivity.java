@@ -656,6 +656,21 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
+        // ✅ AJOUTÉ (24 août 2026, demande Paul — "un moyen pour savoir
+        // quel version nous sommes rendu dans l'apk après chaque commit")
+        // — affiche le hash git court + horodatage du build, capturés
+        // automatiquement à la compilation (voir app/build.gradle).
+        try {
+            TextView txtVersionBuild = findViewById(R.id.txtVersionBuild);
+            if (txtVersionBuild != null) {
+                txtVersionBuild.setText("build: " + BuildConfig.GIT_COMMIT + "  —  " + BuildConfig.BUILD_TIMESTAMP);
+            }
+            TextView txtVersionBuildMain = findViewById(R.id.txtVersionBuildMain);
+            if (txtVersionBuildMain != null) {
+                txtVersionBuildMain.setText("build: " + BuildConfig.GIT_COMMIT + "  —  " + BuildConfig.BUILD_TIMESTAMP);
+            }
+        } catch (Exception ignored) {}
+
         // ✅ Reset guard diagnostic au démarrage
         com.pa.lcrdemo.RegisterConnectionHelper.resetDiagnostic();
 
@@ -3405,16 +3420,38 @@ private void setupTabsTop() {
                 // exports de log_bus_event que Paul m'envoie. logUi() est
                 // le bon appel, déjà utilisé partout ailleurs (ex: "TAB
                 // registre supprimé" juste au-dessus).
+                // ✅ CORRIGÉ (21 août 2026) — trouvé, confirmé par log réel :
+                // getController() ne fait que RÉCUPÉRER une session déjà
+                // existante — il n'y en a aucune ici, puisque la session
+                // du nouveau transport n'a pas encore été créée à ce point
+                // précis. getController() retournait null (pas une
+                // exception), donc le catch/sleep ne se déclenchait
+                // JAMAIS — la boucle tournait à vide, 3 fois, en 38ms
+                // total (confirmé par log). getOrCreate() est la bonne
+                // méthode — établit vraiment la session si elle n'existe
+                // pas, avec le TransportIo déjà ouvert (USB prêt confirmé
+                // juste avant, via MediaTransportManager).
                 boolean refreshOk = false;
+                com.pa.lcr.lcp.transport.TransportIo ioPourRefresh = null;
+                try { ioPourRefresh = mediaTransportManager.getByKey(transportKey); } catch (Exception ignored) {}
                 for (int tentative = 1; tentative <= 3 && !refreshOk; tentative++) {
                     try {
+                        if (ioPourRefresh == null) {
+                            logUi(null, "upsertRegisterTabFromScan: refresh reconnexion tentative "
+                                    + tentative + "/3 — TransportIo introuvable pour " + transportKey + ", abandon");
+                            break;
+                        }
                         com.pa.lcr.lcp.DeliveryController dcNouveau =
-                                RegisterSessionManager.get(this).getController(transportKey, node);
+                                RegisterSessionManager.get(this).getOrCreate(transportKey, node, from, ioPourRefresh);
                         if (dcNouveau != null) {
                             dcNouveau.requestStatus();
                             refreshOk = true;
                             logUi(null, "upsertRegisterTabFromScan: refresh reconnexion OK "
                                     + "sur " + transportKey + " (tentative " + tentative + "/3)");
+                        } else {
+                            logUi(null, "upsertRegisterTabFromScan: refresh reconnexion tentative "
+                                    + tentative + "/3 — getOrCreate a retourné null pour " + transportKey);
+                            try { Thread.sleep(600); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
                         }
                     } catch (Exception e) {
                         logUi(null, "upsertRegisterTabFromScan: refresh reconnexion tentative "
