@@ -3527,6 +3527,22 @@ private void setupTabsTop() {
         if (focus) {
             selectRegisterTabByKey(newTabKey);
             showRegisterFragmentByKey(newTabKey);
+        } else if (currentTabKey == null) {
+            // ✅ CORRIGÉ (24 août 2026, demande Paul — "je ne vois pas le
+            // scan de produit... après l'installation et la création du
+            // tab") — trouvé, confirmé par log réel (zéro trace d'INIT ou
+            // de SCAN-AUTO sur une reconnexion automatique en arrière-plan,
+            // focus=false) : sans ce repli, le tab restait visuellement
+            // créé mais jamais activé — le Fragment (et donc
+            // runInitSequence()/le scan produit) ne se réveille que si
+            // l'utilisateur clique manuellement dessus. Même repli déjà
+            // présent dans l'AUTRE version de cette méthode (le tab
+            // "unknown" placeholder, ligne ~3138) — manquant ici,
+            // maintenant cohérent entre les deux chemins.
+            android.util.Log.i("MainActivity", "upsertRegisterTabFromScan: aucun tab actif — "
+                + "activation automatique de " + newTabKey + " (premier tab, focus=false)");
+            selectRegisterTabByKey(newTabKey);
+            showRegisterFragmentByKey(newTabKey);
         }
     }
 
