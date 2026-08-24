@@ -4807,8 +4807,20 @@ public class RegisterTabFragment extends Fragment {
                 ui.post(() -> {
                     if (!isAdded() || getView() == null || spnProduct == null) return;
                     String cur = spnProduct.getText().toString();
+                    // ✅ CORRIGÉ (24 août 2026, demande Paul — "le produit
+                    // conséquent au dernier ticket n'est toujours pas
+                    // rafraîchi") — trouvé : "cur non vide" incluait un
+                    // simple placeholder numérique par défaut ("1", "2"...)
+                    // — dès que N'IMPORTE QUOI était affiché, la
+                    // correspondance ne se déclenchait jamais. Un numéro
+                    // brut (juste des chiffres) n'est PAS une vraie
+                    // sélection résolue — seul un texte contenant une
+                    // description (via toSpinnerLabel(), format "N -
+                    // description...") compte comme "déjà résolu, à
+                    // préserver".
+                    boolean curEstDejaResolu = !cur.trim().isEmpty() && !cur.trim().matches("\\d+");
                     spnProduct.setAdapter(new android.widget.ArrayAdapter<>(requireContext(), android.R.layout.simple_dropdown_item_1line, labels));
-                    if (!cur.isEmpty()) {
+                    if (curEstDejaResolu) {
                         spnProduct.setText(cur, false);
                     } else if (idxASelectionner > 0 && idxASelectionner <= 16) {
                         spnProduct.setText(labels[idxASelectionner - 1], false);
@@ -4819,6 +4831,8 @@ public class RegisterTabFragment extends Fragment {
                         LogBus.api(node, "[PRODUIT-CACHE] sélection auto (depuis cache existant) — produit="
                                 + idxASelectionner + " (" + (matchIdxF > 0 ? "correspondance texte deep link"
                                 : propaneIdxF > 0 ? "repli propane" : "repli dernier ticket connu (lastResultJson)") + ")");
+                    } else if (!cur.isEmpty()) {
+                        spnProduct.setText(cur, false);
                     }
                 });
             } catch (Exception e) {
