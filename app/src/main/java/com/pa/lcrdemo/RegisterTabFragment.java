@@ -1602,8 +1602,38 @@ public class RegisterTabFragment extends Fragment {
             spnProduct.setAdapter(ad);
             spnProduct.setThreshold(0);
             spnProduct.setOnClickListener(v2 -> spnProduct.showDropDown());
+            // ✅ AJOUTÉ (24 août 2026, demande Paul — "si je fais un
+            // changement dans la section Produits et Preset je le veux
+            // dans le log du tab et dans le log support") — aucun
+            // écouteur n'existait pour capter une sélection manuelle dans
+            // le menu déroulant. LogBus.api() alimente déjà les deux à la
+            // fois (panneau local du tab + Support), un seul appel
+            // suffit — même pattern que partout ailleurs dans ce fichier.
+            spnProduct.setOnItemClickListener((parent, view2, position, id) -> {
+                String selection = parent.getItemAtPosition(position).toString();
+                LogBus.api(node, "[PRODUIT-MANUEL] Sélection manuelle: " + selection);
+            });
         }
         edtPreset = v.findViewById(R.id.edtPreset);
+        if (edtPreset != null) {
+            // ✅ AJOUTÉ (24 août 2026, demande Paul) — même besoin pour le
+            // preset. TextWatcher plutôt que onFocusChange — capture le
+            // changement peu importe comment le focus est perdu (bouton,
+            // clavier, changement d'onglet). Ignore les changements faits
+            // PROGRAMMATIQUEMENT par l'app elle-même (ex: setText() lors
+            // du repli du dernier ticket) — seul un changement initié par
+            // l'utilisateur (hasFocus au moment du changement) est tracé,
+            // pour ne pas noyer Support de bruit à chaque auto-remplissage.
+            edtPreset.addTextChangedListener(new android.text.TextWatcher() {
+                @Override public void beforeTextChanged(CharSequence s, int st, int c, int a) {}
+                @Override public void onTextChanged(CharSequence s, int st, int b, int c) {}
+                @Override public void afterTextChanged(android.text.Editable s) {
+                    if (edtPreset.hasFocus()) {
+                        LogBus.api(node, "[PRESET-MANUEL] Modification manuelle: " + s.toString());
+                    }
+                }
+            });
+        }
         btnConnect = v.findViewById(R.id.btnConnectTab);
         btnA = v.findViewById(R.id.btnA);
         btnB = v.findViewById(R.id.btnB);
@@ -4498,6 +4528,14 @@ public class RegisterTabFragment extends Fragment {
         }
         if (btnScanProducts != null) { btnScanProducts.setEnabled(false); btnScanProducts.setText("⏳ Scan..."); }
         final String serialId = (serialFromArgs != null && !serialFromArgs.trim().isEmpty()) ? serialFromArgs.trim() : null;
+        // ✅ AJOUTÉ (24 août 2026, demande Paul — "la section produit n'est
+        // pas rafraîchie avec le produit de la livraison correspondant")
+        // — lu ici aussi (déjà lu dans la section PRODUIT de l'init, mais
+        // celle-là abandonnait avant que CE scan-ci ait fini — voir
+        // commentaire plus haut sur le timing). Permet à CE scan de
+        // sélectionner directement le bon produit dès qu'il termine,
+        // peu importe si la section d'init a déjà abandonné entre-temps.
+        final String produitDeepLinkPourScan = (getArguments() != null) ? getArguments().getString("produit") : null;
         ui.post(() -> { if (txtLive != null) txtLive.setText("🔍 Scan produits 1 / 16..."); });
         safeBg(() -> {
           // ✅ CORRIGÉ (24 août 2026, demande Paul — "il faut s'assurer que
@@ -4545,20 +4583,78 @@ public class RegisterTabFragment extends Fragment {
                 final String[] labels = new String[16];
                 for (int i = 0; i < 16; i++) labels[i] = String.valueOf(i + 1);
                 final int[] propaneRef = {-1};
+                // ✅ AJOUTÉ (24 août 2026, demande Paul) — correspondance
+                // texte réelle avec produitDeepLink (le produit attendu par
+                // le ticket) — même normalisation que
+                // RegisterProductStore.Row.matchesName(), pas une
+                // comparaison exacte sensible à la casse/tirets. Priorité
+                // sur le repli propane : si le nom du ticket matche un
+                // vrai produit scanné, c'est plus précis qu'un simple flag
+                // isPropane.
+                final int[] matchRef = {-1};
+                String produitNorm = (produitDeepLinkPourScan != null)
+                        ? produitDeepLinkPourScan.trim().toLowerCase(java.util.Locale.ROOT)
+                                .replace("-", " ").replace("_", " ").replaceAll("\\s+", " ")
+                        : null;
                 for (com.pa.lcr.lcp.LcpLink.ProductScanResult r : results) {
                     int idx = r.noteIdx - 1;
                     if (idx >= 0 && idx < 16) labels[idx] = r.toSpinnerLabel();
                     if (r.isPropane && propaneRef[0] == -1) propaneRef[0] = r.noteIdx;
+                    if (produitNorm != null && !produitNorm.isEmpty() && !r.description.isEmpty()) {
+                        String descNorm = r.description.trim().toLowerCase(java.util.Locale.ROOT)
+                                .replace("-", " ").replace("_", " ").replaceAll("\\s+", " ");
+                        if (matchRef[0] == -1 && (descNorm.equals(produitNorm)
+                                || descNorm.contains(produitNorm) || produitNorm.contains(descNorm))) {
+                            matchRef[0] = r.noteIdx;
+                        }
+                    }
                 }
+                // ✅ AJOUTÉ (24 août 2026, demande Paul — "le lien du produit
+                // du dernier ticket n'est pas rafraîchi dans le tab") —
+                // troisième niveau de repli : si ni le deep link (vide
+                // quand le tab vient d'une reconnexion automatique, pas
+                // d'un vrai nouveau deep link) ni le flag propane ne
+                // donnent de correspondance, tente le dernier ticket connu
+                // via DeepLinkHandler.lastResultJson.payload.active_product
+                // — le même champ déjà câblé pour le repli "BD vierge",
+                // mais qui ne s'appliquait jamais une fois le scan réussi.
+                int lastTicketIdx = -1;
+                if (matchRef[0] == -1 && propaneRef[0] == -1) {
+                    try {
+                        String lrj = com.pa.lcrdemo.DeepLinkHandler.lastResultJson;
+                        if (lrj != null) {
+                            org.json.JSONObject j = new org.json.JSONObject(lrj);
+                            org.json.JSONObject payload = j.optJSONObject("payload");
+                            if (payload != null && payload.has("active_product") && !payload.isNull("active_product")) {
+                                int idx = payload.optInt("active_product", -1);
+                                if (idx > 0 && idx <= 16) lastTicketIdx = idx;
+                            }
+                        }
+                    } catch (Exception ignored) {}
+                }
+                final int lastTicketIdxFinal = lastTicketIdx;
+                final int idxSelectionne = matchRef[0] > 0 ? matchRef[0] : (propaneRef[0] > 0 ? propaneRef[0] : lastTicketIdxFinal);
+                final boolean parCorrespondanceTexte = matchRef[0] > 0;
+                final boolean parDernierTicket = matchRef[0] == -1 && propaneRef[0] == -1 && lastTicketIdxFinal > 0;
                 ui.post(() -> {
                     try {
                         if (spnProduct != null) spnProduct.setAdapter(new android.widget.ArrayAdapter<>(requireContext(), android.R.layout.simple_dropdown_item_1line, labels));
-                        if (propaneRef[0] > 0 && spnProduct != null) {
-                            spnProduct.setText(labels[propaneRef[0] - 1], false);
-                            if (txtLive != null) txtLive.setText("✅ Scan terminé — Propane produit " + propaneRef[0]);
-                            android.widget.Toast.makeText(requireContext(), "✅ Propane — produit " + propaneRef[0] + " sélectionné", android.widget.Toast.LENGTH_LONG).show();
+                        if (idxSelectionne > 0 && spnProduct != null) {
+                            spnProduct.setText(labels[idxSelectionne - 1], false);
+                            initValidatedProductIdx = idxSelectionne;
+                            String quoi = parCorrespondanceTexte ? "produit du ticket (\"" + produitDeepLinkPourScan + "\")"
+                                    : parDernierTicket ? "dernier ticket connu" : "Propane";
+                            if (txtLive != null) txtLive.setText("✅ Scan terminé — " + quoi + " — produit " + idxSelectionne);
+                            android.widget.Toast.makeText(requireContext(), "✅ " + quoi + " — produit " + idxSelectionne + " sélectionné", android.widget.Toast.LENGTH_LONG).show();
+                            LogBus.api(node, "[SCAN] sélection auto — produit=" + idxSelectionne + " ("
+                                    + (parCorrespondanceTexte ? "correspondance texte deep link"
+                                        : parDernierTicket ? "repli dernier ticket connu (lastResultJson)" : "repli propane") + ")");
                         } else {
-                            if (txtLive != null) txtLive.setText("✅ Scan terminé — " + results.size() + " produits");
+                            if (txtLive != null) txtLive.setText("✅ Scan terminé — " + results.size() + " produits"
+                                    + (produitDeepLinkPourScan != null ? " — aucune correspondance pour \"" + produitDeepLinkPourScan + "\"" : ""));
+                            if (produitDeepLinkPourScan != null) {
+                                LogBus.api(node, "[SCAN] aucune correspondance trouvée pour produit deep link=\"" + produitDeepLinkPourScan + "\"");
+                            }
                         }
                     } finally {
                         if (btnScanProducts != null) { btnScanProducts.setEnabled(true); btnScanProducts.setText("🔍 Scan produits"); }
