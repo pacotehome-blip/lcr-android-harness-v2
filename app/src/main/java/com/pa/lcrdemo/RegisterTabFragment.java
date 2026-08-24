@@ -572,9 +572,19 @@ public class RegisterTabFragment extends Fragment {
             boolean registreOk = runSectionWithRetry(InitSection.REGISTRE, 1, false, () -> {
                 if (controller == null) return false;
                 controller.requestStatus();
-                return controller.getState() == DeliveryState.CONNECTED
-                        || controller.getState() == DeliveryState.RUNNING_FLOWING
-                        || controller.getState() == DeliveryState.RUNNING_PAUSED;
+                // ✅ CORRIGÉ (24 août 2026, demande Paul — "il arrête à lcr
+                // node et #série" — trouvé le VRAI bug, même famille que
+                // celui de PRODUIT corrigé plus tôt aujourd'hui, mais ici
+                // bien pire : cette section a allowDegraded=false, donc
+                // "if (!registreOk) return;" juste en dessous coupait TOUTE
+                // la séquence (PRODUIT/PRESET/LIVE/TICKET ne tournaient
+                // JAMAIS) si le registre se stabilisait sur IDLE plutôt que
+                // littéralement CONNECTED. Élargi pour accepter IDLE aussi.
+                com.pa.lcr.lcp.DeliveryState stReg = controller.getState();
+                return stReg == DeliveryState.CONNECTED
+                        || stReg == DeliveryState.IDLE
+                        || stReg == DeliveryState.RUNNING_FLOWING
+                        || stReg == DeliveryState.RUNNING_PAUSED;
             });
             if (!registreOk) return; // dépendance dure : le reste ne peut pas continuer
 
@@ -1013,7 +1023,8 @@ public class RegisterTabFragment extends Fragment {
                 // 3000ms laisse largement le temps aux premiers cycles de
                 // sondage live de se stabiliser avant que le scan ne
                 // commence à se disputer le registre.
-                if (state == DeliveryState.CONNECTED && autoScanArmedForThisActivation) {
+                // ✅ CORRIGÉ (24 août 2026) — même bug, élargi pour accepter IDLE.
+                if ((state == DeliveryState.CONNECTED || state == DeliveryState.IDLE) && autoScanArmedForThisActivation) {
                     autoScanArmedForThisActivation = false;
                     ui.postDelayed(RegisterTabFragment.this::autoScanProduitsSiNecessaire, 3000);
                 }
@@ -4147,7 +4158,10 @@ public class RegisterTabFragment extends Fragment {
             // Si ActiveDeliveryStore est vide = DeepLinkHandler a déjà notifié → ne pas doubler
             ui.postDelayed(() -> {
                 if (!isAdded() || getView() == null || controller == null) return;
-                if (controller.getState() != com.pa.lcr.lcp.DeliveryState.CONNECTED) return;
+                // ✅ CORRIGÉ (24 août 2026) — même bug, élargi pour accepter IDLE.
+                com.pa.lcr.lcp.DeliveryState stCheck = controller.getState();
+                if (stCheck != com.pa.lcr.lcp.DeliveryState.CONNECTED
+                        && stCheck != com.pa.lcr.lcp.DeliveryState.IDLE) return;
                 if (currentWoNum == null || currentWoNum.isEmpty()) return;
                 try {
                     com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
@@ -4261,7 +4275,10 @@ public class RegisterTabFragment extends Fragment {
                 // 4. Attendre CONNECTED propre (max 5s)
                 for (int i = 0; i < 25; i++) {
                     try { Thread.sleep(200); } catch (Exception ignored) {}
-                    if (c.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
+                    // ✅ CORRIGÉ (24 août 2026) — même bug, élargi pour accepter IDLE.
+                    com.pa.lcr.lcp.DeliveryState stWait = c.getState();
+                    if (stWait == com.pa.lcr.lcp.DeliveryState.CONNECTED
+                            || stWait == com.pa.lcr.lcp.DeliveryState.IDLE) break;
                 }
                 // Reconnecter le transport si nécessaire
                 try {
