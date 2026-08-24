@@ -61,20 +61,6 @@
         android:layout_weight="1"
         android:orientation="vertical">
 
-        <!-- ✅ AJOUTÉ (24 août 2026, demande Paul — visible ici aussi, pas
-             juste dans Support, puisque Main est l'onglet par défaut. -->
-        <TextView
-            android:id="@+id/txtVersionBuildMain"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:background="#212121"
-            android:textColor="#FFFFFF"
-            android:textSize="10sp"
-            android:fontFamily="monospace"
-            android:padding="4dp"
-            android:gravity="center"
-            android:text="build: —"/>
-
         <LinearLayout
             android:id="@+id/root"
             android:layout_width="match_parent"
@@ -115,6 +101,22 @@
                 android:minHeight="0dp"
                 android:paddingTop="0dp"
                 android:paddingBottom="0dp" />
+
+            <!-- ✅ DÉPLACÉ (24 août 2026, demande Paul — "la bande noire
+                 devrait être placée en bas en dessous de Afficher log
+                 global") — était au tout haut de Main, déplacée ici. -->
+            <TextView
+                android:id="@+id/txtVersionBuildMain"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="#212121"
+                android:textColor="#FFFFFF"
+                android:textSize="10sp"
+                android:fontFamily="monospace"
+                android:padding="4dp"
+                android:layout_marginTop="4dp"
+                android:gravity="center"
+                android:text="build: —"/>
 
             <LinearLayout
                 android:id="@+id/logPanel"
