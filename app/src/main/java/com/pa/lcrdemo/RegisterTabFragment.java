@@ -4400,9 +4400,22 @@ public class RegisterTabFragment extends Fragment {
                 + "autoProductScanInFlight déjà true (cette instance)");
             return;
         }
-        if (controller.getState() != DeliveryState.CONNECTED) {
-            LogBus.api(node, "[SCAN-AUTO] abandon — état=" + controller.getState()
-                + " (attendu CONNECTED) — la section PRODUIT a tourné avant que l'état soit stabilisé");
+        // ✅ CORRIGÉ (24 août 2026, demande Paul — "zéro scan des produits,
+        // tu as tout ce qu'il faut pour que ce soit là") — trouvé, avec
+        // certitude cette fois : DeliveryState a un état IDLE, distinct de
+        // CONNECTED. Le garde exigeait littéralement CONNECTED — si le
+        // registre se stabilise sur IDLE après connexion (état tout aussi
+        // valide pour scanner, aucune livraison en cours), ce garde
+        // rejetait SYSTÉMATIQUEMENT, à chaque tentative, pour toujours —
+        // pas un problème de délai, un vrai blocage permanent. Élargi pour
+        // accepter tout état "au repos" (ni en livraison, ni déconnecté).
+        com.pa.lcr.lcp.DeliveryState stActuel = controller.getState();
+        boolean etatAcceptablePourScan = stActuel == DeliveryState.CONNECTED
+                || stActuel == DeliveryState.IDLE
+                || stActuel == DeliveryState.PRESTART;
+        if (!etatAcceptablePourScan) {
+            LogBus.api(node, "[SCAN-AUTO] abandon — état=" + stActuel
+                + " (accepté: CONNECTED/IDLE/PRESTART) — pas encore prêt à scanner");
             return; // état a pu changer entretemps
         }
         final String serialId = (serialFromArgs != null && !serialFromArgs.trim().isEmpty())
