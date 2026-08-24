@@ -884,6 +884,15 @@ private void reproEvent(String level, String type, String message, JSONObject da
         volatile String ticketNo; // #23 U32
         volatile String serialId; // #80
 
+        // ✅ AJOUTÉ (24 août 2026, demande Paul — "ajouter le type de
+        // produit et la description et le code produit") — mis en cache
+        // sur le job (comme ticketNo/saleNo au-dessus), lu UNE seule fois
+        // par livraison — api_deliveryJobGet() peut être sondée jusqu'à
+        // 600 fois, pas question de relire ces 3 champs à chaque cycle.
+        volatile String activeProductDescription;
+        volatile String activeProductCode;
+        volatile Integer activeProductType;
+
         // Timing
         volatile long startMs = 0L;
         volatile long endMs = 0L;
@@ -3025,6 +3034,34 @@ public ApiResult api_registerValidate(
                 }
             } catch (Exception ignored) {}
 
+            // ✅ AJOUTÉ (24 août 2026, demande Paul — "si on peut ajouter le
+            // type de produit et la description et le code produit ce
+            // serait parfait") — pour le repli "BD vierge" (recovery depuis
+            // lastResultJson quand register_products est vide). Field #0
+            // (ci-dessus) pointe déjà sur le produit actif — lire #11/#1/#94
+            // ICI lit ce MÊME produit, pas un scan des 16 slots — rapide,
+            // 3 lectures au lieu de 48. Exposé dans le JSON pour que ça
+            // voyage jusqu'à lastResultJson.payload et survive même si
+            // register_products est vidé/jamais peuplé.
+            String activeProductDescription = null, activeProductCode = null;
+            Integer activeProductType = null;
+            try {
+                byte[] f11 = lcpGetField(11);
+                if (f11 != null && f11.length > 0)
+                    activeProductDescription = new String(f11, java.nio.charset.StandardCharsets.US_ASCII)
+                            .replace("\0", "").trim();
+            } catch (Exception ignored) {}
+            try {
+                byte[] f1 = lcpGetField(1);
+                if (f1 != null && f1.length > 0)
+                    activeProductCode = new String(f1, java.nio.charset.StandardCharsets.US_ASCII)
+                            .replace("\0", "").trim();
+            } catch (Exception ignored) {}
+            try {
+                byte[] f94 = lcpGetField(94);
+                if (f94 != null && f94.length > 0) activeProductType = f94[0] & 0xFF;
+            } catch (Exception ignored) {}
+
             // ✅ AJOUTÉ (20 août 2026, demande Paul — "récupérer le produit
             // et le preset si on trouve le ticket_number ou sale_number")
             // — le produit était déjà lu ici, jamais le preset. Ajouté aux
@@ -3082,6 +3119,10 @@ public ApiResult api_registerValidate(
             safeJsonPut(data, "serial_id", serialId);
             safeJsonPut(data, "delivery_uid", deliveryUid == null ? JSONObject.NULL : deliveryUid);
             safeJsonPut(data, "active_product", activeProduct1to16 == null ? JSONObject.NULL : activeProduct1to16);
+            // ✅ AJOUTÉ (24 août 2026) — voir commentaire à la lecture, plus haut.
+            safeJsonPut(data, "active_product_description", activeProductDescription == null ? JSONObject.NULL : activeProductDescription);
+            safeJsonPut(data, "active_product_code", activeProductCode == null ? JSONObject.NULL : activeProductCode);
+            safeJsonPut(data, "active_product_type", activeProductType == null ? JSONObject.NULL : activeProductType);
             // ✅ AJOUTÉ (20 août 2026) — voir commentaire à la lecture, plus haut.
             safeJsonPut(data, "preset_gross_l", presetGrossL == null ? JSONObject.NULL : presetGrossL);
             safeJsonPut(data, "preset_net_l", presetNetL == null ? JSONObject.NULL : presetNetL);
@@ -4375,6 +4416,27 @@ job.presetNetL_requested = presetNetL;
         if (job.saleNo == null || job.saleNo.trim().isEmpty()) {
             try { job.saleNo = readSaleNo22(); } catch (Exception ignored) {}
         }
+        // ✅ AJOUTÉ (24 août 2026, demande Paul) — même pattern, lu une
+        // seule fois par job (jamais relu une fois capturé — même vide,
+        // pour ne pas retenter à chaque sondage un champ qui échoue).
+        if (job.activeProductType == null) {
+            try {
+                byte[] f11 = lcpGetField(11);
+                if (f11 != null && f11.length > 0)
+                    job.activeProductDescription = new String(f11, java.nio.charset.StandardCharsets.US_ASCII)
+                            .replace("\0", "").trim();
+            } catch (Exception ignored) {}
+            try {
+                byte[] f1 = lcpGetField(1);
+                if (f1 != null && f1.length > 0)
+                    job.activeProductCode = new String(f1, java.nio.charset.StandardCharsets.US_ASCII)
+                            .replace("\0", "").trim();
+            } catch (Exception ignored) {}
+            try {
+                byte[] f94 = lcpGetField(94);
+                job.activeProductType = (f94 != null && f94.length > 0) ? (f94[0] & 0xFF) : -1;
+            } catch (Exception ignored) { job.activeProductType = -1; }
+        }
 
         try {
             int[] ds = lcpDeliveryStatus();
@@ -4526,6 +4588,14 @@ if (deliveryActive && !job.baselineCaptured) {
 
             safeJsonPut(data, "preset_requested", job.presetNetL_requested);
             safeJsonPut(data, "preset_applied", job.presetNetL_applied);
+
+            // ✅ AJOUTÉ (24 août 2026, demande Paul) — voir cache job.active*
+            // plus haut. Voyage jusqu'à DeepLinkHandler.lastResultJson.payload
+            // via r.data — récupérable même si register_products (BD) est
+            // vide, pour le repli "BD vierge" du tab.
+            safeJsonPut(data, "active_product_description", job.activeProductDescription == null ? JSONObject.NULL : job.activeProductDescription);
+            safeJsonPut(data, "active_product_code", job.activeProductCode == null ? JSONObject.NULL : job.activeProductCode);
+            safeJsonPut(data, "active_product_type", (job.activeProductType == null || job.activeProductType < 0) ? JSONObject.NULL : job.activeProductType);
 
             safeJsonPut(data, "delivered_net", deliveryActive ? netL : JSONObject.NULL);
 

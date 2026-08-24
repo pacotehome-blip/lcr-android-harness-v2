@@ -2186,6 +2186,7 @@ public class RegisterTabFragment extends Fragment {
                 if (!verifierIoAvantAction("REPRINT")) return;
                 safeBg(() -> {
                     c.printInProgress = true;
+                    LogBus.api(node, "[REPRINT] Début");
                     try {
                         if (tabTransportKey != null) {
                             MediaTransportManager.get(requireContext())
@@ -2293,6 +2294,8 @@ public class RegisterTabFragment extends Fragment {
                         } catch (Exception ignored) {}
 
                         if (!ticketNoAfter.isEmpty() && !ticketNoAfter.equals(ticketNoBefore)) {
+                            LogBus.api(node, "[REPRINT] Terminé — confirmé (ticket_no " + ticketNoBefore
+                                    + " → " + ticketNoAfter + ", net=" + netL + "L gross=" + grossL + "L)");
                             android.content.ContentValues cv = new android.content.ContentValues();
                             cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,       woNum);
                             cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID,   woIdGuid);
@@ -2313,6 +2316,9 @@ public class RegisterTabFragment extends Fragment {
                             } finally {
                                 try { lcrDb.close(); } catch (Exception ignored) {}
                             }
+                        } else {
+                            LogBus.api(node, "[REPRINT] Terminé — SANS CONFIRMATION (ticket_no toujours "
+                                    + ticketNoBefore + " après la tentative — l'imprimante n'a probablement pas produit de vraie sortie)");
                         }
 
                     } catch (Exception e) {
@@ -2342,7 +2348,20 @@ public class RegisterTabFragment extends Fragment {
             btnTestPrinter.setOnClickListener(v -> {
                 LogBus.api(node, "[ACTION-CLIC] TEST_IMPRIMANTE");
                 DeliveryController c = controller;
-                if (c == null) return;
+                // ✅ CORRIGÉ (17 août 2026, demande Paul — trouvé par log
+                // réel : le clic était bien enregistré mais rien ne se
+                // passait ensuite, aucun log ni toast — controller était
+                // null à cet instant précis (probablement en pleine
+                // reconnexion, "[INIT 1/6] REGISTRE — ÉCHEC" juste avant
+                // dans le même log). Retour silencieux corrigé — visible
+                // maintenant dans Support et à l'écran.
+                if (c == null) {
+                    LogBus.api(node, "[TEST_IMPRIMANTE] annulé — controller indisponible (reconnexion probable)");
+                    ui.post(() -> android.widget.Toast.makeText(requireContext(),
+                            "Registre non connecté — réessaie dans un instant",
+                            android.widget.Toast.LENGTH_SHORT).show());
+                    return;
+                }
                 if (!verifierIoAvantAction("TEST_IMPRIMANTE")) return;
                 btnTestPrinter.setEnabled(false);
                 safeBg(() -> {
@@ -3170,16 +3189,30 @@ public class RegisterTabFragment extends Fragment {
                         .activateExclusive(tabTransportKey, "CUSTOM_PRINT");
                 }
                 int errors = 0;
+                int total = lines.size();
+                LogBus.api(node, "[CUSTOM_PRINT] Début — " + total + " ligne(s) à imprimer (WO=" + woNum
+                        + " ticket=" + ticketNo + ")");
+                int idxLigne = 0;
                 for (String line : lines) {
+                    idxLigne++;
+                    String apercu = line.trim().isEmpty() ? "(ligne vide)" : line;
+                    long t0 = System.currentTimeMillis();
                     try {
                         c.api_printTextLine(line);
+                        long dt = System.currentTimeMillis() - t0;
+                        LogBus.api(node, "[CUSTOM_PRINT] Ligne " + idxLigne + "/" + total
+                                + " OK (" + dt + "ms): \"" + apercu + "\"");
                         Thread.sleep(150);
                     } catch (Exception e) {
                         errors++;
-                        LogBus.api(node, "[CUSTOM_PRINT] ERR ligne: " + safeMsg(e));
+                        long dt = System.currentTimeMillis() - t0;
+                        LogBus.api(node, "[CUSTOM_PRINT] Ligne " + idxLigne + "/" + total
+                                + " ERR (" + dt + "ms): \"" + apercu + "\" — " + safeMsg(e));
                         surErreurConnexion(e, "CUSTOM_PRINT");
                     }
                 }
+                LogBus.api(node, "[CUSTOM_PRINT] Terminé — " + (total - errors) + "/" + total
+                        + " ligne(s) réussie(s)" + (errors > 0 ? ", " + errors + " échouée(s)" : ""));
 
                 final int fErrors = errors;
                 ui.post(() -> {
@@ -4410,6 +4443,18 @@ public class RegisterTabFragment extends Fragment {
         final String serialId = (serialFromArgs != null && !serialFromArgs.trim().isEmpty()) ? serialFromArgs.trim() : null;
         ui.post(() -> { if (txtLive != null) txtLive.setText("🔍 Scan produits 1 / 16..."); });
         safeBg(() -> {
+          // ✅ CORRIGÉ (24 août 2026, demande Paul — "il faut s'assurer que
+          // rien n'intervienne") — trouvé : scanInProgress (le champ existe
+          // déjà dans DeliveryController, et le keep-alive de
+          // RegisterSessionManager le vérifie déjà pour se suspendre) n'était
+          // JAMAIS posé ici — même bug que printInProgress avant le
+          // correctif de ce matin. Le keep-alive continuait donc de se
+          // battre pour le verrou LCP pendant tout le scan, pouvant causer
+          // exactement le genre d'échec/non-complétion décrit. Garanti
+          // retiré via finally, peu importe le chemin de sortie (succès,
+          // échec après 3 tentatives, exception imprévue).
+          c.scanInProgress = true;
+          try {
             // ✅ FIX CRITIQUE (11 août 2026, demande Paul — trouvé via
             // logcat : "Auto-scan produits" abandonnait complètement dès le
             // premier rc=0x26, alors que LcpLink documente explicitement
@@ -4479,6 +4524,9 @@ public class RegisterTabFragment extends Fragment {
                 return;
             }
             }
+          } finally {
+              c.scanInProgress = false;
+          }
         });
     }
 
@@ -4490,7 +4538,55 @@ public class RegisterTabFragment extends Fragment {
                 java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> rows = store.getAll(serialId, lcrNode);
                 if (rows.isEmpty()) rows = store.getAll(serialId);
                 store.close();
-                if (rows.isEmpty()) return;
+                if (rows.isEmpty()) {
+                    // ✅ AJOUTÉ (24 août 2026, demande Paul — "BD vierge →
+                    // récupérer depuis le JSON de la dernière livraison,
+                    // avec type/description/code produit") — register_products
+                    // vide (première utilisation, DB effacée...) — repli
+                    // dégradé, mais complet cette fois (description+code+type,
+                    // pas juste le numéro de slot), depuis
+                    // DeepLinkHandler.lastResultJson.payload — voyage
+                    // maintenant jusque-là via api_deliveryJobGet() (voir
+                    // DeliveryController). Étiqueté clairement "récupéré",
+                    // jamais confondu avec un vrai scan frais.
+                    try {
+                        String lrj = com.pa.lcrdemo.DeepLinkHandler.lastResultJson;
+                        if (lrj != null) {
+                            org.json.JSONObject j = new org.json.JSONObject(lrj);
+                            org.json.JSONObject payload = j.optJSONObject("payload");
+                            if (payload != null) {
+                                Integer idx = payload.has("active_product") && !payload.isNull("active_product")
+                                        ? payload.optInt("active_product", -1) : null;
+                                String desc = payload.optString("active_product_description", null);
+                                String code = payload.optString("active_product_code", null);
+                                int type = payload.optInt("active_product_type", -1);
+                                if (idx != null && idx > 0 && idx <= 16 && (desc != null || code != null)) {
+                                    final String[] labelsFallback = new String[16];
+                                    for (int i = 0; i < 16; i++) labelsFallback[i] = String.valueOf(i + 1);
+                                    StringBuilder sb = new StringBuilder(String.valueOf(idx));
+                                    if (desc != null && !desc.isEmpty()) sb.append(" - ").append(desc);
+                                    if (code != null && !code.isEmpty()) sb.append(" (").append(code).append(")");
+                                    if (type >= 0) sb.append(" [").append(com.pa.lcr.lcp.LcpLink.decodeProductType(type)).append("]");
+                                    sb.append(" — récupéré, pas encore rescanné");
+                                    labelsFallback[idx - 1] = sb.toString();
+                                    final String curLabel = labelsFallback[idx - 1];
+                                    ui.post(() -> {
+                                        if (!isAdded() || getView() == null || spnProduct == null) return;
+                                        spnProduct.setAdapter(new android.widget.ArrayAdapter<>(requireContext(),
+                                                android.R.layout.simple_dropdown_item_1line, labelsFallback));
+                                        spnProduct.setText(curLabel, false);
+                                        if (txtLive != null) txtLive.setText("⚠️ Produit récupéré de la dernière livraison — scan recommandé pour confirmer");
+                                    });
+                                    LogBus.api(node, "[PRODUIT-FALLBACK] BD vierge — récupéré depuis lastResultJson : "
+                                            + "slot=" + idx + " desc=" + desc + " code=" + code + " type=" + type);
+                                }
+                            }
+                        }
+                    } catch (Exception e2) {
+                        android.util.Log.w("RegisterTabFragment", "applierDescriptions: repli lastResultJson ERR: " + e2.getMessage());
+                    }
+                    return;
+                }
                 final String[] labels = new String[16];
                 for (int i = 0; i < 16; i++) labels[i] = String.valueOf(i + 1);
                 for (com.pa.lcr.lcp.storage.RegisterProductStore.Row r : rows) {
