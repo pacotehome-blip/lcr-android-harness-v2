@@ -4530,6 +4530,34 @@ public class RegisterTabFragment extends Fragment {
         }
     }
 
+    // ✅ AJOUTÉ (25 août 2026, demande Paul — "on a un fichier json dans
+    // download de la dernière livraison... il manque le mappage produit
+    // du ticket vs ce qui est scanné dans le registre") — trouvé : le
+    // fichier de backup (filgo_livraison_*.json, survit à une BD vierge —
+    // contrairement à lastResultJson, un champ EN MÉMOIRE qui se vide au
+    // redémarrage de l'app) contient bien active_product/description/
+    // code/type — mais imbriqué en String sous "payload_complet", jamais
+    // lu par mon repli précédent (qui ne vérifiait que lastResultJson).
+    // Cette méthode lit le vrai fichier persistant, pour un repli qui
+    // survit vraiment à un redémarrage d'app + BD vierge, pas juste à un
+    // changement de tab dans la même session.
+    private org.json.JSONObject lireActiveProductDepuisBackupJson(String ticketNo) {
+        if (ticketNo == null || ticketNo.trim().isEmpty()) return null;
+        try {
+            com.pa.lcr.lcp.storage.LocalDeliveryBackup.BackupMatch match =
+                com.pa.lcr.lcp.storage.LocalDeliveryBackup.findLatestByTicketNo(requireContext(), ticketNo.trim());
+            if (match == null || match.json == null) return null;
+            String payloadCompletStr = match.json.optString("payload_complet", null);
+            if (payloadCompletStr == null || payloadCompletStr.isEmpty()) return null;
+            org.json.JSONObject payloadComplet = new org.json.JSONObject(payloadCompletStr);
+            if (!payloadComplet.has("active_product") || payloadComplet.isNull("active_product")) return null;
+            return payloadComplet;
+        } catch (Exception e) {
+            android.util.Log.w("RegisterTabFragment", "lireActiveProductDepuisBackupJson ERR: " + e.getMessage());
+            return null;
+        }
+    }
+
     private void lancerScanProduits() {
         DeliveryController c = controller;
         if (c == null) {
@@ -4648,6 +4676,22 @@ public class RegisterTabFragment extends Fragment {
                             }
                         }
                     } catch (Exception ignored) {}
+                    // ✅ AJOUTÉ (25 août 2026) — repli SUPPLÉMENTAIRE sur le
+                    // fichier de backup persistant (survit à un redémarrage
+                    // d'app + BD vierge, contrairement à lastResultJson
+                    // ci-dessus). Tenté seulement si lastResultJson n'a rien
+                    // donné — même ticket que celui déjà résolu pour ce tab.
+                    if (lastTicketIdx == -1) {
+                        org.json.JSONObject backupPayload = lireActiveProductDepuisBackupJson(lastKnownTicketNo);
+                        if (backupPayload != null) {
+                            int idx = backupPayload.optInt("active_product", -1);
+                            if (idx > 0 && idx <= 16) {
+                                lastTicketIdx = idx;
+                                LogBus.api(node, "[SCAN] dernier ticket connu récupéré depuis le backup JSON "
+                                        + "(Téléchargements), pas lastResultJson (probablement app redémarrée)");
+                            }
+                        }
+                    }
                 }
                 final int lastTicketIdxFinal = lastTicketIdx;
                 final int idxSelectionne = matchRef[0] > 0 ? matchRef[0] : (propaneRef[0] > 0 ? propaneRef[0] : lastTicketIdxFinal);
@@ -4801,6 +4845,20 @@ public class RegisterTabFragment extends Fragment {
                             }
                         }
                     } catch (Exception ignored) {}
+                    // ✅ AJOUTÉ (25 août 2026) — même repli supplémentaire
+                    // que dans lancerScanProduits() — voir ce commentaire
+                    // pour le détail complet.
+                    if (lastTicketIdxCache == -1) {
+                        org.json.JSONObject backupPayloadCache = lireActiveProductDepuisBackupJson(lastKnownTicketNo);
+                        if (backupPayloadCache != null) {
+                            int idx2 = backupPayloadCache.optInt("active_product", -1);
+                            if (idx2 > 0 && idx2 <= 16) {
+                                lastTicketIdxCache = idx2;
+                                LogBus.api(node, "[PRODUIT-CACHE] dernier ticket connu récupéré depuis le "
+                                        + "backup JSON (Téléchargements), pas lastResultJson");
+                            }
+                        }
+                    }
                 }
                 final int matchIdxF = matchIdx, propaneIdxF = propaneIdx, lastTicketIdxCacheF = lastTicketIdxCache;
                 final int idxASelectionner = matchIdxF > 0 ? matchIdxF : (propaneIdxF > 0 ? propaneIdxF : lastTicketIdxCacheF);
