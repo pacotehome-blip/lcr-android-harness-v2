@@ -875,15 +875,41 @@ public class RegisterConnectionHelper {
                 .setCancelable(true)
                 .setPositiveButton("🔄 Réessayer", (d, w) -> {
                     d.dismiss();
-                    // ✅ FIX : l'ancien code appelait lancerDiagnostic("", node, serialId, woNum)
-                    // — la version à 4 arguments, qui perd woIdGuid/produit/presetStr/mac ET
-                    // surtout deepLinkHandler. Résultat : même si ce nouveau diagnostic réussit,
-                    // le bloc de relance finale ne se déclenche jamais (deepLinkHandler == null),
-                    // donc le tab devient Connected-Ready (communication réellement confirmée,
-                    // ticket_no lu) mais la livraison ne redémarre jamais. On garde le contexte
-                    // complet ici pour que la relance auto fonctionne aussi depuis ce bouton.
-                    lancerDiagnosticForce("", node, serialId, woNum,
-                        woIdGuid, produit, presetStr, mac, deepLinkHandler);
+                    // ✅ AJOUTÉ (25 août 2026, demande Paul — "si le tab est
+                    // déjà connecté, il faut juste fermer cet écran") —
+                    // avant de lancer le diagnostic complet, vérifie
+                    // d'abord si le registre répond DÉJÀ ailleurs
+                    // (réutilise findAliveTransportForSerial(), déjà
+                    // construite plus tôt). Le dialogue a pu rester ouvert
+                    // pendant qu'une reconnexion automatique s'est faite
+                    // en arrière-plan — dans ce cas, relancer un
+                    // diagnostic complet est inutile et redondant, juste
+                    // fermer suffit.
+                    new Thread(() -> {
+                        String transportDejaVivant = findAliveTransportForSerial(serialId, node, null);
+                        if (transportDejaVivant != null) {
+                            Log.i(TAG, "Réessayer: registre déjà joignable sur " + transportDejaVivant
+                                    + " — diagnostic sauté, fermeture seule");
+                            try { com.pa.lcr.lcp.log.LogBus.ui(node, "[RETRY] Déjà reconnecté sur "
+                                    + transportDejaVivant + " — diagnostic sauté"); } catch (Exception ignored) {}
+                            activity.runOnUiThread(() -> {
+                                try {
+                                    android.widget.Toast.makeText(activity, "✅ Registre déjà reconnecté",
+                                            android.widget.Toast.LENGTH_SHORT).show();
+                                } catch (Exception ignored) {}
+                            });
+                            return;
+                        }
+                        // ✅ FIX : l'ancien code appelait lancerDiagnostic("", node, serialId, woNum)
+                        // — la version à 4 arguments, qui perd woIdGuid/produit/presetStr/mac ET
+                        // surtout deepLinkHandler. Résultat : même si ce nouveau diagnostic réussit,
+                        // le bloc de relance finale ne se déclenche jamais (deepLinkHandler == null),
+                        // donc le tab devient Connected-Ready (communication réellement confirmée,
+                        // ticket_no lu) mais la livraison ne redémarre jamais. On garde le contexte
+                        // complet ici pour que la relance auto fonctionne aussi depuis ce bouton.
+                        lancerDiagnosticForce("", node, serialId, woNum,
+                            woIdGuid, produit, presetStr, mac, deepLinkHandler);
+                    }).start();
                 })
                 .setNeutralButton("🔁 Redémarrer APK", (d, w) -> {
                     try {
