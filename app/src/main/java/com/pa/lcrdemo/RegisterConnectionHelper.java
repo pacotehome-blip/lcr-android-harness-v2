@@ -680,17 +680,28 @@ public class RegisterConnectionHelper {
                 etapes[2] = "✅ Registre trouvé — " + foundKey.replace("BT:", "BT: ") + " | Serial: " + foundSerial;
                 updateDlg.run();
 
-                // ✅ FIX (4 août 2026, demande Paul — "si on fait un
-                // changement on le fait à un seul endroit") — avant ce fix,
-                // ce bloc appelait resolveOrCreateForNode() PUIS getOrCreate()
-                // encore une fois pour "réattacher" — deux appels de création
-                // de session redondants, alors que api_registerConnectAuto()
-                // (étape 3 ci-dessus) a DÉJÀ créé/attaché la session au bon
-                // socket via sessions.getOrCreate() en interne. Ici : simple
-                // LECTURE de ce qui existe déjà (getController), aucune
-                // création supplémentaire.
-                dcFinal = com.pa.lcr.lcp.RegisterSessionManager.get(activity)
-                    .getController(fKey, fNodeFinal);
+                // ✅ CORRIGÉ (25 août 2026, demande Paul — "le diagnostique ne
+                // fonctionne pas... pourquoi le diagnostic ne suit pas le
+                // même chemin que la détection") — trouvé, exactement le
+                // même bug que celui corrigé plus tôt aujourd'hui dans le
+                // refresh de migration : getController() ne fait que LIRE
+                // une session déjà existante. L'hypothèse du 4 août
+                // (api_registerConnectAuto() aurait déjà tout créé) ne tient
+                // pas toujours en pratique — confirmé par "Controller non
+                // disponible" à l'étape 4, alors que l'étape 3 vient de
+                // confirmer que le registre a bien été trouvé. getOrCreate()
+                // est sûr à appeler même si une session existe déjà
+                // (retourne simplement l'existante) — plus de dépendance
+                // fragile sur le timing d'un autre appel.
+                com.pa.lcr.lcp.transport.TransportIo ioPourDiag = null;
+                try { ioPourDiag = activity.getMediaTransportManager().getByKey(fKey); } catch (Exception ignored) {}
+                if (ioPourDiag != null) {
+                    dcFinal = com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                        .getOrCreate(fKey, fNodeFinal, 255, ioPourDiag);
+                } else {
+                    dcFinal = com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                        .getController(fKey, fNodeFinal);
+                }
 
                 btConnecte = true;
                 etapesOk[2] = true;
@@ -717,7 +728,10 @@ public class RegisterConnectionHelper {
         try {
             if (dcFinal != null) {
                 com.pa.lcr.lcp.DeliveryState st = dcFinal.getState();
+                // ✅ CORRIGÉ (25 août 2026) — même bug que REGISTRE/PRODUIT
+                // corrigés plus tôt aujourd'hui : IDLE manquait ici aussi.
                 lcpOk = (st == com.pa.lcr.lcp.DeliveryState.CONNECTED
+                    || st == com.pa.lcr.lcp.DeliveryState.IDLE
                     || st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
                     || st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED
                     || st == com.pa.lcr.lcp.DeliveryState.ENDING);
@@ -727,6 +741,7 @@ public class RegisterConnectionHelper {
                         try { Thread.sleep(300); } catch (Exception ignored) {}
                         st = dcFinal.getState();
                         if (st == com.pa.lcr.lcp.DeliveryState.CONNECTED
+                            || st == com.pa.lcr.lcp.DeliveryState.IDLE
                             || st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
                             || st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED) {
                             lcpOk = true; break;
