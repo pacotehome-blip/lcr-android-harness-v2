@@ -214,15 +214,26 @@ public class RegisterConnectionHelper {
                 } catch (Exception ignored) {}
                 return true;
             }
-            // ✅ FIX : lancerDiagnostic() s'auto-ignore silencieusement si
-            // diagnosticEnCours est resté bloqué à true (ex: tentative
-            // antérieure qui n'a pas remis le drapeau à false proprement) —
-            // le chauffeur cliquait Status/Continuer et ne voyait RIEN se
-            // passer, sans erreur, sans log visible côté UI. lancerDiagnosticForce()
-            // existe justement pour ce cas ("le registre ne répond pas même si
-            // BT est connecté, câble débranché") — on l'utilise ici aussi.
-            new Thread(() -> lancerDiagnosticForce(tkFinal, node, serialId, woNum,
-                    woIdGuid, produit, presetStr, mac, deepLinkHandler)).start();
+            // ✅ CORRIGÉ (25 août 2026, demande Paul — "si la déconnexion
+            // est persistante il faut prendre le même principe que si je
+            // viens juste de supprimer le tab") — confirmé par log réel
+            // (54s pour qu'une vraie reconnexion BT se termine) : le
+            // dialogue diagnostic (lancerDiagnosticForce, 3 tentatives,
+            // 2s d'attente) abandonne largement avant qu'une vraie
+            // reconnexion ait le temps de se terminer. Plutôt que de
+            // maintenir ce chemin séparé et inférieur, on réutilise
+            // EXACTEMENT le mécanisme qui fonctionne déjà de façon fiable
+            // (suppression manuelle du tab + détection passive/watchdog
+            // qui reprend le relais sans limite de temps artificielle).
+            Log.i(TAG, "validerConnexion: io mort et introuvable ailleurs — "
+                    + "suppression du tab (même principe qu'une suppression manuelle) pour "
+                    + tkFinal);
+            try { com.pa.lcr.lcp.log.LogBus.ui(node, "[MEDIA][RECONNEXION] io mort — tab "
+                    + tkFinal + " supprimé, détection passive prend le relais (comme une suppression manuelle)"); } catch (Exception ignored) {}
+            activity.runOnUiThread(() -> {
+                try { activity.removeTabAndFragment(tkFinal, "io mort — reconnexion via même principe que suppression manuelle"); }
+                catch (Exception ignored) {}
+            });
             return false;
         }
 
@@ -307,16 +318,21 @@ public class RegisterConnectionHelper {
                 } catch (Exception ignored) {}
                 return true;
             }
-            // ✅ FIX : même traitement que la branche "io mort" ci-dessus.
-            // lancerDiagnostic() (non-force) retourne SILENCIEUSEMENT si
-            // diagnosticEnCours est resté bloqué à true — et resetDiagnostic()
-            // n'est appelé nulle part ailleurs qu'au démarrage de MainActivity,
-            // donc le drapeau reste coincé jusqu'au redémarrage de l'APK. Le
-            // chauffeur cliquait Status et ne voyait rien. On force, en thread
-            // dédié (jamais sur le thread UI : diagnostic() fait des sleep et
-            // des probes LCP bloquants).
-            new Thread(() -> lancerDiagnosticForce(tkFinal, node, serialId, woNum,
-                    woIdGuid, produit, presetStr, mac, deepLinkHandler)).start();
+            // ✅ CORRIGÉ (25 août 2026, demande Paul) — même correctif que
+            // la branche "io mort" ci-dessus : réutilise la suppression de
+            // tab (même principe qu'une suppression manuelle) au lieu du
+            // dialogue diagnostic, dont le budget de reconnexion (3
+            // tentatives, 2s d'attente) est confirmé trop court par log
+            // réel face au temps qu'une vraie reconnexion peut prendre.
+            Log.i(TAG, "validerConnexion: registre ne répond pas et introuvable ailleurs — "
+                    + "suppression du tab (même principe qu'une suppression manuelle) pour "
+                    + tkFinal);
+            try { com.pa.lcr.lcp.log.LogBus.ui(node, "[MEDIA][RECONNEXION] registre muet — tab "
+                    + tkFinal + " supprimé, détection passive prend le relais (comme une suppression manuelle)"); } catch (Exception ignored) {}
+            activity.runOnUiThread(() -> {
+                try { activity.removeTabAndFragment(tkFinal, "registre muet — reconnexion via même principe que suppression manuelle"); }
+                catch (Exception ignored) {}
+            });
             return false;
         }
 

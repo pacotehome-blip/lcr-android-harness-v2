@@ -3731,7 +3731,16 @@ private void setupTabsTop() {
             .show();
     }
 
-    private void removeTabAndFragment(String tabKey, String reason) {
+    // ✅ ÉLARGI (25 août 2026, demande Paul — "si la déconnexion est
+    // persistante il faut prendre le même principe que si je viens juste
+    // de supprimer le tab") — visibilité élargie (package-private au lieu
+    // de private) pour que RegisterConnectionHelper puisse réutiliser
+    // EXACTEMENT le même mécanisme de suppression que le bouton manuel,
+    // au lieu de maintenir un chemin de reconnexion séparé et inférieur
+    // (le dialogue diagnostic, dont on vient de confirmer par log réel
+    // qu'il abandonne bien avant qu'une vraie reconnexion BT ait le temps
+    // de se terminer).
+    void removeTabAndFragment(String tabKey, String reason) {
         if (tabKey == null) return;
 
         tabsByKey.remove(tabKey);
