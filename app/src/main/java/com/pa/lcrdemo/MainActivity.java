@@ -3948,6 +3948,35 @@ private void setupTabsTop() {
         }, 800);
     }
 
+    // ✅ AJOUTÉ (25 août 2026, demande Paul — "on corrige l'écran
+    // diagnostique... réessayer fait le même principe qu'après la
+    // suppression du tab") — méthode SÉPARÉE, ne touche PAS à
+    // removeTabAndFragment() ci-dessus (laissée intacte, comme demandé).
+    // Trouve le tabKey réel associé à un #série+node, puis délègue à
+    // removeTabAndFragment() telle quelle — pour que le bouton
+    // "Réessayer" du dialogue diagnostic puisse déclencher exactement le
+    // même comportement qu'une suppression manuelle de tab.
+    void removeTabBySerial(String serialId, int node, String reason) {
+        if (serialId == null || serialId.trim().isEmpty()) return;
+        String tabKeyTrouve = null;
+        synchronized (tabsByKey) {
+            for (java.util.Map.Entry<String, TabSpec> e : tabsByKey.entrySet()) {
+                TabSpec s = e.getValue();
+                if (s != null && serialId.trim().equalsIgnoreCase(s.serialId)
+                        && (node <= 0 || s.node == node)) {
+                    tabKeyTrouve = e.getKey();
+                    break;
+                }
+            }
+        }
+        if (tabKeyTrouve != null) {
+            removeTabAndFragment(tabKeyTrouve, reason);
+        } else {
+            android.util.Log.i("MainActivity", "removeTabBySerial: aucun tab trouvé pour serial="
+                    + serialId + " node=" + node);
+        }
+    }
+
     // =========================
     // ✅ Serial plausibility (évite les serial garbage: "��")
     // =========================

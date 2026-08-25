@@ -214,26 +214,15 @@ public class RegisterConnectionHelper {
                 } catch (Exception ignored) {}
                 return true;
             }
-            // ✅ CORRIGÉ (25 août 2026, demande Paul — "si la déconnexion
-            // est persistante il faut prendre le même principe que si je
-            // viens juste de supprimer le tab") — confirmé par log réel
-            // (54s pour qu'une vraie reconnexion BT se termine) : le
-            // dialogue diagnostic (lancerDiagnosticForce, 3 tentatives,
-            // 2s d'attente) abandonne largement avant qu'une vraie
-            // reconnexion ait le temps de se terminer. Plutôt que de
-            // maintenir ce chemin séparé et inférieur, on réutilise
-            // EXACTEMENT le mécanisme qui fonctionne déjà de façon fiable
-            // (suppression manuelle du tab + détection passive/watchdog
-            // qui reprend le relais sans limite de temps artificielle).
-            Log.i(TAG, "validerConnexion: io mort et introuvable ailleurs — "
-                    + "suppression du tab (même principe qu'une suppression manuelle) pour "
-                    + tkFinal);
-            try { com.pa.lcr.lcp.log.LogBus.ui(node, "[MEDIA][RECONNEXION] io mort — tab "
-                    + tkFinal + " supprimé, détection passive prend le relais (comme une suppression manuelle)"); } catch (Exception ignored) {}
-            activity.runOnUiThread(() -> {
-                try { activity.removeTabAndFragment(tkFinal, "io mort — reconnexion via même principe que suppression manuelle"); }
-                catch (Exception ignored) {}
-            });
+            // ✅ CORRIGÉ (25 août 2026, demande Paul — précisé : "on garde
+            // le diagnostique en affichage et réessayer fait le même
+            // principe qu'après la suppression du tab") — le dialogue
+            // diagnostic reste affiché (le chauffeur doit voir qu'il y a
+            // un problème), mais son bouton "Réessayer" réutilise
+            // maintenant removeTabAndFragment() au lieu de l'ancienne
+            // boucle de 3 tentatives (confirmée trop courte par log réel).
+            new Thread(() -> lancerDiagnosticForce(tkFinal, node, serialId, woNum,
+                    woIdGuid, produit, presetStr, mac, deepLinkHandler)).start();
             return false;
         }
 
@@ -319,20 +308,11 @@ public class RegisterConnectionHelper {
                 return true;
             }
             // ✅ CORRIGÉ (25 août 2026, demande Paul) — même correctif que
-            // la branche "io mort" ci-dessus : réutilise la suppression de
-            // tab (même principe qu'une suppression manuelle) au lieu du
-            // dialogue diagnostic, dont le budget de reconnexion (3
-            // tentatives, 2s d'attente) est confirmé trop court par log
-            // réel face au temps qu'une vraie reconnexion peut prendre.
-            Log.i(TAG, "validerConnexion: registre ne répond pas et introuvable ailleurs — "
-                    + "suppression du tab (même principe qu'une suppression manuelle) pour "
-                    + tkFinal);
-            try { com.pa.lcr.lcp.log.LogBus.ui(node, "[MEDIA][RECONNEXION] registre muet — tab "
-                    + tkFinal + " supprimé, détection passive prend le relais (comme une suppression manuelle)"); } catch (Exception ignored) {}
-            activity.runOnUiThread(() -> {
-                try { activity.removeTabAndFragment(tkFinal, "registre muet — reconnexion via même principe que suppression manuelle"); }
-                catch (Exception ignored) {}
-            });
+            // la branche "io mort" ci-dessus : le dialogue reste affiché,
+            // mais son bouton "Réessayer" fait maintenant le même principe
+            // qu'une suppression manuelle de tab (voir plus bas).
+            new Thread(() -> lancerDiagnosticForce(tkFinal, node, serialId, woNum,
+                    woIdGuid, produit, presetStr, mac, deepLinkHandler)).start();
             return false;
         }
 
@@ -906,16 +886,17 @@ public class RegisterConnectionHelper {
                 .setCancelable(true)
                 .setPositiveButton("🔄 Réessayer", (d, w) -> {
                     d.dismiss();
-                    // ✅ AJOUTÉ (25 août 2026, demande Paul — "si le tab est
-                    // déjà connecté, il faut juste fermer cet écran") —
-                    // avant de lancer le diagnostic complet, vérifie
-                    // d'abord si le registre répond DÉJÀ ailleurs
-                    // (réutilise findAliveTransportForSerial(), déjà
-                    // construite plus tôt). Le dialogue a pu rester ouvert
-                    // pendant qu'une reconnexion automatique s'est faite
-                    // en arrière-plan — dans ce cas, relancer un
-                    // diagnostic complet est inutile et redondant, juste
-                    // fermer suffit.
+                    // ✅ CORRIGÉ (25 août 2026, demande Paul — "on corrige
+                    // l'écran diagnostique... réessayer fait le même
+                    // principe qu'après la suppression du tab") — d'abord
+                    // vérifie si déjà reconnecté ailleurs (comme avant);
+                    // sinon, au lieu de l'ancienne boucle interne
+                    // (lancerDiagnosticForce, confirmée trop courte par
+                    // log réel — 54s observés pour une vraie reconnexion
+                    // BT), délègue à removeTabBySerial() — même
+                    // comportement qu'une suppression manuelle de tab,
+                    // qui laisse la détection passive (déjà fiable)
+                    // reprendre le relais.
                     new Thread(() -> {
                         String transportDejaVivant = findAliveTransportForSerial(serialId, node, null);
                         if (transportDejaVivant != null) {
@@ -931,15 +912,14 @@ public class RegisterConnectionHelper {
                             });
                             return;
                         }
-                        // ✅ FIX : l'ancien code appelait lancerDiagnostic("", node, serialId, woNum)
-                        // — la version à 4 arguments, qui perd woIdGuid/produit/presetStr/mac ET
-                        // surtout deepLinkHandler. Résultat : même si ce nouveau diagnostic réussit,
-                        // le bloc de relance finale ne se déclenche jamais (deepLinkHandler == null),
-                        // donc le tab devient Connected-Ready (communication réellement confirmée,
-                        // ticket_no lu) mais la livraison ne redémarre jamais. On garde le contexte
-                        // complet ici pour que la relance auto fonctionne aussi depuis ce bouton.
-                        lancerDiagnosticForce("", node, serialId, woNum,
-                            woIdGuid, produit, presetStr, mac, deepLinkHandler);
+                        Log.i(TAG, "Réessayer: pas déjà vivant — suppression du tab "
+                                + "(même principe qu'une suppression manuelle) pour serial=" + serialId + " node=" + node);
+                        try { com.pa.lcr.lcp.log.LogBus.ui(node, "[RETRY] Suppression du tab — "
+                                + "détection passive prend le relais (comme une suppression manuelle)"); } catch (Exception ignored) {}
+                        activity.runOnUiThread(() -> {
+                            try { activity.removeTabBySerial(serialId, node, "Réessayer (diagnostic) — même principe que suppression manuelle"); }
+                            catch (Exception ignored) {}
+                        });
                     }).start();
                 })
                 .setNeutralButton("🔁 Redémarrer APK", (d, w) -> {
