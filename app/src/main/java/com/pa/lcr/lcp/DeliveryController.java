@@ -467,6 +467,25 @@ private void reproEvent(String level, String type, String message, JSONObject da
     private volatile java.util.concurrent.ScheduledFuture<?> liveTickFuture = null;
     // ✅ AJOUTÉ (13 août 2026) — future du superviseur (voir SUPERVISION_INTERVAL_MS).
     private volatile java.util.concurrent.ScheduledFuture<?> supervisionFuture = null;
+    // ✅ CORRIGÉ (26 août 2026, demande Paul — "j'ai encore du lag" — trouvé
+    // avec certitude, en lisant le code : liveTickScheduler est MONO-THREAD.
+    // Le tick rapide (~100-350ms) ET le superviseur (2500ms, appelant
+    // requestLiveSample() — la version LENTE, pas la rapide) tournaient
+    // TOUS LES DEUX dessus. Comme un seul thread ne peut jamais exécuter
+    // les deux en même temps, chaque cycle du superviseur retardait
+    // mécaniquement le tick rapide pendant toute sa propre durée
+    // (jusqu'à ~3-4s selon le commentaire du 13 août, qui avait déjà
+    // identifié et accepté ce compromis à l'époque). Superviseur déplacé
+    // sur son propre exécuteur séparé — ne bloque plus jamais le tick
+    // rapide, peu importe combien de temps il prend.
+    private volatile java.util.concurrent.ScheduledExecutorService supervisionScheduler =
+        java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+    private void ensureSupervisionSchedulerAlive() {
+        if (supervisionScheduler.isShutdown() || supervisionScheduler.isTerminated()) {
+            supervisionScheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+            supervisionFuture = null;
+        }
+    }
     private Listener listener;
 
     /** ✅ AJOUTÉ (12 août 2026) — recrée le planificateur s'il a été fermé
@@ -1159,6 +1178,9 @@ try {
             if (liveTickFuture != null) { liveTickFuture.cancel(false); liveTickFuture = null; }
             if (supervisionFuture != null) { supervisionFuture.cancel(false); supervisionFuture = null; }
             liveTickScheduler.shutdownNow();
+            // ✅ AJOUTÉ (26 août 2026) — arrête aussi le nouvel exécuteur
+            // séparé du superviseur, pour éviter une fuite de thread.
+            supervisionScheduler.shutdownNow();
         } catch (Exception ignored) {}
 
 // ✅ REPRO: close session best-effort
@@ -1267,7 +1289,8 @@ catch (Exception ignored) {}
             // sortir. Ce scheduler tourne maintenant systématiquement dès
             // l'entrée en RUNNING_FLOWING, peu importe qui l'a démarrée.
             if (SUPERVISION_ENABLED && (supervisionFuture == null || supervisionFuture.isDone())) {
-                supervisionFuture = liveTickScheduler.scheduleWithFixedDelay(
+                ensureSupervisionSchedulerAlive();
+                supervisionFuture = supervisionScheduler.scheduleWithFixedDelay(
                     () -> {
                         try {
                             if (isStopped()) return;

@@ -5035,6 +5035,17 @@ public class RegisterTabFragment extends Fragment {
                 + " node=" + lcrNode + " ticketConnu=" + lastKnownTicketNo);
         safeBg(() -> {
             try {
+                // ✅ AJOUTÉ (26 août 2026, demande Paul) — deuxième
+                // vérification, DANS la tâche elle-même — une tâche déjà
+                // soumise avant le début de la livraison ne s'arrêtait pas
+                // en cours de route, même si le garde d'entrée avait
+                // raison au moment de l'appel. Confirmé par log réel : un
+                // appel complétait tout son travail 80ms après le début de
+                // RUNNING_FLOWING.
+                if (etatLivraisonActiveDetecte()) {
+                    LogBus.api(node, "[PRODUIT-CACHE] applierDescriptionsProduits() interrompue en cours de tâche — livraison devenue active");
+                    return;
+                }
                 com.pa.lcr.lcp.storage.RegisterProductStore store = new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
                 java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> rows = store.getAll(serialId, lcrNode);
                 if (rows.isEmpty()) rows = store.getAll(serialId);
@@ -5822,6 +5833,17 @@ public class RegisterTabFragment extends Fragment {
      */
     private void lookupWoForTicket(String ticketNo, boolean allowFullSearch) {
         if (ticketNo == null || ticketNo.isEmpty()) return;
+        // ✅ AJOUTÉ (26 août 2026, demande Paul — "j'ai encore du lag...
+        // toutes l'info pour trouver la vraie raison") — trouvé, confirmé
+        // par log réel : [WO-DETECT] se déclenchait pendant RUNNING_FLOWING,
+        // sans aucun garde, appelée depuis onTicketInfo() à chaque mise à
+        // jour de ticket (continue pendant une livraison active). Détecter
+        // un WO ne sert qu'à démarrer une NOUVELLE livraison — aucune
+        // raison de tourner pendant qu'une livraison coule déjà. Même
+        // garde centralisé que partout ailleurs aujourd'hui.
+        if (etatLivraisonActiveDetecte()) {
+            return;
+        }
         // ✅ Ne pas sortir juste parce que currentWoNum est déjà connu — vérifier
         // plutôt si CE ticket précis a déjà été traité. Si le registre est passé à
         // un nouveau ticket depuis, on doit re-détecter le nouveau WO.
