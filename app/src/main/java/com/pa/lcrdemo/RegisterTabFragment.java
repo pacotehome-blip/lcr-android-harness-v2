@@ -573,20 +573,16 @@ public class RegisterTabFragment extends Fragment {
             return;
         }
         LogBus.api(node, "[INIT] runInitSequence: démarrage");
-        // ✅ CORRIGÉ (26 août 2026, demande Paul — trouvé, confirmé par log
-        // réel : deux appels à 3ms d'intervalle, le premier avant même
-        // qu'un registre soit connecté) — LA vraie cause : safeBg() avale
-        // silencieusement RejectedExecutionException (bg.execute() peut
-        // rejeter très tôt dans le cycle de vie du Fragment). Le
-        // try/finally qui remet initSequenceRunning à false est À
-        // L'INTÉRIEUR de la tâche elle-même — si bg.execute() rejette, la
-        // tâche ne tourne JAMAIS, le finally ne se déclenche JAMAIS, et le
-        // flag reste coincé à true pour le reste de la session, bloquant
-        // silencieusement tout futur appel légitime. N'utilise plus
-        // safeBg() ici — appel direct à bg.execute() avec un catch dédié
-        // qui remet le flag si la soumission elle-même échoue.
+        // ⚠️ CORRECTIF DU 26 AOÛT PRÉCÉDENT INFIRMÉ PAR LOG RÉEL — le même
+        // blocage se reproduit identique malgré le catch RejectedExecutionException.
+        // Instrumentation temporaire ci-dessous : horodatage précis autour de
+        // bg.execute() ET du vrai finally, pour savoir avec certitude COMBIEN
+        // de temps la tentative met réellement, plutôt que de re-théoriser.
+        final long initStartMs = System.currentTimeMillis();
         try {
+            LogBus.api(node, "[INIT-TIMING] avant bg.execute() — t=0ms");
             bg.execute(() -> {
+          LogBus.api(node, "[INIT-TIMING] tâche démarrée réellement — +" + (System.currentTimeMillis() - initStartMs) + "ms");
           try {
             // 1) REGISTRE — connecté, accessible. Dépendance : rien après ne
             // doit avancer si ça échoue (pas de allowDegraded).
@@ -682,6 +678,8 @@ public class RegisterTabFragment extends Fragment {
             initSectionStatus.put(InitSection.ACTION, InitSectionStatus.OK);
             initSectionLog(InitSection.ACTION, 5, "activée");
           } finally {
+            LogBus.api(node, "[INIT-TIMING] finally atteint — flag remis à false — +"
+                + (System.currentTimeMillis() - initStartMs) + "ms depuis le démarrage");
             initSequenceRunning.set(false);
           }
             });
@@ -4628,13 +4626,29 @@ public class RegisterTabFragment extends Fragment {
     // — confirmé directement dans une vraie base de données de Paul),
     // via DeliveryLogStore.getLatestResultBySerial(), déjà existante,
     // jamais utilisée jusqu'ici pour cet usage précis.
-    private org.json.JSONObject lireActiveProductDepuisDeliverySummary(String serialId) {
-        if (serialId == null || serialId.trim().isEmpty()) return null;
+    // ✅ ÉLARGI (26 août 2026, demande Paul — "on parle toujours du dernier
+    // ticket_number ou sales_number présent dans le registre... capable de
+    // tenir compte de toutes les variables") — accepte maintenant le
+    // ticket EN PLUS du #série. ticketPourScan (voir appelant) hérite déjà
+    // du repli ticket→sale_no (readTicketNo23Uncached, fix anti-zéro de ce
+    // matin) — donc peu importe lequel des deux le registre expose,
+    // c'est déjà la bonne valeur ici. Priorité : recherche par ticket
+    // précis d'abord (plus fiable si plusieurs livraisons sur le même
+    // registre), repli sur #série seul (le plus récent, peu importe le
+    // ticket) si le ticket ne donne rien.
+    private org.json.JSONObject lireActiveProductDepuisDeliverySummary(String ticketNo, String serialId) {
         try {
             com.pa.lcr.lcp.storage.DeliveryLogStore store =
                     new com.pa.lcr.lcp.storage.DeliveryLogStore(requireContext());
-            com.pa.lcr.lcp.storage.DeliveryLogStore.LatestResultRow row =
-                    store.getLatestResultBySerial(serialId.trim());
+            com.pa.lcr.lcp.storage.DeliveryLogStore.LatestResultRow row = null;
+            if (ticketNo != null && !ticketNo.trim().isEmpty()) {
+                row = store.getLatestResultByTicketNo(ticketNo.trim());
+                if (row != null) LogBus.api(node, "[PRODUIT-CACHE] trouvé par ticket précis=" + ticketNo);
+            }
+            if (row == null && serialId != null && !serialId.trim().isEmpty()) {
+                row = store.getLatestResultBySerial(serialId.trim());
+                if (row != null) LogBus.api(node, "[PRODUIT-CACHE] trouvé par #série seul (repli, ticket introuvable/absent)");
+            }
             if (row == null || row.resultJson == null || row.resultJson.trim().isEmpty()) return null;
             org.json.JSONObject j = new org.json.JSONObject(row.resultJson);
             if (!j.has("active_product") || j.isNull("active_product")) return null;
@@ -4668,6 +4682,32 @@ public class RegisterTabFragment extends Fragment {
         // sélectionner directement le bon produit dès qu'il termine,
         // peu importe si la section d'init a déjà abandonné entre-temps.
         final String produitDeepLinkPourScan = (getArguments() != null) ? getArguments().getString("produit") : null;
+        // ✅ CORRIGÉ (26 août 2026, demande Paul — "c'est pas compliqué...
+        // un bloc après l'autre") — au lieu d'attendre RETOUR_WO (qui vient
+        // APRÈS dans la séquence d'init, causant le besoin d'une relance
+        // après coup), lit le ticket DIRECTEMENT du registre ici, tout de
+        // suite — api_registerValidate() le fait déjà en une lecture
+        // légère (Field #23, pas de Dataverse/WO). Un seul passage, propre :
+        // ticket → produit attendu → scan → correspondance → application.
+        final String[] ticketPourScanHolder = {lastKnownTicketNo};
+        if (ticketPourScanHolder[0] == null || ticketPourScanHolder[0].trim().isEmpty()) {
+            try {
+                if (c != null) {
+                    com.pa.lcr.lcp.ApiResult rv = c.api_registerValidate(
+                            null, node > 0 ? Integer.valueOf(node) : null, null, null, null, false);
+                    if (rv != null && rv.data != null) {
+                        String t = rv.data.optString("ticket_no", null);
+                        if (t != null && !t.trim().isEmpty() && !"0".equals(t.trim())) {
+                            ticketPourScanHolder[0] = t.trim();
+                            LogBus.api(node, "[SCAN] ticket lu directement du registre pour la correspondance: " + t.trim());
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                android.util.Log.w("RegisterTabFragment", "lancerScanProduits: lecture ticket directe ERR: " + e.getMessage());
+            }
+        }
+        final String ticketPourScan = ticketPourScanHolder[0];
         ui.post(() -> { if (txtLive != null) txtLive.setText("🔍 Scan produits 1 / 16..."); });
         safeBg(() -> {
           // ✅ CORRIGÉ (24 août 2026, demande Paul — "il faut s'assurer que
@@ -4769,7 +4809,7 @@ public class RegisterTabFragment extends Fragment {
                     // complet sur lireActiveProductDepuisDeliverySummary).
                     // Tenté seulement si lastResultJson n'a rien donné.
                     if (lastTicketIdx == -1) {
-                        org.json.JSONObject backupPayload = lireActiveProductDepuisDeliverySummary(serialId);
+                        org.json.JSONObject backupPayload = lireActiveProductDepuisDeliverySummary(ticketPourScan, serialId);
                         if (backupPayload != null) {
                             int idx = backupPayload.optInt("active_product", -1);
                             if (idx > 0 && idx <= 16) {
@@ -4956,7 +4996,7 @@ public class RegisterTabFragment extends Fragment {
                     if (lastTicketIdxCache == -1) {
                         LogBus.api(node, "[PRODUIT-CACHE] lastResultJson n'a rien donné — tentative "
                                 + "delivery_summary pour serial=" + serialId);
-                        org.json.JSONObject backupPayloadCache = lireActiveProductDepuisDeliverySummary(serialId);
+                        org.json.JSONObject backupPayloadCache = lireActiveProductDepuisDeliverySummary(lastKnownTicketNo, serialId);
                         LogBus.api(node, "[PRODUIT-CACHE] résultat lecture delivery_summary — trouvé="
                                 + (backupPayloadCache != null));
                         if (backupPayloadCache != null) {

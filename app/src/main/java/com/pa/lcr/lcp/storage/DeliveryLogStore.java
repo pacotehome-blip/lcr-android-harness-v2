@@ -915,4 +915,34 @@ public class DeliveryLogStore {
         }
         return null;
     }
+
+    // ✅ AJOUTÉ (26 août 2026, demande Paul — "un bloc après l'autre... tu
+    // as déjà en mémoire le produit du dernier ticket") — recherche par
+    // ticket PRÉCIS, pas juste "le plus récent sur ce registre" (qui
+    // pourrait être un ticket différent si plusieurs livraisons ont eu
+    // lieu sur le même registre). Priorité sur getLatestResultBySerial()
+    // quand le vrai ticket est déjà connu.
+    public LatestResultRow getLatestResultByTicketNo(String ticketNo) {
+        if (ticketNo == null || ticketNo.trim().isEmpty()) return null;
+        try {
+            SQLiteDatabase db = helper.getReadableDatabase();
+            try (Cursor c = db.rawQuery(
+                    "SELECT ticket_no, result_json, last_ts " +
+                            "FROM delivery_summary " +
+                            "WHERE ticket_no=? AND result_json IS NOT NULL AND result_json<>'' " +
+                            "ORDER BY last_ts DESC LIMIT 1",
+                    new String[]{ticketNo.trim()})) {
+                if (c.moveToFirst()) {
+                    String tn = c.isNull(0) ? null : c.getString(0);
+                    String resultJson = c.isNull(1) ? null : c.getString(1);
+                    long lastTs = c.isNull(2) ? 0L : c.getLong(2);
+                    if (resultJson != null && !resultJson.trim().isEmpty()) {
+                        return new LatestResultRow(tn, resultJson, lastTs);
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
 }
