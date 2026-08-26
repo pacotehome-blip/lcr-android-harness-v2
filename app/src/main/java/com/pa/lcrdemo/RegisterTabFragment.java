@@ -76,6 +76,28 @@ public class RegisterTabFragment extends Fragment {
         // échouait systématiquement dès sa première vérification, avant
         // même d'avoir eu la chance de se connecter pour de vrai.
         connectThisRegister(false);
+        // ✅ AJOUTÉ (26 août 2026, demande Paul — "je ne suis pas supposé
+        // avoir quoi que ce soit qui roule en arrière-plan sur une
+        // livraison avec RUNNING_FLOWING") — trouvé : runInitSequence()
+        // n'avait AUCUN garde empêchant tout le cycle (incluant le scan
+        // complet des 16 produits, une opération de plusieurs secondes) de
+        // repartir pendant une livraison active. Si onTabActivated() se
+        // redéclenche en RUNNING_FLOWING (mise en arrière-plan/premier
+        // plan de l'app pendant une vraie livraison), toute la séquence
+        // repartait — en concurrence directe avec le tick en direct pour
+        // le même lien LCP, causant exactement le lag décrit. Même liste
+        // d'états que la garde déjà existante dans connectThisRegister()
+        // (12 août 2026) — une livraison active n'a besoin d'aucune
+        // re-vérification registre/produit/preset, elle est déjà en cours.
+        if (controller != null) {
+            DeliveryState stActivation = controller.getState();
+            if (stActivation == DeliveryState.PRESTART || stActivation == DeliveryState.STARTING
+                    || stActivation == DeliveryState.RUNNING_FLOWING || stActivation == DeliveryState.RUNNING_PAUSED
+                    || stActivation == DeliveryState.ENDING) {
+                LogBus.api(node, "[INIT] runInitSequence sauté — livraison active (état=" + stActivation + ")");
+                return;
+            }
+        }
         runInitSequence();
 
         /* ANCIEN CODE (13 août 2026) — désactivé, conservé pour rollback rapide :
