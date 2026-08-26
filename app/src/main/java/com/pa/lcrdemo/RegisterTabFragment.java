@@ -62,6 +62,20 @@ public class RegisterTabFragment extends Fragment {
         // — une seule cascade séquentielle, chaque section attend la
         // précédente. Ancien code laissé plus bas en commentaire, pas
         // supprimé, au cas où il faille revenir en arrière rapidement.
+        //
+        // ✅ CORRIGÉ (26 août 2026, demande Paul — "où est le scan de
+        // produit") — trouvé LE vrai bug racine, confirmé par mesure de
+        // temps réelle (chaque tentative de runInitSequence échouait en
+        // ~500ms, la durée d'UNE seule pause de section, jamais les 6) :
+        // connectThisRegister() — la SEULE méthode qui assigne une vraie
+        // valeur à `controller` — n'était JAMAIS appelée par
+        // onTabActivated(). Le refactor du 13 août vers runInitSequence()
+        // a emporté cet appel critique avec l'ancienne cascade, sans que
+        // personne s'en aperçoive. controller restait donc null pour
+        // toujours sur une activation automatique de tab — REGISTRE
+        // échouait systématiquement dès sa première vérification, avant
+        // même d'avoir eu la chance de se connecter pour de vrai.
+        connectThisRegister(false);
         runInitSequence();
 
         /* ANCIEN CODE (13 août 2026) — désactivé, conservé pour rollback rapide :
