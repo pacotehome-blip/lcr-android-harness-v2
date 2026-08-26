@@ -490,6 +490,15 @@ public class RegisterTabFragment extends Fragment {
 
     private void initSectionLog(InitSection section, int idx, String result) {
         InitSectionStatus st = initSectionStatus.get(section);
+        // ✅ CORRIGÉ (26 août 2026, demande Paul — "je crois que le preset a
+        // été oublié??") — trouvé, MÊME bug que celui déjà corrigé
+        // aujourd'hui pour le garde d'entrée/sortie de runInitSequence,
+        // mais jamais appliqué ICI — le détail de CHAQUE section (pas
+        // seulement PRESET) n'allait qu'au logcat, jamais à Support. C'est
+        // pour ça qu'aucune trace de section n'apparaissait dans aucun des
+        // logs envoyés aujourd'hui, malgré tout le reste déjà corrigé.
+        LogBus.api(node, "[INIT " + idx + "/6] " + section.name() + " — " + result
+                + " (statut=" + (st != null ? st.name() : "?") + ")");
         android.util.Log.i("InitSeq", "[INIT " + idx + "/6] " + section.name() + " — " + result
                 + " (statut=" + (st != null ? st.name() : "?") + ")");
         // ✅ AJOUTÉ (14 août 2026) — même signal, texte amical pour le
@@ -4827,6 +4836,7 @@ public class RegisterTabFragment extends Fragment {
                 // — le même champ déjà câblé pour le repli "BD vierge",
                 // mais qui ne s'appliquait jamais une fois le scan réussi.
                 int lastTicketIdx = -1;
+                final double[] presetDuTicketPourApplication = {-1};
                 if (matchRef[0] == -1 && propaneRef[0] == -1) {
                     try {
                         String lrj = com.pa.lcrdemo.DeepLinkHandler.lastResultJson;
@@ -4853,16 +4863,29 @@ public class RegisterTabFragment extends Fragment {
                                 LogBus.api(node, "[SCAN] dernier ticket connu récupéré depuis delivery_summary "
                                         + "(BD locale), pas lastResultJson (probablement app redémarrée)");
                             }
+                            // ✅ AJOUTÉ (26 août 2026, demande Paul — "si tu es
+                            // capable de m'appliquer le produit selon le
+                            // ticket tu as aussi en même temps le preset du
+                            // dernier ticket") — même JSON, même appel, aucune
+                            // recherche supplémentaire nécessaire.
+                            double pn = backupPayload.optDouble("preset_net_l", -1);
+                            if (pn > 0) presetDuTicketPourApplication[0] = pn;
                         }
                     }
                 }
                 final int lastTicketIdxFinal = lastTicketIdx;
+                final double presetDuTicketFinal = presetDuTicketPourApplication[0];
                 final int idxSelectionne = matchRef[0] > 0 ? matchRef[0] : (propaneRef[0] > 0 ? propaneRef[0] : lastTicketIdxFinal);
                 final boolean parCorrespondanceTexte = matchRef[0] > 0;
                 final boolean parDernierTicket = matchRef[0] == -1 && propaneRef[0] == -1 && lastTicketIdxFinal > 0;
                 ui.post(() -> {
                     try {
                         if (spnProduct != null) spnProduct.setAdapter(new android.widget.ArrayAdapter<>(requireContext(), android.R.layout.simple_dropdown_item_1line, labels));
+                        if (parDernierTicket && presetDuTicketFinal > 0 && edtPreset != null) {
+                            edtPreset.setText(String.valueOf(presetDuTicketFinal));
+                            LogBus.api(node, "[SCAN] preset du dernier ticket appliqué en même temps que le produit: "
+                                    + presetDuTicketFinal + "L");
+                        }
                         if (idxSelectionne > 0 && spnProduct != null) {
                             spnProduct.setText(labels[idxSelectionne - 1], false);
                             initValidatedProductIdx = idxSelectionne;
