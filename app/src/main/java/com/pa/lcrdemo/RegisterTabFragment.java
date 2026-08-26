@@ -562,9 +562,17 @@ public class RegisterTabFragment extends Fragment {
 
     private void runInitSequence() {
         if (!initSequenceRunning.compareAndSet(false, true)) {
+            // ✅ CORRIGÉ (26 août 2026, demande Paul — traçage du scan qui ne
+            // se déclenche jamais) — android.util.Log va au logcat SEULEMENT,
+            // invisible dans les exports Support. Si initSequenceRunning
+            // reste coincé à true (bug ailleurs, ou double appel rapproché),
+            // ce garde ignorait TOUT silencieusement, sans jamais apparaître
+            // dans un log_bus_event.
+            LogBus.api(node, "[INIT] runInitSequence: déjà en cours (initSequenceRunning bloqué à true) — appel ignoré");
             android.util.Log.i("InitSeq", "runInitSequence: déjà en cours, appel ignoré");
             return;
         }
+        LogBus.api(node, "[INIT] runInitSequence: démarrage");
         safeBg(() -> {
           try {
             // 1) REGISTRE — connecté, accessible. Dépendance : rien après ne
