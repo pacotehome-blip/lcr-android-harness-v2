@@ -1291,9 +1291,26 @@ public class RegisterTabFragment extends Fragment {
                 // peuplé, via applierDescriptionsProduits() déjà corrigée
                 // aujourd'hui pour ce genre de repli).
                 if (ticketVientJusteDetreConnu && serialFromArgs != null && !serialFromArgs.trim().isEmpty()) {
-                    LogBus.api(node, "[PRODUIT-CACHE] ticket maintenant connu (" + ticketNo
-                            + ") — relance de la correspondance produit");
-                    applierDescriptionsProduits(serialFromArgs.trim(), node);
+                    // ✅ AJOUTÉ (26 août 2026, demande Paul — "j'ai l'impression
+                    // que c'est ça qui fait obstruction au running_flowing")
+                    // — confirmé par log réel : applierDescriptionsProduits()
+                    // se redéclenchait ici à CHAQUE changement de ticket, y
+                    // compris pendant RUNNING_FLOWING (le ticket_no change/se
+                    // confirme en continu pendant une livraison active) —
+                    // une vraie tournée complète de lectures (register_products,
+                    // lastResultJson, delivery_summary, fichier backup) en
+                    // concurrence directe avec le tick. Même garde que
+                    // onTabActivated() — pas besoin de re-matcher le produit,
+                    // une livraison active a déjà son produit déterminé.
+                    DeliveryState stTicketInfo = controller != null ? controller.getState() : null;
+                    boolean livraisonActive = stTicketInfo == DeliveryState.PRESTART || stTicketInfo == DeliveryState.STARTING
+                            || stTicketInfo == DeliveryState.RUNNING_FLOWING || stTicketInfo == DeliveryState.RUNNING_PAUSED
+                            || stTicketInfo == DeliveryState.ENDING;
+                    if (!livraisonActive) {
+                        LogBus.api(node, "[PRODUIT-CACHE] ticket maintenant connu (" + ticketNo
+                                + ") — relance de la correspondance produit");
+                        applierDescriptionsProduits(serialFromArgs.trim(), node);
+                    }
                 }
             }
             ui.post(() -> {
