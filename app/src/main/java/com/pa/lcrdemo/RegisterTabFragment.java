@@ -1177,7 +1177,28 @@ public class RegisterTabFragment extends Fragment {
         public void onTicketInfo(String ticketNo, String deliveryUid) {
             // ✅ FIX (7 août 2026) — mémorise la dernière valeur connue, pour
             // pouvoir la réappliquer si la vue se recrée avant le prochain push.
-            if (ticketNo != null && !ticketNo.trim().isEmpty()) lastKnownTicketNo = ticketNo;
+            if (ticketNo != null && !ticketNo.trim().isEmpty()) {
+                boolean ticketVientJusteDetreConnu = !ticketNo.trim().equals(lastKnownTicketNo);
+                lastKnownTicketNo = ticketNo;
+                // ✅ AJOUTÉ (25 août 2026, demande Paul — "le scan est
+                // terminé mais je n'ai toujours pas de mappage avec le
+                // produit livré du dernier ticket") — trouvé : l'ordre des
+                // sections d'init est REGISTRE→PRODUIT→PRESET→LIVE→
+                // RETOUR_WO — le scan (section PRODUIT) tourne AVANT que
+                // le ticket ne soit connu (résolu seulement à RETOUR_WO,
+                // via ce callback). lastKnownTicketNo était donc encore
+                // null au moment du scan, empêchant tout repli "dernier
+                // ticket" de fonctionner. Dès que le ticket devient
+                // vraiment connu ici, on relance la correspondance produit
+                // (pas un nouveau scan — juste réappliquer sur le cache déjà
+                // peuplé, via applierDescriptionsProduits() déjà corrigée
+                // aujourd'hui pour ce genre de repli).
+                if (ticketVientJusteDetreConnu && serialFromArgs != null && !serialFromArgs.trim().isEmpty()) {
+                    LogBus.api(node, "[PRODUIT-CACHE] ticket maintenant connu (" + ticketNo
+                            + ") — relance de la correspondance produit");
+                    applierDescriptionsProduits(serialFromArgs.trim(), node);
+                }
+            }
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
                 if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : " + (ticketNo == null ? "—" : ticketNo));
@@ -4746,12 +4767,19 @@ public class RegisterTabFragment extends Fragment {
 
     public void applierDescriptionsProduits(String serialId, int lcrNode) {
         if (serialId == null || serialId.isEmpty()) return;
+        // ✅ AJOUTÉ (25 août 2026, demande Paul — "je veux voir dans le log
+        // de la relance de la correspondance produit car actuellement ça
+        // ne marche pas") — trace complète, à chaque étape, pas juste au
+        // déclenchement initial.
+        LogBus.api(node, "[PRODUIT-CACHE] applierDescriptionsProduits() appelée — serial=" + serialId
+                + " node=" + lcrNode + " ticketConnu=" + lastKnownTicketNo);
         safeBg(() -> {
             try {
                 com.pa.lcr.lcp.storage.RegisterProductStore store = new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
                 java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> rows = store.getAll(serialId, lcrNode);
                 if (rows.isEmpty()) rows = store.getAll(serialId);
                 store.close();
+                LogBus.api(node, "[PRODUIT-CACHE] register_products — " + rows.size() + " ligne(s) trouvée(s) pour ce #série");
                 if (rows.isEmpty()) {
                     // ✅ AJOUTÉ (24 août 2026, demande Paul — "BD vierge →
                     // récupérer depuis le JSON de la dernière livraison,
@@ -4820,6 +4848,7 @@ public class RegisterTabFragment extends Fragment {
                         ? produitDeepLinkPourCache.trim().toLowerCase(java.util.Locale.ROOT)
                                 .replace("-", " ").replace("_", " ").replaceAll("\\s+", " ")
                         : null;
+                LogBus.api(node, "[PRODUIT-CACHE] produitDeepLink=" + produitDeepLinkPourCache);
                 int matchIdx = -1, propaneIdx = -1;
                 for (com.pa.lcr.lcp.storage.RegisterProductStore.Row r : rows) {
                     if (r.isPropane && propaneIdx == -1) propaneIdx = r.noteIdx;
@@ -4832,26 +4861,39 @@ public class RegisterTabFragment extends Fragment {
                         }
                     }
                 }
+                LogBus.api(node, "[PRODUIT-CACHE] après deep link/propane — matchIdx=" + matchIdx
+                        + " propaneIdx=" + propaneIdx);
                 int lastTicketIdxCache = -1;
                 if (matchIdx == -1 && propaneIdx == -1) {
+                    String lrj = com.pa.lcrdemo.DeepLinkHandler.lastResultJson;
+                    LogBus.api(node, "[PRODUIT-CACHE] tentative lastResultJson — présent="
+                            + (lrj != null) + (lrj != null ? " longueur=" + lrj.length() : ""));
                     try {
-                        String lrj = com.pa.lcrdemo.DeepLinkHandler.lastResultJson;
                         if (lrj != null) {
                             org.json.JSONObject j = new org.json.JSONObject(lrj);
                             org.json.JSONObject payload = j.optJSONObject("payload");
+                            LogBus.api(node, "[PRODUIT-CACHE] lastResultJson.payload=" + (payload != null)
+                                    + " active_product présent=" + (payload != null && payload.has("active_product") && !payload.isNull("active_product")));
                             if (payload != null && payload.has("active_product") && !payload.isNull("active_product")) {
                                 int idx2 = payload.optInt("active_product", -1);
                                 if (idx2 > 0 && idx2 <= 16) lastTicketIdxCache = idx2;
                             }
                         }
-                    } catch (Exception ignored) {}
+                    } catch (Exception e) {
+                        LogBus.api(node, "[PRODUIT-CACHE] lastResultJson parse ERR: " + e.getMessage());
+                    }
                     // ✅ AJOUTÉ (25 août 2026) — même repli supplémentaire
                     // que dans lancerScanProduits() — voir ce commentaire
                     // pour le détail complet.
                     if (lastTicketIdxCache == -1) {
+                        LogBus.api(node, "[PRODUIT-CACHE] lastResultJson n'a rien donné — tentative "
+                                + "backup JSON (Téléchargements) pour ticket=" + lastKnownTicketNo);
                         org.json.JSONObject backupPayloadCache = lireActiveProductDepuisBackupJson(lastKnownTicketNo);
+                        LogBus.api(node, "[PRODUIT-CACHE] résultat lecture backup JSON — trouvé="
+                                + (backupPayloadCache != null));
                         if (backupPayloadCache != null) {
                             int idx2 = backupPayloadCache.optInt("active_product", -1);
+                            LogBus.api(node, "[PRODUIT-CACHE] backup JSON — active_product=" + idx2);
                             if (idx2 > 0 && idx2 <= 16) {
                                 lastTicketIdxCache = idx2;
                                 LogBus.api(node, "[PRODUIT-CACHE] dernier ticket connu récupéré depuis le "
@@ -4860,6 +4902,8 @@ public class RegisterTabFragment extends Fragment {
                         }
                     }
                 }
+                LogBus.api(node, "[PRODUIT-CACHE] décision finale — matchIdx=" + matchIdx
+                        + " propaneIdx=" + propaneIdx + " lastTicketIdxCache=" + lastTicketIdxCache);
                 final int matchIdxF = matchIdx, propaneIdxF = propaneIdx, lastTicketIdxCacheF = lastTicketIdxCache;
                 final int idxASelectionner = matchIdxF > 0 ? matchIdxF : (propaneIdxF > 0 ? propaneIdxF : lastTicketIdxCacheF);
                 ui.post(() -> {
@@ -4879,6 +4923,8 @@ public class RegisterTabFragment extends Fragment {
                     boolean curEstDejaResolu = !cur.trim().isEmpty() && !cur.trim().matches("\\d+");
                     spnProduct.setAdapter(new android.widget.ArrayAdapter<>(requireContext(), android.R.layout.simple_dropdown_item_1line, labels));
                     if (curEstDejaResolu) {
+                        LogBus.api(node, "[PRODUIT-CACHE] valeur déjà résolue préservée sans changement: \"" + cur + "\" — "
+                                + "correspondance trouvée (idxASelectionner=" + idxASelectionner + ") NON appliquée pour cette raison");
                         spnProduct.setText(cur, false);
                     } else if (idxASelectionner > 0 && idxASelectionner <= 16) {
                         spnProduct.setText(labels[idxASelectionner - 1], false);
@@ -4890,7 +4936,12 @@ public class RegisterTabFragment extends Fragment {
                                 + idxASelectionner + " (" + (matchIdxF > 0 ? "correspondance texte deep link"
                                 : propaneIdxF > 0 ? "repli propane" : "repli dernier ticket connu (lastResultJson)") + ")");
                     } else if (!cur.isEmpty()) {
+                        LogBus.api(node, "[PRODUIT-CACHE] rien trouvé (idxASelectionner=" + idxASelectionner
+                                + ") — cur non vide conservé tel quel: \"" + cur + "\"");
                         spnProduct.setText(cur, false);
+                    } else {
+                        LogBus.api(node, "[PRODUIT-CACHE] rien trouvé (idxASelectionner=" + idxASelectionner
+                                + ") — cur vide — aucune sélection appliquée");
                     }
                 });
             } catch (Exception e) {
