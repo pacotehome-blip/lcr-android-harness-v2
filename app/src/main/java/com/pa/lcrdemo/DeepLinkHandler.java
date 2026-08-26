@@ -1473,6 +1473,13 @@ public class DeepLinkHandler {
                                         cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,    fWoNum2);
                                         cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID, fWoId2);
                                         cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO, fTicketNow);
+                                        // ✅ AJOUTÉ (26 août 2026, demande Paul
+                                        // — même correctif que RegisterTabFragment,
+                                        // trouvé via screenshot écran de cohérence)
+                                        if (serialId != null && !serialId.trim().isEmpty()) {
+                                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID, serialId.trim());
+                                        }
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_LCRNODE, node);
                                         cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
                                             ticketChanged ? "TICKET_CHANGE" : "ERROR");
                                         cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_ERROR_CODE,
@@ -1573,6 +1580,12 @@ public class DeepLinkHandler {
                                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,    fWoNum3);
                                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID, fWoId3);
                                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO, fTicketNow2);
+                                    // ✅ AJOUTÉ (26 août 2026, demande Paul —
+                                    // même correctif que RegisterTabFragment)
+                                    if (serialId != null && !serialId.trim().isEmpty()) {
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID, serialId.trim());
+                                    }
+                                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_LCRNODE, node);
                                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
                                         ticketChanged2 ? "TICKET_CHANGE" : "ERROR");
                                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_ERROR_CODE,

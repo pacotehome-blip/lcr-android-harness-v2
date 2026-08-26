@@ -2000,6 +2000,21 @@ public class RegisterTabFragment extends Fragment {
                         cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,    "TAB");
                         cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
                             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
+                        // ✅ AJOUTÉ (26 août 2026, demande Paul — "on a le
+                        // #série soit BD soit JSON" / screenshot écran de
+                        // cohérence "aucun serial_id disponible") — trouvé,
+                        // confirmé par vraie ligne de BD (ticket=81) :
+                        // serial_id et lcrnode restaient VIDES ici, alors
+                        // que serialFromArgs/node sont disponibles partout
+                        // ailleurs dans ce fichier. Le #série existait bien
+                        // (imbriqué dans payload_json.result.serial_id),
+                        // juste jamais extrait vers la colonne de premier
+                        // niveau — ce qui cassait toute vérification
+                        // Dataverse basée sur cette colonne.
+                        if (serialFromArgs != null && !serialFromArgs.trim().isEmpty()) {
+                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID, serialFromArgs.trim());
+                        }
+                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_LCRNODE, node);
                         lcrDb.insertDelivery(cv);
                     }
                     // Rafraîchir le cumul WO après insertion
