@@ -88,14 +88,12 @@ public class RegisterTabFragment extends Fragment {
         // pendant une livraison active (déclenchée par
         // showRegisterFragmentByKey(), peu importe la source exacte) ne
         // touche RIEN du tout au lien LCP.
-        if (controller != null) {
-            DeliveryState stActivationAvant = controller.getState();
-            if (stActivationAvant == DeliveryState.PRESTART || stActivationAvant == DeliveryState.STARTING
-                    || stActivationAvant == DeliveryState.RUNNING_FLOWING || stActivationAvant == DeliveryState.RUNNING_PAUSED
-                    || stActivationAvant == DeliveryState.ENDING) {
-                LogBus.api(node, "[INIT] onTabActivated sauté au complet — livraison active (état=" + stActivationAvant + ")");
-                return;
-            }
+        // ✅ SIMPLIFIÉ (26 août 2026) — réutilise etatLivraisonActiveDetecte(),
+        // définie une seule fois, plutôt que de répéter la même liste
+        // d'états à chaque garde.
+        if (etatLivraisonActiveDetecte()) {
+            LogBus.api(node, "[INIT] onTabActivated sauté au complet — livraison active");
+            return;
         }
         connectThisRegister(false);
         // ✅ AJOUTÉ (26 août 2026, demande Paul — "je ne suis pas supposé
@@ -113,14 +111,10 @@ public class RegisterTabFragment extends Fragment {
         // re-vérification registre/produit/preset, elle est déjà en cours.
         // Second passage, après connectThisRegister() — au cas où l'état
         // aurait changé entretemps (ex: PRESTART venait de démarrer).
-        if (controller != null) {
-            DeliveryState stActivation = controller.getState();
-            if (stActivation == DeliveryState.PRESTART || stActivation == DeliveryState.STARTING
-                    || stActivation == DeliveryState.RUNNING_FLOWING || stActivation == DeliveryState.RUNNING_PAUSED
-                    || stActivation == DeliveryState.ENDING) {
-                LogBus.api(node, "[INIT] runInitSequence sauté — livraison active (état=" + stActivation + ")");
-                return;
-            }
+        // ✅ SIMPLIFIÉ (26 août 2026) — même méthode centralisée.
+        if (etatLivraisonActiveDetecte()) {
+            LogBus.api(node, "[INIT] runInitSequence sauté — livraison active");
+            return;
         }
         runInitSequence();
 
@@ -629,6 +623,23 @@ public class RegisterTabFragment extends Fragment {
     private final java.util.concurrent.atomic.AtomicBoolean initSequenceRunning =
             new java.util.concurrent.atomic.AtomicBoolean(false);
 
+    // ✅ AJOUTÉ (26 août 2026, demande Paul) — vérification centralisée,
+    // réutilisée entre chaque section de runInitSequence() ET à l'entrée
+    // de onTabActivated()/applierDescriptionsProduits(). Une seule
+    // définition de "qu'est-ce qu'une livraison active" dans tout le
+    // fichier — jamais plus besoin de répéter la même liste d'états.
+    private boolean etatLivraisonActiveDetecte() {
+        if (controller == null) return false;
+        DeliveryState st = controller.getState();
+        boolean actif = st == DeliveryState.PRESTART || st == DeliveryState.STARTING
+                || st == DeliveryState.RUNNING_FLOWING || st == DeliveryState.RUNNING_PAUSED
+                || st == DeliveryState.ENDING;
+        if (actif) {
+            LogBus.api(node, "[INIT] séquence interrompue en cours de route — livraison devenue active (état=" + st + ")");
+        }
+        return actif;
+    }
+
     private void runInitSequence() {
         if (!initSequenceRunning.compareAndSet(false, true)) {
             // ✅ CORRIGÉ (26 août 2026, demande Paul — traçage du scan qui ne
@@ -674,6 +685,18 @@ public class RegisterTabFragment extends Fragment {
             });
             if (!registreOk) return; // dépendance dure : le reste ne peut pas continuer
 
+            // ✅ AJOUTÉ (26 août 2026, demande Paul — "tu t'appropies tout le
+            // processus... lorsque la livraison est démarrée, il ne doit
+            // avoir aucun processus qui empêche la lecture du registre") —
+            // l'état n'était vérifié qu'À L'ENTRÉE de la séquence. Si une
+            // livraison démarre PENDANT que les ~7-10s de la séquence
+            // tournent déjà (confirmé par log réel : RUNNING_FLOWING a
+            // démarré en plein milieu), rien n'arrêtait la suite — chaque
+            // section continuait jusqu'au bout, en concurrence avec le
+            // tick fraîchement démarré. Vérifiée maintenant AUSSI entre
+            // chaque section, pas juste au départ.
+            if (etatLivraisonActiveDetecte()) return;
+
             // 2) PRODUIT — scan, puis VALIDATION contre le deep link (s'il y
             // en a un), sinon défaut = produit 1 (index 0). Dégradé possible
             // : si la validation échoue 3 fois, on utilise le défaut et on
@@ -714,6 +737,7 @@ public class RegisterTabFragment extends Fragment {
                 initValidatedProductIdx = (resolved != null) ? resolved.noteIdx : 0; // défaut produit 1
                 return resolved != null; // false => tentera encore, puis dégradé (défaut déjà posé)
             });
+            if (etatLivraisonActiveDetecte()) return;
 
             // 2) PRESET — VALIDÉ et affiché, pas écrit au registre ici.
             runSectionWithRetry(InitSection.PRESET, 2, true, () -> {
@@ -729,6 +753,7 @@ public class RegisterTabFragment extends Fragment {
                 }
                 return controller != null;
             });
+            if (etatLivraisonActiveDetecte()) return;
 
             // 3) LIVE — net/gross, tickets liés, CONNECTED READY
             runSectionWithRetry(InitSection.LIVE, 3, false, () -> {
@@ -736,12 +761,14 @@ public class RegisterTabFragment extends Fragment {
                 controller.requestLiveSample();
                 return true;
             });
+            if (etatLivraisonActiveDetecte()) return;
 
             // 4) RETOUR_WO — WO lié au ticket_number/sale_number
             runSectionWithRetry(InitSection.RETOUR_WO, 4, false, () -> {
                 rechercherWoDepuisRegistre();
                 return true;
             });
+            if (etatLivraisonActiveDetecte()) return;
 
             // 5) ACTION — activée seulement après affichage de LIVE
             initSectionStatus.put(InitSection.ACTION, InitSectionStatus.OK);
@@ -1291,22 +1318,12 @@ public class RegisterTabFragment extends Fragment {
                 // peuplé, via applierDescriptionsProduits() déjà corrigée
                 // aujourd'hui pour ce genre de repli).
                 if (ticketVientJusteDetreConnu && serialFromArgs != null && !serialFromArgs.trim().isEmpty()) {
-                    // ✅ AJOUTÉ (26 août 2026, demande Paul — "j'ai l'impression
-                    // que c'est ça qui fait obstruction au running_flowing")
-                    // — confirmé par log réel : applierDescriptionsProduits()
-                    // se redéclenchait ici à CHAQUE changement de ticket, y
-                    // compris pendant RUNNING_FLOWING (le ticket_no change/se
-                    // confirme en continu pendant une livraison active) —
-                    // une vraie tournée complète de lectures (register_products,
-                    // lastResultJson, delivery_summary, fichier backup) en
-                    // concurrence directe avec le tick. Même garde que
-                    // onTabActivated() — pas besoin de re-matcher le produit,
-                    // une livraison active a déjà son produit déterminé.
-                    DeliveryState stTicketInfo = controller != null ? controller.getState() : null;
-                    boolean livraisonActive = stTicketInfo == DeliveryState.PRESTART || stTicketInfo == DeliveryState.STARTING
-                            || stTicketInfo == DeliveryState.RUNNING_FLOWING || stTicketInfo == DeliveryState.RUNNING_PAUSED
-                            || stTicketInfo == DeliveryState.ENDING;
-                    if (!livraisonActive) {
+                    // ✅ SIMPLIFIÉ (26 août 2026) — même méthode centralisée
+                    // (etatLivraisonActiveDetecte()) que partout ailleurs
+                    // maintenant. applierDescriptionsProduits() a aussi son
+                    // propre garde à l'entrée désormais — celui-ci évite
+                    // juste l'appel inutile un peu plus tôt.
+                    if (!etatLivraisonActiveDetecte()) {
                         LogBus.api(node, "[PRODUIT-CACHE] ticket maintenant connu (" + ticketNo
                                 + ") — relance de la correspondance produit");
                         applierDescriptionsProduits(serialFromArgs.trim(), node);
@@ -5005,14 +5022,10 @@ public class RegisterTabFragment extends Fragment {
         // en oubliera toujours un), le garde vit maintenant ICI, à
         // l'entrée même de la méthode — protège TOUS les appelants,
         // présents et futurs, en un seul endroit.
-        if (controller != null) {
-            DeliveryState stApplier = controller.getState();
-            if (stApplier == DeliveryState.PRESTART || stApplier == DeliveryState.STARTING
-                    || stApplier == DeliveryState.RUNNING_FLOWING || stApplier == DeliveryState.RUNNING_PAUSED
-                    || stApplier == DeliveryState.ENDING) {
-                LogBus.api(node, "[PRODUIT-CACHE] applierDescriptionsProduits() sauté — livraison active (état=" + stApplier + ")");
-                return;
-            }
+        // ✅ SIMPLIFIÉ (26 août 2026) — même méthode centralisée.
+        if (etatLivraisonActiveDetecte()) {
+            LogBus.api(node, "[PRODUIT-CACHE] applierDescriptionsProduits() sauté — livraison active");
+            return;
         }
         // ✅ AJOUTÉ (25 août 2026, demande Paul — "je veux voir dans le log
         // de la relance de la correspondance produit car actuellement ça
