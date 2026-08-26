@@ -3632,9 +3632,27 @@ private void setupTabsTop() {
     }
 
     private void showRegisterFragmentByKey(String tabKey) {
-        if (registerContainer == null || tabKey == null) return;
+        // ✅ AJOUTÉ (26 août 2026, demande Paul — traçage du scan qui ne se
+        // déclenche jamais) — trouvé : ce garde était complètement
+        // silencieux. Confirmé par log réel : "TAB registre ajouté"
+        // apparaît, mais jamais aucune trace INIT/SCAN-AUTO ensuite — très
+        // probablement parce que registerContainer n'est pas encore prêt
+        // à ce moment précis (syncTabsFromActiveSessions tourne ~400ms
+        // après onStart, peut arriver avant que la vue soit complètement
+        // liée sur certains appareils/démarrages à froid).
+        if (registerContainer == null) {
+            android.util.Log.w("MainActivity", "showRegisterFragmentByKey: ABANDON — registerContainer "
+                + "encore null pour tabKey=" + tabKey + " — le Fragment ne sera jamais activé, INIT/SCAN ne tourneront jamais");
+            try { com.pa.lcr.lcp.log.LogBus.err(0, "MainActivity.showRegisterFragmentByKey",
+                new Exception("registerContainer null — tab " + tabKey + " jamais activé")); } catch (Exception ignored) {}
+            return;
+        }
+        if (tabKey == null) return;
         TabSpec spec = tabsByKey.get(tabKey);
-        if (spec == null) return;
+        if (spec == null) {
+            android.util.Log.w("MainActivity", "showRegisterFragmentByKey: ABANDON — aucun spec trouvé pour tabKey=" + tabKey);
+            return;
+        }
 
         // ✅ B1 FSM: activer le transport du tab (évite boutons morts après switch)
         ensureActiveTransport(spec.transportKey, "TAB_SWITCH");
