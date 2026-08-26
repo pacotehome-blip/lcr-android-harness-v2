@@ -75,6 +75,28 @@ public class RegisterTabFragment extends Fragment {
         // toujours sur une activation automatique de tab — REGISTRE
         // échouait systématiquement dès sa première vérification, avant
         // même d'avoir eu la chance de se connecter pour de vrai.
+        // ✅ ÉLARGI (26 août 2026, demande Paul — "je marque qu'il y a un
+        // lag dans le tick... si je fais NEW, il n'est pas nécessaire de
+        // repasser l'activation du tab") — trouvé : le garde ne protégeait
+        // que runInitSequence(), pas connectThisRegister() lui-même — celle-
+        // ci a bien SA PROPRE garde interne (12 août), mais elle s'exécute
+        // quand même à chaque appel avant de vérifier et abandonner. Ce
+        // n'est pas gratuit — juste vérifier l'état de retour coûte du
+        // temps réel sur le lien LCP partagé avec le tick. Le garde
+        // vérifie maintenant l'état AVANT même d'appeler
+        // connectThisRegister(), pour qu'une réactivation redondante
+        // pendant une livraison active (déclenchée par
+        // showRegisterFragmentByKey(), peu importe la source exacte) ne
+        // touche RIEN du tout au lien LCP.
+        if (controller != null) {
+            DeliveryState stActivationAvant = controller.getState();
+            if (stActivationAvant == DeliveryState.PRESTART || stActivationAvant == DeliveryState.STARTING
+                    || stActivationAvant == DeliveryState.RUNNING_FLOWING || stActivationAvant == DeliveryState.RUNNING_PAUSED
+                    || stActivationAvant == DeliveryState.ENDING) {
+                LogBus.api(node, "[INIT] onTabActivated sauté au complet — livraison active (état=" + stActivationAvant + ")");
+                return;
+            }
+        }
         connectThisRegister(false);
         // ✅ AJOUTÉ (26 août 2026, demande Paul — "je ne suis pas supposé
         // avoir quoi que ce soit qui roule en arrière-plan sur une
@@ -89,6 +111,8 @@ public class RegisterTabFragment extends Fragment {
         // d'états que la garde déjà existante dans connectThisRegister()
         // (12 août 2026) — une livraison active n'a besoin d'aucune
         // re-vérification registre/produit/preset, elle est déjà en cours.
+        // Second passage, après connectThisRegister() — au cas où l'état
+        // aurait changé entretemps (ex: PRESTART venait de démarrer).
         if (controller != null) {
             DeliveryState stActivation = controller.getState();
             if (stActivation == DeliveryState.PRESTART || stActivation == DeliveryState.STARTING
