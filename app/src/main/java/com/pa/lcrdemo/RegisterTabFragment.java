@@ -4838,6 +4838,14 @@ public class RegisterTabFragment extends Fragment {
                 int lastTicketIdx = -1;
                 final double[] presetDuTicketPourApplication = {-1};
                 if (matchRef[0] == -1 && propaneRef[0] == -1) {
+                    // ✅ AJOUTÉ (26 août 2026, demande Paul — "il manque la
+                    // partie de l'application du produit et preset d'avant,
+                    // nous avons un délai qui fait qu'on ne sait pas ce qui
+                    // arrive") — message visuel explicite pendant cette
+                    // recherche (lastResultJson puis delivery_summary),
+                    // pour que l'utilisateur voie ce qui se passe pendant
+                    // le délai, au lieu de rien du tout.
+                    showInitGuide("Application du produit et du preset du dernier ticket...");
                     try {
                         String lrj = com.pa.lcrdemo.DeepLinkHandler.lastResultJson;
                         if (lrj != null) {
