@@ -4850,7 +4850,7 @@ public class RegisterTabFragment extends Fragment {
                             android.widget.Toast.makeText(requireContext(), "✅ " + quoi + " — produit " + idxSelectionne + " sélectionné", android.widget.Toast.LENGTH_LONG).show();
                             LogBus.api(node, "[SCAN] sélection auto — produit=" + idxSelectionne + " ("
                                     + (parCorrespondanceTexte ? "correspondance texte deep link"
-                                        : parDernierTicket ? "repli dernier ticket connu (lastResultJson)" : "repli propane") + ")");
+                                        : parDernierTicket ? "repli dernier ticket connu (lastResultJson ou delivery_summary)" : "repli propane") + ")");
                         } else {
                             if (txtLive != null) txtLive.setText("✅ Scan terminé — " + results.size() + " produits"
                                     + (produitDeepLinkPourScan != null ? " — aucune correspondance pour \"" + produitDeepLinkPourScan + "\"" : ""));
@@ -5056,7 +5056,7 @@ public class RegisterTabFragment extends Fragment {
                         if (txtLive != null) txtLive.setText("✅ Produit — " + quoi + " — produit " + idxASelectionner);
                         LogBus.api(node, "[PRODUIT-CACHE] sélection auto (depuis cache existant) — produit="
                                 + idxASelectionner + " (" + (matchIdxF > 0 ? "correspondance texte deep link"
-                                : propaneIdxF > 0 ? "repli propane" : "repli dernier ticket connu (lastResultJson)") + ")");
+                                : propaneIdxF > 0 ? "repli propane" : "repli dernier ticket connu (lastResultJson ou delivery_summary)") + ")");
                     } else if (!cur.isEmpty()) {
                         LogBus.api(node, "[PRODUIT-CACHE] rien trouvé (idxASelectionner=" + idxASelectionner
                                 + ") — cur non vide conservé tel quel: \"" + cur + "\"");
