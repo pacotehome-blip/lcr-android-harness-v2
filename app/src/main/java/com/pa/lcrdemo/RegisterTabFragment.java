@@ -1,7 +1,7 @@
 package com.pa.lcrdemo;
 
 // ═══════════════════════════════════════════════════════════════
-//  COMPATIBILITÉ ANDROID : API 28 (Android 9) → API 35 (Android 15)
+// COMPATIBILITÉ ANDROID : API 28 (Android 9) → API 35 (Android 15)
 // Tester sur Android 9 (192.168.134.105) ET Android 15 (R52X508K2DR)
 // ═══════════════════════════════════════════════════════════════
 
@@ -573,7 +573,20 @@ public class RegisterTabFragment extends Fragment {
             return;
         }
         LogBus.api(node, "[INIT] runInitSequence: démarrage");
-        safeBg(() -> {
+        // ✅ CORRIGÉ (26 août 2026, demande Paul — trouvé, confirmé par log
+        // réel : deux appels à 3ms d'intervalle, le premier avant même
+        // qu'un registre soit connecté) — LA vraie cause : safeBg() avale
+        // silencieusement RejectedExecutionException (bg.execute() peut
+        // rejeter très tôt dans le cycle de vie du Fragment). Le
+        // try/finally qui remet initSequenceRunning à false est À
+        // L'INTÉRIEUR de la tâche elle-même — si bg.execute() rejette, la
+        // tâche ne tourne JAMAIS, le finally ne se déclenche JAMAIS, et le
+        // flag reste coincé à true pour le reste de la session, bloquant
+        // silencieusement tout futur appel légitime. N'utilise plus
+        // safeBg() ici — appel direct à bg.execute() avec un catch dédié
+        // qui remet le flag si la soumission elle-même échoue.
+        try {
+            bg.execute(() -> {
           try {
             // 1) REGISTRE — connecté, accessible. Dépendance : rien après ne
             // doit avancer si ça échoue (pas de allowDegraded).
@@ -671,7 +684,16 @@ public class RegisterTabFragment extends Fragment {
           } finally {
             initSequenceRunning.set(false);
           }
-        });
+            });
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            // ✅ AJOUTÉ (26 août 2026) — LA correction : si bg.execute()
+            // rejette la soumission elle-même, remettre le flag ici
+            // directement, puisque le finally interne ne se déclenchera
+            // jamais dans ce cas précis.
+            LogBus.api(node, "[INIT] runInitSequence: bg.execute() a rejeté la tâche (Fragment "
+                + "probablement pas encore prêt) — flag remis à false immédiatement, pas de blocage permanent");
+            initSequenceRunning.set(false);
+        }
     }
 
 
