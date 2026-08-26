@@ -3589,6 +3589,30 @@ public class RegisterTabFragment extends Fragment {
                 // à la BD SQLite privée. Écrit AVANT même la tentative de push Dataverse, donc
                 // une copie existe dès que la livraison est confirmée localement, peu importe
                 // si le push réussit ou non ensuite. Best-effort — ne bloque jamais le flux.
+                // ✅ CORRIGÉ (26 août 2026, demande Paul — "il faut avoir le
+                // payload complet... c'est toi le spécialiste, quelle perte
+                // de temps") — payloadJson (snap ci-dessus) est un simple
+                // "tick" snapshot, structurellement incapable de porter
+                // active_product/description/code/type — confirmé par le
+                // vrai fichier que Paul a fourni. Le VRAI payload complet
+                // (avec active_product) vient de api_registerValidate()
+                // (enrichie plus tôt aujourd'hui) — appelé ici directement,
+                // sur le controller déjà connecté, pour que le fichier de
+                // backup porte enfin la vraie information dès sa création,
+                // pas un contournement après coup.
+                String payloadCompletReel = payloadJson; // repli sur le tick si l'appel échoue
+                try {
+                    if (controller != null) {
+                        com.pa.lcr.lcp.ApiResult rv = controller.api_registerValidate(
+                                null, node > 0 ? Integer.valueOf(node) : null, null, null, null, false);
+                        if (rv != null && rv.data != null) {
+                            payloadCompletReel = rv.data.toString();
+                        }
+                    }
+                } catch (Exception e) {
+                    android.util.Log.w("RetourWO", "api_registerValidate pour payload complet ERR: " + e.getMessage());
+                }
+
                 try {
                     org.json.JSONObject backupPayload = new org.json.JSONObject();
                     backupPayload.put("wo_num", woNum != null ? woNum : "");
@@ -3600,7 +3624,7 @@ public class RegisterTabFragment extends Fragment {
                     backupPayload.put("serial_id", serialFromArgs != null ? serialFromArgs : "");
                     backupPayload.put("lcrnode", node);
                     backupPayload.put("backup_ts", System.currentTimeMillis());
-                    backupPayload.put("payload_complet", payloadJson != null ? payloadJson : "");
+                    backupPayload.put("payload_complet", payloadCompletReel);
                     // ✅ AJOUTÉ (11 août 2026, demande Paul — "ajoute-le au
                     // JSON aussi, ça fait pas de mal") — même valeur que
                     // celle mise en BD locale juste au-dessus
@@ -4592,19 +4616,31 @@ public class RegisterTabFragment extends Fragment {
     // Cette méthode lit le vrai fichier persistant, pour un repli qui
     // survit vraiment à un redémarrage d'app + BD vierge, pas juste à un
     // changement de tab dans la même session.
-    private org.json.JSONObject lireActiveProductDepuisBackupJson(String ticketNo) {
-        if (ticketNo == null || ticketNo.trim().isEmpty()) return null;
+    // ✅ CORRIGÉ (26 août 2026, demande Paul — "tu n'as pas vu dans le code
+    // qu'il n'y avait pas de code produit????") — j'avais construit cette
+    // méthode en SUPPOSANT la structure de payload_complet sans jamais
+    // vérifier le vrai fichier écrit. Confirmé par le vrai fichier de Paul :
+    // payload_complet est un simple "tick" snapshot (ticketNo/net/gross/
+    // state...) — ne contient JAMAIS active_product, structurellement.
+    // Cette méthode ne peut donc jamais fonctionner — remplacée par la
+    // vraie source : delivery_summary.result_json (table SQLite LOCALE,
+    // déjà correctement peuplée avec active_product/description/code/type
+    // — confirmé directement dans une vraie base de données de Paul),
+    // via DeliveryLogStore.getLatestResultBySerial(), déjà existante,
+    // jamais utilisée jusqu'ici pour cet usage précis.
+    private org.json.JSONObject lireActiveProductDepuisDeliverySummary(String serialId) {
+        if (serialId == null || serialId.trim().isEmpty()) return null;
         try {
-            com.pa.lcr.lcp.storage.LocalDeliveryBackup.BackupMatch match =
-                com.pa.lcr.lcp.storage.LocalDeliveryBackup.findLatestByTicketNo(requireContext(), ticketNo.trim());
-            if (match == null || match.json == null) return null;
-            String payloadCompletStr = match.json.optString("payload_complet", null);
-            if (payloadCompletStr == null || payloadCompletStr.isEmpty()) return null;
-            org.json.JSONObject payloadComplet = new org.json.JSONObject(payloadCompletStr);
-            if (!payloadComplet.has("active_product") || payloadComplet.isNull("active_product")) return null;
-            return payloadComplet;
+            com.pa.lcr.lcp.storage.DeliveryLogStore store =
+                    new com.pa.lcr.lcp.storage.DeliveryLogStore(requireContext());
+            com.pa.lcr.lcp.storage.DeliveryLogStore.LatestResultRow row =
+                    store.getLatestResultBySerial(serialId.trim());
+            if (row == null || row.resultJson == null || row.resultJson.trim().isEmpty()) return null;
+            org.json.JSONObject j = new org.json.JSONObject(row.resultJson);
+            if (!j.has("active_product") || j.isNull("active_product")) return null;
+            return j;
         } catch (Exception e) {
-            android.util.Log.w("RegisterTabFragment", "lireActiveProductDepuisBackupJson ERR: " + e.getMessage());
+            android.util.Log.w("RegisterTabFragment", "lireActiveProductDepuisDeliverySummary ERR: " + e.getMessage());
             return null;
         }
     }
@@ -4727,19 +4763,19 @@ public class RegisterTabFragment extends Fragment {
                             }
                         }
                     } catch (Exception ignored) {}
-                    // ✅ AJOUTÉ (25 août 2026) — repli SUPPLÉMENTAIRE sur le
-                    // fichier de backup persistant (survit à un redémarrage
-                    // d'app + BD vierge, contrairement à lastResultJson
-                    // ci-dessus). Tenté seulement si lastResultJson n'a rien
-                    // donné — même ticket que celui déjà résolu pour ce tab.
+                    // ✅ CORRIGÉ (26 août 2026) — repli SUPPLÉMENTAIRE sur
+                    // delivery_summary.result_json (table SQLite LOCALE,
+                    // confirmée correctement peuplée — voir commentaire
+                    // complet sur lireActiveProductDepuisDeliverySummary).
+                    // Tenté seulement si lastResultJson n'a rien donné.
                     if (lastTicketIdx == -1) {
-                        org.json.JSONObject backupPayload = lireActiveProductDepuisBackupJson(lastKnownTicketNo);
+                        org.json.JSONObject backupPayload = lireActiveProductDepuisDeliverySummary(serialId);
                         if (backupPayload != null) {
                             int idx = backupPayload.optInt("active_product", -1);
                             if (idx > 0 && idx <= 16) {
                                 lastTicketIdx = idx;
-                                LogBus.api(node, "[SCAN] dernier ticket connu récupéré depuis le backup JSON "
-                                        + "(Téléchargements), pas lastResultJson (probablement app redémarrée)");
+                                LogBus.api(node, "[SCAN] dernier ticket connu récupéré depuis delivery_summary "
+                                        + "(BD locale), pas lastResultJson (probablement app redémarrée)");
                             }
                         }
                     }
@@ -4912,18 +4948,20 @@ public class RegisterTabFragment extends Fragment {
                     } catch (Exception e) {
                         LogBus.api(node, "[PRODUIT-CACHE] lastResultJson parse ERR: " + e.getMessage());
                     }
-                    // ✅ AJOUTÉ (25 août 2026) — même repli supplémentaire
-                    // que dans lancerScanProduits() — voir ce commentaire
-                    // pour le détail complet.
+                    // ✅ CORRIGÉ (26 août 2026) — même correctif que
+                    // lancerScanProduits() : delivery_summary.result_json
+                    // (via serialId), pas le fichier backup (structurellement
+                    // incapable de porter active_product — voir commentaire
+                    // complet sur lireActiveProductDepuisDeliverySummary).
                     if (lastTicketIdxCache == -1) {
                         LogBus.api(node, "[PRODUIT-CACHE] lastResultJson n'a rien donné — tentative "
-                                + "backup JSON (Téléchargements) pour ticket=" + lastKnownTicketNo);
-                        org.json.JSONObject backupPayloadCache = lireActiveProductDepuisBackupJson(lastKnownTicketNo);
-                        LogBus.api(node, "[PRODUIT-CACHE] résultat lecture backup JSON — trouvé="
+                                + "delivery_summary pour serial=" + serialId);
+                        org.json.JSONObject backupPayloadCache = lireActiveProductDepuisDeliverySummary(serialId);
+                        LogBus.api(node, "[PRODUIT-CACHE] résultat lecture delivery_summary — trouvé="
                                 + (backupPayloadCache != null));
                         if (backupPayloadCache != null) {
                             int idx2 = backupPayloadCache.optInt("active_product", -1);
-                            LogBus.api(node, "[PRODUIT-CACHE] backup JSON — active_product=" + idx2);
+                            LogBus.api(node, "[PRODUIT-CACHE] delivery_summary — active_product=" + idx2);
                             if (idx2 > 0 && idx2 <= 16) {
                                 lastTicketIdxCache = idx2;
                                 LogBus.api(node, "[PRODUIT-CACHE] dernier ticket connu récupéré depuis le "
