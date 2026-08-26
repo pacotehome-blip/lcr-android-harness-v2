@@ -4996,6 +4996,24 @@ public class RegisterTabFragment extends Fragment {
 
     public void applierDescriptionsProduits(String serialId, int lcrNode) {
         if (serialId == null || serialId.isEmpty()) return;
+        // ✅ CORRIGÉ (26 août 2026, demande Paul — "pourquoi j'ai plusieurs
+        // tentatives et produit-cache... il faut simplifier... j'ai encore
+        // du lag pendant la livraison") — trouvé, confirmé par log réel :
+        // TROIS appelants différents (onTicketInfo, validateHeaderAsync,
+        // autoScanProduitsSiNecessaire) — je n'avais gardé QUE le premier.
+        // Au lieu de garder chaque appelant individuellement (fragile, on
+        // en oubliera toujours un), le garde vit maintenant ICI, à
+        // l'entrée même de la méthode — protège TOUS les appelants,
+        // présents et futurs, en un seul endroit.
+        if (controller != null) {
+            DeliveryState stApplier = controller.getState();
+            if (stApplier == DeliveryState.PRESTART || stApplier == DeliveryState.STARTING
+                    || stApplier == DeliveryState.RUNNING_FLOWING || stApplier == DeliveryState.RUNNING_PAUSED
+                    || stApplier == DeliveryState.ENDING) {
+                LogBus.api(node, "[PRODUIT-CACHE] applierDescriptionsProduits() sauté — livraison active (état=" + stApplier + ")");
+                return;
+            }
+        }
         // ✅ AJOUTÉ (25 août 2026, demande Paul — "je veux voir dans le log
         // de la relance de la correspondance produit car actuellement ça
         // ne marche pas") — trace complète, à chaque étape, pas juste au
