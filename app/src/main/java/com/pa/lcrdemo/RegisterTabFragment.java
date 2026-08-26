@@ -504,6 +504,26 @@ public class RegisterTabFragment extends Fragment {
     // réelle (produit + preset ENSEMBLE) se fait au moment de l'armement,
     // comme c'était déjà le cas pour le preset seul.
     private volatile Integer initValidatedProductIdx = null; // 0-based (LCP List 0 : 0 = produit 1)
+    // ✅ AJOUTÉ (26 août 2026, demande Paul — "on a pas besoin de valider le
+    // produit un coup que le premier scan a été complété et jumelé au
+    // ticket de la dernière livraison à la BD vierge. jamais j'ai indiqué
+    // d'avoir une validation à tous les tickets") — trouvé : onTicketInfo()
+    // relançait applierDescriptionsProduits() à CHAQUE nouveau ticket, sans
+    // jamais vérifier si le produit était déjà résolu avec succès pour ce
+    // tab. Une fois vraiment résolu (correspondance texte, propane, OU
+    // dernier ticket connu — pas juste le défaut "produit 1" par manque de
+    // données), plus besoin de re-vérifier à chaque changement de ticket —
+    // le produit dans la citerne ne change pas d'une livraison à l'autre
+    // sur le même camion.
+    private volatile boolean produitDejaResoluPourCetteSession = false;
+    // ✅ AJOUTÉ (26 août 2026, demande Paul — "s'il arrive de deeplink il
+    // applique son produit et valide aussi si le produit est bien présent
+    // dans la liste de produit déjà scanné, si non il annule la
+    // livraison") — non-null seulement si un produit était attendu du
+    // deep link et jamais trouvé parmi les produits déjà scannés du
+    // registre. Vérifié par peutDemarrerLivraison() pour bloquer NEW dans
+    // ce cas précis, avec une vraie raison affichée.
+    private volatile String produitDeepLinkIntrouvableRaison = null;
     private volatile Double initValidatedPresetL = null;
 
     private void initSectionLog(InitSection section, int idx, String result) {
@@ -701,6 +721,15 @@ public class RegisterTabFragment extends Fragment {
             // en a un), sinon défaut = produit 1 (index 0). Dégradé possible
             // : si la validation échoue 3 fois, on utilise le défaut et on
             // continue — ne bloque jamais l'armement à lui seul.
+            // ✅ AJOUTÉ (26 août 2026, demande Paul — "s'il arrive de
+            // deeplink il applique son produit et valide aussi si le
+            // produit est bien présent dans la liste de produit déjà
+            // scanné, si non il annule la livraison") — capturé HORS de la
+            // lambda de retry, pour évaluer seulement APRÈS les 3
+            // tentatives (pas à chaque essai individuel, certains peuvent
+            // échouer transitoirement avant de réussir).
+            final boolean[] produitDeepLinkDemandeMaisIntrouvable = {false};
+            final String produitDeepLinkPourAnnulation = (getArguments() != null) ? getArguments().getString("produit") : null;
             runSectionWithRetry(InitSection.PRODUIT, 2, true, () -> {
                 autoScanProduitsSiNecessaire();
                 String serial = serialFromArgs;
@@ -734,9 +763,30 @@ public class RegisterTabFragment extends Fragment {
                         try { store.close(); } catch (Exception ignored) {}
                     }
                 }
-                initValidatedProductIdx = (resolved != null) ? resolved.noteIdx : 0; // défaut produit 1
-                return resolved != null; // false => tentera encore, puis dégradé (défaut déjà posé)
+                // ✅ AJOUTÉ (26 août 2026) — ne défaut vers "produit 1" QUE
+                // si aucun produit précis n'était attendu (pas de deep
+                // link). Si le deep link attendait un produit précis et
+                // qu'il n'est trouvé dans AUCUNE des 3 tentatives, on
+                // n'accepte plus silencieusement un défaut — voir
+                // évaluation finale juste après runSectionWithRetry.
+                if (resolved != null) {
+                    initValidatedProductIdx = resolved.noteIdx;
+                } else if (produitDeepLink == null || produitDeepLink.trim().isEmpty()) {
+                    initValidatedProductIdx = 0; // défaut produit 1 — légitime, aucune attente précise
+                }
+                return resolved != null; // false => tentera encore, puis dégradé (défaut déjà posé si pas de deep link)
             });
+            // ✅ AJOUTÉ (26 août 2026) — évaluation finale, après les 3
+            // tentatives : un produit était attendu du deep link et jamais
+            // trouvé parmi les produits déjà scannés — annulation requise,
+            // pas un défaut silencieux.
+            if (produitDeepLinkPourAnnulation != null && !produitDeepLinkPourAnnulation.trim().isEmpty()
+                    && initValidatedProductIdx == null) {
+                produitDeepLinkDemandeMaisIntrouvable[0] = true;
+                produitDeepLinkIntrouvableRaison = "Produit attendu (\"" + produitDeepLinkPourAnnulation
+                        + "\") introuvable dans la liste des produits déjà scannés du registre";
+                LogBus.api(node, "[PRODUIT] ANNULATION — " + produitDeepLinkIntrouvableRaison);
+            }
             if (etatLivraisonActiveDetecte()) return;
 
             // 2) PRESET — VALIDÉ et affiché, pas écrit au registre ici.
@@ -1318,12 +1368,13 @@ public class RegisterTabFragment extends Fragment {
                 // peuplé, via applierDescriptionsProduits() déjà corrigée
                 // aujourd'hui pour ce genre de repli).
                 if (ticketVientJusteDetreConnu && serialFromArgs != null && !serialFromArgs.trim().isEmpty()) {
-                    // ✅ SIMPLIFIÉ (26 août 2026) — même méthode centralisée
-                    // (etatLivraisonActiveDetecte()) que partout ailleurs
-                    // maintenant. applierDescriptionsProduits() a aussi son
-                    // propre garde à l'entrée désormais — celui-ci évite
-                    // juste l'appel inutile un peu plus tôt.
-                    if (!etatLivraisonActiveDetecte()) {
+                    // ✅ CORRIGÉ (26 août 2026, demande Paul) — plus de
+                    // relance du tout si le produit est déjà résolu avec
+                    // succès pour cette session de tab. Une fois établi, il
+                    // ne change pas d'un ticket à l'autre sur le même camion.
+                    if (produitDejaResoluPourCetteSession) {
+                        // rien à faire — déjà résolu, aucune re-vérification nécessaire
+                    } else if (!etatLivraisonActiveDetecte()) {
                         LogBus.api(node, "[PRODUIT-CACHE] ticket maintenant connu (" + ticketNo
                                 + ") — relance de la correspondance produit");
                         applierDescriptionsProduits(serialFromArgs.trim(), node);
@@ -4266,6 +4317,24 @@ public class RegisterTabFragment extends Fragment {
 
     private void startNewDeliveryC() {
         if (controller == null) return;
+        // ✅ AJOUTÉ (26 août 2026, demande Paul — "s'il arrive de deeplink
+        // il applique son produit et valide aussi si le produit est bien
+        // présent dans la liste de produit déjà scanné, si non il annule
+        // la livraison") — vraie annulation, pas un défaut silencieux sur
+        // "produit 1" quand le deep link attendait un produit précis
+        // jamais trouvé parmi les produits scannés du registre.
+        if (produitDeepLinkIntrouvableRaison != null) {
+            LogBus.api(node, "[ACTION-CLIC] NEW_C — ANNULÉ: " + produitDeepLinkIntrouvableRaison);
+            if (ui != null) {
+                final String raisonUi = produitDeepLinkIntrouvableRaison;
+                ui.post(() -> new android.app.AlertDialog.Builder(requireContext())
+                        .setTitle("Livraison annulée")
+                        .setMessage(raisonUi + "\n\nVérifie le produit chargé dans la citerne, ou contacte la répartition.")
+                        .setPositiveButton("Compris", null)
+                        .show());
+            }
+            return;
+        }
         // ✅ AJOUTÉ (13 août 2026, demande Paul — "running_flowing doit
         // avoir l'approbation de toutes les sections") — garde commune,
         // peu importe si le démarrage vient du bouton C ou du deep link
@@ -4969,7 +5038,7 @@ public class RegisterTabFragment extends Fragment {
                         }
                         if (idxSelectionne > 0 && spnProduct != null) {
                             spnProduct.setText(labels[idxSelectionne - 1], false);
-                            initValidatedProductIdx = idxSelectionne;
+                            initValidatedProductIdx = idxSelectionne; produitDejaResoluPourCetteSession = true;
                             String quoi = parCorrespondanceTexte ? "produit du ticket (\"" + produitDeepLinkPourScan + "\")"
                                     : parDernierTicket ? "dernier ticket connu" : "Propane";
                             if (txtLive != null) txtLive.setText("✅ Scan terminé — " + quoi + " — produit " + idxSelectionne);
@@ -5013,6 +5082,19 @@ public class RegisterTabFragment extends Fragment {
 
     public void applierDescriptionsProduits(String serialId, int lcrNode) {
         if (serialId == null || serialId.isEmpty()) return;
+        // ✅ CORRIGÉ (26 août 2026, demande Paul — "on a pas besoin de
+        // valider le produit un coup que le premier scan a été complété...
+        // jamais j'ai indiqué d'avoir une validation à tous les tickets")
+        // — une fois le produit vraiment résolu pour cette session de tab
+        // (pas juste le défaut "produit 1"), plus jamais besoin de
+        // re-vérifier — le produit dans la citerne ne change pas d'un
+        // ticket à l'autre sur le même camion. Centralisé ici, comme le
+        // garde d'état actif juste en dessous — protège les trois
+        // appelants (onTicketInfo, validateHeaderAsync,
+        // autoScanProduitsSiNecessaire) en un seul endroit.
+        if (produitDejaResoluPourCetteSession) {
+            return;
+        }
         // ✅ CORRIGÉ (26 août 2026, demande Paul — "pourquoi j'ai plusieurs
         // tentatives et produit-cache... il faut simplifier... j'ai encore
         // du lag pendant la livraison") — trouvé, confirmé par log réel :
@@ -5186,7 +5268,7 @@ public class RegisterTabFragment extends Fragment {
                         spnProduct.setText(cur, false);
                     } else if (idxASelectionner > 0 && idxASelectionner <= 16) {
                         spnProduct.setText(labels[idxASelectionner - 1], false);
-                        initValidatedProductIdx = idxASelectionner;
+                        initValidatedProductIdx = idxASelectionner; produitDejaResoluPourCetteSession = true;
                         String quoi = matchIdxF > 0 ? "produit du ticket (\"" + produitDeepLinkPourCache + "\")"
                                 : propaneIdxF > 0 ? "Propane" : "dernier ticket connu";
                         if (txtLive != null) txtLive.setText("✅ Produit — " + quoi + " — produit " + idxASelectionner);
