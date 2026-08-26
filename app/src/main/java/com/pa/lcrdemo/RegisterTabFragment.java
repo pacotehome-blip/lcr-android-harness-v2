@@ -5039,7 +5039,6 @@ public class RegisterTabFragment extends Fragment {
                 java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> rows = store.getAll(serialId, lcrNode);
                 if (rows.isEmpty()) rows = store.getAll(serialId);
                 store.close();
-                LogBus.api(node, "[PRODUIT-CACHE] register_products — " + rows.size() + " ligne(s) trouvée(s) pour ce #série");
                 if (rows.isEmpty()) {
                     // ✅ AJOUTÉ (24 août 2026, demande Paul — "BD vierge →
                     // récupérer depuis le JSON de la dernière livraison,
@@ -5108,7 +5107,6 @@ public class RegisterTabFragment extends Fragment {
                         ? produitDeepLinkPourCache.trim().toLowerCase(java.util.Locale.ROOT)
                                 .replace("-", " ").replace("_", " ").replaceAll("\\s+", " ")
                         : null;
-                LogBus.api(node, "[PRODUIT-CACHE] produitDeepLink=" + produitDeepLinkPourCache);
                 int matchIdx = -1, propaneIdx = -1;
                 for (com.pa.lcr.lcp.storage.RegisterProductStore.Row r : rows) {
                     if (r.isPropane && propaneIdx == -1) propaneIdx = r.noteIdx;
@@ -5121,19 +5119,13 @@ public class RegisterTabFragment extends Fragment {
                         }
                     }
                 }
-                LogBus.api(node, "[PRODUIT-CACHE] après deep link/propane — matchIdx=" + matchIdx
-                        + " propaneIdx=" + propaneIdx);
                 int lastTicketIdxCache = -1;
                 if (matchIdx == -1 && propaneIdx == -1) {
                     String lrj = com.pa.lcrdemo.DeepLinkHandler.lastResultJson;
-                    LogBus.api(node, "[PRODUIT-CACHE] tentative lastResultJson — présent="
-                            + (lrj != null) + (lrj != null ? " longueur=" + lrj.length() : ""));
                     try {
                         if (lrj != null) {
                             org.json.JSONObject j = new org.json.JSONObject(lrj);
                             org.json.JSONObject payload = j.optJSONObject("payload");
-                            LogBus.api(node, "[PRODUIT-CACHE] lastResultJson.payload=" + (payload != null)
-                                    + " active_product présent=" + (payload != null && payload.has("active_product") && !payload.isNull("active_product")));
                             if (payload != null && payload.has("active_product") && !payload.isNull("active_product")) {
                                 int idx2 = payload.optInt("active_product", -1);
                                 if (idx2 > 0 && idx2 <= 16) lastTicketIdxCache = idx2;
@@ -5148,14 +5140,9 @@ public class RegisterTabFragment extends Fragment {
                     // incapable de porter active_product — voir commentaire
                     // complet sur lireActiveProductDepuisDeliverySummary).
                     if (lastTicketIdxCache == -1) {
-                        LogBus.api(node, "[PRODUIT-CACHE] lastResultJson n'a rien donné — tentative "
-                                + "delivery_summary pour serial=" + serialId);
                         org.json.JSONObject backupPayloadCache = lireActiveProductDepuisDeliverySummary(lastKnownTicketNo, serialId);
-                        LogBus.api(node, "[PRODUIT-CACHE] résultat lecture delivery_summary — trouvé="
-                                + (backupPayloadCache != null));
                         if (backupPayloadCache != null) {
                             int idx2 = backupPayloadCache.optInt("active_product", -1);
-                            LogBus.api(node, "[PRODUIT-CACHE] delivery_summary — active_product=" + idx2);
                             if (idx2 > 0 && idx2 <= 16) {
                                 lastTicketIdxCache = idx2;
                                 LogBus.api(node, "[PRODUIT-CACHE] dernier ticket connu récupéré depuis le "
@@ -5164,8 +5151,6 @@ public class RegisterTabFragment extends Fragment {
                         }
                     }
                 }
-                LogBus.api(node, "[PRODUIT-CACHE] décision finale — matchIdx=" + matchIdx
-                        + " propaneIdx=" + propaneIdx + " lastTicketIdxCache=" + lastTicketIdxCache);
                 final int matchIdxF = matchIdx, propaneIdxF = propaneIdx, lastTicketIdxCacheF = lastTicketIdxCache;
                 final int idxASelectionner = matchIdxF > 0 ? matchIdxF : (propaneIdxF > 0 ? propaneIdxF : lastTicketIdxCacheF);
                 ui.post(() -> {
