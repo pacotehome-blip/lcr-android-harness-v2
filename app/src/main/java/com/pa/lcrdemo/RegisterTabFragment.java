@@ -91,7 +91,7 @@ public class RegisterTabFragment extends Fragment {
         // ✅ SIMPLIFIÉ (26 août 2026) — réutilise etatLivraisonActiveDetecte(),
         // définie une seule fois, plutôt que de répéter la même liste
         // d'états à chaque garde.
-        if (etatLivraisonActiveDetecte()) {
+        if (etatLivraisonActiveDetecte("onTabActivated (avant connectThisRegister)")) {
             LogBus.api(node, "[INIT] onTabActivated sauté au complet — livraison active");
             return;
         }
@@ -112,7 +112,7 @@ public class RegisterTabFragment extends Fragment {
         // Second passage, après connectThisRegister() — au cas où l'état
         // aurait changé entretemps (ex: PRESTART venait de démarrer).
         // ✅ SIMPLIFIÉ (26 août 2026) — même méthode centralisée.
-        if (etatLivraisonActiveDetecte()) {
+        if (etatLivraisonActiveDetecte("onTabActivated (avant runInitSequence)")) {
             LogBus.api(node, "[INIT] runInitSequence sauté — livraison active");
             return;
         }
@@ -648,14 +648,22 @@ public class RegisterTabFragment extends Fragment {
     // de onTabActivated()/applierDescriptionsProduits(). Une seule
     // définition de "qu'est-ce qu'une livraison active" dans tout le
     // fichier — jamais plus besoin de répéter la même liste d'états.
-    private boolean etatLivraisonActiveDetecte() {
+    // ✅ CORRIGÉ (27 août 2026, demande Paul — "pourquoi j'ai plusieurs...
+    // séquence interrompue") — trouvé : le message était identique peu
+    // importe l'appelant (runInitSequence, onTabActivated,
+    // applierDescriptionsProduits), rendant le diagnostic trompeur — un
+    // log qui semblait montrer runInitSequence() interrompue 8 fois
+    // d'affilée était en fait 7 appels totalement différents (guards
+    // d'autres méthodes), un seul étant la vraie séquence. Paramètre
+    // "source" ajouté pour dire honnêtement d'où vient chaque appel.
+    private boolean etatLivraisonActiveDetecte(String source) {
         if (controller == null) return false;
         DeliveryState st = controller.getState();
         boolean actif = st == DeliveryState.PRESTART || st == DeliveryState.STARTING
                 || st == DeliveryState.RUNNING_FLOWING || st == DeliveryState.RUNNING_PAUSED
                 || st == DeliveryState.ENDING;
         if (actif) {
-            LogBus.api(node, "[INIT] séquence interrompue en cours de route — livraison devenue active (état=" + st + ")");
+            LogBus.api(node, "[INIT] " + source + " — livraison active, sauté (état=" + st + ")");
         }
         return actif;
     }
@@ -715,7 +723,7 @@ public class RegisterTabFragment extends Fragment {
             // section continuait jusqu'au bout, en concurrence avec le
             // tick fraîchement démarré. Vérifiée maintenant AUSSI entre
             // chaque section, pas juste au départ.
-            if (etatLivraisonActiveDetecte()) return;
+            if (etatLivraisonActiveDetecte("runInitSequence (après REGISTRE)")) return;
 
             // 2) PRODUIT — scan, puis VALIDATION contre le deep link (s'il y
             // en a un), sinon défaut = produit 1 (index 0). Dégradé possible
@@ -787,7 +795,7 @@ public class RegisterTabFragment extends Fragment {
                         + "\") introuvable dans la liste des produits déjà scannés du registre";
                 LogBus.api(node, "[PRODUIT] ANNULATION — " + produitDeepLinkIntrouvableRaison);
             }
-            if (etatLivraisonActiveDetecte()) return;
+            if (etatLivraisonActiveDetecte("runInitSequence (après PRODUIT)")) return;
 
             // 2) PRESET — VALIDÉ et affiché, pas écrit au registre ici.
             runSectionWithRetry(InitSection.PRESET, 2, true, () -> {
@@ -803,7 +811,7 @@ public class RegisterTabFragment extends Fragment {
                 }
                 return controller != null;
             });
-            if (etatLivraisonActiveDetecte()) return;
+            if (etatLivraisonActiveDetecte("runInitSequence (après PRESET)")) return;
 
             // 3) LIVE — net/gross, tickets liés, CONNECTED READY
             runSectionWithRetry(InitSection.LIVE, 3, false, () -> {
@@ -811,14 +819,14 @@ public class RegisterTabFragment extends Fragment {
                 controller.requestLiveSample();
                 return true;
             });
-            if (etatLivraisonActiveDetecte()) return;
+            if (etatLivraisonActiveDetecte("runInitSequence (après LIVE)")) return;
 
             // 4) RETOUR_WO — WO lié au ticket_number/sale_number
             runSectionWithRetry(InitSection.RETOUR_WO, 4, false, () -> {
                 rechercherWoDepuisRegistre();
                 return true;
             });
-            if (etatLivraisonActiveDetecte()) return;
+            if (etatLivraisonActiveDetecte("runInitSequence (après RETOUR_WO)")) return;
 
             // 5) ACTION — activée seulement après affichage de LIVE
             initSectionStatus.put(InitSection.ACTION, InitSectionStatus.OK);
@@ -1393,7 +1401,7 @@ public class RegisterTabFragment extends Fragment {
                     // ne change pas d'un ticket à l'autre sur le même camion.
                     if (produitDejaResoluPourCetteSession) {
                         // rien à faire — déjà résolu, aucune re-vérification nécessaire
-                    } else if (!etatLivraisonActiveDetecte()) {
+                    } else if (!etatLivraisonActiveDetecte("onTicketInfo")) {
                         LogBus.api(node, "[PRODUIT-CACHE] ticket maintenant connu (" + ticketNo
                                 + ") — relance de la correspondance produit");
                         applierDescriptionsProduits(serialFromArgs.trim(), node);
@@ -5168,7 +5176,7 @@ public class RegisterTabFragment extends Fragment {
         // l'entrée même de la méthode — protège TOUS les appelants,
         // présents et futurs, en un seul endroit.
         // ✅ SIMPLIFIÉ (26 août 2026) — même méthode centralisée.
-        if (etatLivraisonActiveDetecte()) {
+        if (etatLivraisonActiveDetecte("applierDescriptionsProduits (entrée)")) {
             LogBus.api(node, "[PRODUIT-CACHE] applierDescriptionsProduits() sauté — livraison active");
             return;
         }
@@ -5187,7 +5195,7 @@ public class RegisterTabFragment extends Fragment {
                 // raison au moment de l'appel. Confirmé par log réel : un
                 // appel complétait tout son travail 80ms après le début de
                 // RUNNING_FLOWING.
-                if (etatLivraisonActiveDetecte()) {
+                if (etatLivraisonActiveDetecte("applierDescriptionsProduits (tâche en vol)")) {
                     LogBus.api(node, "[PRODUIT-CACHE] applierDescriptionsProduits() interrompue en cours de tâche — livraison devenue active");
                     return;
                 }
@@ -5993,7 +6001,7 @@ public class RegisterTabFragment extends Fragment {
         // un WO ne sert qu'à démarrer une NOUVELLE livraison — aucune
         // raison de tourner pendant qu'une livraison coule déjà. Même
         // garde centralisé que partout ailleurs aujourd'hui.
-        if (etatLivraisonActiveDetecte()) {
+        if (etatLivraisonActiveDetecte("lookupWoForTicket")) {
             return;
         }
         // ✅ Ne pas sortir juste parce que currentWoNum est déjà connu — vérifier
