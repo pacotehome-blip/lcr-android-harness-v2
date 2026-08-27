@@ -1051,9 +1051,16 @@ public class RegisterTabFragment extends Fragment {
             long now = System.currentTimeMillis();
             if (now - lastDelCodePollMs < DELCODE_POLL_MIN_MS) return;
             lastDelCodePollMs = now;
-            ApiResult r = c.api_tickSnapshot();
-            JSONObject d = (r != null) ? r.data : null;
-            if (d != null) lastDelCode = d.optInt("delCode", lastDelCode);
+            // ✅ CORRIGÉ (26 août 2026, demande Paul — "pendant le live
+            // tick on a un rafraîchissement, peux-tu me le trouver") —
+            // trouvé : malgré son nom ("FromTickSnapshot"), cette méthode
+            // rappelait api_tickSnapshot() elle-même — une vraie requête
+            // réseau séparée et redondante toutes les 800ms pendant
+            // RUNNING_FLOWING, en concurrence avec le tick principal.
+            // getLastDelCode() lit directement la valeur déjà en cache
+            // (lastTick, mise à jour à chaque vrai changement) — aucun
+            // appel LCP.
+            lastDelCode = c.getLastDelCode();
         } catch (Exception ignored) {}
     }
 

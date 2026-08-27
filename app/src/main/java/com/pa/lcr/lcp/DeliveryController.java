@@ -705,6 +705,19 @@ private void reproEvent(String level, String type, String message, JSONObject da
     // dernier tick publié
     private volatile LastTick lastTick = null;
 
+    // ✅ AJOUTÉ (26 août 2026, demande Paul — "pendant le live tick on a un
+    // rafraîchissement peux-tu me le trouver") — trouvé :
+    // RegisterTabFragment.refreshDelCodeFromTickSnapshotThrottled() rappelait
+    // api_tickSnapshot() toutes les 800ms pendant RUNNING_FLOWING — une
+    // vraie requête réseau séparée et redondante, alors que lastTick
+    // (ci-dessus) garde déjà la dernière valeur en mémoire, mise à jour à
+    // chaque vrai changement. Getter léger, aucun appel LCP, juste une
+    // lecture de champ déjà en cache.
+    public int getLastDelCode() {
+        LastTick t = lastTick;
+        return t != null ? t.delCode : 0;
+    }
+
     // lock de synchronisation pour long-poll API (wait/notify)
     private final Object tickLock = new Object();
 
