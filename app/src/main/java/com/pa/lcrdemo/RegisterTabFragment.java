@@ -402,6 +402,8 @@ public class RegisterTabFragment extends Fragment {
     private TextView txtSaleNo;
     private TextView txtDeliveryUid;
     private TextView txtLive, txtQtyNet, txtQtyGross;
+    // ✅ AJOUTÉ (27 août 2026, demande Paul — "afin de retrouver facilement")
+    private TextView txtDecimalsInfo;
     private android.widget.AutoCompleteTextView spnProduct;
     private EditText edtPreset;
     private Button btnConnect, btnA, btnB, btnC, btnContinue, btnFinish;
@@ -1371,6 +1373,14 @@ public class RegisterTabFragment extends Fragment {
                 String fmt = "%." + show + "f";
                 if (txtQtyNet != null) txtQtyNet.setText("NET: " + String.format(Locale.ROOT, fmt, net));
                 if (txtQtyGross != null) txtQtyGross.setText("GROSS: " + String.format(Locale.ROOT, fmt, gross));
+                // ✅ AJOUTÉ (27 août 2026, demande Paul — "afin de retrouver
+                // facilement... ce n'est pas un trouble de registre") —
+                // visible directement, sans avoir besoin d'un log complet
+                // pour vérifier si l'échelle utilisée correspond à ce que
+                // le registre affiche physiquement.
+                if (txtDecimalsInfo != null) {
+                    txtDecimalsInfo.setText("Décimales : " + show + " (échelle=" + (int) Math.pow(10, show) + ")");
+                }
             });
         }
 
@@ -2014,6 +2024,7 @@ public class RegisterTabFragment extends Fragment {
         txtLive = v.findViewById(R.id.txtLive);
         txtQtyNet = v.findViewById(R.id.txtQtyNet);
         txtQtyGross = v.findViewById(R.id.txtQtyGross);
+        txtDecimalsInfo = v.findViewById(R.id.txtDecimalsInfo);
         txtDeliveryUid = v.findViewById(R.id.txtDeliveryUid);
         btnReprintTicket = v.findViewById(R.id.btnReprintTicket);
         btnRetourWO      = v.findViewById(R.id.btnRetourWO);

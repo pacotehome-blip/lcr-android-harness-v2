@@ -389,6 +389,21 @@
                             android:textSize="18sp"
                             android:textColor="#222222"
                             android:layout_marginTop="4dp" />
+
+                        <!-- ✅ AJOUTÉ (27 août 2026, demande Paul — "ce n'est
+                             pas un trouble de registre, je vois 11,5 je
+                             devrais avoir 11,5 dans le net... afin de
+                             retrouver facilement") — décimales réellement
+                             utilisées, visible directement, sans avoir
+                             besoin d'un log complet pour vérifier. -->
+                        <TextView
+                            android:id="@+id/txtDecimalsInfo"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Décimales : —"
+                            android:textSize="12sp"
+                            android:textColor="#666666"
+                            android:layout_marginTop="2dp" />
                     </LinearLayout>
 
                     <!-- Droite : cumul WO — visible si WO déjà complété -->
