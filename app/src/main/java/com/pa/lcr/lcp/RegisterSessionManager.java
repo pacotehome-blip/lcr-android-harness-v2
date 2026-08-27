@@ -579,6 +579,9 @@ public final class RegisterSessionManager {
         // if (existing != null).
         DeliveryState ancienEtatPourTransfert = null;
         String ancienJobIdPourTransfert = null;
+        // ✅ AJOUTÉ (27 août 2026, demande Paul — "le registre montre 11,5
+        // au lieu de 1.15") — même principe, pour cachedDigits cette fois.
+        int ancienDigitsPourTransfert = -1;
 
         if (existing != null) {
             // ✅ FIX (le vrai bug) : avant de réutiliser aveuglément une session
@@ -685,8 +688,11 @@ public final class RegisterSessionManager {
                     (existing != null && existing.dc != null) ? existing.dc.getState() : null;
             final String ancienJobIdCapture =
                     (existing != null && existing.dc != null) ? existing.dc.getLastActiveJobId() : null;
+            final int ancienDigitsCapture =
+                    (existing != null && existing.dc != null) ? existing.dc.getCachedDigitsPourTransfert() : -1;
             ancienEtatPourTransfert = ancienEtatCapture;
             ancienJobIdPourTransfert = ancienJobIdCapture;
+            ancienDigitsPourTransfert = ancienDigitsCapture;
             try { existing.scheduler.shutdown(); } catch (Exception ignored) {}
             try { existing.dc.shutdown(false); } catch (Exception ignored) {}
             sessions.remove(k);
@@ -787,6 +793,15 @@ public final class RegisterSessionManager {
                 LogBus.api(node, "[SESSION] état transféré au nouveau contrôleur après remplacement: "
                         + ancienEtatPourTransfert + " — livraison toujours active, pas de faux \"aucune livraison en cours\"");
             }
+        }
+        // ✅ AJOUTÉ (27 août 2026, demande Paul — "le registre montre 11,5
+        // au lieu de 1.15") — évite une nouvelle lecture des décimales
+        // pendant l'instabilité d'une reconnexion, en réutilisant la
+        // valeur déjà connue et fiable de l'ancien contrôleur.
+        if (ancienDigitsPourTransfert >= 0) {
+            dc.adopterDigitsTransferes(ancienDigitsPourTransfert);
+            LogBus.api(node, "[SESSION] cachedDigits transféré au nouveau contrôleur après remplacement: "
+                    + ancienDigitsPourTransfert + " — évite une relecture pendant l'instabilité de reconnexion");
         }
 
         NodeScheduler scheduler = new NodeScheduler(node);

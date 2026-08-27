@@ -999,6 +999,24 @@ private void reproEvent(String level, String type, String message, JSONObject da
             this.state = etatTransfere;
         }
     }
+    // ✅ AJOUTÉ (27 août 2026, demande Paul — "le registre montre 11,5 au
+    // lieu de 1.15" — trouvé, en lien direct avec le remplacement de
+    // contrôleur déjà corrigé) — cachedDigits ne se lit qu'UNE FOIS, mise
+    // en cache pour la vie du contrôleur. Un nouveau contrôleur (créé lors
+    // d'un remplacement pendant une reconnexion) repart à -1 et doit
+    // RELIRE les décimales depuis le registre — exactement au moment le
+    // moins fiable pour une communication propre (BT en pleine
+    // reconnexion). Si cette relecture retourne la mauvaise valeur
+    // (ex: 2 au lieu de 1), l'échelle devient 100 au lieu de 10 — un
+    // facteur 10 exact sur tous les net/gross affichés ensuite. Transfère
+    // maintenant la valeur déjà connue et fiable de l'ancien contrôleur,
+    // au lieu de risquer une nouvelle lecture pendant l'instabilité.
+    public int getCachedDigitsPourTransfert() { return cachedDigits; }
+    public void adopterDigitsTransferes(int digitsTransferes) {
+        if (digitsTransferes >= 0 && digitsTransferes <= 6) {
+            this.cachedDigits = digitsTransferes;
+        }
+    }
     
     public DeliveryController(LcpLink link) {
         this.link = link;

@@ -526,7 +526,14 @@ public class RegisterTabFragment extends Fragment {
     // mode DÉGRADÉ (produit par défaut, pas de vrai scan) et compter quand
     // même comme approuvée.
     private enum InitSectionStatus { EN_ATTENTE, EN_COURS, OK, DEGRADE, ECHEC }
-    private enum InitSection { REGISTRE, PRODUIT, PRESET, LIVE, RETOUR_WO, ACTION }
+    // ✅ ÉLARGI (27 août 2026, demande Paul — "il devrait y en avoir 7,
+    // celui de la comparaison produit du ticket précédent si BD vierge...
+    // j'avais le bon produit dès le départ, je ne sais pas pourquoi") —
+    // trouvé : cette comparaison existait déjà (lireActiveProductDepuisDeliverySummary),
+    // mais tournait de façon complètement asynchrone, en dehors de la
+    // séquence numérotée visible — invisible, sans étape propre. Ajoutée
+    // ici comme vraie 7e section, synchrone, journalisée comme les autres.
+    private enum InitSection { REGISTRE, PRODUIT, COMPARAISON_TICKET, PRESET, LIVE, RETOUR_WO, ACTION }
     private final java.util.Map<InitSection, InitSectionStatus> initSectionStatus =
             new java.util.concurrent.ConcurrentHashMap<>();
     private static final int INIT_MAX_RETRIES = 3;
@@ -567,9 +574,9 @@ public class RegisterTabFragment extends Fragment {
         // seulement PRESET) n'allait qu'au logcat, jamais à Support. C'est
         // pour ça qu'aucune trace de section n'apparaissait dans aucun des
         // logs envoyés aujourd'hui, malgré tout le reste déjà corrigé.
-        LogBus.api(node, "[INIT " + idx + "/6] " + section.name() + " — " + result
+        LogBus.api(node, "[INIT " + idx + "/7] " + section.name() + " — " + result
                 + " (statut=" + (st != null ? st.name() : "?") + ")");
-        android.util.Log.i("InitSeq", "[INIT " + idx + "/6] " + section.name() + " — " + result
+        android.util.Log.i("InitSeq", "[INIT " + idx + "/7] " + section.name() + " — " + result
                 + " (statut=" + (st != null ? st.name() : "?") + ")");
         // ✅ AJOUTÉ (14 août 2026) — même signal, texte amical pour le
         // chauffeur au lieu du format technique du log.
@@ -829,8 +836,61 @@ public class RegisterTabFragment extends Fragment {
             }
             if (etatLivraisonActiveDetecte("runInitSequence (après PRODUIT)")) return;
 
+            // ✅ AJOUTÉ (27 août 2026, demande Paul — "il devrait y en avoir
+            // 7... j'avais le bon produit dès le départ, je ne sais pas
+            // pourquoi") — nouvelle section, synchrone, visible. Ne
+            // remplace pas la logique existante (le repli async dans
+            // lancerScanProduits reste en place, pour le cas où le scan
+            // matériel n'a pas encore de cache) — celle-ci donne une
+            // PREMIÈRE tentative rapide, synchrone, journalisée
+            // clairement comme une vraie étape numérotée, avant même que
+            // le scan matériel ne parte.
+            runSectionWithRetry(InitSection.COMPARAISON_TICKET, 3, true, () -> {
+                if (serialFromArgs == null || serialFromArgs.trim().isEmpty()) return false;
+                org.json.JSONObject backupPayload = lireActiveProductDepuisDeliverySummary(
+                        lastKnownTicketNo, serialFromArgs.trim());
+                if (backupPayload == null) {
+                    LogBus.api(node, "[COMPARAISON_TICKET] aucune correspondance trouvée dans delivery_summary "
+                            + "pour serial=" + serialFromArgs + " ticket=" + lastKnownTicketNo);
+                    return false;
+                }
+                int idxTrouve = backupPayload.optInt("active_product", -1);
+                double presetTrouve = backupPayload.optDouble("preset_net_l", -1);
+                LogBus.api(node, "[COMPARAISON_TICKET] trouvé — produit=" + idxTrouve
+                        + " preset=" + presetTrouve + "L (dernier ticket connu, BD vierge)");
+                if (idxTrouve > 0 && idxTrouve <= 16) {
+                    initValidatedProductIdx = idxTrouve - 1;
+                    produitDejaResoluPourCetteSession = true;
+                    // ✅ AJOUTÉ (27 août 2026, demande Paul — "le produit et
+                    // preset qui n'avait pas été fait comme il faut") —
+                    // trouvé : cette section marquait produitDejaResoluPourCetteSession
+                    // à true, ce qui bloquait ensuite lancerScanProduits()
+                    // (l'ancien mécanisme qui, lui, appliquait vraiment le
+                    // preset à l'écran) — les valeurs étaient trouvées mais
+                    // jamais affichées. Appliqué directement ici maintenant,
+                    // à l'écran, pas juste en interne.
+                    final int idxPourUi = idxTrouve;
+                    final double presetPourUi = presetTrouve;
+                    if (ui != null) {
+                        ui.post(() -> {
+                            if (!isAdded() || getView() == null) return;
+                            if (spnProduct != null && idxPourUi >= 1 && idxPourUi <= spnProduct.getCount()) {
+                                spnProduct.setSelection(idxPourUi - 1);
+                            }
+                            if (presetPourUi > 0 && edtPreset != null) {
+                                edtPreset.setText(String.valueOf(presetPourUi));
+                            }
+                            LogBus.api(node, "[COMPARAISON_TICKET] appliqué à l'écran — produit index="
+                                    + idxPourUi + " preset=" + presetPourUi + "L");
+                        });
+                    }
+                }
+                return idxTrouve > 0;
+            });
+            if (etatLivraisonActiveDetecte("runInitSequence (après COMPARAISON_TICKET)")) return;
+
             // 2) PRESET — VALIDÉ et affiché, pas écrit au registre ici.
-            runSectionWithRetry(InitSection.PRESET, 2, true, () -> {
+            runSectionWithRetry(InitSection.PRESET, 4, true, () -> {
                 String presetStr = (getArguments() != null) ? getArguments().getString("preset") : null;
                 double presetL = 0.0;
                 try { if (presetStr != null && !presetStr.isEmpty()) presetL = Double.parseDouble(presetStr); }
@@ -846,7 +906,7 @@ public class RegisterTabFragment extends Fragment {
             if (etatLivraisonActiveDetecte("runInitSequence (après PRESET)")) return;
 
             // 3) LIVE — net/gross, tickets liés, CONNECTED READY
-            runSectionWithRetry(InitSection.LIVE, 3, false, () -> {
+            runSectionWithRetry(InitSection.LIVE, 5, false, () -> {
                 if (controller == null) return false;
                 controller.requestLiveSample();
                 return true;
@@ -854,7 +914,7 @@ public class RegisterTabFragment extends Fragment {
             if (etatLivraisonActiveDetecte("runInitSequence (après LIVE)")) return;
 
             // 4) RETOUR_WO — WO lié au ticket_number/sale_number
-            runSectionWithRetry(InitSection.RETOUR_WO, 4, false, () -> {
+            runSectionWithRetry(InitSection.RETOUR_WO, 6, false, () -> {
                 rechercherWoDepuisRegistre();
                 return true;
             });
@@ -862,7 +922,7 @@ public class RegisterTabFragment extends Fragment {
 
             // 5) ACTION — activée seulement après affichage de LIVE
             initSectionStatus.put(InitSection.ACTION, InitSectionStatus.OK);
-            initSectionLog(InitSection.ACTION, 5, "activée");
+            initSectionLog(InitSection.ACTION, 7, "activée");
           } finally {
             LogBus.api(node, "[INIT-TIMING] finally atteint — flag remis à false — +"
                 + (System.currentTimeMillis() - initStartMs) + "ms depuis le démarrage");
