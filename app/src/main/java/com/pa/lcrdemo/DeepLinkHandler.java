@@ -1480,6 +1480,11 @@ public class DeepLinkHandler {
                                             cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID, serialId.trim());
                                         }
                                         cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_LCRNODE, node);
+                                        // ✅ AJOUTÉ (27 août 2026, demande Paul —
+                                        // "si on a l'adresse mac du BT on le veut aussi")
+                                        if (mac != null && !mac.trim().isEmpty()) {
+                                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_BTMAC, mac.trim());
+                                        }
                                         cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
                                             ticketChanged ? "TICKET_CHANGE" : "ERROR");
                                         cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_ERROR_CODE,
@@ -1586,6 +1591,11 @@ public class DeepLinkHandler {
                                         cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID, serialId.trim());
                                     }
                                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_LCRNODE, node);
+                                    // ✅ AJOUTÉ (27 août 2026, demande Paul —
+                                    // "si on a l'adresse mac du BT on le veut aussi")
+                                    if (mac != null && !mac.trim().isEmpty()) {
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_BTMAC, mac.trim());
+                                    }
                                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
                                         ticketChanged2 ? "TICKET_CHANGE" : "ERROR");
                                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_ERROR_CODE,

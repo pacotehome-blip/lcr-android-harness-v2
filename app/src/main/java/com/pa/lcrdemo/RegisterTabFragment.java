@@ -846,6 +846,18 @@ public class RegisterTabFragment extends Fragment {
     private volatile boolean pendingReconnect = false;
     private volatile String tabMediaShort = "—";
     private String serialFromArgs = null;
+
+    // ✅ AJOUTÉ (27 août 2026, demande Paul — "si on a l'adresse mac du BT
+    // on le veut aussi") — même principe que serial_id/lcrnode/wo_id_guid
+    // corrigés le 26 août : extrait le MAC directement de tabTransportKey
+    // (format "BT:00:01:95:87:72:A1") plutôt que de dépendre d'un champ
+    // séparé qui pourrait ne jamais être peuplé. Retourne null pour USB/TCP
+    // (pas de MAC pertinent dans ce cas).
+    private String extraireMacDuTransportKey() {
+        if (tabTransportKey == null || !tabTransportKey.startsWith("BT:")) return null;
+        String mac = tabTransportKey.substring(3).trim();
+        return mac.isEmpty() ? null : mac;
+    }
     private String transportFromArgs = null;
     private boolean starting = false;
     // ✅ Scan auto produits (4 août 2026, demande Paul) — évite un déclenchement
@@ -1579,6 +1591,12 @@ public class RegisterTabFragment extends Fragment {
                         cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID,
                             serialFromArgs != null ? serialFromArgs : "");
                         cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_LCRNODE, node);
+                        // ✅ AJOUTÉ (27 août 2026, demande Paul — "si on a
+                        // l'adresse mac du BT on le veut aussi")
+                        String macDiag = extraireMacDuTransportKey();
+                        if (macDiag != null) {
+                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_BTMAC, macDiag);
+                        }
                         cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO, ticketNoForUid);
                         cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE, "DIAGNOSTIC_RESET");
                         cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE, "REGISTRE");
@@ -2113,6 +2131,12 @@ public class RegisterTabFragment extends Fragment {
                             cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID, serialFromArgs.trim());
                         }
                         cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_LCRNODE, node);
+                        // ✅ AJOUTÉ (27 août 2026, demande Paul — "si on a
+                        // l'adresse mac du BT on le veut aussi")
+                        String macFiletSecurite = extraireMacDuTransportKey();
+                        if (macFiletSecurite != null) {
+                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_BTMAC, macFiletSecurite);
+                        }
                         lcrDb.insertDelivery(cv);
                     }
                     // Rafraîchir le cumul WO après insertion
