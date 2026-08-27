@@ -496,15 +496,35 @@ public class DeliveryLogStore {
     }
 
     public long openAttempt(String serialId, String ticketNo, String source, String jobId) {
-        long now = System.currentTimeMillis();
-        SQLiteDatabase db = helper.getWritableDatabase();
-        ContentValues cv = new ContentValues();
-        cv.put("serial_id", serialId);
-        cv.put("ticket_no", ticketNo);
-        cv.put("source", source);
-        cv.put("job_id", jobId);
-        cv.put("start_ts", now);
-        return db.insert("delivery_attempt", null, cv);
+        // ✅ AJOUTÉ (27 août 2026, demande Paul — "je veux savoir c'est quoi
+        // qui cause de la lenteur pendant le running_flowing... regarde ligne
+        // par ligne") — TROUVÉ, confirmé par vraie erreur SQLite dans le
+        // logcat : aucun try/catch ici. Quand la contrainte FOREIGN KEY
+        // (serial_id, ticket_no) → delivery_summary(serial_id, ticket_no)
+        // échoue — ce qui arrive à CHAQUE logDeliveryStart() par deep link,
+        // puisqu'il utilise le numéro de WO comme ticket_no temporaire,
+        // avant qu'un vrai ticket ne soit connu — l'exception remontait NON
+        // CAPTURÉE jusqu'au thread de travail de cet exécuteur mono-thread,
+        // le tuant. L'exécuteur doit en recréer un nouveau à chaque fois —
+        // un coût réel et répété, en plus de rester complètement invisible
+        // (seul logcat le montrait, jamais Support). Capturé maintenant,
+        // journalisé clairement, ne fait plus jamais mourir le thread.
+        try {
+            long now = System.currentTimeMillis();
+            SQLiteDatabase db = helper.getWritableDatabase();
+            ContentValues cv = new ContentValues();
+            cv.put("serial_id", serialId);
+            cv.put("ticket_no", ticketNo);
+            cv.put("source", source);
+            cv.put("job_id", jobId);
+            cv.put("start_ts", now);
+            return db.insert("delivery_attempt", null, cv);
+        } catch (Exception e) {
+            android.util.Log.w("DeliveryLogStore", "openAttempt: échec (serial=" + serialId
+                    + " ticket=" + ticketNo + " source=" + source + "): " + e.getMessage());
+            try { com.pa.lcr.lcp.log.LogBus.err(0, "DeliveryLogStore.openAttempt", e); } catch (Exception ignored) {}
+            return -1;
+        }
     }
 
     public void closeAttemptAsync(long attemptId, String outcome, String resultJson, String errorJson) {
@@ -623,33 +643,48 @@ public class DeliveryLogStore {
 
     public void addEvent(long attemptId, String level, String type, String message, String dataJson,
                          String eventLevel, String eventCode, String eventWhere, String detailShort) {
-
-        long now = System.currentTimeMillis();
-        SQLiteDatabase db = helper.getWritableDatabase();
-
-        StructuredFields sf = null;
-        if (eventLevel == null || eventCode == null || eventWhere == null || detailShort == null) {
-            sf = extractStructuredFromJson(dataJson);
+        // ✅ AJOUTÉ (27 août 2026, demande Paul) — même correctif que
+        // openAttempt() ci-dessus, même contrainte FOREIGN KEY (attempt_id).
+        // Si l'ouverture de l'attempt a échoué (attemptId=-1, voir
+        // openAttempt), ne tente même pas cette insertion — elle
+        // échouerait de toute façon, inutilement.
+        if (attemptId <= 0) {
+            android.util.Log.w("DeliveryLogStore", "addEvent: sauté — attemptId invalide (" + attemptId
+                    + "), l'ouverture de l'attempt avait probablement échoué");
+            return;
         }
-        String evLevel = (eventLevel != null) ? trimOrNull(eventLevel) : (sf != null ? sf.eventLevel : null);
-        String evCode = (eventCode != null) ? trimOrNull(eventCode) : (sf != null ? sf.eventCode : null);
-        String evWhere = (eventWhere != null) ? trimOrNull(eventWhere) : (sf != null ? sf.eventWhere : null);
-        String det = (detailShort != null) ? trunc(detailShort, 240) : (sf != null ? sf.detailShort : null);
+        try {
+            long now = System.currentTimeMillis();
+            SQLiteDatabase db = helper.getWritableDatabase();
 
-        ContentValues cv = new ContentValues();
-        cv.put("attempt_id", attemptId);
-        cv.put("ts", now);
-        cv.put("level", level);
-        cv.put("type", type);
-        cv.put("message", message);
-        cv.put("data_json", dataJson);
+            StructuredFields sf = null;
+            if (eventLevel == null || eventCode == null || eventWhere == null || detailShort == null) {
+                sf = extractStructuredFromJson(dataJson);
+            }
+            String evLevel = (eventLevel != null) ? trimOrNull(eventLevel) : (sf != null ? sf.eventLevel : null);
+            String evCode = (eventCode != null) ? trimOrNull(eventCode) : (sf != null ? sf.eventCode : null);
+            String evWhere = (eventWhere != null) ? trimOrNull(eventWhere) : (sf != null ? sf.eventWhere : null);
+            String det = (detailShort != null) ? trunc(detailShort, 240) : (sf != null ? sf.detailShort : null);
 
-        cv.put("event_level", evLevel);
-        cv.put("event_code", evCode);
-        cv.put("event_where", evWhere);
-        cv.put("detail_short", det);
+            ContentValues cv = new ContentValues();
+            cv.put("attempt_id", attemptId);
+            cv.put("ts", now);
+            cv.put("level", level);
+            cv.put("type", type);
+            cv.put("message", message);
+            cv.put("data_json", dataJson);
 
-        db.insert("delivery_event", null, cv);
+            cv.put("event_level", evLevel);
+            cv.put("event_code", evCode);
+            cv.put("event_where", evWhere);
+            cv.put("detail_short", det);
+
+            db.insert("delivery_event", null, cv);
+        } catch (Exception e) {
+            android.util.Log.w("DeliveryLogStore", "addEvent: échec (attemptId=" + attemptId
+                    + " type=" + type + "): " + e.getMessage());
+            try { com.pa.lcr.lcp.log.LogBus.err(0, "DeliveryLogStore.addEvent", e); } catch (Exception ignored) {}
+        }
     }
 
     // =========================================================
