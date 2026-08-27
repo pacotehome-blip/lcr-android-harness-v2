@@ -2095,8 +2095,31 @@ public class DeepLinkHandler {
     private void logDeliveryEnd(String serialId, String woNum, String jobId,
                                  String outcome, String resultJson, String errorJson) {
         if (deliveryStore == null || serialId == null || serialId.isEmpty()) return;
+        // ✅ CORRIGÉ (27 août 2026, demande Paul — "si on est plus dans la
+        // fiche de départ pour x raison, il n'y a aucun dépôt payload dans
+        // le champ résumé") — trouvé : cette écriture indexait toujours
+        // par woNum, jamais le vrai ticket_no du registre — alors que
+        // resultJson (extraJson) contient déjà le vrai ticket_no à
+        // l'intérieur (construit par api_deliveryJobGet()). Si le chemin
+        // normal de complétion (DeliveryController, indexé par le vrai
+        // ticket_no) n'atteint jamais son écriture pour une raison
+        // quelconque (contexte de livraison perdu), cette ligne-ci —
+        // indexée par woNum — devenait la SEULE trace, mais introuvable
+        // par toute recherche basée sur le vrai ticket (comme
+        // getLatestResultByTicketNo() construite hier). Extrait le vrai
+        // ticket_no du payload quand disponible, repli sur woNum sinon.
+        String ticketNoReel = woNum;
+        if (resultJson != null && !resultJson.trim().isEmpty()) {
+            try {
+                org.json.JSONObject rj = new org.json.JSONObject(resultJson);
+                String t = rj.optString("ticket_no", null);
+                if (t != null && !t.trim().isEmpty() && !"0".equals(t.trim())) {
+                    ticketNoReel = t.trim();
+                }
+            } catch (Exception ignored) {}
+        }
         deliveryStore.upsertSummaryAsync(
-            serialId, woNum != null ? woNum : "DEEPLINK",
+            serialId, ticketNoReel != null ? ticketNoReel : "DEEPLINK",
             null, outcome, DeliveryLogStore.SOURCE_API,
             jobId, resultJson, errorJson);
     }
