@@ -1,7 +1,7 @@
 package com.pa.lcr.lcp;
 
 // ═══════════════════════════════════════════════════════════════════════
-// COMPATIBILITÉ ANDROID : API 28 (Android 9) → API 35 (Android 15)
+//   COMPATIBILITÉ ANDROID : API 28 (Android 9) → API 35 (Android 15)
 // ───────────────────────────────────────────────────────────────────────
 // Toute modification de ce fichier doit être testée sur :
 //   · Android 9  (API 28) — Samsung SM-T397U  · ADB 192.168.134.105:5555
