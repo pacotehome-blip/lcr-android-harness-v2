@@ -874,8 +874,8 @@ public class RegisterTabFragment extends Fragment {
                     if (ui != null) {
                         ui.post(() -> {
                             if (!isAdded() || getView() == null) return;
-                            if (spnProduct != null && idxPourUi >= 1 && idxPourUi <= spnProduct.getCount()) {
-                                spnProduct.setSelection(idxPourUi - 1);
+                            if (spnProduct != null && idxPourUi >= 1 && idxPourUi <= 16) {
+                                spnProduct.setText(String.valueOf(idxPourUi), false);
                             }
                             if (presetPourUi > 0 && edtPreset != null) {
                                 edtPreset.setText(String.valueOf(presetPourUi));
