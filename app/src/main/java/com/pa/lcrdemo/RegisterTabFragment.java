@@ -1362,8 +1362,19 @@ public class RegisterTabFragment extends Fragment {
 
         @Override
         public void onLiveQty(double net, double gross) {
+            // ✅ CORRIGÉ (27 août 2026, demande Paul — "je veux le voir dans
+            // le logcat pas ailleurs") — android.util.Log seulement
+            // (logcat), pas LogBus (Support). Capturé au moment du vrai
+            // callback, avant ui.post(), pour comparer avec le moment du
+            // rendu réel à l'écran plus bas.
+            final long seqRecu = qtyDisplaySeq.incrementAndGet();
+            final long tsRecu = System.currentTimeMillis();
+            android.util.Log.i("QTY-CALLBACK", "#" + seqRecu + " reçu par le fragment — net=" + net + " gross=" + gross);
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
+                long delaiMs = System.currentTimeMillis() - tsRecu;
+                android.util.Log.i("QTY-AFFICHE", "#" + seqRecu + " vraiment rendu à l'écran — net=" + net
+                        + " gross=" + gross + " (délai depuis callback=" + delaiMs + "ms)");
                 int d = lastDigits;
                 try { if (controller != null) d = controller.getDisplayDigits(); } catch (Exception ignored) {}
                 if (d < 0) d = 3;
@@ -3379,6 +3390,10 @@ public class RegisterTabFragment extends Fragment {
     // résultat du DERNIER appel démarré a le droit d'appliquer sa
     // décision à l'écran.
     private final java.util.concurrent.atomic.AtomicLong updateButtonsSeq =
+        new java.util.concurrent.atomic.AtomicLong(0);
+    // ✅ AJOUTÉ (27 août 2026, demande Paul — "on doit être capable de
+    // lire l'évolution") — compteur pour [QTY-CALLBACK]/[QTY-AFFICHE].
+    private final java.util.concurrent.atomic.AtomicLong qtyDisplaySeq =
         new java.util.concurrent.atomic.AtomicLong(0);
 
     private void updateButtons(DeliveryState state) {
