@@ -397,6 +397,9 @@ public class RegisterTabFragment extends Fragment {
     private int from = 255;
 
     private TextView txtLcrNode, txtFrom, txtSerialId, txtTicketNo, txtTicketPending;
+    // ✅ AJOUTÉ (27 août 2026, demande Paul — "afficher le sales_number...
+    // souligner lequel est utilisé")
+    private TextView txtSaleNo;
     private TextView txtDeliveryUid;
     private TextView txtLive, txtQtyNet, txtQtyGross;
     private android.widget.AutoCompleteTextView spnProduct;
@@ -460,6 +463,35 @@ public class RegisterTabFragment extends Fragment {
     // (initSectionLog) — pas un système séparé, juste un deuxième récepteur
     // du même signal.
     private android.widget.TextView txtInitGuide;
+
+    // ✅ AJOUTÉ (27 août 2026, demande Paul — "afficher le sales_number...
+    // et mettre en souligné lequel est utilisé, comme ça le Support ne
+    // cherchera pas la source du ticket_number envoyé à Dataverse") —
+    // affiche les deux valeurs côte à côte dans le tab, avec un vrai
+    // soulignement (SpannableString) sur celle réellement utilisée comme
+    // identifiant final — visible directement à l'écran, sans fouiller
+    // les logs. Appelée partout où txtTicketNo était mis à jour.
+    private void afficherTicketEtSaleNumberAvecSoulignement(String ticketNo) {
+        if (txtTicketNo == null) return;
+        boolean estRepliSaleNumber = controller != null && controller.isDernierTicketSaleNumberFallback();
+        String saleNo = controller != null ? controller.getDernierSaleNoConnu() : null;
+
+        String texteTicket = "Ticket Number : " + (ticketNo == null ? "—" : ticketNo);
+        android.text.SpannableString spanTicket = new android.text.SpannableString(texteTicket);
+        if (!estRepliSaleNumber && ticketNo != null) {
+            spanTicket.setSpan(new android.text.style.UnderlineSpan(), 0, texteTicket.length(), 0);
+        }
+        txtTicketNo.setText(spanTicket);
+
+        if (txtSaleNo != null) {
+            String texteSale = "Sale Number : " + (saleNo == null ? "—" : saleNo);
+            android.text.SpannableString spanSale = new android.text.SpannableString(texteSale);
+            if (estRepliSaleNumber && saleNo != null) {
+                spanSale.setSpan(new android.text.style.UnderlineSpan(), 0, texteSale.length(), 0);
+            }
+            txtSaleNo.setText(spanSale);
+        }
+    }
 
     private void showInitGuide(String texteAmical) {
         if (ui == null) return;
@@ -1380,6 +1412,31 @@ public class RegisterTabFragment extends Fragment {
             // pouvoir la réappliquer si la vue se recrée avant le prochain push.
             if (ticketNo != null && !ticketNo.trim().isEmpty()) {
                 boolean ticketVientJusteDetreConnu = !ticketNo.trim().equals(lastKnownTicketNo);
+                // ✅ AJOUTÉ (27 août 2026, demande Paul — "si je suis
+                // actuellement à 95 et que je fais NEW, c'est certain que je
+                // vais tomber sur 96... impossible de retomber sur 95 après
+                // la livraison") — les tickets doivent toujours progresser,
+                // jamais reculer. Un nouveau ticket inférieur ou égal au
+                // précédent est un vrai signal d'anomalie — exactement le
+                // genre de confusion qu'on a trouvée avec 93/94 aujourd'hui.
+                // Détecte, journalise clairement — ne bloque rien
+                // automatiquement (le vrai registre a le dernier mot), mais
+                // rend l'anomalie visible immédiatement plutôt que de la
+                // découvrir après coup dans Dataverse.
+                if (ticketVientJusteDetreConnu && lastKnownTicketNo != null && !lastKnownTicketNo.trim().isEmpty()) {
+                    try {
+                        long ancien = Long.parseLong(lastKnownTicketNo.trim());
+                        long nouveau = Long.parseLong(ticketNo.trim());
+                        if (nouveau <= ancien) {
+                            LogBus.api(node, "[TICKET-ANOMALIE] Nouveau ticket=" + nouveau
+                                + " <= ancien ticket connu=" + ancien + " — les tickets doivent toujours "
+                                + "progresser, ceci est suspect (lecture transitoire fausse probable, "
+                                + "voir incident 93/94 du 27 août)");
+                        }
+                    } catch (NumberFormatException ignored) {
+                        // Non-numérique (ex: horodatage de repli sur registre réinitialisé) — pas comparable, ignoré.
+                    }
+                }
                 lastKnownTicketNo = ticketNo;
                 // ✅ AJOUTÉ (25 août 2026, demande Paul — "le scan est
                 // terminé mais je n'ai toujours pas de mappage avec le
@@ -1410,7 +1467,7 @@ public class RegisterTabFragment extends Fragment {
             }
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
-                if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : " + (ticketNo == null ? "—" : ticketNo));
+                afficherTicketEtSaleNumberAvecSoulignement(ticketNo);
                 if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : " + (deliveryUid == null ? "—" : deliveryUid));
                 ensureSerialVisibleThrottled();
                 refreshDelCodeFromTickSnapshotThrottled();
@@ -1845,6 +1902,7 @@ public class RegisterTabFragment extends Fragment {
         txtFrom = v.findViewById(R.id.txtFrom);
         txtSerialId = v.findViewById(R.id.txtSerialId);
         txtTicketNo = v.findViewById(R.id.txtTicketNo);
+        txtSaleNo = v.findViewById(R.id.txtSaleNo);
         txtTicketPending = v.findViewById(R.id.txtTicketPending);
         spnProduct = v.findViewById(R.id.spnProduct);
         if (spnProduct != null) {

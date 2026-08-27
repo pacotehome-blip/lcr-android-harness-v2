@@ -589,6 +589,14 @@ private void reproEvent(String level, String type, String message, JSONObject da
     public volatile double  netAtDeliveryEnd   = -1.0;
     public volatile double  grossAtDeliveryEnd = -1.0;
     public volatile String  ticketNoAtEnd      = null; private volatile Long currentDeliveryAttemptId = null;
+    // ✅ AJOUTÉ (27 août 2026, demande Paul — "afficher le sales_number...
+    // et souligner lequel est utilisé, comme ça le Support ne cherchera
+    // pas la source") — vrai à chaque fois que la dernière lecture de
+    // ticket a dû retomber sur sale_number (Field #23=0). Exposé via
+    // getter pour que le tab sache directement quoi souligner, sans avoir
+    // à comparer les deux valeurs lui-même.
+    public volatile boolean dernierTicketEstSaleNumberFallback = false;
+    public boolean isDernierTicketSaleNumberFallback() { return dernierTicketEstSaleNumberFallback; }
  private volatile long deliveryStartMs = 0L;
 // LIVE
     private volatile boolean flowOffStable = false;
@@ -2755,6 +2763,7 @@ softResync("retry/" + step);
             try {
                 String saleNo = readSaleNo22();
                 if (!"0".equals(saleNo)) {
+                    dernierTicketEstSaleNumberFallback = true; // ✅ AJOUTÉ (27 août 2026)
                     // ✅ CORRIGÉ (27 août 2026, demande Paul — "on doit être
                     // certain de voir si c'est sales_number vs ticket_number")
                     // — android.util.Log seul, invisible dans Support. La
@@ -2789,10 +2798,22 @@ softResync("retry/" + step);
                 android.util.Log.w("DeliveryController", "readTicketNo23: vérification du repli SaleNumber ERR: " + e.getMessage());
                 try { com.pa.lcr.lcp.log.LogBus.err(resolveLcpNode(), "DeliveryController.readTicketNo23", e); } catch (Exception ignored) {}
             }
+        } else {
+            dernierTicketEstSaleNumberFallback = false; // ✅ AJOUTÉ (27 août 2026) — vrai ticket direct, pas de repli
         }
         return tno;
     }
-    private String readSaleNo22() throws Exception { return readU32FieldAsDecString(FIELD_SALE_NUMBER); }
+    private String readSaleNo22() throws Exception {
+        String r = readU32FieldAsDecString(FIELD_SALE_NUMBER);
+        dernierSaleNoConnu = r; // ✅ AJOUTÉ (27 août 2026) — mis en cache pour affichage tab
+        return r;
+    }
+    // ✅ AJOUTÉ (27 août 2026, demande Paul — "afficher le sales_number...
+    // souligner lequel est utilisé") — dernière valeur connue, mise à jour
+    // à chaque lecture réelle. Exposé pour que le tab puisse l'afficher
+    // sans avoir à refaire sa propre lecture LCP séparée.
+    public volatile String dernierSaleNoConnu = null;
+    public String getDernierSaleNoConnu() { return dernierSaleNoConnu; }
 
     // =========================
     // Error handling / resync
@@ -5024,9 +5045,30 @@ private String resolveActiveMedia() {
          String ticketNo = null;
          String saleNo = null;
          try { serialId = decodeAzString(lcpGetField(FIELD_SERIAL_ID)); } catch (Exception ignored) {}
-         try { ticketNo = readTicketNo23(); } catch (Exception ignored) {}
+         try { ticketNo = readTicketNo23Uncached(); } catch (Exception ignored) {}
          try { ticketNoAtEnd = ticketNo; } catch (Exception ignored) {} // ✅ mémoriser pour alerte fuite
          try { saleNo = readSaleNo22(); } catch (Exception ignored) {}
+
+         // ✅ AJOUTÉ (27 août 2026, demande Paul — "il ne s'ajuste pas à la
+         // fin de la livraison dans le tab, il faut que je supprime le tab
+         // pour voir le changement") — trouvé, confirmé : le tick rapide
+         // (celui qui tourne pendant RUNNING_FLOWING) ne lit JAMAIS le
+         // ticket, et s'arrête complètement dès que la livraison se
+         // termine. Rien ne relit le ticket automatiquement après —
+         // exactement pourquoi il fallait supprimer le tab. On avertit
+         // maintenant le tab ici, avec la vraie valeur fraîche (héritant
+         // déjà du repli ticket→sale_no via readTicketNo23Uncached, pas la
+         // version cache), pour que l'affichage se mette à jour tout seul.
+         try {
+             if (listener != null && ticketNo != null && !ticketNo.trim().isEmpty()) {
+                 String uidFinDeLivraison = null;
+                 String n = lastNumeroLivraison;
+                 if (n != null && !n.trim().isEmpty()) {
+                     uidFinDeLivraison = n.trim() + "-" + ticketNo.trim();
+                 }
+                 listener.onTicketInfo(ticketNo, uidFinDeLivraison);
+             }
+         } catch (Exception ignored) {}
 
          if (serialId == null || serialId.trim().isEmpty()) serialId = "__UNKNOWN__";
          if (ticketNo == null || ticketNo.trim().isEmpty()) ticketNo = "TICKET-UNKNOWN";

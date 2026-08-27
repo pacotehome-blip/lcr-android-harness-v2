@@ -73,6 +73,19 @@
                     android:text="Ticket Number : —"
                     android:layout_marginTop="2dp" />
 
+                <!-- ✅ AJOUTÉ (27 août 2026, demande Paul — "je pense qu'on
+                     doit afficher le sales_number... et mettre en souligné
+                     lequel est utilisé, comme ça le Support ne cherchera
+                     pas la source du ticket_number envoyé à Dataverse") —
+                     les deux valeurs affichées côte à côte, celle
+                     réellement utilisée soulignée directement dans le tab. -->
+                <TextView
+                    android:id="@+id/txtSaleNo"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Sale Number : —"
+                    android:layout_marginTop="2dp" />
+
                 <!-- Ticket pending en évidence -->
                 <TextView
                     android:id="@+id/txtTicketPending"
