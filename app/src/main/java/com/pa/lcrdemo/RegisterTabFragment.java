@@ -3613,9 +3613,35 @@ public class RegisterTabFragment extends Fragment {
                             && controller.grossAtDeliveryEnd >= 0.0) {
                         netL   = controller.netAtDeliveryEnd;
                         grossL = controller.grossAtDeliveryEnd;
+                        // ✅ CORRIGÉ (27 août 2026, demande Paul — "je n'ai pas
+                        // eu de update... push avec le mauvais ticket") —
+                        // trouvé par log réel : ticketNoAtEnd vient d'une
+                        // LECTURE FRAÎCHE DIRECTE du registre (readTicketNo23,
+                        // pas cache), prise exactement quand la livraison se
+                        // termine — un moment qui peut coïncider avec une
+                        // instabilité de connexion (reconnexion en cours),
+                        // retournant une valeur transitoire fausse (confirmé :
+                        // "ticket=94" poussé vers Dataverse alors que la vraie
+                        // livraison était ticket=93, tous les deux à quelques
+                        // secondes d'une reconnexion). Ne fait plus confiance
+                        // aveuglément — compare contre lastKnownTicketNo (déjà
+                        // connu depuis le début de CETTE livraison) : un
+                        // désaccord est suspect, on garde la valeur déjà
+                        // établie plutôt que la lecture fraîche.
                         if (controller.ticketNoAtEnd != null
                                 && !controller.ticketNoAtEnd.trim().isEmpty()) {
-                            ticketNo = controller.ticketNoAtEnd;
+                            String ticketFrais = controller.ticketNoAtEnd.trim();
+                            if (lastKnownTicketNo != null && !lastKnownTicketNo.trim().isEmpty()
+                                    && !ticketFrais.equals(lastKnownTicketNo.trim())) {
+                                LogBus.api(node, "[RETOUR-WO] MÉFIANCE — ticketNoAtEnd (lecture fraîche)="
+                                    + ticketFrais + " diffère de lastKnownTicketNo (déjà établi pour cette "
+                                    + "livraison)=" + lastKnownTicketNo + " — probablement une lecture "
+                                    + "transitoire fausse (reconnexion en cours). Conservation de "
+                                    + lastKnownTicketNo + ".");
+                                ticketNo = lastKnownTicketNo.trim();
+                            } else {
+                                ticketNo = ticketFrais;
+                            }
                         }
                         android.util.Log.i("RetourWO", "Vérité registre (fin livraison) — "
                             + "ticket=" + ticketNo + " net=" + netL + " gross=" + grossL);
