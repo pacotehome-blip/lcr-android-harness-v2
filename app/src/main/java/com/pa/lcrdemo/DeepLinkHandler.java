@@ -24,7 +24,7 @@ import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 
 /**
- * DeepLinkHandler — gestion complète du flux deep link Field Service ↔ APK.
+ * D eepLinkHandler — gestion complète du flux deep link Field Service ↔ APK.
  *
  * Responsabilités :
  *  - handleDeepLink()          : parse et route le deep link entrant
