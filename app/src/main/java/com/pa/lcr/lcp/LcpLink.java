@@ -1,1411 +1,2373 @@
-package com.pa.lcr.lcp;
+package com.pa.lcrdemo;
 
-// ═══════════════════════════════════════════════════════════════════════
-// COMPATIBILITÉ ANDROID : API 28 (Android 9) → API 35 (Android 15)
-// ───────────────────────────────────────────────────────────────────────
-// Toute modification de ce fichier doit être testée sur :
-//   · Android 9  (API 28) — Samsung SM-T397U  · ADB 192.168.134.105:5555
-//   · Android 15 (API 35) — Samsung R52X508K2DR · ADB 192.168.134.126:5555
-//
-// Règles obligatoires :
-//   1. Détecter la version à l'exécution via Build.VERSION.SDK_INT
-//   2. Appliquer le comportement EXPLICITEMENT par version — pas de spéculation
-//   3. Ne jamais utiliser d'API introduite après API 28 sans guard de version
-//   4. registerReceiver() : RECEIVER_NOT_EXPORTED ou RECEIVER_EXPORTED sur API 34+
-//   5. PendingIntent     : FLAG_IMMUTABLE sur API 31+ · FLAG_MUTABLE + guard sur API 34+
-//   6. startForeground() : type obligatoire sur API 34+ — doit matcher le manifest
-//
-// Constantes utiles :
-//   Build.VERSION_CODES.P                = 28  (Android 9)
-//   Build.VERSION_CODES.Q                = 29  (Android 10)
-//   Build.VERSION_CODES.S                = 31  (Android 12)
-//   Build.VERSION_CODES.TIRAMISU         = 33  (Android 13)
-//   Build.VERSION_CODES.UPSIDE_DOWN_CAKE = 34  (Android 14)
-//   Build.VERSION_CODES.VANILLA_ICE_CREAM= 35  (Android 15)
-// ═══════════════════════════════════════════════════════════════════════
+import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothSocket;
+import android.content.Intent;
+import android.net.Uri;
 
+import androidx.fragment.app.Fragment;
+
+import com.pa.lcr.lcp.MultiRegisterApiFacadeImpl;
+import com.pa.lcr.lcp.storage.ActiveDeliveryStore;
+import com.pa.lcr.lcp.storage.DeliveryLogStore;
+import com.pa.lcr.lcp.transport.MediaTransportManager;
 import com.pa.lcr.lcp.transport.TransportIo;
+import com.pa.lcrdemo.auth.MsalTokenProvider;
+import com.pa.lcrdemo.dataverse.WorkOrderUpdater;
+import com.pa.lcrdemo.dataverse.DeliveryResultQueueDb;
 
-import java.io.IOException;
-import java.text.SimpleDateFormat;
-import java.util.Date;
-import java.util.Locale;
+import org.json.JSONObject;
+
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.util.UUID;
+import java.util.concurrent.ExecutorService;
 
 /**
- * LcpLink — Transport LCP (TransportIo strict)
+ * DeepLinkHandler — gestion complète du flux deep link Field Service ↔ APK.
  *
- * ✅ RX cumulatif (Python-like)
- * ✅ API publique strictement compatible DeliveryController
+ * Responsabilités :
+ *  - handleDeepLink()          : parse et route le deep link entrant
+ *  - connectBtByMacAndOpenTab(): connexion BT + oneshot/start
+ *  - pollJobUntilDone()        : poll état livraison → DONE
+ *  - onDeliveryEnded()         : fin de livraison → retournerFieldService
+ *  - retournerFieldService()   : construit l'URL retour et lance Field Service
  *
- * Correctifs conservés:
- * 1) CRC/RX: CRC calculé sur la partie variable RAW (incluant ESC), comme Python et doc LCP
- * 2) RC=0x26/0x27: queued via 0x7D. ✅ FIX (11 août 2026, demande Paul) —
- *    preuve directe par trace TX/RX brute que RC=0x26 sur Get Machine
- *    Status/Get Delivery Status (0x23/0x28) restait bloqué EN BOUCLE
- *    INFINIE sans jamais se résoudre, alors que Check Request (0x7D)
- *    résolvait ces mêmes files d'attente avec succès pour Set Field dans
- *    le même log. Étendu à Get Machine Status/Get Delivery Status — SEUL
- *    Get Field (0x20) reste "busy/skip" sans 0x7D (jamais observé bloqué,
- *    contrairement aux deux autres).
- * 3) Timeouts queueables: opSetField/opIssueCommand -> 30s
- * 4) sendRecv(): lecture en tranches (slice) pour ne pas bloquer l’envoi des 0x7D
- * 5) 0x7D immédiat après RC=0x26 sur commande queueable (comme Python)
- *
- * ✅ Option B: tout passe par TransportIo (USB/BT/WiFi)
+ * Logging dans DeliveryLogStore :
+ *  - upsertSummaryAsync → openAttemptAsync → addEventAsync → closeAttemptAsync
  */
-public class LcpLink {
+public class DeepLinkHandler {
 
-    // ===================== ✅ A3: TransportException =====================
-    /** Exception typée pour erreurs de transport (I/O read/write/closed). */
-    public static final class TransportException extends IOException {
-        public TransportException(String msg) { super(msg); }
-        public TransportException(String msg, Throwable cause) { super(msg, cause); }
+    private static final String TAG = "LCRDEMO_DEEPLINK";
+    private static final UUID SPP_UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
+
+    private static final String FS_FORM_URL =
+        "https://dev-filgo-sonic.crm3.dynamics.com/WebResources/filgo_lcr_form";
+
+    private final MainActivity activity;
+    private final DeliveryLogStore deliveryStore;
+    private final ExecutorService btExec;
+
+    // ✅ Contexte livraison courante — persisté pour onDeliveryEnded
+    private volatile int    currentNode     = 0;
+    private volatile String currentSerialId = "";
+
+    public DeepLinkHandler(MainActivity activity,
+                           DeliveryLogStore deliveryStore,
+                           ExecutorService btExec) {
+        this.activity      = activity;
+        this.deliveryStore = deliveryStore;
+        this.btExec        = btExec;
     }
 
-
-    // ===================== CONSTANTES =====================
-    public static final byte SYNC = 0x7E;
-    private static final byte ESC = 0x1B;
-
-    private static final int RC_OK = 0x00;
-    private static final int RC_REQUEST_QUEUED = 0x26;
-    private static final int RC_NO_REQUEST_ACTIVE = 0x27;
-    private static final int RC_REQUEST_ABORTED = 0x28;
-
-    private static final byte MSG_GET_FIELD = 0x20;
-    private static final byte MSG_SET_FIELD = 0x21;
-    private static final byte MSG_PRINT_TEXT         = 0x22;
-    private static final byte MSG_GET_MACHINE_STATUS = 0x23;
-    private static final byte MSG_ISSUE_COMMAND = 0x24;
-    private static final byte MSG_GET_DELIVERY_STATUS = 0x28;
-    // ✅ AJOUTÉ (7 août 2026, demande Paul — "donne-moi l'info des deux pour
-    // voir s'il y a une différence") — message générique LCP "Get Product
-    // ID" (msgID=0x00, tout appareil LCP le supporte). Réponse : productID
-    // (0x02 = LCR) + chaîne ASCIIZ "nom+révision" (ex: "SR200b2.05") — une
-    // SOURCE SÉPARÉE du Field #60, pour comparer.
-    private static final byte MSG_GET_PRODUCT_ID = 0x00;
-    private static final byte MSG_CHECK_REQUEST = 0x7D;
-    // ✅ AJOUTÉ (11 août 2026, demande Paul) — "Abort Request" (0x7E),
-    // documenté comme complément de Check Request depuis ce matin, jamais
-    // implémenté jusqu'ici.
-    private static final byte MSG_ABORT_REQUEST = 0x7E;
-    // ✅ AJOUTÉ (7 août 2026, demande Paul — "réduire la vitesse de
-    // transmission entre 19200 et 4800 dans les tests de diagnostic") —
-    // message générique LCP "Set Baud" (msgID=0x7C), sourcé de la doc
-    // officielle. Index : 0=57600, 1=19200, 2=9600, 3=4800, 4=2400.
-    private static final byte MSG_SET_BAUD = (byte) 0x7C;
-
-    // Cadence du CHECK_REQUEST
-    private static final int QP_MS = 200;
-
-    // ✅ AJOUTÉ (13 août 2026, demande Paul — "il y a un effet de bord
-    // partout") — classification UNIFIÉE des commandes LCP. Remplace les
-    // timeouts/booléens "queueable" épars introduits au fil des fixes du
-    // 6/7/11 août, chacun réglant un cas précis sans politique commune.
-    // AVANT ce fix : un simple GET de statut (poll UI, reconnect, vérif de
-    // job) pouvait, sur RC=0x26 busy, retenir sendRecv() — donc le verrou
-    // LcpNodeLocks partagé par node — jusqu'à 8000ms. Pendant ce temps,
-    // TOUT le reste sur ce node (scan produits, tick live, boutons) restait
-    // bloqué derrière, avec effet domino visible partout (tick figé, scan
-    // "gelé puis rattrape", boutons qui ne répondent pas).
-    //
-    // Trois classes, un seul endroit pour décider "combien de temps une
-    // commande a le droit de retenir le registre avant d'abandonner" :
-    //   FAST   : poll haute fréquence (tick live net/gross). Jamais mis en
-    //            file — busy = retour immédiat, on retentera au prochain
-    //            cycle (200ms plus tard). Rien à gagner à attendre ici.
-    //   STATUS : vérification ponctuelle (GET_MACHINE_STATUS,
-    //            GET_DELIVERY_STATUS — utilisées par STATUS_B, reconnect,
-    //            poll de job). Peut se mettre en file, mais PLAFONNÉE —
-    //            2.5s au lieu de 6-8s. Un statut n'a pas besoin d'attendre
-    //            aussi longtemps qu'une action réelle.
-    //   ACTION : intention utilisateur qui DOIT aboutir (SET_FIELD,
-    //            ISSUE_COMMAND, PRINT_TEXT — preset, armement, scan,
-    //            impression). Timeout long inchangé (30s) — c'est
-    //            légitime, ce n'est pas un poll silencieux.
-    enum OpClass {
-        FAST(false, 800),
-        STATUS(true, 2_500),
-        ACTION(true, 30_000);
-
-        final boolean queueable;
-        final int timeoutMs;
-        OpClass(boolean queueable, int timeoutMs) { this.queueable = queueable; this.timeoutMs = timeoutMs; }
-    }
-
-    // ✅ AJOUTÉ (13 août 2026, demande Paul — "augmenter et noter le temps
-    // nécessaire et faire une moyenne par la suite") — le plafond STATUS
-    // fixe de 2.5s ci-dessus s'est révélé insuffisant sur le terrain le
-    // jour même (deux busy consécutifs sur GET_MACHINE_STATUS non résolus
-    // dans les 2.5s, compteur d'échec de DeliveryController rendu à 4/5 —
-    // à un cheveu d'une déconnexion forcée). Remplacé par un timeout
-    // ADAPTATIF par registre (par instance LcpLink) : démarre au plancher
-    // (OpClass.STATUS.timeoutMs), puis s'ajuste selon le temps RÉELLEMENT
-    // observé pour résoudre un busy — moyenne mobile (EMA) + marge de
-    // sécurité. Sur timeout franc (le plafond actuel n'a pas suffi), on
-    // relève immédiatement plutôt que d'attendre que la moyenne rattrape —
-    // on sait déjà que c'est insuffisant pour CE registre.
-    private static final long STATUS_TIMEOUT_FLOOR_MS = OpClass.STATUS.timeoutMs;
-    private static final long STATUS_TIMEOUT_CEILING_MS = 8_000; // jamais pire qu'avant le 13 août
-    private static final double STATUS_TIMEOUT_MARGIN = 1.4;     // 40% au-dessus de la moyenne observée
-    private static final double STATUS_EMA_ALPHA = 0.25;         // poids du dernier échantillon
-    private static final long STATUS_TIMEOUT_BUMP_MS = 1_500;    // relève immédiate sur timeout franc
-
-    private volatile long statusTimeoutMs = STATUS_TIMEOUT_FLOOR_MS;
-    private volatile double statusResolveEmaMs = -1; // -1 = aucun échantillon encore
-
-    // Slice de lecture pour permettre l'interleaving TX 0x7D / RX
-    private static final int RX_SLICE_MS = 250;
-
-    // ===================== TRANSPORT =====================
-    private final TransportIo io;
-    private final Object ioLock = new Object(); // lock par instance (évite blocage cross-media)
-    private final int toAddr;
-    private final int hostAddr;
-
-    private volatile boolean closed = false;
-
-    // ===================== TRACE =====================
-    public interface TraceSink {
-        void onTrace(String line);
-    }
-
-    private volatile TraceSink trace;
-    private volatile boolean traceTsEnabled = false;
-
-    private static final ThreadLocal<SimpleDateFormat> TRACE_DF =
-            ThreadLocal.withInitial(() ->
-                    new SimpleDateFormat("HH:mm:ss.SSS", Locale.CANADA_FRENCH));
-
-    public void setTraceSink(TraceSink sink) { this.trace = sink; }
-    public void setTraceTimestampsEnabled(boolean enabled) { this.traceTsEnabled = enabled; }
-
-    private void t(String s) {
-        TraceSink ts = trace;
-        if (ts == null) return;
-
-        if (traceTsEnabled && (s.startsWith("TX:") || s.startsWith("RX:") || s.startsWith("↳"))) {
-            ts.onTrace("[IO " + TRACE_DF.get().format(new Date()) + "] " + s);
-        } else {
-            ts.onTrace(s);
-        }
-    }
-
-    // ===================== RX BUFFER =====================
-    private final ByteArray rxBuf = new ByteArray();
-
-    // ===================== SESSION =====================
-    private int msgIdBit = 0;
-    private boolean syncUsed = false;
-
-    // ===================== CTOR =====================
-    public LcpLink(TransportIo io, int toAddr, int hostAddr, boolean syncFirst) {
-        this.io = io;
-        this.toAddr = toAddr & 0xFF;
-        this.hostAddr = hostAddr & 0xFF;
-        // syncFirst conservé pour compat; le comportement SYNC initial est maintenu via nextStatusByte()
-    }
-
-    // ===================== LIFECYCLE =====================
-    public boolean isClosed() { return closed; }
-
-    // ✅ Intervalle recommandé pour le live tick — LCR-II 19200 baud → 200ms
-    // Override dans Lc3Link pour LC3 9600 baud → 800ms
-    public long getRecommendedLiveIntervalMs() { return 200L; }
-
-    // getters utiles validate/log/UI
-    public int getToAddr() { return toAddr; }
-    public int getHostAddr() { return hostAddr; }
-    public String getTransportKey() { return (io != null) ? io.getKey() : null; }
-    public long getTransportGenerationId() { return (io != null) ? io.getGenerationId() : 0L; }
-
-    public synchronized void close() {
-        closed = true;
+    /**
+     * ✅ FIX CRITIQUE (13 août 2026, demande Paul — crash réel confirmé dans
+     * un vrai logcat : "FATAL EXCEPTION: main —
+     * java.util.concurrent.RejectedExecutionException... rejected from
+     * ThreadPoolExecutor@...[Terminated...]" à DeepLinkHandler.java:2189,
+     * dans un callback MSAL onSuccess) — trouvé : MainActivity.onDestroy()
+     * appelle btExec.shutdownNow() (correctif du 6 août pour une vraie fuite
+     * de threads sur recréation d'Activity) — mais un callback asynchrone
+     * MSAL (vrai appel réseau, peut prendre plusieurs secondes) peut encore
+     * être EN VOL au moment où l'Activity se détruit (confirmé aujourd'hui :
+     * recréation d'Activity fréquente en arrière-plan). Quand ce callback
+     * revient et essaie safeExecute(), l'exécuteur est déjà fermé —
+     * crash complet de l'app au lieu d'un échec silencieux et géré.
+     * Enveloppe unique : tous les appels safeExecute() du fichier
+     * passent maintenant par ici — capture RejectedExecutionException
+     * spécifiquement, log un avertissement au lieu de planter, protège
+     * automatiquement tout futur appel ajouté à ce fichier aussi.
+     */
+    private void safeExecute(Runnable task) {
         try {
-            synchronized (ioLock) {
-                if (io != null) io.close();
+            btExec.execute(task);
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            android.util.Log.w(TAG, "safeExecute: btExec déjà fermé (Activity probablement recréée/détruite "
+                + "pendant un appel asynchrone en vol) — tâche abandonnée proprement au lieu de planter l'app");
+        }
+    }
+
+    // =========================================================
+    // Point d'entrée principal
+    // =========================================================
+
+    public void handleDeepLink(Intent intent) {
+        if (intent == null) return;
+        Uri data = intent.getData();
+        if (data == null) return;
+        if (!"lcrdemo".equals(data.getScheme())) return;
+
+        String host = data.getHost();
+        android.util.Log.i(TAG, "Deep link reçu: " + data.toString());
+
+        if ("ping".equals(host)) {
+            android.util.Log.i(TAG, "Ping reçu — réponse OK");
+            activity.toast("✅ LCR Deep Link OK — ping reçu");
+            retournerFieldService("ping", "", "ok", null);
+            return;
+        }
+
+        if ("livraison".equals(host)) {
+            String woNum      = data.getQueryParameter("wonum");
+            String woIdGuid   = data.getQueryParameter("woid") != null
+                                ? data.getQueryParameter("woid") : "";
+            String btMac      = data.getQueryParameter("btmac");
+            String serialId   = data.getQueryParameter("serialid");
+            String produit    = data.getQueryParameter("produit");
+            String presetStr  = data.getQueryParameter("preset");
+            String lcrnodeStr = data.getQueryParameter("lcrnode");
+            String orgUrl     = data.getQueryParameter("orgurl"); // ✅ env auto-detect
+            // ✅ N-Port TCP — Field Service peut fournir directement l'IP:port du
+            // N-Port, exactement comme "btmac" pour le Bluetooth. Si fourni,
+            // connexion directe déterministe (pas de scan réseau nécessaire).
+            String nportIp     = data.getQueryParameter("nportip");
+            String nportPortStr = data.getQueryParameter("nportport");
+
+            // ✅ Configurer l'environnement selon l'URL Dataverse reçue de FSM
+            // Un seul APK pour DEV / QA / STAGING / PROD
+            if (orgUrl != null && !orgUrl.isEmpty()) {
+                com.pa.lcrdemo.config.LcrConfig.applyFromOrgUrl(activity, orgUrl);
+                android.util.Log.i(TAG, "Env détecté depuis orgurl: " + orgUrl
+                    + " → " + com.pa.lcrdemo.config.LcrConfig.getEnvironmentName(activity));
             }
-        } catch (Exception ignored) {}
-    }
 
-    /** Compat DeliveryController : fermeture logique uniquement */
-    public synchronized void softClose() { closed = true; }
+            Integer lcrnode = null;
+            try { if (lcrnodeStr != null) lcrnode = Integer.parseInt(lcrnodeStr); }
+            catch (Exception ignored) {}
 
-    /** Compat API — volontairement NO-OP */
-    public void drainInput(int ms) {}
+            Integer nportPort = null;
+            try { if (nportPortStr != null) nportPort = Integer.parseInt(nportPortStr); }
+            catch (Exception ignored) {}
 
-    /** Compat API — volontairement NO-OP */
-    public void forceSyncNext(String reason) {}
+            android.util.Log.i(TAG,
+                "Livraison — WO=" + woNum + " BT=" + btMac +
+                " serial=" + serialId + " node=" + lcrnode +
+                " nportIp=" + nportIp + " nportPort=" + nportPort +
+                " produit=" + produit + " preset=" + presetStr);
 
-    // ===================== STRUCTURES PUBLIQUES =====================
-    public static final class MachineStatus {
-        public final int rc;
-        public final int devStatus;
-        public final int prnStatus;
-        public final int delStatus;
-        public final int delCode;
-        public MachineStatus(int rc, int dev, int prn, int ds, int dc) {
-            this.rc = rc;
-            this.devStatus = dev;
-            this.prnStatus = prn;
-            this.delStatus = ds;
-            this.delCode = dc;
+            final String fWoNum    = woNum;
+            final String fSerialId = serialId != null ? serialId : "";
+            logDeliveryStart(fSerialId, fWoNum, btMac, lcrnode, produit, presetStr);
+
+            // ✅ Persister le contexte livraison pour onDeliveryEnded
+            currentSerialId = fSerialId;
+
+            // ✅ Sauvegarder PENDING dès réception — avant connexion BT
+            // Le tab peut lire ces infos même si la livraison n'est pas encore démarrée
+            try {
+                int iProduit = 1;
+                double dPreset = 0.0;
+                try { iProduit = Integer.parseInt(produit); } catch (Exception ignored) {}
+                try { dPreset = Double.parseDouble(presetStr); } catch (Exception ignored) {}
+                new ActiveDeliveryStore(activity).save(
+                    woNum, woIdGuid, "", // jobId vide — pas encore démarré
+                    btMac != null ? btMac : "",
+                    lcrnode != null ? lcrnode : 250,
+                    fSerialId, iProduit, dPreset, "PENDING");
+            } catch (Exception e) {
+                // ✅ FIX (4 août 2026, demande Paul) — si cette sauvegarde échoue,
+                // le flux "reprendre une livraison en attente" (RegisterTabFragment
+                // .checkPendingDeliveryForThisRegister → bouton "Lancer la
+                // livraison") n'a plus rien à lire — silencieusement aveugle sans
+                // ce log.
+                com.pa.lcr.lcp.log.LogBus.err(
+                    lcrnode != null ? lcrnode : 250, "DeepLinkHandler.ActiveDeliveryStore.save", e);
+            }
+
+            // ✅ Vérifier si une livraison est déjà en cours
+            try {
+                ActiveDeliveryStore ads = new ActiveDeliveryStore(activity);
+                ActiveDeliveryStore.ActiveDelivery active = ads.load();
+                if (active != null && active.jobId != null && !active.jobId.isEmpty()) {
+                    if (woNum != null && woNum.equals(active.woNum)) {
+                        // Même WO — reprendre le poll sans toucher au registre
+                        android.util.Log.i(TAG, "Reprise poll — même WO jobId=" + active.jobId);
+                        activity.toast("↩️ Reprise livraison — " + woNum);
+                        int resumeNode = active.node > 0 ? active.node : (lcrnode != null ? lcrnode : 250);
+                        String resumeMac = (active.mac != null && !active.mac.isEmpty())
+                            ? active.mac : btMac;
+                        pollJobUntilDone(active.jobId, resumeNode, woNum, woIdGuid,
+                            fSerialId, resumeMac);
+                        return;
+                    } else {
+                        // WO différent — bloquer et alerter l'opérateur
+                        android.util.Log.w(TAG, "Livraison en cours: " + active.woNum
+                            + " — impossible de démarrer " + woNum);
+                        final String activeWo = active.woNum;
+                        activity.runOnUiThread(() ->
+                            activity.toast("⚠️ Livraison " + activeWo
+                                + " en cours — terminez-la avant de passer à " + woNum));
+                        retournerFieldService(woNum, woIdGuid, "erreur_livraison_en_cours",
+                            buildErrorJson("DELIVERY_IN_PROGRESS",
+                                "Livraison " + activeWo + " en cours sur ce registre"));
+                        return;
+                    }
+                }
+            } catch (Exception ignored) {}
+
+            activity.toast("📦 Livraison — " + woNum);
+            int finalNode = (lcrnode != null ? lcrnode : 250);
+            currentNode = finalNode;
+            final int fNode = finalNode;
+            final String fBtMac = btMac;
+            final String fProduit = produit;
+            final String fPresetStr = presetStr;
+            final String fNportIp = nportIp;
+            final int fNportPort = (nportPort != null ? nportPort : com.pa.lcr.lcp.api.WifiRegisterScanController.DEFAULT_RAW_PORT);
+
+            // ✅ Résolution transport universel: USB / BT / TCP
+            // Chercher d'abord un transport actif pour ce node/serial via RSM.
+            // Si trouvé → utiliser directement. Si non → fallback BT si MAC fourni.
+            safeExecute(() -> {
+                try {
+                    com.pa.lcr.lcp.RegisterSessionManager rsm =
+                        com.pa.lcr.lcp.RegisterSessionManager.get(activity);
+
+                    // ✅ FIX (UX) : retour visuel IMMÉDIAT dès l'entrée dans la
+                    // résolution — avant, le seul "🔌 Connexion au registre..."
+                    // n'apparaissait qu'APRÈS resolveOrCreateForNode() (qui peut
+                    // sonder plusieurs transports en silence, ex: tentatives TCP
+                    // qui échouent avant de basculer sur BT). Le chauffeur voyait
+                    // "📦 Livraison" puis rien pendant un moment avant "connexion".
+                    activity.runOnUiThread(() -> activity.toast("🔍 Recherche du registre..."));
+
+                    if (fSerialId != null && !fSerialId.isEmpty()) {
+                        rsm.bindExpectedSerial(fNode, fSerialId);
+                    }
+
+                    // ✅ Étape 0 (demandée) : AVANT de sonder quoi que ce soit,
+                    // valider si le node+#série demandés sont déjà ce qui tourne
+                    // sur le média ACTUELLEMENT ACTIF. Si oui → réutilisation
+                    // immédiate, on saute complètement nportip/resolveOrCreateForNode
+                    // /auto-connect — aucun autre transport n'est touché du tout.
+                    String activeMatch = activity.resolveIfActiveMatches(fNode, fSerialId);
+                    if (activeMatch != null) {
+                        android.util.Log.i(TAG, "Deep link: média actif correspond déjà (" + activeMatch
+                                + ") — aucune résolution/scan nécessaire");
+                        lancerLivraison(activeMatch, fNode, fSerialId, woNum, woIdGuid, fProduit, fPresetStr, fBtMac);
+                        return;
+                    }
+
+                    // ✅ N-Port fourni directement par Field Service (nportip/nportport)
+                    // → connexion TCP déterministe AVANT toute résolution/scan.
+                    // Node + #série restent liés dans tous les cas via bindExpectedSerial
+                    // ci-dessus, peu importe si cette connexion directe réussit ou non
+                    // (le fallback USB/BT/scan-auto plus bas prend le relais sinon).
+                    //
+                    // ✅ FIX : ne tenter le TCP QUE si cette livraison ne cible pas
+                    // déjà explicitement du BT (fBtMac présent). Avant ce correctif,
+                    // si Field Service incluait nportip par défaut/résiduel dans
+                    // CHAQUE deep link (même pour des livraisons BT), un onglet TCP
+                    // se créait systématiquement, peu importe le vrai média visé —
+                    // un onglet ne doit exister QUE si un vrai registre est trouvé
+                    // ET que ce registre est réellement celui visé par CETTE livraison.
+                    boolean btIsTarget = fBtMac != null && !fBtMac.trim().isEmpty();
+                    if (!btIsTarget && fNportIp != null && !fNportIp.trim().isEmpty()) {
+                        try {
+                            android.util.Log.i(TAG, "Deep link: N-Port fourni directement — "
+                                + fNportIp + ":" + fNportPort + " node=" + fNode + " serial=" + fSerialId);
+                            com.pa.lcr.lcp.api.WifiRegisterScanController tcpCtl =
+                                new com.pa.lcr.lcp.api.WifiRegisterScanController(
+                                    activity, activity.getMediaTransportManager());
+                            com.pa.lcr.lcp.ApiResult rtcp = tcpCtl.connectManual(fNportIp.trim(), fNportPort);
+                            android.util.Log.i(TAG, "Deep link: connexion N-Port directe → "
+                                + (rtcp != null ? rtcp.msg : "null"));
+                        } catch (Exception e) {
+                            android.util.Log.w(TAG, "Deep link: connexion N-Port directe échouée: " + e.getMessage());
+                            try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.nPortDirect", e); } catch (Exception ignored) {}
+                        }
+                    } else if (btIsTarget && fNportIp != null && !fNportIp.trim().isEmpty()) {
+                        android.util.Log.i(TAG, "Deep link: nportip fourni mais btmac aussi présent — "
+                            + "cette livraison cible BT, connexion TCP ignorée");
+                    }
+
+                    com.pa.lcr.lcp.DeliveryController dc =
+                        rsm.resolveOrCreateForNode(fNode, 255);
+
+                    if (dc != null) {
+                        // ✅ Attendre que le DC soit CONNECTED (probeAndIdentify terminé)
+                        // max 15s, 200ms par itération
+                        activity.runOnUiThread(() -> activity.toast("🔌 Connexion au registre..."));
+                        for (int w = 0; w < 75; w++) {
+                            if (dc.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
+                            // ✅ FIX (UX) : avant, silence total pendant jusqu'à 15s après
+                            // le seul toast initial — "temps mort" perçu par le chauffeur,
+                            // sans savoir si l'app est bloquée ou travaille encore.
+                            // Retour visuel toutes les ~3s (15 x 200ms) pendant l'attente.
+                            if (w > 0 && w % 15 == 0) {
+                                final int fSec = (w * 200) / 1000;
+                                activity.runOnUiThread(() -> activity.toast("🔌 Connexion au registre... (" + fSec + "s)"));
+                            }
+                            try { Thread.sleep(200); } catch (Exception ignored) {}
+                        }
+                        android.util.Log.i(TAG, "DC state avant lancerLivraison: " + dc.getState());
+                        if (dc.getState() != com.pa.lcr.lcp.DeliveryState.CONNECTED) {
+                            android.util.Log.w(TAG, "DC non prêt après 15s — état: " + dc.getState()
+                                + " — tentative auto-connect");
+                            // ✅ Tenter auto-connect (USB ou BT) avant d'abandonner
+                            MultiRegisterApiFacadeImpl facadeRetry = new MultiRegisterApiFacadeImpl(activity);
+                            com.pa.lcr.lcp.ApiResult ra2 = facadeRetry.api_registerConnectAuto(
+                                fSerialId.isEmpty() ? null : fSerialId, fNode);
+                            if (ra2 != null && ra2.code == 1) {
+                                com.pa.lcr.lcp.DeliveryController dc3 =
+                                    rsm.resolveOrCreateForNode(fNode, 255);
+                                if (dc3 != null) {
+                                    for (int w = 0; w < 75; w++) {
+                                        if (dc3.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
+                                        if (w > 0 && w % 15 == 0) {
+                                            final int fSec2 = (w * 200) / 1000;
+                                            activity.runOnUiThread(() -> activity.toast("🔌 Registre trouvé, connexion... (" + fSec2 + "s)"));
+                                        }
+                                        try { Thread.sleep(200); } catch (Exception ignored) {}
+                                    }
+                                    if (dc3.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) {
+                                        String foundKey3 = rsm.findTransportKeyForController(dc3);
+                                        lancerLivraison(foundKey3 != null ? foundKey3 : "", fNode,
+                                            fSerialId, woNum, woIdGuid, fProduit, fPresetStr, fBtMac);
+                                        return;
+                                    }
+                                }
+                            }
+                            logError(fSerialId, woNum, "REGISTER_NOT_READY",
+                                "DC non CONNECTED après 15s + retry auto-connect — état: " + dc.getState());
+                            activity.runOnUiThread(() ->
+                                activity.toast("⚠️ Registre non joignable — tentative de reconnexion..."));
+                            // Lancer sur thread dédié — ne pas bloquer btExec
+                            // diagnosticEnCours static garantit un seul diagnostic à la fois
+                            new Thread(() -> new com.pa.lcrdemo.RegisterConnectionHelper(activity)
+                                .lancerDiagnosticForce("", fNode, fSerialId, woNum,
+                                    woIdGuid, fProduit, fPresetStr, fBtMac,
+                                    DeepLinkHandler.this)).start();
+                            return;
+                        }
+                        String foundKey = rsm.findTransportKeyForController(dc);
+                        android.util.Log.i(TAG, "Transport trouvé pour node=" + fNode
+                            + " transportKey=" + foundKey);
+                        lancerLivraison(foundKey != null ? foundKey : "", fNode,
+                            fSerialId, woNum, woIdGuid, fProduit, fPresetStr, fBtMac);
+                    } else {
+                        // Aucun transport actif — tenter auto-connect (USB / BT / TCP)
+                        android.util.Log.i(TAG, "Aucun transport actif — tentative auto-connect node="
+                            + fNode + " serial=" + fSerialId);
+                        activity.runOnUiThread(() -> activity.toast("📡 Connexion au registre en cours..."));
+                        MultiRegisterApiFacadeImpl facadeAuto = new MultiRegisterApiFacadeImpl(activity);
+                        com.pa.lcr.lcp.ApiResult ra = facadeAuto.api_registerConnectAuto(
+                            fSerialId.isEmpty() ? null : fSerialId, fNode);
+                        android.util.Log.i(TAG, "auto-connect: code=" + (ra != null ? ra.code : "null")
+                            + " msg=" + (ra != null ? ra.msg : "null"));
+
+                        if (ra != null && ra.code == 1) {
+                            // Auto-connect réussi — attendre DC CONNECTED
+                            com.pa.lcr.lcp.DeliveryController dc2 =
+                                rsm.resolveOrCreateForNode(fNode, 255);
+                            if (dc2 != null) {
+                                activity.runOnUiThread(() -> activity.toast("🔌 Connexion au registre..."));
+                                for (int w = 0; w < 75; w++) {
+                                    if (dc2.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
+                                    if (w > 0 && w % 15 == 0) {
+                                        final int fSec3 = (w * 200) / 1000;
+                                        activity.runOnUiThread(() -> activity.toast("🔌 Connexion au registre... (" + fSec3 + "s)"));
+                                    }
+                                    try { Thread.sleep(200); } catch (Exception ignored) {}
+                                }
+                                if (dc2.getState() != com.pa.lcr.lcp.DeliveryState.CONNECTED) {
+                                    android.util.Log.w(TAG, "DC2 non prêt après 15s — état: " + dc2.getState());
+                                    logError(fSerialId, woNum, "REGISTER_NOT_READY",
+                                        "DC2 non CONNECTED après 15s — état: " + dc2.getState());
+                                    activity.runOnUiThread(() ->
+                                        activity.toast("⚠️ Registre non joignable — tentative de reconnexion..."));
+                                    new Thread(() -> new com.pa.lcrdemo.RegisterConnectionHelper(activity)
+                                        .lancerDiagnosticForce("", fNode, fSerialId, woNum,
+                                            woIdGuid, fProduit, fPresetStr, fBtMac,
+                                            DeepLinkHandler.this)).start();
+                                    return;
+                                }
+                            }
+                            String foundKey2 = dc2 != null ? rsm.findTransportKeyForController(dc2) : null;
+                            lancerLivraison(foundKey2 != null ? foundKey2 : "", fNode,
+                                fSerialId, woNum, woIdGuid, fProduit, fPresetStr, fBtMac);
+                        } else if (fBtMac != null && !fBtMac.trim().isEmpty()) {
+                            // Fallback BT explicite
+                            android.util.Log.i(TAG, "Auto-connect échoué — connexion BT: " + fBtMac);
+                            connectBtByMacAndOpenTab(fBtMac, fNode, serialId, woNum, woIdGuid,
+                                fProduit, fPresetStr);
+                        } else {
+                            android.util.Log.w(TAG, "Registre introuvable — node=" + fNode);
+
+                            // ✅ Rester dans l'APK — pas de finish() pour éviter bounce FSM
+                            // Le chauffeur va dans Configure pour connecter le registre
+                            final String fWoNumR = woNum;
+                            final String fWoIdR  = woIdGuid;
+                            final int    fNodeR  = fNode;
+                            activity.runOnUiThread(() -> {
+                                android.app.AlertDialog.Builder dlg =
+                                    new android.app.AlertDialog.Builder(activity);
+                                dlg.setTitle("⚠️ Registre non connecté");
+                                dlg.setMessage(
+                                    "Le registre (node " + fNodeR + " · serial " + fSerialId + ") "
+                                    + "n'est pas détecté sur USB-C, Bluetooth, ni réseau TCP (N-Port).\n\n"
+                                    + "1. Branchez le câble USB-C du registre\n"
+                                    + "   — ou —\n"
+                                    + "2. Activez le Bluetooth et connectez le registre\n"
+                                    + "   — ou —\n"
+                                    + "3. Vérifiez la connexion réseau Wi-Fi vers le N-Port (TCP)\n\n"
+                                    + "Ensuite, allez dans l'onglet Configure pour établir\n"
+                                    + "la connexion, puis relancez depuis Field Service.");
+                                dlg.setPositiveButton("Aller à Configure", (d, w) -> {
+                                    activity.showPage(1); // onglet Configure
+                                });
+                                dlg.setNegativeButton("Annuler", null);
+                                dlg.setCancelable(true);
+                                dlg.show();
+                            });
+
+                            // Logger l'événement
+                            logError(fSerialId, woNum, "NO_TRANSPORT",
+                                "Registre node=" + fNode + " introuvable sur tous les transports");
+                        }
+                    }
+                } catch (Exception e) {
+                    android.util.Log.e(TAG, "Résolution transport ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.Résolution", e); } catch (Exception ignored) {}
+                    if (fBtMac != null && !fBtMac.trim().isEmpty()) {
+                        connectBtByMacAndOpenTab(fBtMac, fNode, serialId, woNum, woIdGuid,
+                            fProduit, fPresetStr);
+                    }
+                }
+            });
         }
     }
 
-    // =========================================================================
-    // ✅ (4 août 2026, demande Paul) — décodage bit par bit du "Machine Code
-    // Byte" (devStatus), documenté page 59 de "LCR LCP API Internal Messages"
-    // (Liquid Controls, Rev. L, ©1998-2018). Non documenté nulle part dans le
-    // code avant ce fix — devStatus n'était que passé brut (dev=0x%02X). Placé
-    // ici (LcpLink, pas DeliveryController) car le format du byte est défini
-    // par le protocole LCP générique lui-même (message "Get Machine Status" /
-    // 0x23, universel SR200 → SR1000, pas spécifique LCR-II) — donc hérité
-    // automatiquement par Lc3Link et tout futur type de registre qui étend
-    // LcpLink, sans duplication.
-    //
-    // Structure du byte (page 59) :
-    //   bits 0-2 (masque 0x07) — position du switch (rouge) :
-    //     0x00 = entre deux positions · 0x01 = RUN · 0x02 = STOP
-    //     0x03 = PRINT · 0x04 = SHIFT-PRINT · 0x05 = CALIBRATE
-    //     0x07 = statut réel indisponible (ex. réponse à un message broadcast)
-    //   bit 3 (masque 0x08) — imprimante RS-232 en cours d'impression
-    //   bits 4-6 (masque 0x70) — état machine :
-    //     0x00 = RUN (livraison démarrée, flux actif)
-    //     0x10 = STOP (livraison démarrée, flux inactif)
-    //     0x20 = END DELIVERY (aucune livraison, aucun flux)
-    //     0x30 = AUXILIARY · 0x40 = SHIFT · 0x50 = CALIBRATE
-    //     0x60 = WAIT FOR NO FLOW (arrêt demandé, flux pas encore confirmé stoppé)
-    //   bit 7 (masque 0x80) — erreur détectée (vérifier delivery/printer/hw status)
-    //
-    // ⚠️ Note fabricant : "0x?0 — switch entre deux positions" et le "0x07"
-    // listé deux fois (à la fois comme masque et comme valeur "indisponible")
-    // sont ambigus dans le document source — retranscrits tels quels, pas
-    // d'invention de notre part. Croisé et confirmé avec le SDK Android
-    // officiel Liquid Controls (Android_SDK_Documentation, objet DevStatus,
-    // p.22-23) : switch=6 = "Not used", confirmé aussi que ce même
-    // découpage (errorBit/stateBits/printerBit/switchBits) est la source de
-    // vérité officielle, pas une interprétation de notre part.
-    public static final int DEV_SWITCH_MASK          = 0x07;
-    public static final int DEV_SWITCH_RUN           = 0x01;
-    public static final int DEV_SWITCH_STOP          = 0x02;
-    public static final int DEV_SWITCH_PRINT         = 0x03;
-    public static final int DEV_SWITCH_SHIFT_PRINT   = 0x04;
-    public static final int DEV_SWITCH_CALIBRATE     = 0x05;
-    public static final int DEV_SWITCH_UNAVAILABLE   = 0x07;
+    // =========================================================
+    // Connexion BT + oneshot/start
+    // =========================================================
 
-    public static final int DEV_PRINTER_PRINTING     = 0x08;
+    // =========================================================
+    // Lancer livraison sur transport déjà actif (USB/BT/TCP)
+    // =========================================================
 
-    public static final int DEV_STATE_MASK           = 0x70;
-    public static final int DEV_STATE_RUN            = 0x00;
-    public static final int DEV_STATE_STOP           = 0x10;
-    public static final int DEV_STATE_END_DELIVERY   = 0x20;
-    public static final int DEV_STATE_AUXILIARY      = 0x30;
-    public static final int DEV_STATE_SHIFT          = 0x40;
-    public static final int DEV_STATE_CALIBRATE      = 0x50;
-    public static final int DEV_STATE_WAIT_NO_FLOW   = 0x60;
+    public void lancerLivraison(String transportKey, int node, String serialId,
+                                  String woNum, String woIdGuid,
+                                  String produit, String presetStr, String mac) {
+        lancerLivraison(transportKey, node, serialId, woNum, woIdGuid,
+            produit, presetStr, mac, false);
+    }
 
-    public static final int DEV_ERROR_FLAG           = 0x80;
-
-    /** Instantané décodé et lisible d'un devStatus brut. */
-    public static final class DeviceStatusDecoded {
-        public final int rawValue;
-        public final int switchPositionCode;
-        public final String switchPositionName;
-        public final int machineStateCode;
-        public final String machineStateName;
-        public final boolean printerPrinting;
-        public final boolean errorFlag;
-
-        DeviceStatusDecoded(int rawValue, int switchPositionCode, String switchPositionName,
-                             int machineStateCode, String machineStateName,
-                             boolean printerPrinting, boolean errorFlag) {
-            this.rawValue = rawValue;
-            this.switchPositionCode = switchPositionCode;
-            this.switchPositionName = switchPositionName;
-            this.machineStateCode = machineStateCode;
-            this.machineStateName = machineStateName;
-            this.printerPrinting = printerPrinting;
-            this.errorFlag = errorFlag;
+    // ✅ skipConnexionCheck=true : utilisé uniquement par la relance automatique de
+    // RegisterConnectionHelper juste après un diagnostic réussi (étape 4: lcpOk=true).
+    // Refaire une vraie vérification LCP (api_registerValidate) immédiatement après
+    // reconnexion, sur un socket BT qui vient tout juste d'être rétabli, est redondant
+    // et risque d'ajouter un délai voire un blocage — le diagnostic vient déjà de
+    // confirmer la connexion à l'instant.
+    public void lancerLivraison(String transportKey, int node, String serialId,
+                                  String woNum, String woIdGuid,
+                                  String produit, String presetStr, String mac,
+                                  boolean skipConnexionCheck) {
+        // ✅ FIX : vérifier AVANT de toucher au tab — l'ancien code rafraîchissait
+        // l'UI (upsertRegisterTabFromScan / showPage) même quand un poll était
+        // déjà actif, ce qui faisait apparaître le tab en "CONNECTED — prêt"
+        // pendant qu'une livraison tournait toujours dessous (désync live/toast).
+        if (!activePolls.isEmpty()) {
+            android.util.Log.w(TAG, "lancerLivraison: poll déjà actif — ignoré (avant UI)");
+            activity.runOnUiThread(() -> activity.toast("↩️ Livraison déjà en cours"));
+            return;
         }
 
-        @Override public String toString() {
-            // ✅ FIX (6 août 2026, demande Paul — "j'ai coché erreur et il y
-            // en a qu'une la dernière en bas") — trouvé : le filtre "Erreurs
-            // seulement" fait une recherche naïve de la sous-chaîne "ERR"
-            // (insensible à la casse) dans le texte — et "error=non" écrit
-            // ici contient "ERR" (les 3 premières lettres de "ERROR"), donc
-            // déclenchait le filtre à tort même quand errorFlag=false. Le mot
-            // "error" n'apparaît plus du tout quand il n'y a pas d'erreur —
-            // seulement affiché explicitement (et en majuscules ⚠) quand
-            // errorFlag est réellement vrai.
-            String errPart = errorFlag ? " ⚠PANNE" : "";
-            return String.format(java.util.Locale.ROOT,
-                "dev=0x%02X [switch=%s state=%s printer=%s%s]",
-                rawValue, switchPositionName, machineStateName,
-                printerPrinting ? "PRINTING" : "idle", errPart);
-        }
-    }
+        // ✅ FIX : confirmer la connexion RÉELLE au registre avant tout — pas un flag
+        // getState()/snapshot en cache (qui peut mentir sur un socket zombie). Si la
+        // vérification échoue, on relance le diagnostic complet (même média d'abord,
+        // sinon recherche du registre sur tous les médias) AVANT de toucher au tab,
+        // avant le check "Bon déjà complété", avant tout. Le diagnostic, une fois
+        // réussi, rappelle lancerLivraison() lui-même avec une connexion confirmée.
+        if (!skipConnexionCheck && !transportKey.isEmpty()) {
+            boolean connexionOk = false;
+            try {
+                com.pa.lcr.lcp.DeliveryController dcCheck =
+                    com.pa.lcr.lcp.RegisterSessionManager.get(activity).getController(transportKey, node);
+                if (dcCheck != null) {
+                    com.pa.lcr.lcp.ApiResult vr = dcCheck.api_registerValidate(
+                        woNum, node, serialId, null, null);
+                    // ✅ code==1 = validé sans blocage métier. Mais un code==0 peut aussi
+                    // vouloir dire "ticket pending"/"delivery active"/mismatch — des cas
+                    // où la communication LCP a RÉUSSI, ce n'est pas une panne transport.
+                    // Seul un vrai échec de communication (pas de "ticket_no" dans data,
+                    // signe que readFullStatus()/readTicketNo23() n'ont jamais abouti)
+                    // doit déclencher le diagnostic de reconnexion.
+                    connexionOk = (vr != null)
+                        && (vr.code == 1 || (vr.data != null && vr.data.has("ticket_no")));
+                }
+            } catch (Exception e) {
+                android.util.Log.w(TAG, "lancerLivraison: vérif connexion ERR: " + e.getMessage());
+                try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.lancerLivraison.verifConnexion", e); } catch (Exception ignored) {}
+            }
 
-    public static DeviceStatusDecoded decodeDeviceStatus(int devStatus) {
-        int sw = devStatus & DEV_SWITCH_MASK;
-        String swName;
-        switch (sw) {
-            case DEV_SWITCH_RUN:         swName = "RUN"; break;
-            case DEV_SWITCH_STOP:        swName = "STOP"; break;
-            case DEV_SWITCH_PRINT:       swName = "PRINT"; break;
-            case DEV_SWITCH_SHIFT_PRINT: swName = "SHIFT_PRINT"; break;
-            case DEV_SWITCH_CALIBRATE:   swName = "CALIBRATE"; break;
-            case DEV_SWITCH_UNAVAILABLE: swName = "INDISPONIBLE"; break;
-            case 0x00:                   swName = "ENTRE_DEUX_POSITIONS"; break;
-            case 0x06:                   swName = "NON_UTILISE"; break;
-            default:                     swName = "INCONNU(0x" + Integer.toHexString(sw) + ")";
-        }
-
-        int st = devStatus & DEV_STATE_MASK;
-        String stName;
-        switch (st) {
-            case DEV_STATE_RUN:          stName = "RUN (livraison+flux actifs)"; break;
-            case DEV_STATE_STOP:         stName = "STOP (livraison active, flux inactif)"; break;
-            case DEV_STATE_END_DELIVERY: stName = "END_DELIVERY (inactif)"; break;
-            case DEV_STATE_AUXILIARY:    stName = "AUXILIARY"; break;
-            case DEV_STATE_SHIFT:        stName = "SHIFT"; break;
-            case DEV_STATE_CALIBRATE:    stName = "CALIBRATE"; break;
-            case DEV_STATE_WAIT_NO_FLOW: stName = "WAIT_NO_FLOW (arrêt demandé)"; break;
-            default:                     stName = "INCONNU(0x" + Integer.toHexString(st) + ")";
+            if (!connexionOk) {
+                android.util.Log.w(TAG, "lancerLivraison: connexion registre non confirmée"
+                    + " — diagnostic + reconnexion avant tout autre traitement");
+                new Thread(() -> new com.pa.lcrdemo.RegisterConnectionHelper(activity)
+                    .lancerDiagnosticForce(transportKey, node, serialId, woNum,
+                        woIdGuid, produit, presetStr, mac,
+                        DeepLinkHandler.this)).start();
+                return;
+            }
+            android.util.Log.i(TAG, "lancerLivraison: connexion registre confirmée — poursuite");
         }
 
-        boolean printing = (devStatus & DEV_PRINTER_PRINTING) != 0;
-        boolean error    = (devStatus & DEV_ERROR_FLAG) != 0;
+        // Ouvrir/activer le tab
+        final String fSerialId = serialId != null ? serialId : "";
+        final String fWoNum = woNum;
+        final String fProduit = produit;
+        final String fPresetStr = presetStr;
 
-        return new DeviceStatusDecoded(devStatus, sw, swName, st, stName, printing, error);
-    }
-    // =========================================================================
-
-    // =========================================================================
-    // ✅ (6 août 2026, demande Paul — "je veux qu'on puisse lire comme humain
-    // les logs et comprendre l'état réel du registre") — même principe que
-    // decodeDeviceStatus() ci-dessus, appliqué à delCode et delStatus (les
-    // deux autres champs bruts hex qu'on affichait sans jamais les
-    // traduire). Sourcé des tables officielles "Delivery Code Bits" et
-    // "Delivery Status Bits" (LCR LCP API Internal Messages, p.57-58).
-    public static final int DC_TICKET_PENDING      = 0x0001; // ticket en attente d'impression
-    public static final int DC_SHIFT_TICKET_PENDING= 0x0002;
-    public static final int DC_FLOW_ACTIVE         = 0x0004; // flux réellement actif
-    public static final int DC_DELIVERY_ACTIVE     = 0x0008; // livraison active
-    public static final int DC_GROSS_PRESET_ACTIVE = 0x0010;
-    public static final int DC_NET_PRESET_ACTIVE   = 0x0020;
-    public static final int DC_GROSS_PRESET_REACHED= 0x0040;
-    public static final int DC_NET_PRESET_REACHED  = 0x0080;
-    public static final int DC_TEMP_COMPENSATED    = 0x0100;
-    public static final int DC_SOLENOID1_CLOSED    = 0x0200;
-    public static final int DC_BEGIN_DELIVERY      = 0x0400; // livraison en train de démarrer
-    public static final int DC_NEW_DELIVERY_QUEUED = 0x0800;
-    public static final int DC_DATA_ACCESS_ERROR   = 0x1000;
-    public static final int DC_CONFIG_EVENT        = 0x2000;
-    public static final int DC_CALIBRATION_EVENT   = 0x4000;
-    public static final int DC_TRANSACTION_SAVED   = 0x8000;
-
-    public static final int DS_PROGRAM_CHECKSUM_ERR   = 0x0001;
-    public static final int DS_TEMP_HW_ERR             = 0x0002;
-    public static final int DS_WATCHDOG_RESET          = 0x0004;
-    public static final int DS_COMP_FACTOR_ERR         = 0x0008;
-    public static final int DS_TEMP_OUT_OF_RANGE       = 0x0010;
-    public static final int DS_METER_CALIB_ERR         = 0x0020;
-    public static final int DS_TOO_MANY_PULSER_REVERSALS = 0x0040;
-    public static final int DS_PRESET_REACHED          = 0x0080;
-    public static final int DS_NO_FLOW_TIMEOUT         = 0x0100;
-    public static final int DS_STOP_REQUEST            = 0x0200;
-    public static final int DS_DELIVERY_END_REQUEST    = 0x0400;
-    public static final int DS_POWER_FAIL              = 0x0800;
-    public static final int DS_PRESET_FIELD_ERR        = 0x1000;
-    public static final int DS_LAPPAD_DISCONNECTED     = 0x2000;
-    public static final int DS_TICKET_PRINTER_OFFLINE  = 0x4000;
-    public static final int DS_CRITICAL_DATA_ERR       = 0x8000;
-
-    /** Traduit delCode en une phrase courte, lisible, décrivant ce qui se passe réellement. */
-    public static String describeDelCode(int delCode) {
-        java.util.List<String> parts = new java.util.ArrayList<>();
-        if ((delCode & DC_DELIVERY_ACTIVE) != 0) {
-            parts.add((delCode & DC_FLOW_ACTIVE) != 0 ? "livraison active, produit en train de couler"
-                                                        : "livraison active, mais aucun flux en ce moment");
-        } else {
-            parts.add("aucune livraison en cours");
+        // ✅ (4 août 2026, demande Paul : "retarder le deeplink si le tab n'existait
+        // pas avant — démarrer la livraison doit être fait après le scan si le tab
+        // vient d'être créé") — déterminer AVANT upsertRegisterTabFromScan() si ce
+        // tab existe déjà, pour savoir plus bas s'il faut attendre la fin du scan
+        // auto produits (RegisterTabFragment.onTabActivated) avant de démarrer.
+        boolean tabWasNewBeforeThisCall;
+        try {
+            String mediaShortCheck = activity.mediaShortFromTransportKey(transportKey);
+            String tabKeyCheck = activity.tabKeyOf(mediaShortCheck, node, fSerialId);
+            boolean tabExistsInMap = activity.tabExists(tabKeyCheck);
+            // ✅ FIX CRITIQUE (12 août 2026, demande Paul — "corrige-moi les 4
+            // trous", trou #2 : "tab neuf" apparaissait même sur une 2e
+            // livraison) — même cause de fond que resolveIfActiveMatches
+            // (MainActivity.java) : tabsByKey est en mémoire seulement, vide
+            // après une recréation d'Activity. Avant de conclure "tab neuf",
+            // vérifier aussi si une vraie session vivante existe déjà pour ce
+            // node+#série dans RegisterSessionManager (singleton applicatif,
+            // survit à la recréation) — si oui, ce n'est PAS un tab neuf,
+            // même si tabsByKey (cette instance) ne le connaît pas encore.
+            boolean sessionSurvivante = false;
+            if (!tabExistsInMap && fSerialId != null && !fSerialId.isEmpty()) {
+                try {
+                    com.pa.lcr.lcp.DeliveryController dcSurv =
+                        com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                            .findLiveControllerByNodeAndSerial(node, fSerialId);
+                    sessionSurvivante = (dcSurv != null);
+                } catch (Exception ignoredSurv) {}
+            }
+            tabWasNewBeforeThisCall = !tabExistsInMap && !sessionSurvivante;
+            android.util.Log.i(TAG, "lancerLivraison: vérif tab existant — transportKey(reçu)=\"" + transportKey
+                + "\" mediaShortCheck=\"" + mediaShortCheck + "\" tabKeyCheck=\"" + tabKeyCheck
+                + "\" tabExistsInMap=" + tabExistsInMap + " sessionSurvivante=" + sessionSurvivante
+                + " tabWasNew=" + tabWasNewBeforeThisCall
+                + " tabsByKey.keys=" + activity.debugDumpTabKeys());
+        } catch (Exception e) {
+            tabWasNewBeforeThisCall = false;
         }
-        if ((delCode & DC_TICKET_PENDING) != 0) parts.add("un ticket attend d'être imprimé (bloque une nouvelle livraison)");
-        if ((delCode & DC_BEGIN_DELIVERY) != 0) parts.add("démarrage de livraison en cours");
-        if ((delCode & DC_NEW_DELIVERY_QUEUED) != 0) parts.add("nouvelle livraison mise en file d'attente");
-        if ((delCode & DC_GROSS_PRESET_REACHED) != 0) parts.add("preset gross atteint");
-        if ((delCode & DC_NET_PRESET_REACHED) != 0) parts.add("preset net atteint");
-        if ((delCode & DC_DATA_ACCESS_ERROR) != 0) parts.add("⚠ erreur d'accès aux données (non critique, défaut utilisé)");
-        return String.join(", ", parts);
-    }
+        final boolean fTabWasNew = tabWasNewBeforeThisCall;
 
-    /** Traduit delStatus en une phrase courte, lisible — priorise les vraies erreurs. */
-    public static String describeDelStatus(int delStatus) {
-        if (delStatus == 0) return "rien à signaler";
-        java.util.List<String> parts = new java.util.ArrayList<>();
-        if ((delStatus & DS_CRITICAL_DATA_ERR) != 0) parts.add("⚠ erreur critique d'accès aux données — livraison bloquée/arrêtée");
-        if ((delStatus & DS_TICKET_PRINTER_OFFLINE) != 0) parts.add("⚠ imprimante hors ligne, ticket requis — livraison ne peut pas démarrer");
-        if ((delStatus & DS_TOO_MANY_PULSER_REVERSALS) != 0) parts.add("⚠ livraison arrêtée — trop de retours de pulser (retour d'air)");
-        if ((delStatus & DS_NO_FLOW_TIMEOUT) != 0) parts.add("livraison arrêtée — aucun flux détecté (timer no-flow expiré)");
-        if ((delStatus & DS_POWER_FAIL) != 0) parts.add("⚠ livraison arrêtée — coupure d'alimentation (>15s)");
-        if ((delStatus & DS_LAPPAD_DISCONNECTED) != 0) parts.add("terminal RS-232 déconnecté pendant la livraison");
-        if ((delStatus & DS_METER_CALIB_ERR) != 0) parts.add("⚠ erreur de calibration du compteur — livraison ne peut pas démarrer");
-        if ((delStatus & DS_STOP_REQUEST) != 0) parts.add("arrêt demandé (Command #1)");
-        if ((delStatus & DS_DELIVERY_END_REQUEST) != 0) parts.add("fin de livraison demandée (Command #2/#6)");
-        if ((delStatus & DS_PRESET_REACHED) != 0) parts.add("preset atteint");
-        if (parts.isEmpty()) parts.add("bit(s) non critique(s) actif(s) (0x" + Integer.toHexString(delStatus) + ")");
-        return String.join(", ", parts);
-    }
-    // =========================================================================
+        activity.runOnUiThread(() -> {
+            try {
+                if (!transportKey.isEmpty()) {
+                    activity.onConfigureMediaActivated(transportKey, "DEEPLINK");
+                    // ✅ Détection isLc3 centralisée — un seul mécanisme partagé
+                    // (voir MainActivity.resolveIsLc3), plus de logique dupliquée ici.
+                    // ✅ CORRIGÉ (27 août 2026, demande Paul — "on devrait déjà
+                    // tout avoir avant d'armer la livraison... rien d'autre
+                    // ne devrait s'exécuter") — trouvé, confirmé avec
+                    // certitude par log réel : focus=true forcé ICI,
+                    // inconditionnellement, redéclenchait TOUJOURS
+                    // showRegisterFragmentByKey() → onTabActivated() →
+                    // runInitSequence() AU COMPLET, même quand on clique NEW
+                    // depuis un tab DÉJÀ actif — relançant REGISTRE/PRODUIT/
+                    // PRESET/LIVE/RETOUR_WO pile au moment où la livraison
+                    // s'arme. fTabWasNew (déjà calculé juste au-dessus)
+                    // distingue exactement ce cas : ne force la réactivation
+                    // complète QUE si le tab vient vraiment d'être créé,
+                    // jamais s'il existait déjà.
+                    activity.upsertRegisterTabFromScan(transportKey, node, 255, fSerialId, fTabWasNew,
+                            activity.resolveIsLc3(transportKey, node));
 
-    public interface ScanProgressCallback {
-        void onProduct(String message);
-    }
+                    // ✅ Retry prefill — le tab peut prendre du temps à être créé après auto-connect
+                    Runnable prefill = new Runnable() {
+                        int attempts = 0;
+                        @Override public void run() {
+                            try {
+                                String mediaShort = activity.mediaShortFromTransportKey(transportKey);
+                                String tabKey = activity.tabKeyOf(mediaShort, node, fSerialId);
+                                Fragment f = activity.getSupportFragmentManager()
+                                    .findFragmentByTag("regtab_" + tabKey);
+                                if (f instanceof RegisterTabFragment) {
+                                    ((RegisterTabFragment) f).prefillFromDeepLink(
+                                        fWoNum, fProduit, fPresetStr);
+                                } else if (attempts++ < 5) {
+                                    // Tab pas encore créé — réessayer
+                                    activity.getUiHandler().postDelayed(this, 800);
+                                }
+                            } catch (Exception ignored) {}
+                        }
+                    };
+                    activity.getUiHandler().postDelayed(prefill, 1200);
+                    activity.refreshAllTabsMediaStatus();
+                    activity.showPage(0);
+                }
+            } catch (Exception ignored) {}
+        });
 
-    public static final class ProductScanResult {
-        public final int     noteIdx;
-        public final String  description;
-        public final boolean isPropane;
-        // ✅ AJOUTÉ (20 août 2026, demande Paul — "on a le produit, slot,
-        // code produit, la description, le type de produit") — code (#1)
-        // et type brut (#94) captés en plus de la description (#11), qui
-        // seule était lue jusqu'ici.
-        public final String  productCode;
-        public final int     productType; // -1 si absent/illisible, sinon 0-7 (List 2 du PDF)
-
-        public ProductScanResult(int noteIdx, String description) {
-            this(noteIdx, description, "", -1);
-        }
-
-        public ProductScanResult(int noteIdx, String description, String productCode, int productType) {
-            this.noteIdx     = noteIdx;
-            this.description = description != null ? description.trim() : "";
-            this.productCode = productCode != null ? productCode.trim() : "";
-            this.productType = productType;
-            // ✅ CORRIGÉ (20 août 2026) — isPropane se basait UNIQUEMENT sur
-            // un match texte dans la description ("contient propane") — le
-            // même problème de fiabilité identifié plus tôt aujourd'hui
-            // (le nom peut être vide ou différent, jamais garanti). Priorité
-            // maintenant au vrai type (#94=5, LPG selon List 2 du PDF
-            // Liquid Controls) — repli sur le texte seulement si le type
-            // est absent/illisible (-1), pour rester compatible avec les
-            // scans faits avant ce fix.
-            this.isPropane = (productType == 5)
-                    || (productType < 0 && this.description.toLowerCase(java.util.Locale.ROOT).contains("propane"));
-        }
-
-        public String toSpinnerLabel() {
-            // ✅ ENRICHI (20 août 2026, demande Paul — "on a le produit,
-            // slot, code produit, la description, le type de produit")
-            // — affiche maintenant code + type en plus de la description,
-            // dans le menu déroulant de sélection lui-même — pas besoin
-            // d'un écran séparé pour voir ces informations.
-            StringBuilder sb = new StringBuilder(String.valueOf(noteIdx));
-            boolean any = false;
-            if (!description.isEmpty()) { sb.append(" - ").append(description); any = true; }
-            if (!productCode.isEmpty()) { sb.append(any ? " (" : " — code:(").append(productCode).append(")"); any = true; }
-            if (productType >= 0) { sb.append(" [").append(LcpLink.decodeProductType(productType)).append("]"); }
-            return sb.toString();
-        }
-    }
-
-    // ✅ AJOUTÉ (20 août 2026) — décodage List 2 du PDF Liquid Controls
-    // (Field #94, ProductType_WM), pour affichage lisible dans le tab.
-    public static String decodeProductType(int type) {
-        switch (type) {
-            case 0: return "Ammonia";
-            case 1: return "Aviation";
-            case 2: return "Distillate";
-            case 3: return "Gasoline";
-            case 4: return "Methanol";
-            case 5: return "LPG";
-            case 6: return "Lube Oil";
-            case 7: return "Aucun";
-            default: return "?";
-        }
-    }
-
-    // ===================== OPS PUBLIQUES =====================
-    public MachineStatus opGetMachineStatus() throws IOException {
-        Response r = sendRecv(buildPayload(MSG_GET_MACHINE_STATUS, null), OpClass.STATUS);
-        ensureOk(r, "GET_MACHINE_STATUS");
-        return new MachineStatus(
-                r.payload[0] & 0xFF,
-                r.payload[1] & 0xFF,
-                r.payload[2] & 0xFF,
-                u16be(r.payload[3], r.payload[4]),
-                u16be(r.payload[5], r.payload[6])
-        );
-    }
-
-    /** Timeout 30s pour commande queueable */
-    public void opIssueCommand(int cmd) throws IOException {
-        Response r = sendRecv(buildPayload(MSG_ISSUE_COMMAND, new byte[]{(byte) cmd}), OpClass.ACTION);
-        ensureOk(r, "ISSUE_COMMAND 0x" + hex2(cmd));
-    }
-
-    /**
-     * Envoie une ligne de texte à l'imprimante LCR-II via MSG_PRINT_TEXT (0x22).
-     * Chaque appel envoie une ligne; l'appelant gère les sauts de ligne si nécessaire.
-     */
-    public void opPrintText(String line) throws IOException {
-        byte[] data = line.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
-        byte[] pl = new byte[1 + data.length];
-        pl[0] = MSG_PRINT_TEXT;
-        System.arraycopy(data, 0, pl, 1, data.length);
-        Response r = sendRecv(pl, OpClass.ACTION);
-        ensureOk(r, "PRINT_TEXT");
-    }
-
-    /**
-     * Diagnostic reset LCR-II — remet les compteurs net/gross à zéro.
-     * Séquence: Auxiliary (0x03) → Print last ticket (0x06) → poll net/gross == 0.
-     *
-     * Utilisé quand le registre affiche une valeur négative après retour d'air
-     * (ex: -0.1L) avant le démarrage d'une nouvelle livraison.
-     *
-     * @param maxWaitMs timeout poll (recommandé: 10000ms)
-     * @return int[] {netBefore, grossBefore} en unités brutes du registre
-     * @throws IOException si la communication BT échoue
-     */
-    public int[] opDiagnosticReset(int maxWaitMs) throws IOException {
-        // Lire net/gross avant reset (fields #45 net, #44 gross)
-        byte[] netRaw   = opGetField(45);
-        byte[] grossRaw = opGetField(44);
-        int netBefore   = toInt32(netRaw);
-        int grossBefore = toInt32(grossRaw);
-
-        android.util.Log.i("LcpLink",
-            "opDiagnosticReset: avant net=" + netBefore + " gross=" + grossBefore);
-
-        // Séquence reset: Auxiliary → Print last ticket
-        opIssueCommand(0x03); // CMD_AUXILIARY
-        try { Thread.sleep(300); } catch (Exception ignored) {}
-        opIssueCommand(0x06); // CMD_PRINT_LAST_TICKET
-
-        // Poll jusqu'à net >= 0 et gross >= 0
-        long deadline = System.currentTimeMillis() + maxWaitMs;
-        while (System.currentTimeMillis() < deadline) {
+        // ✅ Attendre que le média soit READY (max 10s) avant oneshot/start
+        boolean ready = false;
+        for (int i = 0; i < 20; i++) {
             try { Thread.sleep(500); } catch (Exception ignored) {}
             try {
-                byte[] n = opGetField(45);
-                byte[] g = opGetField(44);
-                int net   = toInt32(n);
-                int gross = toInt32(g);
-                android.util.Log.i("LcpLink",
-                    "opDiagnosticReset poll: net=" + net + " gross=" + gross);
-                if (net >= 0 && gross >= 0) {
-                    android.util.Log.i("LcpLink", "opDiagnosticReset: reset OK");
-                    break;
+                java.util.List<com.pa.lcr.lcp.transport.TransportSnapshot> snaps =
+                    activity.getMediaTransportManager().listSnapshots();
+                if (snaps != null) {
+                    for (com.pa.lcr.lcp.transport.TransportSnapshot s : snaps) {
+                        if (s != null && transportKey.equals(s.key)
+                                && s.status == com.pa.lcr.lcp.transport.TransportStatus.READY) {
+                            ready = true;
+                            break;
+                        }
+                    }
                 }
+                if (ready) break;
             } catch (Exception ignored) {}
         }
 
-        return new int[]{netBefore, grossBefore};
-    }
-
-    /** Convertit 4 bytes big-endian signé en int */
-    private static int toInt32(byte[] b) {
-        if (b == null || b.length < 4) return 0;
-        return ((b[0] & 0xFF) << 24) | ((b[1] & 0xFF) << 16)
-             | ((b[2] & 0xFF) << 8)  |  (b[3] & 0xFF);
-    }
-
-    /**
-     * Synchronise date (Field #20) et heure (Field #21) du registre LCR-II
-     * avec l'heure système de la tablette.
-     * Format date : MM/DD/YY (selon Field #19 = 0, valeur par défaut)
-     * Format heure : HH:MM:SS
-     * Appelé après probeAndIdentify() à chaque connexion BT ou USB.
-     */
-    public void opSyncDateTime() throws IOException {
-        // Lire Field #19 pour déterminer le format date (0=MM/DD/YY, 1=DD/MM/YY)
-        byte[] fmt19 = null;
-        try { fmt19 = opGetField(19, 800); } catch (Exception ignored) {}
-        int dateFormatIdx = (fmt19 != null && fmt19.length > 0) ? (fmt19[0] & 0xFF) : 0;
-
-        java.time.LocalDateTime now = java.time.LocalDateTime.now();
-        String dateStr, timeStr;
-        if (dateFormatIdx == 1) {
-            // DD/MM/YY
-            dateStr = String.format(java.util.Locale.ROOT, "%02d/%02d/%02d",
-                now.getDayOfMonth(), now.getMonthValue(), now.getYear() % 100);
-        } else {
-            // MM/DD/YY (défaut)
-            dateStr = String.format(java.util.Locale.ROOT, "%02d/%02d/%02d",
-                now.getMonthValue(), now.getDayOfMonth(), now.getYear() % 100);
+        if (!ready) {
+            android.util.Log.w(TAG, "lancerLivraison: média non prêt après 10s");
+            activity.runOnUiThread(() -> activity.toast("Média non prêt — réessayez"));
+            logError(fSerialId, woNum, "MEDIA_NOT_READY", "Média non prêt après 10s");
+            retournerFieldService(woNum, woIdGuid, "erreur_media",
+                buildErrorJson("MEDIA_NOT_READY", "Média non prêt après 10s"));
+            return;
         }
-        timeStr = String.format(java.util.Locale.ROOT, "%02d:%02d:%02d",
-            now.getHour(), now.getMinute(), now.getSecond());
 
-        // Encoder en ASCIIZ (null-terminated)
-        byte[] dateBytes = toAsciiz(dateStr);
-        byte[] timeBytes = toAsciiz(timeStr);
+        // ✅ FIX (4 août 2026, demande Paul : "j'arrive de deeplink, je vois le
+        // tab usb devenir (off)") — refreshAllTabsMediaStatus() était appelé
+        // une seule fois, juste après upsertRegisterTabFromScan() (ligne ~536),
+        // AVANT cette boucle d'attente — donc quasi toujours avant que le port
+        // USB soit réellement ouvert (énumération/permission USB plus lente que
+        // BT). Le tab affichait "(OFF)" à ce moment-là et rien ne le
+        // rafraîchissait ensuite, même une fois le média confirmé READY juste
+        // au-dessus. On rafraîchit maintenant l'affichage pour refléter l'état
+        // réel une fois qu'on SAIT que le média est prêt.
+        activity.runOnUiThread(activity::refreshAllTabsMediaStatus);
 
-        opSetField(20, dateBytes);
-        opSetField(21, timeBytes);
+        // ✅ (4 août 2026, demande Paul) — si ce tab vient d'être créé par cet
+        // appel (n'existait pas avant), attendre que le scan auto produits
+        // (RegisterTabFragment.onTabActivated → autoScanProduitsSiNecessaire)
+        // soit terminé AVANT de démarrer la livraison. Un tab déjà existant
+        // (donc déjà scanné lors d'une activation précédente) ne subit AUCUN
+        // délai supplémentaire. Max 10s d'attente — best-effort, ne bloque
+        // jamais indéfiniment si le fragment n'est pas trouvé ou ne répond pas.
+        if (fTabWasNew) {
+            boolean scanTermine = false;
+            for (int i = 0; i < 20; i++) {
+                try {
+                    String mediaShort = activity.mediaShortFromTransportKey(transportKey);
+                    String tabKey = activity.tabKeyOf(mediaShort, node, fSerialId);
+                    Fragment f = activity.getSupportFragmentManager()
+                        .findFragmentByTag("regtab_" + tabKey);
+                    if (!(f instanceof RegisterTabFragment)
+                            || !((RegisterTabFragment) f).isAutoProductScanBusy()) {
+                        scanTermine = true;
+                        break;
+                    }
+                } catch (Exception ignored) {
+                    scanTermine = true; // best-effort — ne jamais bloquer sur une erreur ici
+                    break;
+                }
+                try { Thread.sleep(500); } catch (Exception ignored) {}
+            }
+            android.util.Log.i(TAG, "lancerLivraison: attente scan auto produits (tab neuf) — "
+                + (scanTermine ? "terminé" : "timeout 10s, poursuite quand même"));
+        }
 
-        android.util.Log.i("LcpLink",
-            "opSyncDateTime: date=" + dateStr + " heure=" + timeStr
-            + " format=" + (dateFormatIdx == 1 ? "DD/MM/YY" : "MM/DD/YY"));
+        // Démarrer oneshot/start
+        int product = 1;
+        double preset = 0.0;
+        try { product = Integer.parseInt(produit);     } catch (Exception ignored) {}
+        try { preset  = Double.parseDouble(presetStr); } catch (Exception ignored) {}
+
+        final int fProduct = product;
+        final double fPresetD = preset;
+        final String fMac = mac != null ? mac : "";
+
+        // ✅ Même vérification que le bouton C dans RegisterTabFragment (onClick btnC) :
+        // comparer au DERNIER enregistrement du WO (getLatestForWo), pas une somme —
+        // si ce dernier net >= preset (ou preset non fourni), demander confirmation
+        // avant de démarrer une nouvelle livraison sur le même bon.
+        try {
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb statusDb =
+                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow existing;
+            try {
+                existing = statusDb.getLatestForWo(woNum);
+            } finally {
+                try { statusDb.close(); } catch (Exception ignored) {}
+            }
+
+            if (existing != null && existing.type != null && !"ANNULATION".equals(existing.type)) {
+                boolean livraisonComplete = (fPresetD <= 0 || existing.netL >= fPresetD);
+                if (livraisonComplete) {
+                    android.util.Log.w(TAG, "lancerLivraison: bon " + woNum
+                        + " déjà complété (ticket #" + existing.ticketNo
+                        + ", " + existing.netL + "L net, preset=" + fPresetD + "L) — confirmation requise");
+
+                    final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+                    final boolean[] continuer = {false};
+                    final com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow fExisting = existing;
+
+                    activity.runOnUiThread(() -> {
+                        new android.app.AlertDialog.Builder(activity)
+                            .setTitle("Bon déjà complété")
+                            .setMessage("Le bon " + woNum + " a déjà été livré"
+                                + " (ticket #" + fExisting.ticketNo
+                                + ", " + fExisting.netL + "L net).\n\n"
+                                + "Voulez-vous créer une nouvelle livraison sur ce même bon ?")
+                            .setPositiveButton("Continuer", (d, w) -> {
+                                continuer[0] = true;
+                                latch.countDown();
+                            })
+                            .setNegativeButton("Annuler", (d, w) -> {
+                                continuer[0] = false;
+                                latch.countDown();
+                            })
+                            .setCancelable(false)
+                            .show();
+                    });
+
+                    try { latch.await(); } catch (InterruptedException ignored) {}
+
+                    // ✅ Traçabilité: enregistrer le choix du chauffeur dans la table event,
+                    // que ce soit Continuer ou Annuler — action explicite requise (accountability).
+                    logEvent(fSerialId, woNum,
+                        continuer[0] ? DeliveryLogStore.LEVEL_INFO : DeliveryLogStore.LEVEL_WARN,
+                        continuer[0] ? "BON_DEJA_COMPLETE_CONTINUE" : "BON_DEJA_COMPLETE_ANNULE",
+                        "ticket=" + fExisting.ticketNo + " net=" + fExisting.netL
+                            + "L preset=" + fPresetD + "L — chauffeur a choisi "
+                            + (continuer[0] ? "CONTINUER" : "ANNULER"),
+                        null);
+
+                    if (!continuer[0]) {
+                        // ✅ Annuler = retour simple au tab, sans toast ni retour Field Service.
+                        // Le chauffeur reste libre d'utiliser le tab (imprimer, custom print,
+                        // voir le total, etc.) — s'il relance le bouton C, le même dialogue
+                        // reviendra puisque rien n'a changé dans l'historique.
+                        android.util.Log.i(TAG, "lancerLivraison: annulé par le chauffeur (bon déjà complété)");
+                        activity.runOnUiThread(() -> activity.showPage(0));
+                        return;
+                    }
+                    android.util.Log.i(TAG, "lancerLivraison: chauffeur confirme — nouvelle livraison sur bon déjà complété");
+                }
+            }
+        } catch (Exception e) {
+            android.util.Log.w(TAG, "lancerLivraison: erreur vérif bon complété — " + e.getMessage());
+            try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.lancerLivraison.verifBonComplete", e); } catch (Exception ignored) {}
+        }
+
+        try {
+            // ✅ FIX régression session 9 : réutiliser le DeliveryController déjà résolu
+            // (CONNECTED, socket ouvert) au lieu de créer une nouvelle
+            // MultiRegisterApiFacadeImpl — celle-ci ouvrait un second accès au transport
+            // et entrait en conflit avec le socket déjà détenu, causant le
+            // "Timeout waiting LCP response" même si le DC affichait CONNECTED.
+            com.pa.lcr.lcp.RegisterSessionManager rsmOneshot =
+                com.pa.lcr.lcp.RegisterSessionManager.get(activity);
+            com.pa.lcr.lcp.DeliveryController controllerOneshot =
+                rsmOneshot.getController(transportKey, node);
+
+            if (controllerOneshot == null) {
+                android.util.Log.w(TAG, "oneshot/start: controller introuvable pour transportKey="
+                    + transportKey + " node=" + node);
+                logError(fSerialId, woNum, "REGISTER_NOT_READY",
+                    "Controller introuvable au moment du oneshot/start");
+                retournerFieldService(woNum, woIdGuid, "erreur",
+                    buildErrorJson("REGISTER_NOT_READY", "Controller introuvable au moment du oneshot/start"));
+                return;
+            }
+
+            // ✅ FIX #2 : activer le transport en exclusivité avant l'oneshot.
+            // getState()==CONNECTED n'est qu'un état FSM en cache — sans
+            // activateExclusive(), le transport n'est pas garanti armé pour
+            // l'écriture, ce qui produisait un échec quasi instantané
+            // (~1s, pas un vrai timeout LCP) déguisé en "Timeout waiting LCP response".
+            // Même pattern que RegisterTabFragment.lancerDepuisStore().
+            //
+            // ✅ FIX (4 août 2026, demande Paul : "quand j'arrive de Deeplink,
+            // j'ai un trouble avec le transport usb") — activateExclusive()
+            // retourne false si le TransportHandle n'est pas encore enregistré
+            // (cas fréquent en USB, énumération plus lente qu'en BT — le check
+            // "média READY" plus haut peut réussir avant que le handle exclusif
+            // soit prêt). Avant ce fix, un retour false OU une exception étaient
+            // tous les deux avalés silencieusement, et le code continuait quand
+            // même vers api_deliveryOneShotStart() — garanti d'échouer
+            // immédiatement via GuardedTransportIo.requireActive(), déguisé en
+            // "orchestration error" sans aucun indice sur la vraie cause.
+            // Maintenant : jusqu'à 3 tentatives (150ms d'écart, l'énumération USB
+            // peut prendre un instant), loggé si ça échoue quand même, mais on
+            // continue toujours vers l'oneshot ensuite (best-effort, comme avant)
+            // — seule la visibilité change.
+            boolean exclusiveOk = false;
+            // ✅ FIX (4 août 2026, demande Paul : "on ne doit jamais oublier
+            // l'arrivée du deeplink peu importe le transport trouvé") — avant
+            // de voler l'exclusivité ici, vérifier qu'aucune livraison n'est
+            // active sur un AUTRE registre déjà en cours ailleurs (même garde
+            // que MainActivity.ensureActiveTransport, exposée publiquement
+            // via isTransportSwitchSafe() pour que ce chemin direct ne puisse
+            // plus le contourner).
+            if (!activity.isTransportSwitchSafe(transportKey, "DEEPLINK_ONESHOT")) {
+                android.util.Log.w(TAG, "oneshot/start: activateExclusive() BLOQUÉ — livraison active "
+                    + "sur un autre registre, transportKey=" + transportKey + " n'est pas le même registre");
+                logError(fSerialId, woNum, "TRANSPORT_SWITCH_BLOCKED",
+                    "Livraison active sur un autre registre — bascule de transport refusée");
+                retournerFieldService(woNum, woIdGuid, "erreur",
+                    buildErrorJson("TRANSPORT_SWITCH_BLOCKED",
+                        "Une livraison est déjà en cours sur un autre registre"));
+                return;
+            }
+            for (int i = 0; i < 3 && !exclusiveOk; i++) {
+                try {
+                    exclusiveOk = activity.getMediaTransportManager()
+                        .activateExclusive(transportKey, "DEEPLINK_ONESHOT");
+                } catch (Exception e) {
+                    com.pa.lcr.lcp.log.LogBus.err(node,
+                        "DeepLinkHandler.activateExclusive[DEEPLINK_ONESHOT] tentative " + (i + 1), e);
+                }
+                if (!exclusiveOk) { try { Thread.sleep(150); } catch (Exception ignored) {} }
+            }
+            if (!exclusiveOk) {
+                android.util.Log.w(TAG, "oneshot/start: activateExclusive() a échoué après 3 tentatives"
+                    + " pour transportKey=" + transportKey + " — l'oneshot va probablement échouer"
+                    + " (transport pas encore armé)");
+            }
+
+            // ✅ FIX CRITIQUE (12 août 2026, demande Paul — "corrige-moi les 4
+            // trous", trou #3 : registre occupé (rc=0x26 en boucle) au moment
+            // d'ARMED, confirmé PAS causé par le registre lui-même — ton propre
+            // script isolé reste rapide sur le même matériel) — trouvé : des
+            // activités de fond (scan produits, WO-DETECT, CUMUL-WO) ont déjà pu
+            // mettre des commandes dans la file du registre juste AVANT ce point
+            // — le registre les traite encore quand ARMED arrive une fraction de
+            // seconde plus tard. Les gardes d'état existantes (PRESTART/
+            // RUNNING_FLOWING) ne couvrent pas cette fenêtre puisqu'on n'est PAS
+            // encore en PRESTART à ce moment précis — c'est une question de
+            // séquencement, pas d'état. Corrigé : attente courte et bornée (max
+            // 2s) si un scan produits est en vol (scanInProgress, ajouté plus tôt
+            // aujourd'hui) — laisse sa file se vider avant d'ajouter le vrai
+            // démarrage par-dessus, au lieu de les faire compétitionner.
+            for (int waitScan = 0; waitScan < 20; waitScan++) {
+                if (!controllerOneshot.scanInProgress) break;
+                try { Thread.sleep(100); } catch (Exception ignored) {}
+            }
+
+            com.pa.lcr.lcp.ApiResult r = controllerOneshot.api_deliveryOneShotStart(
+                woNum, fProduct, fPresetD, null);
+
+            // ✅ FIX #3 : la détection de timeout ne regardait que r.msg, qui vaut
+            // toujours "Delivery OneShot: 0 - orchestration error" — le mot
+            // "timeout" est dans r.data.detail (JSON imbriqué). Le retry ne se
+            // déclenchait donc jamais, avant comme après le fix #1.
+            boolean isTimeout = false;
+            if (r != null && r.code == 0) {
+                if (r.msg != null && r.msg.toLowerCase().contains("timeout")) isTimeout = true;
+                if (!isTimeout && r.data != null) {
+                    String detail = r.data.optString("detail", "");
+                    if (detail.toLowerCase().contains("timeout")) isTimeout = true;
+                }
+            }
+
+            if (isTimeout) {
+                android.util.Log.w(TAG, "oneshot/start: timeout LCP — retry dans 1.5s");
+                try { Thread.sleep(1500); } catch (Exception ignored) {}
+                r = controllerOneshot.api_deliveryOneShotStart(
+                    woNum, fProduct, fPresetD, null);
+                android.util.Log.i(TAG, "oneshot/start retry: code=" + r.code + " msg=" + r.msg);
+            }
+
+            android.util.Log.i(TAG, "oneshot/start: code=" + r.code + " msg=" + r.msg);
+
+            if (r.code == 1) {
+                String jobId = (r.data != null) ? r.data.optString("jobId", null) : null;
+                logEvent(fSerialId, woNum, DeliveryLogStore.LEVEL_INFO,
+                    "ONESHOT_START", "ARMED jobId=" + jobId, null);
+                // ✅ (ajouté 3 août 2026, demande Paul : "RUNNING_FLOWING pas supposé
+                // ne pas s'afficher") — forcer le rafraîchissement immédiat du tab sur
+                // LE MÊME controller qui vient d'armer la livraison, au lieu d'attendre
+                // passivement pollJobUntilDone() (qui interroge via une facade séparée
+                // et ne pousse jamais à travers le listener UI du tab). Même appel que
+                // runStatusBLikeButton() dans RegisterTabFragment pour Status(B).
+                try {
+                    controllerOneshot.requestStatus();
+                    Thread.sleep(200);
+                    controllerOneshot.requestLiveSample();
+                } catch (Exception ignored) {}
+                if (jobId != null && !jobId.isEmpty()) {
+                    activity.runOnUiThread(() ->
+                        activity.toast("📦 Livraison démarrée — " + woNum));
+                    pollJobUntilDone(jobId, node, woNum, woIdGuid, fSerialId,
+                        fMac.isEmpty() ? transportKey : fMac);
+                }
+            } else {
+                android.util.Log.w(TAG, "oneshot/start code=0: " + r.msg);
+                android.util.Log.w(TAG, "oneshot/start detail: " + (r.data != null ? r.data.toString() : "null"));
+                logEvent(fSerialId, woNum, DeliveryLogStore.LEVEL_WARN,
+                    "ONESHOT_ERROR", r.msg, r.data != null ? r.data.toString() : null);
+
+                // ✅ Détecter ticket pending — ne pas retourner dans FSM
+                // ds=0x0400 = ticketPending sur le registre
+                boolean ticketPending = false;
+                if (r.data != null) {
+                    ticketPending = r.data.optBoolean("ticketPending", false)
+                        || r.data.optInt("delStatus", 0) == 0x0400;
+                }
+                if (r.msg != null && r.msg.toLowerCase().contains("ticket")) {
+                    ticketPending = true;
+                }
+
+                if (ticketPending) {
+                    // Ticket pending — rester dans l'APK, alerter le chauffeur
+                    android.util.Log.w(TAG, "oneshot/start: ticket pending — rester dans APK");
+                    activity.runOnUiThread(() ->
+                        activity.toast("⚠️ Ticket en attente — imprimez le ticket précédent avant de démarrer"));
+                    activity.runOnUiThread(() -> activity.showPage(0));
+                } else {
+                    // Erreur orchestration — rester dans l'APK (pas de finish() pour éviter bounce FSM)
+                    android.util.Log.w(TAG, "oneshot/start: orchestration error — rester dans APK");
+
+                    // ✅ FIX : sur une vraie erreur TRANSPORT (BT/USB coupé), lancer le
+                    // diagnostic avec le contexte complet du deep link (lancerDiagnosticForce)
+                    // au lieu de juste toaster. Sans ça, seule la vérification périodique
+                    // du tab (STATUS_B) détecte la coupure et relance un diagnostic — mais
+                    // SANS connaître woNum/produit/preset/mac, donc SANS jamais relancer
+                    // la livraison une fois le registre reconnecté (voir diagnostic()
+                    // à 4 arguments dans RegisterConnectionHelper, qui passe null partout).
+                    boolean errTransport = false;
+                    if (r.data != null) {
+                        String classErr = r.data.optString("class", "");
+                        String levelErr = r.data.optString("level", "");
+                        errTransport = "TRANSPORT".equalsIgnoreCase(classErr)
+                            || "TRANSPORT".equalsIgnoreCase(levelErr);
+                    }
+
+                    if (errTransport) {
+                        android.util.Log.w(TAG, "oneshot/start: erreur TRANSPORT — diagnostic + relance auto");
+                        activity.runOnUiThread(() ->
+                            activity.toast("⚠️ Registre déconnecté — reconnexion en cours..."));
+                        new Thread(() -> new com.pa.lcrdemo.RegisterConnectionHelper(activity)
+                            .lancerDiagnosticForce(transportKey, node, fSerialId, woNum,
+                                woIdGuid, produit, presetStr, mac,
+                                DeepLinkHandler.this)).start();
+                    } else {
+                        activity.runOnUiThread(() -> {
+                            activity.toast("⚠️ Registre non disponible — vérifiez l'état du registre et réessayez");
+                            activity.showPage(0);
+                        });
+                    }
+                }
+            }
+        } catch (Exception e) {
+            android.util.Log.e(TAG, "lancerLivraison ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.lancerLivraison", e); } catch (Exception ignored) {}
+            logError(fSerialId, woNum, "ONESHOT_EXCEPTION", e.getMessage());
+            retournerFieldService(woNum, woIdGuid, "erreur",
+                buildErrorJson("ONESHOT_EXCEPTION", e.getMessage()));
+        }
     }
-
-    private static byte[] toAsciiz(String s) {
-        byte[] ascii = s.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
-        byte[] result = new byte[ascii.length + 1]; // +1 pour null terminator
-        System.arraycopy(ascii, 0, result, 0, ascii.length);
-        result[ascii.length] = 0x00;
-        return result;
-    }
-
-    public byte[] opGetField(int field) throws IOException {
-        Response r = sendRecv(buildPayload(MSG_GET_FIELD, new byte[]{(byte) field}), 5000);
-        ensureOk(r, "GET_FIELD #" + field);
-        byte[] out = new byte[r.payload.length - 2];
-        System.arraycopy(r.payload, 2, out, 0, out.length);
-        return out;
-    }
-
-    /** overload timeout court (scan rapide) */
-    public byte[] opGetField(int field, int timeoutMs) throws IOException {
-        Response r = sendRecv(buildPayload(MSG_GET_FIELD, new byte[]{(byte) field}), timeoutMs);
-        ensureOk(r, "GET_FIELD #" + field);
-        byte[] out = new byte[r.payload.length - 2];
-        System.arraycopy(r.payload, 2, out, 0, out.length);
-        return out;
-    }
-
-    // ✅ AJOUTÉ (7 août 2026, demande Paul — "je veux être en mesure de
-    // récupérer le firmware du registre et je le veux dans le log du
-    // support") — Field #60 "Software_NE" (TEXT), sourcé directement de la
-    // doc officielle LCP ("Version of the software running in the LCR").
-    // Un seul appel, réutilise opGetField() comme n'importe quel autre champ
-    // texte (même patron que le #80 pour le #série).
-    public static final int FIELD_SOFTWARE_VERSION = 60;
-
-    public String opGetFirmwareVersion() throws IOException {
-        byte[] raw = opGetField(FIELD_SOFTWARE_VERSION, 5000);
-        if (raw == null || raw.length == 0) return "";
-        String s = new String(raw, java.nio.charset.StandardCharsets.UTF_8);
-        int nul = s.indexOf('\0');
-        if (nul >= 0) s = s.substring(0, nul);
-        return s.trim();
-    }
-
-    // ✅ AJOUTÉ (7 août 2026, demande Paul — "donne-moi l'info des deux pour
-    // voir s'il y a une différence") — "Get Product ID" est un message LCP
-    // GÉNÉRIQUE (tout appareil LCP le supporte, même avant de savoir si
-    // c'est un LCR-II), sourcé de la doc officielle. Réponse : rc,
-    // productID (0x02 attendu = LCR), et une chaîne ASCIIZ "nom+révision"
-    // (ex: "SR200b2.05") — indépendante de Field #60, donc utile pour
-    // vérifier s'il y a une divergence entre les deux sources.
-    public String opGetProductIdRevision() throws IOException {
-        Response r = sendRecv(buildPayload(MSG_GET_PRODUCT_ID, null), 5000);
-        ensureOk(r, "GET_PRODUCT_ID");
-        // ✅ FIX CRITIQUE (10 août 2026, audit complet contre la doc
-        // officielle) — CORRECTION D'UNE ERREUR PRÉCÉDENTE : vérifié de
-        // façon décisive dans sendRecv() (ligne ~800 : "int rc =
-        // f.payload[0]..." puis "return new Response(rc, f.payload)" — le
-        // payload n'est JAMAIS tronqué, rc reste à payload[0]) que
-        // r.payload[0] = rc, PAS le premier octet de données. Mon fix
-        // précédent ("r.payload exclut déjà rc") était FAUX — basé sur une
-        // fausse prémisse, jamais vérifié contre le vrai code de parsing.
-        // Structure réelle confirmée contre la doc (Get Product ID) :
-        // payload[0]=rc, payload[1]=productID, payload[2..n]=nom ASCIIZ.
-        // Il faut donc sauter DEUX octets (rc ET productID), pas un seul.
-        if (r.payload == null || r.payload.length < 2) return "";
-        byte[] nameBytes = new byte[r.payload.length - 2];
-        System.arraycopy(r.payload, 2, nameBytes, 0, nameBytes.length);
-        String s = new String(nameBytes, java.nio.charset.StandardCharsets.UTF_8);
-        int nul = s.indexOf('\0');
-        if (nul >= 0) s = s.substring(0, nul);
-        return s.trim();
-    }
-
-    public static final int BAUD_IDX_57600 = 0;
-    public static final int BAUD_IDX_19200 = 1;
-    public static final int BAUD_IDX_9600  = 2;
-    public static final int BAUD_IDX_4800  = 3;
-    public static final int BAUD_IDX_2400  = 4;
-
-    /**
-     * ⚠️ RISQUÉ — change la vitesse de transmission DU REGISTRE lui-même via
-     * LCP. Le registre applique la nouvelle vitesse IMMÉDIATEMENT après cette
-     * réponse — l'appelant DOIT reconfigurer son propre port physique pour
-     * matcher tout de suite après, sinon toute communication ultérieure
-     * échoue jusqu'à un cycle d'alimentation du registre (le registre garde
-     * la nouvelle vitesse même après une déconnexion). Diagnostic seulement
-     * — jamais utilisé dans le flux normal de livraison. Sur BT (SPP), le
-     * lien radio lui-même n'a pas de "vitesse" au sens UART — mais le
-     * module BT du registre relaie en interne vers son UART réel, donc
-     * cette commande peut quand même avoir un effet (à valider sur le
-     * terrain — pas garanti par la doc, qui décrit le comportement RS-232).
-     */
-    public void opSetBaud(int baudIndex) throws IOException {
-        Response r = sendRecv(buildPayload(MSG_SET_BAUD, new byte[]{(byte) baudIndex}), 5000);
-        ensureOk(r, "SET_BAUD idx=" + baudIndex);
-    }
-
-    /** ✅ AJOUTÉ (11 août 2026, demande Paul) — "Abort Request" (0x7E),
-     *  tente d'annuler une requête actuellement en file d'attente dans le
-     *  registre. Structure confirmée dans la doc officielle : aucun
-     *  paramètre, réponse d'un seul octet (rc). Codes de retour pertinents
-     *  (voir REGISTRE_ETATS_REFERENCE.md) : 40=annulée avec succès,
-     *  41=annulation encore en cours de traitement, 42=trop avancée pour
-     *  être annulée, 39=aucune requête en file à annuler. Retourne le rc
-     *  brut plutôt que de lever une exception sur un rc non-zéro — TOUS
-     *  les codes ci-dessus sont des réponses valides et informatives, pas
-     *  des échecs de communication. */
-    public int opAbortRequest() throws IOException {
-        Response r = sendRecv(buildPayload(MSG_ABORT_REQUEST, null), 5000);
-        return r.rc;
-    }
-
 
     // =========================================================
-    // ✅ Précision décimale NET/GROSS — responsabilité du protocole,
-    // PAS de l'UI ni d'un cache générique partagé dans DeliveryController.
-    // Chaque sous-classe de Link connaît sa propre façon de représenter
-    // NET/GROSS (registre à registre, protocole à protocole) et doit
-    // garantir que le résultat final (valeur physique réelle en litres)
-    // est correct — peu importe le mécanisme interne utilisé pour y
-    // arriver. LcpLink (LCR-II) lit le champ FIELD_DECIMALS (#39) du
-    // registre à chaque appel — pas de cache ici, l'appelant (via
-    // DeliveryController) est responsable de mettre en cache s'il le
-    // souhaite pour éviter des lectures répétées inutiles.
-    private static final int FIELD_DECIMALS = 39;
+    // Connexion BT + oneshot/start (fallback si pas de transport actif)
+    // =========================================================
 
-    public int getDecimalDigits() {
-        try {
-            byte[] dec = opGetField(FIELD_DECIMALS, 3000);
-            int idx = (dec != null && dec.length >= 1) ? (dec[0] & 0xFF) : 0;
-            return decimalsDigitsFromIdx(idx);
-        } catch (Exception e) {
-            return 2; // valeur de repli historique LCR-II si la lecture échoue
+    private void connectBtByMacAndOpenTab(String btMac, int node, String serialId,
+                                           String woNum, String woIdGuid,
+                                           String produit, String presetStr) {
+        if (btMac == null || btMac.trim().isEmpty()) {
+            activity.toast("Deep Link: BT MAC manquant");
+            logError(serialId, woNum, "BT_CONNECT", "BT MAC manquant");
+            return;
         }
-    }
+        final String mac = btMac.toUpperCase().trim();
 
-    /** Mapping idx registre → nombre de décimales (LCR-II, protocole LCP standard). */
-    protected static int decimalsDigitsFromIdx(int idx) {
-        switch (idx) {
-            case 0: return 2;
-            case 1: return 1;
-            case 2: return 0;
-            case 3: return 3;
-            default: return 2;
-        }
-    }
-
-    /** Timeout 30s pour SET_FIELD queueable */
-    public void opSetField(int field, byte[] value) throws IOException {
-        byte[] pl = new byte[2 + (value == null ? 0 : value.length)];
-        pl[0] = MSG_SET_FIELD;
-        pl[1] = (byte) field;
-        if (value != null) System.arraycopy(value, 0, pl, 2, value.length);
-        Response r = sendRecv(pl, OpClass.ACTION);
-        ensureOk(r, "SET_FIELD #" + field);
-    }
-
-    public java.util.List<ProductScanResult> opScanAllProductNames(
-            ScanProgressCallback progressLog) throws IOException {
-        try { sendRecv(new byte[]{0x00}, 3000); } catch (Exception ignored) {}
-        byte[] curRaw = opGetField(0);
-        int originalIdx = (curRaw != null && curRaw.length > 0) ? (curRaw[0] & 0xFF) : 0;
-        java.util.List<ProductScanResult> result = new java.util.ArrayList<>();
-        try {
-            for (int idx = 0; idx < 16; idx++) {
-                try {
-                    opSetField(0, new byte[]{(byte) idx});
-                } catch (Exception e) {
-                    result.add(new ProductScanResult(idx + 1, ""));
-                    if (progressLog != null) progressLog.onProduct("Produit " + (idx + 1) + ": ");
-                    continue;
-                }
-                try { Thread.sleep(80); } catch (Exception ignored) {}
-                String desc = "";
-                try {
-                    byte[] f11 = opGetField(11);
-                    if (f11 != null && f11.length > 0)
-                        desc = new String(f11, java.nio.charset.StandardCharsets.US_ASCII)
-                                   .replace("\0", "").trim();
-                } catch (Exception ignored) {}
-                // ✅ AJOUTÉ (20 août 2026) — code (#1) et type (#94), en plus
-                // de la description. Échecs de lecture individuels ignorés
-                // (rc=0x23 possible si champ non applicable à ce slot) —
-                // ne bloque jamais le reste du scan.
-                String code = "";
-                try {
-                    byte[] f1 = opGetField(1);
-                    if (f1 != null && f1.length > 0)
-                        code = new String(f1, java.nio.charset.StandardCharsets.US_ASCII)
-                                   .replace("\0", "").trim();
-                } catch (Exception ignored) {}
-                int type = -1;
-                try {
-                    byte[] f94 = opGetField(94);
-                    if (f94 != null && f94.length > 0) type = f94[0] & 0xFF;
-                } catch (Exception ignored) {}
-                result.add(new ProductScanResult(idx + 1, desc, code, type));
-                if (progressLog != null) progressLog.onProduct("Produit " + (idx + 1) + ": " + desc);
-            }
-        } finally {
-            try { opSetField(0, new byte[]{(byte) originalIdx}); } catch (Exception ignored) {}
-        }
-        return result;
-    }
-
-    public int[] opDeliveryStatus() throws IOException {
-        Response r = sendRecv(buildPayload(MSG_GET_DELIVERY_STATUS, null), OpClass.STATUS);
-        ensureOk(r, "GET_DELIVERY_STATUS");
-        return new int[]{
-                u16be(r.payload[2], r.payload[3]),
-                u16be(r.payload[4], r.payload[5])
-        };
-    }
-
-    /** overload timeout court (scan rapide) */
-    public int[] opDeliveryStatus(int timeoutMs) throws IOException {
-        Response r = sendRecv(buildPayload(MSG_GET_DELIVERY_STATUS, null), timeoutMs);
-        ensureOk(r, "GET_DELIVERY_STATUS");
-        return new int[]{
-                u16be(r.payload[2], r.payload[3]),
-                u16be(r.payload[4], r.payload[5])
-        };
-    }
-
-    /**
-     * ✅ Interprétation du bit "trop de retours de pulseur" dans le Delivery
-     * Status Word — spécifique au protocole LCR-II (bit 0x0040). Méthode
-     * surchargeable pour que Lc3Link (ou tout autre registre futur) puisse
-     * redéfinir sa propre logique — ou retourner toujours false si ce concept
-     * n'existe pas sur ce type de registre — sans jamais toucher à
-     * DeliveryController, qui reste générique et appelle seulement cette
-     * méthode via son link (LcpLink ou sous-classe).
-     */
-    public boolean isPulserReversalTerminated(int delStatus) {
-        return (delStatus & 0x0040) != 0;
-    }
-
-    // ===================== SEND / RECV =====================
-    /** Point d'entrée classifié — TOUJOURS préférer cette forme à
-     *  sendRecv(payload, timeoutMs) directement, pour que le comportement
-     *  (queueable ou non, timeout) vienne d'un seul endroit (OpClass) et
-     *  pas d'une décision au cas par cas dans chaque méthode op*(). */
-    private Response sendRecv(byte[] payload, OpClass cls) throws IOException {
-        if (cls == OpClass.STATUS) {
-            // ✅ Timeout adaptatif — voir statusTimeoutMs. isStatusClass=true
-            // active l'apprentissage (moyenne + relève sur timeout) dans la
-            // boucle sendRecv ci-dessous.
-            return sendRecv(payload, true, (int) statusTimeoutMs, true);
-        }
-        return sendRecv(payload, cls.queueable, cls.timeoutMs, false);
-    }
-
-    // Conservé pour opGetField(field, timeoutMs) — poll rapide, jamais
-    // queueable, mais avec un timeout ajustable au cas par cas (ex: scan,
-    // lecture décimales) plutôt que la valeur fixe d'OpClass.FAST.
-    private Response sendRecv(byte[] payload, int timeoutMs) throws IOException {
-        return sendRecv(payload, false, timeoutMs, false);
-    }
-
-    /** Nourrit la moyenne mobile après une résolution réussie en file. */
-    private void onStatusResolved(long elapsedMs) {
-        statusResolveEmaMs = (statusResolveEmaMs < 0)
-            ? elapsedMs
-            : (statusResolveEmaMs * (1 - STATUS_EMA_ALPHA) + elapsedMs * STATUS_EMA_ALPHA);
-        long candidate = (long) (statusResolveEmaMs * STATUS_TIMEOUT_MARGIN);
-        long newTimeout = Math.min(STATUS_TIMEOUT_CEILING_MS, Math.max(STATUS_TIMEOUT_FLOOR_MS, candidate));
-        if (newTimeout != statusTimeoutMs) {
-            android.util.Log.i("LcpLink", "STATUS adaptatif: moyenne=" + Math.round(statusResolveEmaMs)
-                + "ms → nouveau plafond=" + newTimeout + "ms (était " + statusTimeoutMs + "ms)");
-            statusTimeoutMs = newTimeout;
-        }
-    }
-
-    /** Sur timeout franc : le plafond actuel est prouvé insuffisant — on le
-     *  relève tout de suite plutôt que d'attendre que la moyenne rattrape. */
-    private void onStatusTimedOut(long elapsedMs) {
-        long bumped = Math.min(STATUS_TIMEOUT_CEILING_MS, statusTimeoutMs + STATUS_TIMEOUT_BUMP_MS);
-        if (bumped != statusTimeoutMs) {
-            android.util.Log.w("LcpLink", "STATUS timeout insuffisant (" + statusTimeoutMs
-                + "ms, réel >= " + elapsedMs + "ms) — relevé à " + bumped + "ms");
-            statusTimeoutMs = bumped;
-        }
-        // Nourrit quand même la moyenne avec ce plancher connu (elapsedMs
-        // sous-estime le vrai temps de résolution puisqu'on a coupé avant,
-        // mais c'est un signal valide : "au moins elapsedMs").
-        statusResolveEmaMs = (statusResolveEmaMs < 0)
-            ? elapsedMs
-            : (statusResolveEmaMs * (1 - STATUS_EMA_ALPHA) + elapsedMs * STATUS_EMA_ALPHA);
-    }
-
-    private synchronized Response sendRecv(byte[] payload, boolean queueable, int timeoutMs, boolean isStatusClass) throws IOException {
-        if (closed) throw new TransportException("Transport closed");
-        if (io == null) throw new TransportException("Transport null");
-        if (!io.isOpen()) throw new TransportException("Transport not open");
-
-        // ✅ FIX CRITIQUE (11 août 2026, demande Paul — trouvé via trace
-        // TX/RX brute directement dans le tab) — preuve DIRECTE que Get
-        // Machine Status (0x23) pouvait rester bloqué en RC=0x26 EN BOUCLE
-        // INFINIE sans jamais se résoudre, alors que le même mécanisme
-        // (Check Request 0x7D) résolvait avec succès les RC=0x26 sur Set
-        // Field. D'où l'ajout de Get Machine Status/Get Delivery Status au
-        // comportement "queueable" (0x7D).
-        // ✅ REVU (13 août 2026) — ce "queueable" est maintenant décidé par
-        // OpClass, pas déduit du type de message ici. Voir OpClass pour la
-        // politique complète (FAST/STATUS/ACTION) et pourquoi GET_MACHINE_
-        // STATUS/GET_DELIVERY_STATUS sont "queueable" mais PLAFONNÉS à
-        // 2.5s au lieu de 6-8s — un GET busy ne doit plus pouvoir geler
-        // tout le node derrière lui.
-
-        byte[] frame = encodeFrame(payload);
-        final byte msg = (payload != null && payload.length > 0) ? payload[0] : 0;
-
-        t("TX: " + hexDump(frame));
-        synchronized (ioLock) {
+        safeExecute(() -> {
             try {
-                io.write(frame, 500);
-            } catch (Exception e) {
-                throw new TransportException("Error writing", e);
-            }
-        }
+                String transportKey = MediaTransportManager.btKey(mac);
+                MediaTransportManager mtm = activity.getMediaTransportManager();
+                boolean btDejaConnecte = false;
 
-        long deadline = System.currentTimeMillis() + timeoutMs;
-        long startMs = System.currentTimeMillis();
-        boolean queued = false;
-        int lastQueued = -1;
-        long nextCheck = 0L;
-        // ✅ FIX CRITIQUE (11 août 2026, demande Paul — "ça ramasse en peu
-        // de temps... c'est malade") — trouvé via un vrai log de tab :
-        // certains cycles prennent 10-15 échanges 0x7D avant de se
-        // résoudre, TOUJOURS espacés du même QP_MS=200ms fixe, peu importe
-        // combien de tentatives ont déjà échoué — générant un volume de
-        // trafic/logs énorme sur 5 minutes. Ralentissement progressif
-        // ajouté : reste à 200ms pour les toutes premières tentatives
-        // (cas normal, résolution rapide), puis double jusqu'à un plafond
-        // de 2s après plusieurs échecs consécutifs — la file finit quand
-        // même par se résoudre (le comportement fonctionnel ne change
-        // pas), mais avec beaucoup moins de trafic/bruit pendant qu'elle
-        // prend son temps.
-        int checkAttempts = 0;
-        long checkIntervalMs = QP_MS;
+                if (mtm != null) {
+                    TransportIo existing = mtm.getByKey(transportKey);
+                    if (existing != null && existing.isOpen()) {
+                        btDejaConnecte = true;
+                        android.util.Log.i(TAG, "BT déjà connecté: " + mac + " — réutilisation");
+                        logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
+                            "BT_REUSE", "BT déjà connecté: " + mac, null);
+                    }
+                }
 
-        while (System.currentTimeMillis() < deadline) {
-
-            // 1) Envoi périodique 0x7D si queued
-            if (queued && System.currentTimeMillis() >= nextCheck) {
-                byte[] chk = encodeFrame(new byte[]{MSG_CHECK_REQUEST});
-                t("TX: " + hexDump(chk));
-                synchronized (ioLock) {
+                // ✅ Si BT déjà connecté — valider l'état du registre avant tout
+                if (btDejaConnecte) {
                     try {
-                        io.write(chk, 500);
-                    } catch (Exception e) {
-                        throw new TransportException("Error writing", e);
-                    }
-                }
-                checkAttempts++;
-                if (checkAttempts >= 5) {
-                    checkIntervalMs = Math.min(checkIntervalMs * 2, 2000);
-                }
-                nextCheck = System.currentTimeMillis() + checkIntervalMs;
-            }
+                        String tKey = MediaTransportManager.btKey(mac);
+                        com.pa.lcr.lcp.DeliveryController dc =
+                            com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                                .getController(tKey, node);
 
-            // 2) Lire en tranches courtes pour ne pas bloquer l’envoi des 0x7D
-            long sliceDeadline = Math.min(deadline, System.currentTimeMillis() + RX_SLICE_MS);
-            Frame f = readFrameUntil(sliceDeadline);
-            if (f == null) {
-                if (queued) continue;
-                break;
-            }
+                        if (dc == null) {
+                            // Controller absent — BT zombi
+                            android.util.Log.w(TAG, "BT zombi — controller absent, restart BT");
+                            activity.btDisconnect();
+                            try { Thread.sleep(1500); } catch (Exception ignored) {}
+                            btDejaConnecte = false; // forcer reconnexion
+                        } else {
+                            // Lire l'état du registre via tickSnapshot
+                            com.pa.lcr.lcp.ApiResult snap = dc.api_tickSnapshot();
+                            int delCode = (snap != null && snap.data != null)
+                                ? snap.data.optInt("delCode", 0) : 0;
+                            boolean deliveryActive = (delCode & 0x0008) != 0;
+                            boolean ticketPending  = (delCode & 0x0001) != 0;
 
-            t("RX: " + hexDump(f.raw));
-
-            // ✅ Rejeter les trames d'un autre node — évite contamination buffer BT
-            if (f.from != toAddr) {
-                t("RX: ignoré — from=0x" + hex2(f.from) + " attendu=0x" + hex2(toAddr));
-                continue;
-            }
-
-            int rc = (f.payload.length > 0) ? (f.payload[0] & 0xFF) : 0xFF;
-
-            // 3) Busy/queued handling
-            if (rc == RC_REQUEST_QUEUED || rc == RC_NO_REQUEST_ACTIVE) {
-                if (!queueable) {
-                    // GET_* : busy/skip, pas de 0x7D
-                    return new Response(rc, f.payload);
-                }
-                // ✅ AJOUTÉ (13 août 2026, demande Paul — "dans logcat on est
-                // en mesure de voir les appels ?") — jusqu'ici, seul t()
-                // (TraceSink "Afficher TX/RX") voyait ce moment. On logue
-                // aussi via android.util.Log, tag LcpLink — visible dans
-                // logcat même sans le trace sink, pour corréler avec les
-                // attentes LcpNodeLocks.
-                if (!queued) {
-                    android.util.Log.w("LcpLink", "sendRecv: msg=0x" + hex2(msg)
-                        + " → BUSY (rc=0x" + hex2(rc) + "), entrée en file (0x7D), timeoutMs=" + timeoutMs);
-                    // ✅ AJOUTÉ (13 août 2026, demande Paul — "le tick est
-                    // embrouillé encore, c'est quoi l'affaire") — deux
-                    // hypothèses de suite (doublon supervisionFuture, boucle
-                    // clearTicketPendingSafeForAlign) n'expliquaient PAS le
-                    // martelage continu de GET_MACHINE_STATUS (0x23) observé
-                    // le 13 août en après-midi. Plutôt que deviner un
-                    // troisième appelant depuis la lecture du code, on capture
-                    // maintenant la VRAIE trace d'appel Java au moment précis
-                    // où 0x23 (ou tout autre message queueable) entre en
-                    // file — le prochain log dira exactement quelle méthode,
-                    // quelle ligne, sans ambiguïté.
-                    if (msg == MSG_GET_MACHINE_STATUS) {
-                        StringBuilder st = new StringBuilder("sendRecv: msg=0x23 (GET_MACHINE_STATUS) appelé depuis:");
-                        StackTraceElement[] trace = Thread.currentThread().getStackTrace();
-                        int shown = 0;
-                        for (StackTraceElement e : trace) {
-                            String cn = e.getClassName();
-                            if (cn.contains("Thread") || cn.contains("LcpLink")) continue;
-                            st.append("\n    at ").append(cn).append(".").append(e.getMethodName())
-                              .append("(").append(e.getFileName()).append(":").append(e.getLineNumber()).append(")");
-                            shown++;
-                            if (shown >= 8) break;
+                            if (deliveryActive) {
+                                // Livraison active sur le registre
+                                ActiveDeliveryStore ads = new ActiveDeliveryStore(activity);
+                                ActiveDeliveryStore.ActiveDelivery active = ads.load();
+                                if (active != null && woNum != null && woNum.equals(active.woNum)) {
+                                    // Même WO — déjà géré dans handleDeepLink, ne devrait pas arriver ici
+                                    android.util.Log.i(TAG, "Livraison active même WO — reprise tab");
+                                } else {
+                                    // WO différent ou inconnu — bloquer
+                                    String activeWo = (active != null) ? active.woNum : "inconnue";
+                                    android.util.Log.w(TAG, "Registre: livraison active " + activeWo
+                                        + " — impossible de démarrer " + woNum);
+                                    final String fActiveWo = activeWo;
+                                    activity.runOnUiThread(() ->
+                                        activity.toast("⚠️ Livraison " + fActiveWo
+                                            + " active sur le registre — terminez-la d'abord"));
+                                    retournerFieldService(woNum, woIdGuid, "erreur_livraison_en_cours",
+                                        buildErrorJson("DELIVERY_IN_PROGRESS",
+                                            "Livraison " + fActiveWo + " active sur le registre"));
+                                    return;
+                                }
+                            } else if (ticketPending) {
+                                // Ticket pending seulement — impression en attente
+                                // Le registre permet de démarrer une nouvelle livraison
+                                // On laisse passer — juste loguer
+                                android.util.Log.i(TAG, "Ticket pending détecté — démarrage nouvelle livraison quand même");
+                            } else {
+                                // Registre idle — vérifier si le controller répond (zombi?)
+                                com.pa.lcr.lcp.ApiResult statusCheck = dc.api_tickSnapshot();
+                                if (statusCheck == null) {
+                                    android.util.Log.w(TAG, "Registre zombi — pas de réponse");
+                                    activity.runOnUiThread(() ->
+                                        activity.toast("⚠️ Registre ne répond pas — utilisez Résoudre (A) dans le tab"));
+                                }
+                            }
                         }
-                        android.util.Log.w("LcpLink", st.toString());
+                    } catch (Exception e) {
+                        android.util.Log.w(TAG, "Validation état registre ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.Validation", e); } catch (Exception ignored) {}
+                        // BT zombi probable — restart
+                        android.util.Log.w(TAG, "Possible BT zombi — restart BT");
+                        activity.btDisconnect();
+                        try { Thread.sleep(1500); } catch (Exception ignored) {}
+                        btDejaConnecte = false;
                     }
                 }
-                // Commande queueable : on passe en mode queued + 0x7D ASAP
-                queued = true;
-                lastQueued = rc;
-                nextCheck = System.currentTimeMillis(); // 0x7D immédiat
-                continue;
-            }
 
-            if (rc == RC_REQUEST_ABORTED) {
-                throw new IOException("Queued aborted");
-            }
+                if (!btDejaConnecte) {
+                    android.bluetooth.BluetoothAdapter btAdapter = activity.getBtAdapter();
+                    String lastMac = activity.getLastBtMac();
+                    if (lastMac != null && !lastMac.equalsIgnoreCase(mac)) {
+                        android.util.Log.i(TAG, "BT différent — déconnexion: " + lastMac);
+                        activity.btDisconnect();
+                        try { Thread.sleep(500); } catch (Exception ignored) {}
+                    }
 
-            // 4) Unwrap réponse queued: [OK, OK, ...] -> on enlève le 1er byte
-            if (queued && rc == RC_OK && f.payload.length >= 2 && (f.payload[1] & 0xFF) == RC_OK) {
-                byte[] norm = new byte[f.payload.length - 1];
-                System.arraycopy(f.payload, 1, norm, 0, norm.length);
-                long elapsed = System.currentTimeMillis() - startMs;
-                android.util.Log.w("LcpLink", "sendRecv: msg=0x" + hex2(msg)
-                    + " → résolu après " + elapsed + "ms en file");
-                if (isStatusClass) onStatusResolved(elapsed);
-                return new Response(norm[0] & 0xFF, norm);
-            }
+                    try { if (btAdapter != null) btAdapter.cancelDiscovery(); }
+                    catch (Exception ignored) {}
 
-            if (queued) {
-                long elapsed = System.currentTimeMillis() - startMs;
-                android.util.Log.w("LcpLink", "sendRecv: msg=0x" + hex2(msg)
-                    + " → résolu après " + elapsed + "ms en file (rc direct)");
-                if (isStatusClass) onStatusResolved(elapsed);
-            }
-            return new Response(rc, f.payload);
-        }
+                    BluetoothDevice dev = btAdapter.getRemoteDevice(mac);
+                    BluetoothSocket s;
+                    try {
+                        s = dev.createInsecureRfcommSocketToServiceRecord(SPP_UUID);
+                    } catch (Exception e) {
+                        s = dev.createRfcommSocketToServiceRecord(SPP_UUID);
+                    }
+                    s.connect();
 
-        if (queued) {
-            long elapsed = System.currentTimeMillis() - startMs;
-            android.util.Log.e("LcpLink", "sendRecv: msg=0x" + hex2(msg)
-                + " → TIMEOUT après " + elapsed + "ms en file (dernier rc=0x"
-                + hex2(lastQueued) + ", timeoutMs=" + timeoutMs + ")");
-            if (isStatusClass) onStatusTimedOut(elapsed);
-            throw new IOException("Queued timeout last=0x" + hex2(lastQueued));
-        }
-        throw new IOException("Timeout waiting LCP response");
-    }
+                    InputStream  btIn  = s.getInputStream();
+                    OutputStream btOut = s.getOutputStream();
+                    activity.onBtConnectedFromDeepLink(s, btIn, btOut, mac);
 
-    // ===================== RX =====================
-    private void rxReadSome(int timeoutMs) throws IOException {
-        byte[] tmp = new byte[64];
-        int n;
-        synchronized (ioLock) {
-            if (closed) return;
-            try {
-                n = io.read(tmp, timeoutMs);
+                    android.util.Log.i(TAG, "BT connecté: " + mac);
+                    logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
+                        "BT_CONNECT", "BT connecté: " + mac, null);
+                }
+
+                try {
+                    MultiRegisterApiFacadeImpl facadeVal =
+                        new MultiRegisterApiFacadeImpl(activity);
+                    com.pa.lcr.lcp.ApiResult rv = facadeVal.api_registerValidate(
+                        woNum, node, null, serialId, null, null, "bt", mac);
+                    android.util.Log.i(TAG, "register/validate: code=" + rv.code + " msg=" + rv.msg);
+
+                    if (rv.code != 1) {
+                        android.util.Log.w(TAG, "Registre invalide — tentative auto-connect");
+                        MultiRegisterApiFacadeImpl facadeAuto =
+                            new MultiRegisterApiFacadeImpl(activity);
+                        com.pa.lcr.lcp.ApiResult ra =
+                            facadeAuto.api_registerConnectAuto(serialId, node);
+                        android.util.Log.i(TAG, "register/connect-auto: code=" + ra.code + " msg=" + ra.msg);
+
+                        if (ra.code != 1) {
+                            logError(serialId, woNum, "REGISTER_INVALID",
+                                "Registre invalide: " + rv.msg);
+
+                            // ✅ Mauvais registre — anomalie opérationnelle
+                            // Le chauffeur doit aviser le répartiteur
+                            final String fSerialConnecte = ra.data != null
+                                ? ra.data.optString("serial_id", "inconnu") : "inconnu";
+                            final String fSerialAttendu  = serialId != null ? serialId : "inconnu";
+                            final int    fNodeAttendu    = node;
+                            final String fWoNumI         = woNum;
+
+                            activity.runOnUiThread(() -> {
+                                android.app.AlertDialog.Builder dlg =
+                                    new android.app.AlertDialog.Builder(activity);
+                                dlg.setTitle("⚠️ Mauvais registre détecté");
+                                dlg.setMessage(
+                                    "Le registre connecté ne correspond pas au bon de travail.\n\n"
+                                    + "Attendu  : serial=" + fSerialAttendu
+                                        + " · node=" + fNodeAttendu + "\n"
+                                    + "Connecté : serial=" + fSerialConnecte + "\n\n"
+                                    + "AVISEZ LE RÉPARTITEUR avant de continuer.\n\n"
+                                    + "Il se peut que le camion soit équipé du mauvais registre "
+                                    + "ou que la configuration du bon de travail soit incorrecte.");
+                                dlg.setPositiveButton("J'ai avisé le répartiteur", (d, w) -> {
+                                    // Le chauffeur confirme — rester dans l'APK
+                                    activity.showPage(0);
+                                });
+                                dlg.setNegativeButton("Annuler", null);
+                                dlg.setCancelable(false); // Force la lecture du message
+                                dlg.show();
+                            });
+                            return;
+                        }
+                    }
+                    logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
+                        "REGISTER_OK", "Registre validé node=" + node, null);
+                } catch (Exception e) {
+                    android.util.Log.w(TAG, "register/validate ERR (ignoré): " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.register", e); } catch (Exception ignored) {}
+                }
+
+                final String fProduit      = produit;
+                final String fPreset       = presetStr;
+                final String fWoNum        = woNum;
+                final String fSerialId     = serialId != null ? serialId : "";
+                final String fTransportKey = transportKey;
+
+                activity.runOnUiThread(() -> {
+                    try {
+                        activity.onConfigureMediaActivated(fTransportKey, "DEEPLINK");
+                        // ✅ Détection isLc3 centralisée — même mécanisme partagé.
+                        activity.upsertRegisterTabFromScan(fTransportKey, node, 255, fSerialId, true,
+                                activity.resolveIsLc3(fTransportKey, node));
+                        activity.getUiHandler().postDelayed(() -> {
+                            try {
+                                String   mediaShort = activity.mediaShortFromTransportKey(fTransportKey);
+                                String   tabKey     = activity.tabKeyOf(mediaShort, node, fSerialId);
+                                Fragment f          = activity.getSupportFragmentManager()
+                                                              .findFragmentByTag("regtab_" + tabKey);
+                                if (f instanceof RegisterTabFragment) {
+                                    ((RegisterTabFragment) f).prefillFromDeepLink(
+                                        fWoNum, fProduit, fPreset);
+                                }
+                            } catch (Exception ignored) {}
+                        }, 800);
+                        activity.refreshAllTabsMediaStatus();
+                        activity.showPage(0);
+                        activity.updateBtStatusText("BT : CONNECTED — " + mac + " (FS)");
+                    } catch (Exception ignored) {}
+                });
+
+                int    product = 1;
+                double preset  = 0.0;
+                try { product = Integer.parseInt(produit);     } catch (Exception ignored) {}
+                try { preset  = Double.parseDouble(presetStr); } catch (Exception ignored) {}
+
+                final int    fProduct = product;
+                final double fPresetD = preset;
+
+                boolean ready = false;
+                for (int i = 0; i < 10; i++) {
+                    try { Thread.sleep(500); } catch (Exception ignored) {}
+                    try {
+                        MediaTransportManager mtm2 = activity.getMediaTransportManager();
+                        if (mtm2 != null) {
+                            TransportIo io = mtm2.getByKey(transportKey);
+                            if (io != null && io.isOpen()) { ready = true; break; }
+                        }
+                    } catch (Exception ignored) {}
+                }
+
+                if (ready) {
+                    // ✅ FIX (4 août 2026, demande Paul : "ça devrait être le
+                    // transport au complet, pas juste USB — BT, TCP, autres")
+                    // — même bug que lancerLivraison() : refreshAllTabsMediaStatus()
+                    // (ligne ~1074, juste après upsertRegisterTabFromScan) tournait
+                    // avant que ce transport soit confirmé réellement ouvert, quel
+                    // qu'il soit (BT ici, mais le même code sert aussi TCP/USB
+                    // selon transportKey). Rafraîchi maintenant qu'on SAIT que
+                    // c'est prêt.
+                    activity.runOnUiThread(activity::refreshAllTabsMediaStatus);
+
+                    // ✅ Bloquer si un poll est déjà actif
+                    if (!activePolls.isEmpty()) {
+                        android.util.Log.w(TAG, "connectBt: poll déjà actif — ignoré");
+                        activity.runOnUiThread(() -> activity.toast("↩️ Livraison déjà en cours"));
+                        return;
+                    }
+
+                    // ✅ (4 août 2026, demande Paul) — même garde qu'ailleurs : ce
+                    // chemin crée systématiquement le tab juste au-dessus
+                    // (upsertRegisterTabFromScan) — donc quasi toujours un tab
+                    // neuf. Attendre la fin du scan auto produits avant de
+                    // démarrer, best-effort, max 10s.
+                    try {
+                        String mediaShortWait = activity.mediaShortFromTransportKey(transportKey);
+                        String tabKeyWait = activity.tabKeyOf(mediaShortWait, node, fSerialId);
+                        boolean scanTermine = false;
+                        for (int i = 0; i < 20; i++) {
+                            Fragment fw = activity.getSupportFragmentManager()
+                                .findFragmentByTag("regtab_" + tabKeyWait);
+                            if (!(fw instanceof RegisterTabFragment)
+                                    || !((RegisterTabFragment) fw).isAutoProductScanBusy()) {
+                                scanTermine = true;
+                                break;
+                            }
+                            try { Thread.sleep(500); } catch (Exception ignored) {}
+                        }
+                        android.util.Log.i(TAG, "connectBt: attente scan auto produits — "
+                            + (scanTermine ? "terminé" : "timeout 10s, poursuite quand même"));
+                    } catch (Exception ignored) {}
+
+                    try {
+                        MultiRegisterApiFacadeImpl facade =
+                            new MultiRegisterApiFacadeImpl(activity);
+                        com.pa.lcr.lcp.ApiResult r = facade.api_deliveryOneShotStart(
+                            node, 255, woNum, fProduct, fPresetD, null, "bt", mac);
+
+                        android.util.Log.i(TAG,
+                            "oneshot/start: code=" + r.code + " msg=" + r.msg);
+
+                        if (r.code == 1) {
+                            String jobId = (r.data != null)
+                                ? r.data.optString("jobId", null) : null;
+
+                            logEvent(fSerialId, woNum, DeliveryLogStore.LEVEL_INFO,
+                                "ONESHOT_START", "ARMED jobId=" + jobId, null);
+
+                            if (jobId != null && !jobId.isEmpty()) {
+                                android.util.Log.i(TAG, "Poll démarré — jobId=" + jobId);
+                                activity.runOnUiThread(() ->
+                                    activity.toast("📦 Livraison démarrée — " + woNum));
+                                pollJobUntilDone(jobId, node, woNum, woIdGuid, fSerialId, mac);
+                            } else {
+                                android.util.Log.w(TAG, "oneshot/start: jobId absent");
+                                activity.runOnUiThread(() ->
+                                    activity.toast("📦 Livraison démarrée (sans jobId) — " + woNum));
+                            }
+                        } else {
+                            android.util.Log.w(TAG, "oneshot/start code=0: " + r.msg);
+                            logEvent(fSerialId, woNum, DeliveryLogStore.LEVEL_WARN,
+                                "ONESHOT_ERROR", r.msg,
+                                r.data != null ? r.data.toString() : null);
+                    logError(fSerialId != null ? fSerialId : "",
+                        fWoNum != null ? fWoNum : "",
+                        "REGISTER_NOT_AVAILABLE",
+                        "Registre non disponible oneshot/start dans connectBtByMac");
+                            // Rester dans l'APK — pas de finish() pour éviter bounce FSM
+                            activity.runOnUiThread(() -> {
+                                activity.toast("⚠️ Registre non disponible — vérifiez l'état du registre et réessayez");
+                                activity.showPage(0);
+                            });
+                        }
+
+                    } catch (Exception e) {
+                        android.util.Log.e(TAG, "oneshot/start ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.oneshot", e); } catch (Exception ignored) {}
+                        logError(fSerialId, woNum, "ONESHOT_EXCEPTION", e.getMessage());
+                        retournerFieldService(woNum, woIdGuid, "erreur",
+                            buildErrorJson("ONESHOT_EXCEPTION", e.getMessage()));
+                    }
+                } else {
+                    android.util.Log.w(TAG, "Média non prêt après 5s");
+                    logError(fSerialId != null ? fSerialId : serialId,
+                        woNum, "BT_NOT_READY", "BT non prêt après 5s dans connectBtByMac");
+                    activity.runOnUiThread(() -> activity.toast("BT non prêt — réessayez"));
+                new Thread(() -> new com.pa.lcrdemo.RegisterConnectionHelper(activity)
+                    .lancerDiagnosticForce("", node, serialId != null ? serialId : "", woNum,
+                        woIdGuid, produit, presetStr, mac,
+                        DeepLinkHandler.this)).start();
+                    logError(fSerialId, woNum, "MEDIA_NOT_READY", "Média non prêt après 5s");
+                    retournerFieldService(woNum, woIdGuid, "erreur_media",
+                        buildErrorJson("MEDIA_NOT_READY", "Média non prêt après 5s"));
+                }
+
             } catch (Exception e) {
-                throw new TransportException("Error reading", e);
+                android.util.Log.e(TAG, "BT connect ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.BT", e); } catch (Exception ignored) {}
+                activity.runOnUiThread(() -> activity.toast("BT ERR: " + e.getMessage()));
+                logError(serialId != null ? serialId : "", woNum,
+                    "BT_CONNECT_ERROR", e.getMessage());
+                retournerFieldService(woNum, woIdGuid, "erreur_bt",
+                    buildErrorJson("BT_CONNECT_ERROR", e.getMessage()));
             }
-        }
-        if (n > 0) rxBuf.appendBytes(tmp, 0, n);
+        });
     }
 
-    private Frame readFrameUntil(long deadlineMs) throws IOException {
-        while (!closed && System.currentTimeMillis() < deadlineMs) {
-            rxReadSome(50);
-            int syncPos = findSync(rxBuf);
-            if (syncPos < 0) continue;
-            if (syncPos > 0) rxBuf.drop(syncPos);
-            Frame f = tryParseFrame(rxBuf);
-            if (f != null) return f;
-        }
-        return null;
-    }
+    // ✅ Guard anti-double poll — un seul poll par jobId
+    private static final java.util.Set<String> activePolls =
+        java.util.Collections.synchronizedSet(new java.util.HashSet<>());
 
-    private int findSync(ByteArray b) {
-        for (int i = 0; i + 1 < b.len; i++) {
-            if ((b.buf[i] & 0xFF) == SYNC && (b.buf[i + 1] & 0xFF) == SYNC) return i;
-        }
-        return -1;
-    }
+    // =========================================================
+    // Poll état livraison
+    // =========================================================
 
-    /**
-     * CRC/RX robuste:
-     * - calcule le CRC sur le flux RAW "variable part" (incluant ESC), comme Python
-     */
-    private Frame tryParseFrame(ByteArray b) {
+    private void pollJobUntilDone(String jobId, int node, String woNum,
+                                   String woIdGuid, String serialId, String mac) {
+        // ✅ Anti-double poll — si ce jobId est déjà en cours de poll, ignorer
+        if (!activePolls.add(jobId)) {
+            android.util.Log.w(TAG, "pollJobUntilDone: déjà actif pour jobId=" + jobId + " — ignoré");
+            return;
+        }
+
+        // ✅ Déterminer le transportKey correct — BT ou USB
+        // mac peut contenir un BT MAC ("00:01:95:87:72:A1") ou directement "USB"
+        final String transportKey;
+        if (mac != null && mac.toUpperCase().startsWith("USB")) {
+            transportKey = MediaTransportManager.KEY_USB; // USB
+        } else if (mac != null && mac.contains(":")) {
+            transportKey = MediaTransportManager.btKey(mac); // BT:XX:XX:XX
+        } else {
+            transportKey = mac != null ? mac : "";
+        }
+        // ✅ Persister la livraison courante avec status STARTED
         try {
-            if (b.len < 6) return null;
-            IntRef idx = new IntRef(2); // après "~~"
-            ByteArray rawForCrc = new ByteArray();
+            ActiveDeliveryStore ads = new ActiveDeliveryStore(activity);
+            ActiveDeliveryStore.ActiveDelivery existing = ads.load();
+            int produitSave = (existing != null) ? existing.produit : 1;
+            double presetSave = (existing != null) ? existing.preset : 0.0;
+            ads.save(woNum, woIdGuid, jobId, mac, node, serialId,
+                produitSave, presetSave, "STARTED");
+        } catch (Exception e) {
+            // ✅ FIX (4 août 2026, demande Paul) — même risque que la sauvegarde
+            // PENDING plus haut : si ceci échoue, ActiveDeliveryStore reste
+            // désynchronisé (status resté PENDING alors que la livraison a
+            // réellement démarré), sans aucune trace.
+            com.pa.lcr.lcp.log.LogBus.err(node, "DeepLinkHandler.ActiveDeliveryStore.save[STARTED]", e);
+        }
 
-            int to = readUnescapedAndCaptureRaw(b, rawForCrc, idx);
-            int from = readUnescapedAndCaptureRaw(b, rawForCrc, idx);
-            int status = readUnescapedAndCaptureRaw(b, rawForCrc, idx);
-            int len = readUnescapedAndCaptureRaw(b, rawForCrc, idx);
+        safeExecute(() -> {
+            try {
+                final boolean[] deliveryDone = {false};
 
-            byte[] payload = new byte[len];
-            for (int i = 0; i < len; i++) {
-                payload[i] = (byte) readUnescapedAndCaptureRaw(b, rawForCrc, idx);
+                boolean hasSeenFlowing = false;
+                boolean terminateSent  = false;
+                String  lastState      = "";
+
+                // ✅ Lire ticket# au démarrage pour détecter changement ultérieur
+                String ticketNoAtStartTmp = "";
+                try {
+                    MultiRegisterApiFacadeImpl facadeT =
+                        new MultiRegisterApiFacadeImpl(activity);
+                    com.pa.lcr.lcp.ApiResult tickSnap = facadeT.api_deliveryJobGet(jobId);
+                    if (tickSnap != null && tickSnap.data != null)
+                        ticketNoAtStartTmp = tickSnap.data.optString("ticket_no", "");
+                } catch (Exception ignored) {}
+                final String ticketNoAtStart = ticketNoAtStartTmp;
+
+                // ✅ Délai avant premier continue — USB est plus lent que BT
+                if (transportKey.toUpperCase().startsWith("USB")) {
+                    try { Thread.sleep(800); } catch (Exception ignored) {}
+                }
+
+                try {
+                    // ✅ Vérifier l'état avant d'envoyer continue
+                    // Si déjà RUNNING_FLOWING ou RUNNING_PAUSED, ne pas renvoyer continue
+                    // (évite de redémarrer une livraison en pause lors d'une reprise)
+                    String currentState = "";
+                    try {
+                        MultiRegisterApiFacadeImpl facadeCheck =
+                            new MultiRegisterApiFacadeImpl(activity);
+                        com.pa.lcr.lcp.ApiResult stateCheck =
+                            facadeCheck.api_deliveryJobGet(jobId);
+                        if (stateCheck != null && stateCheck.data != null)
+                            currentState = stateCheck.data.optString("state", "");
+                    } catch (Exception ignored) {}
+
+                    if ("RUNNING_FLOWING".equals(currentState)
+                            || "RUNNING_PAUSED".equals(currentState)) {
+                        android.util.Log.i(TAG, "job/continue ignoré — déjà en " + currentState);
+                        hasSeenFlowing = true;
+                    } else if ("CONNECTED".equals(currentState)) {
+                        // Vérifier si ticket pending — si oui, faire status B et laisser l'opérateur
+                        boolean tp = false;
+                        try {
+                            MultiRegisterApiFacadeImpl facadeCheck2 =
+                                new MultiRegisterApiFacadeImpl(activity);
+                            com.pa.lcr.lcp.ApiResult stateCheck2 =
+                                facadeCheck2.api_deliveryJobGet(jobId);
+                            if (stateCheck2 != null && stateCheck2.data != null)
+                                tp = stateCheck2.data.optInt("ticketPending", 0) == 1;
+                        } catch (Exception ignored) {}
+
+                        if (tp) {
+                            android.util.Log.i(TAG, "Reprise: ticket pending — status B + attente opérateur");
+                            try {
+                                com.pa.lcr.lcp.DeliveryController dc =
+                                    com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                                        .getController(transportKey, node);
+                                if (dc != null) {
+                                    dc.requestStatus();
+                                    Thread.sleep(200);
+                                    dc.requestLiveSample();
+                                }
+                            } catch (Exception ignored) {}
+                            android.util.Log.i(TAG, "pollJob: ticket pending — sortie poll, opérateur gère via bouton A");
+                            // Sortir du poll — l'opérateur gère via bouton A
+                            return;
+                        } else {
+                            // CONNECTED sans ticket pending — envoyer continue avec retry
+                            boolean continueOk = false;
+                            for (int retry = 0; retry < 5; retry++) {
+                                if (retry > 0) {
+                                    try { Thread.sleep(600 + retry * 400L); } catch (Exception ignored) {}
+                                }
+                                MultiRegisterApiFacadeImpl facadeCont =
+                                    new MultiRegisterApiFacadeImpl(activity);
+                                com.pa.lcr.lcp.ApiResult rc =
+                                    facadeCont.api_deliveryContinue(jobId, node);
+                                android.util.Log.i(TAG,
+                                    "job/continue [" + (retry+1) + "/5]: code="
+                                    + (rc != null ? rc.code : "null")
+                                    + " msg=" + (rc != null ? rc.msg : "null"));
+                                logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
+                                    "JOB_CONTINUE",
+                                    "retry=" + retry + " code=" + (rc != null ? rc.code : "null") +
+                                    " msg=" + (rc != null ? rc.msg : "null"), null);
+                                if (rc != null && rc.code == 1) {
+                                    continueOk = true;
+                                    break;
+                                }
+                            }
+                            if (!continueOk) {
+                                android.util.Log.w(TAG, "job/continue: échec après 5 tentatives — chauffeur prend charge");
+
+                                // ✅ Détecter changement de ticket (impression entre-temps)
+                                String ticketNow = "";
+                                try {
+                                    MultiRegisterApiFacadeImpl facadeT2 =
+                                        new MultiRegisterApiFacadeImpl(activity);
+                                    com.pa.lcr.lcp.ApiResult snap2 = facadeT2.api_deliveryJobGet(jobId);
+                                    if (snap2 != null && snap2.data != null)
+                                        ticketNow = snap2.data.optString("ticket_no", "");
+                                } catch (Exception ignored) {}
+
+                                final boolean ticketChanged = !ticketNoAtStart.isEmpty()
+                                    && !ticketNow.isEmpty()
+                                    && !ticketNoAtStart.equals(ticketNow);
+                                final String fTicketNow = ticketNow;
+
+                                // ✅ Logger événement dans LcrDeliveryStatusDb + Dataverse
+                                final String fWoNum2 = woNum;
+                                final String fWoId2  = woIdGuid;
+                                activity.runOnUiThread(() -> {
+                                    activity.toast(ticketChanged
+                                        ? "⚠️ Connexion perdue — ticket changé (" + ticketNoAtStart
+                                            + "→" + fTicketNow + "). Reconnectez et relancez manuellement."
+                                        : "⚠️ Registre non joignable — reconnectez via Configure et relancez manuellement.");
+                                    activity.showPage(0);
+                                });
+
+                                // Logger dans SQLite + Dataverse
+                                safeExecute(() -> {
+                                    try {
+                                        android.content.ContentValues cv =
+                                            new android.content.ContentValues();
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,    fWoNum2);
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID, fWoId2);
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO, fTicketNow);
+                                        // ✅ AJOUTÉ (26 août 2026, demande Paul
+                                        // — même correctif que RegisterTabFragment,
+                                        // trouvé via screenshot écran de cohérence)
+                                        if (serialId != null && !serialId.trim().isEmpty()) {
+                                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID, serialId.trim());
+                                        }
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_LCRNODE, node);
+                                        // ✅ AJOUTÉ (27 août 2026, demande Paul —
+                                        // "si on a l'adresse mac du BT on le veut aussi")
+                                        if (mac != null && !mac.trim().isEmpty()) {
+                                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_BTMAC, mac.trim());
+                                        }
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
+                                            ticketChanged ? "TICKET_CHANGE" : "ERROR");
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_ERROR_CODE,
+                                            "CONTINUE_FAILED");
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_ERROR_MSG,
+                                            ticketChanged
+                                                ? "Ticket changé pendant perte connexion: "
+                                                    + ticketNoAtStart + "→" + fTicketNow
+                                                : "job/continue échec après 5 tentatives");
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,    "SYSTEM");
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE, "LIVRAISON");
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
+                                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
+                                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbTc1 =
+                                            new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
+                                        try {
+                                            dbTc1.insertDelivery(cv);
+                                        } finally {
+                                            try { dbTc1.close(); } catch (Exception ignored) {}
+                                        }
+                                    } catch (Exception e) {
+                                        // ✅ FIX (4 août 2026, demande Paul) — ce bloc enregistre déjà
+                                        // une ERREUR (ticket changé / job-continue échoué). Si
+                                        // l'enregistrement de l'erreur échoue lui-même, on se
+                                        // retrouve avec une double invisibilité — ni l'erreur
+                                        // d'origine ni cet échec ne laissent de trace. Exactement
+                                        // la classe de bug du ticket 10909.
+                                        com.pa.lcr.lcp.log.LogBus.err(
+                                            node, "DeepLinkHandler.insertDelivery[TICKET_CHANGE/ERROR]", e);
+                                    }
+                                });
+
+                                // ✅ Arrêter le poll — chauffeur prend charge
+                                // ActiveDeliveryStore conserve woNum/woIdGuid/jobId pour reprise
+                                logEvent(serialId, woNum, DeliveryLogStore.LEVEL_WARN,
+                                    ticketChanged ? "TICKET_CHANGE" : "CONTINUE_FAILED",
+                                    ticketChanged
+                                        ? "Ticket " + ticketNoAtStart + "→" + fTicketNow
+                                        : "job/continue échec après 5 tentatives", null);
+                                return; // Sortir du poll
+                            }
+                        }
+                    } else {
+                        boolean continueOk2 = false;
+                        for (int retry = 0; retry < 5; retry++) {
+                            if (retry > 0) {
+                                try { Thread.sleep(600 + retry * 400L); } catch (Exception ignored) {}
+                            }
+                            MultiRegisterApiFacadeImpl facadeCont =
+                                new MultiRegisterApiFacadeImpl(activity);
+                            com.pa.lcr.lcp.ApiResult rc =
+                                facadeCont.api_deliveryContinue(jobId, node);
+                            android.util.Log.i(TAG,
+                                "job/continue [" + (retry+1) + "/5]: code="
+                                + (rc != null ? rc.code : "null")
+                                + " msg=" + (rc != null ? rc.msg : "null"));
+                            logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
+                                "JOB_CONTINUE",
+                                "retry=" + retry + " code=" + (rc != null ? rc.code : "null") +
+                                " msg=" + (rc != null ? rc.msg : "null"), null);
+                            if (rc != null && rc.code == 1) {
+                                continueOk2 = true;
+                                break;
+                            }
+                        }
+                        if (!continueOk2) {
+                            android.util.Log.w(TAG, "job/continue: échec après 5 tentatives — chauffeur prend charge");
+
+                            // ✅ Détecter changement de ticket
+                            String ticketNow2 = "";
+                            try {
+                                MultiRegisterApiFacadeImpl facadeT3 =
+                                    new MultiRegisterApiFacadeImpl(activity);
+                                com.pa.lcr.lcp.ApiResult snap3 = facadeT3.api_deliveryJobGet(jobId);
+                                if (snap3 != null && snap3.data != null)
+                                    ticketNow2 = snap3.data.optString("ticket_no", "");
+                            } catch (Exception ignored) {}
+
+                            final boolean ticketChanged2 = !ticketNoAtStart.isEmpty()
+                                && !ticketNow2.isEmpty()
+                                && !ticketNoAtStart.equals(ticketNow2);
+                            final String fTicketNow2 = ticketNow2;
+                            final String fWoNum3 = woNum;
+                            final String fWoId3  = woIdGuid;
+
+                            activity.runOnUiThread(() -> {
+                                activity.toast(ticketChanged2
+                                    ? "⚠️ Connexion perdue — ticket changé (" + ticketNoAtStart
+                                        + "→" + fTicketNow2 + "). Reconnectez et relancez manuellement."
+                                    : "⚠️ Registre non joignable — reconnectez via Configure et relancez manuellement.");
+                                activity.showPage(0);
+                            });
+
+                            safeExecute(() -> {
+                                try {
+                                    android.content.ContentValues cv =
+                                        new android.content.ContentValues();
+                                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,    fWoNum3);
+                                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID, fWoId3);
+                                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO, fTicketNow2);
+                                    // ✅ AJOUTÉ (26 août 2026, demande Paul —
+                                    // même correctif que RegisterTabFragment)
+                                    if (serialId != null && !serialId.trim().isEmpty()) {
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID, serialId.trim());
+                                    }
+                                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_LCRNODE, node);
+                                    // ✅ AJOUTÉ (27 août 2026, demande Paul —
+                                    // "si on a l'adresse mac du BT on le veut aussi")
+                                    if (mac != null && !mac.trim().isEmpty()) {
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_BTMAC, mac.trim());
+                                    }
+                                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
+                                        ticketChanged2 ? "TICKET_CHANGE" : "ERROR");
+                                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_ERROR_CODE,
+                                        "CONTINUE_FAILED");
+                                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_ERROR_MSG,
+                                        ticketChanged2
+                                            ? "Ticket changé: " + ticketNoAtStart + "→" + fTicketNow2
+                                            : "job/continue échec après 5 tentatives");
+                                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,    "SYSTEM");
+                                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE, "LIVRAISON");
+                                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
+                                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
+                                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbTc2 =
+                                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
+                                    try {
+                                        dbTc2.insertDelivery(cv);
+                                    } finally {
+                                        try { dbTc2.close(); } catch (Exception ignored) {}
+                                    }
+                                } catch (Exception e) {
+                                    // ✅ FIX (4 août 2026, demande Paul) — même cas que dbTc1 :
+                                    // ce bloc enregistre déjà une ERREUR ; s'il échoue lui-même,
+                                    // double invisibilité (ni l'erreur d'origine ni cet échec
+                                    // ne laissent de trace).
+                                    com.pa.lcr.lcp.log.LogBus.err(
+                                        node, "DeepLinkHandler.insertDelivery[TICKET_CHANGE/ERROR#2]", e);
+                                }
+                            });
+
+                            logEvent(serialId, woNum, DeliveryLogStore.LEVEL_WARN,
+                                ticketChanged2 ? "TICKET_CHANGE" : "CONTINUE_FAILED",
+                                ticketChanged2
+                                    ? "Ticket " + ticketNoAtStart + "→" + fTicketNow2
+                                    : "job/continue échec après 5 tentatives", null);
+                            return; // Sortir du poll
+                        }
+                    }
+                } catch (Exception e) {
+                    android.util.Log.e(TAG, "job/continue ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.job", e); } catch (Exception ignored) {}
+                    logError(serialId, woNum, "JOB_CONTINUE_ERROR", e.getMessage());
+                }
+
+                for (int i = 0; i < 600; i++) {
+                    try { Thread.sleep(1000); } catch (Exception ignored) {}
+
+                    try {
+                        MultiRegisterApiFacadeImpl facade =
+                            new MultiRegisterApiFacadeImpl(activity);
+                        com.pa.lcr.lcp.ApiResult r = facade.api_deliveryJobGet(jobId);
+                        if (r == null) continue;
+
+                        String state = null;
+                        if (r.data != null)
+                            state = r.data.optString("state", null);
+
+                        android.util.Log.i(TAG, "pollJob: state=" + state);
+
+                        // ✅ state=null = job disparu du controller — sortir immédiatement
+                        if (state == null || state.isEmpty()) {
+                            android.util.Log.w(TAG, "pollJob: state=null — job disparu, arrêt poll");
+                            return;
+                        }
+
+                        if (state != null && !state.equals(lastState)) {
+                            // ✅ CORRIGÉ (27 août 2026, demande Paul — "je ne
+                            // suis pas censé avoir quoi que ce soit de
+                            // requête SQL dans les fragments ou le
+                            // running_flowing") — trouvé, confirmé par
+                            // trace réelle : logEvent() (donc une vraie
+                            // écriture SQLite) se déclenchait ici à chaque
+                            // transition d'état, y compris l'entrée en
+                            // RUNNING_FLOWING/RUNNING_PAUSED. state est déjà
+                            // connu ici, pas besoin d'une lecture séparée du
+                            // contrôleur — bloqué avant même de tenter
+                            // l'écriture, pas juste rendu silencieux après.
+                            boolean livraisonActivePourLog = "RUNNING_FLOWING".equals(state) || "RUNNING_PAUSED".equals(state);
+                            if (!livraisonActivePourLog) {
+                                logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
+                                    "STATE_CHANGE", "state=" + state, null);
+                            }
+                            lastState = state;
+                        }
+
+                        if ("RUNNING_FLOWING".equals(state) || "RUNNING_PAUSED".equals(state)) {
+                            hasSeenFlowing = true;
+                        }
+
+                        // ✅ DONE ou TERMINATED
+                        if ("DONE".equals(state) || "TERMINATED".equals(state)) {
+                            if (deliveryDone[0]) return;
+                            deliveryDone[0] = true;
+                            String extraJson = (r.data != null) ? r.data.toString() : "{}";
+                            android.util.Log.i(TAG, "Livraison DONE — " + extraJson);
+                            logDeliveryEnd(serialId, woNum, jobId, "DONE", extraJson, null);
+                            onDeliveryEnded(woNum, woIdGuid, extraJson);
+                            return;
+                        }
+
+                        // ✅ PRINT_TIMEOUT: imprimante offline — écrire quand même dans Dataverse
+                        if ("ERROR".equals(state) && r.data != null
+                                && "PRINT_TIMEOUT".equals(r.data.optString("err", ""))) {
+                            if (deliveryDone[0]) return;
+                            deliveryDone[0] = true;
+                            String extraJson = r.data.toString();
+                            android.util.Log.w(TAG, "Livraison PRINT_TIMEOUT — Dataverse quand même — " + extraJson);
+                            logDeliveryEnd(serialId, woNum, jobId, "DONE_PRINT_TIMEOUT", extraJson, null);
+                            onDeliveryEnded(woNum, woIdGuid, extraJson);
+                            return;
+                        }
+
+                        // ✅ CONNECTED après terminate = fin propre
+                        if ("CONNECTED".equals(state) && terminateSent) {
+                            if (deliveryDone[0]) return;
+                            deliveryDone[0] = true;
+                            String extraJson = (r.data != null) ? r.data.toString() : "{}";
+                            android.util.Log.i(TAG,
+                                "Livraison terminée (CONNECTED post-terminate) — " + extraJson);
+                            logDeliveryEnd(serialId, woNum, jobId, "DONE", extraJson, null);
+                            onDeliveryEnded(woNum, woIdGuid, extraJson);
+                            return;
+                        }
+
+                        // ✅ CONNECTED après FLOWING — le registre a terminé seul (preset atteint)
+                        // Ne pas envoyer job/terminate — le registre a déjà imprimé.
+                        // Terminer directement → retour Field Service.
+                        if ("CONNECTED".equals(state) && hasSeenFlowing && !terminateSent) {
+                            if (deliveryDone[0]) return;
+                            deliveryDone[0] = true;
+                            String extraJson = (r.data != null) ? r.data.toString() : "{}";
+                            android.util.Log.i(TAG,
+                                "Livraison terminée (CONNECTED preset atteint) — " + extraJson);
+                            logDeliveryEnd(serialId, woNum, jobId, "DONE", extraJson, null);
+                            onDeliveryEnded(woNum, woIdGuid, extraJson);
+                            return;
+                        }
+
+                        // ✅ RUNNING_PAUSED — NE PAS terminer automatiquement.
+                        // L'opérateur doit cliquer "Terminer" dans le tab.
+                        // Le terminate automatique causait une impression non voulue
+                        // quand la venne était coupée manuellement avant le preset.
+
+                    } catch (Exception ignored) {}
+                }
+
+                android.util.Log.w(TAG, "pollJob: timeout 10min sans DONE");
+                logError(serialId, woNum, "POLL_TIMEOUT", "Timeout 10 minutes sans DONE");
+                retournerFieldService(woNum, woIdGuid, "erreur_timeout",
+                    buildErrorJson("POLL_TIMEOUT", "Timeout 10 minutes"));
+
+            } catch (Exception e) {
+                android.util.Log.e(TAG, "pollJob ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.pollJob", e); } catch (Exception ignored) {}
+                logError(serialId, woNum, "POLL_EXCEPTION", e.getMessage());
+                retournerFieldService(woNum, woIdGuid, "erreur",
+                    buildErrorJson("POLL_EXCEPTION", e.getMessage()));
+            } finally {
+                // ✅ Toujours retirer du set — libère le guard pour ce jobId
+                activePolls.remove(jobId);
+            }
+        });
+    }
+
+    // =========================================================
+    // Fin de livraison
+    // =========================================================
+
+    public void onDeliveryEnded(String woNum, String extraJson) {
+        onDeliveryEnded(woNum, "", extraJson);
+    }
+
+    public void onDeliveryEnded(String woNum, String woIdGuid, String extraJson) {
+        // ✅ Effacer la livraison courante
+        try { new ActiveDeliveryStore(activity).clear(); } catch (Exception ignored) {}
+        android.util.Log.i(TAG,
+            "Livraison terminée — WO=" + woNum + " extra=" + extraJson);
+
+        // ✅ Écrire dans LcrDeliveryStatusDb (offline safe) avant retour FSM
+        safeExecute(() -> {
+            try {
+                JSONObject d      = new JSONObject(extraJson != null ? extraJson : "{}");
+                JSONObject result = d.optJSONObject("result");
+                JSONObject tick   = d.optJSONObject("tick");
+
+                double netL      = 0, grossL   = 0;
+                double deltaNet  = 0, deltaGross = 0;
+                String ticketNo  = "", saleNo = "";
+                String startUtc  = "", endUtc = "";
+                double durationS = 0;
+                int    produitNo = 0;
+                String presetStatus = "EXACT";
+
+                if (result != null) {
+                    netL       = result.optDouble("fs_net_l",    0);
+                    grossL     = result.optDouble("fs_gross_l",  0);
+                    deltaNet   = result.optDouble("net_delta_l", 0);
+                    deltaGross = result.optDouble("gross_delta_l", 0);
+                    ticketNo   = result.optString("ticket_no",   "");
+                    saleNo     = result.optString("sale_no",     "");
+                    startUtc   = result.optString("start_utc",   "");
+                    endUtc     = result.optString("end_utc",     "");
+                    durationS  = result.optDouble("duration_s",  0);
+                    produitNo  = result.optInt("product_number", 0);
+                }
+                // Fallback tick
+                if ((netL == 0 || grossL == 0) && tick != null) {
+                    double tn = tick.optDouble("net", 0);
+                    double tg = tick.optDouble("gross", 0);
+                    if (tn > 0) netL   = tn;
+                    if (tg > 0) grossL = tg;
+                }
+
+                // preset_status
+                double presetL = d.optDouble("preset_requested", 0);
+                if (presetL > 0) {
+                    if (Math.abs(netL - presetL) < 0.2)       presetStatus = "EXACT";
+                    else if (netL < presetL)                   presetStatus = "UNDER";
+                    else                                       presetStatus = "OVER";
+                }
+
+                // lcrnode + serialId depuis contexte livraison courante
+                int lcrnode = currentNode;
+                String serialId = currentSerialId;
+
+                android.content.ContentValues cv = new android.content.ContentValues();
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,       woNum != null ? woNum : "");
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID,   woIdGuid != null ? woIdGuid.replace("{","").replace("}","") : "");
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID,    serialId);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_LCRNODE,      lcrnode);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PRODUIT_NO,   produitNo);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO,    ticketNo);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SALE_NO,      saleNo);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,        netL);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L,      grossL);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_DELTA_NET_L,  deltaNet);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_DELTA_GROSS_L,deltaGross);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PRESET_L,     presetL);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PRESET_STATUS,presetStatus);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_START_UTC,    startUtc);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_END_UTC,      endUtc);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_DURATION_S,   durationS);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,       "REGISTRE");
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE,    "LIVRAISON");
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PAYLOAD_JSON, extraJson);
+
+                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
+                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
+                long localId;
+                try {
+                    localId = lcrDb.insertDelivery(cv);
+                } finally {
+                    try { lcrDb.close(); } catch (Exception ignored) {}
+                }
+                android.util.Log.i(TAG, "LcrDeliveryStatusDb: id=" + localId
+                    + " wo=" + woNum + " net=" + netL + " gross=" + grossL
+                    + " ticket=" + ticketNo + " duration=" + durationS);
+
+                // ✅ mettreAJourFieldService APRÈS l'insert — garantit que getAllForWo()
+                // voit la livraison courante dans le payload consolidé
+                mettreAJourFieldService(woNum, woIdGuid, "termine", extraJson);
+
+            } catch (Exception e) {
+                android.util.Log.e(TAG, "LcrDeliveryStatusDb ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.LcrDeliveryStatusDb", e); } catch (Exception ignored) {}
+            }
+        });
+    }
+
+    // =========================================================
+    // Dernier résultat
+    // =========================================================
+
+    public static volatile String lastResultJson  = null;
+    public static volatile String lastResultWoNum  = null;
+    public static volatile String lastResultWoGuid = null;
+    public static volatile long   lastResultTs     = 0;
+
+    // =========================================================
+    // Retour Field Service
+    // =========================================================
+
+    private void retournerFieldService(String woNum, String woIdGuid,
+                                        String status, String extraJson) {
+        try {
+            String net    = "";
+            String gross  = "";
+            String ticket = "";
+            try {
+                JSONObject d = new JSONObject(extraJson != null ? extraJson : "{}");
+                JSONObject result = d.optJSONObject("result");
+                if (result != null) {
+                    net    = String.valueOf(result.optDouble("fs_net_l",   0));
+                    gross  = String.valueOf(result.optDouble("fs_gross_l", 0));
+                    ticket = result.optString("ticket_no", "");
+
+                    // ✅ FIX universel: si stale ou valeurs nulles, utiliser le tick.
+                    boolean stale  = d.optBoolean("stale", false);
+                    double fsNet   = result.optDouble("fs_net_l",   0);
+                    double fsGross = result.optDouble("fs_gross_l", 0);
+                    if (stale || fsNet == 0 || fsGross == 0) {
+                        JSONObject tick = d.optJSONObject("tick");
+                        if (tick != null) {
+                            double tickNet   = tick.optDouble("net",   0);
+                            double tickGross = tick.optDouble("gross", 0);
+                            if (tickNet > 0 && tickGross > 0) {
+                                net   = String.valueOf(tickNet);
+                                gross = String.valueOf(tickGross);
+                                android.util.Log.i(TAG,
+                                    "retournerFS: stale/zero corrigé — tick net=" + tickNet
+                                    + " gross=" + tickGross);
+                            }
+                        }
+                    }
+                } else {
+                    net   = String.valueOf(d.optDouble("net",   0));
+                    gross = String.valueOf(d.optDouble("gross", 0));
+                }
+            } catch (Exception ignored) {}
+
+            String woGuid = (woIdGuid != null && !woIdGuid.isEmpty()) ? woIdGuid : "";
+            woGuid = woGuid.replace("{", "").replace("}", "");
+
+            try {
+                JSONObject lastResult = new JSONObject();
+                lastResult.put("wonum",  woNum  != null ? woNum  : "");
+                lastResult.put("woid",   woGuid);
+                lastResult.put("net",    net);
+                lastResult.put("gross",  gross);
+                lastResult.put("ticket", ticket);
+                lastResult.put("status", status != null ? status : "ok");
+                lastResult.put("ts",     System.currentTimeMillis());
+                if (extraJson != null) {
+                    try { lastResult.put("payload", new JSONObject(extraJson)); }
+                    catch (Exception ignored) {}
+                }
+                lastResultJson   = lastResult.toString();
+                lastResultWoNum  = woNum;
+                lastResultWoGuid = woGuid;
+                lastResultTs     = System.currentTimeMillis();
+                com.pa.lcrdemo.LcrHttpService.lastResultJson = lastResult.toString();
+                android.util.Log.i(TAG, "last-result sauvegardé: wonum=" + woNum
+                    + " net=" + net + " gross=" + gross + " ticket=" + ticket);
+
+                final String fNetP   = net;
+                final String fGrossP = gross;
+                final String fTicketP = ticket;
+                final String fGuidP  = woGuid;
+                final String fWoNumP = woNum;
+                final String fStatusP = status;
+                patchDataverse(fGuidP, fWoNumP, fNetP, fGrossP, fTicketP, fStatusP);
+
+            } catch (Exception e) {
+                // ✅ FIX (4 août 2026, demande Paul) — patchDataverse() enqueue le
+                // résultat de livraison pour sync Dataverse (DeliveryResultQueueDb).
+                // Si ça échoue ici, la livraison ne sera JAMAIS mise en file —
+                // aucun retry possible puisque rien n'a été enregistré. Risque
+                // direct de perte de livraison, classe de bug ticket 10909.
+                com.pa.lcr.lcp.log.LogBus.err(-1, "DeepLinkHandler.patchDataverse[retournerFS]", e);
             }
 
-            int crc0 = readCrcByte(b, idx);
-            int crc1 = readCrcByte(b, idx);
-            int recv = ((crc1 & 0xFF) << 8) | (crc0 & 0xFF);
-            int calc = crcLcp(rawForCrc.buf, 0, rawForCrc.len);
-            if (calc != recv) {
-                b.drop(1);
-                return null;
-            }
+            final String fNet    = net;
+            final String fGross  = gross;
+            final String fTicket = ticket;
+            final String fWoGuid = woGuid;
+            final String fWoNum2 = woNum;
+            final String fStatus = status;
 
-            int rawLen = idx.v;
-            byte[] raw = b.extract(rawLen);
-            b.drop(rawLen);
-            return new Frame(to, from, status, payload, raw);
+            activity.runOnUiThread(() -> {
+                try {
+                    JSONObject lsData = new JSONObject();
+                    try {
+                        lsData.put("wonum",  fWoNum2 != null ? fWoNum2 : "");
+                        lsData.put("woid",   fWoGuid);
+                        lsData.put("net",    fNet);
+                        lsData.put("gross",  fGross);
+                        lsData.put("ticket", fTicket);
+                        lsData.put("status", fStatus != null ? fStatus : "ok");
+                        lsData.put("ts",     System.currentTimeMillis());
+                    } catch (Exception ignored) {}
 
-        } catch (IncompleteFrameException e) {
-            return null;
+                    String js = "try { localStorage.setItem('lcr_last_result', '"
+                        + lsData.toString().replace("'", "\\'") + "'); } catch(e) {}";
+
+                    android.webkit.WebView wv = activity.getFieldServiceWebView();
+                    if (wv != null) {
+                        wv.evaluateJavascript(js, null);
+                        android.util.Log.i(TAG, "localStorage écrit: " + lsData.toString());
+                    } else {
+                        android.util.Log.w(TAG, "WebView non disponible — localStorage ignoré");
+                    }
+                } catch (Exception e) {
+                    android.util.Log.e(TAG, "localStorage ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.localStorage", e); } catch (Exception ignored) {}
+                }
+
+                android.util.Log.i(TAG, "Retour FS — finish()");
+                try {
+                    activity.finish();
+                } catch (Exception e) {
+                    android.util.Log.e(TAG, "finish() ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.finish()", e); } catch (Exception ignored) {}
+                    activity.moveTaskToBack(true);
+                }
+            });
+
+        } catch (Exception e) {
+            android.util.Log.e(TAG, "Retour FS failed: " + e.getMessage());
+            try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.retourFS", e); } catch (Exception ignored) {}
+            activity.moveTaskToBack(true);
         }
     }
-
-    private static final class IntRef { int v; IntRef(int v) { this.v = v; } }
-
-    private int readUnescapedAndCaptureRaw(ByteArray b, ByteArray rawForCrc, IntRef idx)
-            throws IncompleteFrameException {
-        if (idx.v >= b.len) throw new IncompleteFrameException();
-        int v = b.buf[idx.v] & 0xFF;
-        if (v == (ESC & 0xFF)) {
-            if (idx.v + 1 >= b.len) throw new IncompleteFrameException();
-            rawForCrc.append(b.buf[idx.v]);
-            rawForCrc.append(b.buf[idx.v + 1]);
-            int unesc = b.buf[idx.v + 1] & 0xFF;
-            idx.v += 2;
-            return unesc;
-        } else {
-            rawForCrc.append(b.buf[idx.v]);
-            idx.v += 1;
-            return v;
-        }
-    }
-
-    private int readCrcByte(ByteArray b, IntRef idx) throws IncompleteFrameException {
-        if (idx.v >= b.len) throw new IncompleteFrameException();
-        int v = b.buf[idx.v] & 0xFF;
-        if (v == (ESC & 0xFF)) {
-            if (idx.v + 1 >= b.len) throw new IncompleteFrameException();
-            int unesc = b.buf[idx.v + 1] & 0xFF;
-            idx.v += 2;
-            return unesc;
-        } else {
-            idx.v += 1;
-            return v;
-        }
-    }
-
-    // ===================== FRAMING / CRC =====================
-    private byte[] encodeFrame(byte[] payload) {
-        int status = nextStatusByte();
-
-        ByteArray var = new ByteArray();
-        var.append((byte) toAddr);
-        var.append((byte) hostAddr);
-        var.append((byte) status);
-        var.append((byte) payload.length);
-        var.appendBytes(payload, 0, payload.length);
-
-        ByteArray esc = new ByteArray();
-        for (int i = 0; i < var.len; i++) esc.appendEscaped(var.buf[i]);
-
-        int crc = crcLcp(esc.buf, 0, esc.len);
-
-        ByteArray out = new ByteArray();
-        out.append(SYNC);
-        out.append(SYNC);
-        out.appendBytes(esc.buf, 0, esc.len);
-        out.appendEscaped((byte) (crc & 0xFF));
-        out.appendEscaped((byte) ((crc >> 8) & 0xFF));
-        return out.toArray();
-    }
-
-    private int nextStatusByte() {
-        int st = msgIdBit & 1;
-        if (!syncUsed) {
-            st = 0x02;
-            syncUsed = true;
-        }
-        msgIdBit ^= 1;
-        return st;
-    }
-
-    // ===================== UTIL =====================
-    private static byte[] buildPayload(byte msg, byte[] tail) {
-        if (tail == null || tail.length == 0) return new byte[]{msg};
-        byte[] out = new byte[1 + tail.length];
-        out[0] = msg;
-        System.arraycopy(tail, 0, out, 1, tail.length);
-        return out;
-    }
-
-    private static void ensureOk(Response r, String ctx) throws IOException {
-        if (r.rc != RC_OK) throw new IOException(ctx + " rc=0x" + hex2(r.rc));
-    }
-
-    private static int crcLcp(byte[] data, int off, int len) {
-        int crc = 0x7E7E;
-        for (int i = off; i < off + len; i++) {
-            int b = data[i] & 0xFF;
-            for (int bit = 7; bit >= 0; bit--) {
-                boolean fb = (crc & 0x8000) != 0;
-                crc = ((crc << 1) & 0xFFFF) | ((b >> bit) & 1);
-                if (fb) crc ^= 0x1021;
-            }
-        }
-        return crc & 0xFFFF;
-    }
-
-    private static int u16be(byte hi, byte lo) { return ((hi & 0xFF) << 8) | (lo & 0xFF); }
-
-    private static String hex2(int v) { return String.format("%02X", v & 0xFF); }
-
-    private static String hexDump(byte[] b) {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < b.length; i++) {
-            if (i > 0) sb.append(' ');
-            sb.append(hex2(b[i] & 0xFF));
-        }
-        return sb.toString();
-    }
-
-    // ===================== STRUCTURES INTERNES =====================
-    private static final class Frame {
-        final int to, from, status;
-        final byte[] payload;
-        final byte[] raw;
-        Frame(int to, int from, int status, byte[] payload, byte[] raw) {
-            this.to = to;
-            this.from = from;
-            this.status = status;
-            this.payload = payload;
-            this.raw = raw;
-        }
-    }
-
-    private static final class Response {
-        final int rc;
-        final byte[] payload;
-        Response(int rc, byte[] payload) {
-            this.rc = rc;
-            this.payload = payload;
-        }
-    }
-
-    private static final class IncompleteFrameException extends Exception {}
-
-    private static final class ByteArray {
-        byte[] buf = new byte[256];
-        int len = 0;
-
-        void append(byte b) { ensure(1); buf[len++] = b; }
-
-        void appendBytes(byte[] b, int off, int l) {
-            ensure(l);
-            System.arraycopy(b, off, buf, len, l);
-            len += l;
-        }
-
-        void appendEscaped(byte b) {
-            int v = b & 0xFF;
-            if (v == (ESC & 0xFF) || v == (SYNC & 0xFF)) append(ESC);
-            append(b);
-        }
-
-        byte[] extract(int n) {
-            byte[] out = new byte[n];
-            System.arraycopy(buf, 0, out, 0, n);
-            return out;
-        }
-
-        void drop(int n) {
-            if (n <= 0) return;
-            System.arraycopy(buf, n, buf, 0, len - n);
-            len -= n;
-        }
-
-        byte[] toArray() {
-            byte[] out = new byte[len];
-            System.arraycopy(buf, 0, out, 0, len);
-            return out;
-        }
-
-        private void ensure(int extra) {
-            if (len + extra <= buf.length) return;
-            byte[] nb = new byte[Math.max(buf.length * 2, len + extra + 64)];
-            System.arraycopy(buf, 0, nb, 0, len);
-            buf = nb;
-        }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // Comportement vanne post-preset — à overrider dans Lc3Link
-    // ─────────────────────────────────────────────────────────────────────
 
     /**
-     * Indique si le registre contrôle la vanne mécaniquement via solénoïde.
-     *
-     * LCR-II (LcpLink) : true — le registre coupe le solénoïde au preset.
-     *   Si du volume sort après DONE, c'est une défaillance mécanique
-     *   (solénoïde défaillant, fuite hydraulique, bypass manuel).
-     *
-     * LC3 (Lc3Link override) : false — pas de contrôle solénoïde via protocole.
-     *   Le chauffeur doit fermer la vanne manuellement après PRESET STOP.
-     *   Si du volume sort après DONE, le chauffeur n'a pas encore fermé.
+     * Met à jour FSM (patchDataverse + lastResult) sans retourner dans FSM.
+     * Appelé depuis onDeliveryEnded() — le chauffeur reste dans l'APK.
      */
-    public boolean isValveControlledByRegister() {
-        return true; // LCR-II : solénoïde contrôlé par le registre
+    private void mettreAJourFieldService(String woNum, String woIdGuid,
+                                          String status, String extraJson) {
+        try {
+            String net = "", gross = "", ticket = "";
+            try {
+                JSONObject d = new JSONObject(extraJson != null ? extraJson : "{}");
+                JSONObject result = d.optJSONObject("result");
+                if (result != null) {
+                    net    = String.valueOf(result.optDouble("fs_net_l",   0));
+                    gross  = String.valueOf(result.optDouble("fs_gross_l", 0));
+                    ticket = result.optString("ticket_no", "");
+                    boolean stale  = d.optBoolean("stale", false);
+                    double fsNet   = result.optDouble("fs_net_l",   0);
+                    double fsGross = result.optDouble("fs_gross_l", 0);
+                    if (stale || fsNet == 0 || fsGross == 0) {
+                        JSONObject tick = d.optJSONObject("tick");
+                        if (tick != null) {
+                            double tn = tick.optDouble("net",   0);
+                            double tg = tick.optDouble("gross", 0);
+                            if (tn > 0 && tg > 0) { net = String.valueOf(tn); gross = String.valueOf(tg); }
+                        }
+                    }
+                } else {
+                    net   = String.valueOf(d.optDouble("net",   0));
+                    gross = String.valueOf(d.optDouble("gross", 0));
+                }
+            } catch (Exception ignored) {}
+
+            String woGuid = (woIdGuid != null && !woIdGuid.isEmpty()) ? woIdGuid : "";
+            woGuid = woGuid.replace("{", "").replace("}", "");
+
+            // Sauvegarder lastResult
+            JSONObject lastResult = new JSONObject();
+            lastResult.put("wonum",  woNum  != null ? woNum  : "");
+            lastResult.put("woid",   woGuid);
+            lastResult.put("net",    net);
+            lastResult.put("gross",  gross);
+            lastResult.put("ticket", ticket);
+            lastResult.put("status", status != null ? status : "ok");
+            lastResult.put("ts",     System.currentTimeMillis());
+            if (extraJson != null) {
+                try { lastResult.put("payload", new JSONObject(extraJson)); } catch (Exception ignored) {}
+            }
+            lastResultJson   = lastResult.toString();
+            lastResultWoNum  = woNum;
+            lastResultWoGuid = woGuid;
+            lastResultTs     = System.currentTimeMillis();
+            com.pa.lcrdemo.LcrHttpService.lastResultJson = lastResult.toString();
+            android.util.Log.i(TAG, "last-result sauvegardé: wonum=" + woNum
+                + " net=" + net + " gross=" + gross + " ticket=" + ticket);
+
+            // Patch Dataverse (msdyn_workordersummary) sans finish()
+            final String fNet = net, fGross = gross, fTicket = ticket;
+            final String fGuid = woGuid, fWoNum = woNum, fStatus = status;
+            patchDataverse(fGuid, fWoNum, fNet, fGross, fTicket, fStatus);
+
+        } catch (Exception e) {
+            android.util.Log.e(TAG, "mettreAJourFieldService ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.mettreAJourFieldService", e); } catch (Exception ignored) {}
+        }
     }
 
-    /**
-     * Message d'alerte fuite vanne à afficher au chauffeur.
-     * Adapté selon le type de registre et son mode de contrôle de vanne.
-     *
-     * @param ticketNo  numéro de ticket de la livraison terminée
-     * @param netRef    volume net au moment de la coupure (litres)
-     * @param netNow    volume net mesuré maintenant (litres)
-     * @param delta     volume additionnel détecté (litres)
-     */
-    public String getLeakAlertMessage(String ticketNo, double netRef,
-            double netNow, double delta) {
-        // LCR-II : le registre coupe le solenoide au preset via commande hardware.
-        // Si du volume sort apres DONE, defaillance mecanique ou electrique.
-        StringBuilder sb = new StringBuilder();
-        sb.append("VOLUME DETECTE APRES COUPURE DU REGISTRE").append("\n\n");
-        sb.append("Ticket : ").append(ticketNo).append("\n");
-        sb.append(String.format(java.util.Locale.ROOT, "Volume au preset   : %.3f L net\n", netRef));
-        sb.append(String.format(java.util.Locale.ROOT, "Volume actuel      : %.3f L net\n", netNow));
-        sb.append(String.format(java.util.Locale.ROOT, "Volume additionnel : %.3f L\n\n", delta));
-        sb.append("Le registre LCR-II a coupe le solenoide au preset.").append("\n");
-        sb.append("Un volume continue d'etre mesure - verifiez :").append("\n");
-        sb.append("  - La vanne physique et le circuit hydraulique").append("\n");
-        sb.append("  - Le solenoide (defaillance possible)").append("\n");
-        sb.append("  - Toute vanne de bypass ouverte manuellement");
-        return sb.toString();
+    // =========================================================
+    // Logging helpers
+    // =========================================================
+
+    private void logDeliveryStart(String serialId, String woNum, String btMac,
+                                   Integer node, String produit, String preset) {
+        if (deliveryStore == null || serialId == null || serialId.isEmpty()) return;
+        try {
+            JSONObject d = new JSONObject();
+            d.put("woNum",   woNum   != null ? woNum   : "");
+            d.put("btMac",   btMac   != null ? btMac   : "");
+            d.put("node",    node    != null ? node    : 0);
+            d.put("produit", produit != null ? produit : "");
+            d.put("preset",  preset  != null ? preset  : "");
+            d.put("source",  "DEEPLINK_FS");
+            d.put("ts",      System.currentTimeMillis());
+
+            deliveryStore.upsertSummaryAsync(
+                serialId, woNum != null ? woNum : "DEEPLINK",
+                null, "DEEPLINK_START", DeliveryLogStore.SOURCE_API,
+                null, null, null);
+
+            // ✅ RETIRÉ (27 août 2026, demande Paul — "c'est exactement ce
+            // que j'ai après installation" — confirmé que le correctif
+            // précédent (try/catch) n'empêche pas l'erreur elle-même,
+            // seulement sa conséquence de plantage) — openAttemptAsync()
+            // ici exige une ligne delivery_summary(serial_id, ticket_no)
+            // déjà existante (contrainte FOREIGN KEY), mais ticket_no vaut
+            // ici le numéro de WO, jamais un vrai ticket — cette écriture
+            // échouait à CHAQUE appel, par conception, peu importe l'ordre
+            // ou le timing. upsertSummaryAsync ci-dessus capture déjà
+            // l'essentiel ("livraison démarrée") sans dépendre de cette
+            // contrainte fragile — retiré plutôt que rafistolé encore.
+        } catch (Exception ignored) {}
+    }
+
+    private void logDeliveryEnd(String serialId, String woNum, String jobId,
+                                 String outcome, String resultJson, String errorJson) {
+        if (deliveryStore == null || serialId == null || serialId.isEmpty()) return;
+        // ✅ CORRIGÉ (27 août 2026, demande Paul — "si on est plus dans la
+        // fiche de départ pour x raison, il n'y a aucun dépôt payload dans
+        // le champ résumé") — trouvé : cette écriture indexait toujours
+        // par woNum, jamais le vrai ticket_no du registre — alors que
+        // resultJson (extraJson) contient déjà le vrai ticket_no à
+        // l'intérieur (construit par api_deliveryJobGet()). Si le chemin
+        // normal de complétion (DeliveryController, indexé par le vrai
+        // ticket_no) n'atteint jamais son écriture pour une raison
+        // quelconque (contexte de livraison perdu), cette ligne-ci —
+        // indexée par woNum — devenait la SEULE trace, mais introuvable
+        // par toute recherche basée sur le vrai ticket (comme
+        // getLatestResultByTicketNo() construite hier). Extrait le vrai
+        // ticket_no du payload quand disponible, repli sur woNum sinon.
+        String ticketNoReel = woNum;
+        if (resultJson != null && !resultJson.trim().isEmpty()) {
+            try {
+                org.json.JSONObject rj = new org.json.JSONObject(resultJson);
+                String t = rj.optString("ticket_no", null);
+                if (t != null && !t.trim().isEmpty() && !"0".equals(t.trim())) {
+                    ticketNoReel = t.trim();
+                }
+            } catch (Exception ignored) {}
+        }
+        deliveryStore.upsertSummaryAsync(
+            serialId, ticketNoReel != null ? ticketNoReel : "DEEPLINK",
+            null, outcome, DeliveryLogStore.SOURCE_API,
+            jobId, resultJson, errorJson);
+    }
+
+    private void logEvent(String serialId, String woNum, String level,
+                           String type, String message, String dataJson) {
+        if (deliveryStore == null || serialId == null || serialId.isEmpty()) return;
+        try {
+            deliveryStore.openAttemptAsync(
+                serialId, woNum != null ? woNum : "DEEPLINK",
+                DeliveryLogStore.SOURCE_API, null, attemptId ->
+                    deliveryStore.addEventAsync(
+                        attemptId, level, type, message, dataJson));
+        } catch (Exception ignored) {}
+    }
+
+    private void logError(String serialId, String woNum, String code, String message) {
+        if (deliveryStore == null) return;
+        try {
+            String errorJson = new JSONObject()
+                .put("code",    code)
+                .put("message", message != null ? message : "")
+                .put("ts",      System.currentTimeMillis())
+                .toString();
+            logDeliveryEnd(serialId, woNum, null, "ERROR", null, errorJson);
+            logEvent(serialId, woNum, DeliveryLogStore.LEVEL_ERROR, code, message, errorJson);
+        } catch (Exception ignored) {}
+    }
+
+    // =========================================================
+    // Patch Dataverse
+    // =========================================================
+
+    // 📝 NOTE POUR FUTUR CHANTIER (11 août 2026, demande Paul — "dans
+    // Dataverse on enverra que les choses principales et les
+    // particularités car on veut intégrer l'IA dans la lecture des logs")
+    //
+    // Idée validée avec Paul, PAS ENCORE implémentée — juste notée ici pour
+    // ne pas l'oublier :
+    //
+    // Plutôt que d'envoyer le bruit brut complet, envoyer vers Dataverse un
+    // RÉSUMÉ STRUCTURÉ par livraison/session, dans une NOUVELLE TABLE
+    // DATAVERSE DÉDIÉE (pas un champ JSON ajouté à une table existante) :
+    //   - Les infos essentielles (ticket, WO, net/gross, timestamps, etc.)
+    //   - Les "particularités" — définies avec Paul comme : niveau ERROR +
+    //     WARN + changements d'état inhabituels (ex. déconnexions) — PAS le
+    //     bruit de routine (STATUS répété, CUMUL-WO vide, etc.)
+    //
+    // Déclencheur : configurable, les trois options suivantes doivent être
+    // possibles selon le besoin :
+    //   1) À la fin de chaque livraison complétée
+    //   2) Périodiquement pendant la session (ex. toutes les X minutes)
+    //   3) Sur demande manuelle (bouton)
+    //
+    // But final : que ce résumé structuré (et non le log brut complet)
+    // serve de base à une future lecture/analyse par IA — donc le format
+    // doit rester assez condensé et structuré pour être digeste, plutôt
+    // que de reproduire des milliers de lignes répétitives.
+    //
+    // Points à trancher avant de commencer l'implémentation : le schéma
+    // exact de la nouvelle table Dataverse, et où précisément dans le code
+    // brancher chacun des trois déclencheurs.
+
+    private void patchDataverse(String woGuid, String woNum,
+                                 String net, String gross, String ticket,
+                                 String status) {
+        if (woGuid == null || woGuid.isEmpty()) {
+            android.util.Log.w(TAG, "patchDataverse: GUID vide — ignoré");
+            return;
+        }
+
+        // ✅ Bloquer si net=0 et status=erreur — ne jamais écraser avec des données vides
+        double netVal = 0;
+        try { netVal = net != null ? Double.parseDouble(net) : 0; } catch (Exception ignored) {}
+        if (netVal == 0 && status != null && status.startsWith("erreur")) {
+            android.util.Log.w(TAG, "patchDataverse: net=0 + status=" + status + " — ignoré");
+            return;
+        }
+
+        String deliveryUid = "";
+        try {
+            if (lastResultJson != null) {
+                JSONObject j = new JSONObject(lastResultJson);
+                JSONObject payload = j.optJSONObject("payload");
+                if (payload != null) {
+                    JSONObject result = payload.optJSONObject("result");
+                    if (result != null) deliveryUid = result.optString("delivery_uid", "");
+                }
+            }
+        } catch (Exception ignored) {}
+
+        final String fDeliveryUid = deliveryUid.isEmpty()
+            ? woNum + "-" + System.currentTimeMillis()
+            : deliveryUid;
+
+        try {
+            DeliveryResultQueueDb queueDb = new DeliveryResultQueueDb(activity);
+            // ✅ FIX : ce PATCH s'exécute automatiquement à la FIN DE CHAQUE
+            // LIVRAISON (pas seulement via le bouton Retour WO) — c'était la
+            // vraie cause de l'effacement de l'historique dans Field Service :
+            // il appelait patchSummary() (écrase tout) au lieu de la version
+            // consolidée (fusion+ETag) qu'on vient de construire pour
+            // retournerAuWorkOrder(). Marqué "consolidated" pour que
+            // DeliverySyncWorker utilise aussi la bonne méthode en cas de retry.
+            JSONObject queuePayload = new JSONObject();
+            queuePayload.put("consolidated", true);
+            queuePayload.put("workOrderId", woGuid.replace("{", "").replace("}", ""));
+            queuePayload.put("woNum",       woNum   != null ? woNum   : "");
+            queuePayload.put("deliveryUid", fDeliveryUid);
+            queueDb.upsertPending(fDeliveryUid, queuePayload.toString());
+            android.util.Log.i(TAG, "patchDataverse: ajouté à la queue offline (consolidated)");
+            com.pa.lcrdemo.dataverse.DeliverySyncScheduler.triggerNow(activity);
+        } catch (Exception e) {
+            android.util.Log.e(TAG, "Queue ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.Queue", e); } catch (Exception ignored) {}
+        }
+
+        // ✅ (fix 31 juillet 2026, découvert en validant l'exhaustivité du verrou global
+        // demandé par Paul) — ce site MSAL avait été MANQUÉ lors de l'ajout initial du
+        // verrou. Flux ASYNCHRONE (pas de CountDownLatch bloquant) — donc `.lock()` posé
+        // ici et `.unlock()` posé dans CHACUN des 3 callbacks terminaux ci-dessous (succès
+        // token, erreur token, erreur init), pas un simple bloc synchronized qui ne
+        // protégerait rien à travers ces frontières asynchrones.
+        try {
+            MsalTokenProvider.MSAL_SERIAL_LOCK.acquire();
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            android.util.Log.w(TAG, "patchDataverse: acquire() interrompu — abandon");
+            return;
+        }
+        MsalTokenProvider tokenProvider = new MsalTokenProvider(activity);
+        tokenProvider.init(new MsalTokenProvider.InitCallback() {
+            @Override
+            public void onReady() {
+                tokenProvider.acquireTokenSilentFromWorker(new MsalTokenProvider.TokenCallback() {
+                    @Override
+                    public void onSuccess(String accessToken) {
+                        // Token obtenu — l'état MSAL n'est plus en jeu, libérer le verrou
+                        // avant l'envoi HTTP (qui peut prendre plusieurs secondes).
+                        MsalTokenProvider.MSAL_SERIAL_LOCK.release();
+                        safeExecute(() -> {
+                            try {
+                                // ✅ FIX : patchSummaryConsolidated() au lieu de patchSummary()
+                                // — lit d'abord les livraisons locales fraîches (pas juste
+                                // cette livraison-ci), pour que le PATCH fusionne avec
+                                // l'historique existant côté Dataverse au lieu de l'écraser.
+                                String guidClean = woGuid.replace("{", "").replace("}", "");
+                                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
+                                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
+                                org.json.JSONArray livraisons = new org.json.JSONArray();
+                                try {
+                                    java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> rows =
+                                        lcrDb.getAllForWo(woNum);
+                                    for (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow r : rows) {
+                                        if (r.netL > 0 || "ANNULATION".equals(r.type)) {
+                                            org.json.JSONObject entry = new org.json.JSONObject();
+                                            entry.put("ticket_no", r.ticketNo != null ? r.ticketNo : "");
+                                            entry.put("net_l",     r.netL);
+                                            entry.put("gross_l",   r.grossL);
+                                            entry.put("type",      r.type != null ? r.type : "");
+                                            entry.put("end_utc",   r.endUtc != null ? r.endUtc : "");
+                                            livraisons.put(entry);
+                                        }
+                                    }
+                                } finally {
+                                    try { lcrDb.close(); } catch (Exception ignored) {}
+                                }
+                                if (livraisons.length() == 0) {
+                                    // Filet de sécurité — au moins CETTE livraison si la BD locale
+                                    // n'en connaît aucune pour une raison quelconque
+                                    org.json.JSONObject entry = new org.json.JSONObject();
+                                    entry.put("ticket_no", ticket != null ? ticket : "");
+                                    entry.put("net_l",     net    != null ? Double.parseDouble(net)   : 0);
+                                    entry.put("gross_l",   gross  != null ? Double.parseDouble(gross) : 0);
+                                    entry.put("type",      "ORIGINAL");
+                                    livraisons.put(entry);
+                                }
+                                WorkOrderUpdater.patchSummaryConsolidated(
+                                    accessToken, guidClean, woNum, livraisons);
+                                android.util.Log.i(TAG, "patchDataverse MSAL: OK (consolidated) — wonum=" + woNum);
+                                try {
+                                    DeliveryResultQueueDb qdb = new DeliveryResultQueueDb(activity);
+                                    java.util.List<DeliveryResultQueueDb.QueueItem> items =
+                                        qdb.listPending(5);
+                                    for (DeliveryResultQueueDb.QueueItem item : items) {
+                                        if (fDeliveryUid.equals(item.deliveryUid)) {
+                                            qdb.markSent(item.id);
+                                            break;
+                                        }
+                                    }
+                                } catch (Exception ignored) {}
+                            } catch (Exception e) {
+                                android.util.Log.w(TAG, "patchDataverse PATCH ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.patchDataverse", e); } catch (Exception ignored) {}
+                            }
+                        });
+                    }
+                    @Override
+                    public void onError(Exception e) {
+                        MsalTokenProvider.MSAL_SERIAL_LOCK.release();
+                        android.util.Log.w(TAG, "patchDataverse token ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.patchDataverse", e); } catch (Exception ignored) {}
+                    }
+                });
+            }
+            @Override
+            public void onError(Exception e) {
+                MsalTokenProvider.MSAL_SERIAL_LOCK.release();
+                android.util.Log.w(TAG, "patchDataverse MSAL init ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.patchDataverse", e); } catch (Exception ignored) {}
+            }
+        });
+    }
+
+    private static String buildErrorJson(String code, String message) {
+        try {
+            return new JSONObject()
+                .put("error_code",    code)
+                .put("error_message", message != null ? message : "")
+                .put("ts",            System.currentTimeMillis())
+                .toString();
+        } catch (Exception e) {
+            return "{\"error_code\":\"" + code + "\"}";
+        }
     }
 }

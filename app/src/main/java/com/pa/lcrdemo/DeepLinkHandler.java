@@ -1673,8 +1673,22 @@ public class DeepLinkHandler {
                         }
 
                         if (state != null && !state.equals(lastState)) {
-                            logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
-                                "STATE_CHANGE", "state=" + state, null);
+                            // ✅ CORRIGÉ (27 août 2026, demande Paul — "je ne
+                            // suis pas censé avoir quoi que ce soit de
+                            // requête SQL dans les fragments ou le
+                            // running_flowing") — trouvé, confirmé par
+                            // trace réelle : logEvent() (donc une vraie
+                            // écriture SQLite) se déclenchait ici à chaque
+                            // transition d'état, y compris l'entrée en
+                            // RUNNING_FLOWING/RUNNING_PAUSED. state est déjà
+                            // connu ici, pas besoin d'une lecture séparée du
+                            // contrôleur — bloqué avant même de tenter
+                            // l'écriture, pas juste rendu silencieux après.
+                            boolean livraisonActivePourLog = "RUNNING_FLOWING".equals(state) || "RUNNING_PAUSED".equals(state);
+                            if (!livraisonActivePourLog) {
+                                logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
+                                    "STATE_CHANGE", "state=" + state, null);
+                            }
                             lastState = state;
                         }
 
@@ -2093,15 +2107,17 @@ public class DeepLinkHandler {
                 null, "DEEPLINK_START", DeliveryLogStore.SOURCE_API,
                 null, null, null);
 
-            deliveryStore.openAttemptAsync(
-                serialId, woNum != null ? woNum : "DEEPLINK",
-                DeliveryLogStore.SOURCE_API, null, attemptId -> {
-                    deliveryStore.addEventAsync(attemptId,
-                        DeliveryLogStore.LEVEL_INFO,
-                        "DEEPLINK_START",
-                        "WO=" + woNum + " BT=" + btMac + " node=" + node,
-                        d.toString());
-                });
+            // ✅ RETIRÉ (27 août 2026, demande Paul — "c'est exactement ce
+            // que j'ai après installation" — confirmé que le correctif
+            // précédent (try/catch) n'empêche pas l'erreur elle-même,
+            // seulement sa conséquence de plantage) — openAttemptAsync()
+            // ici exige une ligne delivery_summary(serial_id, ticket_no)
+            // déjà existante (contrainte FOREIGN KEY), mais ticket_no vaut
+            // ici le numéro de WO, jamais un vrai ticket — cette écriture
+            // échouait à CHAQUE appel, par conception, peu importe l'ordre
+            // ou le timing. upsertSummaryAsync ci-dessus capture déjà
+            // l'essentiel ("livraison démarrée") sans dépendre de cette
+            // contrainte fragile — retiré plutôt que rafistolé encore.
         } catch (Exception ignored) {}
     }
 
