@@ -629,6 +629,32 @@ public final class RegisterSessionManager {
             } else if (existing.generationId == io.getGenerationId()) {
                 return existing.dc;
             }
+            // ✅ AJOUTÉ (27 août 2026, demande Paul — "pourquoi j'ai du feed
+            // pendant le running_flowing" — trouvé, confirmé par l'ABSENCE
+            // du message [RUNNING_FLOWING-FIN] dans le log, alors que
+            // [RUNNING_FLOWING-DÉBUT] était bien présent) — sur changement
+            // de génération (ex: reconnexion BT), un TOUT NOUVEAU
+            // DeliveryController est créé ci-dessous, qui ne sait RIEN de
+            // la livraison en cours sur l'ancien — remplacement complet et
+            // silencieux, même si l'ancien était activement RUNNING_FLOWING.
+            // L'ancien exécuteur ne peut pas être réutilisé (voir
+            // commentaire ci-dessus, contrainte réelle) — donc on ne peut
+            // pas simplement refuser la recréation comme pour le cas
+            // "changement de transport". Au minimum : rendre ce
+            // remplacement dangereux VISIBLE, fort, dans Support — pas
+            // caché comme aujourd'hui.
+            if (existing != null && existing.dc != null) {
+                DeliveryState stAncien = existing.dc.getState();
+                if (stAncien == DeliveryState.RUNNING_FLOWING || stAncien == DeliveryState.RUNNING_PAUSED) {
+                    try {
+                        com.pa.lcr.lcp.log.LogBus.err(node, "RegisterSessionManager.getOrCreate",
+                            new Exception("⚠️ REMPLACEMENT DE CONTRÔLEUR PENDANT LIVRAISON ACTIVE — "
+                                + "ancien état=" + stAncien + " pour " + k + " — l'ancien contrôleur "
+                                + "(qui suivait la livraison en cours) est abandonné, un nouveau le "
+                                + "remplace sans connaître le contexte — continuité de livraison rompue"));
+                    } catch (Exception ignored) {}
+                }
+            }
             // ✅ FIX : l'ancien test "existing.dc.getState() != null" était toujours vrai
             // (DeliveryController.state est initialisé à DISCONNECTED et n'est jamais null,
             // du début à la fin du cycle de vie — voir DeliveryController.getState()).
@@ -1167,6 +1193,12 @@ public final class RegisterSessionManager {
                 // tour si un scan est réellement en cours, plutôt que de se
                 // battre pour le même verrou partagé entre chaque produit.
                 if (c.scanInProgress) return;
+                // ✅ AJOUTÉ (27 août 2026, demande Paul — "continue à
+                // chercher") — trouvé : printInProgress (posé pendant
+                // REIMPRIMER/CUSTOM_PRINT) était déclaré et posé, mais
+                // jamais vérifié nulle part — même bug que scanInProgress
+                // avant sa correction. Même garde ici, par cohérence.
+                if (c.printInProgress) return;
                 // ✅ FIX (voir commentaire du champ lastKeepAliveMs) — ping
                 // léger périodique pour empêcher le port de rester totalement
                 // silencieux entre deux livraisons.

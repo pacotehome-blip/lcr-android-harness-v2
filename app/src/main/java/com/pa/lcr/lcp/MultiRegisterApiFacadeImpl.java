@@ -119,6 +119,19 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     private final UsbManager usbManager;
     private final RegisterSessionManager sessions;
     private final MediaTransportManager mediaMgr;
+    // ✅ AJOUTÉ (27 août 2026, demande Paul — "on revoit le processus
+    // complet... regarde ce que fait le code") — trouvé, en suivant la
+    // vraie chaîne d'appel jusqu'au bout : emitRegisterState() se
+    // déclenchait INCONDITIONNELLEMENT à chaque appel de requireSession()
+    // (et 5 autres points d'appel dans ce fichier), que la session soit
+    // neuve ou simplement réutilisée — causant la rafale de 10 broadcasts
+    // "NODE_SEEN" confirmée dans le log, juste au moment le plus chargé
+    // en activité API (démarrage de livraison). Throttle simple par node
+    // — n'émet plus qu'une fois par fenêtre courte, peu importe combien
+    // de fois le même événement logique redéclenche l'appel en interne.
+    private final java.util.concurrent.ConcurrentHashMap<Integer, Long> dernierEmitRegisterStateMs =
+        new java.util.concurrent.ConcurrentHashMap<>();
+    private static final long EMIT_REGISTER_STATE_THROTTLE_MS = 2000;
 
     // jobId -> node/from
     private final Map<String, Integer> jobToNode      = new ConcurrentHashMap<>();
@@ -1500,7 +1513,15 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
 
     private void emitRegisterState(int node, int from, String serialId, String transportKey,
                                    JSONObject snap, boolean alreadyConnected) {
-        notifyNodeSeenFull(node, from, serialId, transportKey);
+        // ✅ AJOUTÉ (27 août 2026) — throttle du broadcast SEULEMENT, le
+        // reste (peuplement de snap pour la réponse API elle-même) continue
+        // de fonctionner normalement à chaque appel, peu importe le throttle.
+        long now = System.currentTimeMillis();
+        Long dernier = dernierEmitRegisterStateMs.get(node);
+        if (dernier == null || (now - dernier) >= EMIT_REGISTER_STATE_THROTTLE_MS) {
+            dernierEmitRegisterStateMs.put(node, now);
+            notifyNodeSeenFull(node, from, serialId, transportKey);
+        }
         if (snap == null) return;
         try {
             snap.put("serialId", serialId);

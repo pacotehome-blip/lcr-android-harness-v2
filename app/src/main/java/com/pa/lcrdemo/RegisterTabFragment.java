@@ -3296,6 +3296,20 @@ public class RegisterTabFragment extends Fragment {
         } catch (java.util.concurrent.RejectedExecutionException ignored) {}
     }
 
+    // ✅ AJOUTÉ (27 août 2026, demande Paul — "continue à chercher... le
+    // bouton bleu") — trouvé : 17 points d'appel pour updateButtons(),
+    // chacun lançant sa PROPRE recherche async (safeBg + ui.post séparés)
+    // pour la visibilité de btnRetourWO. Si plusieurs appels se
+    // chevauchent (probable pendant la période chargée du démarrage de
+    // livraison, confirmée par la rafale de broadcasts qu'on vient de
+    // corriger), un résultat plus lent mais démarré plus tôt peut écraser
+    // un résultat plus rapide mais démarré après — cachant le bouton même
+    // s'il devrait être visible. Numéro de séquence monotone : seul le
+    // résultat du DERNIER appel démarré a le droit d'appliquer sa
+    // décision à l'écran.
+    private final java.util.concurrent.atomic.AtomicLong updateButtonsSeq =
+        new java.util.concurrent.atomic.AtomicLong(0);
+
     private void updateButtons(DeliveryState state) {
         if (btnConnect == null || btnA == null || btnB == null || btnC == null
                 || btnContinue == null || btnFinish == null) return;
@@ -3391,6 +3405,10 @@ public class RegisterTabFragment extends Fragment {
             final boolean connectedFinal = connected;
             final String woForCheck = currentWoNum;
             final String serialForFallback = serialFromArgs;
+            // ✅ AJOUTÉ (27 août 2026) — capture le numéro de séquence de CET
+            // appel précis, au moment même où il démarre — voir déclaration
+            // de updateButtonsSeq plus haut.
+            final long monNumeroSeq = updateButtonsSeq.incrementAndGet();
             // ✅ FIX (la vraie cause du bouton manquant après reconnexion) :
             // ActiveDeliveryStore est VIDÉ une fois la livraison terminée — donc
             // si l'onglet est recréé/reconnecté APRÈS la fin d'une livraison
@@ -3453,6 +3471,11 @@ public class RegisterTabFragment extends Fragment {
                 final String fSyncStatusTrouve = syncStatusTrouve;
 
                 boolean hasData = false;
+                // ✅ AJOUTÉ (27 août 2026, demande Paul — "contre-vérifie
+                // pourquoi tu es incapable de finir ce travail correctement"
+                // — bouton bleu manquant) — trace complète de la décision,
+                // à chaque étape, pour que le prochain test donne une
+                // réponse certaine plutôt qu'une théorie de plus.
                 if (woCheck != null && !woCheck.isEmpty()) {
                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db = null;
                     try {
@@ -3468,14 +3491,37 @@ public class RegisterTabFragment extends Fragment {
                         boolean isAnnulation = row != null && "ANNULATION".equalsIgnoreCase(row.type);
                         boolean hasTicket = row != null && row.ticketNo != null && !row.ticketNo.isEmpty();
                         hasData = row != null && (hasTicket || isAnnulation);
-                    } catch (Exception ignored) {
+                        LogBus.api(node, "[BTN-RETOUR-WO] woCheck=" + woCheck + " connectedFinal=" + connectedFinal
+                                + " row=" + (row != null) + " row.ticketNo=" + (row != null ? row.ticketNo : "n/a")
+                                + " row.type=" + (row != null ? row.type : "n/a")
+                                + " isAnnulation=" + isAnnulation + " hasTicket=" + hasTicket + " hasData=" + hasData);
+                    } catch (Exception e) {
+                        LogBus.api(node, "[BTN-RETOUR-WO] ERR pendant getLatestForWo(" + woCheck + "): " + e.getMessage());
                     } finally {
                         if (db != null) { try { db.close(); } catch (Exception ignored) {} }
                     }
+                } else {
+                    LogBus.api(node, "[BTN-RETOUR-WO] woCheck vide/null — currentWoNum=" + woForCheck
+                            + " serialFromArgs=" + serialForFallback + " — aucune vérification possible, bouton restera caché");
                 }
                 final boolean show = connectedFinal && hasData;
+                LogBus.api(node, "[BTN-RETOUR-WO] décision finale — show=" + show
+                        + " (connectedFinal=" + connectedFinal + " hasData=" + hasData
+                        + " monNumeroSeq=" + monNumeroSeq + " dernierNumeroSeq=" + updateButtonsSeq.get() + ")");
                 ui.post(() -> {
                     if (!isAdded() || getView() == null || btnRetourWO == null) return;
+                    // ✅ AJOUTÉ (27 août 2026) — si un appel PLUS RÉCENT à
+                    // updateButtons() a démarré depuis que CET appel-ci a
+                    // capturé son numéro, on abandonne — un résultat plus
+                    // rapide et plus à jour a probablement déjà appliqué la
+                    // bonne décision, ou est sur le point de le faire. Ne
+                    // jamais laisser un résultat périmé écraser un résultat
+                    // plus récent.
+                    if (monNumeroSeq != updateButtonsSeq.get()) {
+                        LogBus.api(node, "[BTN-RETOUR-WO] résultat périmé ignoré (monNumeroSeq=" + monNumeroSeq
+                                + " != dernierNumeroSeq=" + updateButtonsSeq.get() + ")");
+                        return;
+                    }
                     if (show) {
                         btnRetourWO.setVisibility(android.view.View.VISIBLE);
                         btnRetourWO.setEnabled(true);

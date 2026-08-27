@@ -563,7 +563,20 @@ public class DeepLinkHandler {
                     activity.onConfigureMediaActivated(transportKey, "DEEPLINK");
                     // ✅ Détection isLc3 centralisée — un seul mécanisme partagé
                     // (voir MainActivity.resolveIsLc3), plus de logique dupliquée ici.
-                    activity.upsertRegisterTabFromScan(transportKey, node, 255, fSerialId, true,
+                    // ✅ CORRIGÉ (27 août 2026, demande Paul — "on devrait déjà
+                    // tout avoir avant d'armer la livraison... rien d'autre
+                    // ne devrait s'exécuter") — trouvé, confirmé avec
+                    // certitude par log réel : focus=true forcé ICI,
+                    // inconditionnellement, redéclenchait TOUJOURS
+                    // showRegisterFragmentByKey() → onTabActivated() →
+                    // runInitSequence() AU COMPLET, même quand on clique NEW
+                    // depuis un tab DÉJÀ actif — relançant REGISTRE/PRODUIT/
+                    // PRESET/LIVE/RETOUR_WO pile au moment où la livraison
+                    // s'arme. fTabWasNew (déjà calculé juste au-dessus)
+                    // distingue exactement ce cas : ne force la réactivation
+                    // complète QUE si le tab vient vraiment d'être créé,
+                    // jamais s'il existait déjà.
+                    activity.upsertRegisterTabFromScan(transportKey, node, 255, fSerialId, fTabWasNew,
                             activity.resolveIsLc3(transportKey, node));
 
                     // ✅ Retry prefill — le tab peut prendre du temps à être créé après auto-connect

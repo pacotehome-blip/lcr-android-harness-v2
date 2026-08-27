@@ -1,7 +1,7 @@
 package com.pa.lcr.lcp;
 
 // ═══════════════════════════════════════════════════════════════════════
-//   COMPATIBILITÉ ANDROID : API 28 (Android 9) → API 35 (Android 15)
+// COMPATIBILITÉ ANDROID : API 28 (Android 9) → API 35 (Android 15)
 // ───────────────────────────────────────────────────────────────────────
 // Toute modification de ce fichier doit être testée sur :
 //   · Android 9  (API 28) — Samsung SM-T397U  · ADB 192.168.134.105:5555
@@ -1346,6 +1346,12 @@ catch (Exception ignored) {}
                             // le doublon avec pollJobUntilDone, réglé juste
                             // au-dessus. Même garde ici, par cohérence.
                             if (scanInProgress) return;
+                            // ✅ AJOUTÉ (27 août 2026, demande Paul —
+                            // "continue à chercher") — même bug que
+                            // scanInProgress : printInProgress était posé
+                            // pendant REIMPRIMER/CUSTOM_PRINT mais jamais
+                            // vérifié nulle part. Même garde ici.
+                            if (printInProgress) return;
                             // ✅ RETIRÉ (13 août 2026, demande Paul — "les
                             // ticks sont super mais ils ne s'arrêtent plus
                             // car il ne valide plus si le flow est en
@@ -1943,6 +1949,26 @@ try {
         io.execute(() -> {
             if (isStopped()) return;
             if (state != DeliveryState.RUNNING_FLOWING) return;
+            // ✅ AJOUTÉ (27 août 2026, demande Paul — "je veux trouver
+            // pourquoi j'ai un lag dans le running_flowing... regarde ce
+            // que fait le code") — trouvé : le superviseur (ligne ~1348)
+            // ET le keep-alive de NodeScheduler respectent déjà
+            // scanInProgress — mais PAS le tick rapide ici, celui qui
+            // donne les vraies valeurs en direct pendant RUNNING_FLOWING.
+            // Confirmé par log réel : [SCAN-AUTO] démarrage à 624ms avant
+            // RUNNING_FLOWING-DÉBUT, suivi immédiatement de "Queued
+            // timeout last=0x26" — le tick rapide continuait de se battre
+            // pour le même verrou LCP pendant tout le scan (16 lectures
+            // séquentielles), sans jamais céder sa place. Même garde
+            // ajoutée ici, par cohérence avec les deux autres.
+            if (scanInProgress) return;
+            // ✅ AJOUTÉ (27 août 2026, demande Paul — "continue à
+            // chercher") — même bug, pour l'impression cette fois.
+            // printInProgress (posé pendant REIMPRIMER/CUSTOM_PRINT,
+            // confirmé dans le log : 15 lignes × ~100-200ms chacune,
+            // plusieurs secondes de communication LCP réelle) n'était
+            // jamais vérifié ici non plus.
+            if (printInProgress) return;
             // ✅ FIX CRITIQUE (12 août 2026, demande Paul — "je t'ai dit que
             // je ne veux AUCUNE mémoire pendant le live") — retiré
             // complètement la vérification liveNextAllowedMs ici. Cette
@@ -2732,8 +2758,28 @@ softResync("retry/" + step);
         // connu pour cette livraison. Voir cachedTicketNo23 (déclaration)
         // et son invalidation (api_deliveryOneShotStart, nouvelle
         // livraison) pour le vrai cycle de vie de ce cache.
+        //
+        // ✅ CORRIGÉ (27 août 2026, demande Paul — "régression sur le tick...
+        // sale_number est 98, le ticket_number devrait lui aussi suivre...
+        // le delivery-uid aussi devrait être 98") — TROUVÉ, confirmé avec
+        // certitude : ce cache se fige à la PREMIÈRE lecture de la
+        // livraison et ne se remet JAMAIS à jour tant qu'elle coule — par
+        // conception (voir commentaire ci-dessus, 12 août). Ça tient pour
+        // un VRAI ticket_number (censé rester fixe). Mais en mode repli
+        // sale_number (ticket_number=0), la valeur mise en cache était le
+        // sale_number du TOUT DÉBUT de la livraison — jamais réactualisée
+        // si sale_number avance ensuite. dernierSaleNoConnu (utilisée pour
+        // l'affichage "Sale Number"), lui, est TOUJOURS frais — d'où la
+        // divergence entre les deux valeurs affichées. Corrigé : si la
+        // valeur en cache est déjà identifiée comme un repli sale_number,
+        // on ne la réutilise plus aveuglément — on revalide avec une
+        // vraie relecture fraîche du #23 (elle-même peu coûteuse : un
+        // seul champ, et retombe directement sur le même repli si #23 est
+        // encore à 0).
         String cached = cachedTicketNo23;
-        if (cached != null) return cached;
+        if (cached != null && !dernierTicketEstSaleNumberFallback) {
+            return cached;
+        }
         String result = readTicketNo23Uncached();
         cachedTicketNo23 = result;
         return result;
