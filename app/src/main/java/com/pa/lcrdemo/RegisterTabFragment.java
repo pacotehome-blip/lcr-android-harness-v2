@@ -1570,6 +1570,12 @@ public class RegisterTabFragment extends Fragment {
                     try {
                         android.content.ContentValues cv = new android.content.ContentValues();
                         cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM, fWoNum);
+                        // ✅ AJOUTÉ (26 août 2026, demande Paul — "si on a le
+                        // delivery-uid on devrait aussi avoir le wo guid") —
+                        // currentWoIdGuid déjà maintenu au niveau de la classe.
+                        if (currentWoIdGuid != null && !currentWoIdGuid.isEmpty()) {
+                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID, currentWoIdGuid);
+                        }
                         cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID,
                             serialFromArgs != null ? serialFromArgs : "");
                         cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_LCRNODE, node);
@@ -5453,6 +5459,13 @@ public class RegisterTabFragment extends Fragment {
                 try {
                     android.content.ContentValues cv = new android.content.ContentValues();
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,        woNum);
+                    // ✅ AJOUTÉ (26 août 2026, demande Paul — "si on a le
+                    // delivery-uid on devrait aussi avoir le wo guid") —
+                    // currentWoIdGuid est déjà maintenu au niveau de la
+                    // classe pour ce tab, réutilisé ici.
+                    if (currentWoIdGuid != null && !currentWoIdGuid.isEmpty()) {
+                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID, currentWoIdGuid);
+                    }
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO,     ticketNoOriginal);
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO_REF, ticketNoOriginal);
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,         netFinal);
