@@ -4820,6 +4820,25 @@ public class RegisterTabFragment extends Fragment {
     // on réapplique juste le cache (rapide, pas d'IO registre). Sinon on lance
     // lancerScanProduits() (le même scan que le bouton manuel "🔍 Scan produits").
     private void autoScanProduitsSiNecessaire() {
+        // ✅ CORRIGÉ (27 août 2026, demande Paul — "il n'est pas supposé
+        // avoir ceci... si je viens de cliquer sur NEW") — trouvé LE vrai
+        // trou : cette méthode n'avait JAMAIS de garde sur
+        // produitDejaResoluPourCetteSession, contrairement à
+        // applierDescriptionsProduits(). Un scan matériel complet (16
+        // slots) pouvait donc se redéclencher à CHAQUE activation de tab
+        // (chaque fois que la section PRODUIT de runInitSequence() tourne
+        // — y compris juste au moment de cliquer NEW), même si le produit
+        // était déjà résolu avec succès plus tôt dans la même session —
+        // confirmé par log réel : scan complet démarré 624ms avant
+        // RUNNING_FLOWING-DÉBUT, causant la contention avec le tick
+        // (Queued timeout 0x26) qu'on vient de corriger séparément. Le
+        // vrai correctif est ICI, à la source — ne jamais relancer un
+        // scan matériel une fois déjà résolu, peu importe combien de fois
+        // cette méthode est appelée.
+        if (produitDejaResoluPourCetteSession) {
+            LogBus.api(node, "[SCAN-AUTO] sauté — produit déjà résolu pour cette session, aucun scan matériel nécessaire");
+            return;
+        }
         // ✅ AJOUTÉ (24 août 2026, demande Paul — "je ne vois pas le scan de
         // produit... je ne vois pas que le scan en premier") — trouvé :
         // TOUTES les sorties anticipées de cette méthode étaient
