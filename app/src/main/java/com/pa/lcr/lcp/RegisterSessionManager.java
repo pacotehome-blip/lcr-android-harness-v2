@@ -572,6 +572,14 @@ public final class RegisterSessionManager {
 
         NodeSession existing = sessions.get(k);
 
+        // ✅ AJOUTÉ (27 août 2026, demande Paul — "tu peux corriger ça") —
+        // déclarées ici, AVANT le bloc, pour rester visibles jusqu'au point
+        // de création du nouveau contrôleur plus bas, où le transfert se
+        // fait vraiment. Voir commentaire complet plus bas dans le bloc
+        // if (existing != null).
+        DeliveryState ancienEtatPourTransfert = null;
+        String ancienJobIdPourTransfert = null;
+
         if (existing != null) {
             // ✅ FIX (le vrai bug) : avant de réutiliser aveuglément une session
             // mise en cache (même génération de transport), vérifier que son
@@ -664,6 +672,21 @@ public final class RegisterSessionManager {
             // depuis la fermeture précédente — d'où les "Task rejected from ThreadPoolExecutor
             // [Terminated]" en boucle après reconnexion, et le diagnostic qui restait bloqué
             // en DISCONNECTED. Sur changement de génération, on recrée toujours.
+            // ✅ AJOUTÉ (27 août 2026, demande Paul — "tu peux corriger ça")
+            // — capture l'état ESSENTIEL de l'ancien contrôleur AVANT son
+            // shutdown, pour le transférer au nouveau juste après sa
+            // création. apiJobs (la vraie donnée de livraison) est déjà
+            // statique — partagée entre toutes les instances, donc jamais
+            // perdue. Ce qui EST perdu : lastActiveJobId et l'état affiché
+            // (getState()), tous les deux par-instance — causant le
+            // message trompeur "aucune livraison en cours" alors qu'une
+            // livraison coule encore activement sur le nouveau contrôleur.
+            final DeliveryState ancienEtatCapture =
+                    (existing != null && existing.dc != null) ? existing.dc.getState() : null;
+            final String ancienJobIdCapture =
+                    (existing != null && existing.dc != null) ? existing.dc.getLastActiveJobId() : null;
+            ancienEtatPourTransfert = ancienEtatCapture;
+            ancienJobIdPourTransfert = ancienJobIdCapture;
             try { existing.scheduler.shutdown(); } catch (Exception ignored) {}
             try { existing.dc.shutdown(false); } catch (Exception ignored) {}
             sessions.remove(k);
@@ -744,6 +767,27 @@ public final class RegisterSessionManager {
         }
         DeliveryController dc = new DeliveryController(link);
         dc.setLogStore(store);
+
+        // ✅ AJOUTÉ (27 août 2026, demande Paul — "tu peux corriger ça") —
+        // vrai transfert d'état, pas juste un avertissement. apiJobs (la
+        // donnée de livraison elle-même) est déjà statique — jamais
+        // perdue. Ce qui manquait : lastActiveJobId et l'état affiché,
+        // tous les deux par-instance. Transférés ici, immédiatement après
+        // la création du nouveau contrôleur, pour que ni pollJob ni
+        // l'affichage ne pensent à tort qu'aucune livraison n'est en
+        // cours pendant qu'elle coule toujours activement.
+        if (ancienJobIdPourTransfert != null && !ancienJobIdPourTransfert.isEmpty()) {
+            dc.adopterJobIdTransfere(ancienJobIdPourTransfert);
+            LogBus.api(node, "[SESSION] jobId transféré au nouveau contrôleur après remplacement: "
+                    + ancienJobIdPourTransfert);
+        }
+        if (ancienEtatPourTransfert != null) {
+            dc.adopterEtatTransfere(ancienEtatPourTransfert);
+            if (ancienEtatPourTransfert == DeliveryState.RUNNING_FLOWING || ancienEtatPourTransfert == DeliveryState.RUNNING_PAUSED) {
+                LogBus.api(node, "[SESSION] état transféré au nouveau contrôleur après remplacement: "
+                        + ancienEtatPourTransfert + " — livraison toujours active, pas de faux \"aucune livraison en cours\"");
+            }
+        }
 
         NodeScheduler scheduler = new NodeScheduler(node);
         MuxListener mux = new MuxListener();

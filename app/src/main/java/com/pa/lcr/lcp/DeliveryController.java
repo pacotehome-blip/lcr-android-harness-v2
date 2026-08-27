@@ -984,6 +984,21 @@ private void reproEvent(String level, String type, String message, JSONObject da
     // ✅ Global job registry: survive controller rebind/recreate (prevents JOB_NOT_FOUND after DONE)
     private static final Map<String, ApiJob> apiJobs = new ConcurrentHashMap<>();
     private volatile String lastActiveJobId = null; // ✅ dernier jobId actif
+    // ✅ AJOUTÉ (27 août 2026, demande Paul — "tu peux corriger ça") — getter/
+    // setter publics dédiés au transfert d'état lors d'un remplacement de
+    // contrôleur (changement de génération de transport pendant une
+    // livraison active). Voir RegisterSessionManager.getOrCreate().
+    public String getLastActiveJobId() { return lastActiveJobId; }
+    public void adopterJobIdTransfere(String jobId) { this.lastActiveJobId = jobId; }
+    // ✅ AJOUTÉ (idem) — permet à RegisterSessionManager de forcer l'état
+    // initial du nouveau contrôleur si l'ancien était activement en train
+    // de couler, pour éviter le message trompeur "aucune livraison en
+    // cours" pendant que le nouveau contrôleur se stabilise.
+    public void adopterEtatTransfere(DeliveryState etatTransfere) {
+        if (etatTransfere == DeliveryState.RUNNING_FLOWING || etatTransfere == DeliveryState.RUNNING_PAUSED) {
+            this.state = etatTransfere;
+        }
+    }
     
     public DeliveryController(LcpLink link) {
         this.link = link;
