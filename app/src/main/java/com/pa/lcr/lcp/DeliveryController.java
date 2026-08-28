@@ -1710,7 +1710,7 @@ FullStatus fs = readFullStatus("status/full");
  if (n != null && !n.trim().isEmpty() && tno != null && !tno.trim().isEmpty()) {
  uid = n.trim() + "-" + tno.trim();
  }
- if (listener != null) listener.onTicketInfo(tno, uid);
+ if (listener != null) listener.onTicketInfo(tno, uid, isManualUiAction);
  } catch (Exception ignored) {}
 
             } catch (Exception e) {
@@ -1835,6 +1835,24 @@ try {
         // ✅ AJOUTÉ (28 août 2026) — force une vraie lecture delStatus/
         // delCode dès le tout premier cycle rapide de cette livraison.
         fastTickCycleCount = 0;
+        // ✅ AJOUTÉ (28 août 2026, demande Paul — "je vois vraiment
+        // running_flowing, ensuite connected ready ensuite running_flowing"
+        // — trouvé en traçant le vrai logcat : à 14:54:00.214, ~2s après
+        // ARMED, le log "[ÉTAT] EN LIVRAISON, flux actif" affichait déjà
+        // net=9.9L gross=10.1L — exactement les valeurs FINALES de la
+        // livraison PRÉCÉDENTE, alors que celle-ci venait tout juste de
+        // démarrer. Cause : lastTick n'était JAMAIS remis à zéro entre
+        // deux livraisons — describeStateHuman() (et tout autre lecteur de
+        // lastTick) continuait d'afficher les anciennes valeurs jusqu'à ce
+        // que le tick rapide de la NOUVELLE livraison fasse sa première
+        // vraie lecture — une fenêtre qui peut prendre plusieurs secondes
+        // sous contention (confirmé dans ce même log : ~2.7s d'attente de
+        // verrou juste après l'armement). Pendant cette fenêtre, l'écran
+        // pouvait montrer des données incohérentes avec le vrai état
+        // (flux réellement à 0, mais net/gross affichant l'ancienne
+        // livraison) — assez pour ressembler à un flottement d'état vu de
+        // l'écran, même si le state machine lui-même restait correct.
+        lastTick = null;
         liveBackoffMs = LIVE_BASE_MS;
         liveNextAllowedMs = 0L;
         liveLastSkipLogMs = 0L;
@@ -3691,7 +3709,11 @@ public ApiResult api_registerValidate(
     }
 
     private String liveStatusArmed() {
-        return "LIVE: CONNECTED - ARMED (en attente CONTINUER)";
+        // ✅ CORRIGÉ (28 août 2026, demande Paul) — cohérent avec
+        // setState(RUNNING_FLOWING) dans api_deliveryOneShotStart() —
+        // le texte disait "CONNECTED" alors que l'état réel devient
+        // maintenant RUNNING_FLOWING dès l'armement.
+        return "LIVE: RUNNING_FLOWING - ARMED (en attente CONTINUER)";
     }
 
     /**
@@ -4104,7 +4126,24 @@ job.presetNetL_requested = presetNetL;
                 });
             }
 
-            setState(DeliveryState.CONNECTED);
+            // ✅ CORRIGÉ (28 août 2026, demande Paul — "on démarre le
+            // running_flowing à waiting" / "setState(RUNNING_FLOWING)
+            // directement dans api_deliveryOneShotStart dès l'armement
+            // réussi") — avant, l'armement mettait state=CONNECTED, et
+            // seul le VRAI CMD_RUN (dans api_deliveryContinue(), appelé
+            // séparément, parfois 5-7s plus tard sous contention — confirmé
+            // par log réel : ARMED à 58.157s, RUN envoyé seulement à
+            // 03.862s) mettait RUNNING_FLOWING. Pendant toute cette
+            // fenêtre, l'écran affichait légitimement "CONNECTED — prêt",
+            // ce qui ressemblait à un flottement d'état vu du chauffeur.
+            // ⚠️ RISQUE CONNU, à surveiller au prochain test : setState
+            // (RUNNING_FLOWING) démarre IMMÉDIATEMENT le tick rapide ET le
+            // superviseur (voir setState() plus haut) — ils vont donc
+            // commencer à tourner ~5-7s plus tôt qu'avant, pile pendant la
+            // fenêtre où CMD_RUN lui-même se bat déjà contre la contention
+            // documentée (BUSY, verrou attendu 2.7s) — risque réel
+            // d'aggraver cette contention plutôt que de l'alléger.
+            setState(DeliveryState.RUNNING_FLOWING);
 
             // ✅ VÉRIFICATION EMPIRIQUE — lire net/gross juste après l'armement
             // (writePresetNet), avant tout CMD_RUN, pour savoir si le compteur est
@@ -4152,7 +4191,10 @@ job.presetNetL_requested = presetNetL;
             safeJsonPut(data, "preset_applied", presetApplied);
             safeJsonPut(data, "decimals", cachedDigits);
             safeJsonPut(data, "armed", 1);
-            safeJsonPut(data, "state", DeliveryState.CONNECTED.name());
+            // ✅ CORRIGÉ (28 août 2026) — cohérent avec setState(RUNNING_FLOWING)
+            // juste au-dessus, au lieu de coder en dur CONNECTED alors que
+            // l'état réel du contrôleur vient de changer.
+            safeJsonPut(data, "state", state.name());
             safeJsonPut(data, "live_status", liveStatusArmed());
             safeJsonPut(data, "available_actions", actionsContinueTerminate());
 

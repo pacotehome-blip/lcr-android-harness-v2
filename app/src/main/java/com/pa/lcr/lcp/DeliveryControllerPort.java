@@ -69,6 +69,17 @@ public interface DeliveryControllerPort {
          */
         default void onTicketInfo(String ticketNo, String deliveryUid) { /* no-op */ }
 
+        // ✅ AJOUTÉ (28 août 2026, demande Paul — "juste le heartbeat de
+        // la connexion") — isManualTrigger distingue un appel venant d'une
+        // vraie action (Status B, entrée de tab) d'un simple ping
+        // keep-alive automatique. Par défaut (si non redéfini), forwarde
+        // vers la version 2-arg avec true — préserve exactement le
+        // comportement actuel pour tout listener qui ne redéfinit que
+        // l'ancienne version.
+        default void onTicketInfo(String ticketNo, String deliveryUid, boolean isManualTrigger) {
+            onTicketInfo(ticketNo, deliveryUid);
+        }
+
         /**
          * ✅ NEW : notifie qu'un reset diagnostic (net/gross négatifs remis à zéro
          * sur le registre physique) vient d'avoir lieu — pour que l'UI persiste un

@@ -1122,6 +1122,19 @@ public final class RegisterSessionManager {
             }
         }
 
+        // ✅ AJOUTÉ (28 août 2026, demande Paul — "juste le heartbeat de
+        // la connexion") — sans cette surcharge, isManualTrigger passé par
+        // DeliveryController se perdait ICI : ce multiplexeur ne relayait
+        // que la version 2-arg vers les vrais listeners (RegisterTabFragment),
+        // qui recevaient donc TOUJOURS isManualTrigger=true (la valeur par
+        // défaut de l'interface) — rendant le correctif inopérant sans
+        // avertissement, aucune erreur de compilation pour le signaler.
+        @Override public void onTicketInfo(String ticketNo, String deliveryUid, boolean isManualTrigger) {
+            for (DeliveryControllerPort.Listener l : listeners) {
+                try { l.onTicketInfo(ticketNo, deliveryUid, isManualTrigger); } catch (Exception ignored) {}
+            }
+        }
+
         // ✅ FIX CRITIQUE (4 août 2026, demande Paul) — MuxListener n'implémentait
         // PAS onDiagnosticReset() ni onDeliveryFinished(), donc héritait
         // silencieusement du no-op par défaut de DeliveryControllerPort.Listener.

@@ -780,7 +780,26 @@ public class RegisterTabFragment extends Fragment {
             final boolean[] produitDeepLinkDemandeMaisIntrouvable = {false};
             final String produitDeepLinkPourAnnulation = (getArguments() != null) ? getArguments().getString("produit") : null;
             runSectionWithRetry(InitSection.PRODUIT, 2, true, () -> {
-                autoScanProduitsSiNecessaire();
+                // ✅ CORRIGÉ (28 août 2026, demande Paul — "chaque point
+                // doit donner sa confirmation avant de passer au
+                // suivant") — attend vraiment la décision RAPIDE
+                // (cache local ou LcrDeliveryStatusDb) avant de
+                // continuer vers resolveProduct() plus bas, qui en
+                // dépend directement (les deux lisent le MÊME
+                // RegisterProductStore). Ne bloque jamais sur un scan
+                // matériel complet si celui-ci a dû être déclenché —
+                // seulement sur la décision de LE déclencher ou non.
+                java.util.concurrent.CountDownLatch scanDone =
+                        new java.util.concurrent.CountDownLatch(1);
+                autoScanProduitsSiNecessaire(scanDone);
+                try {
+                    boolean confirme = scanDone.await(3, java.util.concurrent.TimeUnit.SECONDS);
+                    if (!confirme) {
+                        LogBus.api(node, "[INIT] PRODUIT — autoScanProduitsSiNecessaire() pas confirmé après 3s, on continue quand même");
+                    }
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
                 String serial = serialFromArgs;
                 String produitDeepLink = (getArguments() != null) ? getArguments().getString("produit") : null;
                 com.pa.lcr.lcp.storage.RegisterProductStore.Row resolved = null;
@@ -950,24 +969,36 @@ public class RegisterTabFragment extends Fragment {
                 // lui-même (updateButtons(), qui interroge LcrDeliveryStatusDb
                 // — une BD SQLite PERSISTÉE, donc valide même après un
                 // crash+réinstall, puisqu'elle ne dépend d'aucune variable
-                // de session en mémoire). Rien ne déclenchait cette
-                // résolution avant la fin des inits — le bouton n'apparaissait
-                // qu'au prochain événement séparé (heartbeat, tick). Déclenché
-                // ici explicitement, pour que sa recherche en arrière-plan
-                // tourne EN PARALLÈLE des étapes restantes, prête (ou très
-                // proche de l'être) dès que ACTION (7/7) est atteint.
-                // ✅ CORRIGÉ (à l'instant) — runInitSequence() tourne sur
-                // bg.execute() (thread d'arrière-plan), mais updateButtons()
-                // touche l'UI DIRECTEMENT (btnConnect.setEnabled(), etc.)
-                // avant même d'atteindre son propre safeBg() interne —
-                // l'appeler ici sans ui.post() aurait crashé
-                // (CalledFromWrongThreadException). Posté sur le thread UI.
+                // de session en mémoire).
+                // ✅ CORRIGÉ (28 août 2026, demande Paul — "chaque point
+                // doit donner sa confirmation avant de passer au suivant...
+                // normalement quand on a connected ready c'est que tout le
+                // tab est prêt à recevoir une commande") — avant, cette
+                // étape se marquait "OK" dès que updateButtons() était
+                // APPELÉ, jamais quand sa vraie décision (lecture BD en
+                // arrière-plan) était TERMINÉE — ACTION (7/7) pouvait donc
+                // se déclarer prête avant que btnRetourWO ait sa bonne
+                // visibilité. CountDownLatch : attend la vraie fin de
+                // updateButtons() (via son doneSignal), borné à 3s — au-delà,
+                // continue quand même (comme les autres étapes en retry),
+                // mais dans l'immense majorité des cas la lecture BD prend
+                // une fraction de seconde, largement sous ce délai.
                 if (controller != null && ui != null) {
                     final DeliveryState stPourBouton = controller.getState();
+                    final java.util.concurrent.CountDownLatch doneSignal =
+                            new java.util.concurrent.CountDownLatch(1);
                     ui.post(() -> {
-                        if (!isAdded() || getView() == null) return;
-                        updateButtons(stPourBouton);
+                        if (!isAdded() || getView() == null) { doneSignal.countDown(); return; }
+                        updateButtons(stPourBouton, doneSignal);
                     });
+                    try {
+                        boolean confirme = doneSignal.await(3, java.util.concurrent.TimeUnit.SECONDS);
+                        if (!confirme) {
+                            LogBus.api(node, "[INIT] RETOUR_WO — updateButtons() pas confirmé après 3s, on continue quand même");
+                        }
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                    }
                 }
                 return true;
             });
@@ -1553,11 +1584,13 @@ public class RegisterTabFragment extends Fragment {
         }
 
         @Override
-        public void onTicketInfo(String ticketNo, String deliveryUid) {
+        public void onTicketInfo(String ticketNo, String deliveryUid, boolean isManualTrigger) {
             // ✅ FIX (7 août 2026) — mémorise la dernière valeur connue, pour
             // pouvoir la réappliquer si la vue se recrée avant le prochain push.
+            final boolean[] ticketChangePourBoutons = {false};
             if (ticketNo != null && !ticketNo.trim().isEmpty()) {
                 boolean ticketVientJusteDetreConnu = !ticketNo.trim().equals(lastKnownTicketNo);
+                ticketChangePourBoutons[0] = ticketVientJusteDetreConnu;
                 // ✅ AJOUTÉ (27 août 2026, demande Paul — "si je suis
                 // actuellement à 95 et que je fais NEW, c'est certain que je
                 // vais tomber sur 96... impossible de retomber sur 95 après
@@ -1617,7 +1650,20 @@ public class RegisterTabFragment extends Fragment {
                 if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : " + (deliveryUid == null ? "—" : deliveryUid));
                 ensureSerialVisibleThrottled();
                 refreshDelCodeFromTickSnapshotThrottled();
-                updateButtons(controller != null ? controller.getState() : null);
+                // ✅ CORRIGÉ (28 août 2026, demande Paul — "juste le
+                // heartbeat de la connexion") — trouvé : ce callback,
+                // partagé entre un vrai Status(B) manuel ET le simple
+                // keep-alive automatique (qui tourne même à l'idle,
+                // 5s→60s), déclenchait updateButtons() (donc une lecture
+                // BD complète pour btnRetourWO) SANS CONDITION à chaque
+                // appel — confirmé par log réel : 42 appels dans une seule
+                // session courte. Ne déclenche plus updateButtons() que si
+                // c'est un vrai déclenchement manuel (Status B, entrée de
+                // tab) OU si le ticket a réellement changé — jamais pour
+                // un simple ping keep-alive qui ne change rien.
+                if (isManualTrigger || ticketChangePourBoutons[0]) {
+                    updateButtons(controller != null ? controller.getState() : null);
+                }
             });
             // ✅ onTicketInfo est un push déjà fiable (via requestStatus()) — brancher
             // la recherche WO/cumul ici aussi, en plus du polling explicite de
@@ -3462,8 +3508,27 @@ public class RegisterTabFragment extends Fragment {
         new java.util.concurrent.atomic.AtomicLong(0);
 
     private void updateButtons(DeliveryState state) {
+        updateButtons(state, null);
+    }
+
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — "chaque point doit donner sa
+    // confirmation avant de passer au suivant... normalement quand on a
+    // connected ready c'est que tout le tab est prêt à recevoir une
+    // commande") — trouvé : runInitSequence() marquait RETOUR_WO "OK" dès
+    // l'appel à updateButtons(), sans jamais attendre sa vraie décision
+    // (calculée en arrière-plan, via LcrDeliveryStatusDb). ACTION (7/7)
+    // pouvait donc se déclarer "prête" AVANT que btnRetourWO ait
+    // réellement sa bonne visibilité — exactement le genre de "pas
+    // vraiment confirmé" que ces étapes numérotées étaient censées
+    // éliminer. doneSignal (optionnel, null pour tous les autres
+    // appelants — 17+ call sites, comportement inchangé pour eux) permet
+    // à RETOUR_WO de vraiment attendre cette décision précise.
+    private void updateButtons(DeliveryState state, java.util.concurrent.CountDownLatch doneSignal) {
         if (btnConnect == null || btnA == null || btnB == null || btnC == null
-                || btnContinue == null || btnFinish == null) return;
+                || btnContinue == null || btnFinish == null) {
+            if (doneSignal != null) doneSignal.countDown();
+            return;
+        }
 
         if (controller == null) {
             btnConnect.setEnabled(true);
@@ -3473,6 +3538,7 @@ public class RegisterTabFragment extends Fragment {
             btnContinue.setEnabled(false);
             btnFinish.setEnabled(false);
             if (btnReprintTicket != null) btnReprintTicket.setEnabled(false);
+            if (doneSignal != null) doneSignal.countDown();
             return;
         }
 
@@ -3551,7 +3617,6 @@ public class RegisterTabFragment extends Fragment {
         // ✅ RETOUR WO: visible seulement quand livraison terminée (CONNECTED post-livraison)
         // et qu'on a des données de livraison (ticket non vide + WO actif)
         if (btnRetourWO != null) {
-            // ✅ Source de vérité: LcrDeliveryStatusDb — indépendant du timing UI
             // Lecture en background pour ne pas bloquer le UI thread
             final boolean connectedFinal = connected;
             final String woForCheck = currentWoNum;
@@ -3671,6 +3736,7 @@ public class RegisterTabFragment extends Fragment {
                     if (monNumeroSeq != updateButtonsSeq.get()) {
                         LogBus.api(node, "[BTN-RETOUR-WO] résultat périmé ignoré (monNumeroSeq=" + monNumeroSeq
                                 + " != dernierNumeroSeq=" + updateButtonsSeq.get() + ")");
+                        if (doneSignal != null) doneSignal.countDown();
                         return;
                     }
                     if (show) {
@@ -3696,8 +3762,11 @@ public class RegisterTabFragment extends Fragment {
                     } else {
                         btnRetourWO.setVisibility(android.view.View.GONE);
                     }
+                    if (doneSignal != null) doneSignal.countDown();
                 });
             });
+        } else if (doneSignal != null) {
+            doneSignal.countDown();
         }
     }
 
@@ -5017,6 +5086,19 @@ public class RegisterTabFragment extends Fragment {
     // on réapplique juste le cache (rapide, pas d'IO registre). Sinon on lance
     // lancerScanProduits() (le même scan que le bouton manuel "🔍 Scan produits").
     private void autoScanProduitsSiNecessaire() {
+        autoScanProduitsSiNecessaire(null);
+    }
+
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — "chaque point doit donner sa
+    // confirmation avant de passer au suivant") — doneSignal (optionnel,
+    // null pour tous les autres appelants) permet à l'étape PRODUIT de
+    // vraiment attendre la décision RAPIDE (cache local ou
+    // LcrDeliveryStatusDb) avant de continuer — mais PAS le scan matériel
+    // complet lui-même (16 slots, plusieurs secondes) : celui-là continue
+    // de tourner en arrière-plan sans bloquer l'init, exactement comme
+    // avant. doneSignal se décompte dès que la DÉCISION rapide est prise
+    // (trouvé ou pas), jamais après un scan matériel complet.
+    private void autoScanProduitsSiNecessaire(java.util.concurrent.CountDownLatch doneSignal) {
         // ✅ CORRIGÉ (27 août 2026, demande Paul — "il n'est pas supposé
         // avoir ceci... si je viens de cliquer sur NEW") — trouvé LE vrai
         // trou : cette méthode n'avait JAMAIS de garde sur
@@ -5034,6 +5116,7 @@ public class RegisterTabFragment extends Fragment {
         // cette méthode est appelée.
         if (produitDejaResoluPourCetteSession) {
             LogBus.api(node, "[SCAN-AUTO] sauté — produit déjà résolu pour cette session, aucun scan matériel nécessaire");
+            if (doneSignal != null) doneSignal.countDown();
             return;
         }
         // ✅ AJOUTÉ (24 août 2026, demande Paul — "je ne vois pas le scan de
@@ -5045,11 +5128,13 @@ public class RegisterTabFragment extends Fragment {
         if (!isAdded() || getView() == null || controller == null) {
             android.util.Log.i("RegisterTabFragment", "autoScanProduitsSiNecessaire: abandon — "
                 + "isAdded=" + isAdded() + " getView()=" + (getView() != null) + " controller=" + (controller != null));
+            if (doneSignal != null) doneSignal.countDown();
             return;
         }
         if (autoProductScanInFlight) {
             android.util.Log.i("RegisterTabFragment", "autoScanProduitsSiNecessaire: abandon — "
                 + "autoProductScanInFlight déjà true (cette instance)");
+            if (doneSignal != null) doneSignal.countDown();
             return;
         }
         // ✅ CORRIGÉ (24 août 2026, demande Paul — "zéro scan des produits,
@@ -5068,12 +5153,14 @@ public class RegisterTabFragment extends Fragment {
         if (!etatAcceptablePourScan) {
             LogBus.api(node, "[SCAN-AUTO] abandon — état=" + stActuel
                 + " (accepté: CONNECTED/IDLE/PRESTART) — pas encore prêt à scanner");
+            if (doneSignal != null) doneSignal.countDown();
             return; // état a pu changer entretemps
         }
         final String serialId = (serialFromArgs != null && !serialFromArgs.trim().isEmpty())
                 ? serialFromArgs.trim() : null;
         if (serialId == null) {
             LogBus.api(node, "[SCAN-AUTO] abandon — serialFromArgs vide/null");
+            if (doneSignal != null) doneSignal.countDown();
             return;
         }
 
@@ -5086,6 +5173,7 @@ public class RegisterTabFragment extends Fragment {
         if (!autoScanLockAcquire(globalKey)) {
             LogBus.api(node, "[SCAN-AUTO] abandon — déjà en cours pour " + globalKey
                 + " (autre instance de fragment, OU verrou resté coincé d'un essai précédent)");
+            if (doneSignal != null) doneSignal.countDown();
             return;
         }
         LogBus.api(node, "[SCAN-AUTO] démarrage — serial=" + serialId + " node=" + node);
@@ -5111,6 +5199,7 @@ public class RegisterTabFragment extends Fragment {
                 applierDescriptionsProduits(serialId, node);
                 autoProductScanInFlight = false;
                 autoScanLockRelease(globalKey);
+                if (doneSignal != null) doneSignal.countDown();
             } else {
                 // ✅ CORRIGÉ (28 août 2026, demande Paul — "on s'en calisse,
                 // on a l'info dans la table, on a l'info du produit selon
@@ -5166,6 +5255,7 @@ public class RegisterTabFragment extends Fragment {
                         } finally {
                             autoProductScanInFlight = false;
                             autoScanLockRelease(globalKey);
+                            if (doneSignal != null) doneSignal.countDown();
                         }
                     });
                     return;
@@ -5179,6 +5269,10 @@ public class RegisterTabFragment extends Fragment {
                     } finally {
                         autoProductScanInFlight = false;
                         autoScanLockRelease(globalKey);
+                        // ✅ decompte ici (decision rapide prise : aucun
+                        // raccourci trouve, scan materiel declenche) - ne
+                        // bloque JAMAIS sur la fin reelle du scan lui-meme.
+                        if (doneSignal != null) doneSignal.countDown();
                     }
                 });
             }
@@ -5190,6 +5284,7 @@ public class RegisterTabFragment extends Fragment {
             // empêchant tout futur scan pour ce registre.
             autoProductScanInFlight = false;
             autoScanLockRelease(globalKey);
+            if (doneSignal != null) doneSignal.countDown();
             android.util.Log.w("RegisterTabFragment", "autoScanProduitsSiNecessaire: échec de planification: " + schedulingErr.getMessage());
         }
     }
@@ -6556,6 +6651,24 @@ public class RegisterTabFragment extends Fragment {
                 }
             }
             rafraichirCumulWo();
+            // ✅ AJOUTÉ (28 août 2026, demande Paul — "tu n'as pas tenu
+            // compte de la restauration du ticket si la BD est vide pour
+            // le retour-wo") — trouvé : cette méthode (lookupWoForTicket)
+            // a déjà toute la cascade de restauration (BD locale →
+            // Dataverse → backup JSON, avec réinsertion dans
+            // LcrDeliveryStatusDb au besoin) — mais tourne sur un thread
+            // SÉPARÉ (remoteSearchExecutor), totalement indépendant de
+            // updateButtons(). L'appel RETOUR_WO de l'init (avec son
+            // CountDownLatch de 3s) ne pouvait pas attendre cette cascade
+            // — un appel réseau Dataverse peut prendre bien plus
+            // longtemps. Résultat : btnRetourWO se décidait AVANT que la
+            // restauration n'ait fini, trouvait la BD vide, et rien ne le
+            // redéclenchait une fois la restauration terminée avec succès
+            // quelques secondes plus tard. Redéclenché ici, explicitement,
+            // dès que cette restauration réussit — la seule vraie
+            // confirmation que la donnée est enfin disponible pour la
+            // décision du bouton.
+            updateButtons(controller != null ? controller.getState() : null);
         });
     }
 
