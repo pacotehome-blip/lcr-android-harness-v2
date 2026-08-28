@@ -226,6 +226,16 @@ public class LcpLink {
     public int getToAddr() { return toAddr; }
     public int getHostAddr() { return hostAddr; }
     public String getTransportKey() { return (io != null) ? io.getKey() : null; }
+
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — "on doit comprendre ce qui
+    // arrive") — passthrough vers io.getIoLatencyAvgMs()/getIoSamples(),
+    // pour que DeliveryController (qui n'a accès qu'à LcpLink, jamais au
+    // TransportIo directement) puisse logger la vraie latence de lecture
+    // BT mesurée au niveau transport, et comparer avec le cycle de tick
+    // réel observé (~200-250ms) — confirme ou infirme si le plancher
+    // vient de la pile BT d'Android plutôt que du reste du code.
+    public int getIoLatencyAvgMs() { return (io != null) ? io.getIoLatencyAvgMs() : -1; }
+    public int getIoSamples() { return (io != null) ? io.getIoSamples() : -1; }
     public long getTransportGenerationId() { return (io != null) ? io.getGenerationId() : 0L; }
 
     public synchronized void close() {

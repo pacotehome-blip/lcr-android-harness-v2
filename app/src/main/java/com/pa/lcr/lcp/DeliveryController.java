@@ -2052,6 +2052,23 @@ try {
                                 : "LIVE: " + state.name() + " — en attente d'ouverture de la vanne (confirmé à l'instant)";
                         listener.onLiveStatus(etat);
                     }
+                    // ✅ AJOUTÉ (28 août 2026, demande Paul — "on doit
+                    // comprendre ce qui arrive" — valider si le BT est la
+                    // cause du cycle réel ~200-250ms vs 100ms visé, sachant
+                    // qu'un script atteint ~40ms sans saut) — latence
+                    // réelle mesurée au niveau du read() BT lui-même
+                    // (io.getIoLatencyAvgMs(), déjà calculée en interne,
+                    // jamais journalisée jusqu'ici). Si cette valeur est
+                    // déjà proche de 200ms, la pile BT d'Android est la
+                    // cause — pas notre code. Si elle reste basse (~40-
+                    // 50ms), le délai vient d'ailleurs dans notre pile.
+                    try {
+                        int latMs = (link != null) ? link.getIoLatencyAvgMs() : -1;
+                        int samples = (link != null) ? link.getIoSamples() : -1;
+                        android.util.Log.i("BT-LATENCY",
+                            "read() moyen=" + latMs + "ms sur " + samples
+                            + " échantillons (node=" + resolveLcpNode() + ")");
+                    } catch (Exception ignored) {}
                 }
 
                 publishTickIfChanged(net, gross,

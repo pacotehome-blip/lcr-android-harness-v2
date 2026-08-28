@@ -100,8 +100,13 @@ public final class BtSppTransportIo implements TransportIo {
     // =========================================================
     public int getIoErrors()   { return ioErrors.get(); }
     public int getIoTimeouts() { return ioTimeouts.get(); }
-    public int getIoSamples()  { return ioSamples.get(); }
+    // ✅ AJOUTÉ (28 août 2026) — @Override : satisfait maintenant
+    // TransportIo.getIoSamples()/getIoLatencyAvgMs(), aucun changement de
+    // comportement, juste rendu accessible via l'interface (donc via
+    // GuardedTransportIo et LcpLink) plutôt que seulement en interne.
+    @Override public int getIoSamples()  { return ioSamples.get(); }
 
+    @Override
     public int getIoLatencyAvgMs() {
         int s = ioSamples.get();
         if (s <= 0) return 0;

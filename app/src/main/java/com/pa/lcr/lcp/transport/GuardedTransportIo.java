@@ -31,6 +31,15 @@ public final class GuardedTransportIo implements TransportIo {
     @Override public boolean isOpen() { return delegate != null && delegate.isOpen(); }
     @Override public long getGenerationId() { return delegate.getGenerationId(); }
 
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — validation latence BT) —
+    // sans ce relais, l'appel passerait par le défaut de l'interface (-1)
+    // même quand le delegate réel (BtSppTransportIo) calcule bien la
+    // vraie valeur — GuardedTransportIo enveloppe presque toujours le
+    // transport actif (LcpLink.io en est un), donc sans ce relais les
+    // stats resteraient invisibles depuis DeliveryController.
+    @Override public int getIoLatencyAvgMs() { return delegate.getIoLatencyAvgMs(); }
+    @Override public int getIoSamples() { return delegate.getIoSamples(); }
+
     private void requireActive() throws Exception {
         if (!MediaTransportManager.isKeyActive(getKey())) {
             String active = MediaTransportManager.getActiveKeyStatic();

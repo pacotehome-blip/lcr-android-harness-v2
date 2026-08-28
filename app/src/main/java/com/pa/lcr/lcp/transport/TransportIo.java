@@ -26,4 +26,14 @@ public interface TransportIo {
 
     /** Ferme le transport */
     void close();
+
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — "on doit comprendre ce qui
+    // arrive" — validation de l'hypothèse latence pile BT Android vs un
+    // script PC à ~40ms) — latence moyenne réelle mesurée d'un read()
+    // (envoi -> octets effectivement reçus), en ms. Défaut -1 (non
+    // supporté) pour USB/TCP qui ne trackent pas ça — seul BtSppTransportIo
+    // le calcule réellement (ioLatencySum/ioSamples déjà existants, jamais
+    // exposés jusqu'ici).
+    default int getIoLatencyAvgMs() { return -1; }
+    default int getIoSamples() { return -1; }
 }
