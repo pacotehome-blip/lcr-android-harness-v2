@@ -605,6 +605,22 @@ private void reproEvent(String level, String type, String message, JSONObject da
  private volatile long deliveryStartMs = 0L;
 // LIVE
     private volatile boolean flowOffStable = false;
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — "tu es supposé valider avant
+    // même de me donner quoi que ce soit") — audit complet suite au bug UI
+    // bloquée sur CONNECTÉ : trouvé que requestLiveSample() flippe l'état
+    // à CONNECTED sur une SEULE lecture "active=false", et que
+    // DeepLinkHandler.pollJobUntilDone() traite ensuite ce même flip comme
+    // "livraison terminée, preset atteint" — appelant logDeliveryEnd() +
+    // onDeliveryEnded() alors que le registre coule peut-être toujours
+    // réellement. Une seule trame BT corrompue/glitch suffisait à
+    // déclencher une fausse fin de livraison complète, pas juste un bug
+    // d'affichage. Compteur de confirmation : exige N lectures FRAÎCHES
+    // consécutives montrant active=false avant d'agir — filtre un glitch
+    // isolé, sans retarder une vraie fin de plus de ~2 cycles superviseur
+    // (2×2.5s = 5s, cohérent avec NO_FLOW_CONFIRM_MS déjà utilisé ailleurs
+    // pour la même classe de décision).
+    private volatile int consecutiveInactiveReads = 0;
+    private static final int INACTIVE_CONFIRM_COUNT = 2;
     private volatile boolean sawFlowOnOnce = false;
     private volatile long flowOffStartMs = 0L;
     private volatile long lastCountsChangeMs = 0L;
@@ -1777,6 +1793,10 @@ try {
         lastCountsChangeMs = 0L;
         lastGrossRaw = -1;
         lastNetRaw = -1;
+        // ✅ AJOUTÉ (28 août 2026) — évite qu'un compteur laissé à 1 par
+        // une livraison précédente (glitch isolé, jamais confirmé) fasse
+        // basculer prématurément la nouvelle livraison dès son 2e cycle.
+        consecutiveInactiveReads = 0;
         liveBackoffMs = LIVE_BASE_MS;
         liveNextAllowedMs = 0L;
         liveLastSkipLogMs = 0L;
@@ -2025,6 +2045,39 @@ try {
             try {
                 try { ensureDigits(); } catch (Exception ignored) { return; }
                 double scale = Math.pow(10, cachedDigits);
+                // ✅ CORRIGÉ (28 août 2026, demande Paul — "j'ai des bugs un
+                // peu partout" — UI figée sur CONNECTÉ pendant un vrai flow
+                // en cours) — RÉGRESSION introduite par mon propre
+                // correctif du 28 août ("un seul lecteur physique") : ce
+                // tick rapide n'a JAMAIS lu delStatus/delCode lui-même — il
+                // se contentait de RECOPIER lastTick.delStatus/delCode
+                // (voir publishTickIfChanged plus bas). Tant que
+                // api_deliveryJobGet()/requestLiveSample() faisaient encore
+                // leur propre vraie lecture GET_DELIVERY_STATUS, ça
+                // suffisait à garder ces valeurs fraîches. En les rendant
+                // cache-only (pour éliminer la contention), j'ai supprimé
+                // la SEULE source qui rafraîchissait réellement
+                // delStatus/delCode — elles restaient figées sur la
+                // première valeur capturée au début du flow, jamais
+                // corrigées ensuite. Une lecture transitoire incorrecte à
+                // ce moment-là (deliveryActive=0) restait donc figée pour
+                // le reste de la livraison, faisant croire à
+                // requestLiveSample() que le flow était terminé — d'où
+                // l'UI bloquée sur CONNECTÉ pendant que le registre coulait
+                // toujours (confirmé par pollJob qui, lui, continuait de
+                // voir RUNNING_FLOWING). Lu ici, par le seul lecteur
+                // physique restant, à chaque cycle — 3 lectures au lieu de
+                // 2 par tick, cycle un peu plus long, mais correct.
+                int dsDelStatus = (lastTick != null) ? lastTick.delStatus : 0;
+                int dsDelCode   = (lastTick != null) ? lastTick.delCode   : 0;
+                try {
+                    int[] ds = lcpDeliveryStatus();
+                    dsDelStatus = ds[0];
+                    dsDelCode   = ds[1];
+                } catch (Exception ignored) {
+                    // Repli sur la dernière valeur connue si cette lecture
+                    // échoue ponctuellement — jamais pire qu'avant ce fix.
+                }
                 int g, n;
                 try {
                     g = beI32(lcpGetField(FIELD_GROSS_COUNT));
@@ -2073,8 +2126,8 @@ try {
 
                 publishTickIfChanged(net, gross,
                     lastDevStatusKnown, lastPrnStatusKnown,
-                    (lastTick != null ? lastTick.delStatus : 0),
-                    (lastTick != null ? lastTick.delCode   : 0),
+                    dsDelStatus,
+                    dsDelCode,
                     state);
             } finally {
                 inLiveSample.set(false);
@@ -2120,6 +2173,20 @@ try {
                 boolean active = (delCode & DC_DELIVERY_ACTIVE) != 0;
 
                 if (!active) {
+                    // ✅ AJOUTÉ (28 août 2026) — voir déclaration de
+                    // consecutiveInactiveReads plus haut. N'agit qu'après
+                    // INACTIVE_CONFIRM_COUNT lectures fraîches consécutives
+                    // — une seule lecture "active=false" isolée est
+                    // ignorée (probable glitch), sans jamais appeler
+                    // setState(CONNECTED) prématurément.
+                    consecutiveInactiveReads++;
+                    if (consecutiveInactiveReads < INACTIVE_CONFIRM_COUNT) {
+                        android.util.Log.w("DeliveryController",
+                            "requestLiveSample: active=false ignoré ("
+                            + consecutiveInactiveReads + "/" + INACTIVE_CONFIRM_COUNT
+                            + " — pas encore confirmé, probable glitch de lecture)");
+                        return;
+                    }
                     liveResetBackoff();
                     setState(DeliveryState.CONNECTED);
 
@@ -2149,6 +2216,12 @@ try {
 
                 try { ensureDigits(); }
                 catch (Exception e) { liveSoftSkip("ensureDigits", e); return; }
+
+                // ✅ AJOUTÉ (28 août 2026) — active=true confirmé sur une
+                // lecture fraîche : remet le compteur à zéro immédiatement,
+                // pas seulement après INACTIVE_CONFIRM_COUNT lectures actives
+                // — un seul "active=true" annule tout de suite le doute.
+                consecutiveInactiveReads = 0;
 
                 double scale = Math.pow(10, cachedDigits);
 
