@@ -472,6 +472,23 @@ public class DeepLinkHandler {
             return;
         }
 
+        // ✅ AJOUTÉ (28 août 2026, demande Paul — "j'ai des bugs un peu
+        // partout") — trouvé via logcat : FOREIGN KEY constraint failed
+        // sur DeliveryLogStore.openAttempt(), déclenché par le logEvent()
+        // "ONESHOT_START" plus bas dans cette méthode. Cause : cette
+        // méthode a PLUSIEURS points d'entrée (handleDeepLink() ligne 150,
+        // qui appelle déjà logDeliveryStart() — mais AUSSI MainActivity
+        // (bouton C local, ligne ~1034) et RegisterConnectionHelper ligne
+        // ~825, qui appellent lancerLivraison() DIRECTEMENT sans jamais
+        // passer par handleDeepLink(). Pour ces deux derniers chemins,
+        // delivery_summary(serial_id, woNum) n'existe pas encore quand
+        // openAttemptAsync() tente de s'y rattacher — FK échoue à chaque
+        // fois, pas de façon intermittente. logDeliveryStart() fait un
+        // UPSERT (idempotent) — le rappeler ici est sans danger même
+        // quand handleDeepLink() l'a déjà appelé une première fois pour
+        // ce même (serialId, woNum).
+        logDeliveryStart(serialId, woNum, mac, node, produit, presetStr);
+
         // ✅ FIX : confirmer la connexion RÉELLE au registre avant tout — pas un flag
         // getState()/snapshot en cache (qui peut mentir sur un socket zombie). Si la
         // vérification échoue, on relance le diagnostic complet (même média d'abord,
