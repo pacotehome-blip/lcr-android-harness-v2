@@ -1156,16 +1156,33 @@ public class LcpLink {
     }
 
     private Frame readFrameUntil(long deadlineMs) throws IOException {
+        // ✅ AJOUTÉ (28 août 2026, demande Paul — "vas y" — validation
+        // exacte du nombre de fragments BT par trame) — compte le nombre
+        // réel d'itérations (donc d'appels io.read()) nécessaires pour
+        // qu'une trame complète arrive, au lieu de l'estimer indirectement
+        // via getIoLatencyAvgMs(). Journalisé une fois sur 20 (throttle)
+        // pour ne pas noyer logcat, avec le nombre exact de fragments.
+        int reads = 0;
         while (!closed && System.currentTimeMillis() < deadlineMs) {
             rxReadSome(50);
+            reads++;
             int syncPos = findSync(rxBuf);
             if (syncPos < 0) continue;
             if (syncPos > 0) rxBuf.drop(syncPos);
             Frame f = tryParseFrame(rxBuf);
-            if (f != null) return f;
+            if (f != null) {
+                if (frameReadCount.incrementAndGet() % 20 == 0) {
+                    android.util.Log.i("BT-FRAGMENTS",
+                        "trame complète après " + reads + " appel(s) io.read()");
+                }
+                return f;
+            }
         }
         return null;
     }
+
+    private static final java.util.concurrent.atomic.AtomicInteger frameReadCount =
+        new java.util.concurrent.atomic.AtomicInteger(0);
 
     private int findSync(ByteArray b) {
         for (int i = 0; i + 1 < b.len; i++) {

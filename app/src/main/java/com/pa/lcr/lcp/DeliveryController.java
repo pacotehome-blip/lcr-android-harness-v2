@@ -632,6 +632,13 @@ private void reproEvent(String level, String type, String message, JSONObject da
     // retrouver la cadence net/gross d'avant.
     private volatile int fastTickCycleCount = 0;
     private static final int DELSTATUS_READ_EVERY_N_TICKS = 3;
+    // ✅ AJOUTÉ (28 août 2026) — voir ApiJob.notActiveSinceMs. 2000ms de
+    // "not active" continu requis avant que api_deliveryJobGet() ne
+    // finalise une livraison — couvre 2-3 cycles de rafraîchissement du
+    // cache (~750-1000ms chacun), donc plusieurs échantillons physiques
+    // réellement distincts, pas juste des appels répétés sur la même
+    // valeur figée.
+    private static final long INACTIVE_CONFIRM_MS_JOB = 2000L;
     private volatile boolean sawFlowOnOnce = false;
     private volatile long flowOffStartMs = 0L;
     private volatile long lastCountsChangeMs = 0L;
@@ -974,6 +981,23 @@ private void reproEvent(String level, String type, String message, JSONObject da
         volatile boolean baselineCaptured = false;
         volatile int grossStartRaw = 0;
         volatile int netStartRaw = 0;
+        // ✅ AJOUTÉ (28 août 2026, demande Paul — "tu es certain que
+        // ailleurs il n'y a rien d'autre???") — trouvé en re-vérifiant :
+        // le déclencheur "DONE" à la ligne ~4972 (!deliveryActive &&
+        // sawDeliveryActiveOnce) lit deliveryActive depuis le MÊME cache
+        // (lastTick, via cacheTick) que celui protégé par
+        // consecutiveInactiveReads dans requestLiveSample() — mais ce
+        // déclencheur-ci est un chemin COMPLÈTEMENT SÉPARÉ, jamais couvert
+        // par cette protection. Une seule lecture cache stale/glitchée ici
+        // pouvait finaliser toute la livraison (impression, DONE) sans la
+        // moindre confirmation — pire que le bug corrigé hier, puisque ce
+        // chemin agit direct sur l'impression/la fin, pas juste l'UI.
+        // Debounce basé sur le temps écoulé réel (pas un simple compteur
+        // d'appels) — robuste peu importe la cadence de rafraîchissement
+        // du cache (1 cycle sur 3 du tick rapide, ~750-1000ms) face à la
+        // cadence de poll de cette méthode (~1Hz) : 0 = pas en cours de
+        // confirmation, sinon horodatage du DÉBUT de la période "inactif".
+        volatile long notActiveSinceMs = 0L;
 
         // End
         volatile int grossEndRaw = 0;
@@ -4969,7 +4993,28 @@ if (deliveryActive && !job.baselineCaptured) {
             }
 
             // DONE
-            if (!deliveryActive && job.sawDeliveryActiveOnce) {
+            // ✅ CORRIGÉ (28 août 2026, demande Paul — "tu es certain que
+            // ailleurs il n'y a rien d'autre???") — voir commentaire complet
+            // sur ApiJob.notActiveSinceMs. N'entre dans ce bloc (impression,
+            // fin de livraison, écriture DB) qu'après confirmation sur une
+            // durée réelle écoulée — jamais sur une seule lecture cache.
+            boolean notActiveNow = !deliveryActive && job.sawDeliveryActiveOnce;
+            if (notActiveNow) {
+                if (job.notActiveSinceMs == 0L) job.notActiveSinceMs = now;
+            } else {
+                job.notActiveSinceMs = 0L;
+            }
+            boolean notActiveConfirmed = notActiveNow
+                && (now - job.notActiveSinceMs) >= INACTIVE_CONFIRM_MS_JOB;
+            if (!notActiveNow) {
+                // rien — laisse tomber au "RUNNING (normal)" plus bas
+            } else if (!notActiveConfirmed) {
+                android.util.Log.w("DeliveryController",
+                    "api_deliveryJobGet: deliveryActive=false pas encore confirmé ("
+                    + (now - job.notActiveSinceMs) + "/" + INACTIVE_CONFIRM_MS_JOB
+                    + "ms — probable glitch de lecture, traité comme RUNNING pour ce poll)");
+            }
+            if (notActiveConfirmed) {
 
             // ✅ SAFE PRINT: si ticketPending reste à 1, attendre clear; sinon erreur API explicite
             if (ticketPending) {
