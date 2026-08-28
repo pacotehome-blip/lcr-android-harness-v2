@@ -1853,6 +1853,18 @@ try {
         // livraison) — assez pour ressembler à un flottement d'état vu de
         // l'écran, même si le state machine lui-même restait correct.
         lastTick = null;
+        // ✅ AJOUTÉ (28 août 2026, demande Paul — "je vois le registre se
+        // rendre à 0.0... mais je ne le vois pas dans la section live") —
+        // même classe de bug que lastTick ci-dessus : lastHeartbeatMs
+        // n'était jamais remis à zéro entre deux livraisons. Le premier
+        // heartbeat (qui pousse "LIVE: RUNNING_FLOWING..." à l'écran) est
+        // gardé par "maintenant - lastHeartbeatMs >= 2000ms" — si la
+        // livraison PRÉCÉDENTE avait un heartbeat récent, la nouvelle
+        // livraison devait attendre jusqu'à 2s de plus (calculées depuis
+        // l'ancien timestamp, pas depuis son propre démarrage) avant que
+        // "Live" ne reflète enfin RUNNING_FLOWING — donnant l'impression
+        // que l'état n'était jamais affiché du tout si on regardait tôt.
+        lastHeartbeatMs = 0L;
         liveBackoffMs = LIVE_BASE_MS;
         liveNextAllowedMs = 0L;
         liveLastSkipLogMs = 0L;
