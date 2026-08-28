@@ -444,6 +444,11 @@ public class RegisterTabFragment extends Fragment {
     private volatile boolean logRefreshDeferredByFlowing = false;
     private int ticketPendingFlag = -1;
     private volatile String lastLiveText = null;
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — "pourquoi je n'ai plus de
+    // sales_number dans la partie régistre") — voir usage plus bas dans
+    // onLiveStatus(). Suit le dernier Sale Number réellement affiché, pour
+    // ne rafraîchir l'écran que sur vrai changement.
+    private volatile String lastDisplayedSaleNo = null;
     private volatile int lastDigits = 3;
     private volatile int lastDelCode = 0;
     private volatile long lastDelCodePollMs = 0L;
@@ -1522,6 +1527,25 @@ public class RegisterTabFragment extends Fragment {
                 if (txtLive != null) txtLive.setText(liveText);
                 ensureSerialVisibleThrottled();
                 refreshDelCodeFromTickSnapshotThrottled();
+                // ✅ AJOUTÉ (28 août 2026, demande Paul — "pourquoi je
+                // n'ai plus de sales_number dans la partie régistre") —
+                // trouvé : afficherTicketEtSaleNumberAvecSoulignement()
+                // (seule fonction qui écrit txtSaleNo) n'était appelée que
+                // depuis onTicketInfo(), lui-même déclenché seulement par
+                // un Status(B) manuel ou le keep-alive (5-60s) — bien
+                // moins souvent que la vraie donnée (dernierSaleNoConnu)
+                // ne se rafraîchit en coulisse via d'autres lecteurs.
+                // Piggyback sur ce même heartbeat (2s), mais ne touche
+                // l'écran QUE si la valeur a vraiment changé depuis le
+                // dernier affichage — même principe que texteReelementChange
+                // juste au-dessus, pour ne pas réintroduire de flash inutile.
+                if (controller != null) {
+                    String saleNoActuel = controller.getDernierSaleNoConnu();
+                    if (!java.util.Objects.equals(saleNoActuel, lastDisplayedSaleNo)) {
+                        lastDisplayedSaleNo = saleNoActuel;
+                        afficherTicketEtSaleNumberAvecSoulignement(lastKnownTicketNo);
+                    }
+                }
                 if (texteReelementChange) {
                     updateButtons(controller != null ? controller.getState() : null);
                 }
