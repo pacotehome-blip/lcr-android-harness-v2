@@ -26,8 +26,21 @@ public class DeliveryResultQueueDb extends SQLiteOpenHelper {
 
     @Override
     public void onCreate(SQLiteDatabase db) {
+        // ✅ CORRIGÉ (28 août 2026, demande Paul — "actuellement dans
+        // dataverse je n'ai aucune des livraisons tests") — trouvé via
+        // logcat réel : "table delivery_queue already exists", crash du
+        // Worker DeliverySyncWorker à chaque exécution. Cause : onCreate()
+        // n'utilisait pas IF NOT EXISTS — SQLiteOpenHelper garantit
+        // normalement un seul appel à onCreate(), MAIS WorkManager (son
+        // propre thread/exécuteur) et l'app principale peuvent toutes les
+        // deux ouvrir cette même BD quasi simultanément au premier accès
+        // — un cas de course classique où les deux tentent onCreate() en
+        // parallèle. La deuxième exécution plantait, faisant échouer TOUT
+        // le Worker (donc TOUTE la synchronisation Dataverse en attente à
+        // ce moment précis) sur une erreur qui n'aurait jamais dû être
+        // fatale.
         db.execSQL(
-            "CREATE TABLE " + TABLE + " (" +
+            "CREATE TABLE IF NOT EXISTS " + TABLE + " (" +
             "id INTEGER PRIMARY KEY AUTOINCREMENT," +
             "delivery_uid TEXT NOT NULL," +
             "payload_json TEXT NOT NULL," +
@@ -38,8 +51,8 @@ public class DeliveryResultQueueDb extends SQLiteOpenHelper {
             "updated_at INTEGER NOT NULL" +
             ")"
         );
-        db.execSQL("CREATE UNIQUE INDEX idx_delivery_uid ON " + TABLE + "(delivery_uid)");
-        db.execSQL("CREATE INDEX idx_status ON " + TABLE + "(status)");
+        db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS idx_delivery_uid ON " + TABLE + "(delivery_uid)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_status ON " + TABLE + "(status)");
     }
 
     @Override
