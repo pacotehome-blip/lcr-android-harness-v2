@@ -6626,7 +6626,17 @@ public class RegisterTabFragment extends Fragment {
 
         ui.post(() -> {
             currentWoNum    = fWoNum;
-            currentWoIdGuid = fWoIdGuid;
+            // ✅ CORRIGÉ (28 août 2026, demande Paul — "on utilise toujours
+            // le guid du wo de fieldservice") — trouvé : seule affectation
+            // à currentWoIdGuid, sur 5 dans ce fichier, sans protection
+            // contre l'écrasement par une valeur vide. Une fois une
+            // livraison locale (re)insérée dans LcrDeliveryStatusDb (via
+            // onDeliveryEnded() ou une restauration backup) sans vrai GUID,
+            // cette méthode "trouvait" cette ligne et écrasait
+            // currentWoIdGuid avec "" — même si le VRAI GUID venait d'être
+            // capturé par un deep link réel quelques instants plus tôt.
+            // Ne descend plus jamais un GUID valide vers une valeur vide.
+            if (fWoIdGuid != null && !fWoIdGuid.isEmpty()) currentWoIdGuid = fWoIdGuid;
             LogBus.api(node, "[WO-DETECT] WO trouvé=" + fWoNum + " deliveryUid=" + fDeliveryUid);
             if (txtTicketNo != null)
                 txtTicketNo.setText("Ticket Number : " + ticketNo);
