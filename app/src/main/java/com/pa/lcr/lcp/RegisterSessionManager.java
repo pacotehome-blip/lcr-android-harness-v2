@@ -1122,19 +1122,6 @@ public final class RegisterSessionManager {
             }
         }
 
-        // ✅ AJOUTÉ (28 août 2026, demande Paul — "juste le heartbeat de
-        // la connexion") — sans cette surcharge, isManualTrigger passé par
-        // DeliveryController se perdait ICI : ce multiplexeur ne relayait
-        // que la version 2-arg vers les vrais listeners (RegisterTabFragment),
-        // qui recevaient donc TOUJOURS isManualTrigger=true (la valeur par
-        // défaut de l'interface) — rendant le correctif inopérant sans
-        // avertissement, aucune erreur de compilation pour le signaler.
-        @Override public void onTicketInfo(String ticketNo, String deliveryUid, boolean isManualTrigger) {
-            for (DeliveryControllerPort.Listener l : listeners) {
-                try { l.onTicketInfo(ticketNo, deliveryUid, isManualTrigger); } catch (Exception ignored) {}
-            }
-        }
-
         // ✅ FIX CRITIQUE (4 août 2026, demande Paul) — MuxListener n'implémentait
         // PAS onDiagnosticReset() ni onDeliveryFinished(), donc héritait
         // silencieusement du no-op par défaut de DeliveryControllerPort.Listener.
@@ -1422,14 +1409,42 @@ public final class RegisterSessionManager {
             // (vérifié), donc pas de doublon inutile.
             if (state == DeliveryState.CONNECTED) {
                 String source;
-                if (lastDisconnectTs > 0) {
+                // ✅ CORRIGÉ (28 août 2026, demande Paul — "il faut le
+                // corriger car il peut induire en erreur le support") —
+                // trouvé : cette branche (state==CONNECTED) est vérifiée
+                // AVANT la logique [RUNNING_FLOWING-FIN] plus bas dans ce
+                // même if/else — donc chaque fin de livraison normale
+                // (RUNNING_FLOWING → CONNECTED, le cas le PLUS fréquent)
+                // tombait ici, jamais dans la branche qui aurait
+                // correctement dit "fin de livraison, durée Xs". Résultat :
+                // le texte affichait "première connexion de cette session"
+                // à CHAQUE fin de livraison, pas seulement la vraie
+                // première fois — trompeur pour quiconque lit Support sans
+                // connaître ce détail d'implémentation. Distingue
+                // maintenant clairement les 3 cas réels.
+                boolean finDeLivraison = (lastKnownState == DeliveryState.RUNNING_FLOWING
+                        || lastKnownState == DeliveryState.RUNNING_PAUSED);
+                if (finDeLivraison) {
+                    String dureeFlow = "";
+                    if (lastDeliveryStartTs > 0) {
+                        long ecouleMs = System.currentTimeMillis() - lastDeliveryStartTs;
+                        dureeFlow = " — durée " + (ecouleMs / 1000) + "s";
+                    }
+                    source = " — fin de livraison" + dureeFlow;
+                } else if (lastDisconnectTs > 0) {
                     long ecouleMs = System.currentTimeMillis() - lastDisconnectTs;
                     source = " — après déconnexion il y a " + (ecouleMs / 1000) + "s"
                         + (lastErrorMessage != null ? " (cause: " + lastErrorMessage + ")" : "");
                     lastDisconnectTs = 0L; // consommé — ne s'applique qu'à la toute prochaine connexion
                     lastErrorMessage = null;
-                } else {
+                } else if (lastKnownState == null) {
                     source = " — première connexion de cette session";
+                } else {
+                    // ✅ Ni fin de livraison, ni après déconnexion, ni la
+                    // toute première fois — un retour à CONNECTED depuis un
+                    // autre état (PRESTART/STARTING avorté, etc.). Neutre,
+                    // sans affirmer quelque chose de faux.
+                    source = "";
                 }
                 LogBus.ui(node, "[CONNEXION] Registre connecté (node=" + node + ")" + source);
             } else if (state == DeliveryState.DISCONNECTED) {
