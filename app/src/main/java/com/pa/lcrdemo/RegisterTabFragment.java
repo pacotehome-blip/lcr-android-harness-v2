@@ -862,27 +862,48 @@ public class RegisterTabFragment extends Fragment {
                         + " preset=" + presetTrouve + "L (dernier ticket connu, BD vierge)");
                 if (idxTrouve > 0 && idxTrouve <= 16) {
                     initValidatedProductIdx = idxTrouve - 1;
-                    produitDejaResoluPourCetteSession = true;
-                    // ✅ AJOUTÉ (27 août 2026, demande Paul — "le produit et
-                    // preset qui n'avait pas été fait comme il faut") —
-                    // trouvé : cette section marquait produitDejaResoluPourCetteSession
-                    // à true, ce qui bloquait ensuite lancerScanProduits()
-                    // (l'ancien mécanisme qui, lui, appliquait vraiment le
-                    // preset à l'écran) — les valeurs étaient trouvées mais
-                    // jamais affichées. Appliqué directement ici maintenant,
-                    // à l'écran, pas juste en interne.
+                    // ✅ CORRIGÉ (28 août 2026, demande Paul — "je ne reste
+                    // pas sur le résultat du scan, je vois que la slot") —
+                    // trouvé : ce repli (backup JSON, dernier ticket connu)
+                    // posait produitDejaResoluPourCetteSession=true, qui
+                    // bloque ensuite autoScanProduitsSiNecessaire() (le
+                    // VRAI scan matériel, déjà lancé une étape plus haut,
+                    // en tâche de fond) — via sa propre garde en tête de
+                    // méthode. Résultat : ce repli grossier (juste le
+                    // numéro de slot brut) gagnait la course contre le vrai
+                    // scan, qui n'appliquait jamais son résultat (un vrai
+                    // nom de produit). Ne pose plus ce flag ici — seul le
+                    // vrai scan matériel (ligne ~5335/5565) le pose, à sa
+                    // propre résolution complète. Ce repli affiche
+                    // maintenant un nom lisible (via RegisterProductStore,
+                    // même format que le scan — Row.toSpinnerLabel()) comme
+                    // AFFICHAGE PROVISOIRE seulement, immédiatement
+                    // remplacé si/quand le vrai scan termine.
                     final int idxPourUi = idxTrouve;
                     final double presetPourUi = presetTrouve;
+                    final String serialPourLabel = serialFromArgs;
                     if (ui != null) {
                         ui.post(() -> {
                             if (!isAdded() || getView() == null) return;
                             if (spnProduct != null && idxPourUi >= 1 && idxPourUi <= 16) {
-                                spnProduct.setText(String.valueOf(idxPourUi), false);
+                                String label = String.valueOf(idxPourUi);
+                                try {
+                                    com.pa.lcr.lcp.storage.RegisterProductStore storeLabel =
+                                            new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
+                                    try {
+                                        com.pa.lcr.lcp.storage.RegisterProductStore.Row rowLabel =
+                                                storeLabel.findByNoteIdx(serialPourLabel, idxPourUi - 1);
+                                        if (rowLabel != null) label = rowLabel.toSpinnerLabel();
+                                    } finally {
+                                        try { storeLabel.close(); } catch (Exception ignored) {}
+                                    }
+                                } catch (Exception ignored) {}
+                                spnProduct.setText(label, false);
                             }
                             if (presetPourUi > 0 && edtPreset != null) {
                                 edtPreset.setText(String.valueOf(presetPourUi));
                             }
-                            LogBus.api(node, "[COMPARAISON_TICKET] appliqué à l'écran — produit index="
+                            LogBus.api(node, "[COMPARAISON_TICKET] appliqué à l'écran (provisoire, le vrai scan peut encore l'affiner) — produit index="
                                     + idxPourUi + " preset=" + presetPourUi + "L");
                         });
                     }
@@ -1423,11 +1444,25 @@ public class RegisterTabFragment extends Fragment {
                     showInitGuide("Livraison démarrée...");
                     fadeOutInitGuide();
                 }
+                // ✅ CORRIGÉ (28 août 2026, demande Paul — "on ne doit pas
+                // toucher la partie actions tant que le flow n'est pas
+                // confirmé pause, ceci cause de flash UI pour rien") —
+                // updateButtons() (qui relance la vérif complète de
+                // btnRetourWO + réévalue tous les boutons d'action)
+                // s'exécutait à CHAQUE appel de onLiveStatus(), y compris
+                // le heartbeat de 2s qui répète le même texte tant que
+                // rien n'a changé. Ne réévalue les boutons que si le texte
+                // Live a RÉELLEMENT changé — un vrai changement d'état
+                // (ex: FLOW ON → FLOW OFF confirmé), jamais une simple
+                // répétition périodique du même statut.
+                boolean texteReelementChange = !java.util.Objects.equals(liveText, lastLiveText);
                 lastLiveText = liveText;
                 if (txtLive != null) txtLive.setText(liveText);
                 ensureSerialVisibleThrottled();
                 refreshDelCodeFromTickSnapshotThrottled();
-                updateButtons(controller != null ? controller.getState() : null);
+                if (texteReelementChange) {
+                    updateButtons(controller != null ? controller.getState() : null);
+                }
                 scheduleLogRefresh();
             });
         }
@@ -6399,10 +6434,38 @@ public class RegisterTabFragment extends Fragment {
                 txtTicketNo.setText("Ticket Number : " + ticketNo);
             if (txtDeliveryUid != null)
                 txtDeliveryUid.setText("Delivery UID : " + fDeliveryUid);
-            if (ffPresetStr != null && edtPreset != null)
-                edtPreset.setText(ffPresetStr);
-            if (ffProduitStr != null && spnProduct != null)
-                spnProduct.setText(ffProduitStr, false);
+            // ✅ CORRIGÉ (28 août 2026, demande Paul — "je ne reste pas sur
+            // le résultat du scan... il doit rester comme le produit, pas
+            // besoin de quoi que ce soit dans le registre pour le preset")
+            // — rechercherWoDepuisRegistre() est rappelée PLUSIEURS fois
+            // pendant une session (init, +3.5s après CONNECTED sans WO,
+            // réactivation du tab) et écrasait produit/preset avec un
+            // numéro brut à CHAQUE appel, sans jamais vérifier si déjà
+            // résolu — ni un changement manuel ni un deep link, exactement
+            // le genre de rafraîchissement non désiré. Ne touche plus
+            // produit/preset une fois déjà résolu pour cette session.
+            if (!produitDejaResoluPourCetteSession) {
+                if (ffPresetStr != null && edtPreset != null)
+                    edtPreset.setText(ffPresetStr);
+                if (ffProduitStr != null && spnProduct != null) {
+                    String labelWo = ffProduitStr;
+                    try {
+                        int idxWo = Integer.parseInt(ffProduitStr);
+                        if (idxWo >= 1 && idxWo <= 16 && serialFromArgs != null) {
+                            com.pa.lcr.lcp.storage.RegisterProductStore storeWo =
+                                    new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
+                            try {
+                                com.pa.lcr.lcp.storage.RegisterProductStore.Row rowWo =
+                                        storeWo.findByNoteIdx(serialFromArgs, idxWo - 1);
+                                if (rowWo != null) labelWo = rowWo.toSpinnerLabel();
+                            } finally {
+                                try { storeWo.close(); } catch (Exception ignored) {}
+                            }
+                        }
+                    } catch (NumberFormatException ignored) {}
+                    spnProduct.setText(labelWo, false);
+                }
+            }
             rafraichirCumulWo();
         });
     }
