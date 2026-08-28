@@ -5112,7 +5112,66 @@ public class RegisterTabFragment extends Fragment {
                 autoProductScanInFlight = false;
                 autoScanLockRelease(globalKey);
             } else {
-                android.util.Log.i("RegisterTabFragment", "Auto-scan produits — aucun cache pour serial="
+                // ✅ CORRIGÉ (28 août 2026, demande Paul — "on s'en calisse,
+                // on a l'info dans la table, on a l'info du produit selon
+                // le ticket qui vient d'être fait, toute l'info est là" —
+                // suite à un scan matériel qui prenait plus de 8 secondes
+                // à démarrer et ne finissait jamais dans la fenêtre de
+                // test) — avant de lancer un scan matériel complet (16
+                // slots, plusieurs secondes, plusieurs lectures LCP par
+                // slot), vérifier d'abord LcrDeliveryStatusDb — la
+                // DERNIÈRE livraison réellement complétée pour ce #série a
+                // déjà son produit_no enregistré, sans aucune lecture
+                // registre nécessaire. Le produit dans la citerne ne
+                // change pas d'un ticket à l'autre sur le même camion —
+                // cette valeur est fiable et immédiatement disponible.
+                int produitDerniereLivraison = -1;
+                try {
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbDerniere =
+                            new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                    try {
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow derniere =
+                                dbDerniere.getLastDeliveryForSerial(serialId);
+                        if (derniere != null && derniere.produitNo > 0) {
+                            produitDerniereLivraison = derniere.produitNo;
+                        }
+                    } finally {
+                        try { dbDerniere.close(); } catch (Exception ignored) {}
+                    }
+                } catch (Exception e) {
+                    android.util.Log.w("RegisterTabFragment", "autoScanProduitsSiNecessaire: lecture LcrDeliveryStatusDb ERR: " + e.getMessage());
+                }
+
+                if (produitDerniereLivraison > 0 && produitDerniereLivraison <= 16) {
+                    final int idxDerniere = produitDerniereLivraison;
+                    android.util.Log.i("RegisterTabFragment", "Auto-scan produits — trouvé dans LcrDeliveryStatusDb (dernière livraison), aucun scan matériel nécessaire, produit=" + idxDerniere);
+                    ui.post(() -> {
+                        try {
+                            if (!isAdded() || getView() == null) return;
+                            String label = String.valueOf(idxDerniere);
+                            try {
+                                com.pa.lcr.lcp.storage.RegisterProductStore storeLabel =
+                                        new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
+                                try {
+                                    com.pa.lcr.lcp.storage.RegisterProductStore.Row rowLabel =
+                                            storeLabel.findByNoteIdx(serialId, idxDerniere - 1);
+                                    if (rowLabel != null) label = rowLabel.toSpinnerLabel();
+                                } finally {
+                                    try { storeLabel.close(); } catch (Exception ignored) {}
+                                }
+                            } catch (Exception ignored) {}
+                            if (spnProduct != null) spnProduct.setText(label, false);
+                            initValidatedProductIdx = idxDerniere - 1;
+                            produitDejaResoluPourCetteSession = true;
+                        } finally {
+                            autoProductScanInFlight = false;
+                            autoScanLockRelease(globalKey);
+                        }
+                    });
+                    return;
+                }
+
+                android.util.Log.i("RegisterTabFragment", "Auto-scan produits — aucun cache et aucune livraison antérieure trouvée pour serial="
                         + serialId + " node=" + node + ", lancement scan matériel");
                 ui.post(() -> {
                     try {
