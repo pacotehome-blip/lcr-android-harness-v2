@@ -2225,10 +2225,24 @@ public class RegisterTabFragment extends Fragment {
         if (woIdGuid != null && !woIdGuid.isEmpty()) currentWoIdGuid = woIdGuid;
         if (produit != null && !produit.isEmpty()) currentProduit = produit;
         if (preset  != null && !preset.isEmpty())  currentPreset  = preset;
-        if (edtPreset != null && preset != null && !preset.isEmpty())
-            edtPreset.setText(preset);
-        if (spnProduct != null && produit != null && !produit.isEmpty())
-            spnProduct.setText(produit, false);
+        // ✅ CORRIGÉ (28 août 2026, demande Paul — "après ce refresh je
+        // perds l'info de comparaison du produit, il n'est pas supposé
+        // avoir deux livraisons il y en a qu'une") — trouvé : cette
+        // méthode est appelée SANS CONDITION à l'intérieur de
+        // lancerLivraison() (bouton C local ET deep link), à CHAQUE appel
+        // — écrasant spnProduct/edtPreset même quand le produit était déjà
+        // correctement résolu (scan matériel ou LcrDeliveryStatusDb) plus
+        // tôt dans la même session de tab. Même trou que COMPARAISON_TICKET
+        // et la recherche WO, corrigés plus tôt aujourd'hui — celui-ci
+        // n'avait jamais été couvert. Ne touche plus l'affichage une fois
+        // déjà résolu — currentProduit/currentPreset (état interne) restent
+        // à jour normalement, seul l'écran ne bouge plus.
+        if (!produitDejaResoluPourCetteSession) {
+            if (edtPreset != null && preset != null && !preset.isEmpty())
+                edtPreset.setText(preset);
+            if (spnProduct != null && produit != null && !produit.isEmpty())
+                spnProduct.setText(produit, false);
+        }
         if (txtDeliveryUid != null && woNum != null && !woNum.isEmpty())
             txtDeliveryUid.setText("Delivery UID : " + woNum);
         // ✅ Rafraîchir le cumul WO dès que le WO est connu
