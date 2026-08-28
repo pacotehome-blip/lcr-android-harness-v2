@@ -2146,9 +2146,22 @@ try {
                 if (nowHb - lastHeartbeatMs >= HEARTBEAT_INTERVAL_MS) {
                     lastHeartbeatMs = nowHb;
                     if (listener != null) {
-                        String etat = (net > 0.0001 || gross > 0.0001)
-                                ? "LIVE: " + state.name() + " (net=" + net + " gross=" + gross + ")"
-                                : "LIVE: " + state.name() + " — en attente d'ouverture de la vanne (confirmé à l'instant)";
+                        // ✅ CORRIGÉ (28 août 2026, demande Paul — "je ne
+                        // veux pas voir le net/gross" dans la section
+                        // Live) — le texte du heartbeat incluait net/gross
+                        // en plus du statut, alors que net/gross a déjà
+                        // son propre affichage (txtQtyNet/txtQtyGross).
+                        // Ne renvoie plus que le statut de flow lui-même —
+                        // identique au texte déjà utilisé ailleurs pour
+                        // cette même transition, pour que le heartbeat ne
+                        // produise PAS un texte différent quand rien n'a
+                        // réellement changé (voir aussi le correctif côté
+                        // RegisterTabFragment.onLiveStatus() qui n'appelle
+                        // plus updateButtons() si le texte est identique).
+                        String etat = "LIVE: " + state.name()
+                                + (net > 0.0001 || gross > 0.0001
+                                    ? " (FLOW ON)"
+                                    : " — en attente d'ouverture de la vanne (confirmé à l'instant)");
                         listener.onLiveStatus(etat);
                     }
                     // ✅ AJOUTÉ (28 août 2026, demande Paul — "on doit
@@ -5015,6 +5028,18 @@ if (deliveryActive && !job.baselineCaptured) {
                     + "ms — probable glitch de lecture, traité comme RUNNING pour ce poll)");
             }
             if (notActiveConfirmed) {
+            // ✅ AJOUTÉ (28 août 2026, demande Paul — "pourquoi je vois des
+            // lectures tick alors que ça fait un bout que ça devrait être
+            // fini") — trouvé : ce bloc DONE construisait déjà
+            // "state":"CONNECTED" dans la réponse JSON pour DeepLinkHandler,
+            // mais n'appelait JAMAIS setState() — le VRAI état interne du
+            // contrôleur restait RUNNING_FLOWING. Le tick rapide
+            // (requestLiveSampleFast(), gardé par "state != RUNNING_FLOWING
+            // return") continuait donc de tourner indéfiniment après la fin
+            // réelle de la livraison, jusqu'à ce qu'un événement extérieur
+            // sans lien finisse par corriger l'état. Confirmé par logcat :
+            // ~8s de lectures tick après "Livraison terminée", même thread.
+            setState(DeliveryState.CONNECTED);
 
             // ✅ SAFE PRINT: si ticketPending reste à 1, attendre clear; sinon erreur API explicite
             if (ticketPending) {
