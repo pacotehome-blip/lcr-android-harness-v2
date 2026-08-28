@@ -2073,33 +2073,25 @@ try {
             try {
                 int delStatus;
                 int delCode;
-                // ✅ AJOUTÉ (13 août 2026, demande Paul — consolidation)
-                // — si api_deliveryJobGet() vient de publier une lecture
-                // fraîche dans lastTick (elle tourne à ~900ms via
-                // pollJobUntilDone, déjà à jour pour toute livraison), on
-                // la réutilise au lieu de refaire notre propre
-                // GET_DELIVERY_STATUS quelques centaines de ms plus tard —
-                // même verrou, même registre, donnée qui n'a pas eu le
-                // temps de changer entre les deux. Fenêtre de fraîcheur
-                // (800ms) volontairement plus courte que API_JOB_MIN_POLL_MS
-                // (900ms) — si aucune lecture récente n'existe (livraison
-                // qui vient de démarrer, ou pollJobUntilDone en retard),
-                // on retombe sur notre propre lecture, sans jamais rester
-                // sans donnée.
+                // ✅ CORRIGÉ (28 août 2026, demande Paul — "je ne veux
+                // aucun appel autre que le running_flowing, pas de requête
+                // sql, rien pentoute. je veux le plus fidèle possible du
+                // registre pendant la livraison") — avant, retombait sur
+                // sa PROPRE lecture GET_DELIVERY_STATUS dès que lastTick
+                // dépassait 800ms — un 2e lecteur physique concurrent du
+                // tick rapide (100ms sur LCR-II), exactement la contention
+                // diagnostiquée le 27 août (logcat: net qui saute par
+                // paliers irréguliers pendant RUNNING_FLOWING). Le tick
+                // rapide tournant à 100ms, lastTick ne devrait jamais être
+                // vieux de plus de ~100-200ms une fois le flow démarré —
+                // retombe maintenant sur un simple SKIP de ce cycle
+                // (retenté au prochain, SUPERVISION_INTERVAL_MS=2500ms
+                // plus tard) plutôt que sur une lecture physique. Le tick
+                // rapide reste le SEUL lecteur physique pendant le flow.
                 LastTick freshTick = lastTick;
-                if (freshTick != null && (now - freshTick.tsMs) < 800) {
-                    delStatus = freshTick.delStatus;
-                    delCode = freshTick.delCode;
-                } else {
-                    try {
-                        int[] ds = lcpDeliveryStatus();
-                        delStatus = ds[0];
-                        delCode = ds[1];
-                    } catch (Exception e) {
-                        liveSoftSkip("GET_DELIVERY_STATUS", e);
-                        return;
-                    }
-                }
+                if (freshTick == null) return;
+                delStatus = freshTick.delStatus;
+                delCode = freshTick.delCode;
 
                 boolean ticket = (delCode & DC_TICKET_PENDING) != 0;
                 boolean flowBit = (delCode & DC_FLOW_ACTIVE) != 0;
@@ -2138,15 +2130,16 @@ try {
 
                 double scale = Math.pow(10, cachedDigits);
 
-                int g, n;
-                try {
-                    g = beI32(lcpGetField(FIELD_GROSS_COUNT));
-                    n = beI32(lcpGetField(FIELD_NET_COUNT));
-                } catch (Exception ex) {
-                    g = (lastGrossRaw >= 0) ? lastGrossRaw : 0;
-                    n = (lastNetRaw >= 0) ? lastNetRaw : 0;
-                    liveBackoffStep("[LIVE] soft-skip counters");
-                }
+                // ✅ CORRIGÉ (28 août 2026, demande Paul) — faisait
+                // toujours sa PROPRE lecture GET_FIELD net/gross, même
+                // juste après avoir réutilisé delStatus/delCode de
+                // lastTick ci-dessus (incohérent : moitié cache, moitié
+                // lecture réelle, ET un 2e lecteur physique en plus du
+                // tick rapide). freshTick porte déjà net/gross à la même
+                // échelle (cachedDigits partagé avec le tick rapide) —
+                // dérivé directement, aucune lecture physique ici non plus.
+                int g = (int) Math.round(freshTick.gross * scale);
+                int n = (int) Math.round(freshTick.net * scale);
 
                 liveResetBackoff();
                 long t = System.currentTimeMillis();
@@ -4584,7 +4577,29 @@ job.presetNetL_requested = presetNetL;
         }
 
         try {
-            int[] ds = lcpDeliveryStatus();
+            // ✅ AJOUTÉ (28 août 2026, demande Paul — "je ne veux aucun
+            // appel autre que le running_flowing, pas de requête sql, rien
+            // pentoute. je veux le plus fidèle possible du registre
+            // pendant la livraison") — pendant RUNNING_FLOWING/RUNNING_
+            // PAUSED, ZÉRO lecture physique ici (ni GET_DELIVERY_STATUS,
+            // ni GET_FIELD net/gross) : ds/g/n dérivés de lastTick, publié
+            // exclusivement par le tick rapide (requestLiveSampleFast(),
+            // désormais seul lecteur physique pendant le flow — voir aussi
+            // requestLiveSample() plus bas, corrigé en même temps). Cette
+            // méthode (le "lent", appelée par DeepLinkHandler.
+            // pollJobUntilDone()) ne redevient un lecteur réel que hors
+            // flow — idle (tab), ou tout au début avant que le tick rapide
+            // n'ait publié son premier snapshot.
+            boolean flowingNow = (state == DeliveryState.RUNNING_FLOWING
+                                || state == DeliveryState.RUNNING_PAUSED);
+            LastTick cacheTick = flowingNow ? lastTick : null;
+
+            int[] ds;
+            if (cacheTick != null) {
+                ds = new int[]{ cacheTick.delStatus, cacheTick.delCode };
+            } else {
+                ds = lcpDeliveryStatus();
+            }
             int delCode = ds[1];
 
             boolean deliveryActive = (delCode & DC_DELIVERY_ACTIVE) != 0;
@@ -4597,7 +4612,8 @@ job.presetNetL_requested = presetNetL;
             // requestStatus() où la détection avait été ajoutée initialement. Sans ce
             // check ici, une livraison pouvait se terminer avec un retour d'air jamais
             // corrigé, comme observé (net affiché à 4294967278 au lieu de -18 — voir
-            // le second fix juste en dessous).
+            // le second fix juste en dessous). Le bit vient de ds[0], que ce soit une
+            // lecture réelle ou (28 août) le cache — comportement identique.
             if (link.isPulserReversalTerminated(ds[0])) {
                 checkPulserReversalAndCorrect();
             }
@@ -4608,8 +4624,14 @@ job.presetNetL_requested = presetNetL;
             double scale = Math.pow(10, cachedDigits);
             double tol = 1.0 / scale;
 
-            int g = beI32(lcpGetField(FIELD_GROSS_COUNT));
-            int n = beI32(lcpGetField(FIELD_NET_COUNT));
+            int g, n;
+            if (cacheTick != null) {
+                g = (int) Math.round(cacheTick.gross * scale);
+                n = (int) Math.round(cacheTick.net * scale);
+            } else {
+                g = beI32(lcpGetField(FIELD_GROSS_COUNT));
+                n = beI32(lcpGetField(FIELD_NET_COUNT));
+            }
 
             // ✅ FIX CRITIQUE : "& 0xFFFFFFFFL" force une interprétation NON SIGNÉE —
             // un retour d'air légitime (n=-18 par exemple) devenait 4294967278 au lieu
@@ -4639,6 +4661,13 @@ if (deliveryActive && !job.baselineCaptured) {
     job.baselineCaptured = true;
 
     // ✅ Capture START réel (DE) à partir des TOTAUX registre (#17/#18)
+    // ⚠️ SEULE lecture physique restante ici pendant RUNNING_FLOWING (28
+    // août 2026) — inévitable : FIELD_GROSS_TOTAL/NET_TOTAL sont des
+    // TOTAUX cumulatifs, jamais publiés par lastTick (qui ne porte que
+    // net/gross de LA livraison en cours). Se déclenche UNE SEULE fois
+    // par job (job.baselineCaptured), au tout premier instant où
+    // deliveryActive devient vrai — pas une lecture répétée à chaque
+    // poll, donc ne recrée pas la contention corrigée juste au-dessus.
     try {
         job.grossStartRaw = beI32(lcpGetField(FIELD_GROSS_TOTAL));
         job.netStartRaw   = beI32(lcpGetField(FIELD_NET_TOTAL));
