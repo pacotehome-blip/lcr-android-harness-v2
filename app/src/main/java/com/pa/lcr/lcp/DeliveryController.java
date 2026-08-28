@@ -54,6 +54,11 @@ import java.util.ArrayDeque;
  * Correctifs champs binaires:
  * - ticket_no DOIT etre le TicketNumber du registre (#23) et donc lu en U32 (4 bytes).
  * - sale_no DOIT etre le SaleNumber du registre (#22) et donc lu en U32 (4 bytes).
+ * - ✅ AJOUTÉ (28 août 2026) — règle officielle fabricant : #22 (SaleNumber)
+ *   s'incrémente AU DÉBUT de la livraison (fiable dès le départ) ; #23
+ *   (TicketNumber) ne s'incrémente qu'APRÈS impression du ticket (fiable
+ *   seulement à la fin, reste à 0 si jamais imprimé). Voir détail complet
+ *   au-dessus de readTicketNo23Uncached()/readSaleNo22().
  *
  * FIX (concordance compteur/UI vs API/Field Service):
  * - Quantité envoyée = compteurs affichés (#44/#45) scaled avec #39.
@@ -2811,6 +2816,29 @@ softResync("retry/" + step);
         return result;
     }
 
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — "regarde les règles de ces
+    // deux champs, il faut une table de transition") — RÈGLE OFFICIELLE
+    // du fabricant (feuille de référence des champs LCR, colonne
+    // Description), confirmée le 28 août — CONTRAIRE à l'hypothèse
+    // discutée plus tôt dans la journée (on croyait sale_no ajusté à la
+    // FIN et ticket_no au DÉBUT — c'est l'inverse) :
+    //
+    //   Field #22 SaleNumber  : "Sale number assigned to the current
+    //     delivery. The sale number is incremented AT THE START of a
+    //     delivery." → #22 est donc fiable DÈS LE DÉBUT d'une livraison.
+    //
+    //   Field #23 TicketNumber: "Ticket number to be printed on the next
+    //     delivery ticket... The ticket number is incremented AFTER it is
+    //     printed on a delivery ticket or duplicate delivery ticket."
+    //     → #23 ne s'incrémente qu'APRÈS impression confirmée — jamais
+    //     fiable avant la fin, et reste à 0 si aucun ticket n'est jamais
+    //     réellement imprimé (ex: TicketRequired=2, "never print").
+    //
+    // Conséquence pratique : le repli sur SaleNumber(#22) ci-dessous
+    // n'est PAS un pis-aller fragile mi-vol — #22 est, selon la doc,
+    // déjà la valeur correcte de LA livraison en cours dès son
+    // démarrage. C'est #23 (TicketNumber) qui ne se stabilise qu'à la
+    // toute fin (impression), pas l'inverse.
     private String readTicketNo23Uncached() throws Exception {
         String tno = readU32FieldAsDecString(FIELD_TICKET_NUMBER);
         // ✅ ÉLARGI (20 août 2026, demande Paul — précisé en 3 cas) :
@@ -2875,6 +2903,10 @@ softResync("retry/" + step);
         }
         return tno;
     }
+    // ✅ AJOUTÉ (28 août 2026) — Field #22 SaleNumber, doc fabricant :
+    // incrémenté AU DÉBUT de la livraison — fiable dès le démarrage,
+    // contrairement à #23 (TicketNumber) qui ne bouge qu'après impression.
+    // Voir commentaire complet au-dessus de readTicketNo23Uncached().
     private String readSaleNo22() throws Exception {
         String r = readU32FieldAsDecString(FIELD_SALE_NUMBER);
         dernierSaleNoConnu = r; // ✅ AJOUTÉ (27 août 2026) — mis en cache pour affichage tab
