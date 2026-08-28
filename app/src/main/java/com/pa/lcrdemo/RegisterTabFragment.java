@@ -862,23 +862,24 @@ public class RegisterTabFragment extends Fragment {
                         + " preset=" + presetTrouve + "L (dernier ticket connu, BD vierge)");
                 if (idxTrouve > 0 && idxTrouve <= 16) {
                     initValidatedProductIdx = idxTrouve - 1;
-                    // ✅ CORRIGÉ (28 août 2026, demande Paul — "je ne reste
-                    // pas sur le résultat du scan, je vois que la slot") —
-                    // trouvé : ce repli (backup JSON, dernier ticket connu)
-                    // posait produitDejaResoluPourCetteSession=true, qui
-                    // bloque ensuite autoScanProduitsSiNecessaire() (le
-                    // VRAI scan matériel, déjà lancé une étape plus haut,
-                    // en tâche de fond) — via sa propre garde en tête de
-                    // méthode. Résultat : ce repli grossier (juste le
-                    // numéro de slot brut) gagnait la course contre le vrai
-                    // scan, qui n'appliquait jamais son résultat (un vrai
-                    // nom de produit). Ne pose plus ce flag ici — seul le
-                    // vrai scan matériel (ligne ~5335/5565) le pose, à sa
-                    // propre résolution complète. Ce repli affiche
-                    // maintenant un nom lisible (via RegisterProductStore,
-                    // même format que le scan — Row.toSpinnerLabel()) comme
-                    // AFFICHAGE PROVISOIRE seulement, immédiatement
-                    // remplacé si/quand le vrai scan termine.
+                    // ✅ CORRIGÉ (28 août 2026, demande Paul — "pourquoi
+                    // n'es-tu pas capable de laisser tranquille la section
+                    // produit et preset, après la livraison") — trouvé LE
+                    // vrai trou de mon correctif d'hier : j'avais retiré
+                    // l'assignation du flag ICI (pour ne plus bloquer le
+                    // vrai scan), mais j'avais oublié de GARDER l'écriture
+                    // écran elle-même derrière ce même flag. Résultat :
+                    // runInitSequence() qui se relance légitimement pour
+                    // une 2e/3e livraison dans la même session de tab (le
+                    // produit ayant déjà été résolu par le VRAI scan durant
+                    // la 1ère) repassait ici et réécrasait quand même
+                    // l'écran avec ce repli grossier. N'applique plus RIEN
+                    // à l'écran si déjà résolu pour cette session — la
+                    // seule vraie raison de changer reste un deep link
+                    // (étape PRODUIT) ou un changement manuel.
+                    if (produitDejaResoluPourCetteSession) {
+                        return true;
+                    }
                     final int idxPourUi = idxTrouve;
                     final double presetPourUi = presetTrouve;
                     final String serialPourLabel = serialFromArgs;
@@ -939,6 +940,35 @@ public class RegisterTabFragment extends Fragment {
             // 4) RETOUR_WO — WO lié au ticket_number/sale_number
             runSectionWithRetry(InitSection.RETOUR_WO, 6, false, () -> {
                 rechercherWoDepuisRegistre();
+                // ✅ AJOUTÉ (28 août 2026, demande Paul — "le bouton bleu
+                // doit être présent dès la fin des inits car le tab
+                // devrait tout avoir en main déjà... si j'ai eu un crash
+                // et que je réinstall je veux récupérer et retourner dans
+                // le bon de travail de fieldservice") — rechercherWoDepuisRegistre()
+                // trouve le WO pour une NOUVELLE livraison (via le registre),
+                // mais ne déclenche jamais la logique du bouton bleu
+                // lui-même (updateButtons(), qui interroge LcrDeliveryStatusDb
+                // — une BD SQLite PERSISTÉE, donc valide même après un
+                // crash+réinstall, puisqu'elle ne dépend d'aucune variable
+                // de session en mémoire). Rien ne déclenchait cette
+                // résolution avant la fin des inits — le bouton n'apparaissait
+                // qu'au prochain événement séparé (heartbeat, tick). Déclenché
+                // ici explicitement, pour que sa recherche en arrière-plan
+                // tourne EN PARALLÈLE des étapes restantes, prête (ou très
+                // proche de l'être) dès que ACTION (7/7) est atteint.
+                // ✅ CORRIGÉ (à l'instant) — runInitSequence() tourne sur
+                // bg.execute() (thread d'arrière-plan), mais updateButtons()
+                // touche l'UI DIRECTEMENT (btnConnect.setEnabled(), etc.)
+                // avant même d'atteindre son propre safeBg() interne —
+                // l'appeler ici sans ui.post() aurait crashé
+                // (CalledFromWrongThreadException). Posté sur le thread UI.
+                if (controller != null && ui != null) {
+                    final DeliveryState stPourBouton = controller.getState();
+                    ui.post(() -> {
+                        if (!isAdded() || getView() == null) return;
+                        updateButtons(stPourBouton);
+                    });
+                }
                 return true;
             });
             if (etatLivraisonActiveDetecte("runInitSequence (après RETOUR_WO)")) return;
