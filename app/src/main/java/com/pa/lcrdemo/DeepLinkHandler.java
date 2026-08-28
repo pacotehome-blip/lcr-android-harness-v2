@@ -1705,7 +1705,17 @@ public class DeepLinkHandler {
                         if (r.data != null)
                             state = r.data.optString("state", null);
 
-                        android.util.Log.i(TAG, "pollJob: state=" + state);
+                        // ✅ CORRIGÉ (28 août 2026, demande Paul — "est-ce
+                        // que ces lignes sont nécessaires maintenant") —
+                        // avant, loguait inconditionnellement à CHAQUE
+                        // cycle de poll (~1s), répétant la même valeur
+                        // pendant toute la durée d'un flow stable (jusqu'à
+                        // 30+ lignes identiques pour une livraison de 30s).
+                        // Ne log plus que sur un vrai changement — réutilise
+                        // lastState, déjà déclaré plus haut pour STATE_CHANGE.
+                        if (!java.util.Objects.equals(state, lastState)) {
+                            android.util.Log.i(TAG, "pollJob: state=" + state);
+                        }
 
                         // ✅ state=null = job disparu du controller — sortir immédiatement
                         if (state == null || state.isEmpty()) {

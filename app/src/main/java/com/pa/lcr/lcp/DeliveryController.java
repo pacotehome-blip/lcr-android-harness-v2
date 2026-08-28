@@ -2883,8 +2883,12 @@ softResync("retry/" + step);
     // répétées inutiles sur LCR-II. Chaque sous-classe garantit un résultat
     // correct par elle-même, peu importe son mécanisme interne.
     private void ensureDigits() throws Exception {
+        // ✅ RETIRÉ (28 août 2026, demande Paul — "est-ce que ces lignes
+        // sont nécessaires maintenant") — ce log confirmait indéfiniment
+        // "toujours en cache", à chaque tick, sans jamais rien faire —
+        // aucune valeur diagnostique après les premières secondes de
+        // toute session. Le early-return lui-même reste inchangé.
         if (cachedDigits >= 0) {
-            android.util.Log.d("DeliveryController", "ensureDigits: déjà en cache = " + cachedDigits + " (scale=" + Math.pow(10, cachedDigits) + ")");
             return;
         }
         cachedDigits = link.getDecimalDigits();

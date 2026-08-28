@@ -1450,13 +1450,14 @@ public class RegisterTabFragment extends Fragment {
             // callback, avant ui.post(), pour comparer avec le moment du
             // rendu réel à l'écran plus bas.
             final long seqRecu = qtyDisplaySeq.incrementAndGet();
-            final long tsRecu = System.currentTimeMillis();
             android.util.Log.i("QTY-CALLBACK", "#" + seqRecu + " reçu par le fragment — net=" + net + " gross=" + gross);
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
-                long delaiMs = System.currentTimeMillis() - tsRecu;
-                android.util.Log.i("QTY-AFFICHE", "#" + seqRecu + " vraiment rendu à l'écran — net=" + net
-                        + " gross=" + gross + " (délai depuis callback=" + delaiMs + "ms)");
+                // ✅ RETIRÉ (28 août 2026, demande Paul — "je garderais que
+                // qty_callback") — QTY-AFFICHE (mesure du délai callback→
+                // rendu réel) retiré, ainsi que tsRecu/delaiMs qui ne
+                // servaient qu'à ce log. QTY-CALLBACK seul reste suffisant
+                // pour confirmer que les valeurs arrivent au fragment.
                 int d = lastDigits;
                 try { if (controller != null) d = controller.getDisplayDigits(); } catch (Exception ignored) {}
                 if (d < 0) d = 3;
