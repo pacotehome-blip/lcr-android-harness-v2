@@ -452,12 +452,12 @@ public class DeepLinkHandler {
             produit, presetStr, mac, false);
     }
 
-    // ✅ skipConnexionCheck=true : utilisé uniquement par la relance automatique de
-    // RegisterConnectionHelper juste après un diagnostic réussi (étape 4: lcpOk=true).
-    // Refaire une vraie vérification LCP (api_registerValidate) immédiatement après
-    // reconnexion, sur un socket BT qui vient tout juste d'être rétabli, est redondant
-    // et risque d'ajouter un délai voire un blocage — le diagnostic vient déjà de
-    // confirmer la connexion à l'instant.
+    // ✅ CORRIGÉ (28 août 2026, demande Paul) — skipConnexionCheck ne fait
+    // plus rien : la pré-vérification qu'il permettait de sauter
+    // (api_registerValidate avant tout armement) a été retirée entièrement
+    // — voir commentaire plus bas dans le corps de la méthode. Paramètre
+    // conservé pour compatibilité avec tous les appelants existants
+    // (RegisterConnectionHelper, MainActivity), sans effet.
     public void lancerLivraison(String transportKey, int node, String serialId,
                                   String woNum, String woIdGuid,
                                   String produit, String presetStr, String mac,
@@ -472,62 +472,22 @@ public class DeepLinkHandler {
             return;
         }
 
-        // ✅ AJOUTÉ (28 août 2026, demande Paul — "j'ai des bugs un peu
-        // partout") — trouvé via logcat : FOREIGN KEY constraint failed
-        // sur DeliveryLogStore.openAttempt(), déclenché par le logEvent()
-        // "ONESHOT_START" plus bas dans cette méthode. Cause : cette
-        // méthode a PLUSIEURS points d'entrée (handleDeepLink() ligne 150,
-        // qui appelle déjà logDeliveryStart() — mais AUSSI MainActivity
-        // (bouton C local, ligne ~1034) et RegisterConnectionHelper ligne
-        // ~825, qui appellent lancerLivraison() DIRECTEMENT sans jamais
-        // passer par handleDeepLink(). Pour ces deux derniers chemins,
-        // delivery_summary(serial_id, woNum) n'existe pas encore quand
-        // openAttemptAsync() tente de s'y rattacher — FK échoue à chaque
-        // fois, pas de façon intermittente. logDeliveryStart() fait un
-        // UPSERT (idempotent) — le rappeler ici est sans danger même
-        // quand handleDeepLink() l'a déjà appelé une première fois pour
-        // ce même (serialId, woNum).
-        logDeliveryStart(serialId, woNum, mac, node, produit, presetStr);
-
-        // ✅ FIX : confirmer la connexion RÉELLE au registre avant tout — pas un flag
-        // getState()/snapshot en cache (qui peut mentir sur un socket zombie). Si la
-        // vérification échoue, on relance le diagnostic complet (même média d'abord,
-        // sinon recherche du registre sur tous les médias) AVANT de toucher au tab,
-        // avant le check "Bon déjà complété", avant tout. Le diagnostic, une fois
-        // réussi, rappelle lancerLivraison() lui-même avec une connexion confirmée.
-        if (!skipConnexionCheck && !transportKey.isEmpty()) {
-            boolean connexionOk = false;
-            try {
-                com.pa.lcr.lcp.DeliveryController dcCheck =
-                    com.pa.lcr.lcp.RegisterSessionManager.get(activity).getController(transportKey, node);
-                if (dcCheck != null) {
-                    com.pa.lcr.lcp.ApiResult vr = dcCheck.api_registerValidate(
-                        woNum, node, serialId, null, null);
-                    // ✅ code==1 = validé sans blocage métier. Mais un code==0 peut aussi
-                    // vouloir dire "ticket pending"/"delivery active"/mismatch — des cas
-                    // où la communication LCP a RÉUSSI, ce n'est pas une panne transport.
-                    // Seul un vrai échec de communication (pas de "ticket_no" dans data,
-                    // signe que readFullStatus()/readTicketNo23() n'ont jamais abouti)
-                    // doit déclencher le diagnostic de reconnexion.
-                    connexionOk = (vr != null)
-                        && (vr.code == 1 || (vr.data != null && vr.data.has("ticket_no")));
-                }
-            } catch (Exception e) {
-                android.util.Log.w(TAG, "lancerLivraison: vérif connexion ERR: " + e.getMessage());
-                try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.lancerLivraison.verifConnexion", e); } catch (Exception ignored) {}
-            }
-
-            if (!connexionOk) {
-                android.util.Log.w(TAG, "lancerLivraison: connexion registre non confirmée"
-                    + " — diagnostic + reconnexion avant tout autre traitement");
-                new Thread(() -> new com.pa.lcrdemo.RegisterConnectionHelper(activity)
-                    .lancerDiagnosticForce(transportKey, node, serialId, woNum,
-                        woIdGuid, produit, presetStr, mac,
-                        DeepLinkHandler.this)).start();
-                return;
-            }
-            android.util.Log.i(TAG, "lancerLivraison: connexion registre confirmée — poursuite");
-        }
+        // ✅ CORRIGÉ (28 août 2026, demande Paul — "si je suis dans le tab
+        // et que je fais new c il doit directement armer la livraison,
+        // juste si je suis en erreur de communication avec le registre
+        // qu'il faut partir le diagnostic et continuer le démarrage de
+        // livraison") — RETIRÉ : cette pré-vérification (api_registerValidate,
+        // une vraie communication LCP) tournait AVANT MÊME de tenter
+        // d'armer, à chaque appel — redondante avec le mécanisme qui
+        // existe déjà plus bas (errTransport, autour de l'appel réel à
+        // api_deliveryOneShotStart) : si l'armement échoue avec une VRAIE
+        // erreur de transport, le diagnostic se déclenche déjà, et
+        // RegisterConnectionHelper rappelle lancerLivraison() une fois
+        // reconnecté. On a déjà un monitoring de connexion constant
+        // (tick rapide, keep-alive) — si l'UI affiche connecté, c'est
+        // qu'il l'est. Le modèle voulu : armement direct, diagnostic
+        // SEULEMENT sur un échec réel constaté à l'armement lui-même —
+        // pas une double vérification avant.
 
         // Ouvrir/activer le tab
         final String fSerialId = serialId != null ? serialId : "";
@@ -915,7 +875,7 @@ public class DeepLinkHandler {
                     activity.runOnUiThread(() ->
                         activity.toast("📦 Livraison démarrée — " + woNum));
                     pollJobUntilDone(jobId, node, woNum, woIdGuid, fSerialId,
-                        fMac.isEmpty() ? transportKey : fMac);
+                        fMac.isEmpty() ? transportKey : fMac, true);
                 }
             } else {
                 android.util.Log.w(TAG, "oneshot/start code=0: " + r.msg);
@@ -1278,7 +1238,7 @@ public class DeepLinkHandler {
                                 android.util.Log.i(TAG, "Poll démarré — jobId=" + jobId);
                                 activity.runOnUiThread(() ->
                                     activity.toast("📦 Livraison démarrée — " + woNum));
-                                pollJobUntilDone(jobId, node, woNum, woIdGuid, fSerialId, mac);
+                                pollJobUntilDone(jobId, node, woNum, woIdGuid, fSerialId, mac, true);
                             } else {
                                 android.util.Log.w(TAG, "oneshot/start: jobId absent");
                                 activity.runOnUiThread(() ->
@@ -1359,6 +1319,23 @@ public class DeepLinkHandler {
 
     private void pollJobUntilDone(String jobId, int node, String woNum,
                                    String woIdGuid, String serialId, String mac) {
+        pollJobUntilDone(jobId, node, woNum, woIdGuid, serialId, mac, false);
+    }
+
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — "avant je n'avais pas de
+    // connected ready avant entre deux running_flowing... fait donc ça"
+    // — réduire le délai de 5.7s mesuré entre ARMED et le vrai CMD_RUN) —
+    // freshStart=true : appelé juste après un armement RÉUSSI (oneshot/
+    // start), où l'on SAIT avec certitude que l'état est CONNECTED
+    // (ARMED, pas encore RUN) et qu'il n'y a pas de ticket pending — les
+    // 2 lectures api_deliveryJobGet() qui vérifiaient ça (chacune une
+    // vraie communication LCP) sont sautées, direct vers CONTINUE.
+    // freshStart=false (par défaut, voir overload ci-dessus) : chemin de
+    // reprise après crash (ActiveDeliveryStore), où l'état RÉEL est
+    // inconnu — garde les vérifications complètes.
+    private void pollJobUntilDone(String jobId, int node, String woNum,
+                                   String woIdGuid, String serialId, String mac,
+                                   boolean freshStart) {
         // ✅ Anti-double poll — si ce jobId est déjà en cours de poll, ignorer
         if (!activePolls.add(jobId)) {
             android.util.Log.w(TAG, "pollJobUntilDone: déjà actif pour jobId=" + jobId + " — ignoré");
@@ -1419,10 +1396,27 @@ public class DeepLinkHandler {
                 }
 
                 try {
-                    // ✅ Vérifier l'état avant d'envoyer continue
-                    // Si déjà RUNNING_FLOWING ou RUNNING_PAUSED, ne pas renvoyer continue
-                    // (évite de redémarrer une livraison en pause lors d'une reprise)
-                    String currentState = "";
+                    // ✅ CORRIGÉ (28 août 2026, demande Paul — "avant je
+                    // n'avais pas de connected ready avant entre deux
+                    // running_flowing") — sur un démarrage frais
+                    // (freshStart=true), on SAIT avec certitude que l'état
+                    // est CONNECTED (ARMED à l'instant, pas encore RUN) et
+                    // qu'il n'y a pas de ticket pending — cette livraison
+                    // vient d'être armée par CE MÊME appelant, quelques
+                    // lignes plus haut, avec un preset fraîchement écrit.
+                    // Les 2 lectures api_deliveryJobGet() ci-dessous (state
+                    // puis ticketPending), chacune une vraie communication
+                    // LCP séparée, ne servent qu'à distinguer ce cas d'une
+                    // VRAIE reprise (où l'état est inconnu) — inutiles ici,
+                    // et mesurées comme contribuant au délai de 5.7s
+                    // observé entre ARMED et le vrai CMD_RUN. Sautées sur
+                    // démarrage frais, direct vers CONTINUE. Le chemin de
+                    // reprise après crash (freshStart=false, seul appelant
+                    // restant à passer par cette branche) garde les
+                    // vérifications complètes, inchangées.
+                    String currentState = freshStart ? "CONNECTED" : "";
+                    boolean tpFreshStart = false; // toujours faux sur un démarrage qu'on vient d'armer nous-même
+                    if (!freshStart) {
                     try {
                         MultiRegisterApiFacadeImpl facadeCheck =
                             new MultiRegisterApiFacadeImpl(activity);
@@ -1431,6 +1425,7 @@ public class DeepLinkHandler {
                         if (stateCheck != null && stateCheck.data != null)
                             currentState = stateCheck.data.optString("state", "");
                     } catch (Exception ignored) {}
+                    }
 
                     if ("RUNNING_FLOWING".equals(currentState)
                             || "RUNNING_PAUSED".equals(currentState)) {
@@ -1438,7 +1433,8 @@ public class DeepLinkHandler {
                         hasSeenFlowing = true;
                     } else if ("CONNECTED".equals(currentState)) {
                         // Vérifier si ticket pending — si oui, faire status B et laisser l'opérateur
-                        boolean tp = false;
+                        boolean tp = tpFreshStart;
+                        if (!freshStart) {
                         try {
                             MultiRegisterApiFacadeImpl facadeCheck2 =
                                 new MultiRegisterApiFacadeImpl(activity);
@@ -1447,6 +1443,7 @@ public class DeepLinkHandler {
                             if (stateCheck2 != null && stateCheck2.data != null)
                                 tp = stateCheck2.data.optInt("ticketPending", 0) == 1;
                         } catch (Exception ignored) {}
+                        }
 
                         if (tp) {
                             android.util.Log.i(TAG, "Reprise: ticket pending — status B + attente opérateur");
