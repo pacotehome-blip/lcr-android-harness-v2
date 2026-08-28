@@ -1927,6 +1927,51 @@ public class DeepLinkHandler {
                     + " wo=" + woNum + " net=" + netL + " gross=" + grossL
                     + " ticket=" + ticketNo + " duration=" + durationS);
 
+                // ✅ AJOUTÉ (28 août 2026, demande Paul — "actuellement dans
+                // dataverse je n'ai aucune des livraisons tests que j'ai
+                // fait" / "utiliser le guid du ticket delivery-uid") —
+                // trouvé : ce chemin de sync (LcrDeliveryStatusDb →
+                // LcrDeliverySync.pushPending(), un vrai POST par
+                // ticket/wo_num, JAMAIS besoin d'un GUID FieldService à
+                // l'avance) écrit correctement sync_status=PENDING ici,
+                // mais RIEN ne déclenchait syncAll() après une livraison —
+                // seul le login MSAL au tout premier démarrage de l'app
+                // le faisait. La livraison attendait donc jusqu'à 15
+                // minutes (le cycle périodique WorkManager) avant de
+                // seulement être TENTÉE. Déclenché ici, immédiatement
+                // après l'écriture PENDING — même patron que
+                // DeliverySyncScheduler.triggerNow() déjà utilisé côté
+                // patchDataverse() pour l'autre file (celle-là exige un
+                // GUID, gérée séparément, sans changement ici).
+                try {
+                    com.pa.lcrdemo.auth.MsalTokenProvider tp =
+                        new com.pa.lcrdemo.auth.MsalTokenProvider(activity);
+                    tp.init(new com.pa.lcrdemo.auth.MsalTokenProvider.InitCallback() {
+                        @Override public void onReady() {
+                            tp.acquireTokenSilentFromWorker(
+                                new com.pa.lcrdemo.auth.MsalTokenProvider.TokenCallback() {
+                                @Override public void onSuccess(String token) {
+                                    new Thread(() -> {
+                                        try {
+                                            com.pa.lcrdemo.dataverse.LcrDeliverySync.syncAll(activity, token);
+                                        } catch (Exception e) {
+                                            android.util.Log.w(TAG, "syncAll post-livraison ERR: " + e.getMessage());
+                                        }
+                                    }).start();
+                                }
+                                @Override public void onError(Exception e) {
+                                    android.util.Log.w(TAG, "syncAll post-livraison — token ERR: " + e.getMessage());
+                                }
+                            });
+                        }
+                        @Override public void onError(Exception e) {
+                            android.util.Log.w(TAG, "syncAll post-livraison — MSAL init ERR: " + e.getMessage());
+                        }
+                    });
+                } catch (Exception e) {
+                    android.util.Log.w(TAG, "syncAll post-livraison — déclenchement ERR: " + e.getMessage());
+                }
+
                 // ✅ mettreAJourFieldService APRÈS l'insert — garantit que getAllForWo()
                 // voit la livraison courante dans le payload consolidé
                 mettreAJourFieldService(woNum, woIdGuid, "termine", extraJson);
