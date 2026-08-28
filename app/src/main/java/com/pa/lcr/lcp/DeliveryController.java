@@ -621,6 +621,17 @@ private void reproEvent(String level, String type, String message, JSONObject da
     // pour la même classe de décision).
     private volatile int consecutiveInactiveReads = 0;
     private static final int INACTIVE_CONFIRM_COUNT = 2;
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — "le tick n'est toujours pas
+    // régulier... 350-470ms au lieu de ~200-250ms") — lire delStatus/
+    // delCode à CHAQUE cycle (fix précédent) corrige bien la sécurité mais
+    // coûte une 3e lecture physique par tick, ralentissant net/gross qui
+    // n'ont pas besoin de ça. delStatus/delCode n'ont besoin d'être frais
+    // que par rapport à la cadence du SUPERVISEUR (2.5s), pas à celle du
+    // tick rapide (~250-350ms) — 1 lecture sur 3 (~750-1000ms) reste très
+    // en dessous de ce seuil, tout en libérant 2 cycles sur 3 pour
+    // retrouver la cadence net/gross d'avant.
+    private volatile int fastTickCycleCount = 0;
+    private static final int DELSTATUS_READ_EVERY_N_TICKS = 3;
     private volatile boolean sawFlowOnOnce = false;
     private volatile long flowOffStartMs = 0L;
     private volatile long lastCountsChangeMs = 0L;
@@ -1797,6 +1808,9 @@ try {
         // une livraison précédente (glitch isolé, jamais confirmé) fasse
         // basculer prématurément la nouvelle livraison dès son 2e cycle.
         consecutiveInactiveReads = 0;
+        // ✅ AJOUTÉ (28 août 2026) — force une vraie lecture delStatus/
+        // delCode dès le tout premier cycle rapide de cette livraison.
+        fastTickCycleCount = 0;
         liveBackoffMs = LIVE_BASE_MS;
         liveNextAllowedMs = 0L;
         liveLastSkipLogMs = 0L;
@@ -2070,13 +2084,21 @@ try {
                 // 2 par tick, cycle un peu plus long, mais correct.
                 int dsDelStatus = (lastTick != null) ? lastTick.delStatus : 0;
                 int dsDelCode   = (lastTick != null) ? lastTick.delCode   : 0;
-                try {
-                    int[] ds = lcpDeliveryStatus();
-                    dsDelStatus = ds[0];
-                    dsDelCode   = ds[1];
-                } catch (Exception ignored) {
-                    // Repli sur la dernière valeur connue si cette lecture
-                    // échoue ponctuellement — jamais pire qu'avant ce fix.
+                // ✅ CORRIGÉ (28 août 2026) — voir DELSTATUS_READ_EVERY_N_TICKS
+                // plus haut. Cycle 0 (premier appel) inclus volontairement,
+                // pour ne jamais démarrer sur une valeur d'une livraison
+                // précédente.
+                boolean doStatusRead = (fastTickCycleCount % DELSTATUS_READ_EVERY_N_TICKS) == 0;
+                fastTickCycleCount++;
+                if (doStatusRead) {
+                    try {
+                        int[] ds = lcpDeliveryStatus();
+                        dsDelStatus = ds[0];
+                        dsDelCode   = ds[1];
+                    } catch (Exception ignored) {
+                        // Repli sur la dernière valeur connue si cette lecture
+                        // échoue ponctuellement — jamais pire qu'avant ce fix.
+                    }
                 }
                 int g, n;
                 try {
