@@ -1318,6 +1318,24 @@ public class DeepLinkHandler {
     private static final java.util.Set<String> activePolls =
         java.util.Collections.synchronizedSet(new java.util.HashSet<>());
 
+    // ✅ AJOUTÉ (27 août 2026, demande Paul — "je veux avoir en bd chaque
+    // livraison qui a toi le ticket_number ou le sales_number, je ne
+    // comprends pas pourquoi j'ai une contrainte") — logEvent()/logError()
+    // utilisaient woNum comme ticket_no pour openAttemptAsync(), mais
+    // delivery_summary est re-clée sous le VRAI ticket_no par
+    // logDeliveryEnd() dès qu'il est connu (voir ticketNoReel). La ligne
+    // sous woNum n'existe alors plus → contrainte FOREIGN KEY échoue à
+    // chaque logEvent()/logError() suivant. Ce cache retient le dernier
+    // ticket_no réel vu par pollJobUntilDone() (qui l'obtient déjà via
+    // api_deliveryJobGet()), clé par serialId+"|"+woNum — jamais par
+    // serialId seul, car un nouveau woNum arrive à chaque livraison FSM.
+    private static final java.util.Map<String, String> lastKnownTicketNo =
+        new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static String ticketCacheKey(String serialId, String woNum) {
+        return (serialId != null ? serialId : "") + "|" + (woNum != null ? woNum : "");
+    }
+
     // =========================================================
     // Poll état livraison
     // =========================================================
@@ -1374,6 +1392,9 @@ public class DeepLinkHandler {
                         ticketNoAtStartTmp = tickSnap.data.optString("ticket_no", "");
                 } catch (Exception ignored) {}
                 final String ticketNoAtStart = ticketNoAtStartTmp;
+                if (!ticketNoAtStart.isEmpty()) {
+                    lastKnownTicketNo.put(ticketCacheKey(serialId, woNum), ticketNoAtStart);
+                }
 
                 // ✅ Délai avant premier continue — USB est plus lent que BT
                 if (transportKey.toUpperCase().startsWith("USB")) {
@@ -1461,6 +1482,9 @@ public class DeepLinkHandler {
                                     if (snap2 != null && snap2.data != null)
                                         ticketNow = snap2.data.optString("ticket_no", "");
                                 } catch (Exception ignored) {}
+                                if (!ticketNow.isEmpty()) {
+                                    lastKnownTicketNo.put(ticketCacheKey(serialId, woNum), ticketNow);
+                                }
 
                                 final boolean ticketChanged = !ticketNoAtStart.isEmpty()
                                     && !ticketNow.isEmpty()
@@ -1575,6 +1599,9 @@ public class DeepLinkHandler {
                                 if (snap3 != null && snap3.data != null)
                                     ticketNow2 = snap3.data.optString("ticket_no", "");
                             } catch (Exception ignored) {}
+                            if (!ticketNow2.isEmpty()) {
+                                lastKnownTicketNo.put(ticketCacheKey(serialId, woNum), ticketNow2);
+                            }
 
                             final boolean ticketChanged2 = !ticketNoAtStart.isEmpty()
                                 && !ticketNow2.isEmpty()
@@ -1670,6 +1697,24 @@ public class DeepLinkHandler {
                         if (state == null || state.isEmpty()) {
                             android.util.Log.w(TAG, "pollJob: state=null — job disparu, arrêt poll");
                             return;
+                        }
+
+                        // ✅ AJOUTÉ (27 août 2026, demande Paul — "je veux
+                        // avoir en bd chaque livraison qui a toi le
+                        // ticket_number ou le sales_number") — cas exact du
+                        // logcat fourni : logDeliveryEnd() re-clé déjà
+                        // delivery_summary sous le vrai ticket_no (ex:
+                        // "104") au moment du DONE, puis ce tick-ci passe en
+                        // CONNECTED et appelle logEvent(serialId, woNum, ...)
+                        // avec l'ancien woNum — ligne qui n'existe plus →
+                        // FOREIGN KEY échoue, attemptId=-1. Rafraîchir le
+                        // cache ici, à chaque tick, avant tout logEvent.
+                        if (r.data != null) {
+                            JSONObject resTick = r.data.optJSONObject("result");
+                            String tNow = resTick != null ? resTick.optString("ticket_no", "") : "";
+                            if (!tNow.isEmpty()) {
+                                lastKnownTicketNo.put(ticketCacheKey(serialId, woNum), tNow);
+                            }
                         }
 
                         if (state != null && !state.equals(lastState)) {
@@ -2151,14 +2196,31 @@ public class DeepLinkHandler {
             serialId, ticketNoReel != null ? ticketNoReel : "DEEPLINK",
             null, outcome, DeliveryLogStore.SOURCE_API,
             jobId, resultJson, errorJson);
+
+        // ✅ AJOUTÉ (27 août 2026) — garder lastKnownTicketNo synchro avec la
+        // clé réelle de delivery_summary, pour que logEvent()/logError()
+        // appelés juste après (ex: dans logError()) utilisent la même clé.
+        if (ticketNoReel != null && !ticketNoReel.trim().isEmpty()) {
+            lastKnownTicketNo.put(ticketCacheKey(serialId, woNum), ticketNoReel.trim());
+        }
     }
 
     private void logEvent(String serialId, String woNum, String level,
                            String type, String message, String dataJson) {
         if (deliveryStore == null || serialId == null || serialId.isEmpty()) return;
         try {
+            // ✅ CORRIGÉ (27 août 2026, demande Paul) — utilisait woNum brut,
+            // qui ne correspond plus à la clé delivery_summary une fois que
+            // logDeliveryEnd() a re-clé la ligne sous le vrai ticket_no →
+            // contrainte FOREIGN KEY échouait, attemptId=-1, événement
+            // sauté. Résout via lastKnownTicketNo (alimenté par
+            // pollJobUntilDone à chaque tick), avec repli sur woNum tant
+            // que le vrai ticket n'est pas encore connu — à ce moment la
+            // ligne existe encore sous woNum (créée par logDeliveryStart).
+            String ticketKey = lastKnownTicketNo.getOrDefault(
+                ticketCacheKey(serialId, woNum), woNum != null ? woNum : "DEEPLINK");
             deliveryStore.openAttemptAsync(
-                serialId, woNum != null ? woNum : "DEEPLINK",
+                serialId, ticketKey,
                 DeliveryLogStore.SOURCE_API, null, attemptId ->
                     deliveryStore.addEventAsync(
                         attemptId, level, type, message, dataJson));
