@@ -884,6 +884,38 @@ public class RegisterTabFragment extends Fragment {
                 double presetTrouve = backupPayload.optDouble("preset_net_l", -1);
                 LogBus.api(node, "[COMPARAISON_TICKET] trouvé — produit=" + idxTrouve
                         + " preset=" + presetTrouve + "L (dernier ticket connu, BD vierge)");
+                // ✅ AJOUTÉ (28 août 2026, demande Paul — "il trouve le
+                // dernier ticket_number par le json c'est quoi ton affaire
+                // tu as encore oublié") — ce même JSON (backupPayload),
+                // déjà en main pour produit/preset, contient AUSSI
+                // ticket_no/sale_no — jamais extraits ni appliqués à
+                // l'écran jusqu'ici, alors que ce mécanisme (repli sur le
+                // dernier résultat connu par #série, via
+                // lireActiveProductDepuisDeliverySummary) existe déjà
+                // précisément pour ce cas — BD vierge, avant tout vrai
+                // onTicketInfo(). Applique maintenant ticket_no/sale_no
+                // ici aussi, synchrone, dès cette même étape d'init —
+                // pas besoin d'attendre le premier heartbeat ou Status(B).
+                String ticketJson = backupPayload.optString("ticket_no", "");
+                String saleNoJson = backupPayload.optString("sale_no", "");
+                if (!ticketJson.isEmpty() && (lastKnownTicketNo == null || lastKnownTicketNo.isEmpty())) {
+                    lastKnownTicketNo = ticketJson;
+                    if (controller != null && !saleNoJson.isEmpty()) {
+                        controller.dernierSaleNoConnu = saleNoJson;
+                    }
+                    final String ticketPourAffichageJson = ticketJson;
+                    if (ui != null) {
+                        ui.post(() -> {
+                            if (!isAdded() || getView() == null) return;
+                            afficherTicketEtSaleNumberAvecSoulignement(ticketPourAffichageJson);
+                            if (txtDeliveryUid != null && serialFromArgs != null
+                                    && currentWoNum != null && !currentWoNum.isEmpty()) {
+                                txtDeliveryUid.setText("Delivery UID : "
+                                        + currentWoNum.trim() + "-" + ticketPourAffichageJson.trim());
+                            }
+                        });
+                    }
+                }
                 if (idxTrouve > 0 && idxTrouve <= 16) {
                     initValidatedProductIdx = idxTrouve - 1;
                     // ✅ CORRIGÉ (28 août 2026, demande Paul — "pourquoi
@@ -1543,7 +1575,38 @@ public class RegisterTabFragment extends Fragment {
                     String saleNoActuel = controller.getDernierSaleNoConnu();
                     if (!java.util.Objects.equals(saleNoActuel, lastDisplayedSaleNo)) {
                         lastDisplayedSaleNo = saleNoActuel;
-                        afficherTicketEtSaleNumberAvecSoulignement(lastKnownTicketNo);
+                        // ✅ CORRIGÉ (28 août 2026, demande Paul — "je n'ai
+                        // pas de repli pour le ticket_number") — trouvé :
+                        // asymétrie dans mon propre correctif précédent.
+                        // lastKnownTicketNo n'est mis à jour QUE par
+                        // onTicketInfo() (Status B/keep-alive), jamais par
+                        // ce heartbeat — pouvait rester périmé/vide pendant
+                        // que le Sale Number, lui, se rafraîchissait
+                        // correctement. En mode repli (le cas le plus
+                        // fréquent — Field #23 encore à 0, pas encore
+                        // imprimé), ticket_no ET sale_no sont EXACTEMENT
+                        // la même valeur (confirmé dans
+                        // readTicketNo23Uncached()) — utilise donc
+                        // saleNoActuel (frais) pour les deux dans ce cas,
+                        // au lieu du champ potentiellement périmé.
+                        String ticketPourAffichage =
+                                controller.isDernierTicketSaleNumberFallback()
+                                    ? saleNoActuel
+                                    : lastKnownTicketNo;
+                        afficherTicketEtSaleNumberAvecSoulignement(ticketPourAffichage);
+                        // ✅ AJOUTÉ (28 août 2026, même correctif) —
+                        // txtDeliveryUid n'était lui non plus jamais
+                        // touché par ce heartbeat, seulement par
+                        // onTicketInfo() — pouvait rester à "—" pendant
+                        // que ticket_no/sale_no se rafraîchissaient
+                        // correctement. Construit ici avec le même
+                        // ticketPourAffichage désormais fiable.
+                        if (txtDeliveryUid != null && currentWoNum != null
+                                && !currentWoNum.isEmpty() && ticketPourAffichage != null
+                                && !ticketPourAffichage.isEmpty()) {
+                            txtDeliveryUid.setText("Delivery UID : "
+                                    + currentWoNum.trim() + "-" + ticketPourAffichage.trim());
+                        }
                     }
                 }
                 if (texteReelementChange) {
