@@ -977,6 +977,25 @@ public class MainActivity extends AppCompatActivity {
         if (deepLinkHandler != null) deepLinkHandler.onDeliveryEnded(woNum, woIdGuid, extraJson);
     }
 
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — "les vides ne sont pas
+    // supposés l'être... le node, le #série") — relais vers la nouvelle
+    // surcharge 5-arg de DeepLinkHandler, avec node/serialId explicites
+    // au lieu de laisser DeepLinkHandler retomber sur ses propres champs
+    // partagés (currentNode/currentSerialId), jamais mis à jour hors de
+    // handleDeepLink().
+    public void onDeliveryEnded(String woNum, String woIdGuid, String extraJson,
+                                 int node, String serialId) {
+        if (deepLinkHandler != null) deepLinkHandler.onDeliveryEnded(woNum, woIdGuid, extraJson, node, serialId);
+    }
+
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — "oublie pas d'ajouter
+    // toujours le woguid, le bt mac") — relais vers la surcharge 6-arg de
+    // DeepLinkHandler, avec mac explicite en plus de node/serialId.
+    public void onDeliveryEnded(String woNum, String woIdGuid, String extraJson,
+                                 int node, String serialId, String mac) {
+        if (deepLinkHandler != null) deepLinkHandler.onDeliveryEnded(woNum, woIdGuid, extraJson, node, serialId, mac);
+    }
+
     /**
      * ✅ Délégation à DeepLinkHandler.lancerLivraison() — permet au bouton C
      * (relance manuelle dans l'APK) d'utiliser EXACTEMENT le même chemin que
@@ -7091,7 +7110,28 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
                             + " (node=" + knownNode + " serial=" + knownSerial + "), transport réellement ouvert — sonde d'identification évitée");
                     ui.post(() -> {
                         try {
-                            upsertRegisterTabFromScan(tk, knownNode, 255, knownSerial, true, knownIsLc3);
+                            // ✅ CORRIGÉ (28 août 2026, demande Paul —
+                            // "pourquoi n'es-tu pas capable de laisser
+                            // tranquille la section produit et preset") —
+                            // trouvé un DEUXIÈME chemin, jamais couvert par
+                            // le correctif du 27 août (celui-là ne visait
+                            // que l'appel direct dans DeepLinkHandler.
+                            // lancerLivraison). Ce chemin-ci force
+                            // focus=true INCONDITIONNELLEMENT, alors qu'on
+                            // est précisément dans la branche "onglet déjà
+                            // connu... transport réellement ouvert" — la
+                            // même situation que le correctif du 27 août
+                            // visait à protéger. focus=true déclenche
+                            // showRegisterFragmentByKey() → onTabActivated()
+                            // → runInitSequence() AU COMPLET (PRODUIT/
+                            // COMPARAISON_TICKET/PRESET/...), à chaque fois
+                            // que ce chemin s'exécute — jusqu'ici protégé
+                            // seulement par coïncidence de timing (le
+                            // anti-rebond 200ms de upsertRegisterTabFromScan
+                            // attrapait ce doublon presque toujours, mais
+                            // pas par conception). Un tab déjà connu et
+                            // déjà ouvert n'a besoin d'aucune réactivation.
+                            upsertRegisterTabFromScan(tk, knownNode, 255, knownSerial, false, knownIsLc3);
                             refreshAllTabsMediaStatus();
                         } catch (Exception ignored) {}
                     });

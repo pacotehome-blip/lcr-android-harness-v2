@@ -1772,7 +1772,7 @@ public class DeepLinkHandler {
                             String extraJson = (r.data != null) ? r.data.toString() : "{}";
                             android.util.Log.i(TAG, "Livraison DONE — " + extraJson);
                             logDeliveryEnd(serialId, woNum, jobId, "DONE", extraJson, null);
-                            onDeliveryEnded(woNum, woIdGuid, extraJson);
+                            onDeliveryEnded(woNum, woIdGuid, extraJson, node, serialId, mac);
                             return;
                         }
 
@@ -1784,7 +1784,7 @@ public class DeepLinkHandler {
                             String extraJson = r.data.toString();
                             android.util.Log.w(TAG, "Livraison PRINT_TIMEOUT — Dataverse quand même — " + extraJson);
                             logDeliveryEnd(serialId, woNum, jobId, "DONE_PRINT_TIMEOUT", extraJson, null);
-                            onDeliveryEnded(woNum, woIdGuid, extraJson);
+                            onDeliveryEnded(woNum, woIdGuid, extraJson, node, serialId, mac);
                             return;
                         }
 
@@ -1796,7 +1796,7 @@ public class DeepLinkHandler {
                             android.util.Log.i(TAG,
                                 "Livraison terminée (CONNECTED post-terminate) — " + extraJson);
                             logDeliveryEnd(serialId, woNum, jobId, "DONE", extraJson, null);
-                            onDeliveryEnded(woNum, woIdGuid, extraJson);
+                            onDeliveryEnded(woNum, woIdGuid, extraJson, node, serialId, mac);
                             return;
                         }
 
@@ -1810,7 +1810,7 @@ public class DeepLinkHandler {
                             android.util.Log.i(TAG,
                                 "Livraison terminée (CONNECTED preset atteint) — " + extraJson);
                             logDeliveryEnd(serialId, woNum, jobId, "DONE", extraJson, null);
-                            onDeliveryEnded(woNum, woIdGuid, extraJson);
+                            onDeliveryEnded(woNum, woIdGuid, extraJson, node, serialId, mac);
                             return;
                         }
 
@@ -1848,6 +1848,32 @@ public class DeepLinkHandler {
     }
 
     public void onDeliveryEnded(String woNum, String woIdGuid, String extraJson) {
+        // ✅ CORRIGÉ (28 août 2026, demande Paul — "les vides ne sont pas
+        // supposés l'être... le node, le #série") — cette surcharge (3-arg)
+        // relayait vers currentNode/currentSerialId, des champs PARTAGÉS de
+        // DeepLinkHandler, jamais mis à jour hors de handleDeepLink() — une
+        // livraison arrivée par tout autre chemin (reconnexion, retry)
+        // héritait de node=0/serialId="" au moment d'écrire dans
+        // LcrDeliveryStatusDb, puis vers Dataverse. Conservée pour tout
+        // appelant existant qui n'a pas node/serialId sous la main — mais
+        // le VRAI point d'entrée est maintenant la surcharge 6-arg
+        // ci-dessous, appelée directement par pollJobUntilDone() (qui, lui,
+        // a déjà node/serialId/mac en paramètres explicites, jamais
+        // partagés). Pas de champ partagé équivalent pour le mac — repli
+        // sur chaîne vide plutôt que d'en inventer un nouveau.
+        onDeliveryEnded(woNum, woIdGuid, extraJson, currentNode, currentSerialId, "");
+    }
+
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — même correctif, "oublie pas
+    // d'ajouter toujours le woguid, le bt mac") — vraie implémentation,
+    // avec node/serialId/mac REÇUS EN PARAMÈTRES au lieu d'être lus
+    // depuis un état partagé potentiellement périmé/jamais initialisé
+    // pour ce chemin d'appel précis. woIdGuid était déjà correctement un
+    // paramètre explicite depuis le début — seul mac manquait
+    // complètement de l'insertion locale jusqu'ici (voir plus bas,
+    // COL_BTMAC jamais posé).
+    public void onDeliveryEnded(String woNum, String woIdGuid, String extraJson,
+                                 int nodeParam, String serialIdParam, String macParam) {
         // ✅ Effacer la livraison courante
         try { new ActiveDeliveryStore(activity).clear(); } catch (Exception ignored) {}
         android.util.Log.i(TAG,
@@ -1897,14 +1923,26 @@ public class DeepLinkHandler {
                 }
 
                 // lcrnode + serialId depuis contexte livraison courante
-                int lcrnode = currentNode;
-                String serialId = currentSerialId;
+                // ✅ CORRIGÉ (28 août 2026) — nodeParam/serialIdParam reçus
+                // en paramètres (voir surcharge 5-arg ci-dessus), plus
+                // jamais currentNode/currentSerialId (partagés, périmés
+                // hors du chemin handleDeepLink()).
+                int lcrnode = nodeParam;
+                String serialId = serialIdParam;
+                // ✅ AJOUTÉ (28 août 2026, demande Paul — "oublie pas
+                // d'ajouter toujours le woguid, le bt mac") — COL_BTMAC
+                // était complètement absent de cette insertion jusqu'ici,
+                // contrairement à d'autres blocs du fichier (lignes ~1531,
+                // ~1645) qui, eux, l'incluaient déjà. Corrigé pour
+                // cohérence — toujours écrit ici aussi maintenant.
+                String mac = macParam;
 
                 android.content.ContentValues cv = new android.content.ContentValues();
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,       woNum != null ? woNum : "");
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID,   woIdGuid != null ? woIdGuid.replace("{","").replace("}","") : "");
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID,    serialId);
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_LCRNODE,      lcrnode);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_BTMAC,        mac != null ? mac : "");
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PRODUIT_NO,   produitNo);
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO,    ticketNo);
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SALE_NO,      saleNo);

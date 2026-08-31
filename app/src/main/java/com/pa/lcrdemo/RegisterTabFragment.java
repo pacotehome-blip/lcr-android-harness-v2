@@ -2442,7 +2442,19 @@ public class RegisterTabFragment extends Fragment {
                 extra.put("grossL",    gross);
             } catch (Exception ignored) {}
 
-            main.onDeliveryEnded(woNum, woIdGuid, extra.toString());
+            // ✅ CORRIGÉ (28 août 2026, même correctif que
+            // DeepLinkHandler.onDeliveryEnded) — node/serialFromArgs déjà
+            // disponibles ici, plutôt que de laisser DeepLinkHandler
+            // retomber sur ses propres currentNode/currentSerialId
+            // potentiellement périmés.
+            // ✅ AJOUTÉ (28 août 2026, même correctif) — mac extrait de
+            // tabTransportKey ("BT:AA:BB:...") si disponible, sinon vide
+            // plutôt que de planter sur un format inattendu (ex: "USB").
+            String macPourFin = "";
+            if (tabTransportKey != null && tabTransportKey.startsWith("BT:") && tabTransportKey.length() > 3) {
+                macPourFin = tabTransportKey.substring(3).trim();
+            }
+            main.onDeliveryEnded(woNum, woIdGuid, extra.toString(), node, serialFromArgs, macPourFin);
 
             // ✅ Insérer dans LcrDeliveryStatusDb si pas déjà fait par DeepLinkHandler
             // Cas ticket pending — le poll a quitté sans appeler onDeliveryEnded dans DeepLinkHandler
