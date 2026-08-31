@@ -5204,6 +5204,13 @@ public class RegisterTabFragment extends Fragment {
                     // la synchronisation pour de bon — exactement le
                     // scénario réel que Paul vient de vivre. Même patron
                     // exact que celui de DeepLinkHandler.onDeliveryEnded().
+                    // ✅ CORRIGÉ (build cassé — "must be final or
+                    // effectively final") — woNum/woIdGuid sont réassignés
+                    // plus haut (repli ActiveDeliveryStore), donc pas
+                    // effectively final — copies finales nécessaires pour
+                    // la capture dans les lambdas imbriquées ci-dessous.
+                    final String fWoNumForPatch = woNum;
+                    final String fWoIdGuidForPatch = woIdGuid;
                     try {
                         com.pa.lcrdemo.auth.MsalTokenProvider tpAnnul =
                             new com.pa.lcrdemo.auth.MsalTokenProvider(requireContext());
@@ -5237,7 +5244,7 @@ public class RegisterTabFragment extends Fragment {
                                                     new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
                                                 java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> allRows;
                                                 try {
-                                                    allRows = lcrFinal.getAllForWo(woNum);
+                                                    allRows = lcrFinal.getAllForWo(fWoNumForPatch);
                                                 } finally {
                                                     try { lcrFinal.close(); } catch (Exception ignored) {}
                                                 }
@@ -5259,9 +5266,9 @@ public class RegisterTabFragment extends Fragment {
                                                 }
                                                 if (livraisons.length() > 0 && !patchGuid.isEmpty()) {
                                                     com.pa.lcrdemo.dataverse.WorkOrderUpdater.patchSummaryConsolidated(
-                                                        token, patchGuid, woNum, livraisons);
+                                                        token, patchGuid, fWoNumForPatch, livraisons);
                                                     android.util.Log.i("Annuler", "patchSummaryConsolidated post-annulation OK — "
-                                                        + livraisons.length() + " livraison(s), wo=" + woNum);
+                                                        + livraisons.length() + " livraison(s), wo=" + fWoNumForPatch);
                                                 }
                                             } catch (Exception e) {
                                                 android.util.Log.w("Annuler", "patchSummaryConsolidated post-annulation ERR (non-bloquant): " + e.getMessage());
