@@ -917,7 +917,25 @@ public class RegisterTabFragment extends Fragment {
                     }
                 }
                 if (idxTrouve > 0 && idxTrouve <= 16) {
-                    initValidatedProductIdx = idxTrouve - 1;
+                    // ✅ CORRIGÉ (28 août 2026, demande Paul — "chaque init
+                    // devait avoir rempli sa condition, si je n'ai pas le
+                    // produit et que le produit n'est pas confirmé entre
+                    // fieldservice et le registre on annule la livraison")
+                    // — trouvé : cette ligne marquait initValidatedProductIdx
+                    // depuis CE repli (BD/JSON), SANS jamais comparer contre
+                    // produitDeepLinkPourAnnulation (ce que FieldService
+                    // attend réellement) — court-circuitant silencieusement
+                    // la vraie validation de l'étape PRODUIT juste avant.
+                    // Si un produit précis est attendu du deep link,
+                    // laisse PRODUIT être la SEULE autorité pour marquer
+                    // "validé" — ce repli reste provisoire à l'écran
+                    // (juste en dessous), mais ne satisfait plus jamais la
+                    // condition d'annulation à sa place.
+                    boolean produitAttenduPrecis = produitDeepLinkPourAnnulation != null
+                            && !produitDeepLinkPourAnnulation.trim().isEmpty();
+                    if (!produitAttenduPrecis) {
+                        initValidatedProductIdx = idxTrouve - 1;
+                    }
                     // ✅ CORRIGÉ (28 août 2026, demande Paul — "pourquoi
                     // n'es-tu pas capable de laisser tranquille la section
                     // produit et preset, après la livraison") — trouvé LE
