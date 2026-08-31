@@ -116,6 +116,65 @@ public final class RegisterSessionManager {
 
     public DeliveryLogStore getStore() { return store; }
 
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — "on devrait aussi empêcher
+    // la validation si une livraison est en cours") — vérifie, sur TOUS
+    // les registres actuellement connus (pas seulement un seul tab),
+    // s'il y a une livraison active en ce moment. Utilise la même vraie
+    // lecture synchrone que api_isDeliveryActiveNow() (via le contrôleur
+    // de chaque session), pas un état en cache — la validation ne doit
+    // jamais démarrer si on n'est pas certain qu'aucune livraison ne
+    // coule nulle part.
+    public boolean isAnyDeliveryActiveAnywhere() {
+        for (NodeSession s : sessions.values()) {
+            if (s == null || s.dc == null || s.dc.isStopped()) continue;
+            try {
+                DeliveryState st = s.dc.getState();
+                if (st == DeliveryState.PRESTART || st == DeliveryState.STARTING
+                        || st == DeliveryState.RUNNING_FLOWING || st == DeliveryState.RUNNING_PAUSED
+                        || st == DeliveryState.ENDING) {
+                    return true;
+                }
+                // ✅ Filet de sécurité supplémentaire : même si l'état en
+                // mémoire dit CONNECTED, une vraie lecture directe du
+                // registre confirme qu'aucun flux n'est réellement en
+                // cours — coûteux (une vraie communication LCP par
+                // registre), mais justifié ici : on s'apprête à couper
+                // toutes les connexions, la certitude prime sur la vitesse.
+                if (s.dc.api_isDeliveryActiveNow()) return true;
+            } catch (Exception ignored) {
+                // Prudence : une session dont l'état ne peut pas être
+                // vérifié ne doit jamais être traitée comme "sûrement
+                // inactive" — bloque la validation par précaution.
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — "je veux avant de démarrer
+    // fermer toutes les connexions présentes dans l'apk... ensuite
+    // lorsque la validation est terminée, il peut relâcher les
+    // connexions par la suite et laisser les tabs reprendre") —
+    // déconnexion "douce" : ferme le transport de chaque session
+    // (shutdown(false), pas shutdown(true) — permet une vraie
+    // reconnexion naturelle après, via les mécanismes de détection
+    // automatique déjà en place, une fois isValidationEnCours() retombé
+    // à false). Les entrées de session elles-mêmes restent en mémoire
+    // (transportKey, serialId) — seul le lien physique est coupé.
+    public void closeAllForValidation() {
+        for (java.util.Map.Entry<String, NodeSession> e : sessions.entrySet()) {
+            NodeSession s = e.getValue();
+            if (s == null) continue;
+            // ✅ Même patron exact que la logique de remplacement de
+            // session déjà existante ailleurs dans ce fichier (scheduler
+            // ET contrôleur arrêtés, entrée retirée) — pas de nouvelle
+            // convention inventée ici.
+            try { s.scheduler.shutdown(); } catch (Exception ignored) {}
+            try { s.dc.shutdown(false); } catch (Exception ignored) {}
+        }
+        sessions.clear();
+    }
+
     // ✅ v7: clé registre = node#serial (serial = #80)
     private static String regKey(int nodeDec, String serialId) {
         int node = nodeDec;
