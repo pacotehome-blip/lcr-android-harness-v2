@@ -306,6 +306,29 @@ private void reproEvent(String level, String type, String message, JSONObject da
 
     // Wrappers LCP
     private int[] lcpDeliveryStatus() throws Exception { return withLcpLock(() -> link.opDeliveryStatus()); }
+
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — "s'il y avait une livraison
+    // en cours il ferait quoi, le tab nous ramènerait automatiquement à
+    // running_flowing") — vraie lecture SYNCHRONE, directe, du registre —
+    // pas basée sur l'historique BD (qui ne voit qu'une livraison déjà
+    // TERMINÉE, jamais une en cours). Utilisée par le chemin de
+    // reconnexion automatique (RegisterConnectionHelper) pour décider,
+    // AVANT d'appeler lancerLivraison(), si le registre coule vraiment
+    // en ce moment — auquel cas il ne faut RIEN réarmer, juste laisser
+    // le state machine déjà en place (requestStatus/requestLiveSample,
+    // appelés juste avant) refléter naturellement RUNNING_FLOWING.
+    public boolean api_isDeliveryActiveNow() {
+        try {
+            int[] ds = lcpDeliveryStatus();
+            return (ds[1] & DC_DELIVERY_ACTIVE) != 0;
+        } catch (Exception e) {
+            // Prudence : en cas d'échec de lecture, on ne SAIT PAS si une
+            // livraison coule ou non — retourner true fait s'abstenir
+            // l'appelant de tout réarmement automatique, plutôt que de
+            // risquer un doublon sur un simple échec de lecture ponctuel.
+            return true;
+        }
+    }
     private LcpLink.MachineStatus lcpMachineStatus() throws Exception {
         // ✅ FIX (13 août 2026, demande Paul — "si Field #37 = 2, on n'a pas
         // besoin de GET_MACHINE_STATUS du tout") — confirmé dans la doc

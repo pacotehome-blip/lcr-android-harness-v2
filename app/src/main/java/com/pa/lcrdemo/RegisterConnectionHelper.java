@@ -786,6 +786,28 @@ public class RegisterConnectionHelper {
                 if (dc2 != null) {
                     dc2.requestStatus();
                     dc2.requestLiveSample();
+
+                    // ✅ AJOUTÉ (28 août 2026, demande Paul — "s'il y avait
+                    // une livraison en cours il ferait quoi, le tab nous
+                    // ramènerait automatiquement à running_flowing") —
+                    // trouvé : le "dejaLivre" plus bas ne vérifie QUE
+                    // l'historique BD (une livraison déjà TERMINÉE) —
+                    // aveugle à une livraison RÉELLEMENT EN COURS
+                    // maintenant (qui n'a pas encore de ligne en BD,
+                    // puisqu'elle n'est pas terminée). Une vraie lecture
+                    // synchrone du registre, ici, AVANT toute décision de
+                    // relance : si une livraison coule vraiment en ce
+                    // moment, requestStatus()/requestLiveSample()
+                    // ci-dessus suffisent déjà à ramener l'état à
+                    // RUNNING_FLOWING naturellement — aucun besoin
+                    // d'appeler lancerLivraison(), qui pourrait montrer le
+                    // dialogue "bon déjà complété" ou même réarmer une
+                    // livraison, alors qu'une vraie est déjà en cours.
+                    if (dc2.api_isDeliveryActiveNow()) {
+                        Log.i(TAG, "diagnostic succès — livraison RÉELLEMENT active sur le registre (deliveryActive=1) — "
+                            + "aucune relance automatique, l'état RUNNING_FLOWING se rétablit déjà via requestStatus/requestLiveSample ci-dessus");
+                        return;
+                    }
                 }
             } catch (Exception ignored) {}
 
