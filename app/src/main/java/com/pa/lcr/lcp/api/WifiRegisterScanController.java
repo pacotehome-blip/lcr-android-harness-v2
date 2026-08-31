@@ -207,9 +207,26 @@ public final class WifiRegisterScanController {
                 android.net.ConnectivityManager cm = (android.net.ConnectivityManager)
                         appCtx.getApplicationContext().getSystemService(Context.CONNECTIVITY_SERVICE);
                 if (cm == null) return null;
-                android.net.Network net = cm.getActiveNetwork();
-                if (net == null) return null;
-                android.net.LinkProperties lp = cm.getLinkProperties(net);
+                // ✅ CORRIGÉ (28 août 2026, demande Paul — "tcp on doit
+                // valider le réseau local de la tablette le wifi
+                // uniquement") — trouvé : getActiveNetwork() retourne le
+                // réseau que le système considère "actif" en ce moment,
+                // SANS garantir que c'est le Wi-Fi — pourrait être les
+                // données cellulaires (Wi-Fi désactivé, ou l'OS priorise
+                // autrement dans certains cas multi-réseaux). Cherche
+                // maintenant explicitement, parmi TOUS les réseaux
+                // actifs, celui qui a le transport WIFI — jamais un
+                // repli implicite sur autre chose.
+                android.net.Network wifiNet = null;
+                for (android.net.Network n : cm.getAllNetworks()) {
+                    android.net.NetworkCapabilities caps = cm.getNetworkCapabilities(n);
+                    if (caps != null && caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI)) {
+                        wifiNet = n;
+                        break;
+                    }
+                }
+                if (wifiNet == null) return null; // pas de Wi-Fi actif — jamais de repli sur un autre réseau
+                android.net.LinkProperties lp = cm.getLinkProperties(wifiNet);
                 if (lp == null) return null;
                 for (android.net.LinkAddress la : lp.getLinkAddresses()) {
                     java.net.InetAddress addr = la.getAddress();
