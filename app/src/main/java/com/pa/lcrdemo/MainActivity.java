@@ -678,6 +678,18 @@ public class MainActivity extends AppCompatActivity {
 
         bindUi();
         wireUi();
+        // ✅ AJOUTÉ (28 août 2026, demande Paul — "sur android 15, il faut
+        // que j'aille dans l'onglet configure... si je ne fais pas ça le
+        // tab ne s'autoinitialise pas") — trouvé : BLUETOOTH_CONNECT
+        // (requise depuis Android 12) n'était JAMAIS demandée avant que
+        // l'utilisateur ne navigue manuellement vers l'onglet Configure
+        // (index 2) — seul endroit qui appelait ensureBtConnectPermission().
+        // Si l'auto-init tentait d'utiliser le BT avant cette visite
+        // manuelle, la permission n'avait jamais été accordée. Demandée
+        // ici, dès le démarrage de l'app, avant toute tentative
+        // d'auto-init — même fonction déjà existante, juste appelée plus
+        // tôt.
+        ensureBtConnectPermission();
         refreshKnownTcpList();
         refreshDetectedSubnet();
         initUiDefaults();
