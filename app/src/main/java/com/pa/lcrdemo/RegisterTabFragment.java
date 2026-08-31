@@ -1387,6 +1387,22 @@ public class RegisterTabFragment extends Fragment {
                 // lance automatiquement, sans attendre un clic.
                 if (state == DeliveryState.DISCONNECTED) {
                     tabMediaReady = false;
+                    // ✅ AJOUTÉ (28 août 2026, demande Paul — "fermer
+                    // toutes les connexions... empêcher la détection
+                    // automatique afin que le test de validation soit
+                    // complété") — trouvé : ce déclenchement automatique
+                    // ne vérifiait jamais isValidationEnCours(). La
+                    // fermeture volontaire des connexions au démarrage
+                    // d'une validation (MainActivity.closeAllForValidation())
+                    // met justement chaque contrôleur à DISCONNECTED —
+                    // sans cette garde, ça relançait immédiatement le
+                    // diagnostic automatique sur chaque tab, annulant
+                    // l'effet recherché.
+                    MainActivity mainAct = (MainActivity) getActivity();
+                    if (mainAct != null && mainAct.isValidationEnCours()) {
+                        android.util.Log.i("RegisterTabFragment", "onStateChanged: DISCONNECTED reçu, mais validation manuelle en cours — diagnostic automatique suspendu");
+                        return;
+                    }
                     android.util.Log.w("RegisterTabFragment", "onStateChanged: DISCONNECTED reçu — déclenchement automatique du diagnostic");
                     surErreurConnexion(
                         new java.io.IOException("Controller a déclaré DISCONNECTED (timeouts LCP répétés)"),
@@ -5481,10 +5497,49 @@ public class RegisterTabFragment extends Fragment {
                 row = store.getLatestResultBySerial(serialId.trim());
                 if (row != null) LogBus.api(node, "[PRODUIT-CACHE] trouvé par #série seul (repli, ticket introuvable/absent)");
             }
-            if (row == null || row.resultJson == null || row.resultJson.trim().isEmpty()) return null;
-            org.json.JSONObject j = new org.json.JSONObject(row.resultJson);
-            if (!j.has("active_product") || j.isNull("active_product")) return null;
-            return j;
+            if (row != null && row.resultJson != null && !row.resultJson.trim().isEmpty()) {
+                org.json.JSONObject j = new org.json.JSONObject(row.resultJson);
+                if (j.has("active_product") && !j.isNull("active_product")) return j;
+            }
+            // ✅ AJOUTÉ (28 août 2026, demande Paul — "sur une bd vierge,
+            // j'ai un trou sur une livraison annulée lorsque je reviens
+            // dans le tab") — trouvé : une ANNULATION s'écrit dans
+            // LcrDeliveryStatusDb (filgo_delivery_status), JAMAIS dans
+            // delivery_summary (DeliveryLogStore, ce que ce bloc vient de
+            // consulter ci-dessus) — deux tables séparées. Sur une vraie
+            // BD vierge où la toute première activité est une annulation,
+            // delivery_summary n'a rien d'utile, et ce chemin de
+            // restauration tombait dans le vide. Repli supplémentaire ici
+            // — même principe déjà établi aujourd'hui pour le produit
+            // (LcrDeliveryStatusDb.getLastDeliveryForSerial(), qui LUI
+            // contient bien les annulations, sans filtre de type).
+            // active_product peut légitimement être absent pour une
+            // annulation (rien n'a été vraiment confirmé) — ticket_no/
+            // sale_no restent utiles quand même, donc pas la même
+            // exigence stricte que le chemin normal ci-dessus.
+            if (serialId != null && !serialId.trim().isEmpty()) {
+                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbFallback =
+                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                try {
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow rowFallback =
+                            dbFallback.getLastDeliveryForSerial(serialId.trim());
+                    if (rowFallback != null) {
+                        LogBus.api(node, "[PRODUIT-CACHE] repli LcrDeliveryStatusDb (delivery_summary vide) — type="
+                                + rowFallback.type + " ticket=" + rowFallback.ticketNo);
+                        org.json.JSONObject jf = new org.json.JSONObject();
+                        if (rowFallback.ticketNo != null) jf.put("ticket_no", rowFallback.ticketNo);
+                        if (rowFallback.saleNo != null) jf.put("sale_no", rowFallback.saleNo);
+                        if (rowFallback.produitNo > 0) {
+                            jf.put("active_product", rowFallback.produitNo);
+                        }
+                        if (rowFallback.presetL > 0) jf.put("preset_net_l", rowFallback.presetL);
+                        return jf;
+                    }
+                } finally {
+                    try { dbFallback.close(); } catch (Exception ignored) {}
+                }
+            }
+            return null;
         } catch (Exception e) {
             android.util.Log.w("RegisterTabFragment", "lireActiveProductDepuisDeliverySummary ERR: " + e.getMessage());
             return null;
