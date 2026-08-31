@@ -2463,13 +2463,12 @@ public class RegisterTabFragment extends Fragment {
             // disponibles ici, plutôt que de laisser DeepLinkHandler
             // retomber sur ses propres currentNode/currentSerialId
             // potentiellement périmés.
-            // ✅ AJOUTÉ (28 août 2026, même correctif) — mac extrait de
-            // tabTransportKey ("BT:AA:BB:...") si disponible, sinon vide
-            // plutôt que de planter sur un format inattendu (ex: "USB").
-            String macPourFin = "";
-            if (tabTransportKey != null && tabTransportKey.startsWith("BT:") && tabTransportKey.length() > 3) {
-                macPourFin = tabTransportKey.substring(3).trim();
-            }
+            // ✅ CORRIGÉ (28 août 2026) — gardait le MAC sans préfixe
+            // "BT:" (substring(3) le retirait), alors que Dataverse le
+            // conserve pour les livraisons normales déjà confirmées
+            // aujourd'hui (ex: "BT:00:01:95:87:72:A1"). Garde le format
+            // complet.
+            String macPourFin = (tabTransportKey != null) ? tabTransportKey.trim() : "";
             main.onDeliveryEnded(woNum, woIdGuid, extra.toString(), node, serialFromArgs, macPourFin);
 
             // ✅ Insérer dans LcrDeliveryStatusDb si pas déjà fait par DeepLinkHandler
@@ -5085,6 +5084,16 @@ public class RegisterTabFragment extends Fragment {
                             ticketNo = result.optString("ticket_no", "");
                     }
                 } catch (Exception ignored) {}
+                // ✅ AJOUTÉ (28 août 2026, demande Paul — "voyons la
+                // question d'une ticket annulé") — trouvé : api_tickSnapshot()
+                // reste vide ici car forceEndSync() (CMD_END forcé, pas le
+                // flux de complétion normal) ne remplit jamais job.ticketNo.
+                // Repli sur lastKnownTicketNo — déjà suivi fidèlement via
+                // onTicketInfo(), confirmé correct dans ce même log
+                // ("120") jusqu'au moment même de l'annulation.
+                if (ticketNo.isEmpty() && lastKnownTicketNo != null && !lastKnownTicketNo.isEmpty()) {
+                    ticketNo = lastKnownTicketNo;
+                }
 
                 // 5. Contexte WO — priorité à currentWoNum/currentWoIdGuid
                 // (champs du fragment, protégés aujourd'hui contre
@@ -5129,14 +5138,30 @@ public class RegisterTabFragment extends Fragment {
                     // l'avait. Sur une BD vierge (réinstall), c'était donc
                     // la SEULE trace possible d'une annulation qui
                     // manquait complètement.
-                    String macAnnul = "";
-                    if (tabTransportKey != null && tabTransportKey.startsWith("BT:") && tabTransportKey.length() > 3) {
-                        macAnnul = tabTransportKey.substring(3).trim();
-                    }
+                    // ✅ CORRIGÉ (28 août 2026) — gardait le MAC SANS
+                    // préfixe "BT:" (substring(3) le retirait), alors que
+                    // les livraisons normales le conservent dans Dataverse
+                    // (confirmé: "BT:00:01:95:87:72:A1"). Garde maintenant
+                    // le format complet, cohérent avec le reste.
+                    String macAnnul = (tabTransportKey != null) ? tabTransportKey.trim() : "";
                     android.content.ContentValues cv = new android.content.ContentValues();
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,      woNum);
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID,  woIdGuid);
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO,   ticketNo);
+                    // ✅ AJOUTÉ (28 août 2026, demande Paul — "je n'ai pas
+                    // le numéro de vente, je n'ai pas le ticket_number") —
+                    // COL_SALE_NO n'était jamais inclus dans cette
+                    // insertion — le seul autre point d'insertion du
+                    // fichier qui le pose est le chemin normal, jamais
+                    // celui-ci. Même valeur que ticketNo (déjà résolue via
+                    // lastKnownTicketNo au besoin) — cohérent avec le
+                    // principe déjà établi partout ailleurs aujourd'hui
+                    // (ticket_no et sale_no sont la même valeur en mode
+                    // repli). delivery_uid se construira correctement de
+                    // lui-même au moment de l'envoi vers Dataverse
+                    // (wo_num + "-" + ticket_no, déjà automatique dans
+                    // pushDeliveryRow) — pas besoin de le fixer séparément.
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SALE_NO,     ticketNo);
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID,   serialFromArgs != null ? serialFromArgs : "");
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_LCRNODE,     node);
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_BTMAC,       macAnnul);
