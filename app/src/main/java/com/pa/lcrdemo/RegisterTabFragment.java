@@ -5347,7 +5347,26 @@ public class RegisterTabFragment extends Fragment {
 
                 if (produitDerniereLivraison > 0 && produitDerniereLivraison <= 16) {
                     final int idxDerniere = produitDerniereLivraison;
-                    android.util.Log.i("RegisterTabFragment", "Auto-scan produits — trouvé dans LcrDeliveryStatusDb (dernière livraison), aucun scan matériel nécessaire, produit=" + idxDerniere);
+                    android.util.Log.i("RegisterTabFragment", "Auto-scan produits — trouvé dans LcrDeliveryStatusDb (dernière livraison), produit=" + idxDerniere);
+                    // ✅ CORRIGÉ (28 août 2026, demande Paul — "je n'ai pas
+                    // le code produit, la description produit, le type
+                    // produit... le scan comme le bouton scan produits n'a
+                    // pas été exécuté") — trouvé : LcrDeliveryStatusDb ne
+                    // contient QU'UN numéro brut, jamais description/code/
+                    // type. Ce bloc appliquait ce numéro brut puis posait
+                    // produitDejaResoluPourCetteSession=true SANS CONDITION
+                    // — bloquant le vrai scan matériel pour de bon, même
+                    // quand RegisterProductStore (le cache LOCAL, qui LUI
+                    // a les vraies descriptions) était vide et n'avait
+                    // donc rien de mieux à offrir que ce numéro brut. Même
+                    // principe que COMPARAISON_TICKET déjà corrigé plus
+                    // tôt aujourd'hui : n'applique ce numéro brut que
+                    // comme PROVISOIRE (pose le flag SEULEMENT si un vrai
+                    // label existait déjà dans RegisterProductStore) —
+                    // sinon, laisse le vrai scan matériel se déclencher
+                    // juste après pour obtenir la vraie description/code/
+                    // type et peupler RegisterProductStore pour de bon.
+                    final boolean[] vraiLabelTrouve = {false};
                     ui.post(() -> {
                         try {
                             if (!isAdded() || getView() == null) return;
@@ -5358,18 +5377,31 @@ public class RegisterTabFragment extends Fragment {
                                 try {
                                     com.pa.lcr.lcp.storage.RegisterProductStore.Row rowLabel =
                                             storeLabel.findByNoteIdx(serialId, idxDerniere - 1);
-                                    if (rowLabel != null) label = rowLabel.toSpinnerLabel();
+                                    if (rowLabel != null) {
+                                        label = rowLabel.toSpinnerLabel();
+                                        vraiLabelTrouve[0] = true;
+                                    }
                                 } finally {
                                     try { storeLabel.close(); } catch (Exception ignored) {}
                                 }
                             } catch (Exception ignored) {}
                             if (spnProduct != null) spnProduct.setText(label, false);
                             initValidatedProductIdx = idxDerniere - 1;
-                            produitDejaResoluPourCetteSession = true;
+                            if (vraiLabelTrouve[0]) {
+                                produitDejaResoluPourCetteSession = true;
+                            }
                         } finally {
                             autoProductScanInFlight = false;
                             autoScanLockRelease(globalKey);
                             if (doneSignal != null) doneSignal.countDown();
+                            if (!vraiLabelTrouve[0]) {
+                                if (controller != null && controller.scanInProgress) {
+                                    android.util.Log.i("RegisterTabFragment", "Auto-scan produits — vrai scan déjà en cours (autre déclencheur), pas de doublon");
+                                } else {
+                                    android.util.Log.i("RegisterTabFragment", "Auto-scan produits — LcrDeliveryStatusDb n'avait qu'un numéro brut (pas de description/code/type en cache) — lancement du vrai scan matériel pour l'affiner");
+                                    lancerScanProduits();
+                                }
+                            }
                         }
                     });
                     return;
