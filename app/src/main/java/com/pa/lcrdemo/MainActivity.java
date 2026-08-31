@@ -424,7 +424,7 @@ public class MainActivity extends AppCompatActivity {
     private volatile long validationEnCoursDepuisMs = 0L;
     private static final long VALIDATION_EN_COURS_EXPIRATION_MS = 60_000;
 
-    private boolean isValidationEnCours() {
+    public boolean isValidationEnCours() {
         long depuis = validationEnCoursDepuisMs;
         if (depuis == 0L) return false;
         if (System.currentTimeMillis() - depuis > VALIDATION_EN_COURS_EXPIRATION_MS) {
@@ -6193,8 +6193,36 @@ private boolean ensureBtConnectPermission() {
     }
 
     private void validerCandidats(TextView resultView, Button btnStart, Button btnCancel) {
+        // ✅ AJOUTÉ (28 août 2026, demande Paul — "on devrait aussi
+        // empêcher la validation si une livraison est en cours") —
+        // vérifie AVANT toute chose, sur tous les registres connus, pas
+        // juste celui du tab actif. Bloque net si une livraison coule
+        // vraiment quelque part — jamais de compromis sur ce point.
+        if (com.pa.lcr.lcp.RegisterSessionManager.get(this).isAnyDeliveryActiveAnywhere()) {
+            if (resultView != null) resultView.setText(
+                "⛔ Validation impossible — une livraison est actuellement en cours sur un registre. "
+                + "Terminez-la avant de lancer la validation.");
+            android.util.Log.w("MainActivity", "validerCandidats: refusé — livraison active détectée sur au moins un registre");
+            return;
+        }
         candidatsAnnules = false;
         validationEnCoursDepuisMs = System.currentTimeMillis(); // ✅ suspend le chien de garde pendant la validation (expire seul après 60s max)
+        // ✅ AJOUTÉ (28 août 2026, demande Paul — "je veux avant de
+        // démarrer fermer toutes les connexions présentes dans l'apk") —
+        // ferme tous les contrôleurs/schedulers actifs avant de tester
+        // les candidats — plus aucune connexion existante ne peut entrer
+        // en conflit avec les sondes de validation. Une fois
+        // validationEnCoursDepuisMs retombé à false (fin normale,
+        // annulation, ou expiration 60s), les mécanismes de détection
+        // automatique déjà en place (déjà protégés par
+        // isValidationEnCours()) recréeront naturellement les
+        // connexions et les tabs reprendront.
+        try {
+            com.pa.lcr.lcp.RegisterSessionManager.get(this).closeAllForValidation();
+            android.util.Log.i("MainActivity", "validerCandidats: toutes les connexions fermées avant validation");
+        } catch (Exception e) {
+            android.util.Log.w("MainActivity", "validerCandidats: fermeture des connexions ERR: " + e.getMessage());
+        }
         if (resultView != null) resultView.setText("");
         android.widget.LinearLayout containerCliquables = findViewById(R.id.containerCandidatsCliquables);
         if (containerCliquables != null) containerCliquables.removeAllViews();
