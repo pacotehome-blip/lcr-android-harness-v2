@@ -1986,6 +1986,48 @@ public class DeepLinkHandler {
                     + " wo=" + woNum + " net=" + netL + " gross=" + grossL
                     + " ticket=" + ticketNo + " duration=" + durationS);
 
+                // ✅ AJOUTÉ (28 août 2026, demande Paul — "j'ai le json
+                // uniquement si je fais le bouton bleu, pas à la fin de la
+                // livraison") — trouvé : backupDeliveryAsync() n'existait
+                // QUE dans retournerAuWorkOrder() (déclenché par le clic
+                // sur le bouton bleu, RegisterTabFragment.java) — jamais
+                // ici, dans la vraie fin de livraison. Sur une BD vierge
+                // (réinstall) sans que le chauffeur n'ait cliqué ce
+                // bouton, il n'y avait donc AUCUNE trace locale survivant
+                // au réinstall. Même structure exacte que celle déjà
+                // utilisée ailleurs — écrite maintenant à la fin de
+                // CHAQUE livraison, peu importe si le bouton bleu est
+                // cliqué ou non par la suite.
+                try {
+                    org.json.JSONObject backupPayloadFin = new org.json.JSONObject();
+                    backupPayloadFin.put("wo_num", woNum != null ? woNum : "");
+                    backupPayloadFin.put("wo_id_guid", woIdGuid != null ? woIdGuid : "");
+                    backupPayloadFin.put("ticket_no", ticketNo != null ? ticketNo : "");
+                    backupPayloadFin.put("sale_no", saleNo != null ? saleNo : "");
+                    backupPayloadFin.put("net_l", netL);
+                    backupPayloadFin.put("gross_l", grossL);
+                    backupPayloadFin.put("serial_id", serialId != null ? serialId : "");
+                    backupPayloadFin.put("lcrnode", lcrnode);
+                    backupPayloadFin.put("btmac", mac != null ? mac : "");
+                    backupPayloadFin.put("type", com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
+                    backupPayloadFin.put("backup_ts", System.currentTimeMillis());
+                    backupPayloadFin.put("payload_complet", extraJson);
+                    backupPayloadFin.put("sync_status",
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
+                    com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
+                        activity.getApplicationContext(), woNum, ticketNo, backupPayloadFin);
+                } catch (Exception e) {
+                    android.util.Log.w(TAG, "Backup local (fin de livraison) ERR (non-bloquant): " + e.getMessage());
+                }
+
+                // ✅ RETIRÉ (28 août 2026, demande Paul — "le plus robuste,
+                // patchSummaryConsolidated, se déclenche automatiquement à
+                // la fin") — ce patchDataverse() simple est remplacé par
+                // l'appel à patchSummaryConsolidated() plus loin (dans le
+                // bloc syncAll ci-dessous), qui réutilise le même token
+                // déjà acquis — plus robuste (fusion+ETag), pas de
+                // deuxième mécanisme séparé.
+
                 // ✅ AJOUTÉ (28 août 2026, demande Paul — "actuellement dans
                 // dataverse je n'ai aucune des livraisons tests que j'ai
                 // fait" / "utiliser le guid du ticket delivery-uid") —
@@ -2015,6 +2057,60 @@ public class DeepLinkHandler {
                                             com.pa.lcrdemo.dataverse.LcrDeliverySync.syncAll(activity, token);
                                         } catch (Exception e) {
                                             android.util.Log.w(TAG, "syncAll post-livraison ERR: " + e.getMessage());
+                                        }
+                                        // ✅ AJOUTÉ (28 août 2026, demande
+                                        // Paul — "le plus robuste,
+                                        // patchSummaryConsolidated, se
+                                        // déclenche automatiquement à la
+                                        // fin, dans la seule condition que
+                                        // cela ne brise rien") — même
+                                        // requête/construction EXACTE que
+                                        // celle déjà utilisée par le
+                                        // bouton bleu (RegisterTabFragment
+                                        // .retournerAuWorkOrder()) —
+                                        // getAllForWo(), filtre net>0 ou
+                                        // ANNULATION, GUID depuis la
+                                        // première ligne qui en a un.
+                                        // Réutilise le MÊME token déjà
+                                        // acquis ci-dessus — pas de
+                                        // deuxième authentification. Le
+                                        // bouton bleu garde son propre
+                                        // appel, inchangé — redevient un
+                                        // filet de sécurité, jamais le
+                                        // seul chemin.
+                                        try {
+                                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrFinal =
+                                                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
+                                            java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> allRows;
+                                            try {
+                                                allRows = lcrFinal.getAllForWo(woNum);
+                                            } finally {
+                                                try { lcrFinal.close(); } catch (Exception ignored) {}
+                                            }
+                                            org.json.JSONArray livraisons = new org.json.JSONArray();
+                                            String patchGuid = "";
+                                            for (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow r : allRows) {
+                                                if (r.woIdGuid != null && !r.woIdGuid.isEmpty() && patchGuid.isEmpty()) {
+                                                    patchGuid = r.woIdGuid;
+                                                }
+                                                if (r.netL > 0 || "ANNULATION".equals(r.type)) {
+                                                    org.json.JSONObject entry = new org.json.JSONObject();
+                                                    entry.put("ticket_no", r.ticketNo != null ? r.ticketNo : "");
+                                                    entry.put("net_l",     r.netL);
+                                                    entry.put("gross_l",   r.grossL);
+                                                    entry.put("type",      r.type != null ? r.type : "");
+                                                    entry.put("end_utc",   r.endUtc != null ? r.endUtc : "");
+                                                    livraisons.put(entry);
+                                                }
+                                            }
+                                            if (livraisons.length() > 0 && !patchGuid.isEmpty()) {
+                                                com.pa.lcrdemo.dataverse.WorkOrderUpdater.patchSummaryConsolidated(
+                                                    token, patchGuid, woNum, livraisons);
+                                                android.util.Log.i(TAG, "patchSummaryConsolidated post-livraison OK — "
+                                                    + livraisons.length() + " livraison(s), wo=" + woNum);
+                                            }
+                                        } catch (Exception e) {
+                                            android.util.Log.w(TAG, "patchSummaryConsolidated post-livraison ERR (non-bloquant): " + e.getMessage());
                                         }
                                     }).start();
                                 }
@@ -2392,7 +2488,7 @@ public class DeepLinkHandler {
     // exact de la nouvelle table Dataverse, et où précisément dans le code
     // brancher chacun des trois déclencheurs.
 
-    private void patchDataverse(String woGuid, String woNum,
+    void patchDataverse(String woGuid, String woNum,
                                  String net, String gross, String ticket,
                                  String status) {
         if (woGuid == null || woGuid.isEmpty()) {
@@ -2420,9 +2516,21 @@ public class DeepLinkHandler {
             }
         } catch (Exception ignored) {}
 
-        final String fDeliveryUid = deliveryUid.isEmpty()
-            ? woNum + "-" + System.currentTimeMillis()
-            : deliveryUid;
+        // ✅ CORRIGÉ (28 août 2026, demande Paul — "elle devient que
+        // sécurité et ne doit avoir une deuxième ou Xième fois dans le wo
+        // et dataverse") — trouvé : le repli utilisait un TIMESTAMP
+        // (woNum + "-" + currentTimeMillis()), différent à chaque appel.
+        // Si patchDataverse() est appelé deux fois pour la même livraison
+        // (une fois automatique à la fin, une fois en filet de sécurité
+        // au clic du bouton bleu), chaque appel générait sa PROPRE clé —
+        // deux entrées séparées dans la file, potentiellement deux PATCH
+        // distincts. Construit maintenant de façon déterministe
+        // (wo_num + "-" + ticket) — même patron que pushDeliveryRow()
+        // ailleurs — pour que les deux appels ciblent TOUJOURS la même
+        // clé, garantissant un vrai UPSERT, jamais un doublon.
+        final String fDeliveryUid = !deliveryUid.isEmpty()
+            ? deliveryUid
+            : (woNum != null ? woNum : "wo") + "-" + (ticket != null && !ticket.isEmpty() ? ticket : "0");
 
         try {
             DeliveryResultQueueDb queueDb = new DeliveryResultQueueDb(activity);

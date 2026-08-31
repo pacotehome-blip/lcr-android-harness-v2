@@ -5190,6 +5190,97 @@ public class RegisterTabFragment extends Fragment {
                     }
                     android.util.Log.i("Annuler", "Annulation loggée wo=" + woNum + " ticket=" + ticketNo);
 
+                    // ✅ AJOUTÉ (28 août 2026, demande Paul — "je te
+                    // confirme que le ticket 122 est dans dataverse [...]
+                    // l'annulation a été fait sur le 122 avant d'effacer
+                    // la bd" — confirmé absent de Dataverse) — trouvé :
+                    // ce chemin (annulation) écrit sync_status=PENDING,
+                    // mais rien ne déclenchait syncAll() immédiatement
+                    // après — exactement le même trou déjà corrigé plus
+                    // tôt aujourd'hui pour onDeliveryEnded() (livraison
+                    // normale), mais jamais répliqué ici. Sans ce
+                    // déclenchement, une annulation suivie d'un réinstall
+                    // rapide (avant le cycle périodique de 15 min) perdait
+                    // la synchronisation pour de bon — exactement le
+                    // scénario réel que Paul vient de vivre. Même patron
+                    // exact que celui de DeepLinkHandler.onDeliveryEnded().
+                    try {
+                        com.pa.lcrdemo.auth.MsalTokenProvider tpAnnul =
+                            new com.pa.lcrdemo.auth.MsalTokenProvider(requireContext());
+                        tpAnnul.init(new com.pa.lcrdemo.auth.MsalTokenProvider.InitCallback() {
+                            @Override public void onReady() {
+                                tpAnnul.acquireTokenSilentFromWorker(
+                                    new com.pa.lcrdemo.auth.MsalTokenProvider.TokenCallback() {
+                                    @Override public void onSuccess(String token) {
+                                        new Thread(() -> {
+                                            try {
+                                                com.pa.lcrdemo.dataverse.LcrDeliverySync.syncAll(requireContext(), token);
+                                            } catch (Exception e) {
+                                                android.util.Log.w("Annuler", "syncAll post-annulation ERR: " + e.getMessage());
+                                            }
+                                            // ✅ CORRIGÉ (28 août 2026,
+                                            // demande Paul — "le plus
+                                            // robuste, patchSummaryConsolidated,
+                                            // se déclenche automatiquement
+                                            // à la fin") — remplace l'appel
+                                            // à patchDataverse() (plus
+                                            // simple) par le même
+                                            // mécanisme consolidé
+                                            // (fusion+ETag) que la
+                                            // livraison normale et le
+                                            // bouton bleu — un seul et
+                                            // même système partout, pas
+                                            // deux. Réutilise le token
+                                            // déjà acquis ci-dessus.
+                                            try {
+                                                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrFinal =
+                                                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                                                java.util.List<com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow> allRows;
+                                                try {
+                                                    allRows = lcrFinal.getAllForWo(woNum);
+                                                } finally {
+                                                    try { lcrFinal.close(); } catch (Exception ignored) {}
+                                                }
+                                                org.json.JSONArray livraisons = new org.json.JSONArray();
+                                                String patchGuid = "";
+                                                for (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow r : allRows) {
+                                                    if (r.woIdGuid != null && !r.woIdGuid.isEmpty() && patchGuid.isEmpty()) {
+                                                        patchGuid = r.woIdGuid;
+                                                    }
+                                                    if (r.netL > 0 || "ANNULATION".equals(r.type)) {
+                                                        org.json.JSONObject entry = new org.json.JSONObject();
+                                                        entry.put("ticket_no", r.ticketNo != null ? r.ticketNo : "");
+                                                        entry.put("net_l",     r.netL);
+                                                        entry.put("gross_l",   r.grossL);
+                                                        entry.put("type",      r.type != null ? r.type : "");
+                                                        entry.put("end_utc",   r.endUtc != null ? r.endUtc : "");
+                                                        livraisons.put(entry);
+                                                    }
+                                                }
+                                                if (livraisons.length() > 0 && !patchGuid.isEmpty()) {
+                                                    com.pa.lcrdemo.dataverse.WorkOrderUpdater.patchSummaryConsolidated(
+                                                        token, patchGuid, woNum, livraisons);
+                                                    android.util.Log.i("Annuler", "patchSummaryConsolidated post-annulation OK — "
+                                                        + livraisons.length() + " livraison(s), wo=" + woNum);
+                                                }
+                                            } catch (Exception e) {
+                                                android.util.Log.w("Annuler", "patchSummaryConsolidated post-annulation ERR (non-bloquant): " + e.getMessage());
+                                            }
+                                        }).start();
+                                    }
+                                    @Override public void onError(Exception e) {
+                                        android.util.Log.w("Annuler", "syncAll post-annulation — token ERR: " + e.getMessage());
+                                    }
+                                });
+                            }
+                            @Override public void onError(Exception e) {
+                                android.util.Log.w("Annuler", "syncAll post-annulation — MSAL init ERR: " + e.getMessage());
+                            }
+                        });
+                    } catch (Exception e) {
+                        android.util.Log.w("Annuler", "syncAll post-annulation — déclenchement ERR: " + e.getMessage());
+                    }
+
                     // ✅ AJOUTÉ (28 août 2026) — backup JSON local, même
                     // structure exacte que celle déjà utilisée pour une
                     // livraison normale (retournerAuWorkOrder) — seule
