@@ -493,7 +493,16 @@ public class LocalDeliveryBackup {
         cv.put(LcrDeliveryStatusDb.COL_GROSS_L, j.optDouble("gross_l", 0.0));
         cv.put(LcrDeliveryStatusDb.COL_SERIAL_ID, j.optString("serial_id", ""));
         cv.put(LcrDeliveryStatusDb.COL_LCRNODE, j.optInt("lcrnode", 0));
-        cv.put(LcrDeliveryStatusDb.COL_TYPE, LcrDeliveryStatusDb.TYPE_ORIGINAL);
+        // ✅ CORRIGÉ (28 août 2026, demande Paul — "mais avant original ou
+        // annulé c'est bien ca" — confirmé, une vraie ligne devait exister
+        // avec net=0/gross=0 ET le bon type) — trouvé : codé en dur à
+        // TYPE_ORIGINAL, peu importe ce que le JSON de backup contenait
+        // réellement. Une annulation restaurée après réinstall redevenait
+        // une "vraie" livraison réussie. Préserve maintenant le type
+        // exact du JSON (ANNULATION ou ORIGINAL) — ORIGINAL reste le repli
+        // par défaut pour les anciens backups d'avant ce correctif, qui
+        // n'avaient jamais ce champ "type" du tout.
+        cv.put(LcrDeliveryStatusDb.COL_TYPE, j.optString("type", LcrDeliveryStatusDb.TYPE_ORIGINAL));
         cv.put(LcrDeliveryStatusDb.COL_SOURCE, "RESTORE_BACKUP");
         cv.put(LcrDeliveryStatusDb.COL_STOP_TYPE, "LIVRAISON");
         cv.put(LcrDeliveryStatusDb.COL_SYNC_STATUS, LcrDeliveryStatusDb.SYNC_PENDING);
