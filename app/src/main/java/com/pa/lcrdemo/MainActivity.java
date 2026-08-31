@@ -6223,6 +6223,30 @@ private boolean ensureBtConnectPermission() {
         } catch (Exception e) {
             android.util.Log.w("MainActivity", "validerCandidats: fermeture des connexions ERR: " + e.getMessage());
         }
+        // ✅ AJOUTÉ (28 août 2026, demande Paul — "on va simplifier ça...
+        // on supprime les tabs, on suspend la connexion automatique le
+        // temps que la validation puisse terminer ses tests") —
+        // closeAllForValidation() ferme le backend (contrôleur/scheduler),
+        // mais ne touche jamais l'UI — les tabs restaient visibles,
+        // affichant des données figées d'une connexion maintenant fermée.
+        // removeTabAndFragment() existe déjà, conçu explicitement pour
+        // être réutilisé (voir son propre commentaire du 25 août) — et sa
+        // propre logique de reconnexion automatique sur "dernier tab
+        // disparu" respecte déjà isValidationEnCours() (posé juste
+        // au-dessus), donc aucun risque qu'elle se redéclenche toute
+        // seule pendant qu'on vide les tabs un par un ici.
+        try {
+            java.util.List<String> tabKeysSnapshot;
+            synchronized (tabsByKey) {
+                tabKeysSnapshot = new java.util.ArrayList<>(tabsByKey.keySet());
+            }
+            for (String tk : tabKeysSnapshot) {
+                removeTabAndFragment(tk, "VALIDATION_MANUELLE");
+            }
+            android.util.Log.i("MainActivity", "validerCandidats: " + tabKeysSnapshot.size() + " tab(s) supprimé(s) avant validation");
+        } catch (Exception e) {
+            android.util.Log.w("MainActivity", "validerCandidats: suppression des tabs ERR: " + e.getMessage());
+        }
         if (resultView != null) resultView.setText("");
         android.widget.LinearLayout containerCliquables = findViewById(R.id.containerCandidatsCliquables);
         if (containerCliquables != null) containerCliquables.removeAllViews();
