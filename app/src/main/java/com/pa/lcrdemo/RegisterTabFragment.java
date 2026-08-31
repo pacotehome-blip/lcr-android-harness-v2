@@ -5086,26 +5086,62 @@ public class RegisterTabFragment extends Fragment {
                     }
                 } catch (Exception ignored) {}
 
-                // 5. Contexte WO depuis ActiveDeliveryStore
-                String woNum = "", woIdGuid = "";
+                // 5. Contexte WO — priorité à currentWoNum/currentWoIdGuid
+                // (champs du fragment, protégés aujourd'hui contre
+                // l'écrasement par une valeur vide — voir lookupWoForTicket()
+                // plus tôt), ActiveDeliveryStore seulement en repli si ces
+                // champs sont vides. Avant ce correctif, cette section
+                // ignorait complètement currentWoIdGuid, se fiant
+                // uniquement à ActiveDeliveryStore — une source séparée,
+                // pas nécessairement à jour pour ce chemin précis.
+                String woNum = (currentWoNum != null && !currentWoNum.isEmpty()) ? currentWoNum : "";
+                String woIdGuid = (currentWoIdGuid != null && !currentWoIdGuid.isEmpty()) ? currentWoIdGuid : "";
                 try {
-                    com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
-                        new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
-                    com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad = ads.load();
-                    if (ad != null) {
-                        woNum    = ad.woNum    != null ? ad.woNum    : "";
-                        woIdGuid = ad.woIdGuid != null ? ad.woIdGuid : "";
+                    if (woNum.isEmpty() || woIdGuid.isEmpty()) {
+                        com.pa.lcr.lcp.storage.ActiveDeliveryStore ads =
+                            new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
+                        com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad = ads.load();
+                        if (ad != null) {
+                            if (woNum.isEmpty() && ad.woNum != null) woNum = ad.woNum;
+                            if (woIdGuid.isEmpty() && ad.woIdGuid != null) woIdGuid = ad.woIdGuid;
+                        }
                     }
                 } catch (Exception ignored) {}
 
                 // 6. Logger TYPE_ANNULATION dans SQLite avec le ticket UID
                 try {
+                    // ✅ CORRIGÉ (28 août 2026, demande Paul — "sur une bd
+                    // vierge... il me faut toutes les mêmes informations
+                    // qu'une livraison dans le json et dataverse mais avec
+                    // le statut annulé avec le net à 0 et le gross à 0") —
+                    // trois trous trouvés en retraçant : (1) serial_id/
+                    // lcrnode/btmac jamais inclus dans cette insertion —
+                    // même bug que celui corrigé plus tôt aujourd'hui pour
+                    // onDeliveryEnded(), mais ce chemin d'annulation ne
+                    // l'avait jamais reçu; (2) net_l/gross_l utilisaient
+                    // les valeurs RÉELLES au moment de l'annulation (ex:
+                    // 2L), pas 0/0 comme demandé — gardées dans le JSON
+                    // pour diagnostic, mais les colonnes structurées
+                    // (celles poussées vers Dataverse) sont maintenant
+                    // forcées à 0; (3) aucun backup JSON local n'était
+                    // jamais écrit pour une annulation — seul le chemin
+                    // "retour au bon de travail" (livraison normale)
+                    // l'avait. Sur une BD vierge (réinstall), c'était donc
+                    // la SEULE trace possible d'une annulation qui
+                    // manquait complètement.
+                    String macAnnul = "";
+                    if (tabTransportKey != null && tabTransportKey.startsWith("BT:") && tabTransportKey.length() > 3) {
+                        macAnnul = tabTransportKey.substring(3).trim();
+                    }
                     android.content.ContentValues cv = new android.content.ContentValues();
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,      woNum);
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID,  woIdGuid);
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO,   ticketNo);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,       netAtCancel);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L,     grossAtCancel);
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID,   serialFromArgs != null ? serialFromArgs : "");
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_LCRNODE,     node);
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_BTMAC,       macAnnul);
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,       0.0);
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L,     0.0);
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
                         com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ANNULATION);
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,      "OPERATEUR");
@@ -5128,6 +5164,33 @@ public class RegisterTabFragment extends Fragment {
                         try { dbAnnuler.close(); } catch (Exception ignored) {}
                     }
                     android.util.Log.i("Annuler", "Annulation loggée wo=" + woNum + " ticket=" + ticketNo);
+
+                    // ✅ AJOUTÉ (28 août 2026) — backup JSON local, même
+                    // structure exacte que celle déjà utilisée pour une
+                    // livraison normale (retournerAuWorkOrder) — seule
+                    // trace possible sur une BD vierge après réinstall.
+                    // net_l/gross_l à 0 ici aussi, cohérent avec la BD.
+                    try {
+                        org.json.JSONObject backupPayloadAnnul = new org.json.JSONObject();
+                        backupPayloadAnnul.put("wo_num", woNum != null ? woNum : "");
+                        backupPayloadAnnul.put("wo_id_guid", woIdGuid != null ? woIdGuid : "");
+                        backupPayloadAnnul.put("ticket_no", ticketNo != null ? ticketNo : "");
+                        backupPayloadAnnul.put("sale_no", ticketNo != null ? ticketNo : "");
+                        backupPayloadAnnul.put("net_l", 0.0);
+                        backupPayloadAnnul.put("gross_l", 0.0);
+                        backupPayloadAnnul.put("serial_id", serialFromArgs != null ? serialFromArgs : "");
+                        backupPayloadAnnul.put("lcrnode", node);
+                        backupPayloadAnnul.put("btmac", macAnnul);
+                        backupPayloadAnnul.put("type", com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ANNULATION);
+                        backupPayloadAnnul.put("backup_ts", System.currentTimeMillis());
+                        backupPayloadAnnul.put("payload_complet", payload.toString());
+                        backupPayloadAnnul.put("sync_status",
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
+                        com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
+                            requireContext().getApplicationContext(), woNum, ticketNo, backupPayloadAnnul);
+                    } catch (Exception e) {
+                        android.util.Log.w("Annuler", "Backup local ERR (non-bloquant): " + e.getMessage());
+                    }
                 } catch (Exception e) {
                     android.util.Log.w("Annuler", "Insert ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(node, "RegisterTabFragment.Insert", e); } catch (Exception ignored) {}
                 }
