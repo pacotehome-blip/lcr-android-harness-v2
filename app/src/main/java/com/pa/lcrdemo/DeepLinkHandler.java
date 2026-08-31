@@ -1864,6 +1864,17 @@ public class DeepLinkHandler {
         onDeliveryEnded(woNum, woIdGuid, extraJson, currentNode, currentSerialId, "");
     }
 
+    // ✅ CORRIGÉ (à l'instant — build cassé, "no suitable method found") —
+    // j'avais remplacé cette surcharge 5-arg par la 6-arg au lieu d'en
+    // garder une EN PLUS de l'autre. MainActivity.onDeliveryEnded(5-arg)
+    // appelle encore celle-ci — sans elle, ça ne compile pas. Relais
+    // simple vers la 6-arg, mac="" (pas d'info mac disponible à ce
+    // point d'appel précis).
+    public void onDeliveryEnded(String woNum, String woIdGuid, String extraJson,
+                                 int nodeParam, String serialIdParam) {
+        onDeliveryEnded(woNum, woIdGuid, extraJson, nodeParam, serialIdParam, "");
+    }
+
     // ✅ AJOUTÉ (28 août 2026, demande Paul — même correctif, "oublie pas
     // d'ajouter toujours le woguid, le bt mac") — vraie implémentation,
     // avec node/serialId/mac REÇUS EN PARAMÈTRES au lieu d'être lus
