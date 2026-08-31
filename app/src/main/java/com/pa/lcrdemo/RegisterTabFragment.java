@@ -5101,7 +5101,10 @@ public class RegisterTabFragment extends Fragment {
                         if (result != null && ticketNo.isEmpty())
                             ticketNo = result.optString("ticket_no", "");
                     }
-                } catch (Exception ignored) {}
+                } catch (Exception e) {
+                    android.util.Log.w("DIAG-TICKET", "api_tickSnapshot() EXCEPTION: " + e.getMessage());
+                }
+                android.util.Log.i("DIAG-TICKET", "après api_tickSnapshot(): ticketNo=\"" + ticketNo + "\"");
                 // ✅ AJOUTÉ (28 août 2026, demande Paul — "voyons la
                 // question d'une ticket annulé") — trouvé : api_tickSnapshot()
                 // reste vide ici car forceEndSync() (CMD_END forcé, pas le
@@ -5112,6 +5115,31 @@ public class RegisterTabFragment extends Fragment {
                 if (ticketNo.isEmpty() && lastKnownTicketNo != null && !lastKnownTicketNo.isEmpty()) {
                     ticketNo = lastKnownTicketNo;
                 }
+                android.util.Log.i("DIAG-TICKET", "après repli lastKnownTicketNo (\"" + lastKnownTicketNo + "\"): ticketNo=\"" + ticketNo + "\"");
+                // ✅ AJOUTÉ (28 août 2026, demande Paul — "il devrait quand
+                // même retrouver le nom du fichier comme les autres tout
+                // est là pour l'avoir") — troisième repli : si
+                // lastKnownTicketNo n'a JAMAIS été rempli (annulation très
+                // tôt, avant le premier onTicketInfo()), lecture FRAÎCHE
+                // et directe du registre — le même repli sale_number déjà
+                // intégré dans readTicketNo23() s'applique ici aussi, pas
+                // besoin de le réinventer.
+                // ✅ AJOUTÉ (28 août 2026, demande Paul — "je te le dis
+                // arrête c'est une nouvelle annulation" — le repli
+                // précédent ne suffisait pas malgré readTicketNo23()
+                // confirmée fonctionnelle quelques centaines de ms avant
+                // ET après cette même séquence) — log précis ici pour
+                // capturer ce qui se passe VRAIMENT à ce point exact —
+                // succès, exception, ou genuinement vide.
+                if (ticketNo.isEmpty() && c != null) {
+                    android.util.Log.i("DIAG-TICKET", "AVANT api_readTicketNo23Frais()");
+                    String fraisTicket = c.api_readTicketNo23Frais();
+                    android.util.Log.i("DIAG-TICKET", "APRÈS api_readTicketNo23Frais() = \"" + fraisTicket + "\"");
+                    if (fraisTicket != null && !fraisTicket.isEmpty()) {
+                        ticketNo = fraisTicket;
+                    }
+                }
+                android.util.Log.i("DIAG-TICKET", "valeur FINALE de ticketNo=\"" + ticketNo + "\"");
 
                 // 5. Contexte WO — priorité à currentWoNum/currentWoIdGuid
                 // (champs du fragment, protégés aujourd'hui contre
