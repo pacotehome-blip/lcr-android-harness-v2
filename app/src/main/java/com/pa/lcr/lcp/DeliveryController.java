@@ -2654,7 +2654,15 @@ try {
         // dès que ticketPending0 est vrai — ligne ~3402). Invisible avant
         // le logging du 13 août — maintenant visible et corrigée, même
         // logique que le bypass existant.
-        if (isTicketRequiredNeverPrint()) {
+        // ✅ AJOUTÉ (28 août 2026, demande Paul — "il faut trouver
+        // pourquoi") — logs DIAG-HANG avant/après chaque appel LCP de
+        // cette fonction, pour localiser précisément un futur blocage —
+        // la dernière ligne visible sans son "après" identifiera l'appel
+        // coincé.
+        android.util.Log.i("DIAG-HANG", "clearTicketPendingSafeForAlign: entrée, appel isTicketRequiredNeverPrint()");
+        boolean bypass = isTicketRequiredNeverPrint();
+        android.util.Log.i("DIAG-HANG", "clearTicketPendingSafeForAlign: isTicketRequiredNeverPrint() = " + bypass);
+        if (bypass) {
             emitLog("[ALIGN-A] TicketRequired=2 (jamais imprimer) — attente de 30s sautée "
                 + "(ticketPending ne se videra jamais par conception)");
             ticketPrintInFlight.set(false);
@@ -2663,20 +2671,27 @@ try {
         }
 
         try {
+            android.util.Log.i("DIAG-HANG", "clearTicketPendingSafeForAlign: AVANT lcpMachineStatus() #1");
             LcpLink.MachineStatus ms0 = lcpMachineStatus();
+            android.util.Log.i("DIAG-HANG", "clearTicketPendingSafeForAlign: APRÈS lcpMachineStatus() #1 — delCode=0x" + Integer.toHexString(ms0.delCode));
             if ((ms0.delCode & DC_TICKET_PENDING) == 0) {
                 ticketPrintInFlight.set(false);
                 ticketPrintStartMs = 0L;
                 return;
             }
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            android.util.Log.w("DIAG-HANG", "clearTicketPendingSafeForAlign: EXCEPTION lcpMachineStatus() #1 — " + e.getMessage());
+        }
 
         long now = System.currentTimeMillis();
         if (ticketPrintInFlight.compareAndSet(false, true)) {
             ticketPrintStartMs = now;
             try {
+                android.util.Log.i("DIAG-HANG", "clearTicketPendingSafeForAlign: AVANT lcpIssueCommand(CMD_PRINT_LAST_TICKET)");
                 lcpIssueCommand(CMD_PRINT_LAST_TICKET);
+                android.util.Log.i("DIAG-HANG", "clearTicketPendingSafeForAlign: APRÈS lcpIssueCommand(CMD_PRINT_LAST_TICKET)");
             } catch (Exception e) {
+                android.util.Log.w("DIAG-HANG", "clearTicketPendingSafeForAlign: EXCEPTION lcpIssueCommand — " + e.getMessage());
                 ticketPrintInFlight.set(false);
                 ticketPrintStartMs = 0L;
                 throw e;
@@ -2686,18 +2701,27 @@ try {
         }
 
         long deadline = ticketPrintStartMs + TICKET_DEVICE_LOOP_MS;
+        android.util.Log.i("DIAG-HANG", "clearTicketPendingSafeForAlign: entrée boucle, deadline dans " + (deadline - System.currentTimeMillis()) + "ms");
+        int loopIter = 0;
         while (!isStopped() && System.currentTimeMillis() < deadline) {
             try { Thread.sleep(200); } catch (InterruptedException ignored) {}
+            loopIter++;
             try {
+                if (loopIter % 5 == 0) android.util.Log.i("DIAG-HANG", "clearTicketPendingSafeForAlign: AVANT lcpMachineStatus() boucle iter=" + loopIter);
                 LcpLink.MachineStatus ms = lcpMachineStatus();
+                if (loopIter % 5 == 0) android.util.Log.i("DIAG-HANG", "clearTicketPendingSafeForAlign: APRÈS lcpMachineStatus() boucle iter=" + loopIter + " delCode=0x" + Integer.toHexString(ms.delCode));
                 if ((ms.delCode & DC_TICKET_PENDING) == 0) {
                     ticketPrintInFlight.set(false);
                     ticketPrintStartMs = 0L;
+                    android.util.Log.i("DIAG-HANG", "clearTicketPendingSafeForAlign: ticketPending vidé après " + loopIter + " itérations");
                     return;
                 }
-            } catch (Exception ignored) {}
+            } catch (Exception e) {
+                android.util.Log.w("DIAG-HANG", "clearTicketPendingSafeForAlign: EXCEPTION lcpMachineStatus() boucle iter=" + loopIter + " — " + e.getMessage());
+            }
         }
 
+        android.util.Log.w("DIAG-HANG", "clearTicketPendingSafeForAlign: sortie boucle par timeout/stopped après " + loopIter + " itérations (isStopped=" + isStopped() + ")");
         ticketPrintInFlight.set(false);
         ticketPrintStartMs = 0L;
     }
@@ -2803,11 +2827,20 @@ try {
     private boolean isTicketRequiredNeverPrint() {
         if (cachedTicketRequired < 0) {
             try {
+                // ✅ AJOUTÉ (28 août 2026, demande Paul — "il faut trouver
+                // pourquoi") — log avant/après ce lcpGetField(37) précis.
+                // Si un blocage se reproduit, la DERNIÈRE ligne visible
+                // dans le log (celle d'AVANT, sans son "après" correspondant)
+                // identifiera exactement quel appel LCP reste coincé — ici,
+                // ou plus loin dans clearTicketPendingSafeForAlign().
+                android.util.Log.i("DIAG-HANG", "isTicketRequiredNeverPrint: AVANT lcpGetField(37)");
                 byte[] raw = lcpGetField(37);
+                android.util.Log.i("DIAG-HANG", "isTicketRequiredNeverPrint: APRÈS lcpGetField(37) — raw=" + (raw != null ? raw.length + " octets" : "null"));
                 if (raw != null && raw.length >= 1) {
                     cachedTicketRequired = raw[0] & 0xFF;
                 }
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                android.util.Log.w("DIAG-HANG", "isTicketRequiredNeverPrint: EXCEPTION lcpGetField(37) — " + e.getMessage());
                 return false; // lecture échouée — ne pas supposer, comportement prudent d'avant
             }
         }
@@ -2978,6 +3011,30 @@ softResync("retry/" + step);
     private String readU32FieldAsDecString(int field) throws Exception {
         long u = beI32(lcpGetField(field)) & 0xFFFFFFFFL;
         return String.valueOf(u);
+    }
+
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — "il devrait quand même
+    // retrouver le nom du fichier comme les autres tout est là pour
+    // l'avoir") — wrapper public pour permettre une lecture FRAÎCHE et
+    // DIRECTE du ticket (avec le repli sale_number déjà intégré dans
+    // readTicketNo23() lui-même), au lieu de dépendre uniquement d'un
+    // cache (lastKnownTicketNo) qui pourrait ne jamais avoir été rempli
+    // — notamment si une annulation arrive très tôt, avant le premier
+    // onTicketInfo(). Best-effort — retourne "" plutôt que de propager
+    // l'exception, pour ne jamais bloquer l'appelant.
+    public String api_readTicketNo23Frais() {
+        try {
+            return readTicketNo23();
+        } catch (Exception e) {
+            // ✅ AJOUTÉ (28 août 2026) — log la vraie cause au lieu de
+            // l'avaler silencieusement — nécessaire pour diagnostiquer
+            // pourquoi ce repli revient vide malgré readTicketNo23()
+            // confirmée fonctionnelle quelques centaines de ms avant/après
+            // dans le même log (voir DIAG-TICKET côté appelant).
+            android.util.Log.w("DIAG-TICKET", "api_readTicketNo23Frais() EXCEPTION: "
+                + e.getClass().getSimpleName() + " — " + e.getMessage());
+            return "";
+        }
     }
 
     private String readTicketNo23() throws Exception {
