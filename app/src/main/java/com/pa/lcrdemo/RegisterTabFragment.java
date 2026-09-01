@@ -4526,6 +4526,24 @@ public class RegisterTabFragment extends Fragment {
                     }
                 } catch (Exception ignored) {}
 
+                // ✅ AJOUTÉ (28 août 2026, demande Paul — "on a pas le
+                // produit... esti me semble que tu es plus intelligent
+                // que ça") — trouvé : cette longue chaîne de replis
+                // (netAtDeliveryEnd → api_tickSnapshot → lastResultJson →
+                // TextViews) ne consultait JAMAIS lastKnownTicketNo — la
+                // source la plus fiable, déjà établie tout au long
+                // d'aujourd'hui (suivie fidèlement via onTicketInfo()).
+                // Confirmé par fichier réel : "state_job":"RUNNING" (pas
+                // "DONE") — le repli api_tickSnapshot() échouait
+                // silencieusement, son "result" n'étant rempli qu'une
+                // fois le job VRAIMENT terminé. Repli ajouté ici, avant
+                // les TextViews (dernier recours le plus fragile).
+                if (ticketNo.isEmpty() && lastKnownTicketNo != null && !lastKnownTicketNo.trim().isEmpty()) {
+                    ticketNo = lastKnownTicketNo.trim();
+                    if (saleNo.isEmpty()) saleNo = ticketNo;
+                    LogBus.api(node, "[RETOUR-WO] repli lastKnownTicketNo — ticket=" + ticketNo);
+                }
+
                 // Fallback TextViews si tout est vide
                 try {
                     if (ticketNo.isEmpty() && txtTicketNo != null)
@@ -4677,6 +4695,46 @@ public class RegisterTabFragment extends Fragment {
                     backupPayload.put("gross_l", grossL);
                     backupPayload.put("serial_id", serialFromArgs != null ? serialFromArgs : "");
                     backupPayload.put("lcrnode", node);
+                    // ✅ AJOUTÉ (28 août 2026, demande Paul — "on a pas le
+                    // produit, le code produit, le preset, le type
+                    // produit... ils doivent tous avoir la même affaire")
+                    // — repli explicite au niveau racine, indépendant de
+                    // api_registerValidate() (qui peut échouer — confirmé
+                    // par le fichier réel de Paul, "repli sur le tick").
+                    // Même recherche RegisterProductStore déjà établie
+                    // ailleurs aujourd'hui (récupération, annulation) —
+                    // garantit la même richesse d'info peu importe si
+                    // l'enrichissement principal réussit ou pas.
+                    try {
+                        int produitRetour = getPendingProduct();
+                        double presetRetour = 0;
+                        if (edtPreset != null) {
+                            String presetTxtRetour = edtPreset.getText().toString().trim();
+                            if (!presetTxtRetour.isEmpty()) presetRetour = Double.parseDouble(presetTxtRetour);
+                        }
+                        String descRetour = "";
+                        String codeRetour = "";
+                        int typeRetour = -1;
+                        com.pa.lcr.lcp.storage.RegisterProductStore prodStoreRetour =
+                            new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
+                        java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> lignesRetour =
+                            prodStoreRetour.getAll(serialFromArgs, node);
+                        for (com.pa.lcr.lcp.storage.RegisterProductStore.Row ligneRetour : lignesRetour) {
+                            if (ligneRetour.noteIdx == produitRetour - 1) {
+                                descRetour = ligneRetour.description;
+                                codeRetour = ligneRetour.productCode;
+                                typeRetour = ligneRetour.productType;
+                                break;
+                            }
+                        }
+                        backupPayload.put("produit_no", produitRetour);
+                        backupPayload.put("preset_net_l", presetRetour);
+                        backupPayload.put("active_product_description", descRetour);
+                        backupPayload.put("active_product_code", codeRetour);
+                        backupPayload.put("active_product_type", typeRetour);
+                    } catch (Exception e) {
+                        android.util.Log.w("RetourWO", "Recherche produit (retour WO) ERR (non-bloquant): " + e.getMessage());
+                    }
                     backupPayload.put("backup_ts", System.currentTimeMillis());
                     backupPayload.put("payload_complet", payloadCompletReel);
                     // ✅ AJOUTÉ (11 août 2026, demande Paul — "ajoute-le au
@@ -7369,20 +7427,30 @@ public class RegisterTabFragment extends Fragment {
                 if (match != null) {
                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db2 =
                         new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                    // ✅ CORRIGÉ (28 août 2026, même correctif) — le vrai
+                    // sync_status du JSON est maintenant préservé par
+                    // toContentValues() — vérifie ici avant de déclencher
+                    // un envoi qui serait inutile si déjà SYNCED.
+                    String syncStatusRestaure = match.json.optString("sync_status",
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
                     try {
                         long localId = db2.insertDelivery(
                             com.pa.lcr.lcp.storage.LocalDeliveryBackup.toContentValues(match.json));
                         LogBus.api(node, "[WO-DETECT] ticket=" + ticketNo
                             + " — trouvé backup local (backup_ts=" + match.backupTs
-                            + "), réinséré en PENDING (id=" + localId + "), reconstruction Dataverse déclenchée");
+                            + "), réinséré (id=" + localId + ", statut=" + syncStatusRestaure + ")"
+                            + (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING.equals(syncStatusRestaure)
+                                ? ", reconstruction Dataverse déclenchée" : ", déjà synchronisé — rien à renvoyer"));
                         row = db2.getByTicketNo(ticketNo);
                     } finally {
                         try { db2.close(); } catch (Exception ignored) {}
                     }
+                    if (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING.equals(syncStatusRestaure)) {
                     try {
                         com.pa.lcrdemo.dataverse.DeliverySyncScheduler.triggerNow(requireContext().getApplicationContext());
                     } catch (Exception e) {
                         LogBus.api(node, "[WO-DETECT] triggerNow ERR (non-bloquant): " + safeMsg(e));
+                    }
                     }
                 }
 

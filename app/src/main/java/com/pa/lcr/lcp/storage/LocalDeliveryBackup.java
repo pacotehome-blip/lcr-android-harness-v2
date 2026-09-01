@@ -554,7 +554,17 @@ public class LocalDeliveryBackup {
         cv.put(LcrDeliveryStatusDb.COL_TYPE, j.optString("type", LcrDeliveryStatusDb.TYPE_ORIGINAL));
         cv.put(LcrDeliveryStatusDb.COL_SOURCE, "RESTORE_BACKUP");
         cv.put(LcrDeliveryStatusDb.COL_STOP_TYPE, "LIVRAISON");
-        cv.put(LcrDeliveryStatusDb.COL_SYNC_STATUS, LcrDeliveryStatusDb.SYNC_PENDING);
+        // ✅ CORRIGÉ (28 août 2026, demande Paul — "s'il y a eu un sync le
+        // statut devrait lui aussi être sync et donc s'il est déjà dans
+        // la bd on a normalement pas besoin") — trouvé : forçait
+        // systématiquement PENDING à la restauration, IGNORANT le vrai
+        // sync_status déjà présent dans le JSON — même si celui-ci disait
+        // déjà SYNCED (confirmant que Dataverse avait déjà cette donnée
+        // avant le crash/réinstall), on redéclenchait quand même un envoi
+        // inutile. Respecte maintenant le vrai statut du JSON — PENDING
+        // reste le repli par défaut pour les anciens backups qui
+        // n'avaient jamais ce champ.
+        cv.put(LcrDeliveryStatusDb.COL_SYNC_STATUS, j.optString("sync_status", LcrDeliveryStatusDb.SYNC_PENDING));
         cv.put(LcrDeliveryStatusDb.COL_PAYLOAD_JSON, j.optString("payload_complet", ""));
         return cv;
     }
