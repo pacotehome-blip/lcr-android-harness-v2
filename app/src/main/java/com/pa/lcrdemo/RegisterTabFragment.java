@@ -592,6 +592,17 @@ public class RegisterTabFragment extends Fragment {
     // asynchrones.
     private volatile boolean produitVerificationTerminee = false;
 
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — "pas encore réglé le produit
+    // avant le running flowing") — expose ce drapeau à DeepLinkHandler.
+    // lancerLivraison() (le vrai chemin d'armement par deep link) armait
+    // la livraison IMMÉDIATEMENT, sans jamais attendre ce drapeau — seul
+    // btnC (bouton local) le vérifiait. Confirmé par log réel : le scan
+    // démarre, et moins d'une seconde plus tard la livraison est déjà en
+    // RUNNING_FLOWING, sans que le scan n'ait eu la chance de conclure.
+    public boolean isProduitVerificationTerminee() {
+        return produitVerificationTerminee;
+    }
+
     private void signalerFinScanProduit(java.util.concurrent.CountDownLatch doneSignal) {
         produitVerificationTerminee = true;
         if (doneSignal != null) doneSignal.countDown();

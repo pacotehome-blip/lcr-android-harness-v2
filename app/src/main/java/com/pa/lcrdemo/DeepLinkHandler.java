@@ -846,6 +846,31 @@ public class DeepLinkHandler {
                 try { Thread.sleep(100); } catch (Exception ignored) {}
             }
 
+            // ✅ AJOUTÉ (28 août 2026, demande Paul — "pas encore réglé le
+            // produit avant le running flowing") — attente bornée
+            // supplémentaire (max 3s) pour que la VRAIE conclusion de la
+            // vérification produit (produitVerificationTerminee, posée
+            // par signalerFinScanProduit()) ait eu lieu avant d'armer —
+            // scanInProgress (ci-dessus) ne couvre que "un scan est en
+            // cours", pas "le scan a vraiment conclu". Sans ce correctif,
+            // le scan démarrait à peine que la livraison était déjà
+            // armée (confirmé par log réel : moins d'une seconde
+            // d'écart). Best-effort — si toujours pas conclu après 3s,
+            // continue quand même (comportement DÉGRADÉ déjà accepté
+            // ailleurs, plutôt que de bloquer indéfiniment).
+            try {
+                String mediaShortArm = activity.mediaShortFromTransportKey(transportKey);
+                String tabKeyArm = activity.tabKeyOf(mediaShortArm, node, serialId);
+                Fragment fArm = activity.getSupportFragmentManager().findFragmentByTag("regtab_" + tabKeyArm);
+                if (fArm instanceof RegisterTabFragment) {
+                    RegisterTabFragment tabArm = (RegisterTabFragment) fArm;
+                    for (int waitProduit = 0; waitProduit < 30; waitProduit++) {
+                        if (tabArm.isProduitVerificationTerminee()) break;
+                        try { Thread.sleep(100); } catch (Exception ignored) {}
+                    }
+                }
+            } catch (Exception ignored) {}
+
             com.pa.lcr.lcp.ApiResult r = controllerOneshot.api_deliveryOneShotStart(
                 woNum, fProduct, fPresetD, null);
 
