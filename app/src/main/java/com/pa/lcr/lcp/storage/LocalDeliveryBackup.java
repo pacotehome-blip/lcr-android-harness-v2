@@ -53,7 +53,13 @@ public class LocalDeliveryBackup {
     private static void backupDelivery(Context ctx, String woNum, String ticketNo, JSONObject payload) {
         try {
             String safeWo = (woNum != null ? woNum : "wo").replaceAll("[^A-Za-z0-9_-]", "_");
-            String safeTicket = (ticketNo != null ? ticketNo : String.valueOf(System.currentTimeMillis()))
+            // ✅ CORRIGÉ (28 août 2026, demande Paul — "le nom du fichier
+            // n'est pas concluant") — trouvé : ne traitait que le cas
+            // null comme "pas de ticket" — une chaîne VIDE ("") passait
+            // ce test et gardait le nom littéral, causant une collision
+            // (même nom de fichier pour deux événements différents).
+            // Traite maintenant vide ET null de la même façon.
+            String safeTicket = (ticketNo != null && !ticketNo.trim().isEmpty() ? ticketNo : String.valueOf(System.currentTimeMillis()))
                     .replaceAll("[^A-Za-z0-9_-]", "_");
             String fileName = "filgo_livraison_" + safeWo + "_" + safeTicket + ".json";
             byte[] bytes = payload.toString(2).getBytes(StandardCharsets.UTF_8);
@@ -74,17 +80,46 @@ public class LocalDeliveryBackup {
     // au lieu de private) pour être réutilisée par DeliveryLogStore.backupAndClearAllAsync().
     static void backupViaMediaStore(Context ctx, String fileName, byte[] bytes) {
         try {
-            ContentValues cv = new ContentValues();
-            cv.put(MediaStore.MediaColumns.DISPLAY_NAME, fileName);
-            cv.put(MediaStore.MediaColumns.MIME_TYPE, "application/json");
-            cv.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+            // ✅ CORRIGÉ (28 août 2026, demande Paul — "j'ai des duplicatats
+            // pourquoi???") — trouvé : MediaStore.insert() ne remplace
+            // JAMAIS un fichier existant portant le même DISPLAY_NAME —
+            // il crée systématiquement une NOUVELLE entrée avec un
+            // suffixe "(1)", "(2)", etc. pour éviter toute collision de
+            // nom. Chaque tentative de "mise à jour" d'un backup déjà
+            // écrit (filet de sécurité qui se met à jour, ou deux
+            // chemins de fin de livraison écrivant sur le même nom)
+            // créait donc un fichier séparé au lieu de vraiment le
+            // remplacer. Cherche maintenant d'abord si une entrée avec ce
+            // nom exact existe déjà — si oui, écrit PAR-DESSUS (troncature)
+            // via son URI existant, jamais une nouvelle insertion.
+            Uri outUri = null;
+            String[] projection = { MediaStore.MediaColumns._ID };
+            String selection = MediaStore.MediaColumns.DISPLAY_NAME + "=?";
+            String[] selectionArgs = { fileName };
+            try (android.database.Cursor c = ctx.getContentResolver().query(
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI, projection,
+                    selection, selectionArgs, null)) {
+                if (c != null && c.moveToFirst()) {
+                    long id = c.getLong(c.getColumnIndexOrThrow(MediaStore.MediaColumns._ID));
+                    outUri = android.content.ContentUris.withAppendedId(
+                        MediaStore.Downloads.EXTERNAL_CONTENT_URI, id);
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "backupViaMediaStore: recherche fichier existant ERR (non-bloquant): " + e.getMessage());
+            }
 
-            Uri outUri = ctx.getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv);
+            if (outUri == null) {
+                ContentValues cv = new ContentValues();
+                cv.put(MediaStore.MediaColumns.DISPLAY_NAME, fileName);
+                cv.put(MediaStore.MediaColumns.MIME_TYPE, "application/json");
+                cv.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+                outUri = ctx.getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv);
+            }
             if (outUri == null) {
                 Log.w(TAG, "backupViaMediaStore: insert MediaStore a échoué pour " + fileName);
                 return;
             }
-            try (OutputStream out = ctx.getContentResolver().openOutputStream(outUri)) {
+            try (OutputStream out = ctx.getContentResolver().openOutputStream(outUri, "wt")) {
                 if (out == null) {
                     Log.w(TAG, "backupViaMediaStore: output stream null pour " + fileName);
                     return;
