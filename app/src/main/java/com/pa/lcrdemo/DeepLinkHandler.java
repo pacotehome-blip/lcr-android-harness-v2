@@ -903,8 +903,49 @@ public class DeepLinkHandler {
                     // jour, pas de nouvelle écriture séparée).
                     try {
                         final String fMacPourArm = fMac.isEmpty() ? transportKey : fMac;
+                        // ✅ AJOUTÉ (28 août 2026, demande Paul — "tu as
+                        // tout pour récupérer sur un crash ou bd
+                        // vierge... le sales_number qui s'applique
+                        // aussitôt qu'on fait running_flowing") — trouvé :
+                        // ticket_no/sale_no restaient vides à l'armement,
+                        // alors que sale_number (contrairement au vrai
+                        // ticket_number, qui exige une impression) est
+                        // lisible presque immédiatement dès que le flow
+                        // démarre. Lecture fraîche ici, même fonction
+                        // déjà utilisée ailleurs (repli sale_number déjà
+                        // intégré dans readTicketNo23() lui-même).
+                        String ticketArm = controllerOneshot.api_readTicketNo23Frais();
+                        if (ticketArm == null) ticketArm = "";
+                        // besoin d'attendre une éventuelle récupération
+                        // ultérieure pour les capturer. description/code/
+                        // type recherchés via RegisterProductStore, même
+                        // principe déjà établi dans la fonction de
+                        // récupération.
+                        String descArm = "";
+                        String codeArm = "";
+                        int typeArm = -1;
+                        try {
+                            com.pa.lcr.lcp.storage.RegisterProductStore prodStoreArm =
+                                new com.pa.lcr.lcp.storage.RegisterProductStore(activity);
+                            java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> lignesArm =
+                                prodStoreArm.getAll(fSerialId, node);
+                            for (com.pa.lcr.lcp.storage.RegisterProductStore.Row ligneArm : lignesArm) {
+                                if (ligneArm.noteIdx == fProduct - 1) {
+                                    descArm = ligneArm.description;
+                                    codeArm = ligneArm.productCode;
+                                    typeArm = ligneArm.productType;
+                                    break;
+                                }
+                            }
+                        } catch (Exception e) {
+                            android.util.Log.w(TAG, "Recherche produit (armement) ERR (non-bloquant): " + e.getMessage());
+                        }
                         android.content.ContentValues cvArm = new android.content.ContentValues();
                         cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_JOB_ID, jobId);
+                        if (!ticketArm.isEmpty()) {
+                            cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO, ticketArm);
+                            cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SALE_NO, ticketArm);
+                        }
                         cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM, woNum != null ? woNum : "");
                         cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID, woIdGuid != null ? woIdGuid : "");
                         cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID, fSerialId != null ? fSerialId : "");
@@ -912,6 +953,8 @@ public class DeepLinkHandler {
                         cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_BTMAC, fMacPourArm);
                         cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L, 0.0);
                         cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L, 0.0);
+                        cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PRODUIT_NO, fProduct);
+                        cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PRESET_L, fPresetD);
                         cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
                             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
                         cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE, "ARMEMENT");
@@ -925,14 +968,15 @@ public class DeepLinkHandler {
                         } finally {
                             try { dbArm.close(); } catch (Exception ignored) {}
                         }
-                        android.util.Log.i(TAG, "Livraison enregistrée dès l'armement — jobId=" + jobId + " wo=" + woNum);
+                        android.util.Log.i(TAG, "Livraison enregistrée dès l'armement — jobId=" + jobId + " wo=" + woNum
+                            + " produit=" + fProduct + " preset=" + fPresetD);
 
                         org.json.JSONObject backupPayloadArm = new org.json.JSONObject();
                         backupPayloadArm.put("job_id", jobId);
                         backupPayloadArm.put("wo_num", woNum != null ? woNum : "");
                         backupPayloadArm.put("wo_id_guid", woIdGuid != null ? woIdGuid : "");
-                        backupPayloadArm.put("ticket_no", "");
-                        backupPayloadArm.put("sale_no", "");
+                        backupPayloadArm.put("ticket_no", ticketArm);
+                        backupPayloadArm.put("sale_no", ticketArm);
                         backupPayloadArm.put("net_l", 0.0);
                         backupPayloadArm.put("gross_l", 0.0);
                         backupPayloadArm.put("serial_id", fSerialId != null ? fSerialId : "");
@@ -940,7 +984,12 @@ public class DeepLinkHandler {
                         backupPayloadArm.put("btmac", fMacPourArm);
                         backupPayloadArm.put("type", com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
                         backupPayloadArm.put("backup_ts", System.currentTimeMillis());
-                        backupPayloadArm.put("payload_complet", "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + jobId + "\"}");
+                        backupPayloadArm.put("payload_complet", "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + jobId
+                            + "\",\"active_product\":" + fProduct
+                            + ",\"active_product_description\":\"" + descArm.replace("\"", "")
+                            + "\",\"active_product_code\":\"" + codeArm.replace("\"", "")
+                            + "\",\"active_product_type\":" + typeArm
+                            + ",\"preset_net_l\":" + fPresetD + "}");
                         backupPayloadArm.put("sync_status",
                             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
                         com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
