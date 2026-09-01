@@ -579,7 +579,7 @@ public class LcrDeliverySync {
                 int upserted = 0;
                 for (int i = 0; i < values.length(); i++) {
                     JSONObject d = values.getJSONObject(i);
-                    String rowTicketNo = d.optString("filgo_ticket_no", null);
+                    String rowTicketNo = optStringSafe(d, "filgo_ticket_no", null);
                     if (rowTicketNo == null || rowTicketNo.isEmpty()) continue; // ligne inexploitable, on l'ignore
                     String rowSerialId = d.optString("filgo_serial_id", serialId);
                     int rowLcrnode = d.optInt("filgo_lcrnode", 0);
@@ -659,7 +659,7 @@ public class LcrDeliverySync {
                 int upserted = 0;
                 for (int i = 0; i < values.length(); i++) {
                     JSONObject d = values.getJSONObject(i);
-                    String rowTicketNo = d.optString("filgo_ticket_no", null);
+                    String rowTicketNo = optStringSafe(d, "filgo_ticket_no", null);
                     if (rowTicketNo == null || rowTicketNo.isEmpty()) continue;
                     int rowLcrnode = d.optInt("filgo_lcrnode", 0);
                     upsertFromDataverseJson(ctx, d, serialId, rowLcrnode, rowTicketNo);
@@ -683,25 +683,39 @@ public class LcrDeliverySync {
     // connu localement, insert sinon). Utilisé par pullDeliveryByTicket ET
     // pullAllDeliveriesForWorkOrder pour ne pas dupliquer la logique de mapping.
     // =========================================================
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — "pourquoi j'ai null-132 dans
+    // delivery-uid") — trouvé : JSONObject.optString(clé, repli) ne
+    // protège QUE contre l'absence de la clé — si la clé existe avec une
+    // valeur JSON null EXPLICITE (ex: "filgo_wo_num": null, un champ
+    // réellement vide côté Dataverse), optString() retourne littéralement
+    // la chaîne "null" (texte), PAS le repli fourni. Piège bien connu de
+    // org.json. Ce helper vérifie explicitement isNull() avant d'appeler
+    // optString(), pour qu'un null JSON produise vraiment une chaîne
+    // vide, jamais le texte "null".
+    private static String optStringSafe(JSONObject d, String key, String fallback) {
+        if (d.isNull(key)) return fallback;
+        return d.optString(key, fallback);
+    }
+
     private static void upsertFromDataverseJson(Context ctx, JSONObject d,
                                                  String fallbackSerialId, Integer fallbackLcrnode,
                                                  String fallbackTicketNo) {
         ContentValues cv = new ContentValues();
-        cv.put(LcrDeliveryStatusDb.COL_WO_NUM,      d.optString("filgo_wo_num", ""));
-        cv.put(LcrDeliveryStatusDb.COL_WO_ID_GUID,  d.optString("filgo_wo_id_guid", ""));
-        cv.put(LcrDeliveryStatusDb.COL_SERIAL_ID,   d.optString("filgo_serial_id", fallbackSerialId));
+        cv.put(LcrDeliveryStatusDb.COL_WO_NUM,      optStringSafe(d, "filgo_wo_num", ""));
+        cv.put(LcrDeliveryStatusDb.COL_WO_ID_GUID,  optStringSafe(d, "filgo_wo_id_guid", ""));
+        cv.put(LcrDeliveryStatusDb.COL_SERIAL_ID,   optStringSafe(d, "filgo_serial_id", fallbackSerialId));
         cv.put(LcrDeliveryStatusDb.COL_LCRNODE,     d.optInt("filgo_lcrnode", fallbackLcrnode != null ? fallbackLcrnode : 0));
-        cv.put(LcrDeliveryStatusDb.COL_TICKET_NO,   d.optString("filgo_ticket_no", fallbackTicketNo));
+        cv.put(LcrDeliveryStatusDb.COL_TICKET_NO,   optStringSafe(d, "filgo_ticket_no", fallbackTicketNo));
         cv.put(LcrDeliveryStatusDb.COL_PRODUIT_NO,  d.optInt("filgo_produit_no", 0));
         cv.put(LcrDeliveryStatusDb.COL_PRESET_L,    d.optDouble("filgo_preset_l", 0.0));
-        cv.put(LcrDeliveryStatusDb.COL_TOURNEE_ID,  d.optString("filgo_tournee_id", ""));
+        cv.put(LcrDeliveryStatusDb.COL_TOURNEE_ID,  optStringSafe(d, "filgo_tournee_id", ""));
         cv.put(LcrDeliveryStatusDb.COL_TRANSACTION_NO, d.optInt("filgo_transaction_no", 1));
         cv.put(LcrDeliveryStatusDb.COL_SOURCE,      "DATAVERSE_PULL");
         cv.put(LcrDeliveryStatusDb.COL_SYNC_STATUS, LcrDeliveryStatusDb.SYNC_SYNCED);
         cv.put(LcrDeliveryStatusDb.COL_DATAVERSE_ID,
-                d.optString("filgo_lcr_delivery_statusid", ""));
+                optStringSafe(d, "filgo_lcr_delivery_statusid", ""));
 
-        String ticketNo = d.optString("filgo_ticket_no", fallbackTicketNo);
+        String ticketNo = optStringSafe(d, "filgo_ticket_no", fallbackTicketNo);
 
         LcrDeliveryStatusDb localDb = new LcrDeliveryStatusDb(ctx);
         try {
