@@ -42,7 +42,7 @@ import java.util.List;
 public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
 
     public static final String DB_NAME    = "filgo_delivery_status.db";
-    public static final int    DB_VERSION = 3; // v3: UNIQUE(wo_num, ticket_no) anti-doublon
+    public static final int    DB_VERSION = 4; // v4: job_id — ancre stable pour recuperer une livraison encore en cours
 
     private static final String TAG = "LcrDeliveryStatusDb";
 
@@ -93,6 +93,18 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
 
     // Données terrain (registre LCR)
     public static final String COL_TICKET_NO           = "ticket_no";
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — "on va ajouter le ticket de
+    // livraison en table avec le statut running_flowing... si jamais on a
+    // un crash une réinstallation on veut être en mesure de la reprendre
+    // là où elle est") — ancre stable, connue dès l'armement (jobId, un
+    // UUID généré avant même que ticket_no soit connu — Field #23=0 tant
+    // que rien n'est imprimé). UNIQUE(wo_num, ticket_no) ON CONFLICT
+    // IGNORE ne peut pas servir de mécanisme de mise à jour pour une
+    // livraison encore en cours (ticket_no vide/instable à ce stade) —
+    // job_id sert de vraie clé pour retrouver et mettre à jour LA MÊME
+    // ligne au fil de la progression, sans jamais dupliquer ni perdre les
+    // données finales en silence.
+    public static final String COL_JOB_ID               = "job_id";
     public static final String COL_SALE_NO             = "sale_no";
     public static final String COL_NET_L               = "net_l";
     public static final String COL_GROSS_L             = "gross_l";
@@ -211,6 +223,12 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
                 " SELECT * FROM " + TABLE_DELIVERY + "_old");
             db.execSQL("DROP TABLE IF EXISTS " + TABLE_DELIVERY + "_old");
         }
+        // v4: job_id — ancre stable pour retrouver/mettre à jour une
+        // livraison encore en cours (ticket_no pas encore connu à
+        // l'armement)
+        if (oldVersion < 4) {
+            addColumnIfMissing(db, TABLE_DELIVERY, COL_JOB_ID, "TEXT");
+        }
     }
 
     // =========================================================
@@ -223,6 +241,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
             COL_DATAVERSE_ID       + " TEXT," +
 
             // Identification
+            COL_JOB_ID             + " TEXT," +
             COL_WO_NUM             + " TEXT NOT NULL," +
             COL_WO_ID_GUID         + " TEXT," +
             COL_TOURNEE_ID         + " TEXT," +
@@ -336,6 +355,62 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
      * Chaque impression = une nouvelle ligne dans filgo_delivery_status.
      * Calcule automatiquement previous/total/count depuis les lignes précédentes.
      */
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — "on tient compte du cumul
+    // partout même dans dataverse... on renforcit même avec une livraison
+    // en cours") — logique cumulative (previous/total/count/overage)
+    // extraite d'insertDelivery() en fonction partagée, réutilisée par
+    // upsertByJobId() aussi. excludeJobId : quand on MET À JOUR notre
+    // propre ligne (armement → fin, même job_id), il faut l'exclure de
+    // la recherche du "précédent" — sinon une ligne se compterait
+    // elle-même comme sa propre livraison précédente, faussant le cumul.
+    private void computeCumulativeFields(ContentValues cv, String woNum, String excludeJobId) {
+        if (woNum == null || woNum.isEmpty()) return;
+        DeliveryRow existing = getLatestForWoExcludingJobId(woNum, excludeJobId);
+        double newNet   = cv.getAsDouble(COL_NET_L)    != null ? cv.getAsDouble(COL_NET_L)    : 0;
+        double newGross = cv.getAsDouble(COL_GROSS_L)  != null ? cv.getAsDouble(COL_GROSS_L)  : 0;
+        if (existing != null) {
+            double presetL  = cv.getAsDouble(COL_PRESET_L) != null ? cv.getAsDouble(COL_PRESET_L) : existing.presetL;
+            double totalNet   = existing.totalNetL  + newNet;
+            double totalGross = existing.totalGrossL + newGross;
+            int    count      = existing.deliveryCount + 1;
+            double overage    = totalNet > presetL && presetL > 0 ? totalNet - presetL : 0;
+
+            cv.put(COL_PREVIOUS_NET_L,     existing.netL);
+            cv.put(COL_PREVIOUS_GROSS_L,   existing.grossL);
+            cv.put(COL_PREVIOUS_TICKET_NO, existing.ticketNo);
+            cv.put(COL_TOTAL_NET_L,        totalNet);
+            cv.put(COL_TOTAL_GROSS_L,      totalGross);
+            cv.put(COL_DELIVERY_COUNT,     count);
+            cv.put(COL_PRESET_OVERAGE_L,   overage);
+        } else {
+            // Première ligne pour ce WO
+            double presetL  = cv.getAsDouble(COL_PRESET_L) != null ? cv.getAsDouble(COL_PRESET_L) : 0;
+            cv.put(COL_TOTAL_NET_L,      newNet);
+            cv.put(COL_TOTAL_GROSS_L,    newGross);
+            cv.put(COL_DELIVERY_COUNT,   1);
+            cv.put(COL_PRESET_OVERAGE_L, newNet > presetL && presetL > 0 ? newNet - presetL : 0);
+        }
+    }
+
+    // ✅ AJOUTÉ (28 août 2026, même correctif) — comme getLatestForWo(),
+    // mais exclut une ligne précise par job_id — nécessaire pour que la
+    // mise à jour d'une livraison déjà en table (armement → fin) ne se
+    // trouve pas elle-même comme "précédente".
+    private DeliveryRow getLatestForWoExcludingJobId(String woNum, String excludeJobId) {
+        if (excludeJobId == null || excludeJobId.isEmpty()) return getLatestForWo(woNum);
+        try (Cursor c = getReadableDatabase().query(
+                TABLE_DELIVERY, null,
+                COL_WO_NUM + "=? AND (" + COL_JOB_ID + " IS NULL OR " + COL_JOB_ID + "!=?)",
+                new String[]{woNum, excludeJobId},
+                null, null,
+                COL_TRANSACTION_NO + " DESC", "1")) {
+            if (c.moveToFirst()) return DeliveryRow.fromCursor(c);
+        } catch (Exception e) {
+            Log.e(TAG, "getLatestForWoExcludingJobId ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.getLatestForWoExcludingJobId", e); } catch (Exception ignored) {}
+        }
+        return null;
+    }
+
     public long insertDelivery(ContentValues cv) {
         long now = System.currentTimeMillis();
         cv.put(COL_TS_CREATED_MS, now);
@@ -346,35 +421,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
 
         // Calculer les champs historique depuis la dernière ligne du même wo_num
         String woNum = cv.getAsString(COL_WO_NUM);
-        if (woNum != null && !woNum.isEmpty()) {
-            DeliveryRow existing = getLatestForWo(woNum);
-            if (existing != null) {
-                double newNet   = cv.getAsDouble(COL_NET_L)    != null ? cv.getAsDouble(COL_NET_L)    : 0;
-                double newGross = cv.getAsDouble(COL_GROSS_L)  != null ? cv.getAsDouble(COL_GROSS_L)  : 0;
-                double presetL  = cv.getAsDouble(COL_PRESET_L) != null ? cv.getAsDouble(COL_PRESET_L) : existing.presetL;
-                double totalNet   = existing.totalNetL  + newNet;
-                double totalGross = existing.totalGrossL + newGross;
-                int    count      = existing.deliveryCount + 1;
-                double overage    = totalNet > presetL && presetL > 0 ? totalNet - presetL : 0;
-
-                cv.put(COL_PREVIOUS_NET_L,     existing.netL);
-                cv.put(COL_PREVIOUS_GROSS_L,   existing.grossL);
-                cv.put(COL_PREVIOUS_TICKET_NO, existing.ticketNo);
-                cv.put(COL_TOTAL_NET_L,        totalNet);
-                cv.put(COL_TOTAL_GROSS_L,      totalGross);
-                cv.put(COL_DELIVERY_COUNT,     count);
-                cv.put(COL_PRESET_OVERAGE_L,   overage);
-            } else {
-                // Première ligne pour ce WO
-                double newNet   = cv.getAsDouble(COL_NET_L)    != null ? cv.getAsDouble(COL_NET_L)    : 0;
-                double newGross = cv.getAsDouble(COL_GROSS_L)  != null ? cv.getAsDouble(COL_GROSS_L)  : 0;
-                double presetL  = cv.getAsDouble(COL_PRESET_L) != null ? cv.getAsDouble(COL_PRESET_L) : 0;
-                cv.put(COL_TOTAL_NET_L,      newNet);
-                cv.put(COL_TOTAL_GROSS_L,    newGross);
-                cv.put(COL_DELIVERY_COUNT,   1);
-                cv.put(COL_PRESET_OVERAGE_L, newNet > presetL && presetL > 0 ? newNet - presetL : 0);
-            }
-        }
+        computeCumulativeFields(cv, woNum, null);
 
         try {
             long id = getWritableDatabase().insertOrThrow(TABLE_DELIVERY, null, cv);
@@ -532,6 +579,108 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
             Log.e(TAG, "getLatestForWo ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.getLatestForWo", e); } catch (Exception ignored) {}
         }
         return null;
+    }
+
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — "si jamais on a un crash une
+    // réinstallation on veut être en mesure de la reprendre là où elle
+    // est") — retrouve une livraison par job_id, l'ancre stable connue
+    // dès l'armement, avant même que ticket_no ne soit fiable.
+    public DeliveryRow getByJobId(String jobId) {
+        if (jobId == null || jobId.isEmpty()) return null;
+        try (Cursor c = getReadableDatabase().query(
+                TABLE_DELIVERY, null,
+                COL_JOB_ID + "=?", new String[]{jobId},
+                null, null, null, "1")) {
+            if (c.moveToFirst()) return DeliveryRow.fromCursor(c);
+        } catch (Exception e) {
+            Log.e(TAG, "getByJobId ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.getByJobId", e); } catch (Exception ignored) {}
+        }
+        return null;
+    }
+
+    // ✅ AJOUTÉ (28 août 2026, même correctif) — retrouve la ligne
+    // "filet de sécurité" (running_flowing, pas encore terminée) pour ce
+    // WO/serial, au retour dans le tab après un crash. STOP_TYPE=
+    // "RUNNING_FLOWING" distingue cette ligne d'une vraie ligne finale
+    // (STOP_TYPE="LIVRAISON") ou d'une annulation (STOP_TYPE="ANNULATION")
+    // — ne cherche QUE les lignes jamais arrivées à terme.
+    public DeliveryRow getRunningFlowingSafetyNet(String woNum, String serialId) {
+        String where; String[] args;
+        if (woNum != null && !woNum.isEmpty()) {
+            where = COL_WO_NUM + "=? AND " + COL_STOP_TYPE + "=?";
+            args = new String[]{woNum, "RUNNING_FLOWING"};
+        } else if (serialId != null && !serialId.isEmpty()) {
+            where = COL_SERIAL_ID + "=? AND " + COL_STOP_TYPE + "=?";
+            args = new String[]{serialId, "RUNNING_FLOWING"};
+        } else {
+            return null;
+        }
+        try (Cursor c = getReadableDatabase().query(
+                TABLE_DELIVERY, null, where, args,
+                null, null, COL_TS_CREATED_MS + " DESC", "1")) {
+            if (c.moveToFirst()) return DeliveryRow.fromCursor(c);
+        } catch (Exception e) {
+            Log.e(TAG, "getRunningFlowingSafetyNet ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.getRunningFlowingSafetyNet", e); } catch (Exception ignored) {}
+        }
+        return null;
+    }
+
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — "on va ajouter une étape
+    // avant de démarrer la livraison... on ne mettra pas à jour
+    // l'enregistrement local et sur dataverse pour cette livraison") —
+    // vraie sémantique upsert par job_id : si une ligne avec ce job_id
+    // existe déjà (créée à l'armement, RUNNING_FLOWING), UPDATE cette
+    // MÊME ligne au fil de la progression — jamais un doublon, jamais
+    // ignoré en silence par la contrainte UNIQUE(wo_num, ticket_no)
+    // (qui ne s'applique qu'aux vraies livraisons complétées, via
+    // insertDelivery() — fonction séparée, inchangée, avec son propre
+    // calcul d'historique previous/total qui ne s'applique pas ici,
+    // puisqu'une livraison encore en cours n'est pas "livrée"). Retourne
+    // l'id de la ligne (nouvelle ou mise à jour).
+    public long upsertByJobId(ContentValues cv) {
+        String jobId = cv.getAsString(COL_JOB_ID);
+        String woNum = cv.getAsString(COL_WO_NUM);
+        long now = System.currentTimeMillis();
+        cv.put(COL_TS_UPDATED_MS, now);
+        // ✅ AJOUTÉ (28 août 2026, demande Paul — "on tient compte du
+        // cumul partout... on renforcit même avec une livraison en
+        // cours") — même calcul cumulatif qu'insertDelivery(), avec
+        // exclusion de sa PROPRE ligne (par job_id) — sinon, à la mise à
+        // jour finale, cette ligne se trouverait elle-même comme
+        // "précédente" (déjà insérée à l'armement), faussant le cumul.
+        // À l'armement (net=0), le total reste correctement égal au
+        // cumul déjà existant (aucun ajout réel encore) — à la fin,
+        // recalculé avec les vraies valeurs net/gross.
+        computeCumulativeFields(cv, woNum, jobId);
+        if (jobId != null && !jobId.isEmpty()) {
+            DeliveryRow existing = getByJobId(jobId);
+            if (existing != null) {
+                try {
+                    int rows = getWritableDatabase().update(
+                        TABLE_DELIVERY, cv, COL_JOB_ID + "=?", new String[]{jobId});
+                    if (rows > 0) {
+                        if (woNum != null) ALL_FOR_WO_CACHE.remove(woNum);
+                        return existing.id;
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "upsertByJobId UPDATE ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.upsertByJobId", e); } catch (Exception ignored) {}
+                    return -1;
+                }
+            }
+        }
+        // Aucune ligne existante pour ce job_id — insertion fraîche
+        cv.put(COL_TS_CREATED_MS, now);
+        if (!cv.containsKey(COL_SYNC_STATUS)) {
+            cv.put(COL_SYNC_STATUS, SYNC_PENDING);
+        }
+        try {
+            long id = getWritableDatabase().insert(TABLE_DELIVERY, null, cv);
+            if (woNum != null) ALL_FOR_WO_CACHE.remove(woNum);
+            return id;
+        } catch (Exception e) {
+            Log.e(TAG, "upsertByJobId INSERT ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.upsertByJobId", e); } catch (Exception ignored) {}
+            return -1;
+        }
     }
 
     /**
@@ -713,6 +862,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
         public double tvq;
         public double taxeCarbone;
         public String memoDispatch;
+        public String jobId;
         public String ticketNo;
         public String saleNo;
         public double netL;
@@ -777,6 +927,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
             r.tvq                = getDouble(c, COL_TVQ);
             r.taxeCarbone        = getDouble(c, COL_TAXE_CARBONE);
             r.memoDispatch       = getString(c, COL_MEMO_DISPATCH);
+            r.jobId              = getString(c, COL_JOB_ID);
             r.ticketNo           = getString(c, COL_TICKET_NO);
             r.saleNo             = getString(c, COL_SALE_NO);
             r.netL               = getDouble(c, COL_NET_L);

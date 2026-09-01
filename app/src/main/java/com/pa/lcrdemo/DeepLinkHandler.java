@@ -872,6 +872,67 @@ public class DeepLinkHandler {
                     controllerOneshot.requestLiveSample();
                 } catch (Exception ignored) {}
                 if (jobId != null && !jobId.isEmpty()) {
+                    // ✅ AJOUTÉ (28 août 2026, demande Paul — "on va
+                    // ajouter le ticket de livraison en table avec le
+                    // statut running_flowing... si jamais on a un crash
+                    // une réinstallation on veut être en mesure de la
+                    // reprendre") — écriture initiale, dès l'armement
+                    // réussi, AVANT même que le flow ne commence. Utilise
+                    // upsertByJobId() (pas insertDelivery()) — job_id
+                    // sert d'ancre stable, ticket_no n'étant pas encore
+                    // connu à ce stade. Même structure JSON que les autres
+                    // backups déjà en place (onDeliveryEnded, annulation)
+                    // — écrasée par la vraie fin une fois la livraison
+                    // terminée (voir jobId réutilisé comme clé de mise à
+                    // jour, pas de nouvelle écriture séparée).
+                    try {
+                        final String fMacPourArm = fMac.isEmpty() ? transportKey : fMac;
+                        android.content.ContentValues cvArm = new android.content.ContentValues();
+                        cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_JOB_ID, jobId);
+                        cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM, woNum != null ? woNum : "");
+                        cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID, woIdGuid != null ? woIdGuid : "");
+                        cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID, fSerialId != null ? fSerialId : "");
+                        cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_LCRNODE, node);
+                        cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_BTMAC, fMacPourArm);
+                        cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L, 0.0);
+                        cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L, 0.0);
+                        cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
+                        cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE, "ARMEMENT");
+                        cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE, "RUNNING_FLOWING");
+                        cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbArm =
+                            new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
+                        try {
+                            dbArm.upsertByJobId(cvArm);
+                        } finally {
+                            try { dbArm.close(); } catch (Exception ignored) {}
+                        }
+                        android.util.Log.i(TAG, "Livraison enregistrée dès l'armement — jobId=" + jobId + " wo=" + woNum);
+
+                        org.json.JSONObject backupPayloadArm = new org.json.JSONObject();
+                        backupPayloadArm.put("job_id", jobId);
+                        backupPayloadArm.put("wo_num", woNum != null ? woNum : "");
+                        backupPayloadArm.put("wo_id_guid", woIdGuid != null ? woIdGuid : "");
+                        backupPayloadArm.put("ticket_no", "");
+                        backupPayloadArm.put("sale_no", "");
+                        backupPayloadArm.put("net_l", 0.0);
+                        backupPayloadArm.put("gross_l", 0.0);
+                        backupPayloadArm.put("serial_id", fSerialId != null ? fSerialId : "");
+                        backupPayloadArm.put("lcrnode", node);
+                        backupPayloadArm.put("btmac", fMacPourArm);
+                        backupPayloadArm.put("type", com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
+                        backupPayloadArm.put("backup_ts", System.currentTimeMillis());
+                        backupPayloadArm.put("payload_complet", "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + jobId + "\"}");
+                        backupPayloadArm.put("sync_status",
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
+                        com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
+                            activity.getApplicationContext(), woNum, jobId, backupPayloadArm);
+                    } catch (Exception e) {
+                        android.util.Log.w(TAG, "Enregistrement initial (armement) ERR (non-bloquant): " + e.getMessage());
+                    }
+
                     activity.runOnUiThread(() ->
                         activity.toast("📦 Livraison démarrée — " + woNum));
                     pollJobUntilDone(jobId, node, woNum, woIdGuid, fSerialId,
@@ -1999,7 +2060,18 @@ public class DeepLinkHandler {
                 // CHAQUE livraison, peu importe si le bouton bleu est
                 // cliqué ou non par la suite.
                 try {
+                    // ✅ RETABLI (28 août 2026, demande Paul — "non on
+                    // garde une ligne par transaction... on ne change
+                    // rien on ajoute le running_flowing") — revient à
+                    // ticket_no comme clé du nom de fichier (comportement
+                    // d'origine). insertDelivery() reste une VRAIE ligne
+                    // finale distincte de celle créée à l'armement
+                    // (running_flowing, via upsertByJobId ailleurs) — pas
+                    // une mise à jour de cette dernière. job_id reste
+                    // dans le payload pour référence/traçabilité, mais ne
+                    // sert plus de clé de fichier ici.
                     org.json.JSONObject backupPayloadFin = new org.json.JSONObject();
+                    backupPayloadFin.put("job_id", d.optString("jobId", ""));
                     backupPayloadFin.put("wo_num", woNum != null ? woNum : "");
                     backupPayloadFin.put("wo_id_guid", woIdGuid != null ? woIdGuid : "");
                     backupPayloadFin.put("ticket_no", ticketNo != null ? ticketNo : "");
