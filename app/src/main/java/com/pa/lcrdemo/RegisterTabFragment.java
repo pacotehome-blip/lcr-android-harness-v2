@@ -603,6 +603,18 @@ public class RegisterTabFragment extends Fragment {
         return produitVerificationTerminee;
     }
 
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — "tu as oublié la règle si
+    // c'est pas le bon produit on cancel la livraison defacto") — expose
+    // la raison de désaccord produit à DeepLinkHandler, pour que
+    // lancerLivraison() (le vrai chemin d'armement) puisse aussi refuser
+    // l'armement si le scan a CONCLU mais a trouvé le MAUVAIS produit —
+    // pas seulement "la validation n'a pas eu le temps de conclure".
+    // Cette règle existait déjà pour le bouton local (startNewDeliveryC())
+    // mais n'avait jamais été répliquée ici.
+    public String getProduitDeepLinkIntrouvableRaison() {
+        return produitDeepLinkIntrouvableRaison;
+    }
+
     private void signalerFinScanProduit(java.util.concurrent.CountDownLatch doneSignal) {
         produitVerificationTerminee = true;
         if (doneSignal != null) doneSignal.countDown();

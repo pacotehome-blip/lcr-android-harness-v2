@@ -847,29 +847,61 @@ public class DeepLinkHandler {
             }
 
             // ✅ AJOUTÉ (28 août 2026, demande Paul — "pas encore réglé le
-            // produit avant le running flowing") — attente bornée
-            // supplémentaire (max 3s) pour que la VRAIE conclusion de la
-            // vérification produit (produitVerificationTerminee, posée
-            // par signalerFinScanProduit()) ait eu lieu avant d'armer —
-            // scanInProgress (ci-dessus) ne couvre que "un scan est en
-            // cours", pas "le scan a vraiment conclu". Sans ce correctif,
-            // le scan démarrait à peine que la livraison était déjà
-            // armée (confirmé par log réel : moins d'une seconde
-            // d'écart). Best-effort — si toujours pas conclu après 3s,
-            // continue quand même (comportement DÉGRADÉ déjà accepté
-            // ailleurs, plutôt que de bloquer indéfiniment).
+            // ✅ CORRIGÉ (28 août 2026, demande Paul — "qu'est-ce qui
+            // arrive si on pousse le mauvais produit genre du gaz dans du
+            // diesel... c'est nous qui armons la livraison, repousse tant
+            // que nous n'avons pas validé le produit") — trouvé : mon
+            // correctif précédent attendait jusqu'à 3s PUIS ARMAIT QUAND
+            // MÊME si la validation n'avait pas conclu — un vrai risque
+            // de sécurité (mauvais produit livré), pas juste un
+            // désagrément esthétique comme les autres "DÉGRADÉ après 3
+            // tentatives" ailleurs dans l'init. Ici : REFUS complet de
+            // l'armement si la validation n'a pas conclu après une
+            // attente raisonnable (10s, le temps normal d'un vrai scan
+            // matériel) — jamais de contournement silencieux. Retourne
+            // vers FieldService avec une erreur claire, même patron déjà
+            // établi pour les autres échecs génuinement bloquants
+            // (POLL_TIMEOUT).
+            boolean produitValideAvantArmement = false;
+            RegisterTabFragment tabArmRef = null;
             try {
                 String mediaShortArm = activity.mediaShortFromTransportKey(transportKey);
                 String tabKeyArm = activity.tabKeyOf(mediaShortArm, node, serialId);
                 Fragment fArm = activity.getSupportFragmentManager().findFragmentByTag("regtab_" + tabKeyArm);
                 if (fArm instanceof RegisterTabFragment) {
-                    RegisterTabFragment tabArm = (RegisterTabFragment) fArm;
-                    for (int waitProduit = 0; waitProduit < 30; waitProduit++) {
-                        if (tabArm.isProduitVerificationTerminee()) break;
+                    tabArmRef = (RegisterTabFragment) fArm;
+                    for (int waitProduit = 0; waitProduit < 100; waitProduit++) {
+                        if (tabArmRef.isProduitVerificationTerminee()) { produitValideAvantArmement = true; break; }
                         try { Thread.sleep(100); } catch (Exception ignored) {}
                     }
                 }
             } catch (Exception ignored) {}
+
+            if (!produitValideAvantArmement) {
+                android.util.Log.w(TAG, "lancerLivraison: REFUS armement — validation produit jamais conclue après 10s");
+                logError(serialId, woNum, "PRODUIT_NON_VALIDE", "Validation produit jamais conclue avant armement — livraison refusée par sécurité");
+                retournerFieldService(woNum, woIdGuid, "erreur_produit_non_valide",
+                    buildErrorJson("PRODUIT_NON_VALIDE", "Le produit n'a pas pu être validé sur le registre avant l'armement — livraison refusée par sécurité. Réessayez, ou vérifiez le registre."));
+                return;
+            }
+
+            // ✅ AJOUTÉ (28 août 2026, demande Paul — "tu as oublié la
+            // règle si c'est pas le bon produit on cancel la livraison
+            // defacto") — la validation a CONCLU, mais a-t-elle trouvé le
+            // BON produit ? Même règle déjà établie pour le bouton local
+            // (startNewDeliveryC()), jamais répliquée ici — annulation
+            // franche, pas un défaut silencieux sur un produit différent
+            // de celui attendu par FieldService.
+            if (tabArmRef != null) {
+                String raisonMismatch = tabArmRef.getProduitDeepLinkIntrouvableRaison();
+                if (raisonMismatch != null && !raisonMismatch.isEmpty()) {
+                    android.util.Log.w(TAG, "lancerLivraison: REFUS armement — mismatch produit: " + raisonMismatch);
+                    logError(serialId, woNum, "PRODUIT_MISMATCH", raisonMismatch);
+                    retournerFieldService(woNum, woIdGuid, "erreur_produit_mismatch",
+                        buildErrorJson("PRODUIT_MISMATCH", raisonMismatch));
+                    return;
+                }
+            }
 
             com.pa.lcr.lcp.ApiResult r = controllerOneshot.api_deliveryOneShotStart(
                 woNum, fProduct, fPresetD, null);
