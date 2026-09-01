@@ -5432,8 +5432,24 @@ safeJsonPut(data, "state_job", "DONE");
                 safeJsonPut(data, "live_status", presetReached
                         ? "LIVE: RUNNING_PAUSED (FLOW OFF confirmed)"
                         : "LIVE: RUNNING_PAUSED (FLOW OFF confirmed - preset not reached)");
-            } else {
+            } else if (state == DeliveryState.RUNNING_FLOWING || state == DeliveryState.RUNNING_PAUSED) {
                 safeJsonPut(data, "live_status", "LIVE: RUNNING_FLOWING");
+            } else {
+                // ✅ CORRIGÉ (28 août 2026, demande Paul — "j'ai ticket
+                // connu, je suis selon le registre en running_flowing,
+                // pas de sens... j'ai encore le bouton terminer qui
+                // flash") — trouvé : ce bloc ("RUNNING (normal)")
+                // supposait implicitement TOUJOURS être en flux actif —
+                // aucune vérification de l'état réel avant de produire
+                // "LIVE: RUNNING_FLOWING" par défaut. Confirmé par log
+                // réel : state="CONNECTED" (fin de livraison, preset
+                // atteint) mais live_status affichait quand même "LIVE:
+                // RUNNING_FLOWING" — signal contradictoire dans la même
+                // réponse, causant le clignotement du bouton Terminer
+                // (deux informations opposées reçues côte à côte).
+                // Reflète maintenant le vrai état si ce n'est réellement
+                // ni un flux actif ni une pause connue.
+                safeJsonPut(data, "live_status", "LIVE: " + state.name());
             }
 
             job.lastOkData = safeJsonCopy(data);
