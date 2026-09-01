@@ -5558,6 +5558,43 @@ public class RegisterTabFragment extends Fragment {
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_BTMAC,       macAnnul);
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,       0.0);
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L,     0.0);
+                    // ✅ AJOUTÉ (28 août 2026, demande Paul — "on a pas le
+                    // produit, le code produit, le preset, le type
+                    // produit dans les deux ça prend ça aussi pour le
+                    // ticket annulé... ils doivent tous avoir la même
+                    // affaire") — même richesse d'information que le
+                    // filet de sécurité (running_flowing) — une
+                    // annulation mérite exactement le même niveau de
+                    // détail, pas moins.
+                    int produitAnnul = getPendingProduct();
+                    double presetAnnul = 0;
+                    try {
+                        if (edtPreset != null) {
+                            String presetTxtAnnul = edtPreset.getText().toString().trim();
+                            if (!presetTxtAnnul.isEmpty()) presetAnnul = Double.parseDouble(presetTxtAnnul);
+                        }
+                    } catch (Exception ignored) {}
+                    String descAnnul = "";
+                    String codeAnnul = "";
+                    int typeProduitAnnul = -1;
+                    try {
+                        com.pa.lcr.lcp.storage.RegisterProductStore prodStoreAnnul =
+                            new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
+                        java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> lignesAnnul =
+                            prodStoreAnnul.getAll(serialFromArgs, node);
+                        for (com.pa.lcr.lcp.storage.RegisterProductStore.Row ligneAnnul : lignesAnnul) {
+                            if (ligneAnnul.noteIdx == produitAnnul - 1) {
+                                descAnnul = ligneAnnul.description;
+                                codeAnnul = ligneAnnul.productCode;
+                                typeProduitAnnul = ligneAnnul.productType;
+                                break;
+                            }
+                        }
+                    } catch (Exception e) {
+                        android.util.Log.w("Annuler", "Recherche produit (annulation) ERR (non-bloquant): " + e.getMessage());
+                    }
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PRODUIT_NO, produitAnnul);
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PRESET_L, presetAnnul);
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
                         com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ANNULATION);
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,      "OPERATEUR");
@@ -5571,6 +5608,11 @@ public class RegisterTabFragment extends Fragment {
                     payload.put("gross_at_cancel", grossAtCancel);
                     payload.put("cancel_ts",       System.currentTimeMillis());
                     payload.put("ticket_no",       ticketNo);
+                    payload.put("active_product",  produitAnnul);
+                    payload.put("active_product_description", descAnnul);
+                    payload.put("active_product_code", codeAnnul);
+                    payload.put("active_product_type", typeProduitAnnul);
+                    payload.put("preset_net_l",    presetAnnul);
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PAYLOAD_JSON, payload.toString());
                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbAnnuler =
                         new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
@@ -5695,6 +5737,11 @@ public class RegisterTabFragment extends Fragment {
                         backupPayloadAnnul.put("serial_id", serialFromArgs != null ? serialFromArgs : "");
                         backupPayloadAnnul.put("lcrnode", node);
                         backupPayloadAnnul.put("btmac", macAnnul);
+                        backupPayloadAnnul.put("produit_no", produitAnnul);
+                        backupPayloadAnnul.put("active_product_description", descAnnul);
+                        backupPayloadAnnul.put("active_product_code", codeAnnul);
+                        backupPayloadAnnul.put("active_product_type", typeProduitAnnul);
+                        backupPayloadAnnul.put("preset_net_l", presetAnnul);
                         backupPayloadAnnul.put("type", com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ANNULATION);
                         backupPayloadAnnul.put("backup_ts", System.currentTimeMillis());
                         backupPayloadAnnul.put("payload_complet", payload.toString());
