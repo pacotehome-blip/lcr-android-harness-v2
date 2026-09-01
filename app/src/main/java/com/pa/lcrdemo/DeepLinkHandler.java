@@ -1872,6 +1872,28 @@ public class DeepLinkHandler {
                                 "Livraison terminée (CONNECTED preset atteint) — " + extraJson);
                             logDeliveryEnd(serialId, woNum, jobId, "DONE", extraJson, null);
                             onDeliveryEnded(woNum, woIdGuid, extraJson, node, serialId, mac);
+                            // ✅ AJOUTÉ (28 août 2026, demande Paul — "il
+                            // faut vraiment récupérer l'état du registre
+                            // pourquoi j'ai été obligé de faire status")
+                            // — trouvé : ce même rafraîchissement immédiat
+                            // (requestStatus()+requestLiveSample())
+                            // existait déjà pour le cas "ticket pending"
+                            // (voir plus haut dans cette même boucle),
+                            // mais manquait ICI — laissant l'affichage
+                            // figé sur l'ancien état (RUNNING_FLOWING)
+                            // jusqu'à ce que Paul déclenche manuellement
+                            // STATUS_B, 30 secondes plus tard dans le log
+                            // fourni. Même patron, appliqué ici aussi.
+                            try {
+                                com.pa.lcr.lcp.DeliveryController dcFin =
+                                    com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                                        .getController(transportKey, node);
+                                if (dcFin != null) {
+                                    dcFin.requestStatus();
+                                    Thread.sleep(200);
+                                    dcFin.requestLiveSample();
+                                }
+                            } catch (Exception ignored) {}
                             return;
                         }
 
