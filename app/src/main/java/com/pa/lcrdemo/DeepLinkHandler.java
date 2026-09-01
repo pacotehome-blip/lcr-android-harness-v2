@@ -566,8 +566,24 @@ public class DeepLinkHandler {
                                 Fragment f = activity.getSupportFragmentManager()
                                     .findFragmentByTag("regtab_" + tabKey);
                                 if (f instanceof RegisterTabFragment) {
+                                    // ✅ CORRIGÉ (28 août 2026, demande Paul —
+                                    // "si on arrive du deeplink, on doit
+                                    // valider le produit sur le scan produit
+                                    // du registre... si je reviens suite à un
+                                    // crash [...] ce qui nécessite le scan
+                                    // produit et sa validation") — trouvé :
+                                    // ce point d'appel (tab pas encore créé,
+                                    // typique d'un deep link arrivant sur un
+                                    // tab neuf OU en reprise après crash)
+                                    // utilisait la version 3-arg, sans
+                                    // woIdGuid — la revalidation forcée du
+                                    // produit (ajoutée plus tôt aujourd'hui
+                                    // dans prefillFromDeepLink 4-arg) ne se
+                                    // déclenchait donc JAMAIS pour ce chemin
+                                    // précis. woIdGuid est déjà disponible
+                                    // ici (ligne ~112), jamais réassigné.
                                     ((RegisterTabFragment) f).prefillFromDeepLink(
-                                        fWoNum, fProduit, fPresetStr);
+                                        fWoNum, woIdGuid, fProduit, fPresetStr);
                                 } else if (attempts++ < 5) {
                                     // Tab pas encore créé — réessayer
                                     activity.getUiHandler().postDelayed(this, 800);
@@ -1191,6 +1207,7 @@ public class DeepLinkHandler {
                 final String fProduit      = produit;
                 final String fPreset       = presetStr;
                 final String fWoNum        = woNum;
+                final String fWoIdGuid     = woIdGuid;
                 final String fSerialId     = serialId != null ? serialId : "";
                 final String fTransportKey = transportKey;
 
@@ -1207,8 +1224,11 @@ public class DeepLinkHandler {
                                 Fragment f          = activity.getSupportFragmentManager()
                                                               .findFragmentByTag("regtab_" + tabKey);
                                 if (f instanceof RegisterTabFragment) {
+                                    // ✅ CORRIGÉ (28 août 2026, même correctif
+                                    // que le premier point d'appel plus haut)
+                                    // — même trou, même cause.
                                     ((RegisterTabFragment) f).prefillFromDeepLink(
-                                        fWoNum, fProduit, fPreset);
+                                        fWoNum, fWoIdGuid, fProduit, fPreset);
                                 }
                             } catch (Exception ignored) {}
                         }, 800);
