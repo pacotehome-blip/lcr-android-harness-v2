@@ -96,16 +96,30 @@ public class LocalDeliveryBackup {
             String[] projection = { MediaStore.MediaColumns._ID };
             String selection = MediaStore.MediaColumns.DISPLAY_NAME + "=?";
             String[] selectionArgs = { fileName };
+            // ✅ AJOUTÉ (28 août 2026, demande Paul — "après le
+            // correction... j'ai fait retour au bon de travail" — le
+            // fichier "(2)" a quand même été créé malgré le correctif) —
+            // logs précis pour voir si la recherche trouve vraiment le
+            // fichier existant, ou échoue silencieusement pour une
+            // raison encore à identifier (permission, format de requête,
+            // etc.).
+            Log.i(TAG, "backupViaMediaStore: recherche fichier existant — DISPLAY_NAME=\"" + fileName + "\"");
             try (android.database.Cursor c = ctx.getContentResolver().query(
                     MediaStore.Downloads.EXTERNAL_CONTENT_URI, projection,
                     selection, selectionArgs, null)) {
+                Log.i(TAG, "backupViaMediaStore: requête exécutée — curseur=" + (c != null)
+                    + " count=" + (c != null ? c.getCount() : -1));
                 if (c != null && c.moveToFirst()) {
                     long id = c.getLong(c.getColumnIndexOrThrow(MediaStore.MediaColumns._ID));
                     outUri = android.content.ContentUris.withAppendedId(
                         MediaStore.Downloads.EXTERNAL_CONTENT_URI, id);
+                    Log.i(TAG, "backupViaMediaStore: fichier existant TROUVÉ — id=" + id + " uri=" + outUri);
+                } else {
+                    Log.i(TAG, "backupViaMediaStore: aucun fichier existant trouvé pour ce nom — nouvelle insertion à suivre");
                 }
             } catch (Exception e) {
-                Log.w(TAG, "backupViaMediaStore: recherche fichier existant ERR (non-bloquant): " + e.getMessage());
+                Log.w(TAG, "backupViaMediaStore: recherche fichier existant EXCEPTION: "
+                    + e.getClass().getSimpleName() + " — " + e.getMessage());
             }
 
             if (outUri == null) {
