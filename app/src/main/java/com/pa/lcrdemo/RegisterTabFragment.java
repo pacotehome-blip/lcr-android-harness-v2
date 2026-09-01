@@ -570,6 +570,12 @@ public class RegisterTabFragment extends Fragment {
     // session, voir son propre commentaire) — une seule tentative
     // suffit.
     private volatile boolean recuperationRunningFlowingTentee = false;
+    // ✅ AJOUTÉ (28 août 2026, même correctif) — drapeau séparé pour le
+    // cas "CONNECTED avec filet de sécurité orphelin" — distinct du cas
+    // RUNNING_FLOWING ci-dessus, pour que les deux puissent se déclencher
+    // indépendamment dans une même session si l'état passe de l'un à
+    // l'autre.
+    private volatile boolean finalisationOrphelineTentee = false;
     // ✅ AJOUTÉ (26 août 2026, demande Paul — "s'il arrive de deeplink il
     // applique son produit et valide aussi si le produit est bien présent
     // dans la liste de produit déjà scanné, si non il annule la
@@ -733,7 +739,67 @@ public class RegisterTabFragment extends Fragment {
             recuperationRunningFlowingTentee = true;
             safeBg(() -> tenterRecuperationRunningFlowing());
         }
+        // ✅ AJOUTÉ (28 août 2026, demande Paul — "pourquoi j'avais le json
+        // et là je ne l'ai plus... revois le processus au complet") —
+        // trouvé (log réel confirmé) : le sondage automatique
+        // (pollJobUntilDone) a un timeout de 10 minutes — si la vraie fin
+        // de livraison survient APRÈS ce délai (confirmé : 21m46s dans le
+        // cas réel), le poll a déjà abandonné et personne ne détecte
+        // jamais la transition réelle vers CONNECTED — la ligne "filet de
+        // sécurité" (RUNNING_FLOWING) reste alors orpheline pour
+        // toujours, sans jamais être remplacée par la vraie ligne finale.
+        // Ici : si on revient dans le tab et que le registre est déjà
+        // CONNECTED (livraison bel et bien terminée), on vérifie s'il
+        // existe une ligne filet de sécurité encore marquée
+        // RUNNING_FLOWING pour ce WO/serial — si oui, c'est le signe
+        // qu'elle n'a jamais été finalisée, et on complète la sauvegarde
+        // maintenant avec les vraies valeurs actuelles.
+        if (st == DeliveryState.CONNECTED && !finalisationOrphelineTentee) {
+            finalisationOrphelineTentee = true;
+            safeBg(() -> tenterFinalisationLivraisonOrpheline());
+        }
         return actif;
+    }
+
+    private void tenterFinalisationLivraisonOrpheline() {
+        try {
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbOrph =
+                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow safetyNet;
+            try {
+                safetyNet = dbOrph.getRunningFlowingSafetyNet(currentWoNum, serialFromArgs);
+            } finally {
+                try { dbOrph.close(); } catch (Exception ignored) {}
+            }
+            if (safetyNet == null || safetyNet.jobId == null || safetyNet.jobId.isEmpty()) {
+                return; // rien d'orphelin à finaliser
+            }
+            LogBus.api(node, "[FINALISATION-ORPHELINE] ligne filet de sécurité trouvée pour jobId="
+                + safetyNet.jobId + " — registre déjà CONNECTED, la vraie fin a été manquée (probable timeout du sondage)");
+            DeliveryController c = controller;
+            if (c == null) return;
+            String ticketFin = c.api_readTicketNo23Frais();
+            if (ticketFin == null || ticketFin.isEmpty()) ticketFin = lastKnownTicketNo;
+            double netFin = parseDisplayNet();
+            double grossFin = parseDisplayGross();
+            String macFin = (tabTransportKey != null) ? tabTransportKey.trim() : "";
+            org.json.JSONObject extraOrph = new org.json.JSONObject();
+            org.json.JSONObject resultOrph = new org.json.JSONObject();
+            resultOrph.put("ticket_no", ticketFin != null ? ticketFin : "");
+            resultOrph.put("sale_no", ticketFin != null ? ticketFin : "");
+            resultOrph.put("fs_net_l", netFin);
+            resultOrph.put("fs_gross_l", grossFin);
+            extraOrph.put("result", resultOrph);
+            MainActivity main = (MainActivity) getActivity();
+            if (main != null) {
+                main.onDeliveryEnded(currentWoNum, currentWoIdGuid, extraOrph.toString(),
+                    node, serialFromArgs, macFin);
+                LogBus.api(node, "[FINALISATION-ORPHELINE] onDeliveryEnded appelé — ticket="
+                    + ticketFin + " net=" + netFin + " gross=" + grossFin);
+            }
+        } catch (Exception e) {
+            android.util.Log.w("RegisterTabFragment", "tenterFinalisationLivraisonOrpheline ERR: " + e.getMessage());
+        }
     }
 
     private void tenterRecuperationRunningFlowing() {
@@ -2982,6 +3048,51 @@ public class RegisterTabFragment extends Fragment {
                 try { if (controller != null) controller.requestLiveSample(); } catch (Exception ignored) {}
                 refreshDelCodeFromTickSnapshotThrottled();
                 updateButtons(controller != null ? controller.getState() : null);
+                // ✅ AJOUTÉ (28 août 2026, demande Paul — "vas y" pour le
+                // clic manuel Terminer) — trouvé (log réel confirmé) : la
+                // chaîne automatique (onDeliveryFinishedIfNeeded("FSM") →
+                // onDeliveryFinished() → retournerAuWorkOrder()) ne se
+                // déclenchait pas de façon fiable pour ce chemin — aucune
+                // trace "[AUTO-BACKUP]" dans un cas confirmé où la
+                // livraison s'est bel et bien terminée (12:11:45,
+                // "[ÉTAT] CONNECTÉ, prêt"), laissant la livraison sans
+                // JSON ni ligne BD finale. Filet de sécurité direct ici —
+                // sans danger même si la chaîne automatique fonctionne
+                // aussi de son côté, protégé par UNIQUE(wo_num,ticket_no)
+                // ON CONFLICT IGNORE déjà en place.
+                safeBg(() -> {
+                    try {
+                        DeliveryController c = controller;
+                        if (c == null) return;
+                        String ticketFin = c.api_readTicketNo23Frais();
+                        if (ticketFin == null || ticketFin.isEmpty()) {
+                            if (lastKnownTicketNo != null) ticketFin = lastKnownTicketNo;
+                        }
+                        double netFin = parseDisplayNet();
+                        double grossFin = parseDisplayGross();
+                        String macFin = (tabTransportKey != null) ? tabTransportKey.trim() : "";
+                        org.json.JSONObject extraFin = new org.json.JSONObject();
+                        extraFin.put("ticket_no", ticketFin != null ? ticketFin : "");
+                        extraFin.put("sale_no", ticketFin != null ? ticketFin : "");
+                        extraFin.put("net", netFin);
+                        extraFin.put("gross", grossFin);
+                        org.json.JSONObject resultFin = new org.json.JSONObject();
+                        resultFin.put("ticket_no", ticketFin != null ? ticketFin : "");
+                        resultFin.put("sale_no", ticketFin != null ? ticketFin : "");
+                        resultFin.put("fs_net_l", netFin);
+                        resultFin.put("fs_gross_l", grossFin);
+                        extraFin.put("result", resultFin);
+                        MainActivity main = (MainActivity) getActivity();
+                        if (main != null) {
+                            main.onDeliveryEnded(currentWoNum, currentWoIdGuid, extraFin.toString(),
+                                node, serialFromArgs, macFin);
+                            LogBus.api(node, "[FILET-TERMINER] onDeliveryEnded appelé directement — ticket="
+                                + ticketFin + " net=" + netFin + " gross=" + grossFin);
+                        }
+                    } catch (Exception e) {
+                        android.util.Log.w("RegisterTabFragment", "Filet sécurité TERMINER ERR: " + e.getMessage());
+                    }
+                });
             }, 1500);
         });
 
