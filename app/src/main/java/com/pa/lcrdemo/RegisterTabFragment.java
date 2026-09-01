@@ -336,14 +336,49 @@ public class RegisterTabFragment extends Fragment {
                 // le scan ne serait pas armé/en vol), attendre sa fin avant de
                 // démarrer. Sur un tab déjà existant, isAutoProductScanBusy()
                 // est déjà false ici — aucun délai. Max 10s, best-effort.
-                boolean scanTermine = false;
-                for (int i = 0; i < 20; i++) {
-                    if (!isAutoProductScanBusy()) { scanTermine = true; break; }
-                    try { Thread.sleep(500); } catch (Exception ignored) {}
+                // ✅ CORRIGÉ (28 août 2026, demande Paul — "je n'ai pas la
+                // bonne place... j'ai le même comportement, revoit le
+                // init, c'est là que ça se passe") — trouvé : une
+                // TROISIÈME fonction séparée (lancerDepuisStore, celle-
+                // ci), jamais corrigée en même temps que
+                // DeepLinkHandler.lancerLivraison() — même trou exact :
+                // vérifiait seulement "un scan est en cours"
+                // (isAutoProductScanBusy), pas "la validation a vraiment
+                // conclu" (produitVerificationTerminee), et continuait
+                // quand même après le timeout de 10s. Ici : accès direct
+                // aux drapeaux (même classe, pas besoin de getter) — vrai
+                // refus si pas validé, ou si mauvais produit détecté.
+                // ✅ CORRIGÉ (28 août 2026, demande Paul — "respecte les
+                // étapes du init de 1 à 7") — utilise maintenant la même
+                // fonction centrale que le bouton local
+                // (peutDemarrerLivraison(), corrigée juste au-dessus pour
+                // vérifier le VRAI drapeau produitVerificationTerminee) —
+                // au lieu d'une logique de vérification ad hoc, séparée
+                // et incomplète (isAutoProductScanBusy() seul, plus
+                // "continue quand même" après timeout).
+                boolean toutesLesEtapesApprouvees = false;
+                for (int i = 0; i < 100; i++) {
+                    if (peutDemarrerLivraison()) { toutesLesEtapesApprouvees = true; break; }
+                    try { Thread.sleep(100); } catch (Exception ignored) {}
                 }
                 android.util.Log.i("RegisterTabFragment",
-                    "lancerDepuisStore: attente scan auto produits — "
-                        + (scanTermine ? "terminé" : "timeout 10s, poursuite quand même"));
+                    "lancerDepuisStore: attente approbation des 7 étapes — "
+                        + (toutesLesEtapesApprouvees ? "approuvées" : "timeout 10s — ARMEMENT REFUSÉ ("
+                            + initSectionStatus.toString() + ")"));
+                if (!toutesLesEtapesApprouvees) {
+                    ui.post(() -> android.widget.Toast.makeText(requireContext(),
+                        "Livraison refusée — initialisation non complétée (produit/preset/registre). Réessayez.",
+                        android.widget.Toast.LENGTH_LONG).show());
+                    return;
+                }
+                if (produitDeepLinkIntrouvableRaison != null && !produitDeepLinkIntrouvableRaison.isEmpty()) {
+                    final String raisonMismatchStore = produitDeepLinkIntrouvableRaison;
+                    android.util.Log.w("RegisterTabFragment", "lancerDepuisStore: REFUS armement — mismatch produit: " + raisonMismatchStore);
+                    ui.post(() -> android.widget.Toast.makeText(requireContext(),
+                        "Livraison refusée — " + raisonMismatchStore,
+                        android.widget.Toast.LENGTH_LONG).show());
+                    return;
+                }
                 try {
                     com.pa.lcr.lcp.ApiResult r = controller.api_deliveryOneShotStart(
                         fWoNum, fProduit, fPreset, null);
@@ -615,6 +650,15 @@ public class RegisterTabFragment extends Fragment {
         return produitDeepLinkIntrouvableRaison;
     }
 
+    // ✅ AJOUTÉ (28 août 2026, même correctif) — expose la vraie fonction
+    // centrale (peutDemarrerLivraison(), utilisée par le bouton local) à
+    // DeepLinkHandler, pour que lancerLivraison() vérifie exactement la
+    // même chose — les 7 étapes de l'init, pas seulement le produit
+    // isolément.
+    public boolean isPeutDemarrerLivraison() {
+        return peutDemarrerLivraison();
+    }
+
     private void signalerFinScanProduit(java.util.concurrent.CountDownLatch doneSignal) {
         produitVerificationTerminee = true;
         if (doneSignal != null) doneSignal.countDown();
@@ -677,14 +721,24 @@ public class RegisterTabFragment extends Fragment {
     // EN_COURS ou ÉCHEC bloque vraiment. Ça préserve l'intention d'origine
     // (attendre pendant une vraie initialisation en cours) sans jamais
     // condamner un tab dont le suivi n'a simplement jamais démarré.
+    // ✅ CORRIGÉ (28 août 2026, demande Paul — "je veux que tu me
+    // redonnes et que tu respectes les étapes du init de 1 à 7") —
+    // trouvé : cette fonction centrale (déjà utilisée par le bouton
+    // local) vérifiait initSectionStatus.get(PRODUIT) — un statut
+    // "fire-and-forget", marqué OK/DÉGRADÉ en moins de 50ms, JAMAIS
+    // quand le vrai scan matériel a vraiment conclu (confirmé
+    // aujourd'hui, voir produitVerificationTerminee). Corrigé pour
+    // vérifier le VRAI drapeau — une seule fonction centrale, fiable,
+    // à utiliser PARTOUT (bouton local, deep link, lancerDepuisStore)
+    // au lieu de dupliquer une logique de vérification séparée à
+    // chaque endroit.
     private boolean peutDemarrerLivraison() {
         for (InitSection s : new InitSection[]{InitSection.REGISTRE, InitSection.LIVE, InitSection.RETOUR_WO}) {
             InitSectionStatus st = initSectionStatus.get(s);
             if (st == InitSectionStatus.EN_COURS || st == InitSectionStatus.ECHEC) return false;
         }
-        InitSectionStatus produit = initSectionStatus.get(InitSection.PRODUIT);
+        if (!produitVerificationTerminee) return false;
         InitSectionStatus preset = initSectionStatus.get(InitSection.PRESET);
-        if (produit == InitSectionStatus.EN_COURS || produit == InitSectionStatus.ECHEC) return false;
         if (preset == InitSectionStatus.EN_COURS || preset == InitSectionStatus.ECHEC) return false;
         return true;
     }

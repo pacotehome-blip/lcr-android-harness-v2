@@ -871,17 +871,17 @@ public class DeepLinkHandler {
                 if (fArm instanceof RegisterTabFragment) {
                     tabArmRef = (RegisterTabFragment) fArm;
                     for (int waitProduit = 0; waitProduit < 100; waitProduit++) {
-                        if (tabArmRef.isProduitVerificationTerminee()) { produitValideAvantArmement = true; break; }
+                        if (tabArmRef.isPeutDemarrerLivraison()) { produitValideAvantArmement = true; break; }
                         try { Thread.sleep(100); } catch (Exception ignored) {}
                     }
                 }
             } catch (Exception ignored) {}
 
             if (!produitValideAvantArmement) {
-                android.util.Log.w(TAG, "lancerLivraison: REFUS armement — validation produit jamais conclue après 10s");
-                logError(serialId, woNum, "PRODUIT_NON_VALIDE", "Validation produit jamais conclue avant armement — livraison refusée par sécurité");
-                retournerFieldService(woNum, woIdGuid, "erreur_produit_non_valide",
-                    buildErrorJson("PRODUIT_NON_VALIDE", "Le produit n'a pas pu être validé sur le registre avant l'armement — livraison refusée par sécurité. Réessayez, ou vérifiez le registre."));
+                android.util.Log.w(TAG, "lancerLivraison: REFUS armement — initialisation (7 étapes) jamais approuvée après 10s");
+                logError(serialId, woNum, "INIT_NON_APPROUVEE", "Initialisation jamais complétée avant armement (registre/produit/preset/live/retour_wo) — livraison refusée par sécurité");
+                retournerFieldService(woNum, woIdGuid, "erreur_init_non_approuvee",
+                    buildErrorJson("INIT_NON_APPROUVEE", "L'initialisation n'a pas pu se compléter avant l'armement — livraison refusée par sécurité. Réessayez, ou vérifiez le registre."));
                 return;
             }
 
