@@ -842,6 +842,50 @@ public class RegisterTabFragment extends Fragment {
             String ticketFrais = (controller != null) ? controller.api_readTicketNo23Frais() : "";
             double netFrais = parseDisplayNet();
             double grossFrais = parseDisplayGross();
+            // ✅ AJOUTÉ (28 août 2026, demande Paul — "je vais aussi te
+            // dire pourquoi je n'ai pas le preset, le produit dans le
+            // json, car ça te prends ça pour reconstruire la livraison
+            // comme si elle arrivait du deeplink") — trouvé : cette
+            // fonction ne capturait jamais le produit ni le preset —
+            // seulement ticket/net/gross. Le scan (maintenant corrigé
+            // pour s'exécuter même en livraison active) applique le
+            // produit à l'écran AVANT que cette récupération ne
+            // s'exécute — on le lit maintenant ici, même repli déjà
+            // utilisé pour armer une vraie livraison (getPendingProduct()).
+            int produitFrais = getPendingProduct();
+            double presetFrais = 0;
+            try {
+                if (edtPreset != null) {
+                    String presetTxt = edtPreset.getText().toString().trim();
+                    if (!presetTxt.isEmpty()) presetFrais = Double.parseDouble(presetTxt);
+                }
+            } catch (Exception ignored) {}
+            // ✅ AJOUTÉ (28 août 2026, demande Paul — "je veux le produit
+            // du ticket avec le type de produit, le code de produit
+            // aussi") — recherche la ligne complète (description, code,
+            // type) correspondant à l'index sélectionné, via
+            // RegisterProductStore (déjà rempli par le scan matériel,
+            // désormais garanti de s'exécuter grâce au correctif
+            // précédent).
+            String produitDescription = "";
+            String produitCode = "";
+            int produitType = -1;
+            try {
+                com.pa.lcr.lcp.storage.RegisterProductStore prodStore =
+                    new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
+                java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> lignes =
+                    prodStore.getAll(serialFromArgs, node);
+                for (com.pa.lcr.lcp.storage.RegisterProductStore.Row ligne : lignes) {
+                    if (ligne.noteIdx == produitFrais - 1) {
+                        produitDescription = ligne.description;
+                        produitCode = ligne.productCode;
+                        produitType = ligne.productType;
+                        break;
+                    }
+                }
+            } catch (Exception e) {
+                LogBus.api(node, "[RECUP-RUNNING] recherche produit (description/code/type) ERR (non-bloquant): " + e.getMessage());
+            }
             android.content.ContentValues cvRec = new android.content.ContentValues();
             cvRec.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_JOB_ID, safetyNet.jobId);
             cvRec.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM, safetyNet.woNum != null ? safetyNet.woNum : "");
@@ -851,6 +895,8 @@ public class RegisterTabFragment extends Fragment {
             }
             cvRec.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L, netFrais);
             cvRec.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L, grossFrais);
+            cvRec.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PRODUIT_NO, produitFrais);
+            cvRec.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PRESET_L, presetFrais);
             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbRec2 =
                 new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
             try {
@@ -859,7 +905,8 @@ public class RegisterTabFragment extends Fragment {
                 try { dbRec2.close(); } catch (Exception ignored) {}
             }
             LogBus.api(node, "[RECUP-RUNNING] filet de sécurité mis à jour — jobId=" + safetyNet.jobId
-                + " ticket=" + ticketFrais + " net=" + netFrais + " gross=" + grossFrais);
+                + " ticket=" + ticketFrais + " net=" + netFrais + " gross=" + grossFrais
+                + " produit=" + produitFrais + " preset=" + presetFrais);
 
             try {
                 org.json.JSONObject backupPayloadRec = new org.json.JSONObject();
@@ -875,7 +922,12 @@ public class RegisterTabFragment extends Fragment {
                 backupPayloadRec.put("btmac", safetyNet.btmac != null ? safetyNet.btmac : "");
                 backupPayloadRec.put("type", com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
                 backupPayloadRec.put("backup_ts", System.currentTimeMillis());
-                backupPayloadRec.put("payload_complet", "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + safetyNet.jobId + "\",\"recovered\":true}");
+                backupPayloadRec.put("payload_complet", "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\""
+                    + safetyNet.jobId + "\",\"recovered\":true,\"active_product\":" + produitFrais
+                    + ",\"active_product_description\":\"" + produitDescription.replace("\"", "")
+                    + "\",\"active_product_code\":\"" + produitCode.replace("\"", "")
+                    + "\",\"active_product_type\":" + produitType
+                    + ",\"preset_net_l\":" + presetFrais + "}");
                 backupPayloadRec.put("sync_status",
                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
                 com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
@@ -943,7 +995,23 @@ public class RegisterTabFragment extends Fragment {
             // section continuait jusqu'au bout, en concurrence avec le
             // tick fraîchement démarré. Vérifiée maintenant AUSSI entre
             // chaque section, pas juste au départ.
-            if (etatLivraisonActiveDetecte("runInitSequence (après REGISTRE)")) return;
+            // ✅ CORRIGÉ (28 août 2026, demande Paul — "pourquoi je n'ai pas
+            // la validation du produit avant que je retombe sur
+            // running_flowing... on est supposé l'avoir dans le json le
+            // produit pourquoi je ne l'ai pas") — trouvé : cette garde
+            // sautait TOUJOURS l'étape PRODUIT dès qu'une livraison était
+            // active (RUNNING_FLOWING inclus) — y compris en reprise après
+            // crash sur une BD vierge, où le scan n'a JAMAIS eu la chance
+            // de se produire. Le produit n'était donc jamais vérifié ni
+            // capturé dans le JSON de récupération, dans exactement le
+            // scénario où c'est le plus critique. Ne saute maintenant que
+            // si le scan a DÉJÀ été fait au moins une fois cette session
+            // (produitVerificationTerminee) — préserve la protection
+            // d'origine contre la contention avec le tick (13 août) pour
+            // une livraison qui continue normalement, tout en laissant le
+            // scan s'exécuter la toute première fois, même en reprise.
+            boolean livraisonActiveApresRegistre = etatLivraisonActiveDetecte("runInitSequence (après REGISTRE)");
+            if (produitVerificationTerminee && livraisonActiveApresRegistre) return;
 
             // 2) PRODUIT — scan, puis VALIDATION contre le deep link (s'il y
             // en a un), sinon défaut = produit 1 (index 0). Dégradé possible
@@ -2510,6 +2578,23 @@ public class RegisterTabFragment extends Fragment {
 
     public void prefillFromDeepLink(String woNum, String woIdGuid, String produit, String preset) {
         deliveryNotified = false; // reset pour la nouvelle livraison
+        // ✅ AJOUTÉ (28 août 2026, demande Paul — "si je reviens de
+        // deeplink il faut revalider car le produit peut changer, il
+        // doit être valide à chaque fois qu'on arrive sur le tab par
+        // deeplink") — trouvé : produitDejaResoluPourCetteSession
+        // persiste tant que le tab/fragment reste vivant, y compris
+        // entre PLUSIEURS deep links successifs pour des WO
+        // potentiellement DIFFÉRENTS (chacun avec son propre produit
+        // attendu). Réinitialise la validation SEULEMENT pour un vrai
+        // deep link (woIdGuid non vide — un test local via le bouton C
+        // n'en a jamais un, confirmé toute la journée) — pas pour un
+        // test local répété, où le produit physique sur le registre ne
+        // change pas d'un essai à l'autre.
+        if (woIdGuid != null && !woIdGuid.isEmpty()) {
+            produitDejaResoluPourCetteSession = false;
+            produitVerificationTerminee = false;
+            LogBus.api(node, "[PRODUIT] revalidation forcée — nouveau deep link (woIdGuid=" + woIdGuid + "), le produit peut différer de la livraison précédente");
+        }
         if (woNum != null && !woNum.isEmpty()) {
             currentWoNum = woNum;
             // ✅ Ce WO vient directement du deep link — priorité sur toute recherche
