@@ -613,6 +613,17 @@ private void reproEvent(String level, String type, String message, JSONObject da
 
  // ===== Livraison métier (auto-clôture) =====
      private volatile boolean deliveryInProgress = false;
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — "le _ est le 128") — signale
+    // que la transition RUNNING_FLOWING→CONNECTED à venir provient d'une
+    // annulation EXPLICITE (forceEndSync/CMD_END), pas d'une vraie fin
+    // naturelle (preset atteint). onDeliveryFinishedIfNeeded("FSM") en
+    // tient compte pour ne pas déclencher son propre backup automatique
+    // (onDeliveryFinished→retournerAuWorkOrder) en parallèle du code
+    // d'annulation dédié (proceedWithAnnulation), qui gère déjà
+    // entièrement ce cas — évite la double écriture et la corruption du
+    // ticket_no (lu depuis l'écran, potentiellement périmé) déjà
+    // confirmées dans les JSON de backup.
+    private volatile boolean dernierArretEstAnnulation = false;
     // ✅ Référence post-livraison pour détection fuite vanne (seuil 0.5L)
     public volatile double  netAtDeliveryEnd   = -1.0;
     public volatile double  grossAtDeliveryEnd = -1.0;
@@ -1992,6 +2003,11 @@ try {
      */
     public boolean forceEndSync(long timeoutMs) {
         if (isStopped()) return false;
+        // ✅ AJOUTÉ (28 août 2026) — voir déclaration de
+        // dernierArretEstAnnulation. forceEndSync() n'est appelée QUE par
+        // le code d'annulation (tag [CANCEL] confirmé juste en dessous) —
+        // légitime de poser ce drapeau ici, sans condition.
+        dernierArretEstAnnulation = true;
         try {
             emitLog("[CANCEL] forceEndSync — CMD_END depuis état " + state.name());
             lcpIssueCommand(CMD_END);
@@ -2211,10 +2227,26 @@ try {
                         // réellement changé (voir aussi le correctif côté
                         // RegisterTabFragment.onLiveStatus() qui n'appelle
                         // plus updateButtons() si le texte est identique).
+                        // ✅ CORRIGÉ (28 août 2026, demande Paul — "on a
+                        // (flow off - waiting progression) par
+                        // intermittence... en attente d'ouverture de la
+                        // vanne") — trouvé : ce texte (heartbeat, 2s) et
+                        // celui du superviseur ("Flow OFF - waiting
+                        // progression", 2.5s) alternaient par
+                        // intermittence sur le même affichage Live, selon
+                        // lequel des deux minuteurs se déclenchait en
+                        // dernier. Celui-ci ne contenait jamais "FLOW
+                        // OFF" — désactivant le bouton Terminer chaque
+                        // fois qu'il gagnait la course (même bug que celui
+                        // corrigé juste avant, mais depuis une source
+                        // différente). Uniformisé — même texte que le
+                        // superviseur pour cet état précis, une seule
+                        // formulation possible, plus d'alternance ni de
+                        // désactivation intermittente du bouton.
                         String etat = "LIVE: " + state.name()
                                 + (net > 0.0001 || gross > 0.0001
                                     ? " (FLOW ON)"
-                                    : " — en attente d'ouverture de la vanne (confirmé à l'instant)");
+                                    : " (Flow OFF - waiting progression)");
                         listener.onLiveStatus(etat);
                     }
                     // ✅ RETIRÉ (28 août 2026, demande Paul — "je ne veux
@@ -2394,6 +2426,13 @@ try {
 
                 long now2 = System.currentTimeMillis();
                 if (continueGraceUntilMs > now2) {
+                    // ✅ RETIRÉ (28 août 2026, demande Paul — "si on
+                    // corrige le bouton terminer... on a plus besoin du
+                    // décompte juste le comportement actuel") — le vrai
+                    // problème était le bouton Terminer, pas l'absence
+                    // d'un décompte visible. Une fois le bouton corrigé
+                    // (comparaison insensible à la casse sur "FLOW OFF"),
+                    // le comportement d'affichage d'origine suffit.
                     if (listener != null) {
                         listener.onFlowStability(flowBit, false, age);
                         listener.onLiveStatus("LIVE: RUNNING_FLOWING (Flow OFF - waiting progression)");
@@ -5473,6 +5512,25 @@ private String resolveActiveMedia() {
  // ===== Auto close delivery on FSM end (write in SQLite) =====
  private void onDeliveryFinishedIfNeeded(String reason) {
      if (!deliveryInProgress) return;
+     // ✅ AJOUTÉ (28 août 2026, demande Paul — "le _ est le 128") —
+     // consomme le drapeau ici, au tout début. Si cette transition vient
+     // d'une annulation explicite (forceEndSync), on saute ENTIÈREMENT ce
+     // traitement — proceedWithAnnulation() (côté RegisterTabFragment)
+     // gère déjà complètement ce cas (BD locale, JSON, sync, patch). Sans
+     // ce saut, les deux tournaient en parallèle sur le même événement,
+     // causant la double écriture (une ANNULATION correcte, une ORIGINAL
+     // avec ticket_no corrompu "—" — confirmé dans les JSON de backup)
+     // déjà diagnostiquée. Ne consomme QUE pour "FSM" (la transition
+     // d'état générique) — "END" (déclenché depuis initialize(), un
+     // filet de sécurité après crash) garde son propre comportement
+     // inchangé — il sert un but différent (récupération, pas une vraie
+     // transition en direct).
+     if ("FSM".equals(reason) && dernierArretEstAnnulation) {
+         dernierArretEstAnnulation = false;
+         deliveryInProgress = false;
+         emitLog("[CANCEL] onDeliveryFinishedIfNeeded(FSM) sauté — annulation déjà gérée par proceedWithAnnulation()");
+         return;
+     }
      deliveryInProgress = false;
      final long endMs = System.currentTimeMillis();
      final long startMs = (deliveryStartMs > 0L) ? deliveryStartMs : 0L;

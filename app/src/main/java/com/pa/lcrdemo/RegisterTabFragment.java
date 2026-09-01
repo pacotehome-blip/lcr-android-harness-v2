@@ -3706,7 +3706,16 @@ public class RegisterTabFragment extends Fragment {
             btnFinish.setEnabled(false);
         } else {
             String lt = lastLiveText;
-            boolean flowOffPhase = (lt != null && lt.contains("Flow OFF"));
+            // ✅ CORRIGÉ (28 août 2026, demande Paul — "le bouton
+            // terminer... devrait toujours rester actif") — trouvé :
+            // contains("Flow OFF") (casse mixte) ne correspond qu'au
+            // premier texte ("Flow OFF - waiting progression"). Les deux
+            // autres ("FLOW OFF confirmed", "FLOW OFF - confirming...")
+            // utilisent une casse différente (tout en majuscules) —
+            // jamais reconnus, désactivant le bouton dès la transition
+            // hors du tout premier état. Comparaison insensible à la
+            // casse maintenant.
+            boolean flowOffPhase = (lt != null && lt.toUpperCase(java.util.Locale.ROOT).contains("FLOW OFF"));
             boolean enable = (paused || flowOffPhase) && tabMediaReady;
             btnContinue.setEnabled(enable);
             btnFinish.setEnabled(enable);
