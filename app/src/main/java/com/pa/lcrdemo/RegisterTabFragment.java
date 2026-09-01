@@ -5727,7 +5727,7 @@ public class RegisterTabFragment extends Fragment {
         // cette méthode est appelée.
         if (produitDejaResoluPourCetteSession) {
             LogBus.api(node, "[SCAN-AUTO] sauté — produit déjà résolu pour cette session, aucun scan matériel nécessaire");
-            if (doneSignal != null) signalerFinScanProduit(doneSignal);
+            signalerFinScanProduit(doneSignal);
             return;
         }
         // ✅ AJOUTÉ (24 août 2026, demande Paul — "je ne vois pas le scan de
@@ -5739,13 +5739,13 @@ public class RegisterTabFragment extends Fragment {
         if (!isAdded() || getView() == null || controller == null) {
             android.util.Log.i("RegisterTabFragment", "autoScanProduitsSiNecessaire: abandon — "
                 + "isAdded=" + isAdded() + " getView()=" + (getView() != null) + " controller=" + (controller != null));
-            if (doneSignal != null) signalerFinScanProduit(doneSignal);
+            signalerFinScanProduit(doneSignal);
             return;
         }
         if (autoProductScanInFlight) {
             android.util.Log.i("RegisterTabFragment", "autoScanProduitsSiNecessaire: abandon — "
                 + "autoProductScanInFlight déjà true (cette instance)");
-            if (doneSignal != null) signalerFinScanProduit(doneSignal);
+            signalerFinScanProduit(doneSignal);
             return;
         }
         // ✅ CORRIGÉ (24 août 2026, demande Paul — "zéro scan des produits,
@@ -5764,14 +5764,14 @@ public class RegisterTabFragment extends Fragment {
         if (!etatAcceptablePourScan) {
             LogBus.api(node, "[SCAN-AUTO] abandon — état=" + stActuel
                 + " (accepté: CONNECTED/IDLE/PRESTART) — pas encore prêt à scanner");
-            if (doneSignal != null) signalerFinScanProduit(doneSignal);
+            signalerFinScanProduit(doneSignal);
             return; // état a pu changer entretemps
         }
         final String serialId = (serialFromArgs != null && !serialFromArgs.trim().isEmpty())
                 ? serialFromArgs.trim() : null;
         if (serialId == null) {
             LogBus.api(node, "[SCAN-AUTO] abandon — serialFromArgs vide/null");
-            if (doneSignal != null) signalerFinScanProduit(doneSignal);
+            signalerFinScanProduit(doneSignal);
             return;
         }
 
@@ -5784,7 +5784,7 @@ public class RegisterTabFragment extends Fragment {
         if (!autoScanLockAcquire(globalKey)) {
             LogBus.api(node, "[SCAN-AUTO] abandon — déjà en cours pour " + globalKey
                 + " (autre instance de fragment, OU verrou resté coincé d'un essai précédent)");
-            if (doneSignal != null) signalerFinScanProduit(doneSignal);
+            signalerFinScanProduit(doneSignal);
             return;
         }
         LogBus.api(node, "[SCAN-AUTO] démarrage — serial=" + serialId + " node=" + node);
@@ -5810,7 +5810,7 @@ public class RegisterTabFragment extends Fragment {
                 applierDescriptionsProduits(serialId, node);
                 autoProductScanInFlight = false;
                 autoScanLockRelease(globalKey);
-                if (doneSignal != null) signalerFinScanProduit(doneSignal);
+                signalerFinScanProduit(doneSignal);
             } else {
                 // ✅ CORRIGÉ (28 août 2026, demande Paul — "on s'en calisse,
                 // on a l'info dans la table, on a l'info du produit selon
@@ -5890,7 +5890,7 @@ public class RegisterTabFragment extends Fragment {
                         } finally {
                             autoProductScanInFlight = false;
                             autoScanLockRelease(globalKey);
-                            if (doneSignal != null) signalerFinScanProduit(doneSignal);
+                            signalerFinScanProduit(doneSignal);
                             if (!vraiLabelTrouve[0]) {
                                 if (controller != null && controller.scanInProgress) {
                                     android.util.Log.i("RegisterTabFragment", "Auto-scan produits — vrai scan déjà en cours (autre déclencheur), pas de doublon");
@@ -5915,7 +5915,7 @@ public class RegisterTabFragment extends Fragment {
                         // ✅ decompte ici (decision rapide prise : aucun
                         // raccourci trouve, scan materiel declenche) - ne
                         // bloque JAMAIS sur la fin reelle du scan lui-meme.
-                        if (doneSignal != null) signalerFinScanProduit(doneSignal);
+                        signalerFinScanProduit(doneSignal);
                     }
                 });
             }
@@ -5927,7 +5927,7 @@ public class RegisterTabFragment extends Fragment {
             // empêchant tout futur scan pour ce registre.
             autoProductScanInFlight = false;
             autoScanLockRelease(globalKey);
-            if (doneSignal != null) signalerFinScanProduit(doneSignal);
+            signalerFinScanProduit(doneSignal);
             android.util.Log.w("RegisterTabFragment", "autoScanProduitsSiNecessaire: échec de planification: " + schedulingErr.getMessage());
         }
     }
