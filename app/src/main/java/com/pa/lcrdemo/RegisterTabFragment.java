@@ -5846,6 +5846,27 @@ public class RegisterTabFragment extends Fragment {
         boolean etatAcceptablePourScan = stActuel == DeliveryState.CONNECTED
                 || stActuel == DeliveryState.IDLE
                 || stActuel == DeliveryState.PRESTART;
+        // ✅ CORRIGÉ (28 août 2026, demande Paul — "à quel moment j'ai eu
+        // un scan produit... j'ai fait une fin de livraison et je
+        // n'avais pas de json") — trouvé : cette garde bloquait TOUJOURS
+        // le scan pendant RUNNING_FLOWING/RUNNING_PAUSED, même après mon
+        // correctif précédent qui laissait runInitSequence() ATTEINDRE
+        // cette fonction — cette garde-ci, séparée et plus profonde,
+        // refusait quand même d'agir. Résultat : sur une reprise après
+        // crash (BD vierge, scan jamais fait), le scan n'aboutissait
+        // JAMAIS, peu importe combien de fois runInitSequence()
+        // réessayait. Élargi — accepte aussi RUNNING_FLOWING/
+        // RUNNING_PAUSED, mais SEULEMENT si le scan n'a jamais réussi
+        // cette session (!produitVerificationTerminee) — la sécurité du
+        // produit passe avant le risque d'interférence matérielle avec
+        // le flux, mais seulement pour cette toute première tentative
+        // critique; une livraison qui continue normalement (scan déjà
+        // fait) garde la protection d'origine.
+        if (!produitVerificationTerminee
+                && (stActuel == DeliveryState.RUNNING_FLOWING || stActuel == DeliveryState.RUNNING_PAUSED)) {
+            etatAcceptablePourScan = true;
+            LogBus.api(node, "[SCAN-AUTO] état=" + stActuel + " mais scan jamais fait cette session — autorisé exceptionnellement (récupération)");
+        }
         if (!etatAcceptablePourScan) {
             LogBus.api(node, "[SCAN-AUTO] abandon — état=" + stActuel
                 + " (accepté: CONNECTED/IDLE/PRESTART) — pas encore prêt à scanner");
