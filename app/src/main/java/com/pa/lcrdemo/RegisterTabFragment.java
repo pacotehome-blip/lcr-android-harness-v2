@@ -562,6 +562,14 @@ public class RegisterTabFragment extends Fragment {
     // le produit dans la citerne ne change pas d'une livraison à l'autre
     // sur le même camion.
     private volatile boolean produitDejaResoluPourCetteSession = false;
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — "on va ajouter le ticket de
+    // livraison en table avec le statut running_flowing... si jamais on a
+    // un crash une réinstallation on veut être en mesure de la reprendre
+    // là où elle est") — évite de retenter la récupération à chaque appel
+    // de etatLivraisonActiveDetecte() (appelée plusieurs fois par
+    // session, voir son propre commentaire) — une seule tentative
+    // suffit.
+    private volatile boolean recuperationRunningFlowingTentee = false;
     // ✅ AJOUTÉ (26 août 2026, demande Paul — "s'il arrive de deeplink il
     // applique son produit et valide aussi si le produit est bien présent
     // dans la liste de produit déjà scanné, si non il annule la
@@ -711,7 +719,87 @@ public class RegisterTabFragment extends Fragment {
         if (actif) {
             LogBus.api(node, "[INIT] " + source + " — livraison active, sauté (état=" + st + ")");
         }
+        // ✅ AJOUTÉ (28 août 2026, même correctif) — au retour dans le tab
+        // pendant que le registre est RÉELLEMENT RUNNING_FLOWING (crash
+        // de l'app, pas du registre — le flow physique continue), on
+        // retrouve la ligne "filet de sécurité" créée à l'armement (par
+        // wo_num/serial_id, jamais un nouveau job_id — un job_id est
+        // généré UNE SEULE FOIS, à l'armement, jamais à la reprise) et on
+        // tente au mieux une relecture fraîche. Une seule fois par
+        // session (recuperationRunningFlowingTentee). Best-effort —
+        // aucune tentative ne bloque ni n'échoue bruyamment; si rien
+        // n'est trouvé, tant pis, ce n'est pas grave (comme demandé).
+        if (st == DeliveryState.RUNNING_FLOWING && !recuperationRunningFlowingTentee) {
+            recuperationRunningFlowingTentee = true;
+            safeBg(() -> tenterRecuperationRunningFlowing());
+        }
         return actif;
+    }
+
+    private void tenterRecuperationRunningFlowing() {
+        try {
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbRec =
+                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow safetyNet;
+            try {
+                safetyNet = dbRec.getRunningFlowingSafetyNet(currentWoNum, serialFromArgs);
+            } finally {
+                try { dbRec.close(); } catch (Exception ignored) {}
+            }
+            if (safetyNet == null || safetyNet.jobId == null || safetyNet.jobId.isEmpty()) {
+                LogBus.api(node, "[RECUP-RUNNING] aucune ligne filet de sécurité trouvée — rien à mettre à jour");
+                return;
+            }
+            // Repli au mieux : ticket_number (une fois imprimé) prime sur
+            // sale_number — même principe déjà établi ailleurs, rien de
+            // nouveau ici, juste appliqué à ce cas.
+            String ticketFrais = (controller != null) ? controller.api_readTicketNo23Frais() : "";
+            double netFrais = parseDisplayNet();
+            double grossFrais = parseDisplayGross();
+            android.content.ContentValues cvRec = new android.content.ContentValues();
+            cvRec.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_JOB_ID, safetyNet.jobId);
+            cvRec.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM, safetyNet.woNum != null ? safetyNet.woNum : "");
+            if (ticketFrais != null && !ticketFrais.isEmpty()) {
+                cvRec.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO, ticketFrais);
+                cvRec.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SALE_NO, ticketFrais);
+            }
+            cvRec.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L, netFrais);
+            cvRec.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L, grossFrais);
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbRec2 =
+                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+            try {
+                dbRec2.upsertByJobId(cvRec);
+            } finally {
+                try { dbRec2.close(); } catch (Exception ignored) {}
+            }
+            LogBus.api(node, "[RECUP-RUNNING] filet de sécurité mis à jour — jobId=" + safetyNet.jobId
+                + " ticket=" + ticketFrais + " net=" + netFrais + " gross=" + grossFrais);
+
+            try {
+                org.json.JSONObject backupPayloadRec = new org.json.JSONObject();
+                backupPayloadRec.put("job_id", safetyNet.jobId);
+                backupPayloadRec.put("wo_num", safetyNet.woNum != null ? safetyNet.woNum : "");
+                backupPayloadRec.put("wo_id_guid", safetyNet.woIdGuid != null ? safetyNet.woIdGuid : "");
+                backupPayloadRec.put("ticket_no", ticketFrais != null ? ticketFrais : "");
+                backupPayloadRec.put("sale_no", ticketFrais != null ? ticketFrais : "");
+                backupPayloadRec.put("net_l", netFrais);
+                backupPayloadRec.put("gross_l", grossFrais);
+                backupPayloadRec.put("serial_id", safetyNet.serialId != null ? safetyNet.serialId : "");
+                backupPayloadRec.put("lcrnode", safetyNet.lcrnode);
+                backupPayloadRec.put("btmac", safetyNet.btmac != null ? safetyNet.btmac : "");
+                backupPayloadRec.put("type", com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
+                backupPayloadRec.put("backup_ts", System.currentTimeMillis());
+                backupPayloadRec.put("payload_complet", "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + safetyNet.jobId + "\",\"recovered\":true}");
+                backupPayloadRec.put("sync_status",
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
+                com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
+                    requireContext().getApplicationContext(), safetyNet.woNum, safetyNet.jobId, backupPayloadRec);
+            } catch (Exception e) {
+                LogBus.api(node, "[RECUP-RUNNING] backup JSON ERR (non-bloquant): " + e.getMessage());
+            }
+        } catch (Exception e) {
+            android.util.Log.w("RegisterTabFragment", "tenterRecuperationRunningFlowing ERR: " + e.getMessage());
+        }
     }
 
     private void runInitSequence() {
@@ -3748,7 +3836,19 @@ public class RegisterTabFragment extends Fragment {
                 hasActiveDelivery = (!uid.isEmpty() && !uid.equals("—"))
                     || (currentWoNum != null && !currentWoNum.isEmpty());
             } catch (Exception ignored) {}
-            boolean canCancel = (connected || flowing || paused) && !starting && hasActiveDelivery;
+            // ✅ CORRIGÉ (28 août 2026, demande Paul — "je suis à flow
+            // off, mais je n'ai plus le bouton annulé... je dois être
+            // capable de l'annuler") — trouvé : hasActiveDelivery exige
+            // un delivery_uid ou un currentWoNum réel — les deux restent
+            // vides pour toute livraison démarrée via le bouton C local
+            // (pas de vrai deep link, donc pas de contexte WO détecté).
+            // Le bouton disparaissait complètement (GONE, pas juste
+            // désactivé) alors qu'une vraie livraison était bel et bien
+            // en cours. Être RÉELLEMENT flowing/paused est déjà une
+            // preuve suffisante en soi — hasActiveDelivery ne reste
+            // nécessaire que pour le cas "connected seul" (où on veut
+            // éviter d'afficher Annuler si rien n'a jamais démarré).
+            boolean canCancel = !starting && (flowing || paused || (connected && hasActiveDelivery));
             if (canCancel) {
                 btnAnnuler.setVisibility(android.view.View.VISIBLE);
                 if (flowStarted) {
