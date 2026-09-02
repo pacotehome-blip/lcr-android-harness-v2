@@ -54,20 +54,18 @@ public class RegisterTabFragment extends Fragment {
     }
 
     public void onTabActivated() {
-        // ✅ AJOUTÉ (2 sept 2026, demande Paul — "ben c'est ca qui a
-        // placer lancerlivraison() avant l'établissement conforme du
-        // tab????") — vérifié EN PREMIER, avant même
-        // etatLivraisonActiveDetecte() : au moment précis où l'armement
-        // vient d'être déclenché (commande envoyée, registre pas encore
-        // confirmé RUNNING_FLOWING), etatLivraisonActiveDetecte() ne
-        // détecterait pas encore l'état actif — laissant runInitSequence()
-        // se déclencher quand même, en pleine course. Ce drapeau, posé
-        // directement par lancerLivraison() avant l'armement, couvre ce
-        // trou précis.
-        if (armementEnCoursParCetteSession) {
-            LogBus.api(node, "[INIT] onTabActivated sauté — armement en cours par cette session");
-            return;
-        }
+        // ✅ CORRIGÉ (2 sept 2026, demande Paul — "le processus de
+        // livraison n'a jamais été respecté pour ça... le tab est resté
+        // sur 145, mais en arrière c'était 146") — trouvé : mon propre
+        // correctif précédent bloquait TOUT onTabActivated() dès son
+        // entrée, y compris connectThisRegister() (la SEULE méthode qui
+        // attache le vrai controller, et donc les listeners en direct
+        // onLiveQty/onLiveStatus) — l'écran restait figé sur l'ancienne
+        // livraison pendant que la nouvelle armait et se terminait
+        // entièrement en arrière-plan, invisible. La vraie protection
+        // contre la course ne doit bloquer QUE runInitSequence() (la
+        // vraie source du problème original), pas connectThisRegister()
+        // ni le reste — déplacée plus bas, juste devant runInitSequence().
         // ✅ REMPLACÉ (13 août 2026, demande Paul — "on fait les sections")
         // — l'ancienne cascade de postDelayed (runStatusBLikeButton à 300ms,
         // checkPendingDeliveryForThisRegister à 600ms, autoScanProduitsSiNecessaire
@@ -126,8 +124,9 @@ public class RegisterTabFragment extends Fragment {
         // Second passage, après connectThisRegister() — au cas où l'état
         // aurait changé entretemps (ex: PRESTART venait de démarrer).
         // ✅ SIMPLIFIÉ (26 août 2026) — même méthode centralisée.
-        if (etatLivraisonActiveDetecte("onTabActivated (avant runInitSequence)")) {
-            LogBus.api(node, "[INIT] runInitSequence sauté — livraison active");
+        if (etatLivraisonActiveDetecte("onTabActivated (avant runInitSequence)")
+                || armementEnCoursParCetteSession) {
+            LogBus.api(node, "[INIT] runInitSequence sauté — livraison active ou armement en cours par cette session");
             return;
         }
         runInitSequence();
@@ -4686,6 +4685,7 @@ public class RegisterTabFragment extends Fragment {
                             if (mainShortcut != null && mainShortcut.getDeepLinkHandler() != null) {
                                 mainShortcut.getDeepLinkHandler().retournerFieldServicePublic(
                                     currentWoNum, currentWoIdGuid, "termine", extraShortcut.toString());
+                                com.pa.lcrdemo.DeepLinkHandler.marquerLivraisonTerminee(currentWoNum);
                                 LogBus.api(node, "[RETOUR-WO] FieldService informé (déjà SYNCED) — ticket=" + rowValidation.ticketNo);
                             }
                         } catch (Exception eShortcut) {
