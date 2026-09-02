@@ -482,6 +482,21 @@ public class DeepLinkHandler {
             return;
         }
 
+        // ✅ AJOUTÉ (2 sept 2026, demande Paul — "corrige le") — deuxième
+        // filet de sécurité contre le hijacking (deep link fantôme
+        // renvoyé par FieldService juste après un retour) : refuse
+        // d'armer une NOUVELLE livraison pour ce même WO si une vient
+        // tout juste de se terminer, dans les 60 dernières secondes —
+        // peu importe la vraie cause du deep link.
+        if (armementRecentRefuse(woNum)) {
+            android.util.Log.w(TAG, "lancerLivraison: REFUS — livraison pour wo=" + woNum
+                + " terminée trop récemment, probable deep link fantôme");
+            retournerFieldService(woNum, woIdGuid, "erreur_rearmement_trop_recent",
+                buildErrorJson("REARMEMENT_TROP_RECENT",
+                    "Une livraison pour ce WO vient de se terminer — nouvel armement refusé (fenêtre 60s)"));
+            return;
+        }
+
         // ✅ CORRIGÉ (28 août 2026, demande Paul — "si je suis dans le tab
         // et que je fais new c il doit directement armer la livraison,
         // juste si je suis en erreur de communication avec le registre
@@ -1276,6 +1291,18 @@ public class DeepLinkHandler {
         }
         final String mac = btMac.toUpperCase().trim();
 
+        // ✅ AJOUTÉ (2 sept 2026, demande Paul — "corrige le") — même
+        // protection que lancerLivraison(), un seul processus de
+        // livraison, pas un chemin protégé et l'autre pas.
+        if (armementRecentRefuse(woNum)) {
+            android.util.Log.w(TAG, "connectBtByMacAndOpenTab: REFUS — livraison pour wo=" + woNum
+                + " terminée trop récemment, probable deep link fantôme");
+            retournerFieldService(woNum, woIdGuid, "erreur_rearmement_trop_recent",
+                buildErrorJson("REARMEMENT_TROP_RECENT",
+                    "Une livraison pour ce WO vient de se terminer — nouvel armement refusé (fenêtre 60s)"));
+            return;
+        }
+
         safeExecute(() -> {
             try {
                 String transportKey = MediaTransportManager.btKey(mac);
@@ -1785,6 +1812,31 @@ public class DeepLinkHandler {
     // BD vierge) — jamais pour une livraison déjà suivie normalement.
     public static boolean isPollActif() {
         return !activePolls.isEmpty();
+    }
+
+    // ✅ AJOUTÉ (2 sept 2026, demande Paul — "corrige le") — trouvé : mon
+    // correctif du bouton bleu (informer vraiment FieldService avant
+    // finish()) devrait empêcher le vrai hijacking à sa source — mais je
+    // ne peux pas le garantir sans un vrai nouveau test. Deuxième filet
+    // de sécurité, indépendant de la cause : refuse d'armer une NOUVELLE
+    // livraison pour le même WO si une vient tout juste de se terminer,
+    // dans une courte fenêtre (60s) — peu importe la vraie cause du
+    // deep link (FieldService, hijacking, ou tout autre scénario).
+    private static final java.util.Map<String, Long> derniereFinLivraisonParWo =
+        java.util.Collections.synchronizedMap(new java.util.HashMap<>());
+    private static final long FENETRE_REFUS_REARMEMENT_MS = 60000;
+
+    public static void marquerLivraisonTerminee(String woNum) {
+        if (woNum != null && !woNum.isEmpty()) {
+            derniereFinLivraisonParWo.put(woNum, System.currentTimeMillis());
+        }
+    }
+
+    public static boolean armementRecentRefuse(String woNum) {
+        if (woNum == null || woNum.isEmpty()) return false;
+        Long derniereFin = derniereFinLivraisonParWo.get(woNum);
+        if (derniereFin == null) return false;
+        return (System.currentTimeMillis() - derniereFin) < FENETRE_REFUS_REARMEMENT_MS;
     }
 
     // ✅ AJOUTÉ (27 août 2026, demande Paul — "je veux avoir en bd chaque
@@ -2770,6 +2822,7 @@ public class DeepLinkHandler {
                 // ✅ mettreAJourFieldService APRÈS l'insert — garantit que getAllForWo()
                 // voit la livraison courante dans le payload consolidé
                 mettreAJourFieldService(woNum, woIdGuid, "termine", extraJsonCorrige);
+                marquerLivraisonTerminee(woNum);
 
             } catch (Exception e) {
                 android.util.Log.e(TAG, "LcrDeliveryStatusDb ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.LcrDeliveryStatusDb", e); } catch (Exception ignored) {}
