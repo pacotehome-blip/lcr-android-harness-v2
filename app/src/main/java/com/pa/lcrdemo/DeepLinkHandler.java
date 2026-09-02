@@ -157,7 +157,17 @@ public class DeepLinkHandler {
             try {
                 int iProduit = 1;
                 double dPreset = 0.0;
-                try { iProduit = Integer.parseInt(produit); } catch (Exception ignored) {}
+                boolean produitEstNumerique3 = false;
+                try { iProduit = Integer.parseInt(produit); produitEstNumerique3 = true; } catch (Exception ignored) {}
+                if (!produitEstNumerique3 && produit != null && !produit.trim().isEmpty()) {
+                    try {
+                        com.pa.lcr.lcp.storage.RegisterProductStore prodStoreArm4 =
+                            new com.pa.lcr.lcp.storage.RegisterProductStore(activity);
+                        com.pa.lcr.lcp.storage.RegisterProductStore.Row rowParNom3 =
+                            prodStoreArm4.findByName(fSerialId, produit.trim());
+                        if (rowParNom3 != null) iProduit = rowParNom3.noteIdx;
+                    } catch (Exception ignored) {}
+                }
                 try { dPreset = Double.parseDouble(presetStr); } catch (Exception ignored) {}
                 new ActiveDeliveryStore(activity).save(
                     woNum, woIdGuid, "", // jobId vide — pas encore démarré
@@ -669,9 +679,38 @@ public class DeepLinkHandler {
         }
 
         // Démarrer oneshot/start
+        // ✅ CORRIGÉ (2 sept 2026, demande Paul — "on veut savoir si c'est
+        // du propane, du gaz, du diesel... actuellement on envoie propane
+        // en minuscule alors c'est facile à trouver") — trouvé : ce code
+        // faisait TOUJOURS Integer.parseInt(produit) — si FieldService
+        // envoie un texte ("propane"), le parsing échouait
+        // SILENCIEUSEMENT (catch ignoré), retombant TOUJOURS sur le
+        // défaut codé en dur (produit=1), peu importe le vrai produit
+        // demandé. resolveProduct()/findByName() (RegisterProductStore)
+        // gèrent déjà ce cas correctement (insensible à la casse) —
+        // jamais utilisés ici, seulement pour la validation ailleurs.
         int product = 1;
         double preset = 0.0;
-        try { product = Integer.parseInt(produit);     } catch (Exception ignored) {}
+        boolean produitEstNumerique = false;
+        try { product = Integer.parseInt(produit); produitEstNumerique = true; } catch (Exception ignored) {}
+        if (!produitEstNumerique && produit != null && !produit.trim().isEmpty()) {
+            try {
+                com.pa.lcr.lcp.storage.RegisterProductStore prodStoreArm2 =
+                    new com.pa.lcr.lcp.storage.RegisterProductStore(activity);
+                com.pa.lcr.lcp.storage.RegisterProductStore.Row rowParNom =
+                    prodStoreArm2.findByName(serialId, produit.trim());
+                if (rowParNom != null) {
+                    product = rowParNom.noteIdx;
+                    android.util.Log.i(TAG, "lancerLivraison: produit texte \"" + produit
+                        + "\" résolu vers noteIdx=" + product + " (\"" + rowParNom.description + "\")");
+                } else {
+                    android.util.Log.w(TAG, "lancerLivraison: produit texte \"" + produit
+                        + "\" introuvable parmi les produits scannés — défaut=1 utilisé");
+                }
+            } catch (Exception e) {
+                android.util.Log.w(TAG, "lancerLivraison: résolution produit par nom ERR (non-bloquant): " + e.getMessage());
+            }
+        }
         try { preset  = Double.parseDouble(presetStr); } catch (Exception ignored) {}
 
         final int fProduct = product;
@@ -1006,7 +1045,22 @@ public class DeepLinkHandler {
                                     + lignesArm.size() + " ligne(s) trouvée(s)");
                             }
                             for (com.pa.lcr.lcp.storage.RegisterProductStore.Row ligneArm : lignesArm) {
-                                if (ligneArm.noteIdx == fProduct - 1) {
+                                // ✅ CORRIGÉ (2 sept 2026, demande Paul —
+                                // "je n'ai pas dans la section init...
+                                // comment veux-tu reconstruire la
+                                // livraison") — trouvé le VRAI bug :
+                                // noteIdx = idx + 1 (1-indexé, voir
+                                // LcpLink.java) — cette comparaison
+                                // soustrayait 1 à tort ("noteIdx ==
+                                // fProduct - 1"), ne trouvant JAMAIS la
+                                // bonne ligne, dans TOUS les points
+                                // d'écriture d'aujourd'hui (armement, fin
+                                // normale, récupération, annulation,
+                                // retour WO) — confirmé par les deux
+                                // fichiers réels de Paul, description/
+                                // code/type vides dans les deux, malgré
+                                // le scan ayant réussi.
+                                if (ligneArm.noteIdx == fProduct) {
                                     descArm = ligneArm.description;
                                     codeArm = ligneArm.productCode;
                                     typeArm = ligneArm.productType;
@@ -1341,7 +1395,23 @@ public class DeepLinkHandler {
 
                 int    product = 1;
                 double preset  = 0.0;
-                try { product = Integer.parseInt(produit);     } catch (Exception ignored) {}
+                boolean produitEstNumerique2 = false;
+                try { product = Integer.parseInt(produit); produitEstNumerique2 = true; } catch (Exception ignored) {}
+                if (!produitEstNumerique2 && produit != null && !produit.trim().isEmpty()) {
+                    try {
+                        com.pa.lcr.lcp.storage.RegisterProductStore prodStoreArm3 =
+                            new com.pa.lcr.lcp.storage.RegisterProductStore(activity);
+                        com.pa.lcr.lcp.storage.RegisterProductStore.Row rowParNom2 =
+                            prodStoreArm3.findByName(serialId, produit.trim());
+                        if (rowParNom2 != null) {
+                            product = rowParNom2.noteIdx;
+                            android.util.Log.i(TAG, "connectBtByMacAndOpenTab: produit texte \"" + produit
+                                + "\" résolu vers noteIdx=" + product);
+                        }
+                    } catch (Exception e) {
+                        android.util.Log.w(TAG, "connectBtByMacAndOpenTab: résolution produit par nom ERR (non-bloquant): " + e.getMessage());
+                    }
+                }
                 try { preset  = Double.parseDouble(presetStr); } catch (Exception ignored) {}
 
                 final int    fProduct = product;
@@ -1408,6 +1478,77 @@ public class DeepLinkHandler {
 
                         android.util.Log.i(TAG,
                             "oneshot/start: code=" + r.code + " msg=" + r.msg);
+
+                        // ✅ AJOUTÉ (2 sept 2026, demande Paul — "il faut
+                        // que ça se rende dans la bd locale et les
+                        // fichiers json... on veut reconstruire la
+                        // livraison si on redémarre l'application ou si
+                        // on a arrive sur une bd vierge") — trouvé : ce
+                        // chemin d'armement (connectBtByMacAndOpenTab)
+                        // armait le registre mais n'écrivait JAMAIS en
+                        // BD/JSON locale — aucun filet de sécurité
+                        // initial, contrairement à lancerLivraison().
+                        // Même patron exact, job_id généré ici puisque ce
+                        // chemin n'en avait jamais eu.
+                        try {
+                            String jobIdConnect = java.util.UUID.randomUUID().toString();
+                            String ticketArmConnect = "";
+                            try {
+                                com.pa.lcr.lcp.DeliveryController controllerConnect =
+                                    com.pa.lcr.lcp.RegisterSessionManager.get(activity).getController(fTransportKey, node);
+                                if (controllerConnect != null) {
+                                    String t = controllerConnect.api_readTicketNo23Frais();
+                                    if (t != null) ticketArmConnect = t;
+                                }
+                            } catch (Exception ignored) {}
+                            String descConnect = "";
+                            String codeConnect = "";
+                            int typeConnect = -1;
+                            try {
+                                com.pa.lcr.lcp.storage.RegisterProductStore prodStoreConnect =
+                                    new com.pa.lcr.lcp.storage.RegisterProductStore(activity);
+                                java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> lignesConnect =
+                                    prodStoreConnect.getAll(serialId, node);
+                                if (lignesConnect.isEmpty()) lignesConnect = prodStoreConnect.getAll(serialId);
+                                for (com.pa.lcr.lcp.storage.RegisterProductStore.Row ligneConnect : lignesConnect) {
+                                    if (ligneConnect.noteIdx == fProduct) {
+                                        descConnect = ligneConnect.description;
+                                        codeConnect = ligneConnect.productCode;
+                                        typeConnect = ligneConnect.productType;
+                                        break;
+                                    }
+                                }
+                            } catch (Exception ignored) {}
+                            android.content.ContentValues cvConnect =
+                                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.construireLivraisonComplete(
+                                    jobIdConnect, woNum, fWoIdGuid, ticketArmConnect, ticketArmConnect,
+                                    0.0, 0.0, serialId, node, mac != null ? mac : "",
+                                    fProduct, descConnect, codeConnect, typeConnect, fPresetD,
+                                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
+                                    "RUNNING_FLOWING",
+                                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
+                                    "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + jobIdConnect + "\"}");
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbConnect =
+                                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
+                            try {
+                                dbConnect.upsertByJobId(cvConnect);
+                            } finally {
+                                try { dbConnect.close(); } catch (Exception ignored) {}
+                            }
+                            org.json.JSONObject jsonConnect =
+                                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.construireJsonLivraisonComplet(
+                                    jobIdConnect, woNum, fWoIdGuid, ticketArmConnect, ticketArmConnect,
+                                    0.0, 0.0, serialId, node, mac != null ? mac : "",
+                                    fProduct, descConnect, codeConnect, typeConnect, fPresetD,
+                                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
+                                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
+                                    "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + jobIdConnect + "\"}");
+                            com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
+                                activity.getApplicationContext(), woNum, jobIdConnect, jsonConnect);
+                            android.util.Log.i(TAG, "connectBtByMacAndOpenTab: livraison enregistrée dès l'armement — jobId=" + jobIdConnect);
+                        } catch (Exception e) {
+                            android.util.Log.w(TAG, "connectBtByMacAndOpenTab: backup armement ERR (non-bloquant): " + e.getMessage());
+                        }
 
                         if (r.code == 1) {
                             String jobId = (r.data != null)
@@ -2142,7 +2283,7 @@ public class DeepLinkHandler {
                             prodStoreFin.getAll(serialIdParam, nodeParam);
                         if (lignesFin.isEmpty()) lignesFin = prodStoreFin.getAll(serialIdParam);
                         for (com.pa.lcr.lcp.storage.RegisterProductStore.Row ligneFin : lignesFin) {
-                            if (ligneFin.noteIdx == produitNo - 1) {
+                            if (ligneFin.noteIdx == produitNo) {
                                 produitDescriptionFin = ligneFin.description;
                                 produitCodeFin = ligneFin.productCode;
                                 produitTypeFin = ligneFin.productType;
