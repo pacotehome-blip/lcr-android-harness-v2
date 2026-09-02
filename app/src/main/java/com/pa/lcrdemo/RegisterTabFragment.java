@@ -4708,6 +4708,30 @@ public class RegisterTabFragment extends Fragment {
                     if (saleNo.isEmpty()) saleNo = ticketNo;
                     LogBus.api(node, "[RETOUR-WO] repli lastKnownTicketNo — ticket=" + ticketNo);
                 }
+                // ✅ AJOUTÉ (2 sept 2026, demande Paul — "où sont les
+                // ticket_number, sales_number... dans le json envoyé à
+                // dataverse sont vides") — trouvé : ni le snapshot
+                // (result), ni lastKnownTicketNo n'appelaient JAMAIS
+                // api_readTicketNo23Frais() — la SEULE fonction qui
+                // applique le vrai repli horodatage (jamais "0", conçu
+                // précisément pour ce cas : registre réinitialisé,
+                // ticket=0 ET sale=0 simultanément). Sans cet appel, ce
+                // cas extrême laissait ticketNo vide jusqu'aux TextViews
+                // (fragile), se propageant ensuite jusqu'au résumé
+                // Dataverse (patchSummaryConsolidated). Dernier repli
+                // fiable ici, avant les TextViews.
+                if (ticketNo.isEmpty() && controller != null) {
+                    try {
+                        String ticketFrais2 = controller.api_readTicketNo23Frais();
+                        if (ticketFrais2 != null && !ticketFrais2.isEmpty()) {
+                            ticketNo = ticketFrais2;
+                            if (saleNo.isEmpty()) saleNo = ticketNo;
+                            LogBus.api(node, "[RETOUR-WO] repli api_readTicketNo23Frais() — ticket=" + ticketNo);
+                        }
+                    } catch (Exception e) {
+                        android.util.Log.w("RetourWO", "repli api_readTicketNo23Frais() ERR (non-bloquant): " + e.getMessage());
+                    }
+                }
 
                 // Fallback TextViews si tout est vide
                 try {
