@@ -20,6 +20,19 @@ import java.util.concurrent.TimeUnit;
 public class DeliverySyncScheduler {
 
     private static final String PERIODIC_NAME = "lcr-delivery-sync-periodic";
+    // ✅ AJOUTÉ (2 sept 2026, demande Paul — "pourquoi j'ai eu du lag
+    // pendant le running_flowing... on avait réglé ça une fois pour
+    // toute") — trouvé (log réel confirmé) : triggerNow() utilisait
+    // enqueue() SIMPLE, sans déduplication — quand plusieurs mécanismes
+    // (récupération running_flowing, finalisation orpheline,
+    // retournerAuWorkOrder) déclenchaient tous une synchronisation
+    // presque simultanément pour le MÊME événement, WorkManager créait
+    // AUTANT de travaux séparés, chacun refaisant sa propre
+    // authentification MSAL complète (confirmé : 4 cycles MSAL distincts
+    // en moins d'une seconde dans un vrai log) — la vraie cause du lag
+    // du tick juste après. Même patron déjà établi pour
+    // schedulePeriodic() ci-dessous, appliqué ici aussi.
+    private static final String TRIGGER_NOW_NAME = "lcr-delivery-sync-triggernow";
 
     // ✅ Planifier un sync périodique (toutes les 15 min, réseau requis)
     public static void schedulePeriodic(Context context) {
@@ -51,6 +64,10 @@ public class DeliverySyncScheduler {
             .setConstraints(constraints)
             .build();
 
-        WorkManager.getInstance(context).enqueue(req);
+        WorkManager.getInstance(context).enqueueUniqueWork(
+            TRIGGER_NOW_NAME,
+            androidx.work.ExistingWorkPolicy.KEEP,
+            req
+        );
     }
 }
