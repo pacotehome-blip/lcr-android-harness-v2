@@ -2397,6 +2397,7 @@ public class DeepLinkHandler {
         safeExecute(() -> {
             try {
                 JSONObject d      = new JSONObject(extraJson != null ? extraJson : "{}");
+                String extraJsonCorrige = extraJson;
                 JSONObject result = d.optJSONObject("result");
                 JSONObject tick   = d.optJSONObject("tick");
 
@@ -2446,17 +2447,17 @@ public class DeepLinkHandler {
                     // payload aussi") — trouvé : mon correctif précédent
                     // ne touchait que les variables racine (ticketNo/
                     // saleNo), jamais le "result" NICHÉ à l'intérieur
-                    // d'extraJson lui-même — passé tel quel comme
+                    // d'extraJsonCorrige lui-même — passé tel quel comme
                     // payloadExtra. payload_complet aurait donc gardé
                     // ticket_no/sale_no vides malgré la correction des
                     // champs racine. Injecte le même repli dans le
-                    // result niché, puis reconstruit extraJson (la
+                    // result niché, puis reconstruit extraJsonCorrige (la
                     // chaîne réellement passée plus loin) depuis d
                     // modifié.
                     try {
                         result.put("ticket_no", ticketNo);
                         result.put("sale_no", saleNo);
-                        extraJson = d.toString();
+                        extraJsonCorrige = d.toString();
                     } catch (Exception eNestedFix) {
                         android.util.Log.w(TAG, "Injection ticket_no/sale_no dans payload_complet ERR (non-bloquant): " + eNestedFix.getMessage());
                     }
@@ -2523,7 +2524,7 @@ public class DeepLinkHandler {
                         com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
                         "LIVRAISON",
                         com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
-                        extraJson);
+                        extraJsonCorrige);
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID,
                     woIdGuid != null ? woIdGuid.replace("{","").replace("}","") : "");
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_DELTA_NET_L,  deltaNet);
@@ -2576,7 +2577,7 @@ public class DeepLinkHandler {
                             produitNo, produitDescriptionFin, produitCodeFin, produitTypeFin, presetL,
                             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
                             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
-                            extraJson);
+                            extraJsonCorrige);
                     com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
                         activity.getApplicationContext(), woNum, ticketNo, backupPayloadFin);
                 } catch (Exception e) {
@@ -2722,7 +2723,7 @@ public class DeepLinkHandler {
 
                 // ✅ mettreAJourFieldService APRÈS l'insert — garantit que getAllForWo()
                 // voit la livraison courante dans le payload consolidé
-                mettreAJourFieldService(woNum, woIdGuid, "termine", extraJson);
+                mettreAJourFieldService(woNum, woIdGuid, "termine", extraJsonCorrige);
 
             } catch (Exception e) {
                 android.util.Log.e(TAG, "LcrDeliveryStatusDb ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.LcrDeliveryStatusDb", e); } catch (Exception ignored) {}
