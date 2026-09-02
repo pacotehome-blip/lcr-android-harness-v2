@@ -1829,14 +1829,31 @@ public class DeepLinkHandler {
     public static void marquerLivraisonTerminee(String woNum) {
         if (woNum != null && !woNum.isEmpty()) {
             derniereFinLivraisonParWo.put(woNum, System.currentTimeMillis());
+            android.util.Log.i(TAG, "marquerLivraisonTerminee: woNum=\"" + woNum + "\" — map maintenant: " + derniereFinLivraisonParWo);
+        } else {
+            android.util.Log.w(TAG, "marquerLivraisonTerminee: woNum vide/null, RIEN marqué — appelant devrait vérifier son currentWoNum");
         }
     }
 
     public static boolean armementRecentRefuse(String woNum) {
+        // ✅ AJOUTÉ (2 sept 2026, demande Paul — "pourquoi c'est encore
+        // là") — trouvé (en vérifiant honnêtement) : je ne peux pas
+        // confirmer avec certitude pourquoi ce garde-fou n'a pas bloqué
+        // le hijacking du dernier test, malgré tout le code déjà en
+        // place. Vrai diagnostic ici — valeurs exactes entre guillemets
+        // (révèle tout espace/casse caché), contenu complet de la map —
+        // pour confirmer avec certitude au prochain test, pas deviner.
+        android.util.Log.i(TAG, "armementRecentRefuse: vérification woNum=\"" + woNum + "\" — map actuelle: " + derniereFinLivraisonParWo);
         if (woNum == null || woNum.isEmpty()) return false;
         Long derniereFin = derniereFinLivraisonParWo.get(woNum);
-        if (derniereFin == null) return false;
-        return (System.currentTimeMillis() - derniereFin) < FENETRE_REFUS_REARMEMENT_MS;
+        if (derniereFin == null) {
+            android.util.Log.w(TAG, "armementRecentRefuse: AUCUNE entrée trouvée pour woNum=\"" + woNum + "\" dans la map — pas de refus");
+            return false;
+        }
+        long ecarteMs = System.currentTimeMillis() - derniereFin;
+        boolean refuse = ecarteMs < FENETRE_REFUS_REARMEMENT_MS;
+        android.util.Log.i(TAG, "armementRecentRefuse: entrée trouvée pour woNum=\"" + woNum + "\" — écart=" + ecarteMs + "ms — refuse=" + refuse);
+        return refuse;
     }
 
     // ✅ AJOUTÉ (27 août 2026, demande Paul — "je veux avoir en bd chaque
