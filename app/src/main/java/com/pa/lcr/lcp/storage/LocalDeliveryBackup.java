@@ -492,6 +492,51 @@ public class LocalDeliveryBackup {
      * ticket_no == ticketNo, et retourne celui au backup_ts le plus élevé.
      * Retourne null si aucun backup ne correspond à ce ticket.
      */
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — "si on arrive dans une bd
+    // vierge il faut le récupérer dans le json avant le running_flowing")
+    // — trouvé : getRunningFlowingSafetyNet() (LcrDeliveryStatusDb) ne
+    // cherche que dans la BD LOCALE — vide sur une BD vierge (réinstall).
+    // Cette fonction cherche directement dans les fichiers JSON (qui
+    // survivent au réinstall, stockage externe) par wo_num — utile ici
+    // précisément parce que ticket_no peut encore être inconnu à ce
+    // stade (Field #23=0, avant même le premier repli sale_number).
+    // Cherche spécifiquement un filet de sécurité jamais complété
+    // (payload_complet contient "RUNNING_FLOWING", pas une vraie fin).
+    public static BackupMatch findLatestRunningFlowingByWoNum(Context ctx, String woNum) {
+        if (woNum == null || woNum.trim().isEmpty()) return null;
+
+        List<String> messages = new ArrayList<>();
+        List<byte[]> files = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+                ? listBackupFilesMediaStore(ctx, messages)
+                : listBackupFilesLegacy(ctx, messages);
+
+        BackupMatch best = null;
+        for (byte[] raw : files) {
+            try {
+                JSONObject j = new JSONObject(new String(raw, StandardCharsets.UTF_8));
+                if (!woNum.equals(j.optString("wo_num", ""))) continue;
+                String payloadComplet = j.optString("payload_complet", "");
+                if (!payloadComplet.contains("RUNNING_FLOWING")) continue;
+
+                long ts = j.optLong("backup_ts", 0L);
+                if (best == null || ts > best.backupTs) {
+                    best = new BackupMatch(j, ts);
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "findLatestRunningFlowingByWoNum: fichier ignoré (parsing) — " + e.getMessage());
+                try { com.pa.lcr.lcp.log.LogBus.err(0, "LocalDeliveryBackup.findLatestRunningFlowingByWoNum", e); } catch (Exception ignored) {}
+            }
+        }
+
+        if (best == null) {
+            Log.i(TAG, "findLatestRunningFlowingByWoNum: aucun filet de sécurité trouvé pour wo=" + woNum);
+        } else {
+            Log.i(TAG, "findLatestRunningFlowingByWoNum: match wo=" + woNum
+                    + " backup_ts=" + best.backupTs);
+        }
+        return best;
+    }
+
     public static BackupMatch findLatestByTicketNo(Context ctx, String ticketNo) {
         if (ticketNo == null || ticketNo.trim().isEmpty()) return null;
 

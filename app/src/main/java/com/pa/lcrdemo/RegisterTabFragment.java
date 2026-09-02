@@ -909,6 +909,64 @@ public class RegisterTabFragment extends Fragment {
             } finally {
                 try { dbRec.close(); } catch (Exception ignored) {}
             }
+            // ✅ AJOUTÉ (28 août 2026, demande Paul — "si on arrive dans
+            // une bd vierge il faut le récupérer dans le json avant le
+            // running_flowing") — trouvé : cette recherche ne cherchait
+            // QUE dans la BD locale — vide sur une BD vierge (réinstall).
+            // Repli sur les fichiers JSON (survivent au réinstall) par
+            // wo_num si la BD locale ne trouve rien.
+            if ((safetyNet == null || safetyNet.jobId == null || safetyNet.jobId.isEmpty())
+                    && currentWoNum != null && !currentWoNum.isEmpty()) {
+                com.pa.lcr.lcp.storage.LocalDeliveryBackup.BackupMatch matchJson =
+                    com.pa.lcr.lcp.storage.LocalDeliveryBackup.findLatestRunningFlowingByWoNum(
+                        requireContext(), currentWoNum);
+                if (matchJson != null) {
+                    org.json.JSONObject j = matchJson.json;
+                    safetyNet = new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow();
+                    safetyNet.jobId = j.optString("job_id", "");
+                    safetyNet.woNum = j.optString("wo_num", "");
+                    safetyNet.woIdGuid = j.optString("wo_id_guid", "");
+                    safetyNet.serialId = j.optString("serial_id", "");
+                    safetyNet.lcrnode = j.optInt("lcrnode", 0);
+                    safetyNet.btmac = j.optString("btmac", "");
+                    org.json.JSONObject payloadInterne = null;
+                    try { payloadInterne = new org.json.JSONObject(j.optString("payload_complet", "{}")); } catch (Exception ignored) {}
+                    if (payloadInterne != null) {
+                        safetyNet.produitNo = payloadInterne.optInt("active_product", 0);
+                        safetyNet.presetL = payloadInterne.optDouble("preset_net_l", 0.0);
+                    }
+                    LogBus.api(node, "[RECUP-RUNNING] filet de sécurité retrouvé dans le JSON (BD locale vide) — jobId=" + safetyNet.jobId);
+                    // Réinsère en BD locale immédiatement, pour que les
+                    // prochains passages retrouvent la ligne directement.
+                    try {
+                        android.content.ContentValues cvReinsert = new android.content.ContentValues();
+                        cvReinsert.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_JOB_ID, safetyNet.jobId);
+                        cvReinsert.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM, safetyNet.woNum);
+                        cvReinsert.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID, safetyNet.woIdGuid);
+                        cvReinsert.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID, safetyNet.serialId);
+                        cvReinsert.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_LCRNODE, safetyNet.lcrnode);
+                        cvReinsert.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_BTMAC, safetyNet.btmac);
+                        cvReinsert.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PRODUIT_NO, safetyNet.produitNo);
+                        cvReinsert.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PRESET_L, safetyNet.presetL);
+                        cvReinsert.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L, 0.0);
+                        cvReinsert.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L, 0.0);
+                        cvReinsert.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
+                        cvReinsert.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE, "RUNNING_FLOWING");
+                        cvReinsert.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbReinsert =
+                            new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                        try {
+                            dbReinsert.upsertByJobId(cvReinsert);
+                        } finally {
+                            try { dbReinsert.close(); } catch (Exception ignored) {}
+                        }
+                    } catch (Exception e) {
+                        LogBus.api(node, "[RECUP-RUNNING] réinsertion BD locale ERR (non-bloquant): " + e.getMessage());
+                    }
+                }
+            }
             if (safetyNet == null || safetyNet.jobId == null || safetyNet.jobId.isEmpty()) {
                 LogBus.api(node, "[RECUP-RUNNING] aucune ligne filet de sécurité trouvée — rien à mettre à jour");
                 return;
@@ -919,50 +977,73 @@ public class RegisterTabFragment extends Fragment {
             String ticketFrais = (controller != null) ? controller.api_readTicketNo23Frais() : "";
             double netFrais = parseDisplayNet();
             double grossFrais = parseDisplayGross();
-            // ✅ AJOUTÉ (28 août 2026, demande Paul — "je vais aussi te
-            // dire pourquoi je n'ai pas le preset, le produit dans le
-            // json, car ça te prends ça pour reconstruire la livraison
-            // comme si elle arrivait du deeplink") — trouvé : cette
-            // fonction ne capturait jamais le produit ni le preset —
-            // seulement ticket/net/gross. Le scan (maintenant corrigé
-            // pour s'exécuter même en livraison active) applique le
-            // produit à l'écran AVANT que cette récupération ne
-            // s'exécute — on le lit maintenant ici, même repli déjà
-            // utilisé pour armer une vraie livraison (getPendingProduct()).
-            int produitFrais = getPendingProduct();
-            double presetFrais = 0;
-            try {
-                if (edtPreset != null) {
-                    String presetTxt = edtPreset.getText().toString().trim();
-                    if (!presetTxt.isEmpty()) presetFrais = Double.parseDouble(presetTxt);
-                }
-            } catch (Exception ignored) {}
+            // ✅ CORRIGÉ (28 août 2026, demande Paul — "le registre est
+            // toujours en running_flowing donc pas disponible pour
+            // autre chose, il faut juste reconstruire le ticket") — ne
+            // lit plus l'écran (getPendingProduct()/edtPreset, qui
+            // pourraient être vides/par défaut si aucun scan n'a jamais
+            // réussi sur ce tab précis) — utilise directement produit/
+            // preset déjà enregistrés dans safetyNet, écrits À
+            // L'ARMEMENT quand le registre était libre pour un vrai
+            // scan. Aucune tentative de communication avec le registre
+            // ici — pure reconstruction depuis l'existant.
+            int produitFrais = safetyNet.produitNo > 0 ? safetyNet.produitNo : getPendingProduct();
+            double presetFrais = safetyNet.presetL > 0 ? safetyNet.presetL : 0;
             // ✅ AJOUTÉ (28 août 2026, demande Paul — "je veux le produit
             // du ticket avec le type de produit, le code de produit
             // aussi") — recherche la ligne complète (description, code,
-            // type) correspondant à l'index sélectionné, via
-            // RegisterProductStore (déjà rempli par le scan matériel,
-            // désormais garanti de s'exécuter grâce au correctif
-            // précédent).
+            // type) via RegisterProductStore — une lecture LOCALE (notre
+            // propre cache SQLite, déjà rempli par le scan fait à
+            // l'armement), jamais une communication avec le registre
+            // lui-même.
             String produitDescription = "";
             String produitCode = "";
             int produitType = -1;
+            com.pa.lcr.lcp.storage.RegisterProductStore.Row ligneTrouvee = null;
             try {
                 com.pa.lcr.lcp.storage.RegisterProductStore prodStore =
                     new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
                 java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> lignes =
                     prodStore.getAll(serialFromArgs, node);
+                if (lignes.isEmpty()) lignes = prodStore.getAll(serialFromArgs);
                 for (com.pa.lcr.lcp.storage.RegisterProductStore.Row ligne : lignes) {
                     if (ligne.noteIdx == produitFrais - 1) {
                         produitDescription = ligne.description;
                         produitCode = ligne.productCode;
                         produitType = ligne.productType;
+                        ligneTrouvee = ligne;
                         break;
                     }
                 }
             } catch (Exception e) {
                 LogBus.api(node, "[RECUP-RUNNING] recherche produit (description/code/type) ERR (non-bloquant): " + e.getMessage());
             }
+            // ✅ AJOUTÉ (28 août 2026, demande Paul — "il faut que dans le
+            // ui on voit la vrai slot et le vrai nom tel que nous
+            // l'avions au départ") — jusqu'ici, cette fonction écrivait
+            // en BD/JSON mais n'appliquait JAMAIS le produit/preset
+            // retrouvé à l'écran lui-même — le livreur aurait continué
+            // de voir un défaut/rien, même avec les bonnes données en
+            // arrière-plan. Applique maintenant à l'écran, sur le thread
+            // UI, même format déjà établi ailleurs (toSpinnerLabel()).
+            final com.pa.lcr.lcp.storage.RegisterProductStore.Row ligneFinale = ligneTrouvee;
+            final int produitFraisFinal = produitFrais;
+            final double presetFraisFinal = presetFrais;
+            ui.post(() -> {
+                try {
+                    if (spnProduct != null) {
+                        String label = (ligneFinale != null) ? ligneFinale.toSpinnerLabel() : String.valueOf(produitFraisFinal);
+                        spnProduct.setText(label, false);
+                    }
+                    if (edtPreset != null && presetFraisFinal > 0) {
+                        edtPreset.setText(String.valueOf(presetFraisFinal));
+                    }
+                    initValidatedProductIdx = produitFraisFinal - 1;
+                    produitDejaResoluPourCetteSession = true;
+                } catch (Exception e) {
+                    android.util.Log.w("RegisterTabFragment", "Application produit/preset à l'écran (récupération) ERR: " + e.getMessage());
+                }
+            });
             android.content.ContentValues cvRec = new android.content.ContentValues();
             cvRec.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_JOB_ID, safetyNet.jobId);
             cvRec.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM, safetyNet.woNum != null ? safetyNet.woNum : "");
@@ -4785,6 +4866,7 @@ public class RegisterTabFragment extends Fragment {
                             new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
                         java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> lignesRetour =
                             prodStoreRetour.getAll(serialFromArgs, node);
+                        if (lignesRetour.isEmpty()) lignesRetour = prodStoreRetour.getAll(serialFromArgs);
                         for (com.pa.lcr.lcp.storage.RegisterProductStore.Row ligneRetour : lignesRetour) {
                             if (ligneRetour.noteIdx == produitRetour - 1) {
                                 descRetour = ligneRetour.description;
@@ -5706,6 +5788,7 @@ public class RegisterTabFragment extends Fragment {
                             new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
                         java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> lignesAnnul =
                             prodStoreAnnul.getAll(serialFromArgs, node);
+                        if (lignesAnnul.isEmpty()) lignesAnnul = prodStoreAnnul.getAll(serialFromArgs);
                         for (com.pa.lcr.lcp.storage.RegisterProductStore.Row ligneAnnul : lignesAnnul) {
                             if (ligneAnnul.noteIdx == produitAnnul - 1) {
                                 descAnnul = ligneAnnul.description;
@@ -6028,27 +6111,19 @@ public class RegisterTabFragment extends Fragment {
         boolean etatAcceptablePourScan = stActuel == DeliveryState.CONNECTED
                 || stActuel == DeliveryState.IDLE
                 || stActuel == DeliveryState.PRESTART;
-        // ✅ CORRIGÉ (28 août 2026, demande Paul — "à quel moment j'ai eu
-        // un scan produit... j'ai fait une fin de livraison et je
-        // n'avais pas de json") — trouvé : cette garde bloquait TOUJOURS
-        // le scan pendant RUNNING_FLOWING/RUNNING_PAUSED, même après mon
-        // correctif précédent qui laissait runInitSequence() ATTEINDRE
-        // cette fonction — cette garde-ci, séparée et plus profonde,
-        // refusait quand même d'agir. Résultat : sur une reprise après
-        // crash (BD vierge, scan jamais fait), le scan n'aboutissait
-        // JAMAIS, peu importe combien de fois runInitSequence()
-        // réessayait. Élargi — accepte aussi RUNNING_FLOWING/
-        // RUNNING_PAUSED, mais SEULEMENT si le scan n'a jamais réussi
-        // cette session (!produitVerificationTerminee) — la sécurité du
-        // produit passe avant le risque d'interférence matérielle avec
-        // le flux, mais seulement pour cette toute première tentative
-        // critique; une livraison qui continue normalement (scan déjà
-        // fait) garde la protection d'origine.
-        if (!produitVerificationTerminee
-                && (stActuel == DeliveryState.RUNNING_FLOWING || stActuel == DeliveryState.RUNNING_PAUSED)) {
-            etatAcceptablePourScan = true;
-            LogBus.api(node, "[SCAN-AUTO] état=" + stActuel + " mais scan jamais fait cette session — autorisé exceptionnellement (récupération)");
-        }
+        // ✅ RETOUR EN ARRIÈRE (28 août 2026, demande Paul — "si je suis
+        // en running_flowing, le scan ne peut être fait car le registre
+        // est occupé... la vraie solution est d'avoir tout dans le json
+        // du départ") — mon élargissement précédent (autoriser le scan
+        // pendant RUNNING_FLOWING/RUNNING_PAUSED en reprise) était une
+        // MAUVAISE direction : le registre est GENUINEMENT occupé
+        // pendant le flux — le scan ne peut pas y réussir, peu importe
+        // combien de temps on le laisse essayer (confirmé par log réel :
+        // scan démarré, jamais conclu avant la fin de la livraison, 35s
+        // plus tard). La vraie protection d'origine reste correcte —
+        // CONNECTED/IDLE/PRESTART seulement. La récupération doit lire
+        // l'existant (JSON/BD écrits À L'ARMEMENT, quand le registre
+        // était libre), pas retenter un scan impossible.
         if (!etatAcceptablePourScan) {
             LogBus.api(node, "[SCAN-AUTO] abandon — état=" + stActuel
                 + " (accepté: CONNECTED/IDLE/PRESTART) — pas encore prêt à scanner");
