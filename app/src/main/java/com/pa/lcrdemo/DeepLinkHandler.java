@@ -2539,7 +2539,15 @@ public class DeepLinkHandler {
                     new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
                 long localId;
                 try {
-                    localId = lcrDb.insertDelivery(cv);
+                    // ✅ CORRIGÉ (2 sept 2026, demande Paul — "je veux pas
+                    // de doublon corrige moi ca") — trouvé : cette fin de
+                    // livraison utilisait insertDelivery() (toujours une
+                    // NOUVELLE ligne), jamais upsertByJobId() (comme
+                    // l'armement et la récupération) — créant une ligne
+                    // séparée pour le même job_id au lieu de mettre à
+                    // jour celle déjà correctement établie plus tôt dans
+                    // le cycle de cette même livraison.
+                    localId = lcrDb.upsertByJobId(cv);
                 } finally {
                     try { lcrDb.close(); } catch (Exception ignored) {}
                 }
