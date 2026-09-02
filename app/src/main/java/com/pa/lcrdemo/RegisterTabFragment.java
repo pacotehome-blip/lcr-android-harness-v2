@@ -886,6 +886,15 @@ public class RegisterTabFragment extends Fragment {
             resultOrph.put("sale_no", ticketFin != null ? ticketFin : "");
             resultOrph.put("fs_net_l", netFin);
             resultOrph.put("fs_gross_l", grossFin);
+            // ✅ AJOUTÉ (28 août 2026, demande Paul — "analyse tout ce qui
+            // est nécessaire") — trouvé : resultOrph ne contenait jamais
+            // product_number/preset_requested — onDeliveryEnded()
+            // extrait produitNo depuis result.optInt("product_number", 0),
+            // donc ce chemin recevait toujours produitNo=0. Réutilise
+            // safetyNet (déjà trouvé, avec produit/preset capturés à
+            // l'armement).
+            resultOrph.put("product_number", safetyNet.produitNo);
+            resultOrph.put("preset_requested", safetyNet.presetL);
             extraOrph.put("result", resultOrph);
             MainActivity main = (MainActivity) getActivity();
             if (main != null) {
@@ -932,8 +941,23 @@ public class RegisterTabFragment extends Fragment {
                     org.json.JSONObject payloadInterne = null;
                     try { payloadInterne = new org.json.JSONObject(j.optString("payload_complet", "{}")); } catch (Exception ignored) {}
                     if (payloadInterne != null) {
-                        safetyNet.produitNo = payloadInterne.optInt("active_product", 0);
-                        safetyNet.presetL = payloadInterne.optDouble("preset_net_l", 0.0);
+                        // ✅ CORRIGÉ (28 août 2026, demande Paul — "c'est pas
+                        // suffisant élargi") — trouvé : le VRAI registre
+                        // lui-même est incohérent selon le contexte —
+                        // "active_product" (armement/nos propres
+                        // constructions) VS "result.product_number" (vraie
+                        // fin normale, onDeliveryEnded/extraJson) pour le
+                        // produit; "preset_requested" VS "preset_net_l"
+                        // pour le preset (confirmé dans DeliveryController.
+                        // java lui-même, deux endroits différents, deux
+                        // noms différents). Vérifie maintenant TOUTES les
+                        // variantes en repli, peu importe la source réelle
+                        // du payload_complet — via la fonction utilitaire
+                        // partagée (optFirstInt/optFirstDouble).
+                        safetyNet.produitNo = com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.optFirstInt(
+                            payloadInterne, 0, "active_product", "product_number");
+                        safetyNet.presetL = com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.optFirstDouble(
+                            payloadInterne, 0.0, "preset_requested", "preset_net_l");
                     }
                     LogBus.api(node, "[RECUP-RUNNING] filet de sécurité retrouvé dans le JSON (BD locale vide) — jobId=" + safetyNet.jobId);
                     // Réinsère en BD locale immédiatement, pour que les
@@ -1044,17 +1068,15 @@ public class RegisterTabFragment extends Fragment {
                     android.util.Log.w("RegisterTabFragment", "Application produit/preset à l'écran (récupération) ERR: " + e.getMessage());
                 }
             });
-            android.content.ContentValues cvRec = new android.content.ContentValues();
-            cvRec.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_JOB_ID, safetyNet.jobId);
-            cvRec.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM, safetyNet.woNum != null ? safetyNet.woNum : "");
-            if (ticketFrais != null && !ticketFrais.isEmpty()) {
-                cvRec.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO, ticketFrais);
-                cvRec.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SALE_NO, ticketFrais);
-            }
-            cvRec.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L, netFrais);
-            cvRec.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L, grossFrais);
-            cvRec.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PRODUIT_NO, produitFrais);
-            cvRec.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PRESET_L, presetFrais);
+            android.content.ContentValues cvRec =
+                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.construireLivraisonComplete(
+                    safetyNet.jobId, safetyNet.woNum, safetyNet.woIdGuid, ticketFrais, ticketFrais,
+                    netFrais, grossFrais, safetyNet.serialId, safetyNet.lcrnode, safetyNet.btmac,
+                    produitFrais, produitDescription, produitCode, produitType, presetFrais,
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
+                    "RUNNING_FLOWING",
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
+                    "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + safetyNet.jobId + "\",\"recovered\":true}");
             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbRec2 =
                 new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
             try {
@@ -1067,27 +1089,14 @@ public class RegisterTabFragment extends Fragment {
                 + " produit=" + produitFrais + " preset=" + presetFrais);
 
             try {
-                org.json.JSONObject backupPayloadRec = new org.json.JSONObject();
-                backupPayloadRec.put("job_id", safetyNet.jobId);
-                backupPayloadRec.put("wo_num", safetyNet.woNum != null ? safetyNet.woNum : "");
-                backupPayloadRec.put("wo_id_guid", safetyNet.woIdGuid != null ? safetyNet.woIdGuid : "");
-                backupPayloadRec.put("ticket_no", ticketFrais != null ? ticketFrais : "");
-                backupPayloadRec.put("sale_no", ticketFrais != null ? ticketFrais : "");
-                backupPayloadRec.put("net_l", netFrais);
-                backupPayloadRec.put("gross_l", grossFrais);
-                backupPayloadRec.put("serial_id", safetyNet.serialId != null ? safetyNet.serialId : "");
-                backupPayloadRec.put("lcrnode", safetyNet.lcrnode);
-                backupPayloadRec.put("btmac", safetyNet.btmac != null ? safetyNet.btmac : "");
-                backupPayloadRec.put("type", com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
-                backupPayloadRec.put("backup_ts", System.currentTimeMillis());
-                backupPayloadRec.put("payload_complet", "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\""
-                    + safetyNet.jobId + "\",\"recovered\":true,\"active_product\":" + produitFrais
-                    + ",\"active_product_description\":\"" + produitDescription.replace("\"", "")
-                    + "\",\"active_product_code\":\"" + produitCode.replace("\"", "")
-                    + "\",\"active_product_type\":" + produitType
-                    + ",\"preset_net_l\":" + presetFrais + "}");
-                backupPayloadRec.put("sync_status",
-                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
+                org.json.JSONObject backupPayloadRec =
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.construireJsonLivraisonComplet(
+                        safetyNet.jobId, safetyNet.woNum, safetyNet.woIdGuid, ticketFrais, ticketFrais,
+                        netFrais, grossFrais, safetyNet.serialId, safetyNet.lcrnode, safetyNet.btmac,
+                        produitFrais, produitDescription, produitCode, produitType, presetFrais,
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
+                        "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + safetyNet.jobId + "\",\"recovered\":true}");
                 com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
                     requireContext().getApplicationContext(), safetyNet.woNum, safetyNet.jobId, backupPayloadRec);
             } catch (Exception e) {
@@ -1280,8 +1289,8 @@ public class RegisterTabFragment extends Fragment {
                             + "pour serial=" + serialFromArgs + " ticket=" + lastKnownTicketNo);
                     return false;
                 }
-                int idxTrouve = backupPayload.optInt("active_product", -1);
-                double presetTrouve = backupPayload.optDouble("preset_net_l", -1);
+                int idxTrouve = com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.optFirstInt(backupPayload, -1, "active_product", "product_number");
+                double presetTrouve = com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.optFirstDouble(backupPayload, -1, "preset_requested", "preset_net_l");
                 LogBus.api(node, "[COMPARAISON_TICKET] trouvé — produit=" + idxTrouve
                         + " preset=" + presetTrouve + "L (dernier ticket connu, BD vierge)");
                 // ✅ AJOUTÉ (28 août 2026, demande Paul — "il trouve le
@@ -4780,88 +4789,20 @@ public class RegisterTabFragment extends Fragment {
                             + " deja enregistre (id=" + existing.id + ") — skip INSERT");
                     }
                 } else {
-                    android.content.ContentValues cv = new android.content.ContentValues();
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,      woNum);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID,  woIdGuid);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO,   ticketNo);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SALE_NO,     saleNo);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,       netL);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L,     grossL);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
-                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,      "REGISTRE");
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE,   "LIVRAISON");
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
-                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PAYLOAD_JSON, payloadJson);
-
-                    long localId = lcrDb.insertDelivery(cv);
-                    android.util.Log.i("RetourWO", "Delivery sauvegardée localId=" + localId
-                        + " wo=" + woNum + " net=" + netL + " gross=" + grossL);
-                }
-                } finally {
-                    try { lcrDb.close(); } catch (Exception ignored) {}
-                }
-
-                // ✅ (demandé 31 juillet 2026, suite à la perte du ticket 10898) : backup
-                // JSON durable dans Téléchargements — survit à une désinstallation, contrairement
-                // à la BD SQLite privée. Écrit AVANT même la tentative de push Dataverse, donc
-                // une copie existe dès que la livraison est confirmée localement, peu importe
-                // si le push réussit ou non ensuite. Best-effort — ne bloque jamais le flux.
-                // ✅ CORRIGÉ (26 août 2026, demande Paul — "il faut avoir le
-                // payload complet... c'est toi le spécialiste, quelle perte
-                // de temps") — payloadJson (snap ci-dessus) est un simple
-                // "tick" snapshot, structurellement incapable de porter
-                // active_product/description/code/type — confirmé par le
-                // vrai fichier que Paul a fourni. Le VRAI payload complet
-                // (avec active_product) vient de api_registerValidate()
-                // (enrichie plus tôt aujourd'hui) — appelé ici directement,
-                // sur le controller déjà connecté, pour que le fichier de
-                // backup porte enfin la vraie information dès sa création,
-                // pas un contournement après coup.
-                String payloadCompletReel = payloadJson; // repli sur le tick si l'appel échoue
-                try {
-                    if (controller != null) {
-                        com.pa.lcr.lcp.ApiResult rv = controller.api_registerValidate(
-                                null, node > 0 ? Integer.valueOf(node) : null, null, null, null, false);
-                        if (rv != null && rv.data != null) {
-                            payloadCompletReel = rv.data.toString();
-                        }
-                    }
-                } catch (Exception e) {
-                    android.util.Log.w("RetourWO", "api_registerValidate pour payload complet ERR: " + e.getMessage());
-                }
-
-                try {
-                    org.json.JSONObject backupPayload = new org.json.JSONObject();
-                    backupPayload.put("wo_num", woNum != null ? woNum : "");
-                    backupPayload.put("wo_id_guid", woIdGuid != null ? woIdGuid : "");
-                    backupPayload.put("ticket_no", ticketNo != null ? ticketNo : "");
-                    backupPayload.put("sale_no", saleNo != null ? saleNo : "");
-                    backupPayload.put("net_l", netL);
-                    backupPayload.put("gross_l", grossL);
-                    backupPayload.put("serial_id", serialFromArgs != null ? serialFromArgs : "");
-                    backupPayload.put("lcrnode", node);
-                    // ✅ AJOUTÉ (28 août 2026, demande Paul — "on a pas le
-                    // produit, le code produit, le preset, le type
-                    // produit... ils doivent tous avoir la même affaire")
-                    // — repli explicite au niveau racine, indépendant de
-                    // api_registerValidate() (qui peut échouer — confirmé
-                    // par le fichier réel de Paul, "repli sur le tick").
                     // Même recherche RegisterProductStore déjà établie
                     // ailleurs aujourd'hui (récupération, annulation) —
                     // garantit la même richesse d'info peu importe si
                     // l'enrichissement principal réussit ou pas.
+                    int produitRetour = getPendingProduct();
+                    double presetRetour = 0;
+                    if (edtPreset != null) {
+                        String presetTxtRetour = edtPreset.getText().toString().trim();
+                        try { if (!presetTxtRetour.isEmpty()) presetRetour = Double.parseDouble(presetTxtRetour); } catch (Exception ignored) {}
+                    }
+                    String descRetour = "";
+                    String codeRetour = "";
+                    int typeRetour = -1;
                     try {
-                        int produitRetour = getPendingProduct();
-                        double presetRetour = 0;
-                        if (edtPreset != null) {
-                            String presetTxtRetour = edtPreset.getText().toString().trim();
-                            if (!presetTxtRetour.isEmpty()) presetRetour = Double.parseDouble(presetTxtRetour);
-                        }
-                        String descRetour = "";
-                        String codeRetour = "";
-                        int typeRetour = -1;
                         com.pa.lcr.lcp.storage.RegisterProductStore prodStoreRetour =
                             new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
                         java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> lignesRetour =
@@ -4875,14 +4816,46 @@ public class RegisterTabFragment extends Fragment {
                                 break;
                             }
                         }
-                        backupPayload.put("produit_no", produitRetour);
-                        backupPayload.put("preset_net_l", presetRetour);
-                        backupPayload.put("active_product_description", descRetour);
-                        backupPayload.put("active_product_code", codeRetour);
-                        backupPayload.put("active_product_type", typeRetour);
+                        // ✅ CORRIGÉ (28 août 2026, demande Paul — "ouvre plus
+                        // grand ton analyse... c'est critique") — trouvé :
+                        // ces champs n'étaient mis QU'au niveau racine de
+                        // backupPayload, JAMAIS à l'intérieur de
+                        // payload_complet (payloadCompletReel, une
+                        // variable séparée) — là où TOUTES les fonctions
+                        // de reconstruction les cherchent réellement
+                        // (payload.optInt("active_product", -1), etc.).
+                        // Un fichier écrit par CETTE fonction était donc
+                        // invisible pour toute tentative de reconstruction
+                        // future. Injecté maintenant aussi dans
+                        // payloadCompletReel lui-même.
+                        try {
+                            org.json.JSONObject pInterne = new org.json.JSONObject(payloadCompletReel);
+                            pInterne.put("active_product", produitRetour);
+                            pInterne.put("active_product_description", descRetour);
+                            pInterne.put("active_product_code", codeRetour);
+                            pInterne.put("active_product_type", typeRetour);
+                            pInterne.put("preset_requested", presetRetour);
+                            payloadCompletReel = pInterne.toString();
+                        } catch (Exception e) {
+                            android.util.Log.w("RetourWO", "Injection produit dans payload_complet ERR (non-bloquant): " + e.getMessage());
+                        }
                     } catch (Exception e) {
                         android.util.Log.w("RetourWO", "Recherche produit (retour WO) ERR (non-bloquant): " + e.getMessage());
                     }
+                    android.content.ContentValues cv =
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.construireLivraisonComplete(
+                            null, woNum, woIdGuid, ticketNo, saleNo,
+                            netL, grossL, serialFromArgs, node, (tabTransportKey != null ? tabTransportKey.trim() : ""),
+                            produitRetour, descRetour, codeRetour, typeRetour, presetRetour,
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
+                            "LIVRAISON",
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
+                            payloadCompletReel);
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE, "REGISTRE");
+                    long localId = lcrDb.insertDelivery(cv);
+                    android.util.Log.i("RetourWO", "Delivery sauvegardée localId=" + localId
+                        + " wo=" + woNum + " net=" + netL + " gross=" + grossL);
+
                     backupPayload.put("backup_ts", System.currentTimeMillis());
                     backupPayload.put("payload_complet", payloadCompletReel);
                     // ✅ AJOUTÉ (11 août 2026, demande Paul — "ajoute-le au
@@ -4897,6 +4870,7 @@ public class RegisterTabFragment extends Fragment {
                         com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
                     com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
                         requireContext().getApplicationContext(), woNum, ticketNo, backupPayload);
+                }
                 } catch (Exception e) {
                     android.util.Log.w("RetourWO", "Backup local ERR (non-bloquant): " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(node, "RegisterTabFragment.Backup", e); } catch (Exception ignored) {}
                 }
@@ -5741,37 +5715,6 @@ public class RegisterTabFragment extends Fragment {
                     // (confirmé: "BT:00:01:95:87:72:A1"). Garde maintenant
                     // le format complet, cohérent avec le reste.
                     String macAnnul = (tabTransportKey != null) ? tabTransportKey.trim() : "";
-                    android.content.ContentValues cv = new android.content.ContentValues();
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,      woNum);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID,  woIdGuid);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO,   ticketNo);
-                    // ✅ AJOUTÉ (28 août 2026, demande Paul — "je n'ai pas
-                    // le numéro de vente, je n'ai pas le ticket_number") —
-                    // COL_SALE_NO n'était jamais inclus dans cette
-                    // insertion — le seul autre point d'insertion du
-                    // fichier qui le pose est le chemin normal, jamais
-                    // celui-ci. Même valeur que ticketNo (déjà résolue via
-                    // lastKnownTicketNo au besoin) — cohérent avec le
-                    // principe déjà établi partout ailleurs aujourd'hui
-                    // (ticket_no et sale_no sont la même valeur en mode
-                    // repli). delivery_uid se construira correctement de
-                    // lui-même au moment de l'envoi vers Dataverse
-                    // (wo_num + "-" + ticket_no, déjà automatique dans
-                    // pushDeliveryRow) — pas besoin de le fixer séparément.
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SALE_NO,     ticketNo);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID,   serialFromArgs != null ? serialFromArgs : "");
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_LCRNODE,     node);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_BTMAC,       macAnnul);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,       0.0);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L,     0.0);
-                    // ✅ AJOUTÉ (28 août 2026, demande Paul — "on a pas le
-                    // produit, le code produit, le preset, le type
-                    // produit dans les deux ça prend ça aussi pour le
-                    // ticket annulé... ils doivent tous avoir la même
-                    // affaire") — même richesse d'information que le
-                    // filet de sécurité (running_flowing) — une
-                    // annulation mérite exactement le même niveau de
-                    // détail, pas moins.
                     int produitAnnul = getPendingProduct();
                     double presetAnnul = 0;
                     try {
@@ -5800,27 +5743,28 @@ public class RegisterTabFragment extends Fragment {
                     } catch (Exception e) {
                         android.util.Log.w("Annuler", "Recherche produit (annulation) ERR (non-bloquant): " + e.getMessage());
                     }
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PRODUIT_NO, produitAnnul);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PRESET_L, presetAnnul);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
-                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ANNULATION);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,      "OPERATEUR");
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE,   "ANNULATION");
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
-                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
+                    // ✅ REFACTORISÉ (28 août 2026, demande Paul — "analyse
+                    // tout ce qui est nécessaire") — le payload interne
+                    // (cancel_reason/net_at_cancel/etc.) est construit
+                    // D'ABORD, puis utilisé comme base pour la fonction
+                    // partagée — même patron que partout ailleurs
+                    // aujourd'hui.
                     org.json.JSONObject payload = new org.json.JSONObject();
                     payload.put("cancelled",       true);
                     payload.put("cancel_reason",   "operator_cancel");
                     payload.put("net_at_cancel",   netAtCancel);
                     payload.put("gross_at_cancel", grossAtCancel);
                     payload.put("cancel_ts",       System.currentTimeMillis());
-                    payload.put("ticket_no",       ticketNo);
-                    payload.put("active_product",  produitAnnul);
-                    payload.put("active_product_description", descAnnul);
-                    payload.put("active_product_code", codeAnnul);
-                    payload.put("active_product_type", typeProduitAnnul);
-                    payload.put("preset_net_l",    presetAnnul);
-                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PAYLOAD_JSON, payload.toString());
+                    android.content.ContentValues cv =
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.construireLivraisonComplete(
+                            null, woNum, woIdGuid, ticketNo, ticketNo,
+                            0.0, 0.0, serialFromArgs, node, macAnnul,
+                            produitAnnul, descAnnul, codeAnnul, typeProduitAnnul, presetAnnul,
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ANNULATION,
+                            "ANNULATION",
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
+                            payload.toString());
+                    cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE, "OPERATEUR");
                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbAnnuler =
                         new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
                     try {
@@ -5934,26 +5878,14 @@ public class RegisterTabFragment extends Fragment {
                     // trace possible sur une BD vierge après réinstall.
                     // net_l/gross_l à 0 ici aussi, cohérent avec la BD.
                     try {
-                        org.json.JSONObject backupPayloadAnnul = new org.json.JSONObject();
-                        backupPayloadAnnul.put("wo_num", woNum != null ? woNum : "");
-                        backupPayloadAnnul.put("wo_id_guid", woIdGuid != null ? woIdGuid : "");
-                        backupPayloadAnnul.put("ticket_no", ticketNo != null ? ticketNo : "");
-                        backupPayloadAnnul.put("sale_no", ticketNo != null ? ticketNo : "");
-                        backupPayloadAnnul.put("net_l", 0.0);
-                        backupPayloadAnnul.put("gross_l", 0.0);
-                        backupPayloadAnnul.put("serial_id", serialFromArgs != null ? serialFromArgs : "");
-                        backupPayloadAnnul.put("lcrnode", node);
-                        backupPayloadAnnul.put("btmac", macAnnul);
-                        backupPayloadAnnul.put("produit_no", produitAnnul);
-                        backupPayloadAnnul.put("active_product_description", descAnnul);
-                        backupPayloadAnnul.put("active_product_code", codeAnnul);
-                        backupPayloadAnnul.put("active_product_type", typeProduitAnnul);
-                        backupPayloadAnnul.put("preset_net_l", presetAnnul);
-                        backupPayloadAnnul.put("type", com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ANNULATION);
-                        backupPayloadAnnul.put("backup_ts", System.currentTimeMillis());
-                        backupPayloadAnnul.put("payload_complet", payload.toString());
-                        backupPayloadAnnul.put("sync_status",
-                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
+                        org.json.JSONObject backupPayloadAnnul =
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.construireJsonLivraisonComplet(
+                                null, woNum, woIdGuid, ticketNo, ticketNo,
+                                0.0, 0.0, serialFromArgs, node, macAnnul,
+                                produitAnnul, descAnnul, codeAnnul, typeProduitAnnul, presetAnnul,
+                                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ANNULATION,
+                                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
+                                payload.toString());
                         com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
                             requireContext().getApplicationContext(), woNum, ticketNo, backupPayloadAnnul);
                     } catch (Exception e) {
@@ -6376,7 +6308,7 @@ public class RegisterTabFragment extends Fragment {
                         if (rowFallback.produitNo > 0) {
                             jf.put("active_product", rowFallback.produitNo);
                         }
-                        if (rowFallback.presetL > 0) jf.put("preset_net_l", rowFallback.presetL);
+                        if (rowFallback.presetL > 0) jf.put("preset_requested", rowFallback.presetL);
                         return jf;
                     }
                 } finally {
@@ -6551,7 +6483,7 @@ public class RegisterTabFragment extends Fragment {
                     if (lastTicketIdx == -1) {
                         org.json.JSONObject backupPayload = lireActiveProductDepuisDeliverySummary(ticketPourScan, serialId);
                         if (backupPayload != null) {
-                            int idx = backupPayload.optInt("active_product", -1);
+                            int idx = com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.optFirstInt(backupPayload, -1, "active_product", "product_number");
                             if (idx > 0 && idx <= 16) {
                                 lastTicketIdx = idx;
                                 LogBus.api(node, "[SCAN] dernier ticket connu récupéré depuis delivery_summary "
@@ -6562,7 +6494,7 @@ public class RegisterTabFragment extends Fragment {
                             // ticket tu as aussi en même temps le preset du
                             // dernier ticket") — même JSON, même appel, aucune
                             // recherche supplémentaire nécessaire.
-                            double pn = backupPayload.optDouble("preset_net_l", -1);
+                            double pn = com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.optFirstDouble(backupPayload, -1, "preset_requested", "preset_net_l");
                             if (pn > 0) presetDuTicketPourApplication[0] = pn;
                         }
                     }

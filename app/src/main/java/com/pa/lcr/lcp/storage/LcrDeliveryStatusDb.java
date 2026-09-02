@@ -637,6 +637,148 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     // calcul d'historique previous/total qui ne s'applique pas ici,
     // puisqu'une livraison encore en cours n'est pas "livrée"). Retourne
     // l'id de la ligne (nouvelle ou mise à jour).
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — "pourquoi ne prends-tu pas le
+    // même format que la livraison, pourquoi es-tu obligé d'avoir une
+    // nouvelle fonction??? il faut pas juste coder pour coder") — UNE
+    // SEULE fonction partagée, utilisée par TOUS les points d'écriture
+    // (armement, fin normale, annulation, récupération, finalisation
+    // orpheline, retour au bon de travail) — élimine le patron répété
+    // toute la journée où chaque fonction reconstruisait sa propre
+    // structure séparément, oubliant un champ ici, l'ajoutant là. Un
+    // seul endroit à maintenir désormais. net_l/gross_l valent 0 à
+    // l'armement, les vraies valeurs à la fin — MÊME structure dans les
+    // deux cas, comme demandé.
+    // ✅ CORRIGÉ (28 août 2026, demande Paul — "utilise le même format que
+    // livraison terminée, et si on a besoin de reconstruire la livraison
+    // on doit aller chercher les infos aussi dans le payload") — le
+    // payload_complet (description/code/type/preset nichés dedans) est
+    // maintenant construit UNE SEULE FOIS, ici, dans cette fonction —
+    // jamais par chaque appelant séparément. La BD le stocke aussi (via
+    // COL_PAYLOAD_JSON, déjà utilisée par LocalDeliveryBackup pour la
+    // restauration) — même source unique, BD et JSON, exactement comme
+    // le fait déjà une livraison terminée (le vrai payload du registre,
+    // extraJson, contient déjà ces mêmes champs nichés).
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — "continue à chercher, passe
+    // en revue toute l'application") — trouvé : ApiServer.java a déjà un
+    // mécanisme équivalent (extractBestEffort), mais privé, spécifique à
+    // ce fichier. Cette version, publique et partagée ici, vérifie
+    // plusieurs clés possibles en repli (ex: "ticket_no", "ticketNo",
+    // "ticket") — et, si aucune ne matche au niveau racine, cherche aussi
+    // dans un sous-objet "result" imbriqué (le vrai registre y range
+    // parfois ces champs, confirmé pour product_number/preset_requested).
+    // Remplace les replis manuels répétés un peu partout dans
+    // l'application.
+    public static String optFirstString(org.json.JSONObject j, String... keys) {
+        if (j == null) return "";
+        for (String k : keys) {
+            String v = j.optString(k, "");
+            if (!v.isEmpty()) return v;
+        }
+        org.json.JSONObject result = j.optJSONObject("result");
+        if (result != null) {
+            for (String k : keys) {
+                String v = result.optString(k, "");
+                if (!v.isEmpty()) return v;
+            }
+        }
+        return "";
+    }
+
+    public static int optFirstInt(org.json.JSONObject j, int defaultVal, String... keys) {
+        if (j == null) return defaultVal;
+        for (String k : keys) {
+            if (j.has(k)) return j.optInt(k, defaultVal);
+        }
+        org.json.JSONObject result = j.optJSONObject("result");
+        if (result != null) {
+            for (String k : keys) {
+                if (result.has(k)) return result.optInt(k, defaultVal);
+            }
+        }
+        return defaultVal;
+    }
+
+    public static double optFirstDouble(org.json.JSONObject j, double defaultVal, String... keys) {
+        if (j == null) return defaultVal;
+        for (String k : keys) {
+            if (j.has(k)) return j.optDouble(k, defaultVal);
+        }
+        org.json.JSONObject result = j.optJSONObject("result");
+        if (result != null) {
+            for (String k : keys) {
+                if (result.has(k)) return result.optDouble(k, defaultVal);
+            }
+        }
+        return defaultVal;
+    }
+
+    private static String construirePayloadInterne(
+            int produitNo, String produitDescription, String produitCode, int produitType,
+            double presetL, String extra) {
+        try {
+            org.json.JSONObject p = (extra != null && !extra.isEmpty())
+                ? new org.json.JSONObject(extra) : new org.json.JSONObject();
+            p.put("active_product", produitNo);
+            p.put("active_product_description", produitDescription != null ? produitDescription : "");
+            p.put("active_product_code", produitCode != null ? produitCode : "");
+            p.put("active_product_type", produitType);
+            p.put("preset_requested", presetL);
+            return p.toString();
+        } catch (Exception e) {
+            return extra != null ? extra : "{}";
+        }
+    }
+
+    public static ContentValues construireLivraisonComplete(
+            String jobId, String woNum, String woIdGuid, String ticketNo, String saleNo,
+            double netL, double grossL, String serialId, int lcrnode, String btmac,
+            int produitNo, String produitDescription, String produitCode, int produitType,
+            double presetL, String type, String stopType, String syncStatus, String payloadExtra) {
+        ContentValues cv = new ContentValues();
+        if (jobId != null && !jobId.isEmpty()) cv.put(COL_JOB_ID, jobId);
+        cv.put(COL_WO_NUM, woNum != null ? woNum : "");
+        cv.put(COL_WO_ID_GUID, woIdGuid != null ? woIdGuid : "");
+        cv.put(COL_TICKET_NO, ticketNo != null ? ticketNo : "");
+        cv.put(COL_SALE_NO, saleNo != null ? saleNo : "");
+        cv.put(COL_NET_L, netL);
+        cv.put(COL_GROSS_L, grossL);
+        cv.put(COL_SERIAL_ID, serialId != null ? serialId : "");
+        cv.put(COL_LCRNODE, lcrnode);
+        cv.put(COL_BTMAC, btmac != null ? btmac : "");
+        cv.put(COL_PRODUIT_NO, produitNo);
+        cv.put(COL_PRESET_L, presetL);
+        cv.put(COL_TYPE, type != null ? type : TYPE_ORIGINAL);
+        cv.put(COL_STOP_TYPE, stopType != null ? stopType : "LIVRAISON");
+        cv.put(COL_SYNC_STATUS, syncStatus != null ? syncStatus : SYNC_PENDING);
+        cv.put(COL_PAYLOAD_JSON, construirePayloadInterne(
+            produitNo, produitDescription, produitCode, produitType, presetL, payloadExtra));
+        return cv;
+    }
+
+    public static org.json.JSONObject construireJsonLivraisonComplet(
+            String jobId, String woNum, String woIdGuid, String ticketNo, String saleNo,
+            double netL, double grossL, String serialId, int lcrnode, String btmac,
+            int produitNo, String produitDescription, String produitCode, int produitType,
+            double presetL, String type, String syncStatus, String payloadExtra) throws org.json.JSONException {
+        org.json.JSONObject j = new org.json.JSONObject();
+        if (jobId != null && !jobId.isEmpty()) j.put("job_id", jobId);
+        j.put("wo_num", woNum != null ? woNum : "");
+        j.put("wo_id_guid", woIdGuid != null ? woIdGuid : "");
+        j.put("ticket_no", ticketNo != null ? ticketNo : "");
+        j.put("sale_no", saleNo != null ? saleNo : "");
+        j.put("net_l", netL);
+        j.put("gross_l", grossL);
+        j.put("serial_id", serialId != null ? serialId : "");
+        j.put("lcrnode", lcrnode);
+        j.put("btmac", btmac != null ? btmac : "");
+        j.put("type", type != null ? type : TYPE_ORIGINAL);
+        j.put("backup_ts", System.currentTimeMillis());
+        j.put("payload_complet", construirePayloadInterne(
+            produitNo, produitDescription, produitCode, produitType, presetL, payloadExtra));
+        j.put("sync_status", syncStatus != null ? syncStatus : SYNC_PENDING);
+        return j;
+    }
+
     public long upsertByJobId(ContentValues cv) {
         String jobId = cv.getAsString(COL_JOB_ID);
         String woNum = cv.getAsString(COL_WO_NUM);

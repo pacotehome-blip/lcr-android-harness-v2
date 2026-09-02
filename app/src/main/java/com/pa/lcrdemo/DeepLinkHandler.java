@@ -986,6 +986,25 @@ public class DeepLinkHandler {
                                 new com.pa.lcr.lcp.storage.RegisterProductStore(activity);
                             java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> lignesArm =
                                 prodStoreArm.getAll(fSerialId, node);
+                            android.util.Log.i(TAG, "Recherche produit (armement) — serialId=\"" + fSerialId
+                                + "\" node=" + node + " → " + lignesArm.size() + " ligne(s) trouvée(s)");
+                            // ✅ AJOUTÉ (28 août 2026, demande Paul — "ou est
+                            // le code produit, ou est le type de produit...
+                            // j'arrive d'un running flowing et j'ai pas ça")
+                            // — trouvé (fichier réel : active_product=1
+                            // présent, mais description/code/type tous
+                            // vides) : getAll(serialId, node) peut revenir
+                            // vide si node ne correspond pas exactement à
+                            // celui utilisé lors de l'écriture réelle
+                            // (store.upsertAll dans api_scanProductNames()).
+                            // Repli sur getAll(serialId) SANS node — déjà
+                            // prévu dans RegisterProductStore lui-même pour
+                            // ce genre de cas.
+                            if (lignesArm.isEmpty()) {
+                                lignesArm = prodStoreArm.getAll(fSerialId);
+                                android.util.Log.i(TAG, "Recherche produit (armement) — repli sans node → "
+                                    + lignesArm.size() + " ligne(s) trouvée(s)");
+                            }
                             for (com.pa.lcr.lcp.storage.RegisterProductStore.Row ligneArm : lignesArm) {
                                 if (ligneArm.noteIdx == fProduct - 1) {
                                     descArm = ligneArm.description;
@@ -997,27 +1016,16 @@ public class DeepLinkHandler {
                         } catch (Exception e) {
                             android.util.Log.w(TAG, "Recherche produit (armement) ERR (non-bloquant): " + e.getMessage());
                         }
-                        android.content.ContentValues cvArm = new android.content.ContentValues();
-                        cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_JOB_ID, jobId);
-                        if (!ticketArm.isEmpty()) {
-                            cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO, ticketArm);
-                            cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SALE_NO, ticketArm);
-                        }
-                        cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM, woNum != null ? woNum : "");
-                        cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID, woIdGuid != null ? woIdGuid : "");
-                        cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID, fSerialId != null ? fSerialId : "");
-                        cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_LCRNODE, node);
-                        cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_BTMAC, fMacPourArm);
-                        cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L, 0.0);
-                        cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L, 0.0);
-                        cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PRODUIT_NO, fProduct);
-                        cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PRESET_L, fPresetD);
-                        cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
-                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
+                        android.content.ContentValues cvArm =
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.construireLivraisonComplete(
+                                jobId, woNum, woIdGuid, ticketArm, ticketArm,
+                                0.0, 0.0, fSerialId, node, fMacPourArm,
+                                fProduct, descArm, codeArm, typeArm, fPresetD,
+                                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
+                                "RUNNING_FLOWING",
+                                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
+                                "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + jobId + "\"}");
                         cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE, "ARMEMENT");
-                        cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE, "RUNNING_FLOWING");
-                        cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
-                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
                         com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbArm =
                             new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
                         try {
@@ -1028,27 +1036,14 @@ public class DeepLinkHandler {
                         android.util.Log.i(TAG, "Livraison enregistrée dès l'armement — jobId=" + jobId + " wo=" + woNum
                             + " produit=" + fProduct + " preset=" + fPresetD);
 
-                        org.json.JSONObject backupPayloadArm = new org.json.JSONObject();
-                        backupPayloadArm.put("job_id", jobId);
-                        backupPayloadArm.put("wo_num", woNum != null ? woNum : "");
-                        backupPayloadArm.put("wo_id_guid", woIdGuid != null ? woIdGuid : "");
-                        backupPayloadArm.put("ticket_no", ticketArm);
-                        backupPayloadArm.put("sale_no", ticketArm);
-                        backupPayloadArm.put("net_l", 0.0);
-                        backupPayloadArm.put("gross_l", 0.0);
-                        backupPayloadArm.put("serial_id", fSerialId != null ? fSerialId : "");
-                        backupPayloadArm.put("lcrnode", node);
-                        backupPayloadArm.put("btmac", fMacPourArm);
-                        backupPayloadArm.put("type", com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
-                        backupPayloadArm.put("backup_ts", System.currentTimeMillis());
-                        backupPayloadArm.put("payload_complet", "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + jobId
-                            + "\",\"active_product\":" + fProduct
-                            + ",\"active_product_description\":\"" + descArm.replace("\"", "")
-                            + "\",\"active_product_code\":\"" + codeArm.replace("\"", "")
-                            + "\",\"active_product_type\":" + typeArm
-                            + ",\"preset_net_l\":" + fPresetD + "}");
-                        backupPayloadArm.put("sync_status",
-                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
+                        org.json.JSONObject backupPayloadArm =
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.construireJsonLivraisonComplet(
+                                jobId, woNum, woIdGuid, ticketArm, ticketArm,
+                                0.0, 0.0, fSerialId, node, fMacPourArm,
+                                fProduct, descArm, codeArm, typeArm, fPresetD,
+                                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
+                                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
+                                "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + jobId + "\"}");
                         com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
                             activity.getApplicationContext(), woNum, jobId, backupPayloadArm);
                     } catch (Exception e) {
@@ -2113,6 +2108,19 @@ public class DeepLinkHandler {
                 double durationS = 0;
                 int    produitNo = 0;
                 String presetStatus = "EXACT";
+                // ✅ AJOUTÉ (28 août 2026, demande Paul — "pourquoi as-tu
+                // manqué de rigueur depuis le début... tu es capable de
+                // voir les fonctions, les entrées, les sorties") — trouvé
+                // en cartographiant systématiquement : onDeliveryEnded()
+                // (la vraie fin normale, la plus fréquente) n'avait
+                // JAMAIS été refactorisée pour utiliser la fonction
+                // partagée — elle construisait encore son propre JSON
+                // séparément, sans jamais extraire description/code/type
+                // du tout. Extrait maintenant via la fonction utilitaire
+                // partagée, qui vérifie plusieurs variantes possibles.
+                String produitDescriptionFin = "";
+                String produitCodeFin = "";
+                int produitTypeFin = -1;
 
                 if (result != null) {
                     netL       = result.optDouble("fs_net_l",    0);
@@ -2125,6 +2133,25 @@ public class DeepLinkHandler {
                     endUtc     = result.optString("end_utc",     "");
                     durationS  = result.optDouble("duration_s",  0);
                     produitNo  = result.optInt("product_number", 0);
+                }
+                if (produitNo > 0) {
+                    try {
+                        com.pa.lcr.lcp.storage.RegisterProductStore prodStoreFin =
+                            new com.pa.lcr.lcp.storage.RegisterProductStore(activity);
+                        java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> lignesFin =
+                            prodStoreFin.getAll(serialId, lcrnode);
+                        if (lignesFin.isEmpty()) lignesFin = prodStoreFin.getAll(serialId);
+                        for (com.pa.lcr.lcp.storage.RegisterProductStore.Row ligneFin : lignesFin) {
+                            if (ligneFin.noteIdx == produitNo - 1) {
+                                produitDescriptionFin = ligneFin.description;
+                                produitCodeFin = ligneFin.productCode;
+                                produitTypeFin = ligneFin.productType;
+                                break;
+                            }
+                        }
+                    } catch (Exception e) {
+                        android.util.Log.w(TAG, "Recherche produit (fin normale) ERR (non-bloquant): " + e.getMessage());
+                    }
                 }
                 // Fallback tick
                 if ((netL == 0 || grossL == 0) && tick != null) {
@@ -2157,31 +2184,24 @@ public class DeepLinkHandler {
                 // cohérence — toujours écrit ici aussi maintenant.
                 String mac = macParam;
 
-                android.content.ContentValues cv = new android.content.ContentValues();
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,       woNum != null ? woNum : "");
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID,   woIdGuid != null ? woIdGuid.replace("{","").replace("}","") : "");
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID,    serialId);
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_LCRNODE,      lcrnode);
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_BTMAC,        mac != null ? mac : "");
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PRODUIT_NO,   produitNo);
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO,    ticketNo);
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SALE_NO,      saleNo);
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,        netL);
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L,      grossL);
+                android.content.ContentValues cv =
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.construireLivraisonComplete(
+                        d.optString("jobId", ""), woNum, woIdGuid, ticketNo, saleNo,
+                        netL, grossL, serialId, lcrnode, mac,
+                        produitNo, produitDescriptionFin, produitCodeFin, produitTypeFin, presetL,
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
+                        "LIVRAISON",
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
+                        extraJson);
+                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID,
+                    woIdGuid != null ? woIdGuid.replace("{","").replace("}","") : "");
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_DELTA_NET_L,  deltaNet);
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_DELTA_GROSS_L,deltaGross);
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PRESET_L,     presetL);
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PRESET_STATUS,presetStatus);
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_START_UTC,    startUtc);
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_END_UTC,      endUtc);
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_DURATION_S,   durationS);
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TYPE,
-                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE,       "REGISTRE");
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE,    "LIVRAISON");
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SYNC_STATUS,
-                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
-                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PAYLOAD_JSON, extraJson);
 
                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDb =
                     new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
@@ -2218,22 +2238,14 @@ public class DeepLinkHandler {
                     // une mise à jour de cette dernière. job_id reste
                     // dans le payload pour référence/traçabilité, mais ne
                     // sert plus de clé de fichier ici.
-                    org.json.JSONObject backupPayloadFin = new org.json.JSONObject();
-                    backupPayloadFin.put("job_id", d.optString("jobId", ""));
-                    backupPayloadFin.put("wo_num", woNum != null ? woNum : "");
-                    backupPayloadFin.put("wo_id_guid", woIdGuid != null ? woIdGuid : "");
-                    backupPayloadFin.put("ticket_no", ticketNo != null ? ticketNo : "");
-                    backupPayloadFin.put("sale_no", saleNo != null ? saleNo : "");
-                    backupPayloadFin.put("net_l", netL);
-                    backupPayloadFin.put("gross_l", grossL);
-                    backupPayloadFin.put("serial_id", serialId != null ? serialId : "");
-                    backupPayloadFin.put("lcrnode", lcrnode);
-                    backupPayloadFin.put("btmac", mac != null ? mac : "");
-                    backupPayloadFin.put("type", com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
-                    backupPayloadFin.put("backup_ts", System.currentTimeMillis());
-                    backupPayloadFin.put("payload_complet", extraJson);
-                    backupPayloadFin.put("sync_status",
-                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
+                    org.json.JSONObject backupPayloadFin =
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.construireJsonLivraisonComplet(
+                            d.optString("jobId", ""), woNum, woIdGuid, ticketNo, saleNo,
+                            netL, grossL, serialId, lcrnode, mac,
+                            produitNo, produitDescriptionFin, produitCodeFin, produitTypeFin, presetL,
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
+                            extraJson);
                     com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
                         activity.getApplicationContext(), woNum, ticketNo, backupPayloadFin);
                 } catch (Exception e) {
