@@ -1775,6 +1775,17 @@ public class DeepLinkHandler {
     // ✅ Guard anti-double poll — un seul poll par jobId
     private static final java.util.Set<String> activePolls =
         java.util.Collections.synchronizedSet(new java.util.HashSet<>());
+    // ✅ AJOUTÉ (2 sept 2026, demande Paul — "il faut respecter le
+    // processus de livraison c'pas compliqué") — trouvé : la récupération
+    // (tenterRecuperationRunningFlowing) s'était déclenchée pour une
+    // livraison que CETTE MÊME SESSION suivait déjà activement via
+    // pollJobUntilDone() (le vrai suivi, depuis son propre armement) —
+    // deux mécanismes différents pour la même livraison, en parallèle.
+    // La récupération ne sert que pour un vrai état perdu (crash,
+    // BD vierge) — jamais pour une livraison déjà suivie normalement.
+    public static boolean isPollActif() {
+        return !activePolls.isEmpty();
+    }
 
     // ✅ AJOUTÉ (27 août 2026, demande Paul — "je veux avoir en bd chaque
     // livraison qui a toi le ticket_number ou le sales_number, je ne
@@ -2547,6 +2558,33 @@ public class DeepLinkHandler {
                     // séparée pour le même job_id au lieu de mettre à
                     // jour celle déjà correctement établie plus tôt dans
                     // le cycle de cette même livraison.
+                    // ✅ AJOUTÉ (2 sept 2026, demande Paul — "vérifie le
+                    // point resté en suspens : écrasement par payload
+                    // périmé") — trouvé (confirmé par fichier réel) :
+                    // r.data peut contenir des champs internes non
+                    // synchronisés entre eux (state="CONNECTED" vrai,
+                    // mais ticket_no/sale_no encore périmés d'un cycle
+                    // précédent) — avec upsertByJobId, cette incohérence
+                    // écraserait maintenant une valeur déjà correcte
+                    // (établie par l'armement/la récupération) au lieu
+                    // de simplement créer un doublon inoffensif comme
+                    // avant. Garde-fou : si la ligne existante a déjà un
+                    // ticket_no valide et que le nouveau semble vide ou
+                    // suspect, préserve l'ancien plutôt que de l'écraser.
+                    String jobIdPourGuard = cv.getAsString(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_JOB_ID);
+                    if (jobIdPourGuard != null && !jobIdPourGuard.isEmpty()) {
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow existingPourGuard =
+                            lcrDb.getByJobId(jobIdPourGuard);
+                        if (existingPourGuard != null
+                                && existingPourGuard.ticketNo != null && !existingPourGuard.ticketNo.isEmpty()) {
+                            String nouveauTicketPourGuard = cv.getAsString(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO);
+                            if (nouveauTicketPourGuard == null || nouveauTicketPourGuard.isEmpty()) {
+                                android.util.Log.w(TAG, "onDeliveryEnded: nouveau ticket_no vide, préservation de l'existant=" + existingPourGuard.ticketNo);
+                                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO, existingPourGuard.ticketNo);
+                                cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SALE_NO, existingPourGuard.saleNo);
+                            }
+                        }
+                    }
                     localId = lcrDb.upsertByJobId(cv);
                 } finally {
                     try { lcrDb.close(); } catch (Exception ignored) {}

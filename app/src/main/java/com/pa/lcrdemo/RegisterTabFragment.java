@@ -858,7 +858,8 @@ public class RegisterTabFragment extends Fragment {
         // session (recuperationRunningFlowingTentee). Best-effort —
         // aucune tentative ne bloque ni n'échoue bruyamment; si rien
         // n'est trouvé, tant pis, ce n'est pas grave (comme demandé).
-        if (st == DeliveryState.RUNNING_FLOWING && !recuperationRunningFlowingTentee) {
+        if (st == DeliveryState.RUNNING_FLOWING && !recuperationRunningFlowingTentee
+                && !com.pa.lcrdemo.DeepLinkHandler.isPollActif()) {
             recuperationRunningFlowingTentee = true;
             safeBg(() -> tenterRecuperationRunningFlowing());
         }
