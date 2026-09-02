@@ -1031,7 +1031,7 @@ public class RegisterTabFragment extends Fragment {
                     prodStore.getAll(serialFromArgs, node);
                 if (lignes.isEmpty()) lignes = prodStore.getAll(serialFromArgs);
                 for (com.pa.lcr.lcp.storage.RegisterProductStore.Row ligne : lignes) {
-                    if (ligne.noteIdx == produitFrais - 1) {
+                    if (ligne.noteIdx == produitFrais) {
                         produitDescription = ligne.description;
                         produitCode = ligne.productCode;
                         produitType = ligne.productType;
@@ -1252,7 +1252,16 @@ public class RegisterTabFragment extends Fragment {
                 // n'accepte plus silencieusement un défaut — voir
                 // évaluation finale juste après runSectionWithRetry.
                 if (resolved != null) {
-                    initValidatedProductIdx = resolved.noteIdx;
+                    // ✅ CORRIGÉ (2 sept 2026, demande Paul — "quand on
+                    // demande de valider le produit demandé vs ce que le
+                    // registre a comme produit tu fais quoi") — trouvé :
+                    // initValidatedProductIdx est explicitement 0-indexée
+                    // (voir sa déclaration, "0 = produit 1"), mais
+                    // resolved.noteIdx est 1-indexé (idx+1, confirmé dans
+                    // LcpLink.java) — assignation directe sans conversion,
+                    // décalant TOUJOURS d'un cran la vraie comparaison
+                    // produit demandé vs produit trouvé.
+                    initValidatedProductIdx = resolved.noteIdx - 1;
                 } else if (produitDeepLink == null || produitDeepLink.trim().isEmpty()) {
                     initValidatedProductIdx = 0; // défaut produit 1 — légitime, aucune attente précise
                 }
@@ -4814,7 +4823,7 @@ public class RegisterTabFragment extends Fragment {
                             prodStoreRetour.getAll(serialFromArgs, node);
                         if (lignesRetour.isEmpty()) lignesRetour = prodStoreRetour.getAll(serialFromArgs);
                         for (com.pa.lcr.lcp.storage.RegisterProductStore.Row ligneRetour : lignesRetour) {
-                            if (ligneRetour.noteIdx == produitRetour - 1) {
+                            if (ligneRetour.noteIdx == produitRetour) {
                                 descRetour = ligneRetour.description;
                                 codeRetour = ligneRetour.productCode;
                                 typeRetour = ligneRetour.productType;
@@ -5749,7 +5758,7 @@ public class RegisterTabFragment extends Fragment {
                             prodStoreAnnul.getAll(serialFromArgs, node);
                         if (lignesAnnul.isEmpty()) lignesAnnul = prodStoreAnnul.getAll(serialFromArgs);
                         for (com.pa.lcr.lcp.storage.RegisterProductStore.Row ligneAnnul : lignesAnnul) {
-                            if (ligneAnnul.noteIdx == produitAnnul - 1) {
+                            if (ligneAnnul.noteIdx == produitAnnul) {
                                 descAnnul = ligneAnnul.description;
                                 codeAnnul = ligneAnnul.productCode;
                                 typeProduitAnnul = ligneAnnul.productType;
@@ -6184,7 +6193,7 @@ public class RegisterTabFragment extends Fragment {
                                         new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
                                 try {
                                     com.pa.lcr.lcp.storage.RegisterProductStore.Row rowLabel =
-                                            storeLabel.findByNoteIdx(serialId, idxDerniere - 1);
+                                            storeLabel.findByNoteIdx(serialId, idxDerniere);
                                     if (rowLabel != null) {
                                         label = rowLabel.toSpinnerLabel();
                                         vraiLabelTrouve[0] = true;
@@ -6530,7 +6539,7 @@ public class RegisterTabFragment extends Fragment {
                         }
                         if (idxSelectionne > 0 && spnProduct != null) {
                             spnProduct.setText(labels[idxSelectionne - 1], false);
-                            initValidatedProductIdx = idxSelectionne; produitDejaResoluPourCetteSession = true;
+                            initValidatedProductIdx = idxSelectionne - 1; produitDejaResoluPourCetteSession = true;
                             String quoi = parCorrespondanceTexte ? "produit du ticket (\"" + produitDeepLinkPourScan + "\")"
                                     : parDernierTicket ? "dernier ticket connu" : "Propane";
                             if (txtLive != null) txtLive.setText("✅ Scan terminé — " + quoi + " — produit " + idxSelectionne);
@@ -6760,7 +6769,7 @@ public class RegisterTabFragment extends Fragment {
                         spnProduct.setText(cur, false);
                     } else if (idxASelectionner > 0 && idxASelectionner <= 16) {
                         spnProduct.setText(labels[idxASelectionner - 1], false);
-                        initValidatedProductIdx = idxASelectionner; produitDejaResoluPourCetteSession = true;
+                        initValidatedProductIdx = idxASelectionner - 1; produitDejaResoluPourCetteSession = true;
                         String quoi = matchIdxF > 0 ? "produit du ticket (\"" + produitDeepLinkPourCache + "\")"
                                 : propaneIdxF > 0 ? "Propane" : "dernier ticket connu";
                         if (txtLive != null) txtLive.setText("✅ Produit — " + quoi + " — produit " + idxASelectionner);
