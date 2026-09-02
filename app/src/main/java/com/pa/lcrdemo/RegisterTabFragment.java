@@ -4664,6 +4664,32 @@ public class RegisterTabFragment extends Fragment {
                     if (rowValidation != null
                             && com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_SYNCED.equals(rowValidation.syncStatus)) {
                         LogBus.api(node, "[RETOUR-WO] WO déjà en BD et SYNCED — bascule directe vers FieldService, sans reconstruction");
+                        // ✅ CORRIGÉ (2 sept 2026, demande Paul — "tout le
+                        // processus a été hijacké") — trouvé : ce
+                        // raccourci appelait finish() SANS JAMAIS
+                        // informer FieldService (aucun appel à
+                        // retournerFieldService()) — FieldService, sans
+                        // confirmation reçue, renvoyait le même deep
+                        // link, hijackant tout le processus suivant.
+                        // Construit le résultat depuis rowValidation
+                        // (déjà en BD, déjà correct) et informe
+                        // vraiment FieldService avant de fermer.
+                        try {
+                            org.json.JSONObject extraShortcut = new org.json.JSONObject();
+                            org.json.JSONObject resultShortcut = new org.json.JSONObject();
+                            resultShortcut.put("fs_net_l", rowValidation.netL);
+                            resultShortcut.put("fs_gross_l", rowValidation.grossL);
+                            resultShortcut.put("ticket_no", rowValidation.ticketNo != null ? rowValidation.ticketNo : "");
+                            extraShortcut.put("result", resultShortcut);
+                            MainActivity mainShortcut = (MainActivity) getActivity();
+                            if (mainShortcut != null && mainShortcut.getDeepLinkHandler() != null) {
+                                mainShortcut.getDeepLinkHandler().retournerFieldServicePublic(
+                                    currentWoNum, currentWoIdGuid, "termine", extraShortcut.toString());
+                                LogBus.api(node, "[RETOUR-WO] FieldService informé (déjà SYNCED) — ticket=" + rowValidation.ticketNo);
+                            }
+                        } catch (Exception eShortcut) {
+                            LogBus.api(node, "[RETOUR-WO] retour FieldService (raccourci SYNCED) ERR (non-bloquant): " + eShortcut.getMessage());
+                        }
                         ui.post(() -> { try { if (getActivity() != null) getActivity().finish(); } catch (Exception ignored) {} });
                         return;
                     }

@@ -2744,6 +2744,20 @@ public class DeepLinkHandler {
     // Retour Field Service
     // =========================================================
 
+    // ✅ AJOUTÉ (2 sept 2026, demande Paul — "j'arrive de deeplink. tout
+    // le processus a été hijacké") — trouvé la vraie source : le
+    // raccourci du bouton bleu (RegisterTabFragment, cas "déjà SYNCED")
+    // appelait finish() SANS JAMAIS informer FieldService du résultat
+    // (aucun appel à retournerFieldService(), donc lastResultJson/
+    // LcrHttpService jamais mis à jour). FieldService, ne recevant
+    // jamais de confirmation, a renvoyé le même deep link — hijackant
+    // tout le processus suivant. Expose publiquement pour que le
+    // raccourci puisse enfin informer FieldService avant de fermer.
+    public void retournerFieldServicePublic(String woNum, String woIdGuid,
+                                             String status, String extraJson) {
+        retournerFieldService(woNum, woIdGuid, status, extraJson);
+    }
+
     private void retournerFieldService(String woNum, String woIdGuid,
                                         String status, String extraJson) {
         try {
