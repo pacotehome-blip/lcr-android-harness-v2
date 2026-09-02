@@ -942,6 +942,63 @@ public class DeepLinkHandler {
                 }
             }
 
+            // ✅ CORRIGÉ (2 sept 2026, demande Paul — "je dirais même que le
+            // running_flowing ne devrait jamais démarrer si j'ai pas le
+            // sales_number et mais si j'ai le ticket_number c'est bon") —
+            // trouvé (en validant mon propre correctif) : api_readTicketNo23Frais()
+            // ne convient PAS ici — elle a déjà un repli horodatage
+            // intégré qui masque l'échec au lieu de le révéler. Utilise
+            // maintenant api_readSaleNumberRaw() (vraie lecture brute,
+            // sans repli), avec acceptation si un ticket_number est déjà
+            // connu (cas de reprise), exactement comme demandé.
+            try {
+                // ✅ AJOUTÉ (2 sept 2026, en élargissant la vérification
+                // comme demandé) — trouvé : ce garde-fou n'avait AUCUN
+                // retry, contrairement à la validation produit (jusqu'à
+                // 10s). Une simple lenteur temporaire de communication LCP
+                // (pas un vrai registre réinitialisé) aurait causé un
+                // faux refus. 3 tentatives, court délai, avant de refuser.
+                String saleRaw = null;
+                for (int retrySale = 0; retrySale < 3 && saleRaw == null; retrySale++) {
+                    try { saleRaw = controllerOneshot.api_readSaleNumberRaw(); } catch (Exception ignoredSale) {}
+                    if (saleRaw == null && retrySale < 2) { try { Thread.sleep(300); } catch (Exception ignored) {} }
+                }
+                boolean saleOk = saleRaw != null && !saleRaw.trim().isEmpty() && !"0".equals(saleRaw.trim());
+                String ticketDejaConnu = (tabArmRef != null) ? tabArmRef.getLastKnownTicketNo() : null;
+                boolean ticketOk = ticketDejaConnu != null && !ticketDejaConnu.trim().isEmpty();
+                if (!saleOk && !ticketOk) {
+                    android.util.Log.w(TAG, "lancerLivraison: REFUS armement — ni sale_number ni ticket_number déjà connu");
+                    logError(serialId, woNum, "SALE_NUMBER_INDISPONIBLE",
+                        "Ni sale_number lisible ni ticket_number déjà connu avant armement");
+                    retournerFieldService(woNum, woIdGuid, "erreur_sale_number_indisponible",
+                        buildErrorJson("SALE_NUMBER_INDISPONIBLE",
+                            "Impossible de lire sale_number sur le registre et aucun ticket_number déjà connu — armement refusé"));
+                    return;
+                }
+            } catch (Exception ePreArm) {
+                android.util.Log.w(TAG, "lancerLivraison: REFUS armement — vérification sale_number ERR: " + ePreArm.getMessage());
+                logError(serialId, woNum, "SALE_NUMBER_INDISPONIBLE", "Vérification sale_number ERR: " + ePreArm.getMessage());
+                retournerFieldService(woNum, woIdGuid, "erreur_sale_number_indisponible",
+                    buildErrorJson("SALE_NUMBER_INDISPONIBLE", "Vérification sale_number/ticket_number a échoué"));
+                return;
+            }
+
+            if (tabArmRef != null) {
+                tabArmRef.armementEnCoursParCetteSession = true;
+                // ✅ AJOUTÉ (2 sept 2026, en validant mon propre correctif)
+                // — filet de sécurité temporel : aucun try/catch n'entoure
+                // l'appel d'armement lui-même (juste en dessous) — une
+                // vraie exception non prévue laisserait ce drapeau bloqué
+                // à true pour toujours, empêchant définitivement l'init de
+                // ce tab. Levée automatique après 30s, peu importe ce qui
+                // se passe entre-temps — le finally normal (plus loin)
+                // lève le drapeau bien avant dans le cas normal, ce filet
+                // ne sert que si tout le reste échoue silencieusement.
+                final RegisterTabFragment tabArmRefFinal = tabArmRef;
+                new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+                    tabArmRefFinal.armementEnCoursParCetteSession = false;
+                }, 30000);
+            }
             com.pa.lcr.lcp.ApiResult r = controllerOneshot.api_deliveryOneShotStart(
                 woNum, fProduct, fPresetD, null);
 
@@ -1010,8 +1067,35 @@ public class DeepLinkHandler {
                         // démarre. Lecture fraîche ici, même fonction
                         // déjà utilisée ailleurs (repli sale_number déjà
                         // intégré dans readTicketNo23() lui-même).
-                        String ticketArm = controllerOneshot.api_readTicketNo23Frais();
-                        if (ticketArm == null) ticketArm = "";
+                        // ✅ CORRIGÉ (2 sept 2026, demande Paul — "avant
+                        // d'armer une livraison on doit lire le
+                        // ticket_number et/ou le sales_number. si
+                        // l'impression est obligatoire on attend la fin
+                        // de la livraison pour avoir le ticket_number, si
+                        // l'impression n'est pas obligatoire tu utilises
+                        // comme ticket_number le sales_number") — trouvé
+                        // (en corrigeant ma propre erreur) : tester
+                        // "ticketArm.isEmpty()" ne fonctionne JAMAIS —
+                        // api_readTicketNo23Frais() a son propre repli
+                        // horodatage interne, jamais vide. Vraie décision
+                        // binaire ici : impression obligatoire → ticketArm
+                        // reste tel quel (le vrai ticket viendra à la
+                        // fin) ; pas obligatoire → sale_number (déjà lu
+                        // et validé par le garde-fou) sert directement de
+                        // ticket_number, sans attendre.
+                        String ticketArm;
+                        boolean impressionObligatoireArm = true;
+                        try { impressionObligatoireArm = !controllerOneshot.api_isTicketRequiredNeverPrint(); } catch (Exception ignoredReqArm) {}
+                        if (impressionObligatoireArm) {
+                            ticketArm = "";
+                            android.util.Log.i(TAG, "lancerLivraison: impression obligatoire — ticket_number attendu à la fin de la livraison");
+                        } else {
+                            String saleFallbackArm = null;
+                            try { saleFallbackArm = controllerOneshot.api_readSaleNumberRaw(); } catch (Exception ignoredSaleArm) {}
+                            ticketArm = (saleFallbackArm != null && !saleFallbackArm.trim().isEmpty() && !"0".equals(saleFallbackArm.trim()))
+                                ? saleFallbackArm.trim() : "";
+                            android.util.Log.i(TAG, "lancerLivraison: impression non obligatoire — sale_number utilisé comme ticket_number=" + ticketArm);
+                        }
                         // besoin d'attendre une éventuelle récupération
                         // ultérieure pour les capturer. description/code/
                         // type recherchés via RegisterProductStore, même
@@ -1102,6 +1186,8 @@ public class DeepLinkHandler {
                             activity.getApplicationContext(), woNum, jobId, backupPayloadArm);
                     } catch (Exception e) {
                         android.util.Log.w(TAG, "Enregistrement initial (armement) ERR (non-bloquant): " + e.getMessage());
+                    } finally {
+                        if (tabArmRef != null) tabArmRef.armementEnCoursParCetteSession = false;
                     }
 
                     activity.runOnUiThread(() ->
@@ -1110,6 +1196,7 @@ public class DeepLinkHandler {
                         fMac.isEmpty() ? transportKey : fMac, true);
                 }
             } else {
+                if (tabArmRef != null) tabArmRef.armementEnCoursParCetteSession = false;
                 android.util.Log.w(TAG, "oneshot/start code=0: " + r.msg);
                 android.util.Log.w(TAG, "oneshot/start detail: " + (r.data != null ? r.data.toString() : "null"));
                 logEvent(fSerialId, woNum, DeliveryLogStore.LEVEL_WARN,
@@ -1471,8 +1558,67 @@ public class DeepLinkHandler {
                     } catch (Exception ignored) {}
 
                     try {
+                        // ✅ CORRIGÉ (2 sept 2026, demande Paul) — même
+                        // correction que lancerLivraison() :
+                        // api_readTicketNo23Frais() masquait l'échec via
+                        // son repli horodatage intégré. Utilise
+                        // api_readSaleNumberRaw() (vraie lecture, sans
+                        // repli). Pas de repli ticket_number ici — ce
+                        // chemin crée systématiquement un tab neuf, sans
+                        // historique de ticket connu.
+                        try {
+                            com.pa.lcr.lcp.DeliveryController controllerPreArm2 =
+                                com.pa.lcr.lcp.RegisterSessionManager.get(activity).getController(fTransportKey, node);
+                            String saleRaw2 = null;
+                            for (int retrySale2 = 0; retrySale2 < 3 && saleRaw2 == null; retrySale2++) {
+                                try { saleRaw2 = (controllerPreArm2 != null) ? controllerPreArm2.api_readSaleNumberRaw() : null; } catch (Exception ignoredSale2b) {}
+                                if (saleRaw2 == null && retrySale2 < 2) { try { Thread.sleep(300); } catch (Exception ignored) {} }
+                            }
+                            boolean saleOk2 = saleRaw2 != null && !saleRaw2.trim().isEmpty() && !"0".equals(saleRaw2.trim());
+                            if (!saleOk2) {
+                                android.util.Log.w(TAG, "connectBtByMacAndOpenTab: REFUS armement — sale_number non lisible");
+                                logError(serialId, woNum, "SALE_NUMBER_INDISPONIBLE",
+                                    "sale_number non lisible sur le registre avant armement");
+                                retournerFieldService(woNum, woIdGuid, "erreur_sale_number_indisponible",
+                                    buildErrorJson("SALE_NUMBER_INDISPONIBLE",
+                                        "Impossible de lire sale_number sur le registre — armement refusé"));
+                                return;
+                            }
+                        } catch (Exception ePreArm2) {
+                            android.util.Log.w(TAG, "connectBtByMacAndOpenTab: REFUS armement — vérification sale_number ERR: " + ePreArm2.getMessage());
+                            retournerFieldService(woNum, woIdGuid, "erreur_sale_number_indisponible",
+                                buildErrorJson("SALE_NUMBER_INDISPONIBLE", "Vérification sale_number a échoué"));
+                            return;
+                        }
+
                         MultiRegisterApiFacadeImpl facade =
                             new MultiRegisterApiFacadeImpl(activity);
+                        // ✅ AJOUTÉ (2 sept 2026, en revérifiant au complet
+                        // comme demandé) — ce chemin n'avait PAS le
+                        // drapeau armementEnCoursParCetteSession posé pour
+                        // lancerLivraison() — même course possible ici,
+                        // jamais couverte. Récupère le fragment (créé plus
+                        // haut par upsertRegisterTabFromScan) et pose le
+                        // même drapeau, avec le même filet de sécurité
+                        // temporel (30s).
+                        RegisterTabFragment tabArmRef2 = null;
+                        try {
+                            String mediaShortArm2 = activity.mediaShortFromTransportKey(fTransportKey);
+                            String tabKeyArm2 = activity.tabKeyOf(mediaShortArm2, node, serialId);
+                            Fragment fArm2 = activity.getSupportFragmentManager()
+                                .findFragmentByTag("regtab_" + tabKeyArm2);
+                            if (fArm2 instanceof RegisterTabFragment) {
+                                tabArmRef2 = (RegisterTabFragment) fArm2;
+                            }
+                        } catch (Exception ignoredArm2) {}
+                        if (tabArmRef2 != null) {
+                            tabArmRef2.armementEnCoursParCetteSession = true;
+                            final RegisterTabFragment tabArmRef2Final = tabArmRef2;
+                            new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+                                tabArmRef2Final.armementEnCoursParCetteSession = false;
+                            }, 30000);
+                        }
+                        final RegisterTabFragment tabArmRef2ForFinally = tabArmRef2;
                         com.pa.lcr.lcp.ApiResult r = facade.api_deliveryOneShotStart(
                             node, 255, woNum, fProduct, fPresetD, null, "bt", mac);
 
@@ -1497,8 +1643,18 @@ public class DeepLinkHandler {
                                 com.pa.lcr.lcp.DeliveryController controllerConnect =
                                     com.pa.lcr.lcp.RegisterSessionManager.get(activity).getController(fTransportKey, node);
                                 if (controllerConnect != null) {
-                                    String t = controllerConnect.api_readTicketNo23Frais();
-                                    if (t != null) ticketArmConnect = t;
+                                    // ✅ CORRIGÉ (2 sept 2026, demande Paul —
+                                    // même règle que les autres chemins :
+                                    // impression obligatoire → attendre la
+                                    // fin ; sinon → sale_number sert de
+                                    // ticket_number, immédiatement.
+                                    boolean impressionObligatoireConnect = !controllerConnect.api_isTicketRequiredNeverPrint();
+                                    if (!impressionObligatoireConnect) {
+                                        String saleFallbackConnect = controllerConnect.api_readSaleNumberRaw();
+                                        if (saleFallbackConnect != null && !saleFallbackConnect.trim().isEmpty() && !"0".equals(saleFallbackConnect.trim())) {
+                                            ticketArmConnect = saleFallbackConnect.trim();
+                                        }
+                                    }
                                 }
                             } catch (Exception ignored) {}
                             String descConnect = "";
@@ -1548,6 +1704,8 @@ public class DeepLinkHandler {
                             android.util.Log.i(TAG, "connectBtByMacAndOpenTab: livraison enregistrée dès l'armement — jobId=" + jobIdConnect);
                         } catch (Exception e) {
                             android.util.Log.w(TAG, "connectBtByMacAndOpenTab: backup armement ERR (non-bloquant): " + e.getMessage());
+                        } finally {
+                            if (tabArmRef2ForFinally != null) tabArmRef2ForFinally.armementEnCoursParCetteSession = false;
                         }
 
                         if (r.code == 1) {
@@ -2270,6 +2428,38 @@ public class DeepLinkHandler {
                     deltaGross = result.optDouble("gross_delta_l", 0);
                     ticketNo   = result.optString("ticket_no",   "");
                     saleNo     = result.optString("sale_no",     "");
+                    // ✅ AJOUTÉ (2 sept 2026, demande Paul — "est-ce qu'on
+                    // est certain qu'on envoie le sales_number=ticket_number
+                    // dans le wo de fieldservice et dans dataverse") —
+                    // trouvé : ticketNo et saleNo étaient lus séparément
+                    // ICI, sans jamais se repli l'un sur l'autre — la
+                    // même règle déjà établie ailleurs (sale_number sert
+                    // de ticket_number quand le registre n'exige jamais
+                    // l'impression) n'était jamais appliquée dans ce
+                    // chemin précis (fin de livraison normale). Sans ce
+                    // repli, filgo_ticket_no (envoyé à Dataverse) restait
+                    // vide même quand sale_no était parfaitement connu.
+                    if (ticketNo.isEmpty() && !saleNo.isEmpty()) ticketNo = saleNo;
+                    if (saleNo.isEmpty() && !ticketNo.isEmpty()) saleNo = ticketNo;
+                    // ✅ AJOUTÉ (2 sept 2026, demande Paul — "il faut que
+                    // tu te souviennes que des infos sont dans les
+                    // payload aussi") — trouvé : mon correctif précédent
+                    // ne touchait que les variables racine (ticketNo/
+                    // saleNo), jamais le "result" NICHÉ à l'intérieur
+                    // d'extraJson lui-même — passé tel quel comme
+                    // payloadExtra. payload_complet aurait donc gardé
+                    // ticket_no/sale_no vides malgré la correction des
+                    // champs racine. Injecte le même repli dans le
+                    // result niché, puis reconstruit extraJson (la
+                    // chaîne réellement passée plus loin) depuis d
+                    // modifié.
+                    try {
+                        result.put("ticket_no", ticketNo);
+                        result.put("sale_no", saleNo);
+                        extraJson = d.toString();
+                    } catch (Exception eNestedFix) {
+                        android.util.Log.w(TAG, "Injection ticket_no/sale_no dans payload_complet ERR (non-bloquant): " + eNestedFix.getMessage());
+                    }
                     startUtc   = result.optString("start_utc",   "");
                     endUtc     = result.optString("end_utc",     "");
                     durationS  = result.optDouble("duration_s",  0);
@@ -2483,7 +2673,37 @@ public class DeepLinkHandler {
                                                     + livraisons.length() + " livraison(s), wo=" + woNum);
                                             }
                                         } catch (Exception e) {
-                                            android.util.Log.w(TAG, "patchSummaryConsolidated post-livraison ERR (non-bloquant): " + e.getMessage());
+                                            android.util.Log.w(TAG, "patchSummaryConsolidated post-livraison ERR (probablement hors ligne) — "
+                                                + "mise en file pour retry automatique: " + e.getMessage());
+                                            // ✅ AJOUTÉ (2 sept 2026, demande Paul — "le path doit
+                                            // fonctionner offline et online comme le bouton
+                                            // blue") — trouvé : ce chemin normal (fin de
+                                            // livraison automatique) ne faisait que loguer
+                                            // l'échec, sans jamais mettre en file — contrairement
+                                            // au bouton bleu qui, lui, avait déjà ce filet. Même
+                                            // mécanisme exact ici : DeliveryResultQueueDb, marqué
+                                            // "consolidated", retry via DeliverySyncWorker dès que
+                                            // le réseau revient.
+                                            try {
+                                                org.json.JSONObject queuePayloadEnd = new org.json.JSONObject();
+                                                queuePayloadEnd.put("consolidated", true);
+                                                queuePayloadEnd.put("workOrderId", woIdGuid != null ? woIdGuid : "");
+                                                queuePayloadEnd.put("woNum", woNum != null ? woNum : "");
+                                                String queueUidEnd = (woNum != null ? woNum : "wo") + "-consolidated-"
+                                                    + System.currentTimeMillis();
+                                                queuePayloadEnd.put("deliveryUid", queueUidEnd);
+                                                com.pa.lcrdemo.dataverse.DeliveryResultQueueDb queueDbEnd =
+                                                    new com.pa.lcrdemo.dataverse.DeliveryResultQueueDb(activity);
+                                                try {
+                                                    queueDbEnd.upsertPending(queueUidEnd, queuePayloadEnd.toString());
+                                                } finally {
+                                                    try { queueDbEnd.close(); } catch (Exception ignored) {}
+                                                }
+                                                com.pa.lcrdemo.dataverse.DeliverySyncScheduler.triggerNow(activity);
+                                                android.util.Log.i(TAG, "patchSummaryConsolidated post-livraison — mise en file OK, retry dès réseau dispo");
+                                            } catch (Exception eQueueEnd) {
+                                                android.util.Log.w(TAG, "patchSummaryConsolidated post-livraison — mise en file ERR: " + eQueueEnd.getMessage());
+                                            }
                                         }
                                     }).start();
                                 }
@@ -2536,6 +2756,22 @@ public class DeepLinkHandler {
                     net    = String.valueOf(result.optDouble("fs_net_l",   0));
                     gross  = String.valueOf(result.optDouble("fs_gross_l", 0));
                     ticket = result.optString("ticket_no", "");
+                    // ✅ AJOUTÉ (2 sept 2026, demande Paul) — repli sur
+                    // sale_no si ticket_no vide (même règle que partout
+                    // ailleurs) — jamais appliqué dans ce chemin précis
+                    // (le vrai retour vers FieldService/Dataverse).
+                    if (ticket.isEmpty()) ticket = result.optString("sale_no", "");
+                    // ✅ AJOUTÉ (2 sept 2026, demande Paul — "des infos sont
+                    // dans les payload aussi") — même repli injecté dans le
+                    // result niché, extraJson reconstruit avant d'être
+                    // réutilisé comme "payload" plus loin.
+                    try {
+                        result.put("ticket_no", ticket);
+                        result.put("sale_no", ticket);
+                        extraJson = d.toString();
+                    } catch (Exception eNestedFixA) {
+                        android.util.Log.w(TAG, "Injection ticket dans payload (retournerFieldService A) ERR (non-bloquant): " + eNestedFixA.getMessage());
+                    }
 
                     // ✅ FIX universel: si stale ou valeurs nulles, utiliser le tick.
                     boolean stale  = d.optBoolean("stale", false);
@@ -2667,6 +2903,14 @@ public class DeepLinkHandler {
                     net    = String.valueOf(result.optDouble("fs_net_l",   0));
                     gross  = String.valueOf(result.optDouble("fs_gross_l", 0));
                     ticket = result.optString("ticket_no", "");
+                    if (ticket.isEmpty()) ticket = result.optString("sale_no", "");
+                    try {
+                        result.put("ticket_no", ticket);
+                        result.put("sale_no", ticket);
+                        extraJson = d.toString();
+                    } catch (Exception eNestedFixB) {
+                        android.util.Log.w(TAG, "Injection ticket dans payload (retournerFieldService B) ERR (non-bloquant): " + eNestedFixB.getMessage());
+                    }
                     boolean stale  = d.optBoolean("stale", false);
                     double fsNet   = result.optDouble("fs_net_l",   0);
                     double fsGross = result.optDouble("fs_gross_l", 0);

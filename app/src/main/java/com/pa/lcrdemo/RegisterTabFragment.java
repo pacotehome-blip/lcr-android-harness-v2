@@ -54,6 +54,20 @@ public class RegisterTabFragment extends Fragment {
     }
 
     public void onTabActivated() {
+        // ✅ AJOUTÉ (2 sept 2026, demande Paul — "ben c'est ca qui a
+        // placer lancerlivraison() avant l'établissement conforme du
+        // tab????") — vérifié EN PREMIER, avant même
+        // etatLivraisonActiveDetecte() : au moment précis où l'armement
+        // vient d'être déclenché (commande envoyée, registre pas encore
+        // confirmé RUNNING_FLOWING), etatLivraisonActiveDetecte() ne
+        // détecterait pas encore l'état actif — laissant runInitSequence()
+        // se déclencher quand même, en pleine course. Ce drapeau, posé
+        // directement par lancerLivraison() avant l'armement, couvre ce
+        // trou précis.
+        if (armementEnCoursParCetteSession) {
+            LogBus.api(node, "[INIT] onTabActivated sauté — armement en cours par cette session");
+            return;
+        }
         // ✅ REMPLACÉ (13 août 2026, demande Paul — "on fait les sections")
         // — l'ancienne cascade de postDelayed (runStatusBLikeButton à 300ms,
         // checkPendingDeliveryForThisRegister à 600ms, autoScanProduitsSiNecessaire
@@ -585,6 +599,18 @@ public class RegisterTabFragment extends Fragment {
     // réelle (produit + preset ENSEMBLE) se fait au moment de l'armement,
     // comme c'était déjà le cas pour le preset seul.
     private volatile Integer initValidatedProductIdx = null; // 0-based (LCP List 0 : 0 = produit 1)
+    // ✅ AJOUTÉ (2 sept 2026, demande Paul — "ben c'est ca qui a placer
+    // lancerlivraison() avant l'établissement conforme du tab????") —
+    // trouvé : même avec focus=false (correctif 28 août),
+    // showRegisterFragmentByKey() peut se redéclencher via la condition
+    // currentTabKey==null dans upsertRegisterTabFromScan(), appelant
+    // onTabActivated() → runInitSequence() SANS AUCUNE CONDITION, y
+    // compris en pleine course pendant que lancerLivraison() est encore
+    // en train de valider/armer CETTE MÊME livraison. Posé juste avant
+    // l'armement physique, levé une fois l'écriture BD/JSON terminée —
+    // onTabActivated() ne lance runInitSequence() que si ce drapeau est
+    // faux, laissant lancerLivraison() terminer son travail en paix.
+    public volatile boolean armementEnCoursParCetteSession = false;
     // ✅ AJOUTÉ (26 août 2026, demande Paul — "on a pas besoin de valider le
     // produit un coup que le premier scan a été complété et jumelé au
     // ticket de la dernière livraison à la BD vierge. jamais j'ai indiqué
@@ -995,10 +1021,44 @@ public class RegisterTabFragment extends Fragment {
                 LogBus.api(node, "[RECUP-RUNNING] aucune ligne filet de sécurité trouvée — rien à mettre à jour");
                 return;
             }
-            // Repli au mieux : ticket_number (une fois imprimé) prime sur
-            // sale_number — même principe déjà établi ailleurs, rien de
-            // nouveau ici, juste appliqué à ce cas.
-            String ticketFrais = (controller != null) ? controller.api_readTicketNo23Frais() : "";
+            // ✅ RECONSTRUIT (2 sept 2026, en revoyant tout le processus
+            // de livraison comme demandé) — trouvé une vraie incohérence
+            // dans ma première correction : la vieille ligne
+            // (api_readTicketNo23Frais(), avec son repli horodatage
+            // interne) n'avait jamais été retirée, seulement patchée
+            // par-dessus. Vraie règle complète appliquée ici :
+            // - impression pas obligatoire → sale_number = ticket_number,
+            //   directement.
+            // - impression obligatoire → la récupération diffère de
+            //   l'armement : la livraison POURRAIT déjà être terminée
+            //   (crash après la vraie fin, avant finalisation) — tenter
+            //   une lecture BRUTE du vrai champ #23 (sans repli) ; si
+            //   réellement non-zéro, l'impression a eu lieu, on le garde.
+            //   Si toujours zéro (livraison encore en cours), rester
+            //   explicitement vide — pas de faux repli horodatage.
+            String ticketFrais = "";
+            if (controller != null) {
+                try {
+                    boolean impressionObligatoireRec = !controller.api_isTicketRequiredNeverPrint();
+                    if (!impressionObligatoireRec) {
+                        String saleFallbackRec = controller.api_readSaleNumberRaw();
+                        if (saleFallbackRec != null && !saleFallbackRec.trim().isEmpty() && !"0".equals(saleFallbackRec.trim())) {
+                            ticketFrais = saleFallbackRec.trim();
+                            LogBus.api(node, "[RECUP-RUNNING] impression non obligatoire — sale_number utilisé comme ticket_number=" + ticketFrais);
+                        }
+                    } else {
+                        String ticketRawRec = controller.api_readTicketNumberRaw();
+                        if (ticketRawRec != null && !ticketRawRec.trim().isEmpty() && !"0".equals(ticketRawRec.trim())) {
+                            ticketFrais = ticketRawRec.trim();
+                            LogBus.api(node, "[RECUP-RUNNING] impression obligatoire — vrai ticket déjà imprimé=" + ticketFrais);
+                        } else {
+                            LogBus.api(node, "[RECUP-RUNNING] impression obligatoire — pas encore imprimé, ticket reste vide");
+                        }
+                    }
+                } catch (Exception eRecRule) {
+                    LogBus.api(node, "[RECUP-RUNNING] vérification règle ticket ERR (non-bloquant): " + eRecRule.getMessage());
+                }
+            }
             double netFrais = parseDisplayNet();
             double grossFrais = parseDisplayGross();
             // ✅ CORRIGÉ (28 août 2026, demande Paul — "le registre est
@@ -1600,6 +1660,11 @@ public class RegisterTabFragment extends Fragment {
     // exact de la recréation). Dernière valeur connue mise en cache ici,
     // réappliquée immédiatement dans initUi().
     private volatile String lastKnownTicketNo = null;
+    // ✅ AJOUTÉ (2 sept 2026) — expose lastKnownTicketNo pour le garde-fou
+    // pré-armement (DeepLinkHandler) : "si j'ai le ticket_number c'est
+    // bon" — permet de vérifier un ticket déjà connu sans exposer le
+    // champ private directement.
+    public String getLastKnownTicketNo() { return lastKnownTicketNo; }
     // ✅ FIX (4 août 2026, demande Paul — "j'ai commencé le logcat... tout est
     // présent dans ça", en creusant pourquoi l'export Support de 300 lignes
     // ne remontait pas jusqu'à l'échec réel) — un ticket qui échoue en
@@ -4575,6 +4640,38 @@ public class RegisterTabFragment extends Fragment {
 
         safeBg(() -> {
             try {
+                // ✅ AJOUTÉ (2 sept 2026, demande Paul — "le bouton blue
+                // doit avoir une validation est-ce que le wo_ticket_number
+                // (sale_number) est dans la bd local, si oui est-ce qu'il
+                // est sync, si oui on fait juste basculer à fieldservice.
+                // sinon on met à jours avec l'état réel du wo") — trouvé :
+                // ce bouton refaisait TOUJOURS la reconstruction complète,
+                // même quand le flux automatique (onDeliveryEnded) avait
+                // déjà tout fait correctement. Le but réel du bouton est
+                // de retourner à FieldService — mais sans rien oublier
+                // derrière : cette validation garantit qu'on ne refait le
+                // travail QUE si c'est vraiment nécessaire.
+                try {
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbValidation =
+                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow rowValidation;
+                    try {
+                        rowValidation = (currentWoNum != null && !currentWoNum.isEmpty())
+                            ? dbValidation.getLatestForWo(currentWoNum) : null;
+                    } finally {
+                        try { dbValidation.close(); } catch (Exception ignored) {}
+                    }
+                    if (rowValidation != null
+                            && com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_SYNCED.equals(rowValidation.syncStatus)) {
+                        LogBus.api(node, "[RETOUR-WO] WO déjà en BD et SYNCED — bascule directe vers FieldService, sans reconstruction");
+                        ui.post(() -> { try { if (getActivity() != null) getActivity().finish(); } catch (Exception ignored) {} });
+                        return;
+                    }
+                    LogBus.api(node, "[RETOUR-WO] WO absent de la BD ou encore PENDING — mise à jour avec l'état réel avant retour");
+                } catch (Exception eValidation) {
+                    LogBus.api(node, "[RETOUR-WO] validation initiale ERR (non-bloquant, poursuite normale): " + eValidation.getMessage());
+                }
+
                 // 1. Compiler le payload complet
                 String ticketNo   = "";
                 String saleNo     = "";
@@ -4733,6 +4830,34 @@ public class RegisterTabFragment extends Fragment {
                     }
                 }
 
+                // ✅ AJOUTÉ (2 sept 2026, demande Paul — "on ajoute la
+                // validation du json") — trouvé : ce bouton n'avait AUCUN
+                // repli vers les fichiers JSON persistés (contrairement à
+                // tenterRecuperationRunningFlowing()) — seulement des
+                // variables en mémoire (result, lastResultJson,
+                // lastKnownTicketNo), toutes perdues après un vrai crash.
+                // Repli supplémentaire ici, avant les TextViews : cherche
+                // dans les fichiers JSON persistés (survivent au crash),
+                // par wo_num, RUNNING_FLOWING ou non.
+                if (ticketNo.isEmpty() && woNum != null && !woNum.isEmpty()) {
+                    try {
+                        com.pa.lcr.lcp.storage.LocalDeliveryBackup.BackupMatch matchJsonRetourWO =
+                            com.pa.lcr.lcp.storage.LocalDeliveryBackup.findLatestRunningFlowingByWoNum(
+                                requireContext(), woNum);
+                        if (matchJsonRetourWO != null) {
+                            org.json.JSONObject jRetourWO = matchJsonRetourWO.json;
+                            String ticketJsonRetourWO = jRetourWO.optString("ticket_no", "");
+                            if (!ticketJsonRetourWO.isEmpty()) {
+                                ticketNo = ticketJsonRetourWO;
+                                if (saleNo.isEmpty()) saleNo = jRetourWO.optString("sale_no", ticketNo);
+                                LogBus.api(node, "[RETOUR-WO] repli fichier JSON persisté — ticket=" + ticketNo);
+                            }
+                        }
+                    } catch (Exception eJsonFallback) {
+                        android.util.Log.w("RetourWO", "repli fichier JSON ERR (non-bloquant): " + eJsonFallback.getMessage());
+                    }
+                }
+
                 // Fallback TextViews si tout est vide
                 try {
                     if (ticketNo.isEmpty() && txtTicketNo != null)
@@ -4784,6 +4909,19 @@ public class RegisterTabFragment extends Fragment {
                     android.util.Log.w("RetourWO", "woNum vide — lastResultJson et ActiveDeliveryStore épuisés");
                 }
 
+                // ✅ AJOUTÉ (2 sept 2026, en revérifiant au complet comme
+                // demandé — "il faut que tu te souviennes que des infos
+                // sont dans les payload aussi") — trouvé : cette fonction
+                // avait plusieurs replis saleNo=ticketNo, mais AUCUN dans
+                // l'autre sens — et mon premier essai de correctif était
+                // placé APRÈS que snap/payloadCompletReel soient déjà
+                // construits, donc trop tard. Placé ici, juste avant
+                // snap.put(...), pour que le payload niché reçoive aussi
+                // le bon ticketNo dès sa construction.
+                if (ticketNo.isEmpty() && !saleNo.isEmpty()) {
+                    ticketNo = saleNo;
+                    LogBus.api(node, "[RETOUR-WO] repli final ticketNo=saleNo — ticket=" + ticketNo);
+                }
                 snap.put("ticketNo", ticketNo);
                 snap.put("saleNo",   saleNo);
                 snap.put("netL",     netL);

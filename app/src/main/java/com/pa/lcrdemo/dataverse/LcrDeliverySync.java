@@ -132,6 +132,39 @@ public class LcrDeliverySync {
                 String dataverseId = pushDeliveryRow(row, orgUrl, accessToken);
                 long durationMs = System.currentTimeMillis() - startMs;
                 db.markSynced(row.id, dataverseId);
+                // ✅ AJOUTÉ (2 sept 2026, demande Paul — "le path doit
+                // fonctionner offline et online" / question sur
+                // sync_status BD vs JSON) — trouvé : la BD locale passait
+                // bien PENDING→SYNCED (juste au-dessus), mais le fichier
+                // JSON restait figé PENDING pour toujours, jamais mis à
+                // jour après un vrai push réussi. Réécrit ici le même
+                // fichier (même wo_num+ticket, grâce à la recherche-avant-
+                // écriture déjà en place) avec sync_status=SYNCED — le
+                // JSON reflète maintenant fidèlement l'état réel, pas
+                // seulement la BD.
+                try {
+                    org.json.JSONObject jsonSynced = new org.json.JSONObject();
+                    jsonSynced.put("job_id",      row.jobId != null ? row.jobId : "");
+                    jsonSynced.put("wo_num",      row.woNum != null ? row.woNum : "");
+                    jsonSynced.put("wo_id_guid",  row.woIdGuid != null ? row.woIdGuid : "");
+                    jsonSynced.put("ticket_no",   row.ticketNo != null ? row.ticketNo : "");
+                    jsonSynced.put("sale_no",     row.saleNo != null ? row.saleNo : "");
+                    jsonSynced.put("net_l",       row.netL);
+                    jsonSynced.put("gross_l",     row.grossL);
+                    jsonSynced.put("serial_id",   row.serialId != null ? row.serialId : "");
+                    jsonSynced.put("lcrnode",     row.lcrnode);
+                    jsonSynced.put("btmac",       row.btmac != null ? row.btmac : "");
+                    jsonSynced.put("type",        row.type != null ? row.type : "");
+                    jsonSynced.put("backup_ts",   System.currentTimeMillis());
+                    jsonSynced.put("payload_complet", row.payloadJson != null ? row.payloadJson : "{}");
+                    jsonSynced.put("sync_status", com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_SYNCED);
+                    String ticketPourNomFichier = (row.ticketNo != null && !row.ticketNo.trim().isEmpty())
+                        ? row.ticketNo : row.jobId;
+                    com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
+                        ctx, row.woNum, ticketPourNomFichier, jsonSynced);
+                } catch (Exception eJsonSync) {
+                    Log.w(TAG, "Mise à jour JSON sync_status=SYNCED ERR (non-bloquant): " + eJsonSync.getMessage());
+                }
                 Log.i(TAG, "pushPending: OK id=" + row.id + " wo=" + row.woNum
                     + " dataverseId=" + dataverseId);
                 LogBus.api(row.lcrnode, "[DATAVERSE-PUSH] OK ticket=" + row.ticketNo
@@ -470,6 +503,59 @@ public class LcrDeliverySync {
         } catch (Exception e) {
             Log.w(TAG, "peekDeliveryByTicket ERR pour ticket=" + ticketNo + ": " + e.getMessage());
             return null;
+        }
+    }
+
+    // ✅ AJOUTÉ (2 sept 2026, demande Paul — "il l'est dans le payload,
+    // concentre-toi regarde plus... on doit déjà avoir une validation si
+    // la livraison avait déjà été synchronisé puisqu'on a le job_id") —
+    // job_id n'est PAS un champ Dataverse dédié — mais il EST niché dans
+    // filgo_payload_json (envoyé pour chaque livraison). OData supporte
+    // contains() sur un champ texte — recherche ici SANS avoir besoin
+    // d'un nouveau champ Dataverse. Retourne true si une livraison avec
+    // ce job_id EXISTE DÉJÀ côté Dataverse (déjà synchronisée) — permet
+    // de vérifier avant un renvoi, même quand ticket_no n'est pas encore
+    // connu (armement, BD vierge).
+    public static boolean deliveryExistsByJobId(Context ctx, String accessToken, String jobId) {
+        if (jobId == null || jobId.trim().isEmpty()) return false;
+        try {
+            String orgUrl = LcrConfig.getDataverseUrl(ctx);
+            String filter = "contains(filgo_payload_json, '" + odataEscape(jobId) + "')";
+            String urlStr = orgUrl + "/api/data/v9.2/" + TABLE_DELIVERY
+                + "?$filter=" + java.net.URLEncoder.encode(filter, "UTF-8").replace("+", "%20")
+                + "&$select=filgo_lcr_delivery_statusid"
+                + "&$top=1";
+
+            URL url = new URL(urlStr);
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            try {
+                conn.setRequestMethod("GET");
+                conn.setConnectTimeout(10000);
+                conn.setReadTimeout(10000);
+                conn.setRequestProperty("Authorization",    "Bearer " + accessToken);
+                conn.setRequestProperty("Accept",           "application/json");
+                conn.setRequestProperty("OData-MaxVersion", "4.0");
+                conn.setRequestProperty("OData-Version",    "4.0");
+
+                int code = conn.getResponseCode();
+                if (code != 200) {
+                    Log.w(TAG, "deliveryExistsByJobId: HTTP " + code + " pour jobId=" + jobId);
+                    return false;
+                }
+
+                byte[] respBytes = readStream(conn.getInputStream());
+                JSONObject resp = new JSONObject(new String(respBytes, StandardCharsets.UTF_8));
+                JSONArray values = resp.optJSONArray("value");
+                boolean exists = values != null && values.length() > 0;
+                Log.i(TAG, "deliveryExistsByJobId: jobId=" + jobId + " — " + (exists ? "DÉJÀ présent côté Dataverse" : "absent"));
+                return exists;
+
+            } finally {
+                conn.disconnect();
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "deliveryExistsByJobId ERR pour jobId=" + jobId + ": " + e.getMessage());
+            return false;
         }
     }
 

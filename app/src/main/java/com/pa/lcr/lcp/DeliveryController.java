@@ -2863,6 +2863,18 @@ try {
      *  — si la lecture échoue, retourne false (comportement d'avant,
      *  prudent : ne suppose jamais que l'impression est désactivée sans
      *  confirmation réelle). */
+    // ✅ AJOUTÉ (2 sept 2026, demande Paul — "si l'impression est
+    // obligatoire on attend la fin de la livraison pour avoir le
+    // ticket_number, si l'impression n'est pas obligatoire tu utilises
+    // comme ticket_number le sales_number") — expose isTicketRequiredNeverPrint()
+    // publiquement pour permettre une vraie décision binaire AVANT
+    // l'armement, plutôt que de tester le résultat de
+    // api_readTicketNo23Frais() (jamais vide, à cause de son propre
+    // repli horodatage interne — teste toujours faux).
+    public boolean api_isTicketRequiredNeverPrint() {
+        return isTicketRequiredNeverPrint();
+    }
+
     private boolean isTicketRequiredNeverPrint() {
         if (cachedTicketRequired < 0) {
             try {
@@ -3204,6 +3216,27 @@ softResync("retry/" + step);
         String r = readU32FieldAsDecString(FIELD_SALE_NUMBER);
         dernierSaleNoConnu = r; // ✅ AJOUTÉ (27 août 2026) — mis en cache pour affichage tab
         return r;
+    }
+    // ✅ AJOUTÉ (2 sept 2026, demande Paul — garde-fou pré-armement,
+    // "running_flowing ne devrait jamais démarrer si j'ai pas le
+    // sales_number") — trouvé (en validant mon propre correctif) que
+    // api_readTicketNo23Frais() ne convient PAS pour ce garde-fou : elle
+    // a déjà un repli horodatage intégré qui garantit une valeur non-vide
+    // MÊME quand ticket=0 ET sale=0 simultanément (le cas exact que ce
+    // garde-fou doit détecter) — masquant l'échec au lieu de le révéler.
+    // Cette méthode expose la vraie lecture brute, sans repli, pour que
+    // l'appelant puisse vraiment savoir si sale_number a échoué.
+    public String api_readSaleNumberRaw() throws Exception {
+        return readSaleNo22();
+    }
+    // ✅ AJOUTÉ (2 sept 2026, demande Paul — comprendre la règle métier
+    // complète) — lecture BRUTE de ticket_number (#23), sans le repli
+    // interne de readTicketNo23Uncached()/api_readTicketNo23Frais().
+    // Nécessaire pour distinguer "vraiment imprimé" (valeur non-zéro) de
+    // "toujours en cours, pas encore imprimé" (0) — le repli interne
+    // masque cette distinction en retournant toujours quelque chose.
+    public String api_readTicketNumberRaw() throws Exception {
+        return readU32FieldAsDecString(FIELD_TICKET_NUMBER);
     }
     // ✅ AJOUTÉ (27 août 2026, demande Paul — "afficher le sales_number...
     // souligner lequel est utilisé") — dernière valeur connue, mise à jour
