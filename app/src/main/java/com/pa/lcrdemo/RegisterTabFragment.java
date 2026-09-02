@@ -4758,6 +4758,11 @@ public class RegisterTabFragment extends Fragment {
                 snap.put("woNum",    woNum);
                 snap.put("woIdGuid", woIdGuid);
                 payloadJson = snap.toString();
+                // ✅ RESTAURÉ (28 août 2026) — déclaration perdue par
+                // erreur lors d'une restructuration précédente. Repli sur
+                // le tick (payloadJson) si l'enrichissement via
+                // api_registerValidate() échoue plus loin.
+                String payloadCompletReel = payloadJson;
 
                 // 2. Écrire dans LcrDeliveryStatusDb — vérifier si ticket déjà enregistré
                 // ✅ FIX CRITIQUE (11 août 2026, demande Paul — fuite de
@@ -4856,6 +4861,17 @@ public class RegisterTabFragment extends Fragment {
                     android.util.Log.i("RetourWO", "Delivery sauvegardée localId=" + localId
                         + " wo=" + woNum + " net=" + netL + " gross=" + grossL);
 
+                    // ✅ RESTAURÉ (28 août 2026) — déclaration perdue par
+                    // erreur lors d'une restructuration précédente — même
+                    // fonction partagée que cv, juste au-dessus.
+                    org.json.JSONObject backupPayload =
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.construireJsonLivraisonComplet(
+                            null, woNum, woIdGuid, ticketNo, saleNo,
+                            netL, grossL, serialFromArgs, node, (tabTransportKey != null ? tabTransportKey.trim() : ""),
+                            produitRetour, descRetour, codeRetour, typeRetour, presetRetour,
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
+                            payloadCompletReel);
                     backupPayload.put("backup_ts", System.currentTimeMillis());
                     backupPayload.put("payload_complet", payloadCompletReel);
                     // ✅ AJOUTÉ (11 août 2026, demande Paul — "ajoute-le au

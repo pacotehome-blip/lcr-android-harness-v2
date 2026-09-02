@@ -2139,8 +2139,8 @@ public class DeepLinkHandler {
                         com.pa.lcr.lcp.storage.RegisterProductStore prodStoreFin =
                             new com.pa.lcr.lcp.storage.RegisterProductStore(activity);
                         java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> lignesFin =
-                            prodStoreFin.getAll(serialId, lcrnode);
-                        if (lignesFin.isEmpty()) lignesFin = prodStoreFin.getAll(serialId);
+                            prodStoreFin.getAll(serialIdParam, nodeParam);
+                        if (lignesFin.isEmpty()) lignesFin = prodStoreFin.getAll(serialIdParam);
                         for (com.pa.lcr.lcp.storage.RegisterProductStore.Row ligneFin : lignesFin) {
                             if (ligneFin.noteIdx == produitNo - 1) {
                                 produitDescriptionFin = ligneFin.description;
