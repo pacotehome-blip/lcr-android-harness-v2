@@ -794,8 +794,19 @@ public class MainActivity extends AppCompatActivity {
             startService(svcIntent);
         }
         
-        // ✅ Deep Link au lancement (APK fermé)
+        // ✅ CORRIGÉ (2 sept 2026, demande Paul — "tu as un affaire qui
+        // hijack l'apk") — trouvé la vraie cause racine : ce commentaire
+        // disait "au lancement (APK fermé)", supposant onCreate() une
+        // seule fois — mais onCreate() peut être appelée PLUSIEURS fois
+        // dans le même processus (recréation d'activité), et rien
+        // n'effaçait jamais l'Intent après traitement. getIntent()
+        // retournait donc TOUJOURS le même vieux deep link, rejoué à
+        // chaque recréation — un vrai auto-hijacking causé par notre
+        // propre code, sans aucune intervention réelle de FieldService.
+        // Consomme l'Intent ici, une fois traité, pour qu'une future
+        // recréation ne le rejoue jamais.
         deepLinkHandler.handleDeepLink(getIntent());
+        setIntent(new android.content.Intent());
     }
 
     @Override
@@ -976,6 +987,11 @@ public class MainActivity extends AppCompatActivity {
         super.onNewIntent(intent);
         setIntent(intent);
         if (deepLinkHandler != null) deepLinkHandler.handleDeepLink(intent);
+        // ✅ AJOUTÉ (2 sept 2026, demande Paul — "tu as un affaire qui
+        // hijack l'apk") — même correctif que onCreate() : consomme
+        // l'Intent une fois traité, pour qu'une recréation ultérieure
+        // d'onCreate() ne le rejoue jamais.
+        setIntent(new android.content.Intent());
     }
 
 
@@ -1006,6 +1022,18 @@ public class MainActivity extends AppCompatActivity {
     public void onDeliveryEnded(String woNum, String woIdGuid, String extraJson,
                                  int node, String serialId, String mac) {
         if (deepLinkHandler != null) deepLinkHandler.onDeliveryEnded(woNum, woIdGuid, extraJson, node, serialId, mac);
+    }
+
+    // ✅ AJOUTÉ (28 août 2026, demande Paul — "le patch sur le wo est
+    // instantané aussi car il permettra au livreur de facturer dans
+    // fieldservice") — relais vers patchDataverse() de DeepLinkHandler,
+    // pour que le chemin d'annulation (RegisterTabFragment) puisse aussi
+    // déclencher le PATCH direct immédiat, jusqu'ici réservé aux
+    // livraisons normales.
+    public void patchDataverse(String woGuid, String woNum,
+                                String net, String gross, String ticket,
+                                String status) {
+        if (deepLinkHandler != null) deepLinkHandler.patchDataverse(woGuid, woNum, net, gross, ticket, status);
     }
 
     /**

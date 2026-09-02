@@ -145,6 +145,25 @@ public class DeepLinkHandler {
                 " nportIp=" + nportIp + " nportPort=" + nportPort +
                 " produit=" + produit + " preset=" + presetStr);
 
+            // ✅ AJOUTÉ (2 sept 2026, demande Paul — "je vois livraison —
+            // wo, ensuite recherche registre") — trouvé : mon garde-fou
+            // anti-hijacking (armementRecentRefuse) était placé dans
+            // lancerLivraison(), BEAUCOUP trop tard — les toasts "📦
+            // Livraison" et "🔍 Recherche du registre" (dans
+            // handleDeepLink() lui-même) se déclenchaient à CHAQUE deep
+            // link fantôme, avant même d'atteindre mon garde-fou —
+            // donnant l'impression d'un hijacking répété visible à
+            // l'écran, même si l'armement final était peut-être bloqué
+            // plus loin. Vérifié ici, dès l'entrée, avant tout le reste.
+            if (armementRecentRefuse(woNum)) {
+                android.util.Log.w(TAG, "handleDeepLink: REFUS précoce — livraison pour wo=" + woNum
+                    + " terminée trop récemment, probable deep link fantôme (avant tout toast/traitement)");
+                retournerFieldService(woNum, woIdGuid, "erreur_rearmement_trop_recent",
+                    buildErrorJson("REARMEMENT_TROP_RECENT",
+                        "Une livraison pour ce WO vient de se terminer — nouvel armement refusé (fenêtre 60s)"));
+                return;
+            }
+
             final String fWoNum    = woNum;
             final String fSerialId = serialId != null ? serialId : "";
             logDeliveryStart(fSerialId, fWoNum, btMac, lcrnode, produit, presetStr);
