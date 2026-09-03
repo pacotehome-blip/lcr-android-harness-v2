@@ -7612,6 +7612,20 @@ public class RegisterTabFragment extends Fragment {
      */
     private void lookupWoForTicket(String ticketNo, boolean allowFullSearch) {
         if (ticketNo == null || ticketNo.isEmpty()) return;
+        // ✅ CORRIGÉ (2 sept 2026, demande Paul — "j'ai eu le message de
+        // filgo-registre a planté") — trouvé, confirmé par vrai crash log
+        // (FATAL EXCEPTION, requireContext() sur fragment détaché,
+        // Process tué SIG 9) : cette fonction tourne en arrière-plan
+        // (thread pool, depuis rechercherWoDepuisRegistre) et peut
+        // s'exécuter APRÈS que le fragment se soit détaché (recréation
+        // d'activité) — requireContext() lançait alors une exception
+        // fatale, non rattrapée, tuant tout le processus. Même garde
+        // que tenterFinalisationLivraisonOrpheline (déjà protégée).
+        if (!isAdded()) {
+            android.util.Log.w("RegisterTabFragment",
+                "lookupWoForTicket: fragment non attaché — abandon (évite le crash requireContext)");
+            return;
+        }
         // ✅ AJOUTÉ (26 août 2026, demande Paul — "j'ai encore du lag...
         // toutes l'info pour trouver la vraie raison") — trouvé, confirmé
         // par log réel : [WO-DETECT] se déclenchait pendant RUNNING_FLOWING,
