@@ -830,6 +830,69 @@ public class DeepLinkHandler {
                 return;
             }
 
+            // ✅ AJOUTÉ (2 sept 2026, demande Paul — "lorsqu'on démarre une
+            // livraison sur un ticket et que le preset est déjà complété,
+            // il doit avertir que le preset est atteint, continuer ou
+            // annulé") — trouvé : le dialogue "Bon déjà complété" plus haut
+            // ne vérifie que la BD locale (getLatestForWo) — mais dans
+            // TOUS les cas analysés aujourd'hui, la BD était vide au
+            // moment de ce check (recovery via JSON, pas encore réécrite),
+            // donc ce dialogue ne se déclenchait jamais, même si le
+            // registre montrait déjà physiquement preset atteint (reste
+            // d'une livraison précédente pas encore effacée). Vérification
+            // complémentaire ici, sur l'état RÉEL du registre (delCode),
+            // toujours fiable même quand la BD est vide.
+            try {
+                int dcPreArmement = controllerOneshot.getLastDelCode();
+                boolean presetDejaAtteint =
+                    (dcPreArmement & com.pa.lcr.lcp.LcpLink.DC_NET_PRESET_REACHED) != 0
+                    || (dcPreArmement & com.pa.lcr.lcp.LcpLink.DC_GROSS_PRESET_REACHED) != 0;
+                if (presetDejaAtteint) {
+                    android.util.Log.w(TAG, "lancerLivraison: registre montre déjà preset atteint (delCode=0x"
+                        + Integer.toHexString(dcPreArmement) + ") — confirmation requise avant nouvel armement");
+
+                    final java.util.concurrent.CountDownLatch latchPreset = new java.util.concurrent.CountDownLatch(1);
+                    final boolean[] continuerPreset = {false};
+
+                    activity.runOnUiThread(() -> {
+                        new android.app.AlertDialog.Builder(activity)
+                            .setTitle("Preset déjà atteint")
+                            .setMessage("Le registre indique que le preset est déjà atteint"
+                                + " (reste d'une livraison précédente non effacée).\n\n"
+                                + "Voulez-vous quand même armer une nouvelle livraison ?")
+                            .setPositiveButton("Continuer", (d, w) -> {
+                                continuerPreset[0] = true;
+                                latchPreset.countDown();
+                            })
+                            .setNegativeButton("Annuler", (d, w) -> {
+                                continuerPreset[0] = false;
+                                latchPreset.countDown();
+                            })
+                            .setCancelable(false)
+                            .show();
+                    });
+
+                    try { latchPreset.await(); } catch (InterruptedException ignored) {}
+
+                    logEvent(fSerialId, woNum,
+                        continuerPreset[0] ? DeliveryLogStore.LEVEL_INFO : DeliveryLogStore.LEVEL_WARN,
+                        continuerPreset[0] ? "PRESET_DEJA_ATTEINT_CONTINUE" : "PRESET_DEJA_ATTEINT_ANNULE",
+                        "delCode=0x" + Integer.toHexString(dcPreArmement) + " — chauffeur a choisi "
+                            + (continuerPreset[0] ? "CONTINUER" : "ANNULER"),
+                        null);
+
+                    if (!continuerPreset[0]) {
+                        android.util.Log.i(TAG, "lancerLivraison: annulé par le chauffeur (preset déjà atteint)");
+                        activity.runOnUiThread(() -> activity.showPage(0));
+                        return;
+                    }
+                    android.util.Log.i(TAG, "lancerLivraison: chauffeur confirme — nouvel armement malgré preset déjà atteint");
+                }
+            } catch (Exception e) {
+                android.util.Log.w(TAG, "lancerLivraison: erreur vérif preset atteint — " + e.getMessage());
+                try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.lancerLivraison.verifPresetAtteint", e); } catch (Exception ignored) {}
+            }
+
             // ✅ FIX #2 : activer le transport en exclusivité avant l'oneshot.
             // getState()==CONNECTED n'est qu'un état FSM en cache — sans
             // activateExclusive(), le transport n'est pas garanti armé pour

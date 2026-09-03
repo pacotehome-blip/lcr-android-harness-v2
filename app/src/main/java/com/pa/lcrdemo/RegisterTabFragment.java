@@ -5641,6 +5641,35 @@ public class RegisterTabFragment extends Fragment {
             updateButtons(controller.getState());
             return;
         }
+        // ✅ AJOUTÉ (2 sept 2026, demande Paul — "quand on fait new c il doit
+        // aussi le demander") — même vérification que lancerLivraison()
+        // côté deep link : si le registre montre déjà preset atteint (reste
+        // d'une livraison précédente non effacée), avertir avant d'armer.
+        // Thread UI ici (pas de latch.await bloquant comme côté deep link,
+        // qui tourne en arrière-plan) — dialogue asynchrone, continue via
+        // callback dans startNewDeliveryCApresVerifPreset().
+        boolean presetDejaAtteintC =
+            (dc & com.pa.lcr.lcp.LcpLink.DC_NET_PRESET_REACHED) != 0
+            || (dc & com.pa.lcr.lcp.LcpLink.DC_GROSS_PRESET_REACHED) != 0;
+        if (presetDejaAtteintC) {
+            LogBus.api(node, "[ACTION-CLIC] NEW_C — preset déjà atteint (delCode=0x"
+                + Integer.toHexString(dc) + ") — confirmation requise");
+            new android.app.AlertDialog.Builder(requireContext())
+                .setTitle("Preset déjà atteint")
+                .setMessage("Le registre indique que le preset est déjà atteint"
+                    + " (reste d'une livraison précédente non effacée).\n\n"
+                    + "Voulez-vous quand même armer une nouvelle livraison ?")
+                .setPositiveButton("Continuer", (d, w) -> startNewDeliveryCApresVerifPreset())
+                .setNegativeButton("Annuler", (d, w) ->
+                    LogBus.api(node, "[ACTION-CLIC] NEW_C — annulé par le chauffeur (preset déjà atteint)"))
+                .setCancelable(false)
+                .show();
+            return;
+        }
+        startNewDeliveryCApresVerifPreset();
+    }
+
+    private void startNewDeliveryCApresVerifPreset() {
         if (!(getActivity() instanceof MainActivity)) return;
         MainActivity main = (MainActivity) getActivity();
 
