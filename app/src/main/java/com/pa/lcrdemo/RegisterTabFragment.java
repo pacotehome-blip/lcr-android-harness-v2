@@ -6233,10 +6233,27 @@ public class RegisterTabFragment extends Fragment {
         // savoir laquelle se déclenchait sans deviner. Journalisées ici,
         // une par une, pour que la prochaine session de test le confirme.
         if (!isAdded() || getView() == null || controller == null) {
-            android.util.Log.i("RegisterTabFragment", "autoScanProduitsSiNecessaire: abandon — "
-                + "isAdded=" + isAdded() + " getView()=" + (getView() != null) + " controller=" + (controller != null));
-            signalerFinScanProduit(doneSignal);
-            return;
+            // ✅ CORRIGÉ (2 sept 2026, demande Paul — "voici le hicup") —
+            // trouvé, confirmé par log réel : cette fonction abandonnait
+            // INSTANTANÉMENT si le fragment n'était pas encore isAdded()
+            // — et runSectionWithRetry() (l'appelant) n'a lui non plus
+            // aucun délai entre ses 3 tentatives. Résultat : les 3
+            // tentatives se produisaient presque simultanément, avant
+            // même que le fragment n'ait eu la chance de finir de
+            // s'attacher (quelques dizaines de ms après onCreate(),
+            // le deep link arrivant parfois plus vite que ce cycle de
+            // vie Android). PRODUIT/COMPARAISON_TICKET tombaient donc
+            // en DÉGRADÉ à tort. Court délai ici, avant d'abandonner,
+            // pour laisser une vraie chance au fragment de s'attacher.
+            if (!isAdded()) {
+                try { Thread.sleep(150); } catch (InterruptedException ignored) {}
+            }
+            if (!isAdded() || getView() == null || controller == null) {
+                android.util.Log.i("RegisterTabFragment", "autoScanProduitsSiNecessaire: abandon — "
+                    + "isAdded=" + isAdded() + " getView()=" + (getView() != null) + " controller=" + (controller != null));
+                signalerFinScanProduit(doneSignal);
+                return;
+            }
         }
         if (autoProductScanInFlight) {
             android.util.Log.i("RegisterTabFragment", "autoScanProduitsSiNecessaire: abandon — "
