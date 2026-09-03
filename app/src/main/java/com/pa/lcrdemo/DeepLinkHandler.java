@@ -145,24 +145,17 @@ public class DeepLinkHandler {
                 " nportIp=" + nportIp + " nportPort=" + nportPort +
                 " produit=" + produit + " preset=" + presetStr);
 
-            // ✅ AJOUTÉ (2 sept 2026, demande Paul — "je vois livraison —
-            // wo, ensuite recherche registre") — trouvé : mon garde-fou
-            // anti-hijacking (armementRecentRefuse) était placé dans
-            // lancerLivraison(), BEAUCOUP trop tard — les toasts "📦
-            // Livraison" et "🔍 Recherche du registre" (dans
-            // handleDeepLink() lui-même) se déclenchaient à CHAQUE deep
-            // link fantôme, avant même d'atteindre mon garde-fou —
-            // donnant l'impression d'un hijacking répété visible à
-            // l'écran, même si l'armement final était peut-être bloqué
-            // plus loin. Vérifié ici, dès l'entrée, avant tout le reste.
-            if (armementRecentRefuse(woNum)) {
-                android.util.Log.w(TAG, "handleDeepLink: REFUS précoce — livraison pour wo=" + woNum
-                    + " terminée trop récemment, probable deep link fantôme (avant tout toast/traitement)");
-                retournerFieldService(woNum, woIdGuid, "erreur_rearmement_trop_recent",
-                    buildErrorJson("REARMEMENT_TROP_RECENT",
-                        "Une livraison pour ce WO vient de se terminer — nouvel armement refusé (fenêtre 60s)"));
-                return;
-            }
+            // ❌ RETIRÉ (2 sept 2026, demande Paul — "ben caliss pourquoi ton
+            // correctif a eu un impact direct... j'entre pas sur filgo-registre")
+            // — confirmé par log réel (nouveau_7.txt) : ce garde-fou était la
+            // VRAIE CAUSE d'une boucle infernale, pas sa solution. Refus ->
+            // retournerFieldService() -> finish() -> FieldService renvoie
+            // immédiatement un nouveau deep link -> refus à nouveau -> boucle
+            // sans fin, empêchant TOUTE entrée dans l'app tant que la fenêtre
+            // de 60s n'était pas écoulée. La vraie cause du hijacking original
+            // (Intent jamais consommé dans onCreate()/onNewIntent()) est déjà
+            // corrigée séparément - ce filet de sécurité causait plus de tort
+            // que de bien et a été retiré.
 
             final String fWoNum    = woNum;
             final String fSerialId = serialId != null ? serialId : "";
@@ -501,20 +494,12 @@ public class DeepLinkHandler {
             return;
         }
 
-        // ✅ AJOUTÉ (2 sept 2026, demande Paul — "corrige le") — deuxième
-        // filet de sécurité contre le hijacking (deep link fantôme
-        // renvoyé par FieldService juste après un retour) : refuse
-        // d'armer une NOUVELLE livraison pour ce même WO si une vient
-        // tout juste de se terminer, dans les 60 dernières secondes —
-        // peu importe la vraie cause du deep link.
-        if (armementRecentRefuse(woNum)) {
-            android.util.Log.w(TAG, "lancerLivraison: REFUS — livraison pour wo=" + woNum
-                + " terminée trop récemment, probable deep link fantôme");
-            retournerFieldService(woNum, woIdGuid, "erreur_rearmement_trop_recent",
-                buildErrorJson("REARMEMENT_TROP_RECENT",
-                    "Une livraison pour ce WO vient de se terminer — nouvel armement refusé (fenêtre 60s)"));
-            return;
-        }
+        // ❌ RETIRÉ (2 sept 2026, demande Paul — confirmé par log réel
+        // nouveau_7.txt) : ce garde-fou causait une boucle infernale
+        // (refus -> retournerFieldService() -> finish() -> FieldService
+        // renvoie le même deep link -> refus à nouveau), empêchant toute
+        // entrée dans l'app. Retiré - la vraie cause du hijacking (Intent
+        // jamais consommé) est corrigée séparément dans MainActivity.
 
         // ✅ CORRIGÉ (28 août 2026, demande Paul — "si je suis dans le tab
         // et que je fais new c il doit directement armer la livraison,
@@ -1313,14 +1298,12 @@ public class DeepLinkHandler {
         // ✅ AJOUTÉ (2 sept 2026, demande Paul — "corrige le") — même
         // protection que lancerLivraison(), un seul processus de
         // livraison, pas un chemin protégé et l'autre pas.
-        if (armementRecentRefuse(woNum)) {
-            android.util.Log.w(TAG, "connectBtByMacAndOpenTab: REFUS — livraison pour wo=" + woNum
-                + " terminée trop récemment, probable deep link fantôme");
-            retournerFieldService(woNum, woIdGuid, "erreur_rearmement_trop_recent",
-                buildErrorJson("REARMEMENT_TROP_RECENT",
-                    "Une livraison pour ce WO vient de se terminer — nouvel armement refusé (fenêtre 60s)"));
-            return;
-        }
+        // ❌ RETIRÉ (2 sept 2026, demande Paul — confirmé par log réel
+        // nouveau_7.txt) : ce garde-fou causait une boucle infernale
+        // (refus -> retournerFieldService() -> finish() -> FieldService
+        // renvoie le même deep link -> refus à nouveau), empêchant toute
+        // entrée dans l'app. Retiré - la vraie cause du hijacking (Intent
+        // jamais consommé) est corrigée séparément dans MainActivity.
 
         safeExecute(() -> {
             try {
