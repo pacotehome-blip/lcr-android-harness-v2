@@ -1879,14 +1879,30 @@ public class DeepLinkHandler {
         return !activePolls.isEmpty();
     }
 
-    // ✅ AJOUTÉ (2 sept 2026, demande Paul — "corrige le") — trouvé : mon
-    // correctif du bouton bleu (informer vraiment FieldService avant
-    // finish()) devrait empêcher le vrai hijacking à sa source — mais je
-    // ne peux pas le garantir sans un vrai nouveau test. Deuxième filet
-    // de sécurité, indépendant de la cause : refuse d'armer une NOUVELLE
-    // livraison pour le même WO si une vient tout juste de se terminer,
-    // dans une courte fenêtre (60s) — peu importe la vraie cause du
-    // deep link (FieldService, hijacking, ou tout autre scénario).
+    // ❌ RETIRÉ (4 sept 2026, demande Paul — "as-tu retiré tes changements
+    // pour rétablir comme avant") — le garde-fou des 60 secondes
+    // (derniereFinLivraisonParWo/marquerLivraisonTerminee/
+    // armementRecentRefuse) avait déjà été retiré de ses 3 points d'appel
+    // le 2 sept (confirmé être la vraie cause d'une boucle infernale,
+    // pas sa solution — voir historique git). Les fonctions elles-mêmes
+    // restaient, code mort : marquerLivraisonTerminee() était encore
+    // appelée à 2 endroits sans jamais être consultée par
+    // armementRecentRefuse() (elle-même jamais appelée nulle part).
+    // Toute la structure retirée proprement.
+
+    // 🪦 CODE MORT — CANDIDAT (4 sept 2026, demande Paul — "marque-les
+    // comme mort, on fera une tâche de repérage systématique de tout le
+    // code mort de l'apk plus tard, associer les fonctions/méthodes pour
+    // voir ce qui est utilisé ou pas") — armementRecentRefuse() n'est
+    // JAMAIS appelée nulle part (retirée de ses 3 points d'appel le
+    // 2 sept, confirmée être la vraie cause d'une boucle infernale, pas
+    // sa solution). marquerLivraisonTerminee() est encore appelée à 2
+    // endroits (DeepLinkHandler ligne ~2876, RegisterTabFragment ligne
+    // ~4682), mais son seul effet (remplir derniereFinLivraisonParWo)
+    // n'est plus jamais consulté par personne. Restaurées ici (pas
+    // supprimées) pour ne pas casser la compilation des 2 appels
+    // existants — à retirer ensemble (fonctions + appels) lors de la
+    // vraie tâche de nettoyage.
     private static final java.util.Map<String, Long> derniereFinLivraisonParWo =
         java.util.Collections.synchronizedMap(new java.util.HashMap<>());
     private static final long FENETRE_REFUS_REARMEMENT_MS = 60000;
@@ -1894,31 +1910,14 @@ public class DeepLinkHandler {
     public static void marquerLivraisonTerminee(String woNum) {
         if (woNum != null && !woNum.isEmpty()) {
             derniereFinLivraisonParWo.put(woNum, System.currentTimeMillis());
-            android.util.Log.i(TAG, "marquerLivraisonTerminee: woNum=\"" + woNum + "\" — map maintenant: " + derniereFinLivraisonParWo);
-        } else {
-            android.util.Log.w(TAG, "marquerLivraisonTerminee: woNum vide/null, RIEN marqué — appelant devrait vérifier son currentWoNum");
         }
     }
 
     public static boolean armementRecentRefuse(String woNum) {
-        // ✅ AJOUTÉ (2 sept 2026, demande Paul — "pourquoi c'est encore
-        // là") — trouvé (en vérifiant honnêtement) : je ne peux pas
-        // confirmer avec certitude pourquoi ce garde-fou n'a pas bloqué
-        // le hijacking du dernier test, malgré tout le code déjà en
-        // place. Vrai diagnostic ici — valeurs exactes entre guillemets
-        // (révèle tout espace/casse caché), contenu complet de la map —
-        // pour confirmer avec certitude au prochain test, pas deviner.
-        android.util.Log.i(TAG, "armementRecentRefuse: vérification woNum=\"" + woNum + "\" — map actuelle: " + derniereFinLivraisonParWo);
         if (woNum == null || woNum.isEmpty()) return false;
         Long derniereFin = derniereFinLivraisonParWo.get(woNum);
-        if (derniereFin == null) {
-            android.util.Log.w(TAG, "armementRecentRefuse: AUCUNE entrée trouvée pour woNum=\"" + woNum + "\" dans la map — pas de refus");
-            return false;
-        }
-        long ecarteMs = System.currentTimeMillis() - derniereFin;
-        boolean refuse = ecarteMs < FENETRE_REFUS_REARMEMENT_MS;
-        android.util.Log.i(TAG, "armementRecentRefuse: entrée trouvée pour woNum=\"" + woNum + "\" — écart=" + ecarteMs + "ms — refuse=" + refuse);
-        return refuse;
+        if (derniereFin == null) return false;
+        return (System.currentTimeMillis() - derniereFin) < FENETRE_REFUS_REARMEMENT_MS;
     }
 
     // ✅ AJOUTÉ (27 août 2026, demande Paul — "je veux avoir en bd chaque

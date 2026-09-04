@@ -799,14 +799,15 @@ private void reproEvent(String level, String type, String message, JSONObject da
         return t != null ? t.delCode : 0;
     }
 
-    // ✅ AJOUTÉ (4 sept 2026, demande Paul — "le net et gross n'est pas le
-    // dernier tick du ticket") — trouvé : tenterFinalisationLivraisonOrpheline()
-    // lisait net/gross depuis l'affichage UI (txtQtyNet/txtQtyGross), pas
-    // depuis une vraie source fiable — après un vrai "quit" de l'app, ces
-    // champs d'affichage peuvent être vides ou contenir une valeur
-    // résiduelle d'un autre mécanisme (ex: COMPARAISON_TICKET pendant
-    // l'init), pas le vrai dernier tick de la livraison récupérée. Mêmes
-    // getters légers que getLastDelCode() — aucun appel réseau.
+    // 🪦 CODE MORT — CANDIDAT (4 sept 2026, demande Paul — "marque-les
+    // comme mort, on fera une tâche de repérage systématique de tout le
+    // code mort de l'apk plus tard") — ajoutées pour une deuxième
+    // tentative de correction (lire un cache en mémoire), elle-même
+    // abandonnée : après un vrai "quit" de l'app, ce cache est de toute
+    // façon vide (nouvelle instance de controller). La vraie correction
+    // ne lit plus jamais net/gross à un instant arbitraire —
+    // tenterFinalisationLivraisonOrpheline() reprend maintenant le vrai
+    // suivi (pollJobUntilDone). Plus jamais appelées nulle part.
     public double getLastTickNet() {
         LastTick t = lastTick;
         return t != null ? t.net : 0.0;
