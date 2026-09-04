@@ -557,6 +557,9 @@ public class RegisterTabFragment extends Fragment {
     // onTabActivated() ne lance runInitSequence() que si ce drapeau est
     // faux, laissant lancerLivraison() terminer son travail en paix.
     public volatile boolean armementEnCoursParCetteSession = false;
+    // ✅ AJOUTÉ (4 sept 2026) — évite de redéclencher le filet CONNECTED à
+    // chaque rappel onStateChanged tant qu'on reste dans le même état.
+    private volatile boolean finalisationFiletCetteTransition = false;
     // ✅ AJOUTÉ (26 août 2026, demande Paul — "on a pas besoin de valider le
     // produit un coup que le premier scan a été complété et jumelé au
     // ticket de la dernière livraison à la BD vierge. jamais j'ai indiqué
@@ -1819,6 +1822,64 @@ public class RegisterTabFragment extends Fragment {
                 refreshDelCodeFromTickSnapshotThrottled();
                 updateButtons(state);
                 scheduleLogRefresh();
+
+                // ✅ AJOUTÉ (4 sept 2026, demande Paul — "il faut avoir le
+                // running_flowing du registre c'est lui le mettre") —
+                // trouvé, confirmé par log réel : la ligne finale restait
+                // coincée à RUNNING_FLOWING avec une valeur périmée
+                // (RECUP-RUNNING), malgré un vrai mécanisme de fin déjà
+                // existant côté poll — sans certitude sur pourquoi ce
+                // mécanisme a raté. Vrai filet indépendant, ici : c'est le
+                // VRAI ÉTAT PHYSIQUE DU REGISTRE (déjà affiché en direct
+                // par ce même listener, source de vérité) qui déclenche la
+                // finalisation — pas le poll séparé qui peut échouer.
+                if (state == DeliveryState.CONNECTED && !finalisationFiletCetteTransition) {
+                    finalisationFiletCetteTransition = true;
+                    safeBg(() -> {
+                        try {
+                            DeliveryController cFiletFin = controller;
+                            if (cFiletFin == null) return;
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbFiletFin =
+                                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow safetyNetFin;
+                            try {
+                                safetyNetFin = dbFiletFin.getRunningFlowingSafetyNet(currentWoNum, serialFromArgs);
+                            } finally {
+                                try { dbFiletFin.close(); } catch (Exception ignored) {}
+                            }
+                            if (safetyNetFin == null || safetyNetFin.jobId == null || safetyNetFin.jobId.isEmpty()) return;
+                            LogBus.api(node, "[FILET-CONNECTED] registre revenu à CONNECTED, ligne RUNNING_FLOWING non résolue trouvée — jobId="
+                                + safetyNetFin.jobId + " — vraie lecture fraîche forcée");
+                            double[] ngFrais = cFiletFin.readNetGrossFromHardware();
+                            double netFin = (ngFrais[0] >= 0) ? ngFrais[0] : parseDisplayNet();
+                            double grossFin = (ngFrais[1] >= 0) ? ngFrais[1] : parseDisplayGross();
+                            String ticketFin = cFiletFin.api_readTicketNo23Frais();
+                            if (ticketFin == null || ticketFin.isEmpty()) ticketFin = lastKnownTicketNo;
+                            org.json.JSONObject extraFilet = new org.json.JSONObject();
+                            org.json.JSONObject resultFilet = new org.json.JSONObject();
+                            resultFilet.put("ticket_no", ticketFin != null ? ticketFin : "");
+                            resultFilet.put("sale_no", ticketFin != null ? ticketFin : "");
+                            resultFilet.put("fs_net_l", netFin);
+                            resultFilet.put("fs_gross_l", grossFin);
+                            resultFilet.put("product_number", safetyNetFin.produitNo);
+                            resultFilet.put("preset_requested", safetyNetFin.presetL);
+                            extraFilet.put("result", resultFilet);
+                            extraFilet.put("jobId", safetyNetFin.jobId);
+                            extraFilet.put("preset_requested", safetyNetFin.presetL);
+                            MainActivity mainFilet = (MainActivity) getActivity();
+                            if (mainFilet != null) {
+                                mainFilet.onDeliveryEnded(currentWoNum, currentWoIdGuid, extraFilet.toString(),
+                                    node, serialFromArgs, (tabTransportKey != null ? tabTransportKey.trim() : ""));
+                                LogBus.api(node, "[FILET-CONNECTED] finalisation forcée — jobId=" + safetyNetFin.jobId
+                                    + " net=" + netFin + " gross=" + grossFin);
+                            }
+                        } catch (Exception eFiletFin) {
+                            android.util.Log.w("RegisterTabFragment", "[FILET-CONNECTED] ERR: " + eFiletFin.getMessage());
+                        }
+                    });
+                } else if (state != DeliveryState.CONNECTED) {
+                    finalisationFiletCetteTransition = false;
+                }
                 // ✅ AJOUTÉ (12 août 2026) — rattrapage : si des événements se
                 // sont accumulés pendant RUNNING_FLOWING sans être affichés
                 // (log mis en attente exprès, voir scheduleLogRefresh), et
@@ -5550,6 +5611,17 @@ public class RegisterTabFragment extends Fragment {
 
     private void startNewDeliveryC() {
         if (controller == null) return;
+        // ❌ RETIRÉ (4 sept 2026, demande Paul — "il peut arriver que le
+        // livreur provoque une livraison sans wo. mais plus tard dans
+        // fieldservice, la répartition va prendre le registre et #série
+        // lcrnode timestamp on va le trouver dans dataverse et donc
+        // l'appliquer à un wo spécifique") — ma correction précédente
+        // bloquait ça à tort : une livraison sans WO connu au moment de
+        // l'armement est un VRAI scénario métier légitime, pas une
+        // erreur — la répartition la relie après coup via le registre/
+        // lcrnode/timestamp dans Dataverse, pour ensuite facturer. Ce
+        // qui compte vraiment : que cette livraison soit correctement
+        // envoyée à Dataverse (même sans WO), pas de la bloquer.
         // ✅ AJOUTÉ (26 août 2026, demande Paul — "s'il arrive de deeplink
         // il applique son produit et valide aussi si le produit est bien
         // présent dans la liste de produit déjà scanné, si non il annule
