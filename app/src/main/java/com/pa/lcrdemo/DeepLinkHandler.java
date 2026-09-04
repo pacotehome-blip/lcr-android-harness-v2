@@ -113,6 +113,33 @@ public class DeepLinkHandler {
                                 ? data.getQueryParameter("woid") : "";
             String btMac      = data.getQueryParameter("btmac");
             String serialId   = data.getQueryParameter("serialid");
+
+            // ✅ AJOUTÉ (4 sept 2026, demande Paul — "s'il y a une
+            // livraison pending tout est arrêté, cette partie doit être
+            // réglée avant quoi que ce soit") — vrai verrou dur, ici, le
+            // seul point où les 3 chemins convergent vraiment (deep link,
+            // new C via lancerLivraisonDepuisTab, et la reprise via
+            // lancerDepuisStore envoient tous un vrai Intent qui atterrit
+            // ici). Si une livraison PENDING existe déjà pour un AUTRE WO
+            // — refus complet, rien d'autre ne procède tant qu'elle n'est
+            // pas réglée. Si c'est la MÊME livraison (celle qu'on essaie
+            // justement de résoudre) — laissé passer normalement.
+            try {
+                com.pa.lcr.lcp.storage.ActiveDeliveryStore adsGate =
+                    new com.pa.lcr.lcp.storage.ActiveDeliveryStore(activity);
+                com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery adGate = adsGate.load();
+                if (adGate != null && "PENDING".equals(adGate.status)
+                        && adGate.woNum != null && !adGate.woNum.equals(woNum)) {
+                    android.util.Log.w(TAG, "handleDeepLink: REFUS — livraison PENDING déjà en attente pour wo="
+                        + adGate.woNum + " (demande actuelle wo=" + woNum + ") — doit être réglée avant quoi que ce soit");
+                    retournerFieldService(woNum, woIdGuid, "erreur_livraison_pending_en_attente",
+                        buildErrorJson("LIVRAISON_PENDING_EN_ATTENTE",
+                            "Une livraison pour le WO " + adGate.woNum + " est déjà en attente — réglez-la avant d'en démarrer une nouvelle."));
+                    return;
+                }
+            } catch (Exception eGate) {
+                android.util.Log.w(TAG, "handleDeepLink: erreur vérif PENDING — " + eGate.getMessage());
+            }
             String produit    = data.getQueryParameter("produit");
             String presetStr  = data.getQueryParameter("preset");
             String lcrnodeStr = data.getQueryParameter("lcrnode");
@@ -1018,99 +1045,24 @@ public class DeepLinkHandler {
                 return;
             }
 
-            // ✅ RECONSTRUIT (4 sept 2026, demande Paul — "juste avant
-            // l'armement car là on a un nouveau delivery-uid c'est clair
-            // ça non??") — trouvé le vrai bon endroit après 3 essais : ni
-            // avant le garde-fou sale_number (lisait un reste physique
-            // d'une AUTRE livraison, aucun delivery-uid propre encore
-            // établi), ni après l'armement complet (trop tard, complexité
-            // inutile). C'est ICI, juste après confirmation d'un
-            // sale_number frais (donc un delivery-uid propre à CETTE
-            // livraison), juste avant l'armement lui-même, que le check a
-            // vraiment sa place.
-            try {
-                int dcPreArm = controllerOneshot.getLastDelCode();
-                boolean presetDejaAtteintArm =
-                    (dcPreArm & com.pa.lcr.lcp.LcpLink.DC_NET_PRESET_REACHED) != 0
-                    || (dcPreArm & com.pa.lcr.lcp.LcpLink.DC_GROSS_PRESET_REACHED) != 0;
-                // ✅ CORRIGÉ (4 sept 2026, demande Paul — "c'est le dernier
-                // test") — trouvé : mes logs de diagnostic utilisaient
-                // android.util.Log, invisible dans le résumé LogBus que
-                // Paul partage — impossible de confirmer si ce code
-                // s'exécutait vraiment. Remplacé par LogBus.api() partout
-                // ici, avec un vrai log dès l'entrée, avant même de savoir
-                // si le dialogue va se déclencher.
-                com.pa.lcr.lcp.log.LogBus.api(node, "[PRESET-CHECK] avant armement — wo=" + woNum + " delCode=0x"
-                    + Integer.toHexString(dcPreArm) + " presetDejaAtteint=" + presetDejaAtteintArm);
-                if (presetDejaAtteintArm) {
-                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb statusDbArm =
-                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
-                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow existingArm;
-                    try {
-                        existingArm = statusDbArm.getLatestForWo(woNum);
-                    } finally {
-                        try { statusDbArm.close(); } catch (Exception ignored) {}
-                    }
-                    com.pa.lcr.lcp.log.LogBus.api(node, "[PRESET-CHECK] getLatestForWo(" + woNum + ") = "
-                        + (existingArm == null ? "AUCUNE ligne trouvée" : "ligne trouvée, ticket=" + existingArm.ticketNo));
-                    if (existingArm == null) {
-                        com.pa.lcr.lcp.log.LogBus.api(node, "[PRESET-CHECK] AUCUNE ligne pour wo="
-                            + woNum + " — reste d'un AUTRE wo, dialogue non déclenché");
-                        presetDejaAtteintArm = false;
-                    }
-                }
-                if (presetDejaAtteintArm) {
-                    com.pa.lcr.lcp.log.LogBus.api(node, "[PRESET-CHECK] DÉCLENCHEMENT du dialogue (delCode=0x"
-                        + Integer.toHexString(dcPreArm) + ") — confirmation requise avant armement");
-                    final java.util.concurrent.CountDownLatch latchPresetArm = new java.util.concurrent.CountDownLatch(1);
-                    final boolean[] continuerPresetArm = {false};
-                    activity.runOnUiThread(() -> {
-                        new android.app.AlertDialog.Builder(activity)
-                            .setTitle("Preset déjà atteint")
-                            .setMessage("Le registre indique que le preset est déjà atteint.\n\n"
-                                + "Voulez-vous quand même armer une nouvelle livraison ?")
-                            .setPositiveButton("Continuer", (d, w) -> {
-                                continuerPresetArm[0] = true;
-                                latchPresetArm.countDown();
-                            })
-                            .setNegativeButton("Annuler", (d, w) -> {
-                                continuerPresetArm[0] = false;
-                                latchPresetArm.countDown();
-                            })
-                            .setCancelable(false)
-                            .show();
-                    });
-                    try { latchPresetArm.await(); } catch (InterruptedException ignored) {}
-                    logEvent(fSerialId, woNum,
-                        continuerPresetArm[0] ? DeliveryLogStore.LEVEL_INFO : DeliveryLogStore.LEVEL_WARN,
-                        continuerPresetArm[0] ? "PRESET_DEJA_ATTEINT_CONTINUE" : "PRESET_DEJA_ATTEINT_ANNULE",
-                        "delCode=0x" + Integer.toHexString(dcPreArm) + " — chauffeur a choisi "
-                            + (continuerPresetArm[0] ? "CONTINUER" : "ANNULER"), null);
-                    if (!continuerPresetArm[0]) {
-                        android.util.Log.i(TAG, "lancerLivraison: annulé par le chauffeur (preset déjà atteint)");
-                        activity.runOnUiThread(() -> activity.showPage(0));
-                        return;
-                    }
-                }
-            } catch (Exception ePresetArm) {
-                android.util.Log.w(TAG, "lancerLivraison: erreur vérif preset atteint — " + ePresetArm.getMessage());
-            }
+            // ❌ RETIRÉ (4 sept 2026, demande Paul — "si on fait new C,
+            // valider le preset") — ce check ne doit PAS s'appliquer au
+            // deep link, seulement à new C (action locale de l'opérateur,
+            // sans validation externe préalable) — un deep link vient
+            // déjà avec une vraie demande légitime de FieldService. Déplacé
+            // dans startNewDeliveryC() (RegisterTabFragment), retiré d'ici.
 
-            // ✅ AJOUTÉ (4 sept 2026, demande Paul — "corrige ça", confirmé
-            // par log réel LogBus : applierDescriptionsProduits() interrompue
-            // en plein vol, seulement 472ms après son début, avant l'armement
-            // physique) — cette résolution tourne en fire-and-forget
-            // (safeBg), jamais attendue par l'armement. Vraie attente
-            // courte ici, bornée (jamais indéfinie), avant de procéder —
-            // laisse une vraie chance à la résolution de finir.
-            if (tabArmRef != null && !tabArmRef.produitDejaResoluPourCetteSession) {
-                for (int iAttenteProduit = 0; iAttenteProduit < 8; iAttenteProduit++) { // ~800ms max
-                    if (tabArmRef.produitDejaResoluPourCetteSession) break;
-                    try { Thread.sleep(100); } catch (InterruptedException ignored) { break; }
-                }
-                com.pa.lcr.lcp.log.LogBus.api(node, "[PRODUIT-ATTENTE] avant armement — résolu="
-                    + tabArmRef.produitDejaResoluPourCetteSession);
-            }
+
+            // ❌ RETIRÉ (4 sept 2026, demande Paul — "il doit y avoir un
+            // thread après l'autre même pas un délai x... Queued timeout"
+            // confirmé par log réel) — mon Thread.sleep(100) bloquait
+            // btExec, le MÊME thread que celui qui gère la vraie
+            // communication protocole avec le registre (envoi/réception
+            // des commandes) — causant un vrai timeout côté matériel
+            // ("Queued timeout last=0x26") et une fin prématurée de la
+            // livraison. Un vrai sleep() bloquant sur un thread partagé
+            // avec la communication temps réel n'est jamais la bonne
+            // solution — retiré entièrement.
 
             if (tabArmRef != null) {
                 tabArmRef.armementEnCoursParCetteSession = true;
