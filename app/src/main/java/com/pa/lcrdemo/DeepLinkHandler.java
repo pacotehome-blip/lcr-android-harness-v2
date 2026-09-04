@@ -830,68 +830,21 @@ public class DeepLinkHandler {
                 return;
             }
 
-            // ✅ AJOUTÉ (2 sept 2026, demande Paul — "lorsqu'on démarre une
-            // livraison sur un ticket et que le preset est déjà complété,
-            // il doit avertir que le preset est atteint, continuer ou
-            // annulé") — trouvé : le dialogue "Bon déjà complété" plus haut
-            // ne vérifie que la BD locale (getLatestForWo) — mais dans
-            // TOUS les cas analysés aujourd'hui, la BD était vide au
-            // moment de ce check (recovery via JSON, pas encore réécrite),
-            // donc ce dialogue ne se déclenchait jamais, même si le
-            // registre montrait déjà physiquement preset atteint (reste
-            // d'une livraison précédente pas encore effacée). Vérification
-            // complémentaire ici, sur l'état RÉEL du registre (delCode),
-            // toujours fiable même quand la BD est vide.
-            try {
-                int dcPreArmement = controllerOneshot.getLastDelCode();
-                boolean presetDejaAtteint =
-                    (dcPreArmement & com.pa.lcr.lcp.LcpLink.DC_NET_PRESET_REACHED) != 0
-                    || (dcPreArmement & com.pa.lcr.lcp.LcpLink.DC_GROSS_PRESET_REACHED) != 0;
-                if (presetDejaAtteint) {
-                    android.util.Log.w(TAG, "lancerLivraison: registre montre déjà preset atteint (delCode=0x"
-                        + Integer.toHexString(dcPreArmement) + ") — confirmation requise avant nouvel armement");
+            // ❌ RETIRÉ (4 sept 2026, demande Paul — "l'idee est que
+            // j'arrive avec un nouveau wo... il ne devrait pas etre la tant
+            // que nous n'avons pas passe au travers des 7 inits et avoir
+            // demarre une nouvelle livraison") — ce check se declenchait
+            // AVANT meme la tentative d'armement (avant activateExclusive)
+            // — a ce moment, aucune nouvelle livraison n'existe encore pour
+            // ce WO, donc tout bit "preset atteint" lu ici ne peut venir
+            // que d'un reste PHYSIQUE du registre appartenant a une AUTRE
+            // livraison (le meme registre sert plusieurs WO dans la
+            // journee) — pas pertinent pour un armement qui n'a pas encore
+            // eu lieu. Retiré de cette position. Si ce genre d'avertissement
+            // doit exister, il doit se trouver APRES les 7 inits, une fois
+            // qu'une nouvelle livraison est vraiment demarree pour CE WO —
+            // pas comme garde-fou pre-armement.
 
-                    final java.util.concurrent.CountDownLatch latchPreset = new java.util.concurrent.CountDownLatch(1);
-                    final boolean[] continuerPreset = {false};
-
-                    activity.runOnUiThread(() -> {
-                        new android.app.AlertDialog.Builder(activity)
-                            .setTitle("Preset déjà atteint")
-                            .setMessage("Le registre indique que le preset est déjà atteint"
-                                + " (reste d'une livraison précédente non effacée).\n\n"
-                                + "Voulez-vous quand même armer une nouvelle livraison ?")
-                            .setPositiveButton("Continuer", (d, w) -> {
-                                continuerPreset[0] = true;
-                                latchPreset.countDown();
-                            })
-                            .setNegativeButton("Annuler", (d, w) -> {
-                                continuerPreset[0] = false;
-                                latchPreset.countDown();
-                            })
-                            .setCancelable(false)
-                            .show();
-                    });
-
-                    try { latchPreset.await(); } catch (InterruptedException ignored) {}
-
-                    logEvent(fSerialId, woNum,
-                        continuerPreset[0] ? DeliveryLogStore.LEVEL_INFO : DeliveryLogStore.LEVEL_WARN,
-                        continuerPreset[0] ? "PRESET_DEJA_ATTEINT_CONTINUE" : "PRESET_DEJA_ATTEINT_ANNULE",
-                        "delCode=0x" + Integer.toHexString(dcPreArmement) + " — chauffeur a choisi "
-                            + (continuerPreset[0] ? "CONTINUER" : "ANNULER"),
-                        null);
-
-                    if (!continuerPreset[0]) {
-                        android.util.Log.i(TAG, "lancerLivraison: annulé par le chauffeur (preset déjà atteint)");
-                        activity.runOnUiThread(() -> activity.showPage(0));
-                        return;
-                    }
-                    android.util.Log.i(TAG, "lancerLivraison: chauffeur confirme — nouvel armement malgré preset déjà atteint");
-                }
-            } catch (Exception e) {
-                android.util.Log.w(TAG, "lancerLivraison: erreur vérif preset atteint — " + e.getMessage());
-                try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.lancerLivraison.verifPresetAtteint", e); } catch (Exception ignored) {}
-            }
 
             // ✅ FIX #2 : activer le transport en exclusivité avant l'oneshot.
             // getState()==CONNECTED n'est qu'un état FSM en cache — sans
@@ -1063,6 +1016,84 @@ public class DeepLinkHandler {
                 retournerFieldService(woNum, woIdGuid, "erreur_sale_number_indisponible",
                     buildErrorJson("SALE_NUMBER_INDISPONIBLE", "Vérification sale_number/ticket_number a échoué"));
                 return;
+            }
+
+            // ✅ RECONSTRUIT (4 sept 2026, demande Paul — "juste avant
+            // l'armement car là on a un nouveau delivery-uid c'est clair
+            // ça non??") — trouvé le vrai bon endroit après 3 essais : ni
+            // avant le garde-fou sale_number (lisait un reste physique
+            // d'une AUTRE livraison, aucun delivery-uid propre encore
+            // établi), ni après l'armement complet (trop tard, complexité
+            // inutile). C'est ICI, juste après confirmation d'un
+            // sale_number frais (donc un delivery-uid propre à CETTE
+            // livraison), juste avant l'armement lui-même, que le check a
+            // vraiment sa place.
+            try {
+                int dcPreArm = controllerOneshot.getLastDelCode();
+                boolean presetDejaAtteintArm =
+                    (dcPreArm & com.pa.lcr.lcp.LcpLink.DC_NET_PRESET_REACHED) != 0
+                    || (dcPreArm & com.pa.lcr.lcp.LcpLink.DC_GROSS_PRESET_REACHED) != 0;
+                // ✅ CORRIGÉ (4 sept 2026, demande Paul — "c'est le dernier
+                // test") — trouvé : mes logs de diagnostic utilisaient
+                // android.util.Log, invisible dans le résumé LogBus que
+                // Paul partage — impossible de confirmer si ce code
+                // s'exécutait vraiment. Remplacé par LogBus.api() partout
+                // ici, avec un vrai log dès l'entrée, avant même de savoir
+                // si le dialogue va se déclencher.
+                LogBus.api(node, "[PRESET-CHECK] avant armement — wo=" + woNum + " delCode=0x"
+                    + Integer.toHexString(dcPreArm) + " presetDejaAtteint=" + presetDejaAtteintArm);
+                if (presetDejaAtteintArm) {
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb statusDbArm =
+                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow existingArm;
+                    try {
+                        existingArm = statusDbArm.getLatestForWo(woNum);
+                    } finally {
+                        try { statusDbArm.close(); } catch (Exception ignored) {}
+                    }
+                    LogBus.api(node, "[PRESET-CHECK] getLatestForWo(" + woNum + ") = "
+                        + (existingArm == null ? "AUCUNE ligne trouvée" : "ligne trouvée, ticket=" + existingArm.ticketNo));
+                    if (existingArm == null) {
+                        LogBus.api(node, "[PRESET-CHECK] AUCUNE ligne pour wo="
+                            + woNum + " — reste d'un AUTRE wo, dialogue non déclenché");
+                        presetDejaAtteintArm = false;
+                    }
+                }
+                if (presetDejaAtteintArm) {
+                    LogBus.api(node, "[PRESET-CHECK] DÉCLENCHEMENT du dialogue (delCode=0x"
+                        + Integer.toHexString(dcPreArm) + ") — confirmation requise avant armement");
+                    final java.util.concurrent.CountDownLatch latchPresetArm = new java.util.concurrent.CountDownLatch(1);
+                    final boolean[] continuerPresetArm = {false};
+                    activity.runOnUiThread(() -> {
+                        new android.app.AlertDialog.Builder(activity)
+                            .setTitle("Preset déjà atteint")
+                            .setMessage("Le registre indique que le preset est déjà atteint.\n\n"
+                                + "Voulez-vous quand même armer une nouvelle livraison ?")
+                            .setPositiveButton("Continuer", (d, w) -> {
+                                continuerPresetArm[0] = true;
+                                latchPresetArm.countDown();
+                            })
+                            .setNegativeButton("Annuler", (d, w) -> {
+                                continuerPresetArm[0] = false;
+                                latchPresetArm.countDown();
+                            })
+                            .setCancelable(false)
+                            .show();
+                    });
+                    try { latchPresetArm.await(); } catch (InterruptedException ignored) {}
+                    logEvent(fSerialId, woNum,
+                        continuerPresetArm[0] ? DeliveryLogStore.LEVEL_INFO : DeliveryLogStore.LEVEL_WARN,
+                        continuerPresetArm[0] ? "PRESET_DEJA_ATTEINT_CONTINUE" : "PRESET_DEJA_ATTEINT_ANNULE",
+                        "delCode=0x" + Integer.toHexString(dcPreArm) + " — chauffeur a choisi "
+                            + (continuerPresetArm[0] ? "CONTINUER" : "ANNULER"), null);
+                    if (!continuerPresetArm[0]) {
+                        android.util.Log.i(TAG, "lancerLivraison: annulé par le chauffeur (preset déjà atteint)");
+                        activity.runOnUiThread(() -> activity.showPage(0));
+                        return;
+                    }
+                }
+            } catch (Exception ePresetArm) {
+                android.util.Log.w(TAG, "lancerLivraison: erreur vérif preset atteint — " + ePresetArm.getMessage());
             }
 
             if (tabArmRef != null) {
