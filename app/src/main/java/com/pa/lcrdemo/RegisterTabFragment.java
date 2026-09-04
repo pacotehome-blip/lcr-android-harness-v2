@@ -903,8 +903,25 @@ public class RegisterTabFragment extends Fragment {
             if (c == null) return;
             String ticketFin = c.api_readTicketNo23Frais();
             if (ticketFin == null || ticketFin.isEmpty()) ticketFin = lastKnownTicketNo;
-            double netFin = parseDisplayNet();
-            double grossFin = parseDisplayGross();
+            // ✅ CORRIGÉ (4 sept 2026, demande Paul — "le net et gross n'est
+            // pas le dernier tick du ticket... sans la fiche du wo de
+            // fieldservice j'ai 20.4net 20.7 gross") — trouvé, confirmé par
+            // le JSON réel (net_l=29.9 au lieu de la vraie valeur) :
+            // parseDisplayNet()/parseDisplayGross() lisaient l'affichage UI
+            // (txtQtyNet/txtQtyGross), pas une vraie source fiable — après
+            // un vrai "quit" de l'app, ces champs peuvent contenir une
+            // valeur résiduelle d'un autre mécanisme, pas le vrai dernier
+            // tick de la livraison récupérée. Utilise maintenant le vrai
+            // dernier tick connu du controller.
+            double netFin = c.getLastTickNet();
+            double grossFin = c.getLastTickGross();
+            if (netFin <= 0 && grossFin <= 0) {
+                // Filet de sécurité : si le controller n'a jamais reçu de
+                // tick pour cette session (cas limite), repli sur
+                // l'affichage — mieux qu'un vrai zéro silencieux.
+                netFin = parseDisplayNet();
+                grossFin = parseDisplayGross();
+            }
             String macFin = (tabTransportKey != null) ? tabTransportKey.trim() : "";
             org.json.JSONObject extraOrph = new org.json.JSONObject();
             org.json.JSONObject resultOrph = new org.json.JSONObject();
@@ -922,6 +939,15 @@ public class RegisterTabFragment extends Fragment {
             resultOrph.put("product_number", safetyNet.produitNo);
             resultOrph.put("preset_requested", safetyNet.presetL);
             extraOrph.put("result", resultOrph);
+            // ✅ CORRIGÉ (4 sept 2026, demande Paul — même analyse) — trouvé,
+            // confirmé par le JSON réel (job_id absent, preset_requested
+            // incohérent 0 vs 10 nichés) : extraOrph ne mettait jamais
+            // jobId ni preset_requested au niveau racine — onDeliveryEnded()
+            // ne pouvait donc jamais faire upsertByJobId() correctement
+            // pour ce chemin (risque de doublon), et tout code lisant
+            // preset_requested à la racine obtenait 0.
+            extraOrph.put("jobId", safetyNet.jobId);
+            extraOrph.put("preset_requested", safetyNet.presetL);
             MainActivity main = (MainActivity) getActivity();
             if (main != null) {
                 main.onDeliveryEnded(currentWoNum, currentWoIdGuid, extraOrph.toString(),

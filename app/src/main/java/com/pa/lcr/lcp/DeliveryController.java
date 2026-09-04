@@ -799,6 +799,24 @@ private void reproEvent(String level, String type, String message, JSONObject da
         return t != null ? t.delCode : 0;
     }
 
+    // ✅ AJOUTÉ (4 sept 2026, demande Paul — "le net et gross n'est pas le
+    // dernier tick du ticket") — trouvé : tenterFinalisationLivraisonOrpheline()
+    // lisait net/gross depuis l'affichage UI (txtQtyNet/txtQtyGross), pas
+    // depuis une vraie source fiable — après un vrai "quit" de l'app, ces
+    // champs d'affichage peuvent être vides ou contenir une valeur
+    // résiduelle d'un autre mécanisme (ex: COMPARAISON_TICKET pendant
+    // l'init), pas le vrai dernier tick de la livraison récupérée. Mêmes
+    // getters légers que getLastDelCode() — aucun appel réseau.
+    public double getLastTickNet() {
+        LastTick t = lastTick;
+        return t != null ? t.net : 0.0;
+    }
+
+    public double getLastTickGross() {
+        LastTick t = lastTick;
+        return t != null ? t.gross : 0.0;
+    }
+
     // lock de synchronisation pour long-poll API (wait/notify)
     private final Object tickLock = new Object();
 
