@@ -885,6 +885,23 @@ public class RegisterTabFragment extends Fragment {
     }
 
     private void tenterFinalisationLivraisonOrpheline() {
+        // ✅ RECONSTRUIT (4 sept 2026, demande Paul — "tu as dérogé du
+        // processus de livraison... ne pas démarrer de livraison car la on
+        // sait qu'il est en running_flowing") — trouvé, confirmé par log
+        // réel : cette fonction finalisait IMMÉDIATEMENT sur un simple
+        // CONNECTED, capturant un instantané (UI, puis cache mémoire, puis
+        // lecture matérielle fraîche) au mauvais moment — le registre
+        // repartait souvent en RUNNING_FLOWING juste après (même livraison
+        // physique continue, cycle continue/protocole déjà documenté
+        // ailleurs), rendant toute lecture prise à cet instant prématurée
+        // et potentiellement fausse. Le vrai processus : sur une livraison
+        // encore possiblement en cours, on ne finalise JAMAIS à la volée —
+        // on reprend le VRAI suivi (pollJobUntilDone, déjà conçu pour ce cas
+        // précis — "chemin de reprise après crash") avec le job_id/produit/
+        // preset déjà connus (aucun scan) — et c'est LUI qui détectera la
+        // vraie fin, stable, et appellera onDeliveryEnded() avec le vrai
+        // tick final au bon moment — exactement comme pour une livraison
+        // normale, jamais de finalisation prise à un instant arbitraire.
         try {
             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbOrph =
                 new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
@@ -895,70 +912,21 @@ public class RegisterTabFragment extends Fragment {
                 try { dbOrph.close(); } catch (Exception ignored) {}
             }
             if (safetyNet == null || safetyNet.jobId == null || safetyNet.jobId.isEmpty()) {
-                return; // rien d'orphelin à finaliser
+                return; // rien d'orphelin à reprendre
             }
             LogBus.api(node, "[FINALISATION-ORPHELINE] ligne filet de sécurité trouvée pour jobId="
-                + safetyNet.jobId + " — registre déjà CONNECTED, la vraie fin a été manquée (probable timeout du sondage)");
-            DeliveryController c = controller;
-            if (c == null) return;
-            String ticketFin = c.api_readTicketNo23Frais();
-            if (ticketFin == null || ticketFin.isEmpty()) ticketFin = lastKnownTicketNo;
-            // ✅ CORRIGÉ (4 sept 2026, demande Paul — "le net et gross n'est
-            // pas le dernier tick du ticket... sans la fiche du wo de
-            // fieldservice j'ai 20.4net 20.7 gross") — trouvé, confirmé par
-            // le JSON réel (net_l=29.9 au lieu de la vraie valeur) :
-            // parseDisplayNet()/parseDisplayGross() lisaient l'affichage UI
-            // (txtQtyNet/txtQtyGross), pas une vraie source fiable — après
-            // un vrai "quit" de l'app, ces champs peuvent contenir une
-            // valeur résiduelle d'un autre mécanisme, pas le vrai dernier
-            // tick de la livraison récupérée. Utilise maintenant le vrai
-            // dernier tick connu du controller.
-            double netFin = c.getLastTickNet();
-            double grossFin = c.getLastTickGross();
-            if (netFin <= 0 && grossFin <= 0) {
-                // Filet de sécurité : si le controller n'a jamais reçu de
-                // tick pour cette session (cas limite), repli sur
-                // l'affichage — mieux qu'un vrai zéro silencieux.
-                netFin = parseDisplayNet();
-                grossFin = parseDisplayGross();
-            }
-            String macFin = (tabTransportKey != null) ? tabTransportKey.trim() : "";
-            org.json.JSONObject extraOrph = new org.json.JSONObject();
-            org.json.JSONObject resultOrph = new org.json.JSONObject();
-            resultOrph.put("ticket_no", ticketFin != null ? ticketFin : "");
-            resultOrph.put("sale_no", ticketFin != null ? ticketFin : "");
-            resultOrph.put("fs_net_l", netFin);
-            resultOrph.put("fs_gross_l", grossFin);
-            // ✅ AJOUTÉ (28 août 2026, demande Paul — "analyse tout ce qui
-            // est nécessaire") — trouvé : resultOrph ne contenait jamais
-            // product_number/preset_requested — onDeliveryEnded()
-            // extrait produitNo depuis result.optInt("product_number", 0),
-            // donc ce chemin recevait toujours produitNo=0. Réutilise
-            // safetyNet (déjà trouvé, avec produit/preset capturés à
-            // l'armement).
-            resultOrph.put("product_number", safetyNet.produitNo);
-            resultOrph.put("preset_requested", safetyNet.presetL);
-            extraOrph.put("result", resultOrph);
-            // ✅ CORRIGÉ (4 sept 2026, demande Paul — même analyse) — trouvé,
-            // confirmé par le JSON réel (job_id absent, preset_requested
-            // incohérent 0 vs 10 nichés) : extraOrph ne mettait jamais
-            // jobId ni preset_requested au niveau racine — onDeliveryEnded()
-            // ne pouvait donc jamais faire upsertByJobId() correctement
-            // pour ce chemin (risque de doublon), et tout code lisant
-            // preset_requested à la racine obtenait 0.
-            extraOrph.put("jobId", safetyNet.jobId);
-            extraOrph.put("preset_requested", safetyNet.presetL);
+                + safetyNet.jobId + " — reprise du vrai suivi (pas de finalisation à la volée)");
+            if (!(getActivity() instanceof MainActivity)) return;
             MainActivity main = (MainActivity) getActivity();
-            if (main != null) {
-                main.onDeliveryEnded(currentWoNum, currentWoIdGuid, extraOrph.toString(),
-                    node, serialFromArgs, macFin);
-                LogBus.api(node, "[FINALISATION-ORPHELINE] onDeliveryEnded appelé — ticket="
-                    + ticketFin + " net=" + netFin + " gross=" + grossFin);
-            }
+            if (main.getDeepLinkHandler() == null) return;
+            String macFin = (tabTransportKey != null) ? tabTransportKey.trim() : "";
+            main.getDeepLinkHandler().pollJobUntilDonePublic(
+                safetyNet.jobId, node, currentWoNum, currentWoIdGuid, serialFromArgs, macFin);
         } catch (Exception e) {
             android.util.Log.w("RegisterTabFragment", "tenterFinalisationLivraisonOrpheline ERR: " + e.getMessage());
         }
     }
+
 
     private void tenterRecuperationRunningFlowing() {
         try {

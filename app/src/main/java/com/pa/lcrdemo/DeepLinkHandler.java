@@ -2939,6 +2939,22 @@ public class DeepLinkHandler {
         retournerFieldService(woNum, woIdGuid, status, extraJson);
     }
 
+    // ✅ AJOUTÉ (4 sept 2026, demande Paul — "tu as dérogé du processus de
+    // livraison... ne pas démarrer de livraison car la on sait qu'il est
+    // en running_flowing") — trouvé, confirmé par log réel : la
+    // finalisation orpheline finalisait immédiatement sur un simple
+    // CONNECTED, sans tenir compte du fait que le registre peut reprendre
+    // RUNNING_FLOWING juste après (même livraison physique continue, pas
+    // vraiment terminée — cycle continue/protocole déjà documenté
+    // ailleurs). Exposé publiquement pour que la finalisation orpheline
+    // reprenne le VRAI suivi (déjà conçu pour ce cas précis — "chemin de
+    // reprise après crash") au lieu de finaliser prématurément sur un
+    // état transitoire.
+    public void pollJobUntilDonePublic(String jobId, int node, String woNum,
+                                        String woIdGuid, String serialId, String mac) {
+        pollJobUntilDone(jobId, node, woNum, woIdGuid, serialId, mac);
+    }
+
     private void retournerFieldService(String woNum, String woIdGuid,
                                         String status, String extraJson) {
         try {
