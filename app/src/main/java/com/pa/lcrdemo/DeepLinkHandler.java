@@ -1040,7 +1040,7 @@ public class DeepLinkHandler {
                 // s'exécutait vraiment. Remplacé par LogBus.api() partout
                 // ici, avec un vrai log dès l'entrée, avant même de savoir
                 // si le dialogue va se déclencher.
-                LogBus.api(node, "[PRESET-CHECK] avant armement — wo=" + woNum + " delCode=0x"
+                com.pa.lcr.lcp.log.LogBus.api(node, "[PRESET-CHECK] avant armement — wo=" + woNum + " delCode=0x"
                     + Integer.toHexString(dcPreArm) + " presetDejaAtteint=" + presetDejaAtteintArm);
                 if (presetDejaAtteintArm) {
                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb statusDbArm =
@@ -1051,16 +1051,16 @@ public class DeepLinkHandler {
                     } finally {
                         try { statusDbArm.close(); } catch (Exception ignored) {}
                     }
-                    LogBus.api(node, "[PRESET-CHECK] getLatestForWo(" + woNum + ") = "
+                    com.pa.lcr.lcp.log.LogBus.api(node, "[PRESET-CHECK] getLatestForWo(" + woNum + ") = "
                         + (existingArm == null ? "AUCUNE ligne trouvée" : "ligne trouvée, ticket=" + existingArm.ticketNo));
                     if (existingArm == null) {
-                        LogBus.api(node, "[PRESET-CHECK] AUCUNE ligne pour wo="
+                        com.pa.lcr.lcp.log.LogBus.api(node, "[PRESET-CHECK] AUCUNE ligne pour wo="
                             + woNum + " — reste d'un AUTRE wo, dialogue non déclenché");
                         presetDejaAtteintArm = false;
                     }
                 }
                 if (presetDejaAtteintArm) {
-                    LogBus.api(node, "[PRESET-CHECK] DÉCLENCHEMENT du dialogue (delCode=0x"
+                    com.pa.lcr.lcp.log.LogBus.api(node, "[PRESET-CHECK] DÉCLENCHEMENT du dialogue (delCode=0x"
                         + Integer.toHexString(dcPreArm) + ") — confirmation requise avant armement");
                     final java.util.concurrent.CountDownLatch latchPresetArm = new java.util.concurrent.CountDownLatch(1);
                     final boolean[] continuerPresetArm = {false};
