@@ -334,104 +334,51 @@ public class RegisterTabFragment extends Fragment {
             }
             if (!verifierIoAvantAction("LANCER_LIVRAISON")) return;
 
-            // ✅ Activer le transport du tab AVANT oneshot
+            // ✅ CORRIGÉ (4 sept 2026, demande Paul — "je le ferai passer
+            // par la même place... il peut sauter la partie pour activer
+            // le tab dans lancerLivraison() car il vient de le faire") —
+            // trouvé, en creusant plus loin : cette fonction armait
+            // DIRECTEMENT (api_deliveryOneShotStart) PUIS renvoyait un
+            // deep link à elle-même "pour poll FSM" — un vrai DOUBLE
+            // armement pour la même livraison (une fois ici, une
+            // deuxième fois quand ce deep link relancé déclenchait
+            // lancerLivraison() à son tour). Simplifié : n'arme plus
+            // jamais directement — prépare et envoie seulement le deep
+            // link, qui fait tout le travail (validation produit,
+            // sale_number, preset, activation transport — idempotente,
+            // vérifiée sûre à rappeler — puis le vrai armement) via le
+            // même chemin unifié que new C et le deep link authentique.
             try {
-                if (tabTransportKey != null)
-                    MediaTransportManager.get(requireContext())
-                        .activateExclusive(tabTransportKey, "LANCER_LIVRAISON");
-            } catch (Exception ignored) {}
-
-            // ✅ Appel direct sur le controller du tab — un seul socket
-            new Thread(() -> {
-                // ✅ (4 août 2026, demande Paul) — même garde que DeepLinkHandler
-                // .lancerLivraison() : si le scan auto produits est encore en
-                // cours pour CE tab (donc un tab qui vient d'être créé — sinon
-                // le scan ne serait pas armé/en vol), attendre sa fin avant de
-                // démarrer. Sur un tab déjà existant, isAutoProductScanBusy()
-                // est déjà false ici — aucun délai. Max 10s, best-effort.
-                // ✅ CORRIGÉ (28 août 2026, demande Paul — "je n'ai pas la
-                // bonne place... j'ai le même comportement, revoit le
-                // init, c'est là que ça se passe") — trouvé : une
-                // TROISIÈME fonction séparée (lancerDepuisStore, celle-
-                // ci), jamais corrigée en même temps que
-                // DeepLinkHandler.lancerLivraison() — même trou exact :
-                // vérifiait seulement "un scan est en cours"
-                // (isAutoProductScanBusy), pas "la validation a vraiment
-                // conclu" (produitVerificationTerminee), et continuait
-                // quand même après le timeout de 10s. Ici : accès direct
-                // aux drapeaux (même classe, pas besoin de getter) — vrai
-                // refus si pas validé, ou si mauvais produit détecté.
-                // ✅ CORRIGÉ (28 août 2026, demande Paul — "respecte les
-                // étapes du init de 1 à 7") — utilise maintenant la même
-                // fonction centrale que le bouton local
-                // (peutDemarrerLivraison(), corrigée juste au-dessus pour
-                // vérifier le VRAI drapeau produitVerificationTerminee) —
-                // au lieu d'une logique de vérification ad hoc, séparée
-                // et incomplète (isAutoProductScanBusy() seul, plus
-                // "continue quand même" après timeout).
-                boolean toutesLesEtapesApprouvees = false;
-                for (int i = 0; i < 100; i++) {
-                    if (peutDemarrerLivraison()) { toutesLesEtapesApprouvees = true; break; }
-                    try { Thread.sleep(100); } catch (Exception ignored) {}
-                }
-                android.util.Log.i("RegisterTabFragment",
-                    "lancerDepuisStore: attente approbation des 7 étapes — "
-                        + (toutesLesEtapesApprouvees ? "approuvées" : "timeout 10s — ARMEMENT REFUSÉ ("
-                            + initSectionStatus.toString() + ")"));
-                if (!toutesLesEtapesApprouvees) {
-                    ui.post(() -> android.widget.Toast.makeText(requireContext(),
-                        "Livraison refusée — initialisation non complétée (produit/preset/registre). Réessayez.",
-                        android.widget.Toast.LENGTH_LONG).show());
-                    return;
-                }
-                if (produitDeepLinkIntrouvableRaison != null && !produitDeepLinkIntrouvableRaison.isEmpty()) {
-                    final String raisonMismatchStore = produitDeepLinkIntrouvableRaison;
-                    android.util.Log.w("RegisterTabFragment", "lancerDepuisStore: REFUS armement — mismatch produit: " + raisonMismatchStore);
-                    ui.post(() -> android.widget.Toast.makeText(requireContext(),
-                        "Livraison refusée — " + raisonMismatchStore,
-                        android.widget.Toast.LENGTH_LONG).show());
-                    return;
-                }
-                try {
-                    com.pa.lcr.lcp.ApiResult r = controller.api_deliveryOneShotStart(
-                        fWoNum, fProduit, fPreset, null);
-
-                    android.util.Log.i("RegisterTabFragment",
-                        "lancerDepuisStore oneshot: code=" + r.code + " msg=" + r.msg);
-
-                    final com.pa.lcr.lcp.ApiResult fR = r;
-                    if (r.code == 1) {
-                        // ✅ Succès — relancer deep link pour poll FSM
-                        ui.post(() -> {
-                            try {
-                                android.net.Uri uri = android.net.Uri.parse(
-                                    "lcrdemo://livraison"
-                                    + "?wonum="    + android.net.Uri.encode(fWoNum)
-                                    + "&woid="     + android.net.Uri.encode(fWoIdGuid)
-                                    + "&btmac="    + android.net.Uri.encode(fMac)
-                                    + "&serialid=" + android.net.Uri.encode(fSerialId)
-                                    + "&lcrnode="  + fNode
-                                    + "&produit="  + fProduit
-                                    + "&preset="   + (int) fPreset
-                                    + "&orgurl="   + android.net.Uri.encode(
-                                        com.pa.lcrdemo.config.LcrConfig.getDataverseUrl(requireContext())));
-                                android.content.Intent intent = new android.content.Intent(
-                                    android.content.Intent.ACTION_VIEW, uri);
-                                intent.setPackage(requireContext().getPackageName());
-                                requireContext().startActivity(intent);
-                            } catch (Exception ignored) {}
-                        });
-                    } else {
-                        ui.post(() -> android.widget.Toast.makeText(requireContext(),
-                            "Échec démarrage: " + fR.msg,
-                            android.widget.Toast.LENGTH_LONG).show());
-                    }
-                } catch (Exception e) {
-                    android.util.Log.e("RegisterTabFragment",
-                        "lancerDepuisStore ERR: " + e.getMessage());
-                    ui.post(() -> surErreurConnexion(e, "LANCER_LIVRAISON"));
-                }
-            }).start();
+                android.net.Uri uri = android.net.Uri.parse(
+                    "lcrdemo://livraison"
+                    + "?wonum="    + android.net.Uri.encode(fWoNum)
+                    + "&woid="     + android.net.Uri.encode(fWoIdGuid)
+                    + "&btmac="    + android.net.Uri.encode(fMac)
+                    + "&serialid=" + android.net.Uri.encode(fSerialId)
+                    + "&lcrnode="  + fNode
+                    + "&produit="  + fProduit
+                    + "&preset="   + (int) fPreset
+                    + "&orgurl="   + android.net.Uri.encode(
+                        com.pa.lcrdemo.config.LcrConfig.getDataverseUrl(requireContext())));
+                android.content.Intent intent = new android.content.Intent(
+                    android.content.Intent.ACTION_VIEW, uri);
+                intent.setPackage(requireContext().getPackageName());
+                requireContext().startActivity(intent);
+                // ✅ CORRIGÉ (4 sept 2026, demande Paul — "j'ai quand même
+                // besoin de la trace dans support") — même erreur déjà
+                // apprise aujourd'hui : android.util.Log est invisible
+                // dans la trace support (LogBus). Tag distinctif pour
+                // identifier clairement ce chemin précis (reprise via
+                // ActiveDeliveryStore), pas confondu avec un vrai deep
+                // link externe de FieldService.
+                LogBus.api(node, "[LANCER-DEPUIS-STORE] deep link envoyé (armement unique, ex-double appel corrigé) — wo="
+                    + fWoNum + " ticket/produit=" + fProduit + " preset=" + fPreset);
+            } catch (Exception e) {
+                android.util.Log.e("RegisterTabFragment",
+                    "lancerDepuisStore ERR: " + e.getMessage());
+                LogBus.api(node, "[LANCER-DEPUIS-STORE] ERR: " + e.getMessage());
+                ui.post(() -> surErreurConnexion(e, "LANCER_LIVRAISON"));
+            }
 
         } catch (Exception e) {
             android.util.Log.e("RegisterTabFragment",
@@ -656,7 +603,12 @@ public class RegisterTabFragment extends Fragment {
     // jamais directement, pour garantir qu'il se pose sur TOUS les
     // chemins de sortie de autoScanProduitsSiNecessaire(), même
     // asynchrones.
-    private volatile boolean produitVerificationTerminee = false;
+    // ✅ RENDU ACCESSIBLE (4 sept 2026, demande Paul — "assure-toi qu'aucun
+    // processus passe par dessus un autre") — ce garde existait déjà pour
+    // new C (via peutDemarrerLivraison()), mais lancerLivraison() (chemin
+    // deep link) ne le vérifiait jamais — c'est pour ça que la course sur
+    // le produit ne touchait que le deep link, jamais new C.
+    volatile boolean produitVerificationTerminee = false;
 
     // ✅ AJOUTÉ (28 août 2026, demande Paul — "pas encore réglé le produit
     // avant le running flowing") — expose ce drapeau à DeepLinkHandler.
@@ -5649,6 +5601,50 @@ public class RegisterTabFragment extends Fragment {
         // venir que d'un reste physique du registre appartenant à une
         // AUTRE livraison, pas pertinent pour un armement qui n'a pas
         // encore eu lieu. Même raison que le retrait côté deep link.
+        // ✅ RECONSTRUIT (4 sept 2026, demande Paul — "si on fait new C,
+        // valider le preset contre la lecture actuelle du registre. Si <
+        // que preset alors arme directement. Sinon avertis avant
+        // d'armer.") — vrai bon endroit cette fois : SEULEMENT ici, dans
+        // new C (jamais le deep link, qui vient déjà avec une vraie
+        // demande légitime de FieldService) — en séquence stricte, juste
+        // avant l'armement, corrélé au bon WO (pas un reste d'un autre).
+        boolean presetDejaAtteintNewC =
+            (dc & com.pa.lcr.lcp.LcpLink.DC_NET_PRESET_REACHED) != 0
+            || (dc & com.pa.lcr.lcp.LcpLink.DC_GROSS_PRESET_REACHED) != 0;
+        if (presetDejaAtteintNewC) {
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb statusDbNewC =
+                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow existingNewC;
+            try {
+                existingNewC = statusDbNewC.getLatestForWo(currentWoNum);
+            } finally {
+                try { statusDbNewC.close(); } catch (Exception ignored) {}
+            }
+            LogBus.api(node, "[PRESET-CHECK] new C — wo=" + currentWoNum + " delCode=0x"
+                + Integer.toHexString(dc) + " " + (existingNewC == null ? "AUCUNE ligne — reste d'un autre wo, non déclenché" : "ligne trouvée ticket=" + existingNewC.ticketNo));
+            if (existingNewC == null) {
+                presetDejaAtteintNewC = false;
+            }
+        }
+        if (presetDejaAtteintNewC) {
+            final int dcFinal = dc;
+            new android.app.AlertDialog.Builder(requireContext())
+                .setTitle("Preset déjà atteint")
+                .setMessage("Le registre indique que le preset est déjà atteint"
+                    + " (reste d'une livraison précédente non effacée).\n\n"
+                    + "Voulez-vous quand même armer une nouvelle livraison ?")
+                .setPositiveButton("Continuer", (d, w) -> {
+                    LogBus.api(node, "[PRESET-CHECK] new C — chauffeur a choisi CONTINUER (delCode=0x"
+                        + Integer.toHexString(dcFinal) + ")");
+                    startNewDeliveryCApresVerifPreset();
+                })
+                .setNegativeButton("Annuler", (d, w) ->
+                    LogBus.api(node, "[PRESET-CHECK] new C — chauffeur a choisi ANNULER (delCode=0x"
+                        + Integer.toHexString(dcFinal) + ")"))
+                .setCancelable(false)
+                .show();
+            return;
+        }
         startNewDeliveryCApresVerifPreset();
     }
 
