@@ -1096,6 +1096,22 @@ public class DeepLinkHandler {
                 android.util.Log.w(TAG, "lancerLivraison: erreur vérif preset atteint — " + ePresetArm.getMessage());
             }
 
+            // ✅ AJOUTÉ (4 sept 2026, demande Paul — "corrige ça", confirmé
+            // par log réel LogBus : applierDescriptionsProduits() interrompue
+            // en plein vol, seulement 472ms après son début, avant l'armement
+            // physique) — cette résolution tourne en fire-and-forget
+            // (safeBg), jamais attendue par l'armement. Vraie attente
+            // courte ici, bornée (jamais indéfinie), avant de procéder —
+            // laisse une vraie chance à la résolution de finir.
+            if (tabArmRef != null && !tabArmRef.produitDejaResoluPourCetteSession) {
+                for (int iAttenteProduit = 0; iAttenteProduit < 8; iAttenteProduit++) { // ~800ms max
+                    if (tabArmRef.produitDejaResoluPourCetteSession) break;
+                    try { Thread.sleep(100); } catch (InterruptedException ignored) { break; }
+                }
+                com.pa.lcr.lcp.log.LogBus.api(node, "[PRODUIT-ATTENTE] avant armement — résolu="
+                    + tabArmRef.produitDejaResoluPourCetteSession);
+            }
+
             if (tabArmRef != null) {
                 tabArmRef.armementEnCoursParCetteSession = true;
                 // ✅ AJOUTÉ (2 sept 2026, en validant mon propre correctif)

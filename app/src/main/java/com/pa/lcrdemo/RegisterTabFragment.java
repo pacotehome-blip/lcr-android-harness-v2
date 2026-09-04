@@ -621,7 +621,13 @@ public class RegisterTabFragment extends Fragment {
     // données), plus besoin de re-vérifier à chaque changement de ticket —
     // le produit dans la citerne ne change pas d'une livraison à l'autre
     // sur le même camion.
-    private volatile boolean produitDejaResoluPourCetteSession = false;
+    // ✅ RENDU ACCESSIBLE (4 sept 2026, demande Paul — "corrige ça" — la
+    // course où applierDescriptionsProduits() est interrompue en plein
+    // vol par un armement trop rapide) — permet à lancerLivraison()
+    // (DeepLinkHandler, même package) d'attendre vraiment ce signal
+    // avant l'armement physique, au lieu de foncer sans savoir si la
+    // résolution produit a eu le temps de finir.
+    volatile boolean produitDejaResoluPourCetteSession = false;
     // ✅ AJOUTÉ (28 août 2026, demande Paul — "on va ajouter le ticket de
     // livraison en table avec le statut running_flowing... si jamais on a
     // un crash une réinstallation on veut être en mesure de la reprendre
@@ -5635,31 +5641,14 @@ public class RegisterTabFragment extends Fragment {
             updateButtons(controller.getState());
             return;
         }
-        // ✅ AJOUTÉ (2 sept 2026, demande Paul — "quand on fait new c il doit
-        // aussi le demander") — même vérification que lancerLivraison()
-        // côté deep link : si le registre montre déjà preset atteint (reste
-        // d'une livraison précédente non effacée), avertir avant d'armer.
-        // Thread UI ici (pas de latch.await bloquant comme côté deep link,
-        // qui tourne en arrière-plan) — dialogue asynchrone, continue via
-        // callback dans startNewDeliveryCApresVerifPreset().
-        boolean presetDejaAtteintC =
-            (dc & com.pa.lcr.lcp.LcpLink.DC_NET_PRESET_REACHED) != 0
-            || (dc & com.pa.lcr.lcp.LcpLink.DC_GROSS_PRESET_REACHED) != 0;
-        if (presetDejaAtteintC) {
-            LogBus.api(node, "[ACTION-CLIC] NEW_C — preset déjà atteint (delCode=0x"
-                + Integer.toHexString(dc) + ") — confirmation requise");
-            new android.app.AlertDialog.Builder(requireContext())
-                .setTitle("Preset déjà atteint")
-                .setMessage("Le registre indique que le preset est déjà atteint"
-                    + " (reste d'une livraison précédente non effacée).\n\n"
-                    + "Voulez-vous quand même armer une nouvelle livraison ?")
-                .setPositiveButton("Continuer", (d, w) -> startNewDeliveryCApresVerifPreset())
-                .setNegativeButton("Annuler", (d, w) ->
-                    LogBus.api(node, "[ACTION-CLIC] NEW_C — annulé par le chauffeur (preset déjà atteint)"))
-                .setCancelable(false)
-                .show();
-            return;
-        }
+        // ❌ RETIRÉ (4 sept 2026, demande Paul — "il ne devrait pas être là
+        // tant que nous n'avons pas passé au travers des 7 inits et avoir
+        // démarré une nouvelle livraison") — ce check se déclenchait AVANT
+        // l'armement — à ce moment, aucune nouvelle livraison n'existe
+        // encore pour ce WO, donc tout bit "preset atteint" lu ici ne peut
+        // venir que d'un reste physique du registre appartenant à une
+        // AUTRE livraison, pas pertinent pour un armement qui n'a pas
+        // encore eu lieu. Même raison que le retrait côté deep link.
         startNewDeliveryCApresVerifPreset();
     }
 
@@ -5696,6 +5685,17 @@ public class RegisterTabFragment extends Fragment {
             }
         } catch (Exception ignored) {}
 
+        // ❌ RETIRÉ (4 sept 2026, demande Paul — "juste avant l'armement car
+        // là on a un nouveau delivery-uid c'est clair ça non??") — ma
+        // version "après armement" ici était redondante et au mauvais
+        // endroit : startNewDeliveryCApresVerifPreset() appelle
+        // lancerLivraisonDepuisTab() → DeepLinkHandler.lancerLivraison() —
+        // le même chemin unifié que le deep link (confirmé plus tôt
+        // aujourd'hui). Le vrai check "preset déjà atteint" est maintenant
+        // dans lancerLivraison() lui-même (juste après le garde-fou
+        // sale_number, juste avant l'armement) — il couvre donc déjà
+        // automatiquement le bouton C, sans avoir besoin de sa propre
+        // vérification séparée ici.
         String tk = (tabTransportKey != null) ? tabTransportKey.trim() : "";
         main.lancerLivraisonDepuisTab(tk, node, serialFromArgs,
             currentWoNum, currentWoIdGuid, String.valueOf(prod), presetStr, "");
