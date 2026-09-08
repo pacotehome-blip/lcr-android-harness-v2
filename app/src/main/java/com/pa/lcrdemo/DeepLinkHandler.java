@@ -261,8 +261,12 @@ public class DeepLinkHandler {
                             activity.toast("⚠️ Livraison " + activeWo
                                 + " en cours — la demande pour " + woNum + " a été refusée");
                             try {
-                                String mediaShortRefus = activity.mediaShortFromTransportKey(transportKey);
-                                String tabKeyRefus = activity.tabKeyOf(mediaShortRefus, node, fSerialId);
+                                int nodeRefus = active.node > 0 ? active.node : (lcrnode != null ? lcrnode : 250);
+                                String transportKeyRefus = (active.mac != null && !active.mac.isEmpty())
+                                    ? com.pa.lcr.lcp.transport.MediaTransportManager.btKey(active.mac) : null;
+                                if (transportKeyRefus == null) return;
+                                String mediaShortRefus = activity.mediaShortFromTransportKey(transportKeyRefus);
+                                String tabKeyRefus = activity.tabKeyOf(mediaShortRefus, nodeRefus, fSerialId);
                                 Fragment fRefus = activity.getSupportFragmentManager()
                                     .findFragmentByTag("regtab_" + tabKeyRefus);
                                 if (fRefus instanceof RegisterTabFragment) {
