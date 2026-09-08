@@ -2848,6 +2848,26 @@ public class RegisterTabFragment extends Fragment {
             produitDejaResoluPourCetteSession = false;
             produitVerificationTerminee = false;
             LogBus.api(node, "[PRODUIT] revalidation forcée — nouveau deep link (woIdGuid=" + woIdGuid + "), le produit peut différer de la livraison précédente");
+            // ✅ AJOUTÉ (8 sept 2026, demande Paul — "un nouveau wo ne
+            // devrait pas avoir de dispute entre lui et l'autre, le nouveau
+            // doit réinitialiser avec sa livraison") — trouvé : remettre
+            // ces deux drapeaux à false ne suffisait pas — rien ne
+            // relançait jamais le vrai scan derrière. isPeutDemarrerLivraison()
+            // (sondée par DeepLinkHandler.lancerLivraison()) ne fait que
+            // LIRE produitVerificationTerminee, elle ne le fait jamais
+            // avancer elle-même. Sans cet appel, le poll restait bloqué à
+            // "pas prêt" indéfiniment (10s) → refus INIT_NON_APPROUVEE —
+            // ou, pire, lisait encore l'ancienne valeur "true" si ce reset
+            // arrivait après coup (c'était le vrai bug). Le reset et le
+            // redéclenchement doivent être le même geste atomique, pour
+            // qu'un nouveau WO obtienne toujours un vrai nouveau cycle
+            // complet (REGISTRE→PRODUIT→COMPARAISON_TICKET→PRESET→LIVE→
+            // RETOUR_WO→ACTION), que le tab soit neuf ou déjà actif —
+            // jamais l'état hérité de la livraison précédente sur ce même
+            // tab. runInitSequence() a déjà son propre garde de
+            // réentrance (initSequenceRunning) — aucun risque de double
+            // exécution si un cycle est déjà en cours.
+            runInitSequence();
         }
         if (woNum != null && !woNum.isEmpty()) {
             currentWoNum = woNum;

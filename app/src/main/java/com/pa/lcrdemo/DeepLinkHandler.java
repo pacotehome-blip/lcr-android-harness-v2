@@ -647,7 +647,25 @@ public class DeepLinkHandler {
                             } catch (Exception ignored) {}
                         }
                     };
-                    activity.getUiHandler().postDelayed(prefill, 1200);
+                    // ✅ CORRIGÉ (8 sept 2026, demande Paul — "un nouveau wo
+                    // ne devrait pas avoir de dispute entre lui et l'autre,
+                    // le nouveau doit réinitialiser avec sa livraison") —
+                    // trouvé : ce délai de 1200ms n'a de raison d'être que
+                    // si le tab vient d'être créé (fTabWasNew) — le temps
+                    // qu'il existe vraiment dans le FragmentManager. Sur un
+                    // tab DÉJÀ actif (2e+ deep link, même tab), le fragment
+                    // est trouvable immédiatement — attendre quand même
+                    // ouvrait une vraie fenêtre de course : le thread
+                    // d'armement (isPeutDemarrerLivraison(), sondé dès
+                    // maintenant à 100ms) lisait un état laissé par le WO
+                    // PRÉCÉDENT avant que ce Runnable n'ait la chance de le
+                    // réinitialiser. Appel synchrone immédiat dans ce cas —
+                    // aucun risque d'échec puisque le fragment existe déjà.
+                    if (fTabWasNew) {
+                        activity.getUiHandler().postDelayed(prefill, 1200);
+                    } else {
+                        prefill.run();
+                    }
                     activity.refreshAllTabsMediaStatus();
                     activity.showPage(0);
                 }
