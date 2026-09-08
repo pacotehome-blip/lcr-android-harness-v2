@@ -257,16 +257,16 @@ public class DeepLinkHandler {
                         // nouveau deep link n'a rien fait. Le tab affiche
                         // maintenant ce refus dans son statut live, visible
                         // tant que la livraison en cours n'est pas terminée.
+                        final int fNodeRefus = active.node > 0 ? active.node : (lcrnode != null ? lcrnode : 250);
                         activity.runOnUiThread(() -> {
                             activity.toast("⚠️ Livraison " + activeWo
                                 + " en cours — la demande pour " + woNum + " a été refusée");
                             try {
-                                int nodeRefus = active.node > 0 ? active.node : (lcrnode != null ? lcrnode : 250);
                                 String transportKeyRefus = (active.mac != null && !active.mac.isEmpty())
                                     ? com.pa.lcr.lcp.transport.MediaTransportManager.btKey(active.mac) : null;
                                 if (transportKeyRefus == null) return;
                                 String mediaShortRefus = activity.mediaShortFromTransportKey(transportKeyRefus);
-                                String tabKeyRefus = activity.tabKeyOf(mediaShortRefus, nodeRefus, fSerialId);
+                                String tabKeyRefus = activity.tabKeyOf(mediaShortRefus, fNodeRefus, fSerialId);
                                 Fragment fRefus = activity.getSupportFragmentManager()
                                     .findFragmentByTag("regtab_" + tabKeyRefus);
                                 if (fRefus instanceof RegisterTabFragment) {
