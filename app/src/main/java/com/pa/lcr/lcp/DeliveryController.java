@@ -4337,24 +4337,30 @@ job.presetNetL_requested = presetNetL;
                 });
             }
 
-            // ✅ CORRIGÉ (28 août 2026, demande Paul — "on démarre le
-            // running_flowing à waiting" / "setState(RUNNING_FLOWING)
-            // directement dans api_deliveryOneShotStart dès l'armement
-            // réussi") — avant, l'armement mettait state=CONNECTED, et
-            // seul le VRAI CMD_RUN (dans api_deliveryContinue(), appelé
-            // séparément, parfois 5-7s plus tard sous contention — confirmé
-            // par log réel : ARMED à 58.157s, RUN envoyé seulement à
-            // 03.862s) mettait RUNNING_FLOWING. Pendant toute cette
-            // fenêtre, l'écran affichait légitimement "CONNECTED — prêt",
-            // ce qui ressemblait à un flottement d'état vu du chauffeur.
-            // ⚠️ RISQUE CONNU, à surveiller au prochain test : setState
-            // (RUNNING_FLOWING) démarre IMMÉDIATEMENT le tick rapide ET le
-            // superviseur (voir setState() plus haut) — ils vont donc
-            // commencer à tourner ~5-7s plus tôt qu'avant, pile pendant la
-            // fenêtre où CMD_RUN lui-même se bat déjà contre la contention
-            // documentée (BUSY, verrou attendu 2.7s) — risque réel
-            // d'aggraver cette contention plutôt que de l'alléger.
-            setState(DeliveryState.RUNNING_FLOWING);
+            // ❌ RETIRÉ (8 sept 2026, demande Paul — "on veut toujours
+            // respecter le processus de livraison... je ne veux plus avoir
+            // à faire status quand je sais que je suis en running_flowing")
+            // — ce setState optimiste (28 août) réglait un vrai problème
+            // (écran figé sur CONNECTED pendant 5-7s entre ARMED et le
+            // vrai CMD_RUN) mais en créait un autre, confirmé par deux
+            // vraies sessions de terrain : le registre rapporte parfois
+            // brièvement RUNNING_FLOWING avec les net/gross RÉSIDUELS de
+            // la livraison précédente (pas encore remis à zéro), ce qui
+            // déclenchait un faux [DÉBUT-LIVRAISON] suivi d'un faux
+            // "fin de livraison" 2s plus tard — sans qu'aucun vrai flux
+            // n'ait jamais coulé. Le chauffeur voyait alors RUNNING_FLOWING
+            // puis CONNECTÉ, sans comprendre, et devait forcer Status pour
+            // enfin voir le vrai démarrage. Cette fonction-ci (nouveau
+            // jobId créé juste au-dessus) SAIT avec certitude qu'elle arme
+            // du neuf — jamais une reprise — donc il n'y a aucune raison
+            // légitime de recopier un net/gross résiduel ici. Remplacé par
+            // un vrai statut "armé, en attente" (onLiveStatus seul, sans
+            // changer `state`) — l'écran reste vivant sans mentir sur
+            // l'état. Le vrai RUNNING_FLOWING se déclenche maintenant
+            // exclusivement via les chemins déjà existants et fiables :
+            // détection réelle du flux (sawFlowOnOnce, plus bas) ou envoi
+            // réel de CMD_RUN (api_deliveryContinue()) — jamais avant.
+            if (listener != null) listener.onLiveStatus("LIVE: ARMÉ — départ imminent (en attente du vrai flux)");
 
             // ✅ VÉRIFICATION EMPIRIQUE — lire net/gross juste après l'armement
             // (writePresetNet), avant tout CMD_RUN, pour savoir si le compteur est
@@ -4402,9 +4408,11 @@ job.presetNetL_requested = presetNetL;
             safeJsonPut(data, "preset_applied", presetApplied);
             safeJsonPut(data, "decimals", cachedDigits);
             safeJsonPut(data, "armed", 1);
-            // ✅ CORRIGÉ (28 août 2026) — cohérent avec setState(RUNNING_FLOWING)
-            // juste au-dessus, au lieu de coder en dur CONNECTED alors que
-            // l'état réel du contrôleur vient de changer.
+            // ✅ CORRIGÉ (8 sept 2026) — state.name() reste honnête ici :
+            // depuis le retrait du setState(RUNNING_FLOWING) optimiste
+            // ci-dessus, ce champ reflète le VRAI état du contrôleur au
+            // moment de l'armement (généralement encore CONNECTED, en
+            // attente du vrai CMD_RUN) — jamais forcé.
             safeJsonPut(data, "state", state.name());
             safeJsonPut(data, "live_status", liveStatusArmed());
             safeJsonPut(data, "available_actions", actionsContinueTerminate());
