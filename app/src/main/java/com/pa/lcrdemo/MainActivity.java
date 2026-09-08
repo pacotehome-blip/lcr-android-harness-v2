@@ -1090,7 +1090,7 @@ public class MainActivity extends AppCompatActivity {
             // est bloquée) et le clic ne peut jamais arriver — auto-blocage garanti.
             // Partout ailleurs dans le code, cet appel est fait via new Thread(...) —
             // ce point d'entrée était le seul oublié.
-            new Thread(() -> deepLinkHandler.lancerLivraison(transportKey, node, serialId,
+            new Thread(() -> deepLinkHandler.lancerLivraisonDepuisNewC(transportKey, node, serialId,
                 woNum, woIdGuid, produit, presetStr, mac)).start();
         }
     }

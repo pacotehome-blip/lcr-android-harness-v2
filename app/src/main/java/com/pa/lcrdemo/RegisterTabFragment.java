@@ -557,6 +557,12 @@ public class RegisterTabFragment extends Fragment {
     // onTabActivated() ne lance runInitSequence() que si ce drapeau est
     // faux, laissant lancerLivraison() terminer son travail en paix.
     public volatile boolean armementEnCoursParCetteSession = false;
+    // ✅ AJOUTÉ (8 sept 2026, demande Paul — "avertir comment en cours
+    // par deeplink, vs new c") — identifie QUI a posé
+    // armementEnCoursParCetteSession, pour que le chemin refusé (deep
+    // link ou New C) puisse afficher un vrai message distinguant les
+    // deux, au lieu d'un refus générique.
+    public volatile String armementEnCoursSource = null;
     // ✅ AJOUTÉ (4 sept 2026) — évite de redéclencher le filet CONNECTED à
     // chaque rappel onStateChanged tant qu'on reste dans le même état.
     private volatile boolean finalisationFiletCetteTransition = false;
@@ -5656,6 +5662,26 @@ public class RegisterTabFragment extends Fragment {
 
     private void startNewDeliveryC() {
         if (controller == null) return;
+        // ✅ AJOUTÉ (8 sept 2026, demande Paul — "il se passe un temps
+        // qu'on est incertain si oui ou non on a un deeplink en cours et
+        // actif... avertir comment en cours par deeplink, vs new c") —
+        // trouvé : New C et le deep link convergent tous deux vers
+        // DeepLinkHandler.lancerLivraison() (via
+        // lancerLivraisonDepuisTab()), mais armementEnCoursParCetteSession
+        // n'était vérifié nulle part ici avant de foncer. Confirmé par un
+        // vrai log : un clic New C suivi ~2s plus tard d'un deep link pour
+        // le même WO ont armé en parallèle, sans se voir. Refuse
+        // proprement maintenant, avec la vraie source.
+        if (armementEnCoursParCetteSession) {
+            String sourceEnCours = armementEnCoursSource != null ? armementEnCoursSource : "une autre livraison";
+            String sourceAffichee = "DEEPLINK".equals(sourceEnCours) ? "deep link" : "New C";
+            LogBus.api(node, "[ACTION-CLIC] NEW_C — refusé: armement déjà en cours (" + sourceAffichee + ")");
+            if (ui != null) {
+                final String msg = "Armement déjà en cours par " + sourceAffichee + " — patiente";
+                ui.post(() -> android.widget.Toast.makeText(getContext(), msg, android.widget.Toast.LENGTH_SHORT).show());
+            }
+            return;
+        }
         // ❌ RETIRÉ (4 sept 2026, demande Paul — "il peut arriver que le
         // livreur provoque une livraison sans wo. mais plus tard dans
         // fieldservice, la répartition va prendre le registre et #série

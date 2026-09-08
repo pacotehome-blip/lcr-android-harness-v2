@@ -511,6 +511,26 @@ public class DeepLinkHandler {
                                   String woNum, String woIdGuid,
                                   String produit, String presetStr, String mac,
                                   boolean skipConnexionCheck) {
+        lancerLivraison(transportKey, node, serialId, woNum, woIdGuid,
+            produit, presetStr, mac, skipConnexionCheck, "DEEPLINK");
+    }
+
+    // ✅ AJOUTÉ (8 sept 2026, demande Paul — "avertir comment en cours par
+    // deeplink, vs new c") — New C (via MainActivity.lancerLivraisonDepuisTab())
+    // et le deep link convergent tous deux vers CETTE méthode. sourceOrigine
+    // distingue les deux pour le garde-fou "armement déjà en cours"
+    // ci-dessous, et pour tout message affiché à l'opérateur.
+    public void lancerLivraisonDepuisNewC(String transportKey, int node, String serialId,
+                                  String woNum, String woIdGuid,
+                                  String produit, String presetStr, String mac) {
+        lancerLivraison(transportKey, node, serialId, woNum, woIdGuid,
+            produit, presetStr, mac, false, "NEW_C");
+    }
+
+    private void lancerLivraison(String transportKey, int node, String serialId,
+                                  String woNum, String woIdGuid,
+                                  String produit, String presetStr, String mac,
+                                  boolean skipConnexionCheck, String sourceOrigine) {
         // ✅ FIX : vérifier AVANT de toucher au tab — l'ancien code rafraîchissait
         // l'UI (upsertRegisterTabFromScan / showPage) même quand un poll était
         // déjà actif, ce qui faisait apparaître le tab en "CONNECTED — prêt"
@@ -589,6 +609,50 @@ public class DeepLinkHandler {
             tabWasNewBeforeThisCall = false;
         }
         final boolean fTabWasNew = tabWasNewBeforeThisCall;
+
+        // ✅ AJOUTÉ (8 sept 2026, demande Paul — "il se passe un temps
+        // qu'on est incertain si oui ou non on a un deeplink en cours et
+        // actif") — trouvé, confirmé par log réel : armementEnCoursParCetteSession
+        // n'était posé que juste avant api_deliveryOneShotStart(), bien
+        // après la résolution transport/produit/sale_number (plusieurs
+        // secondes). New C et le deep link convergent tous deux vers cette
+        // méthode (New C via lancerLivraisonDepuisNewC()) mais aucun des
+        // deux ne pouvait voir que l'autre était déjà en train de s'armer
+        // pendant cette fenêtre — un clic New C suivi ~2s plus tard d'un
+        // deep link pour le même WO se sont armés en parallèle, sans se
+        // voir, laissant le registre dans un état résiduel non nettoyé.
+        // Posé maintenant le plus tôt possible, avec la vraie source — le
+        // deuxième arrivant se fait refuser proprement au lieu de foncer
+        // en parallèle.
+        RegisterTabFragment tabArmEarlyRef = null;
+        try {
+            String mediaShortEarly = activity.mediaShortFromTransportKey(transportKey);
+            String tabKeyEarly = activity.tabKeyOf(mediaShortEarly, node, fSerialId);
+            Fragment fEarly = activity.getSupportFragmentManager().findFragmentByTag("regtab_" + tabKeyEarly);
+            if (fEarly instanceof RegisterTabFragment) tabArmEarlyRef = (RegisterTabFragment) fEarly;
+        } catch (Exception ignoredEarly) {}
+        if (tabArmEarlyRef != null) {
+            if (tabArmEarlyRef.armementEnCoursParCetteSession) {
+                String sourceEnCours = tabArmEarlyRef.armementEnCoursSource != null
+                    ? tabArmEarlyRef.armementEnCoursSource : "une autre livraison";
+                String sourceAffichee = "DEEPLINK".equals(sourceEnCours) ? "deep link" : "New C";
+                android.util.Log.w(TAG, "lancerLivraison: REFUS — armement déjà en cours (" + sourceAffichee + ")");
+                com.pa.lcr.lcp.log.LogBus.api(node, "[ARMEMENT] refusé (" + sourceOrigine + ") — déjà en cours par " + sourceAffichee);
+                activity.runOnUiThread(() -> activity.toast("⏳ Armement déjà en cours (" + sourceAffichee + ") — patiente"));
+                if ("DEEPLINK".equals(sourceOrigine)) {
+                    retournerFieldService(woNum, woIdGuid, "erreur_armement_en_cours",
+                        buildErrorJson("ARMEMENT_EN_COURS", "Un armement est déjà en cours (" + sourceAffichee + ")"));
+                }
+                return;
+            }
+            tabArmEarlyRef.armementEnCoursParCetteSession = true;
+            tabArmEarlyRef.armementEnCoursSource = sourceOrigine;
+            final RegisterTabFragment tabArmEarlyRefFinal = tabArmEarlyRef;
+            new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+                tabArmEarlyRefFinal.armementEnCoursParCetteSession = false;
+                tabArmEarlyRefFinal.armementEnCoursSource = null;
+            }, 30000);
+        }
 
         activity.runOnUiThread(() -> {
             try {
@@ -1096,6 +1160,7 @@ public class DeepLinkHandler {
                 final RegisterTabFragment tabArmRefFinal = tabArmRef;
                 new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
                     tabArmRefFinal.armementEnCoursParCetteSession = false;
+                    tabArmRefFinal.armementEnCoursSource = null;
                 }, 30000);
             }
             com.pa.lcr.lcp.ApiResult r = controllerOneshot.api_deliveryOneShotStart(
@@ -1286,7 +1351,10 @@ public class DeepLinkHandler {
                     } catch (Exception e) {
                         android.util.Log.w(TAG, "Enregistrement initial (armement) ERR (non-bloquant): " + e.getMessage());
                     } finally {
-                        if (tabArmRef != null) tabArmRef.armementEnCoursParCetteSession = false;
+                        if (tabArmRef != null) {
+                            tabArmRef.armementEnCoursParCetteSession = false;
+                            tabArmRef.armementEnCoursSource = null;
+                        }
                     }
 
                     activity.runOnUiThread(() ->
@@ -1295,7 +1363,10 @@ public class DeepLinkHandler {
                         fMac.isEmpty() ? transportKey : fMac, true);
                 }
             } else {
-                if (tabArmRef != null) tabArmRef.armementEnCoursParCetteSession = false;
+                if (tabArmRef != null) {
+                    tabArmRef.armementEnCoursParCetteSession = false;
+                    tabArmRef.armementEnCoursSource = null;
+                }
                 android.util.Log.w(TAG, "oneshot/start code=0: " + r.msg);
                 android.util.Log.w(TAG, "oneshot/start detail: " + (r.data != null ? r.data.toString() : "null"));
                 logEvent(fSerialId, woNum, DeliveryLogStore.LEVEL_WARN,
@@ -1722,9 +1793,11 @@ public class DeepLinkHandler {
                         } catch (Exception ignoredArm2) {}
                         if (tabArmRef2 != null) {
                             tabArmRef2.armementEnCoursParCetteSession = true;
+                            tabArmRef2.armementEnCoursSource = "DEEPLINK";
                             final RegisterTabFragment tabArmRef2Final = tabArmRef2;
                             new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
                                 tabArmRef2Final.armementEnCoursParCetteSession = false;
+                                tabArmRef2Final.armementEnCoursSource = null;
                             }, 30000);
                         }
                         final RegisterTabFragment tabArmRef2ForFinally = tabArmRef2;
@@ -1814,7 +1887,10 @@ public class DeepLinkHandler {
                         } catch (Exception e) {
                             android.util.Log.w(TAG, "connectBtByMacAndOpenTab: backup armement ERR (non-bloquant): " + e.getMessage());
                         } finally {
-                            if (tabArmRef2ForFinally != null) tabArmRef2ForFinally.armementEnCoursParCetteSession = false;
+                            if (tabArmRef2ForFinally != null) {
+                                tabArmRef2ForFinally.armementEnCoursParCetteSession = false;
+                                tabArmRef2ForFinally.armementEnCoursSource = null;
+                            }
                         }
 
                         if (r.code == 1) {
