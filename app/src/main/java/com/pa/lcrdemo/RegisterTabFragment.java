@@ -2898,6 +2898,21 @@ public class RegisterTabFragment extends Fragment {
             // tab. runInitSequence() a déjà son propre garde de
             // réentrance (initSequenceRunning) — aucun risque de double
             // exécution si un cycle est déjà en cours.
+            // ✅ AJOUTÉ (8 sept 2026, demande Paul — "je l'ai diagnostiqué
+            // mais jamais réellement corrigé") — trouvé, confirmé par
+            // logcat réel : sur une Activity fraîchement recréée
+            // (nouveau fragment, controller encore null), cet appel à
+            // runInitSequence() partait SANS jamais passer par
+            // connectThisRegister() d'abord — contrairement à
+            // onTabActivated() (l'autre vrai point d'entrée), qui
+            // appelle TOUJOURS connectThisRegister(false) avant
+            // runInitSequence(). Résultat : REGISTRE (étape 1/7)
+            // échouait en 4ms (3 tentatives instantanées sur un
+            // controller null, aucune vraie tentative matérielle) — bien
+            // avant que RegisterSessionManager.getOrCreate() n'ait même
+            // eu la chance de démarrer la vraie connexion. Même ordre
+            // que onTabActivated() maintenant, ici aussi.
+            connectThisRegister(false);
             runInitSequence();
         }
         if (woNum != null && !woNum.isEmpty()) {
