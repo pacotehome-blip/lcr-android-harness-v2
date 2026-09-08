@@ -635,6 +635,13 @@ private void reproEvent(String level, String type, String message, JSONObject da
     // getter pour que le tab sache directement quoi souligner, sans avoir
     // à comparer les deux valeurs lui-même.
     public volatile boolean dernierTicketEstSaleNumberFallback = false;
+    // ✅ AJOUTÉ (4 sept 2026, demande Paul — "si on a une erreur là, le
+    // reste ne peut pas continuer") — true seulement si le dernier appel
+    // à readTicketNo23() (via requestStatus) a vraiment réussi, sans
+    // exception LCP. Permet à registreOk (INIT 1/7) de vraiment vérifier
+    // le succès de cette lecture, pas seulement l'état de connexion.
+    public volatile boolean dernierTicketReadReussi = false;
+    public boolean isDernierTicketReadReussi() { return dernierTicketReadReussi; }
     public boolean isDernierTicketSaleNumberFallback() { return dernierTicketEstSaleNumberFallback; }
  private volatile long deliveryStartMs = 0L;
 // LIVE
@@ -1764,7 +1771,17 @@ FullStatus fs = readFullStatus("status/full");
  uid = n.trim() + "-" + tno.trim();
  }
  if (listener != null) listener.onTicketInfo(tno, uid, isManualUiAction);
- } catch (Exception ignored) {}
+ // ✅ AJOUTÉ (4 sept 2026, demande Paul — "avant de passer à l'étape
+ // 2, si on a une erreur là, le reste ne peut pas continuer, il
+ // faut repasser en boucle") — confirmé, l'exception ici était déjà
+ // attrapée et ignorée silencieusement, ne remontait jamais jusqu'à
+ // registreOk (INIT 1/7), qui ne vérifiait que l'état de connexion,
+ // jamais le vrai succès de cette lecture. Vrai drapeau exposé.
+ dernierTicketReadReussi = true;
+ } catch (Exception eTicket) {
+ dernierTicketReadReussi = false;
+ android.util.Log.w("DeliveryController", "requestStatus: readTicketNo23() ERR — " + eTicket.getMessage());
+ }
 
             } catch (Exception e) {
                 handleIoFailure("status", e);
@@ -3234,6 +3251,23 @@ softResync("retry/" + step);
     private String readSaleNo22() throws Exception {
         String r = readU32FieldAsDecString(FIELD_SALE_NUMBER);
         dernierSaleNoConnu = r; // ✅ AJOUTÉ (27 août 2026) — mis en cache pour affichage tab
+        // ✅ AJOUTÉ (4 sept 2026, demande Paul — processus complet du
+        // ticket_number, "comment ça doit se comporter") — trouvé, confirmé
+        // par delivery_summary réel (sale_no='174' déjà correct, mais
+        // affichage montrait encore ticket_number souligné) : le drapeau
+        // d'affichage dépendait UNIQUEMENT du succès de readTicketNo23()
+        // (appel séparé, plus fragile — exception LCP possible) — même
+        // quand CETTE lecture-ci réussissait. La vraie règle (#37, déjà en
+        // cache, ne dépend d'aucune communication LCP supplémentaire)
+        // suffit à elle seule pour décider — ne dépend plus du succès
+        // séparé de readTicketNo23().
+        if (r != null && !r.trim().isEmpty() && !"0".equals(r.trim())) {
+            try {
+                if (isTicketRequiredNeverPrint()) {
+                    dernierTicketEstSaleNumberFallback = true;
+                }
+            } catch (Exception ignored) {}
+        }
         return r;
     }
     // ✅ AJOUTÉ (2 sept 2026, demande Paul — garde-fou pré-armement,
