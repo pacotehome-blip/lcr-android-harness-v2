@@ -3049,6 +3049,28 @@ public class DeepLinkHandler {
 
     private void retournerFieldService(String woNum, String woIdGuid,
                                         String status, String extraJson) {
+        // ✅ AJOUTÉ (8 sept 2026, demande Paul — "on respecte la solution
+        // de chacun des erreurs possible, chacune de ses erreurs a une
+        // résolution vrai") — trouvé : les 19 chemins d'erreur de
+        // lancerLivraison()/handleDeepLink() passent TOUS par cette même
+        // méthode (status="erreur_..."), mais aucun ne nettoyait jamais
+        // ActiveDeliveryStore (écrit en PENDING dès la réception du deep
+        // link) — le laissant figé pour toujours, bloquant tout deep link
+        // suivant, même pour un WO différent. logError() (appelé juste
+        // avant, à chaque site d'erreur) écrit déjà l'erreur dans Support
+        // — c'était déjà visible. Ce qui manquait : une vraie clôture.
+        // Chaque retour d'erreur EST la résolution de son propre
+        // problème — donc chaque retour d'erreur nettoie maintenant le
+        // verrou ici même, au seul endroit où les 19 convergent déjà —
+        // pas une estimation d'âge, une vraie fermeture par erreur.
+        if (status != null && status.startsWith("erreur")) {
+            try {
+                new com.pa.lcr.lcp.storage.ActiveDeliveryStore(activity).clear();
+                com.pa.lcr.lcp.log.LogBus.api(0, "[ARMEMENT] PENDING nettoyé après erreur (" + status + ") wo=" + woNum);
+            } catch (Exception eClearErr) {
+                android.util.Log.w(TAG, "retournerFieldService: nettoyage PENDING ERR (non-bloquant): " + eClearErr.getMessage());
+            }
+        }
         try {
             String net    = "";
             String gross  = "";
