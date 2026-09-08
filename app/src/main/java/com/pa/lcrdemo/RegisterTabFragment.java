@@ -2853,6 +2853,17 @@ public class RegisterTabFragment extends Fragment {
         updateButtons(null);
     }
 
+    // ✅ AJOUTÉ (8 sept 2026, demande Paul — "on affiche dans l'écran que
+    // la demande du wo est refusée car il y a un pending sur tel wo") —
+    // message persistant (pas un toast qui disparaît) — n'interrompt et
+    // ne modifie RIEN de la livraison en cours, purement informatif.
+    public void afficherDemandeRefuseePendantLivraisonEnCours(String woEnCours, String woRefuse) {
+        if (!isAdded() || getView() == null) return;
+        if (txtLive != null) {
+            txtLive.setText("⚠️ Demande refusée pour " + woRefuse + " — livraison " + woEnCours + " en cours (pending)");
+        }
+    }
+
     public void prefillFromDeepLink(String woNum, String produit, String preset) {
         prefillFromDeepLink(woNum, "", produit, preset);
     }
@@ -2941,8 +2952,33 @@ public class RegisterTabFragment extends Fragment {
         if (!produitDejaResoluPourCetteSession) {
             if (edtPreset != null && preset != null && !preset.isEmpty())
                 edtPreset.setText(preset);
-            if (spnProduct != null && produit != null && !produit.isEmpty())
-                spnProduct.setText(produit, false);
+            if (spnProduct != null && produit != null && !produit.isEmpty()) {
+                // ✅ AJOUTÉ (8 sept 2026, demande Paul — "si le produit est
+                // 3... on doit afficher ce que nous avons dans la table
+                // produit... ça c'est dans la validation du produit vs
+                // registre produit") — trouvé : quand le deep link donne un
+                // index numérique (ex. "3"), ce code affichait le CHIFFRE
+                // BRUT tel quel — jamais la vraie description depuis
+                // RegisterProductStore (la table des produits déjà scannés
+                // sur ce registre). Pour un index numérique, cherche
+                // maintenant la vraie description dans la table — affiche
+                // le chiffre brut seulement si rien n'est encore en cache
+                // pour cet index (pas de scan précédent).
+                String labelAffiche = produit;
+                try {
+                    int idxNum = Integer.parseInt(produit.trim());
+                    com.pa.lcr.lcp.storage.RegisterProductStore prodStorePrefill =
+                        new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
+                    com.pa.lcr.lcp.storage.RegisterProductStore.Row rowPrefill =
+                        prodStorePrefill.findByNoteIdx(serialFromArgs, idxNum);
+                    if (rowPrefill != null && rowPrefill.description != null && !rowPrefill.description.trim().isEmpty()) {
+                        labelAffiche = rowPrefill.description;
+                    }
+                } catch (NumberFormatException ignoredNonNumeric) {
+                    // produit textuel (ex. "propane") — affiché tel quel, comportement inchangé
+                } catch (Exception ignoredLookup) {}
+                spnProduct.setText(labelAffiche, false);
+            }
         }
         if (txtDeliveryUid != null && woNum != null && !woNum.isEmpty())
             txtDeliveryUid.setText("Delivery UID : " + woNum);

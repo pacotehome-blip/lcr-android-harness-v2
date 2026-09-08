@@ -239,13 +239,37 @@ public class DeepLinkHandler {
                             fSerialId, resumeMac);
                         return;
                     } else {
-                        // WO différent — bloquer et alerter l'opérateur
+                        // WO différent — bloquer et alerter l'opérateur, SANS
+                        // toucher à la livraison en cours (elle continue
+                        // normalement, le livreur ne doit rien remarquer de
+                        // ce refus sur le registre lui-même).
                         android.util.Log.w(TAG, "Livraison en cours: " + active.woNum
                             + " — impossible de démarrer " + woNum);
                         final String activeWo = active.woNum;
-                        activity.runOnUiThread(() ->
+                        com.pa.lcr.lcp.log.LogBus.api(0, "[DEEPLINK] refusé — demande wo=" + woNum
+                            + " pendant que wo=" + activeWo + " est en cours (pending)");
+                        // ✅ AJOUTÉ (8 sept 2026, demande Paul — "on affiche
+                        // dans l'écran que la demande du wo est refusée car
+                        // il y a un pending sur tel wo") — trouvé : avant,
+                        // seul un toast transitoire (quelques secondes,
+                        // disparaît) avertissait — rien de persistant à
+                        // l'écran pour que le livreur comprenne pourquoi le
+                        // nouveau deep link n'a rien fait. Le tab affiche
+                        // maintenant ce refus dans son statut live, visible
+                        // tant que la livraison en cours n'est pas terminée.
+                        activity.runOnUiThread(() -> {
                             activity.toast("⚠️ Livraison " + activeWo
-                                + " en cours — terminez-la avant de passer à " + woNum));
+                                + " en cours — la demande pour " + woNum + " a été refusée");
+                            try {
+                                String mediaShortRefus = activity.mediaShortFromTransportKey(transportKey);
+                                String tabKeyRefus = activity.tabKeyOf(mediaShortRefus, node, fSerialId);
+                                Fragment fRefus = activity.getSupportFragmentManager()
+                                    .findFragmentByTag("regtab_" + tabKeyRefus);
+                                if (fRefus instanceof RegisterTabFragment) {
+                                    ((RegisterTabFragment) fRefus).afficherDemandeRefuseePendantLivraisonEnCours(activeWo, woNum);
+                                }
+                            } catch (Exception ignoredRefusUi) {}
+                        });
                         retournerFieldService(woNum, woIdGuid, "erreur_livraison_en_cours",
                             buildErrorJson("DELIVERY_IN_PROGRESS",
                                 "Livraison " + activeWo + " en cours sur ce registre"));
@@ -3063,7 +3087,18 @@ public class DeepLinkHandler {
         // problème — donc chaque retour d'erreur nettoie maintenant le
         // verrou ici même, au seul endroit où les 19 convergent déjà —
         // pas une estimation d'âge, une vraie fermeture par erreur.
-        if (status != null && status.startsWith("erreur")) {
+        // ❌ CORRIGÉ (8 sept 2026, même session, demande Paul — "le
+        // livreur continue sa livraison normale, on laisse le processus
+        // continuer") — trouvé un vrai défaut de ce correctif : ces 3
+        // statuts précis signifient qu'UNE AUTRE livraison est
+        // légitimement active/en attente — le nettoyer ici effacerait le
+        // verrou d'une livraison qui continue réellement de couler,
+        // exactement l'inverse de l'intention. Exclus explicitement.
+        boolean autreLivraisonLegitimementActive =
+            "erreur_livraison_en_cours".equals(status)
+            || "erreur_livraison_pending_en_attente".equals(status)
+            || "erreur_armement_en_cours".equals(status);
+        if (status != null && status.startsWith("erreur") && !autreLivraisonLegitimementActive) {
             try {
                 new com.pa.lcr.lcp.storage.ActiveDeliveryStore(activity).clear();
                 com.pa.lcr.lcp.log.LogBus.api(0, "[ARMEMENT] PENDING nettoyé après erreur (" + status + ") wo=" + woNum);
