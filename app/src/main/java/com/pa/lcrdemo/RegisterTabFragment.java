@@ -613,6 +613,27 @@ public class RegisterTabFragment extends Fragment {
     // le produit ne touchait que le deep link, jamais new C.
     volatile boolean produitVerificationTerminee = false;
 
+    // ✅ AJOUTÉ (8 sept 2026, demande Paul — "je veux que ça arrête de
+    // tourner en rond") — trouvé, confirmé par logcat réel :
+    // prefillFromDeepLink() est déjà appelée depuis PLUSIEURS chemins
+    // différents pour un seul et même deep link (resolveIfActiveMatches,
+    // lancerLivraison, lancerLivraisonViaTabExistant — tous existants
+    // avant aujourd'hui, inoffensifs avant puisque cette fonction ne
+    // faisait que remettre deux drapeaux à false). Depuis l'ajout de
+    // runInitSequence() dans le même geste, ces appels redondants (vus
+    // dans le vrai logcat : 3 fois en moins de 20ms pour le même
+    // woIdGuid) déclenchaient chacun une vraie tentative d'init en
+    // parallèle des autres — contention réelle sur le lien BT/LCP,
+    // confirmée par l'échec REGISTRE observé juste après. Debounce par
+    // woIdGuid : un vrai nouveau WO redéclenche toujours le cycle
+    // complet, mais un rappel pour le MÊME woIdGuid dans les 2 secondes
+    // qui suivent (même rafale d'appels redondants pour le même
+    // événement) est ignoré — assez large pour couvrir la rafale
+    // observée (quelques dizaines de ms), assez court pour ne jamais
+    // bloquer une vraie nouvelle livraison sur ce même WO plus tard.
+    private volatile String lastReinitWoIdGuid = null;
+    private volatile long lastReinitAtMs = 0L;
+
     // ✅ AJOUTÉ (28 août 2026, demande Paul — "pas encore réglé le produit
     // avant le running flowing") — expose ce drapeau à DeepLinkHandler.
     // lancerLivraison() (le vrai chemin d'armement par deep link) armait
@@ -2844,7 +2865,11 @@ public class RegisterTabFragment extends Fragment {
         // n'en a jamais un, confirmé toute la journée) — pas pour un
         // test local répété, où le produit physique sur le registre ne
         // change pas d'un essai à l'autre.
-        if (woIdGuid != null && !woIdGuid.isEmpty()) {
+        if (woIdGuid != null && !woIdGuid.isEmpty()
+                && (!woIdGuid.equals(lastReinitWoIdGuid)
+                    || (System.currentTimeMillis() - lastReinitAtMs) >= 2000)) {
+            lastReinitWoIdGuid = woIdGuid;
+            lastReinitAtMs = System.currentTimeMillis();
             produitDejaResoluPourCetteSession = false;
             produitVerificationTerminee = false;
             LogBus.api(node, "[PRODUIT] revalidation forcée — nouveau deep link (woIdGuid=" + woIdGuid + "), le produit peut différer de la livraison précédente");
