@@ -3251,22 +3251,21 @@ softResync("retry/" + step);
     private String readSaleNo22() throws Exception {
         String r = readU32FieldAsDecString(FIELD_SALE_NUMBER);
         dernierSaleNoConnu = r; // ✅ AJOUTÉ (27 août 2026) — mis en cache pour affichage tab
-        // ✅ AJOUTÉ (4 sept 2026, demande Paul — processus complet du
-        // ticket_number, "comment ça doit se comporter") — trouvé, confirmé
-        // par delivery_summary réel (sale_no='174' déjà correct, mais
-        // affichage montrait encore ticket_number souligné) : le drapeau
-        // d'affichage dépendait UNIQUEMENT du succès de readTicketNo23()
-        // (appel séparé, plus fragile — exception LCP possible) — même
-        // quand CETTE lecture-ci réussissait. La vraie règle (#37, déjà en
-        // cache, ne dépend d'aucune communication LCP supplémentaire)
-        // suffit à elle seule pour décider — ne dépend plus du succès
-        // séparé de readTicketNo23().
-        if (r != null && !r.trim().isEmpty() && !"0".equals(r.trim())) {
-            try {
-                if (isTicketRequiredNeverPrint()) {
-                    dernierTicketEstSaleNumberFallback = true;
-                }
-            } catch (Exception ignored) {}
+        // ✅ CORRIGÉ (4 sept 2026, demande Paul — "pourquoi la connexion au
+        // registre ne se fait plus automatiquement") — trouvé, confirmé :
+        // ma première version appelait isTicketRequiredNeverPrint(), qui
+        // peut déclencher un VRAI nouvel appel LCP (lcpGetField(37)) si le
+        // cache est encore vide — un vrai deuxième verrou LCP, avec un
+        // vrai timeout de 15s, silencieusement avalé par le try/catch —
+        // exactement le genre de délai qui ralentit/bloque une vraie
+        // séquence de connexion en cours, qui dispute probablement le même
+        // verrou. Lit maintenant UNIQUEMENT le vrai cache déjà existant
+        // (cachedTicketRequired) — jamais un nouvel appel LCP depuis ici.
+        // Si le cache est encore vide, le drapeau sera mis à jour plus
+        // tard, quand isTicketRequiredNeverPrint() sera vraiment appelée
+        // ailleurs, dans un contexte déjà sûr.
+        if (r != null && !r.trim().isEmpty() && !"0".equals(r.trim()) && cachedTicketRequired == 2) {
+            dernierTicketEstSaleNumberFallback = true;
         }
         return r;
     }
