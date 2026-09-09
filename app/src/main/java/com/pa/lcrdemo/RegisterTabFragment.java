@@ -6578,11 +6578,31 @@ public class RegisterTabFragment extends Fragment {
                     }
                 } catch (Exception ignored) {}
 
+                final String ticketNoPourAffichage = ticketNo != null ? ticketNo : "";
+                final String woNumPourAffichage = woNum != null ? woNum : "";
                 ui.post(() -> {
                     if (txtQtyNet   != null) txtQtyNet.setText("NET: 0.0");
                     if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
-                    if (txtTicketNo != null) txtTicketNo.setText("Ticket Number : —");
-                    if (txtDeliveryUid != null) txtDeliveryUid.setText("Delivery UID : —");
+                    // ✅ CORRIGÉ (9 sept 2026, demande Paul — "même si c'est
+                    // annulé j'ai besoin de retrouver dans la partie
+                    // ticket le delivery-uid, quand je fais annulé il
+                    // n'affiche pas") — trouvé : cette fonction retrouve
+                    // déjà correctement le vrai ticketNo (trois replis) et
+                    // l'écrit correctement en BD/JSON (TYPE_ANNULATION,
+                    // confirmé) — mais écrasait ensuite systématiquement
+                    // l'écran avec "—", jetant tout ce travail de
+                    // résolution. Affiche maintenant le vrai ticket/UID
+                    // retrouvé — jamais perdu en BD/JSON, juste jamais
+                    // montré à l'écran jusqu'ici.
+                    if (txtTicketNo != null) {
+                        txtTicketNo.setText("Ticket Number : " + (ticketNoPourAffichage.isEmpty() ? "—" : ticketNoPourAffichage));
+                    }
+                    if (txtDeliveryUid != null) {
+                        String uidPourAffichage = (!woNumPourAffichage.isEmpty() && !ticketNoPourAffichage.isEmpty())
+                            ? woNumPourAffichage + "-" + ticketNoPourAffichage
+                            : ticketNoPourAffichage;
+                        txtDeliveryUid.setText("Delivery UID : " + (uidPourAffichage.isEmpty() ? "—" : uidPourAffichage));
+                    }
                     // ✅ Réactiver tous les boutons désactivés pendant l'annulation
                     if (btnAnnuler  != null) btnAnnuler.setEnabled(true);
                     if (btnConnect  != null) btnConnect.setEnabled(true);
