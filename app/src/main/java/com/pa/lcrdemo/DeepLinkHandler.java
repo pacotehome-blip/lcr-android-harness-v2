@@ -984,6 +984,123 @@ public class DeepLinkHandler {
             // qu'une nouvelle livraison est vraiment demarree pour CE WO —
             // pas comme garde-fou pre-armement.
 
+            // ✅ RECONSTRUIT (9 sept 2026, demande Paul — "j'ai un trouble
+            // dans la continuité des tests, pendant un running_flowing ou
+            // juste après j'ai eu le bouton bleu qui a coupé la livraison")
+            // — trouvé, avec certitude, en retraçant plusieurs vraies
+            // sessions aujourd'hui : le retrait ci-dessus avait un vrai
+            // motif (un bit "preset atteint" pouvait appartenir à un AUTRE
+            // WO), mais New C a ce MÊME risque et le résout déjà en
+            // filtrant sur getLatestForWo(woNum) — si le résidu appartient
+            // vraiment à CE WO (le cas confirmé toute la journée : même
+            // WO, tickets séquentiels, résidu jamais nettoyé entre deux),
+            // l'avertissement est légitime. Le 4 sept avait aussi retiré
+            // ce check spécifiquement du chemin deep link (raison : "vient
+            // déjà avec une vraie demande légitime de FieldService") —
+            // mais le registre physique, lui, ne sait pas que la demande
+            // est légitime, il garde juste son état matériel. Reconstruit
+            // ici, même logique exacte que New C, même filtre par woNum.
+            // Différence : aucun humain n'est nécessairement devant
+            // l'écran à cet instant (armement automatique) — délai
+            // d'attente court, puis continue automatiquement si personne
+            // ne répond (FieldService a quand même demandé une vraie
+            // livraison), mais tracé clairement dans Support dans les
+            // deux cas.
+            try {
+                int dcDeepLink = controllerOneshot.getLastDelCode();
+                boolean presetDejaAtteintDeepLink =
+                    (dcDeepLink & com.pa.lcr.lcp.LcpLink.DC_NET_PRESET_REACHED) != 0
+                    || (dcDeepLink & com.pa.lcr.lcp.LcpLink.DC_GROSS_PRESET_REACHED) != 0;
+                // ✅ AJOUTÉ (9 sept 2026, demande Paul — "il faut penser que
+                // pour les livraisons il y aura des délais entre eux, ici
+                // c'est que je teste à profusion") — trouvé, avec Paul :
+                // c'est intermittent, dépendant du temps que le registre
+                // prend RÉELLEMENT à finir de se vider après une livraison
+                // — surtout visible en tests rapprochés, moins en usage
+                // réel avec plus d'espacement naturel entre deux
+                // livraisons. Avant de déranger qui que ce soit, réessaie
+                // — même patron que partout ailleurs dans ce fichier (3
+                // tentatives) — avec une vraie relecture forcée
+                // (requestStatus(), pas juste le cache) entre chaque. Le
+                // dialogue ne s'affiche que si le résidu est ENCORE là
+                // après ces vraies tentatives.
+                int tentativesPresetDeepLink = 0;
+                while (presetDejaAtteintDeepLink && tentativesPresetDeepLink < 3) {
+                    tentativesPresetDeepLink++;
+                    LogBus.api(node, "[PRESET-CHECK] deep link — résidu encore présent (delCode=0x"
+                        + Integer.toHexString(dcDeepLink) + "), réessai " + tentativesPresetDeepLink + "/3 après vraie relecture");
+                    try {
+                        controllerOneshot.requestStatus();
+                        Thread.sleep(800);
+                    } catch (Exception ignoredRetryPreset) {}
+                    dcDeepLink = controllerOneshot.getLastDelCode();
+                    presetDejaAtteintDeepLink =
+                        (dcDeepLink & com.pa.lcr.lcp.LcpLink.DC_NET_PRESET_REACHED) != 0
+                        || (dcDeepLink & com.pa.lcr.lcp.LcpLink.DC_GROSS_PRESET_REACHED) != 0;
+                }
+                if (!presetDejaAtteintDeepLink && tentativesPresetDeepLink > 0) {
+                    LogBus.api(node, "[PRESET-CHECK] deep link — résidu disparu tout seul après "
+                        + tentativesPresetDeepLink + " réessai(s), armement continue sans dialogue");
+                }
+                if (presetDejaAtteintDeepLink) {
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb statusDbDeepLink =
+                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow existingDeepLink;
+                    try {
+                        existingDeepLink = statusDbDeepLink.getLatestForWo(woNum);
+                    } finally {
+                        try { statusDbDeepLink.close(); } catch (Exception ignored) {}
+                    }
+                    LogBus.api(node, "[PRESET-CHECK] deep link — wo=" + woNum + " delCode=0x"
+                        + Integer.toHexString(dcDeepLink) + " "
+                        + (existingDeepLink == null ? "AUCUNE ligne — reste d'un autre wo, non déclenché" : "ligne trouvée ticket=" + existingDeepLink.ticketNo));
+                    if (existingDeepLink != null) {
+                        final java.util.concurrent.CountDownLatch presetLatch = new java.util.concurrent.CountDownLatch(1);
+                        final boolean[] continuerDeepLink = {true}; // défaut si personne ne répond
+                        final int dcFinalDeepLink = dcDeepLink;
+                        activity.runOnUiThread(() -> {
+                            try {
+                                new android.app.AlertDialog.Builder(activity)
+                                    .setTitle("Preset déjà atteint")
+                                    .setMessage("Le registre indique que le preset est déjà atteint"
+                                        + " (reste d'une livraison précédente non effacée).\n\n"
+                                        + "Voulez-vous quand même armer une nouvelle livraison ?")
+                                    .setPositiveButton("Continuer", (d, w) -> {
+                                        continuerDeepLink[0] = true;
+                                        LogBus.api(node, "[PRESET-CHECK] deep link — chauffeur a choisi CONTINUER (delCode=0x"
+                                            + Integer.toHexString(dcFinalDeepLink) + ")");
+                                        presetLatch.countDown();
+                                    })
+                                    .setNegativeButton("Annuler", (d, w) -> {
+                                        continuerDeepLink[0] = false;
+                                        LogBus.api(node, "[PRESET-CHECK] deep link — chauffeur a choisi ANNULER (delCode=0x"
+                                            + Integer.toHexString(dcFinalDeepLink) + ")");
+                                        presetLatch.countDown();
+                                    })
+                                    .setCancelable(false)
+                                    .show();
+                            } catch (Exception eDialogDeepLink) {
+                                android.util.Log.w(TAG, "[PRESET-CHECK] deep link — dialogue ERR (non-bloquant): " + eDialogDeepLink.getMessage());
+                                presetLatch.countDown();
+                            }
+                        });
+                        boolean repondu = presetLatch.await(15, java.util.concurrent.TimeUnit.SECONDS);
+                        if (!repondu) {
+                            LogBus.api(node, "[PRESET-CHECK] deep link — personne n'a répondu en 15s, continue automatiquement (delCode=0x"
+                                + Integer.toHexString(dcFinalDeepLink) + ")");
+                        }
+                        if (!continuerDeepLink[0]) {
+                            logError(fSerialId, woNum, "PRESET_DEJA_ATTEINT", "Chauffeur a annulé (delCode=0x" + Integer.toHexString(dcFinalDeepLink) + ")");
+                            retournerFieldService(woNum, woIdGuid, "erreur_preset_deja_atteint",
+                                buildErrorJson("PRESET_DEJA_ATTEINT", "Preset déjà atteint, armement annulé par le chauffeur"));
+                            return;
+                        }
+                    }
+                }
+            } catch (Exception ePresetDeepLink) {
+                android.util.Log.w(TAG, "[PRESET-CHECK] deep link — vérification ERR (non-bloquant): " + ePresetDeepLink.getMessage());
+            }
+
 
             // ✅ FIX #2 : activer le transport en exclusivité avant l'oneshot.
             // getState()==CONNECTED n'est qu'un état FSM en cache — sans
