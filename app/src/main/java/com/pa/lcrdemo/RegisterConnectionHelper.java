@@ -767,7 +767,22 @@ public class RegisterConnectionHelper {
         // Succès — fermer dialog et basculer vers le tab
         Log.i(TAG, "diagnostic: registre joignable — node=" + fNodeFinal + " serial=" + fSerialIdFinal);
         activity.runOnUiThread(() -> {
-            if (dlg[0] != null) dlg[0].dismiss();
+            // ✅ CORRIGÉ (9 sept 2026, demande Paul — vrai FATAL EXCEPTION
+            // confirmé par logcat, tuant tout le processus : "View=...
+            // MainActivity not attached to window manager" sur
+            // Dialog.dismiss()) — trouvé, avec certitude : ce dismiss()
+            // ne vérifiait que dlg[0] != null, jamais si l'Activity était
+            // encore vivante/attachée à une fenêtre. Si l'Activity se
+            // fait détruire (Quit, navigation, tuée en arrière-plan)
+            // pendant que ce diagnostic tournait encore, ce callback
+            // différé tentait de fermer un dialogue dont la fenêtre
+            // n'existait plus — crash complet de l'app, pas juste ce
+            // dialogue. Vérifie maintenant l'état réel avant d'agir, avec
+            // un filet try/catch en plus par précaution.
+            if (activity.isFinishing() || activity.isDestroyed()) return;
+            if (dlg[0] != null && dlg[0].isShowing()) {
+                try { dlg[0].dismiss(); } catch (Exception ignoredDismiss) {}
+            }
             try { activity.showPage(0); } catch (Exception ignored) {}
         });
 
