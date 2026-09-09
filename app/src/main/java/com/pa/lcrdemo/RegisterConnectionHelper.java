@@ -430,14 +430,28 @@ public class RegisterConnectionHelper {
         String fSerialId = (serialId != null && !serialId.isEmpty()) ? serialId : "";
         int fNode = node;
         try {
+            // ✅ CORRIGÉ (9 sept 2026, demande Paul — vrai leak confirmé
+            // par logcat : "SQLiteConnection object for database
+            // ...lcr_delivery.db was leaked!" répété plusieurs fois de
+            // suite) — trouvé, avec certitude, après un audit systématique
+            // des 71 instanciations de connexions BD dans tout le projet :
+            // ce chemin précis (diagnostic(), appelé à chaque diagnostic
+            // manuel) était le SEUL des 71 à ne jamais fermer sa
+            // connexion — jamais de finally, jamais de close(). Corrigé
+            // avec le même patron try/finally déjà utilisé partout
+            // ailleurs dans le projet.
             LcrDeliveryStatusDb db = new LcrDeliveryStatusDb(activity);
-            LcrDeliveryStatusDb.DeliveryRow row = (woNum != null && !woNum.isEmpty())
-                ? db.getLatestForWo(woNum) : db.getLastDelivery();
-            if (row != null) {
-                if (row.ticketNo != null) ticketNo = row.ticketNo;
-                if (fSerialId.isEmpty() && row.serialId != null && !row.serialId.isEmpty())
-                    fSerialId = row.serialId;
-                if (fNode <= 0 && row.lcrnode > 0) fNode = row.lcrnode;
+            try {
+                LcrDeliveryStatusDb.DeliveryRow row = (woNum != null && !woNum.isEmpty())
+                    ? db.getLatestForWo(woNum) : db.getLastDelivery();
+                if (row != null) {
+                    if (row.ticketNo != null) ticketNo = row.ticketNo;
+                    if (fSerialId.isEmpty() && row.serialId != null && !row.serialId.isEmpty())
+                        fSerialId = row.serialId;
+                    if (fNode <= 0 && row.lcrnode > 0) fNode = row.lcrnode;
+                }
+            } finally {
+                try { db.close(); } catch (Exception ignoredClose) {}
             }
         } catch (Exception e) {
             Log.w(TAG, "DB read ERR: " + e.getMessage());
