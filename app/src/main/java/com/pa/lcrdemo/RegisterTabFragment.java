@@ -1943,6 +1943,43 @@ public class RegisterTabFragment extends Fragment {
                                 try { dbFiletFin.close(); } catch (Exception ignored) {}
                             }
                             if (safetyNetFin == null || safetyNetFin.jobId == null || safetyNetFin.jobId.isEmpty()) return;
+                            // ✅ CORRIGÉ (9 sept 2026, demande Paul —
+                            // "j'étais en running_flowing, j'ai remplacé
+                            // l'USB, je reviens et étrangement il est
+                            // terminé, je n'ai jamais envoyé une fin de
+                            // livraison") — trouvé, avec certitude : ce
+                            // filet se déclenchait sur SEULEMENT
+                            // state==CONNECTED, sans jamais vérifier que
+                            // la livraison était VRAIMENT terminée (preset
+                            // atteint). Un changement de transport
+                            // (débranchement/rebranchement) fait passer
+                            // l'état par CONNECTED aussi — ce filet
+                            // finalisait alors la livraison EN PLEIN
+                            // MILIEU, avec des valeurs figées à ce moment
+                            // précis, jamais les vraies valeurs finales.
+                            // Vérifie maintenant les mêmes bits officiels
+                            // que partout ailleurs dans l'app
+                            // (DC_NET_PRESET_REACHED/DC_GROSS_PRESET_REACHED)
+                            // avant de finaliser quoi que ce soit — si le
+                            // preset n'est pas vraiment atteint, reprend
+                            // le suivi au lieu de déclarer la livraison
+                            // terminée.
+                            int dcVerifFilet = cFiletFin.getLastDelCode();
+                            boolean presetVraimentAtteint =
+                                (dcVerifFilet & com.pa.lcr.lcp.LcpLink.DC_NET_PRESET_REACHED) != 0
+                                || (dcVerifFilet & com.pa.lcr.lcp.LcpLink.DC_GROSS_PRESET_REACHED) != 0;
+                            if (!presetVraimentAtteint) {
+                                LogBus.api(node, "[FILET-CONNECTED] état CONNECTED atteint mais preset PAS vraiment atteint (delCode=0x"
+                                    + Integer.toHexString(dcVerifFilet) + ") — probablement un changement de transport, pas une vraie fin. "
+                                    + "Reprise du suivi au lieu de finaliser — jobId=" + safetyNetFin.jobId);
+                                MainActivity mainReprise2 = (MainActivity) getActivity();
+                                if (mainReprise2 != null && mainReprise2.getDeepLinkHandler() != null) {
+                                    mainReprise2.getDeepLinkHandler().reprendreLivraisonEnAttente(
+                                        safetyNetFin.jobId, node, safetyNetFin.woNum, safetyNetFin.woIdGuid,
+                                        serialFromArgs, tabTransportKey != null ? tabTransportKey.trim() : "");
+                                }
+                                return;
+                            }
                             LogBus.api(node, "[FILET-CONNECTED] registre revenu à CONNECTED, ligne RUNNING_FLOWING non résolue trouvée — jobId="
                                 + safetyNetFin.jobId + " — vraie lecture fraîche forcée");
                             // ✅ AJOUTÉ (9 sept 2026, demande Paul — "il ne
