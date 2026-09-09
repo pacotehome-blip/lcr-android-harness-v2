@@ -109,7 +109,7 @@ import java.util.concurrent.Executors;
  * (thread de travail séparé, callbacks, jamais de blocage). Toute
  * NOUVELLE fonctionnalité touchant Dataverse/réseau doit suivre le même
  * patron — vérifier ce principe avant d'ajouter un appel réseau
- * quelconque n'importe où dans le chemin de connexion/livraison.
+ *   quelconque n'importe où dans le chemin de connexion/livraison.
  */
 
 public class MainActivity extends AppCompatActivity {
@@ -6138,6 +6138,46 @@ private boolean ensureBtConnectPermission() {
     // être réutilisable ici ET par le bouton dédié. Retourne le débit
     // trouvé, ou -1 si aucun candidat ne répond. Remet le port au débit
     // trouvé avant de retourner (laisse la connexion utilisable ensuite).
+    // ✅ AJOUTÉ (9 sept 2026, demande Paul — "on va voir sur quel baud
+    // c'est testé et qu'est-ce qu'on a en retour") — teste TOUS les
+    // débits candidats (pas juste jusqu'au premier succès comme
+    // detecterBaudSurPort() ci-dessous, gardée pour compatibilité),
+    // rapporte le vrai résultat pour chacun — visibilité complète, pas
+    // juste la réponse finale. Remet le port au débit qui a vraiment
+    // répondu à la fin (ou 19200 par défaut si aucun n'a répondu).
+    private java.util.List<String> detecterBaudDetaille(UsbSerialPort port, int node) {
+        java.util.List<String> lignes = new java.util.ArrayList<>();
+        int baudTrouve = -1;
+        for (int candidat : BAUD_DETECT_ORDER) {
+            long t0 = System.currentTimeMillis();
+            try {
+                port.setParameters(candidat, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
+                Thread.sleep(150);
+                com.pa.lcr.lcp.transport.UsbTransportIo io =
+                        new com.pa.lcr.lcp.transport.UsbTransportIo(
+                                com.pa.lcr.lcp.transport.MediaTransportManager.KEY_USB + ":DETECT",
+                                port, "Détection débit détaillée (temporaire)", 0);
+                com.pa.lcr.lcp.LcpLink probe = new com.pa.lcr.lcp.LcpLink(io, node, 255, true);
+                byte[] serial = probe.opGetField(80, 1500);
+                long ms = System.currentTimeMillis() - t0;
+                if (serial != null && serial.length > 0) {
+                    String serialStr = decodeSerialBytes(serial);
+                    lignes.add("  " + candidat + " bauds : ✅ répond — #série=" + (serialStr != null ? serialStr : "?") + " (" + ms + "ms)");
+                    if (baudTrouve < 0) baudTrouve = candidat;
+                } else {
+                    lignes.add("  " + candidat + " bauds : ⚠ aucune donnée reçue (" + ms + "ms)");
+                }
+            } catch (Exception e) {
+                long ms = System.currentTimeMillis() - t0;
+                lignes.add("  " + candidat + " bauds : ❌ " + e.getClass().getSimpleName() + " (" + ms + "ms)");
+            }
+        }
+        try {
+            port.setParameters(baudTrouve > 0 ? baudTrouve : 19200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
+        } catch (Exception ignored) {}
+        return lignes;
+    }
+
     private int detecterBaudSurPort(UsbSerialPort port, int node) {
         for (int candidat : BAUD_DETECT_ORDER) {
             try {
@@ -6262,6 +6302,7 @@ private boolean ensureBtConnectPermission() {
 
     /** Callback de progression pour runValidationOnCandidats() — un appel par candidat, plus onDone() à la fin. */
     public interface ValidationProgressListener {
+        void onPreparationStep(String message);
         void onCandidatStart(String label, String candidatKey);
         void onCandidatResult(String label, String candidatKey, String resultat);
         void onDone(boolean annule, String messageFinal);
@@ -6327,6 +6368,7 @@ private boolean ensureBtConnectPermission() {
         try {
             com.pa.lcr.lcp.RegisterSessionManager.get(this).closeAllForValidation();
             android.util.Log.i("MainActivity", "runValidationOnCandidats: toutes les connexions fermées avant validation");
+            if (listener != null) runOnUiThread(() -> listener.onPreparationStep("✅ Couche logique (contrôleurs/schedulers) arrêtée"));
         } catch (Exception e) {
             android.util.Log.w("MainActivity", "runValidationOnCandidats: fermeture des connexions ERR: " + e.getMessage());
         }
@@ -6339,9 +6381,30 @@ private boolean ensureBtConnectPermission() {
                 removeTabAndFragment(tk, "VALIDATION_MANUELLE");
             }
             android.util.Log.i("MainActivity", "runValidationOnCandidats: " + tabKeysSnapshot.size() + " tab(s) supprimé(s) avant validation");
+            final int nbTabs = tabKeysSnapshot.size();
+            if (listener != null) runOnUiThread(() -> listener.onPreparationStep("✅ " + nbTabs + " tab(s) supprimé(s)"));
         } catch (Exception e) {
             android.util.Log.w("MainActivity", "runValidationOnCandidats: suppression des tabs ERR: " + e.getMessage());
         }
+        // ✅ AJOUTÉ (9 sept 2026, demande Paul — "confirmer que tous les
+        // tab sont supprimés avant de tester") — trouvé, avec certitude :
+        // closeAllForValidation() ci-dessus ne fait QUE softClose() (voir
+        // LcpLink.softClose() — pose un drapeau, ne touche jamais le vrai
+        // port/socket). Le transport physique restait réellement ouvert,
+        // cause probable des timeouts BT observés. Ferme maintenant
+        // vraiment chaque transport (io.close() via setDisconnected()),
+        // avec un vrai compte confirmé — jamais deviné.
+        try {
+            int fermes = com.pa.lcr.lcp.transport.MediaTransportManager.get(this).closeAllRealTransports();
+            android.util.Log.i("MainActivity", "runValidationOnCandidats: " + fermes + " transport(s) physique(s) réellement fermé(s)");
+            if (listener != null) runOnUiThread(() -> listener.onPreparationStep("✅ " + fermes + " transport(s) physique(s) réellement fermé(s) (port/socket)"));
+        } catch (Exception e) {
+            android.util.Log.w("MainActivity", "runValidationOnCandidats: fermeture transports physiques ERR: " + e.getMessage());
+        }
+        // Court délai — laisse le système d'exploitation (pile BT/USB)
+        // vraiment libérer les sockets/ports avant la première tentative.
+        try { Thread.sleep(500); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+        if (listener != null) runOnUiThread(() -> listener.onPreparationStep("▶ Démarrage des tests..."));
 
         new Thread(() -> {
           try {
@@ -6708,7 +6771,7 @@ private boolean ensureBtConnectPermission() {
      *  Note : lit Field #23 directement, SANS le repli SaleNumber utilisé
      *  ailleurs dans l'app pour l'affichage normal (celui-ci est un
      *  diagnostic brut, pas l'affichage métier). */
-    private String infosSupplementaires(com.pa.lcr.lcp.LcpLink tmp, int node) {
+    private String infosSupplementaires(com.pa.lcr.lcp.LcpLink tmp, int node, String baudConfirme) {
         String firmware = "?";
         try { firmware = tmp.opGetFirmwareVersion(); } catch (Exception ignored) {}
         String ticketNo = "?";
@@ -6720,7 +6783,13 @@ private boolean ensureBtConnectPermission() {
                 ticketNo = String.valueOf(u);
             }
         } catch (Exception ignored) {}
-        return " | node=" + node + " | ticket=" + ticketNo + " | firmware=" + firmware;
+        // ✅ AJOUTÉ (9 sept 2026, demande Paul — "le détails des tests est
+        // aussi pour valider sur quel vitesse le registre répond le
+        // mieux") — le débit confirmé (celui qui a vraiment répondu)
+        // apparaît maintenant systématiquement, pas seulement quand la
+        // détection après échec était nécessaire.
+        return " | node=" + node + " | ticket=" + ticketNo + " | firmware=" + firmware
+            + (baudConfirme != null ? " | débit=" + baudConfirme + " bauds" : "");
     }
 
     private String validerUnCandidatLectureSeule(String candidatKey) {
@@ -6740,7 +6809,12 @@ private boolean ensureBtConnectPermission() {
                 long ms = System.currentTimeMillis() - t0;
                 String serial = decodeSerialBytes(raw);
                 if (serial != null) {
-                    return "✅ Présent — #série=" + serial + " (" + ms + "ms)" + infosSupplementaires(tmp, 250);
+                    String detailBauds = "";
+                    if (usbPort != null) {
+                        java.util.List<String> lignesBaud = detecterBaudDetaille(usbPort, 250);
+                        detailBauds = "\n  Débits testés :\n" + String.join("\n", lignesBaud);
+                    }
+                    return "✅ Présent — #série=" + serial + " (" + ms + "ms)" + infosSupplementaires(tmp, 250, "19200 (confirmé — port app)") + detailBauds;
                 }
                 // ✅ AJOUTÉ (20 août 2026, demande Paul — "ajouter dans la
                 // validation la détection du baud rate") — au lieu de
@@ -6748,10 +6822,12 @@ private boolean ensureBtConnectPermission() {
                 // detecterBaudSurPort(). USB seulement — le seul transport
                 // où le débit peut être vérifié/changé de cette façon.
                 if (usbPort != null) {
-                    int trouve = detecterBaudSurPort(usbPort, 250);
-                    if (trouve > 0) {
-                        return "⚠ Présent mais débit incorrect (" + ms + "ms) — détecté à " + trouve
-                                + " bauds (attendu 19200) — utilise \"Forcer la vitesse\" pour corriger";
+                    java.util.List<String> lignesBaud = detecterBaudDetaille(usbPort, 250);
+                    String detail = "\n  Débits testés :\n" + String.join("\n", lignesBaud);
+                    boolean unTrouve = lignesBaud.stream().anyMatch(l -> l.contains("✅"));
+                    if (unTrouve) {
+                        return "⚠ Présent mais débit incorrect (assumé 19200, " + ms + "ms)" + detail
+                                + "\n  → utilise \"Forcer la vitesse\" pour corriger";
                     }
                 }
                 return "⚠ Présent mais silencieux (" + ms + "ms) — débit introuvable parmi "
@@ -6804,7 +6880,7 @@ private boolean ensureBtConnectPermission() {
                 byte[] raw = tmp.opGetField(80, 3000);
                 long ms = System.currentTimeMillis() - t0;
                 String serial = decodeSerialBytes(raw);
-                return serial != null ? "✅ Présent — #série=" + serial + " (" + ms + "ms) @19200" + infosSupplementaires(tmp, 250)
+                return serial != null ? "✅ Présent — #série=" + serial + " (" + ms + "ms)" + infosSupplementaires(tmp, 250, "pont supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (RFCOMM)")
                     : "⚠ Présent mais silencieux (" + ms + "ms) — débit du pont BT à vérifier séparément (voir guide)";
             } catch (Exception e) {
                 return "❌ Absent/injoignable — " + e.getClass().getSimpleName() + ": " + e.getMessage();
@@ -6827,7 +6903,7 @@ private boolean ensureBtConnectPermission() {
                 byte[] raw = tmp.opGetField(80, 3000);
                 long ms = System.currentTimeMillis() - t0;
                 String serial = decodeSerialBytes(raw);
-                return serial != null ? "✅ Présent — #série=" + serial + " (" + ms + "ms)" + infosSupplementaires(tmp, 250)
+                return serial != null ? "✅ Présent — #série=" + serial + " (" + ms + "ms)" + infosSupplementaires(tmp, 250, "N-Port supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (TCP)")
                     : "⚠ Présent mais silencieux (" + ms + "ms) — mauvais débit probable";
             } catch (Exception e) {
                 return "❌ Absent/injoignable — " + e.getClass().getSimpleName() + ": " + e.getMessage();
