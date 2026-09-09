@@ -1563,6 +1563,8 @@ tabRegisters = findViewById(R.id.tabRegisters);
         TextView txtValiderCandidatsResult = findViewById(R.id.txtValiderCandidatsResult);
         if (btnAnnulerCandidats != null) btnAnnulerCandidats.setVisibility(View.GONE);
         if (txtValiderCandidatsResult != null) txtValiderCandidatsResult.setVisibility(View.GONE);
+        android.widget.ScrollView scrollValiderCandidatsResult = findViewById(R.id.scrollValiderCandidatsResult);
+        if (scrollValiderCandidatsResult != null) scrollValiderCandidatsResult.setVisibility(View.GONE);
         // ✅ REMPLACÉ (9 sept 2026, demande Paul — "on utilise le bouton
         // démarrer la validation on remplace tout ça") — ouvre maintenant
         // RegisterValidationActivity (écran plein écran, cases à cocher
