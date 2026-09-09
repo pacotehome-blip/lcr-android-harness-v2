@@ -1465,8 +1465,19 @@ public class RegisterTabFragment extends Fragment {
                                     com.pa.lcr.lcp.storage.RegisterProductStore storeLabel =
                                             new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
                                     try {
+                                        // ❌ CORRIGÉ (9 sept 2026, demande Paul — capture
+                                        // d'écran confirmant "1" affiché au lieu de "1 -
+                                        // PROPANE (prod1) [Aucun]", après COMPARAISON_TICKET
+                                        // cette fois, pas initUi()) — trouvé, avec certitude :
+                                        // noteIdx est 1-based PARTOUT ailleurs dans le code
+                                        // (confirmé par le scan lui-même — "[SCAN] Produit 1:
+                                        // ...", jamais "Produit 0" — et par initUi(), qui
+                                        // utilise l'index directement sans jamais soustraire
+                                        // 1, et qui fonctionne). Ce "-1" ici faisait chercher
+                                        // le mauvais slot à chaque fois, la recherche échouait
+                                        // TOUJOURS, et le code retombait sur le chiffre brut.
                                         com.pa.lcr.lcp.storage.RegisterProductStore.Row rowLabel =
-                                                storeLabel.findByNoteIdx(serialPourLabel, idxPourUi - 1);
+                                                storeLabel.findByNoteIdx(serialPourLabel, idxPourUi);
                                         if (rowLabel != null) label = rowLabel.toSpinnerLabel();
                                     } finally {
                                         try { storeLabel.close(); } catch (Exception ignored) {}
