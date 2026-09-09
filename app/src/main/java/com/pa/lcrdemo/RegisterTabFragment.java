@@ -6192,6 +6192,50 @@ public class RegisterTabFragment extends Fragment {
                 // Rafraîchir l'état UI → CONNECTED Ready
                 try { c.requestStatus(); } catch (Exception ignored) {}
 
+                // ✅ AJOUTÉ (9 sept 2026, demande Paul — "un genre de
+                // validation de lecture après une annulation d'une
+                // livraison, comme si on faisait un reset du tab, sans
+                // démarrer une nouvelle livraison") — trouvé, avec Paul :
+                // la boucle ci-dessus ne vérifiait que l'état général
+                // (CONNECTED/IDLE) — jamais les vrais bits delCode (preset
+                // atteint, 0x0080/0x0040). L'annulation utilise
+                // forceEndSync() (CMD_END forcé), un chemin différent
+                // d'une vraie fin par preset atteint naturellement — le
+                // tab se déclarait "propre" dès que l'état général
+                // revenait, sans jamais confirmer que le registre avait
+                // vraiment fini de nettoyer son résidu. Vraie validation
+                // de lecture ici, pas un armement : relit delCode, réessaie
+                // avec une vraie relecture forcée (requestStatus()) entre
+                // chaque, jusqu'à 5s — trace clairement dans Support si le
+                // résidu persiste au-delà, sans jamais bloquer le retour à
+                // l'écran normal (best-effort, comme le reste de
+                // l'annulation).
+                int dcApresAnnulation = c.getLastDelCode();
+                boolean presetResiduelApresAnnulation =
+                    (dcApresAnnulation & com.pa.lcr.lcp.LcpLink.DC_NET_PRESET_REACHED) != 0
+                    || (dcApresAnnulation & com.pa.lcr.lcp.LcpLink.DC_GROSS_PRESET_REACHED) != 0;
+                int tentativesValidationAnnulation = 0;
+                while (presetResiduelApresAnnulation && tentativesValidationAnnulation < 10) {
+                    tentativesValidationAnnulation++;
+                    LogBus.api(node, "[ANNULATION-VALIDATION] résidu preset encore présent après annulation (delCode=0x"
+                        + Integer.toHexString(dcApresAnnulation) + "), réessai " + tentativesValidationAnnulation + "/10");
+                    try {
+                        c.requestStatus();
+                        Thread.sleep(500);
+                    } catch (Exception ignoredValidationAnnulation) {}
+                    dcApresAnnulation = c.getLastDelCode();
+                    presetResiduelApresAnnulation =
+                        (dcApresAnnulation & com.pa.lcr.lcp.LcpLink.DC_NET_PRESET_REACHED) != 0
+                        || (dcApresAnnulation & com.pa.lcr.lcp.LcpLink.DC_GROSS_PRESET_REACHED) != 0;
+                }
+                if (presetResiduelApresAnnulation) {
+                    LogBus.api(node, "[ANNULATION-VALIDATION] résidu preset toujours présent après 5s (delCode=0x"
+                        + Integer.toHexString(dcApresAnnulation) + ") — le prochain armement (deep link ou New C) le détectera et redemandera");
+                } else if (tentativesValidationAnnulation > 0) {
+                    LogBus.api(node, "[ANNULATION-VALIDATION] registre confirmé propre après "
+                        + tentativesValidationAnnulation + " réessai(s) — aucun résidu, aucune nouvelle livraison démarrée");
+                }
+
                 // 4. Lire le ticket UID généré par endDelivery
                 String ticketNo = "";
                 try {
