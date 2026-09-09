@@ -27,6 +27,28 @@ public final class MediaTransportManager {
 
     private static volatile MediaTransportManager INSTANCE;
 
+    // ✅ AJOUTÉ (9 sept 2026, demande Paul — "valider ou confirmer que
+    // tous les tab sont supprimés avant de tester") — trouvé, avec
+    // certitude : closeAllForValidation() (RegisterSessionManager)
+    // n'appelle que dc.shutdown(false) → link.softClose(), qui ne fait
+    // QUE poser un drapeau interne (closed=true) — ne touche JAMAIS le
+    // vrai transport physique (port USB, socket BT). Le port/socket
+    // restait donc réellement ouvert pendant que validerCandidats()
+    // essayait d'en ouvrir un nouveau vers le même appareil — cause
+    // probable des timeouts BT observés. setDisconnected() (déjà présent
+    // sur TransportHandle, utilisé ailleurs) ferme vraiment (io.close())
+    // — jamais utilisé pour TOUS les transports avant une validation.
+    // Retourne le nombre de transports réellement fermés.
+    public int closeAllRealTransports() {
+        int fermes = 0;
+        for (TransportHandle h : handles.values()) {
+            if (h == null) continue;
+            if (h.getIo() != null) fermes++;
+            h.setDisconnected("VALIDATION_MANUELLE — fermeture réelle avant test");
+        }
+        return fermes;
+    }
+
     public static MediaTransportManager get(Context ctx) {
         if (INSTANCE != null) return INSTANCE;
         synchronized (MediaTransportManager.class) {
