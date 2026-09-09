@@ -3317,6 +3317,7 @@ try {
 
         boolean hardFatal =
                 msg.contains("Transport closed") ||
+                msg.contains("Transport not open") ||
                 msg.contains("Error writing") ||
                 msg.contains("rc=-1") ||
                 msg.contains("Connection closed");
