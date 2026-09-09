@@ -517,9 +517,21 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
      */
     public List<DeliveryRow> getPendingDeliveries() {
         List<DeliveryRow> list = new ArrayList<>();
+        // ❌ CORRIGÉ (8 sept 2026, demande Paul — confirmé par vraie BD :
+        // une ligne écrite à l'armement (stop_type=RUNNING_FLOWING,
+        // sync_status=PENDING, net=0, ticket="") a été poussée vers
+        // Dataverse et marquée SYNCED 1 SECONDE après sa création — avant
+        // même que la vraie fin de livraison n'ait la chance d'écrire les
+        // vraies valeurs par-dessus. sync_status=PENDING sert à DEUX
+        // choses différentes sans les distinguer : "trace de secours à
+        // l'armement" et "prêt à pousser vers Dataverse". Exclut
+        // maintenant explicitement RUNNING_FLOWING : une livraison encore
+        // en train de couler n'est jamais éligible au push, peu importe
+        // son sync_status.
         try (Cursor c = getReadableDatabase().query(
                 TABLE_DELIVERY, null,
-                COL_SYNC_STATUS + " IN (?, ?)", new String[]{SYNC_PENDING, SYNC_ERROR},
+                COL_SYNC_STATUS + " IN (?, ?) AND " + COL_STOP_TYPE + " != ?",
+                new String[]{SYNC_PENDING, SYNC_ERROR, "RUNNING_FLOWING"},
                 null, null, COL_TS_CREATED_MS + " ASC")) {
             while (c.moveToNext()) {
                 list.add(DeliveryRow.fromCursor(c));
