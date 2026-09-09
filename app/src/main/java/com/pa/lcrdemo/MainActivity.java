@@ -6787,8 +6787,13 @@ private boolean ensureBtConnectPermission() {
         // mieux") — le débit confirmé (celui qui a vraiment répondu)
         // apparaît maintenant systématiquement, pas seulement quand la
         // détection après échec était nécessaire.
-        return " | node=" + node + " | ticket=" + ticketNo + " | firmware=" + firmware
-            + (baudConfirme != null ? " | débit=" + baudConfirme + " bauds" : "");
+        // ✅ REFORMATÉ (9 sept 2026, demande Paul — "je veux voir le
+        // détails du test si on est 19200 ou etc") — lignes distinctes,
+        // indentées, au lieu de tout entasser sur une seule ligne "|" —
+        // le débit (confirmé ou supposé) saute maintenant aux yeux, pas
+        // noyé dans le reste.
+        return "\n  node=" + node + "\n  ticket=" + ticketNo + "\n  firmware=" + firmware
+            + (baudConfirme != null ? "\n  débit=" + baudConfirme : "");
     }
 
     /** Résultat d'un balayage de node réussi — {node, #série}. */
