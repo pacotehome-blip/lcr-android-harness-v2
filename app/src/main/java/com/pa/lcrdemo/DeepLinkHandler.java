@@ -1031,7 +1031,11 @@ public class DeepLinkHandler {
                         + Integer.toHexString(dcDeepLink) + "), réessai " + tentativesPresetDeepLink + "/3 après vraie relecture");
                     try {
                         controllerOneshot.requestStatus();
-                        Thread.sleep(800);
+                        // ✅ CORRIGÉ (9 sept 2026, demande Paul — "aucun
+                        // scan en arrivant de deeplink") — 800ms → 500ms,
+                        // moins de temps grugé avant le début de
+                        // l'armement, garde les 3 vraies tentatives.
+                        Thread.sleep(500);
                     } catch (Exception ignoredRetryPreset) {}
                     dcDeepLink = controllerOneshot.getLastDelCode();
                     presetDejaAtteintDeepLink =

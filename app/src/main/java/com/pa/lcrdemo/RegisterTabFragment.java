@@ -1306,9 +1306,18 @@ public class RegisterTabFragment extends Fragment {
                         new java.util.concurrent.CountDownLatch(1);
                 autoScanProduitsSiNecessaire(scanDone);
                 try {
-                    boolean confirme = scanDone.await(3, java.util.concurrent.TimeUnit.SECONDS);
+                    // ✅ CORRIGÉ (9 sept 2026, demande Paul — "aucun scan
+                    // en arrivant de deeplink, le processus n'a pas été
+                    // respecté") — trouvé, avec certitude : le check
+                    // preset ajouté ce soir (3 réessais, jusqu'à ~2.4s)
+                    // tourne AVANT même le début de cette séquence
+                    // d'armement, grugeant systématiquement le temps réel
+                    // disponible pour le vrai scan matériel. 3s → 5s pour
+                    // compenser — le scan a maintenant une vraie chance
+                    // de vraiment répondre, pas juste 3s amputées d'avance.
+                    boolean confirme = scanDone.await(5, java.util.concurrent.TimeUnit.SECONDS);
                     if (!confirme) {
-                        LogBus.api(node, "[INIT] PRODUIT — autoScanProduitsSiNecessaire() pas confirmé après 3s, on continue quand même");
+                        LogBus.api(node, "[INIT] PRODUIT — autoScanProduitsSiNecessaire() pas confirmé après 5s, on continue quand même");
                     }
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
