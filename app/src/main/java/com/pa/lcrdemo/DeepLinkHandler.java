@@ -1060,7 +1060,16 @@ public class DeepLinkHandler {
                         + (existingDeepLink == null ? "AUCUNE ligne — reste d'un autre wo, non déclenché" : "ligne trouvée ticket=" + existingDeepLink.ticketNo));
                     if (existingDeepLink != null) {
                         final java.util.concurrent.CountDownLatch presetLatch = new java.util.concurrent.CountDownLatch(1);
-                        final boolean[] continuerDeepLink = {true}; // défaut si personne ne répond
+                        // ✅ CORRIGÉ (9 sept 2026, demande Paul — "pourquoi
+                        // que si je n'ai pas encore répondu à la question,
+                        // je suis rendu à running_flowing??? la question
+                        // devrait être juste avant d'armer... que ça
+                        // reste vraiment bloquant tant que quelqu'un n'a
+                        // pas répondu") — retiré le délai automatique de
+                        // 15s (et son défaut "Continuer" silencieux) —
+                        // attend maintenant vraiment une réponse, sans
+                        // jamais continuer tout seul.
+                        final boolean[] continuerDeepLink = {false};
                         final int dcFinalDeepLink = dcDeepLink;
                         activity.runOnUiThread(() -> {
                             try {
@@ -1088,11 +1097,7 @@ public class DeepLinkHandler {
                                 presetLatch.countDown();
                             }
                         });
-                        boolean repondu = presetLatch.await(15, java.util.concurrent.TimeUnit.SECONDS);
-                        if (!repondu) {
-                            com.pa.lcr.lcp.log.LogBus.api(node, "[PRESET-CHECK] deep link — personne n'a répondu en 15s, continue automatiquement (delCode=0x"
-                                + Integer.toHexString(dcFinalDeepLink) + ")");
-                        }
+                        presetLatch.await();
                         if (!continuerDeepLink[0]) {
                             logError(fSerialId, woNum, "PRESET_DEJA_ATTEINT", "Chauffeur a annulé (delCode=0x" + Integer.toHexString(dcFinalDeepLink) + ")");
                             retournerFieldService(woNum, woIdGuid, "erreur_preset_deja_atteint",
