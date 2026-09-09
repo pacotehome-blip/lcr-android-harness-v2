@@ -2863,8 +2863,57 @@ public class RegisterTabFragment extends Fragment {
         if (txtLive != null) txtLive.setText("LIVE: (en attente)");
         if (txtQtyNet != null) txtQtyNet.setText("NET: 0.0");
         if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
-        if (edtPreset != null) edtPreset.setText("50");
-        if (spnProduct != null) spnProduct.setText("1", false);
+        // ✅ AJOUTÉ (8 sept 2026, demande Paul — "si on a les données dans
+        // la bd il faut juste valider est-ce le meme #serie registre et
+        // node, est-ce que la table est vide non alors récupère l'info
+        // selon le produit du deeplink, si vide alors scan le registre")
+        // — trouvé : initUi() remettait produit/preset à des valeurs
+        // codées en dur ("1"/"50") à CHAQUE recréation de vue — y
+        // compris juste après une livraison (Activity recréée), effaçant
+        // le vrai "PROPANE (prod1)" déjà résolu, sans jamais le
+        // récupérer. Vérifie maintenant : même #série+node que la
+        // dernière livraison connue ? Table RegisterProductStore non
+        // vide pour ce couple ? Si oui, récupère le vrai libellé pour le
+        // produit du deep link (ActiveDeliveryStore.produit) — sinon
+        // garde le défaut, le vrai scan (étape PRODUIT de
+        // runInitSequence()) le remplira normalement.
+        String produitLabelInitUi = "1";
+        String presetLabelInitUi = "50";
+        try {
+            com.pa.lcr.lcp.storage.ActiveDeliveryStore adsInitUi =
+                new com.pa.lcr.lcp.storage.ActiveDeliveryStore(requireContext());
+            com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery adInitUi = adsInitUi.load();
+            boolean memeRegistre = adInitUi != null && serialFromArgs != null
+                && serialFromArgs.trim().equals(adInitUi.serialId) && adInitUi.node == node;
+            if (memeRegistre) {
+                if (adInitUi.preset > 0) presetLabelInitUi = String.valueOf(adInitUi.preset);
+                if (adInitUi.produit > 0) {
+                    com.pa.lcr.lcp.storage.RegisterProductStore prodStoreInitUi =
+                        new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
+                    java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> rowsInitUi =
+                        prodStoreInitUi.getAll(serialFromArgs.trim(), node);
+                    if (!rowsInitUi.isEmpty()) {
+                        for (com.pa.lcr.lcp.storage.RegisterProductStore.Row r : rowsInitUi) {
+                            if (r.noteIdx == adInitUi.produit && r.description != null && !r.description.trim().isEmpty()) {
+                                StringBuilder sbInitUi = new StringBuilder(String.valueOf(adInitUi.produit))
+                                    .append(" - ").append(r.description);
+                                if (r.productCode != null && !r.productCode.isEmpty())
+                                    sbInitUi.append(" (").append(r.productCode).append(")");
+                                if (r.productType >= 0)
+                                    sbInitUi.append(" [").append(com.pa.lcr.lcp.LcpLink.decodeProductType(r.productType)).append("]");
+                                produitLabelInitUi = sbInitUi.toString();
+                                LogBus.api(node, "[PRODUIT-CACHE] initUi() — récupéré depuis RegisterProductStore, même #série+node — " + produitLabelInitUi);
+                                break;
+                            }
+                        }
+                    }
+                    // Table vide pour ce #série+node — laissé au défaut,
+                    // le vrai scan (étape PRODUIT) le remplira lui-même.
+                }
+            }
+        } catch (Exception ignoredInitUiProduit) {}
+        if (edtPreset != null) edtPreset.setText(presetLabelInitUi);
+        if (spnProduct != null) spnProduct.setText(produitLabelInitUi, false);
         if (cbShowLog != null) cbShowLog.setChecked(false);
         if (logPanel != null) logPanel.setVisibility(View.GONE);
         logViewSinceMs = 0L;
