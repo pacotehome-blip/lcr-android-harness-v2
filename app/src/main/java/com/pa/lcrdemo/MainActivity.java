@@ -3457,6 +3457,56 @@ private void setupTabsTop() {
         }
         upsertTabDebounceMap.put(debounceKey, nowDebounce);
 
+        // ✅ AJOUTÉ (9 sept 2026, demande Paul — "la livraison ne doit
+        // jamais dépendre du type de transport... s'il y a un ticket sur
+        // running_flowing il doit continuer sur un autre transport") —
+        // trouvé : rien ne reliait "même registre physique" entre deux
+        // transports différents — chaque transport avait sa propre
+        // session complètement séparée. Dès qu'un #série connu est
+        // identifié ici, peu importe le transport (USB/BT/TCP), vérifie
+        // s'il existe une livraison RUNNING_FLOWING non résolue pour CE
+        // #série précis, même si elle a été armée sur un AUTRE transport
+        // — réutilise getRunningFlowingSafetyNet() déjà existant (déjà
+        // conçu pour chercher par #série seul), et le pont de reprise
+        // déjà construit ce matin (reprendreLivraisonEnAttente()). La
+        // livraison suit maintenant le registre, pas le fil qui le relie
+        // à la tablette à ce moment précis.
+        try {
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbCrossTransport =
+                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(this);
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow rowCrossTransport;
+            try {
+                rowCrossTransport = dbCrossTransport.getRunningFlowingSafetyNet(null, serial);
+            } finally {
+                try { dbCrossTransport.close(); } catch (Exception ignored) {}
+            }
+            if (rowCrossTransport != null && rowCrossTransport.jobId != null && !rowCrossTransport.jobId.isEmpty()
+                    && rowCrossTransport.lcrnode == node) {
+                android.util.Log.i("MainActivity", "upsertRegisterTabFromScan: livraison RUNNING_FLOWING non résolue trouvée "
+                    + "pour #série=" + serial + " (jobId=" + rowCrossTransport.jobId + ", wo=" + rowCrossTransport.woNum
+                    + ") — reprise sur le nouveau transport=" + transportKey);
+                try {
+                    com.pa.lcr.lcp.storage.ActiveDeliveryStore adsCrossTransport = new com.pa.lcr.lcp.storage.ActiveDeliveryStore(this);
+                    com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery adCrossTransport = new com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery();
+                    adCrossTransport.woNum = rowCrossTransport.woNum;
+                    adCrossTransport.jobId = rowCrossTransport.jobId;
+                    adCrossTransport.mac = transportKey;
+                    adCrossTransport.node = node;
+                    adCrossTransport.serialId = serial;
+                    adCrossTransport.status = "STARTED";
+                    adsCrossTransport.save(adCrossTransport);
+                } catch (Exception eSaveCrossTransport) {
+                    android.util.Log.w("MainActivity", "upsertRegisterTabFromScan: sauvegarde ActiveDeliveryStore (reprise cross-transport) ERR: " + eSaveCrossTransport.getMessage());
+                }
+                if (deepLinkHandler != null) {
+                    deepLinkHandler.reprendreLivraisonEnAttente(rowCrossTransport.jobId, node, rowCrossTransport.woNum,
+                        rowCrossTransport.woIdGuid, serial, transportKey);
+                }
+            }
+        } catch (Exception eCrossTransport) {
+            android.util.Log.w("MainActivity", "upsertRegisterTabFromScan: vérification reprise cross-transport ERR (non-bloquant): " + eCrossTransport.getMessage());
+        }
+
         // 1) retirer les tabs legacy (serial vide) dès qu'on trouve au moins un registre
         removeAllUnknownSerialTabsBestEffort();
 
