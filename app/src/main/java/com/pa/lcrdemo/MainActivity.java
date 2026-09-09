@@ -3487,14 +3487,8 @@ private void setupTabsTop() {
                     + ") — reprise sur le nouveau transport=" + transportKey);
                 try {
                     com.pa.lcr.lcp.storage.ActiveDeliveryStore adsCrossTransport = new com.pa.lcr.lcp.storage.ActiveDeliveryStore(this);
-                    com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery adCrossTransport = new com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery();
-                    adCrossTransport.woNum = rowCrossTransport.woNum;
-                    adCrossTransport.jobId = rowCrossTransport.jobId;
-                    adCrossTransport.mac = transportKey;
-                    adCrossTransport.node = node;
-                    adCrossTransport.serialId = serial;
-                    adCrossTransport.status = "STARTED";
-                    adsCrossTransport.save(adCrossTransport);
+                    adsCrossTransport.save(rowCrossTransport.woNum, rowCrossTransport.woIdGuid, rowCrossTransport.jobId,
+                        transportKey, node, serial, rowCrossTransport.produitNo, rowCrossTransport.presetL, "STARTED");
                 } catch (Exception eSaveCrossTransport) {
                     android.util.Log.w("MainActivity", "upsertRegisterTabFromScan: sauvegarde ActiveDeliveryStore (reprise cross-transport) ERR: " + eSaveCrossTransport.getMessage());
                 }
