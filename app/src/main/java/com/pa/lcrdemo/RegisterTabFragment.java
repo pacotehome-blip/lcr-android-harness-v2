@@ -1125,7 +1125,26 @@ public class RegisterTabFragment extends Fragment {
                         edtPreset.setText(String.valueOf(presetFraisFinal));
                     }
                     initValidatedProductIdx = produitFraisFinal - 1;
-                    produitDejaResoluPourCetteSession = true;
+                    // ✅ CORRIGÉ (9 sept 2026, demande Paul — capture d'écran
+                    // confirmant "1" affiché au lieu de "1 - PROPANE (prod1)
+                    // [Aucun]") — trouvé, avec certitude : ce chemin
+                    // verrouillait produitDejaResoluPourCetteSession=true
+                    // même quand ligneFinale était null (RegisterProductStore
+                    // ne connaissait pas encore ce produit à ce moment précis)
+                    // — affichant alors le CHIFFRE BRUT ("1") comme libellé,
+                    // puis bloquant pour toujours (règle du 26 août : "jamais
+                    // revalider à chaque ticket") toute future résolution
+                    // réelle, même quand le vrai scan trouvait PROPANE
+                    // quelques secondes plus tard. Ne verrouille maintenant
+                    // que si une vraie description existe — le chiffre brut
+                    // reste affiché temporairement, sans jamais bloquer le
+                    // vrai scan qui doit encore suivre.
+                    if (ligneFinale != null) {
+                        produitDejaResoluPourCetteSession = true;
+                    } else {
+                        LogBus.api(node, "[PRODUIT-CACHE] récupération — affiché chiffre brut (pas encore de description), "
+                                + "PAS verrouillé — le vrai scan pourra encore affiner");
+                    }
                 } catch (Exception e) {
                     android.util.Log.w("RegisterTabFragment", "Application produit/preset à l'écran (récupération) ERR: " + e.getMessage());
                 }
