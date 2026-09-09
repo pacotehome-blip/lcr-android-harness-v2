@@ -6302,7 +6302,34 @@ public class RegisterTabFragment extends Fragment {
                                                         + livraisons.length() + " livraison(s), wo=" + fWoNumForPatch);
                                                 }
                                             } catch (Exception e) {
-                                                android.util.Log.w("Annuler", "patchSummaryConsolidated post-annulation ERR (non-bloquant): " + e.getMessage());
+                                                android.util.Log.w("Annuler", "patchSummaryConsolidated post-annulation ERR (probablement hors ligne) — "
+                                                    + "mise en file pour retry automatique: " + e.getMessage());
+                                                // ✅ AJOUTÉ (8 sept 2026, demande Paul) — ce
+                                                // chemin (patch après une annulation) était
+                                                // marqué "(non-bloquant)" — l'échec était
+                                                // juste logué, rien n'était mis en file. Même
+                                                // mécanisme exact que le bouton bleu et la fin
+                                                // de livraison automatique.
+                                                try {
+                                                    org.json.JSONObject queuePayloadAnnuler = new org.json.JSONObject();
+                                                    queuePayloadAnnuler.put("consolidated", true);
+                                                    queuePayloadAnnuler.put("workOrderId", currentWoIdGuid != null ? currentWoIdGuid : "");
+                                                    queuePayloadAnnuler.put("woNum", fWoNumForPatch != null ? fWoNumForPatch : "");
+                                                    String queueUidAnnuler = (fWoNumForPatch != null ? fWoNumForPatch : "wo")
+                                                        + "-consolidated-" + System.currentTimeMillis();
+                                                    queuePayloadAnnuler.put("deliveryUid", queueUidAnnuler);
+                                                    com.pa.lcrdemo.dataverse.DeliveryResultQueueDb queueDbAnnuler =
+                                                        new com.pa.lcrdemo.dataverse.DeliveryResultQueueDb(requireContext());
+                                                    try {
+                                                        queueDbAnnuler.upsertPending(queueUidAnnuler, queuePayloadAnnuler.toString());
+                                                    } finally {
+                                                        try { queueDbAnnuler.close(); } catch (Exception ignored) {}
+                                                    }
+                                                    com.pa.lcrdemo.dataverse.DeliverySyncScheduler.triggerNow(requireContext());
+                                                    android.util.Log.i("Annuler", "patchSummaryConsolidated post-annulation — mise en file OK, retry dès réseau dispo");
+                                                } catch (Exception eQueueAnnuler) {
+                                                    android.util.Log.w("Annuler", "patchSummaryConsolidated post-annulation — mise en file ERR: " + eQueueAnnuler.getMessage());
+                                                }
                                             }
                                         }).start();
                                     }

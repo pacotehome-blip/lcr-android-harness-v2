@@ -3653,7 +3653,36 @@ public class DeepLinkHandler {
                                     }
                                 } catch (Exception ignored) {}
                             } catch (Exception e) {
-                                android.util.Log.w(TAG, "patchDataverse PATCH ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.patchDataverse", e); } catch (Exception ignored) {}
+                                android.util.Log.w(TAG, "patchDataverse PATCH ERR (probablement hors ligne) — "
+                                    + "mise en file pour retry automatique: " + e.getMessage());
+                                try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.patchDataverse", e); } catch (Exception ignored) {}
+                                // ✅ AJOUTÉ (8 sept 2026, demande Paul) — ce
+                                // chemin (patchDataverse, variante MSAL) ne
+                                // faisait que loguer l'échec, sans jamais
+                                // mettre en file — contrairement au bouton
+                                // bleu et à la fin de livraison automatique,
+                                // qui avaient déjà ce filet. Même mécanisme
+                                // exact ici.
+                                try {
+                                    org.json.JSONObject queuePayloadMsal = new org.json.JSONObject();
+                                    queuePayloadMsal.put("consolidated", true);
+                                    queuePayloadMsal.put("workOrderId", woGuid != null ? woGuid : "");
+                                    queuePayloadMsal.put("woNum", woNum != null ? woNum : "");
+                                    String queueUidMsal = fDeliveryUid != null && !fDeliveryUid.isEmpty()
+                                        ? fDeliveryUid
+                                        : (woNum != null ? woNum : "wo") + "-consolidated-" + System.currentTimeMillis();
+                                    queuePayloadMsal.put("deliveryUid", queueUidMsal);
+                                    DeliveryResultQueueDb queueDbMsal = new DeliveryResultQueueDb(activity);
+                                    try {
+                                        queueDbMsal.upsertPending(queueUidMsal, queuePayloadMsal.toString());
+                                    } finally {
+                                        try { queueDbMsal.close(); } catch (Exception ignored) {}
+                                    }
+                                    com.pa.lcrdemo.dataverse.DeliverySyncScheduler.triggerNow(activity);
+                                    android.util.Log.i(TAG, "patchDataverse MSAL — mise en file OK, retry dès réseau dispo");
+                                } catch (Exception eQueueMsal) {
+                                    android.util.Log.w(TAG, "patchDataverse MSAL — mise en file ERR: " + eQueueMsal.getMessage());
+                                }
                             }
                         });
                     }
