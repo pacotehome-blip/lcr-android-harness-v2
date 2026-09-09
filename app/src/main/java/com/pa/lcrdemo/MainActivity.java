@@ -5314,7 +5314,7 @@ private void scanUsb() {
             // partagée (ex. une méthode statique commune) pour qu'un futur
             // changement de vitesse ne puisse plus désynchroniser les deux
             // chemins par oubli.
-            port.setParameters(19200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
+            port.setParameters(com.pa.lcr.lcp.transport.MediaTransportManager.USB_BAUD, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
             try { port.purgeHwBuffers(true, true); } catch (Exception ignoredPurge) {}
             usbPort = port;
             UsbSession.set(dev, port);
