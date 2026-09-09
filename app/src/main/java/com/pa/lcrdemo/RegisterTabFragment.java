@@ -1945,7 +1945,30 @@ public class RegisterTabFragment extends Fragment {
                             if (safetyNetFin == null || safetyNetFin.jobId == null || safetyNetFin.jobId.isEmpty()) return;
                             LogBus.api(node, "[FILET-CONNECTED] registre revenu à CONNECTED, ligne RUNNING_FLOWING non résolue trouvée — jobId="
                                 + safetyNetFin.jobId + " — vraie lecture fraîche forcée");
+                            // ✅ AJOUTÉ (9 sept 2026, demande Paul — "il ne
+                            // faut pas oublier de faire une derniere
+                            // lecture du net et gross avant d'écrire...
+                            // actuellement j'ai 10.4 le registre affiche
+                            // 10.5") — trouvé, avec certitude : ce chemin
+                            // de finalisation forcée faisait une seule
+                            // lecture immédiate, sans jamais le même
+                            // délai de stabilisation + relecture de
+                            // confirmation déjà en place ailleurs depuis
+                            // le 14 août ("ce qui est affiché est ce qui
+                            // est facturé" — un reliquat de débit peut
+                            // continuer de s'accumuler un court instant
+                            // après l'arrêt, fermeture progressive du
+                            // solénoïde). Même filet ici, jamais
+                            // implémenté pour ce chemin précis.
+                            double[] ngFraisAvant = cFiletFin.readNetGrossFromHardware();
+                            try { Thread.sleep(400); } catch (InterruptedException ignoredSleep) { Thread.currentThread().interrupt(); }
                             double[] ngFrais = cFiletFin.readNetGrossFromHardware();
+                            if (ngFrais[0] < 0 && ngFraisAvant[0] >= 0) ngFrais = ngFraisAvant; // relecture échouée — garde la première capture
+                            if (ngFraisAvant[0] >= 0 && ngFrais[0] >= 0 && (ngFraisAvant[0] != ngFrais[0] || ngFraisAvant[1] != ngFrais[1])) {
+                                LogBus.api(node, "[FILET-CONNECTED] reliquat de débit détecté après arrêt — net "
+                                    + ngFraisAvant[0] + "→" + ngFrais[0] + ", gross " + ngFraisAvant[1] + "→" + ngFrais[1]
+                                    + " (valeur confirmée retenue)");
+                            }
                             double netFin = (ngFrais[0] >= 0) ? ngFrais[0] : parseDisplayNet();
                             double grossFin = (ngFrais[1] >= 0) ? ngFrais[1] : parseDisplayGross();
                             String ticketFin = cFiletFin.api_readTicketNo23Frais();
@@ -4467,6 +4490,22 @@ public class RegisterTabFragment extends Fragment {
         }
 
         DeliveryState st = (state != null) ? state : controller.getState();
+        // ✅ AJOUTÉ (9 sept 2026, demande Paul — "si je suis sur une
+        // nouvelle livraison et que j'arme une livraison, le bouton
+        // retour au bon de livraison devrait etre caché") — trouvé, avec
+        // certitude : cette fonction ne vérifiait jamais
+        // armementEnCoursParCetteSession. Pendant l'armement, avant que
+        // RUNNING_FLOWING prenne vraiment effet, l'état peut encore
+        // afficher CONNECTED — le bouton bleu pouvait alors montrer les
+        // données de la livraison PRÉCÉDENTE sur ce même WO pendant
+        // qu'une nouvelle était en train de s'armer. Caché maintenant,
+        // sans exception, tant qu'un armement est en cours.
+        if (armementEnCoursParCetteSession) {
+            if (btnRetourWO != null) btnRetourWO.setVisibility(android.view.View.GONE);
+            LogBus.api(node, "[BTN-RETOUR-WO] caché — armement en cours (" + armementEnCoursSource + ")");
+            if (doneSignal != null) doneSignal.countDown();
+            return;
+        }
         boolean connected = (st == DeliveryState.CONNECTED);
         boolean paused    = (st == DeliveryState.RUNNING_PAUSED);
         boolean flowing   = (st == DeliveryState.RUNNING_FLOWING);
@@ -4690,6 +4729,28 @@ public class RegisterTabFragment extends Fragment {
                     if (monNumeroSeq != updateButtonsSeq.get()) {
                         LogBus.api(node, "[BTN-RETOUR-WO] résultat périmé ignoré (monNumeroSeq=" + monNumeroSeq
                                 + " != dernierNumeroSeq=" + updateButtonsSeq.get() + ")");
+                        if (doneSignal != null) doneSignal.countDown();
+                        return;
+                    }
+                    boolean encoreVraimentConnecteMaintenant = controller != null
+                        && controller.getState() == DeliveryState.CONNECTED
+                        && !armementEnCoursParCetteSession;
+                    if (show && !encoreVraimentConnecteMaintenant) {
+                        // ✅ CORRIGÉ (9 sept 2026, demande Paul — "le bouton
+                        // ne devrait pas etre présent si j'ai
+                        // running_flowing") — trouvé : armementEnCoursParCetteSession
+                        // seul ne suffisait pas — ce drapeau peut redevenir
+                        // faux AVANT que l'état soit vraiment stabilisé à
+                        // RUNNING_FLOWING (le flag se remet à false à la
+                        // toute fin de runInitSequence(), après l'étape
+                        // LIVE qui a déjà fait la vraie transition). Relit
+                        // maintenant l'état frais du contrôleur, juste
+                        // avant d'afficher — le dernier mot revient
+                        // toujours à l'état réel au moment précis d'agir,
+                        // jamais à une valeur capturée plus tôt pendant la
+                        // recherche BD en arrière-plan.
+                        btnRetourWO.setVisibility(android.view.View.GONE);
+                        LogBus.api(node, "[BTN-RETOUR-WO] caché — état réel plus CONNECTED au moment d'afficher (probablement RUNNING_FLOWING)");
                         if (doneSignal != null) doneSignal.countDown();
                         return;
                     }
