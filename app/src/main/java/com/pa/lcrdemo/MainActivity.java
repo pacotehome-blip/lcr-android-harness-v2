@@ -6791,6 +6791,34 @@ private boolean ensureBtConnectPermission() {
             + (baudConfirme != null ? " | débit=" + baudConfirme + " bauds" : "");
     }
 
+    /** Résultat d'un balayage de node réussi — {node, #série}. */
+    private static final class NodeTrouve {
+        final int node;
+        final String serial;
+        NodeTrouve(int node, String serial) { this.node = node; this.serial = serial; }
+    }
+
+    // ✅ AJOUTÉ (9 sept 2026, demande Paul — "on veut trouver le #serie et
+    // le lcrnode, on doit scanner 1 à 250, comme dans l'écran configure
+    // dans la section bluetooth") — trouvé, avec Paul : la validation
+    // supposait toujours node=250 (adresse d'usine par défaut), jamais
+    // garanti sur toute la flotte (déjà noté le 20 août). Même patron
+    // exact que le scan LCR-II 1..250 déjà utilisé dans Configure
+    // (TF=300ms par node — voir finalizeTcpRegisterTab()/scan BT), pas
+    // une nouvelle logique inventée. S'arrête au premier node qui répond.
+    private NodeTrouve scannerNodePourSerie(com.pa.lcr.lcp.transport.TransportIo io) {
+        final int TF = 300;
+        for (int node = 1; node <= 250; node++) {
+            try {
+                com.pa.lcr.lcp.LcpLink tmp = new com.pa.lcr.lcp.LcpLink(io, node, 255, true);
+                byte[] raw = tmp.opGetField(80, TF);
+                String serial = decodeSerialBytes(raw);
+                if (serial != null && !serial.trim().isEmpty()) return new NodeTrouve(node, serial);
+            } catch (Exception ignored) {}
+        }
+        return null;
+    }
+
     private String validerUnCandidatLectureSeule(String candidatKey) {
         long t0 = System.currentTimeMillis();
         if (candidatKey.equals("USB")) {
@@ -6803,17 +6831,16 @@ private boolean ensureBtConnectPermission() {
                 com.pa.lcr.lcp.transport.TransportIo io = (mediaTransportManager != null)
                     ? mediaTransportManager.getByKey("USB") : null;
                 if (io == null || !io.isOpen()) return "❌ Absent — port USB non ouvert";
-                com.pa.lcr.lcp.LcpLink tmp = new com.pa.lcr.lcp.LcpLink(io, 250, 255, true);
-                byte[] raw = tmp.opGetField(80, 3000);
+                NodeTrouve trouve = scannerNodePourSerie(io);
                 long ms = System.currentTimeMillis() - t0;
-                String serial = decodeSerialBytes(raw);
-                if (serial != null) {
+                if (trouve != null) {
+                    com.pa.lcr.lcp.LcpLink tmp = new com.pa.lcr.lcp.LcpLink(io, trouve.node, 255, true);
                     String detailBauds = "";
                     if (usbPort != null) {
-                        java.util.List<String> lignesBaud = detecterBaudDetaille(usbPort, 250);
+                        java.util.List<String> lignesBaud = detecterBaudDetaille(usbPort, trouve.node);
                         detailBauds = "\n  Débits testés :\n" + String.join("\n", lignesBaud);
                     }
-                    return "✅ Présent — #série=" + serial + " (" + ms + "ms)" + infosSupplementaires(tmp, 250, "19200 (confirmé — port app)") + detailBauds;
+                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "19200 (confirmé — port app)") + detailBauds;
                 }
                 // ✅ AJOUTÉ (20 août 2026, demande Paul — "ajouter dans la
                 // validation la détection du baud rate") — au lieu de
@@ -6875,12 +6902,13 @@ private boolean ensureBtConnectPermission() {
                 com.pa.lcr.lcp.transport.BtSppTransportIo tmpIo = new com.pa.lcr.lcp.transport.BtSppTransportIo(
                     "BT:" + mac, sock, sock.getInputStream(), sock.getOutputStream(),
                     "Validation candidat BT:" + mac, System.currentTimeMillis());
-                com.pa.lcr.lcp.LcpLink tmp = new com.pa.lcr.lcp.LcpLink(tmpIo, 250, 255, true);
-                byte[] raw = tmp.opGetField(80, 3000);
+                NodeTrouve trouve = scannerNodePourSerie(tmpIo);
                 long ms = System.currentTimeMillis() - t0;
-                String serial = decodeSerialBytes(raw);
-                return serial != null ? "✅ Présent — #série=" + serial + " (" + ms + "ms)" + infosSupplementaires(tmp, 250, "pont supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (RFCOMM)")
-                    : "⚠ Présent mais silencieux (" + ms + "ms) — débit du pont BT à vérifier séparément (voir guide)";
+                if (trouve != null) {
+                    com.pa.lcr.lcp.LcpLink tmp = new com.pa.lcr.lcp.LcpLink(tmpIo, trouve.node, 255, true);
+                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "pont supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (RFCOMM)");
+                }
+                return "⚠ Présent mais silencieux (" + ms + "ms, 250 nodes balayés) — débit du pont BT à vérifier séparément (voir guide)";
             } catch (Exception e) {
                 return "❌ Absent/injoignable — " + e.getClass().getSimpleName() + ": " + e.getMessage();
             } finally {
@@ -6898,12 +6926,13 @@ private boolean ensureBtConnectPermission() {
                 com.pa.lcr.lcp.transport.TcpTransportIo tmpIo = new com.pa.lcr.lcp.transport.TcpTransportIo(
                     tcpKey, sock, sock.getInputStream(), sock.getOutputStream(),
                     "Validation candidat " + tcpKey, System.currentTimeMillis());
-                com.pa.lcr.lcp.LcpLink tmp = new com.pa.lcr.lcp.LcpLink(tmpIo, 250, 255, true);
-                byte[] raw = tmp.opGetField(80, 3000);
+                NodeTrouve trouve = scannerNodePourSerie(tmpIo);
                 long ms = System.currentTimeMillis() - t0;
-                String serial = decodeSerialBytes(raw);
-                return serial != null ? "✅ Présent — #série=" + serial + " (" + ms + "ms)" + infosSupplementaires(tmp, 250, "N-Port supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (TCP)")
-                    : "⚠ Présent mais silencieux (" + ms + "ms) — mauvais débit probable";
+                if (trouve != null) {
+                    com.pa.lcr.lcp.LcpLink tmp = new com.pa.lcr.lcp.LcpLink(tmpIo, trouve.node, 255, true);
+                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "N-Port supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (TCP)");
+                }
+                return "⚠ Présent mais silencieux (" + ms + "ms, 250 nodes balayés) — mauvais débit probable";
             } catch (Exception e) {
                 return "❌ Absent/injoignable — " + e.getClass().getSimpleName() + ": " + e.getMessage();
             } finally {
