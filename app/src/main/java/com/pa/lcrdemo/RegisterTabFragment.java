@@ -282,6 +282,24 @@ public class RegisterTabFragment extends Fragment {
                     "showDeliveryReadyPanel annulé — status DONE");
                 return;
             }
+            // ✅ AJOUTÉ (9 sept 2026, demande Paul — capture d'écran
+            // montrant le bouton vert "Lancer la livraison" apparaître
+            // juste avant que le vrai RUNNING_FLOWING (déclenché par un
+            // deep link déjà en train de s'armer) ne prenne effet) —
+            // trouvé : ce panneau se déclenche sur un délai fixe (800ms),
+            // complètement indépendant du vrai runInitSequence() qui
+            // tourne en parallèle. Taper sur ce bouton pendant cette
+            // fenêtre reste sans danger (lancerDepuisStore() envoie un
+            // vrai deep link interne, protégé par le même garde-fou
+            // armementEnCoursParCetteSession qu'hier) — mais l'affichage
+            // lui-même est trompeur, laissant croire qu'aucun armement
+            // n'est en cours alors qu'il y en a déjà un. Sauté si un
+            // armement est déjà en cours, peu importe sa source.
+            if (armementEnCoursParCetteSession) {
+                android.util.Log.i("RegisterTabFragment",
+                    "showDeliveryReadyPanel annulé — armement déjà en cours (" + armementEnCoursSource + ")");
+                return;
+            }
 
             // ✅ Afficher infos livraison dans txtDeliveryUid
             if (txtDeliveryUid != null) {
