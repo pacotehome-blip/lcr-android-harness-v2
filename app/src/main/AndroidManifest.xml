@@ -96,6 +96,18 @@
             android:exported="true"
             android:configChanges="orientation|screenSize|keyboardHidden" />
 
+        <!-- ✅ AJOUTÉ (9 sept 2026, demande Paul — "un moyen efficace pour
+             tester la connectivité aux registres... écran à part car le
+             scroll du bouton démarrer n'est pas efficace car il est déjà
+             dans un scroll") — remplace la section "Démarrer la
+             validation" de l'onglet Configure, plein écran, cases à
+             cocher par candidat. -->
+        <activity
+            android:name="com.pa.lcrdemo.RegisterValidationActivity"
+            android:label="Validation registres"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+
         <!-- ✅ MSAL — BrowserTabActivity pour le flow OAuth interactif -->
         <activity
             android:name="com.microsoft.identity.client.BrowserTabActivity"

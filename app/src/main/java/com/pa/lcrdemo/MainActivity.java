@@ -655,6 +655,7 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+        ACTIVE_INSTANCE = this;
 
         // ✅ AJOUTÉ (24 août 2026, demande Paul — "un moyen pour savoir
         // quel version nous sommes rendu dans l'apk après chaque commit")
@@ -954,6 +955,7 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
+        if (ACTIVE_INSTANCE == this) ACTIVE_INSTANCE = null;
         stopApiServer("Activity destroyed");
         try { scanExec.shutdownNow(); } catch (Exception ignored) {}
         // ✅ FIX (6 août 2026, demande Paul — balayage systématique des
@@ -1559,9 +1561,17 @@ tabRegisters = findViewById(R.id.tabRegisters);
         Button btnValiderCandidats = findViewById(R.id.btnValiderCandidats);
         Button btnAnnulerCandidats = findViewById(R.id.btnAnnulerCandidats);
         TextView txtValiderCandidatsResult = findViewById(R.id.txtValiderCandidatsResult);
+        if (btnAnnulerCandidats != null) btnAnnulerCandidats.setVisibility(View.GONE);
+        if (txtValiderCandidatsResult != null) txtValiderCandidatsResult.setVisibility(View.GONE);
+        // ✅ REMPLACÉ (9 sept 2026, demande Paul — "on utilise le bouton
+        // démarrer la validation on remplace tout ça") — ouvre maintenant
+        // RegisterValidationActivity (écran plein écran, cases à cocher
+        // par candidat) au lieu de validerCandidats() directement dans ce
+        // scroll. validerCandidats() elle-même reste inchangée dans le
+        // fichier (au cas où), simplement plus jamais appelée depuis ici.
         if (btnValiderCandidats != null) {
-            btnValiderCandidats.setOnClickListener(v -> validerCandidats(
-                txtValiderCandidatsResult, btnValiderCandidats, btnAnnulerCandidats));
+            btnValiderCandidats.setOnClickListener(v ->
+                startActivity(new android.content.Intent(MainActivity.this, RegisterValidationActivity.class)));
         }
         if (btnAnnulerCandidats != null) {
             btnAnnulerCandidats.setOnClickListener(v -> {
@@ -6237,6 +6247,122 @@ private boolean ensureBtConnectPermission() {
                 btn.setEnabled(true);
             });
         });
+    }
+
+    // ✅ AJOUTÉ (9 sept 2026, demande Paul — nouvel écran de validation,
+    // remplace la section "Démarrer la validation" du scroll Configure) —
+    // référence statique faible, posée dans onCreate()/effacée dans
+    // onDestroy() — permet à RegisterValidationActivity (une Activity
+    // séparée) d'appeler dans MainActivity sans dupliquer sa logique déjà
+    // prouvée (fermeture des connexions, suppression des tabs, garde
+    // livraison active, test par candidat).
+    public static MainActivity ACTIVE_INSTANCE;
+
+    /** Callback de progression pour runValidationOnCandidats() — un appel par candidat, plus onDone() à la fin. */
+    public interface ValidationProgressListener {
+        void onCandidatStart(String label, String candidatKey);
+        void onCandidatResult(String label, String candidatKey, String resultat);
+        void onDone(boolean annule, String messageFinal);
+    }
+
+    /** Retourne le refus si une livraison est active quelque part, sinon null. Vérification seule, sans effet de bord. */
+    public String verifierAucuneLivraisonActive() {
+        if (com.pa.lcr.lcp.RegisterSessionManager.get(this).isAnyDeliveryActiveAnywhere()) {
+            return "⛔ Validation impossible — une livraison est actuellement en cours sur un registre. "
+                + "Terminez-la avant de lancer la validation.";
+        }
+        return null;
+    }
+
+    /** Découverte des candidats — même logique exacte que validerCandidats() (USB, chaque BT appairé, chaque TCP connu). */
+    public java.util.List<String[]> discoverValidationCandidates() {
+        java.util.List<String[]> candidats = new java.util.ArrayList<>();
+        candidats.add(new String[]{"USB", "USB"});
+        try {
+            for (BluetoothDevice d : btBonded) {
+                if (d == null) continue;
+                String name;
+                try { name = d.getName(); } catch (SecurityException se) { name = null; }
+                candidats.add(new String[]{"BT: " + (name != null ? name : d.getAddress())
+                    + " (" + d.getAddress() + ")", "BT:" + d.getAddress()});
+            }
+        } catch (Exception ignored) {}
+        try {
+            com.pa.lcr.lcp.storage.KnownTcpDeviceStore store =
+                new com.pa.lcr.lcp.storage.KnownTcpDeviceStore(this);
+            org.json.JSONArray known = store.listKnown();
+            for (int i = 0; i < known.length(); i++) {
+                org.json.JSONObject o = known.optJSONObject(i);
+                if (o == null) continue;
+                String ip = o.optString("ip", "");
+                int port = o.optInt("port", 0);
+                if (ip.isEmpty()) continue;
+                candidats.add(new String[]{"TCP: " + ip + ":" + port, "TCP:" + ip + ":" + port});
+            }
+        } catch (Exception ignored) {}
+        return candidats;
+    }
+
+    /** Annulation coopérative pour une validation lancée depuis RegisterValidationActivity — même drapeau que l'ancien flux. */
+    public volatile boolean validationExterneAnnulee = false;
+
+    /**
+     * Exécute la validation sur EXACTEMENT les candidats fournis (jamais
+     * tous automatiquement — cases à cocher côté RegisterValidationActivity).
+     * Même logique exacte que validerCandidats() (fermeture connexions,
+     * suppression tabs, garde livraison active, test un par un,
+     * infosSupplementaires/détection débit pour USB) — juste paramétrée
+     * par la sélection au lieu de toujours tout tester.
+     */
+    public void runValidationOnCandidats(java.util.List<String[]> candidatsSelectionnes, ValidationProgressListener listener) {
+        String refus = verifierAucuneLivraisonActive();
+        if (refus != null) {
+            if (listener != null) listener.onDone(false, refus);
+            return;
+        }
+        validationExterneAnnulee = false;
+        validationEnCoursDepuisMs = System.currentTimeMillis();
+        try {
+            com.pa.lcr.lcp.RegisterSessionManager.get(this).closeAllForValidation();
+            android.util.Log.i("MainActivity", "runValidationOnCandidats: toutes les connexions fermées avant validation");
+        } catch (Exception e) {
+            android.util.Log.w("MainActivity", "runValidationOnCandidats: fermeture des connexions ERR: " + e.getMessage());
+        }
+        try {
+            java.util.List<String> tabKeysSnapshot;
+            synchronized (tabsByKey) {
+                tabKeysSnapshot = new java.util.ArrayList<>(tabsByKey.keySet());
+            }
+            for (String tk : tabKeysSnapshot) {
+                removeTabAndFragment(tk, "VALIDATION_MANUELLE");
+            }
+            android.util.Log.i("MainActivity", "runValidationOnCandidats: " + tabKeysSnapshot.size() + " tab(s) supprimé(s) avant validation");
+        } catch (Exception e) {
+            android.util.Log.w("MainActivity", "runValidationOnCandidats: suppression des tabs ERR: " + e.getMessage());
+        }
+
+        new Thread(() -> {
+          try {
+            for (String[] candidat : candidatsSelectionnes) {
+                if (validationExterneAnnulee) {
+                    if (listener != null) runOnUiThread(() -> listener.onDone(true, "⛔ Annulé par l'utilisateur — arrêt propre, aucun état de connexion réel n'a été touché."));
+                    logMedia1("[VALIDATION-CANDIDATS] Arrêt propre après annulation");
+                    return;
+                }
+                final String label = candidat[0];
+                final String candidatKey = candidat[1];
+                if (listener != null) runOnUiThread(() -> listener.onCandidatStart(label, candidatKey));
+                String resultat = validerUnCandidatLectureSeule(candidatKey);
+                logMedia1("[VALIDATION-CANDIDATS] " + label + " → " + resultat.replace("\n", " | "));
+                final String finalResultat = resultat;
+                if (listener != null) runOnUiThread(() -> listener.onCandidatResult(label, candidatKey, finalResultat));
+                try { Thread.sleep(200); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+            }
+            if (listener != null) runOnUiThread(() -> listener.onDone(false, "✅ Validation terminée."));
+          } finally {
+              validationEnCoursDepuisMs = 0L;
+          }
+        }).start();
     }
 
     private void validerCandidats(TextView resultView, Button btnStart, Button btnCancel) {
