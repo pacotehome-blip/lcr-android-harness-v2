@@ -117,6 +117,38 @@ public class RegisterValidationActivity extends Activity {
         containerResultats.setOrientation(LinearLayout.VERTICAL);
         root.addView(containerResultats);
 
+        // ✅ AJOUTÉ (9 sept 2026, demande Paul — "un bouton retour qui
+        // relance la connexion au registre à la fin") — réutilise
+        // api_registerConnectAuto() (MultiRegisterApiFacadeImpl), le même
+        // point d'entrée unifié déjà utilisé partout ailleurs pour la
+        // reconnexion automatique après suppression du dernier tab (voir
+        // MainActivity.removeTabAndFragment()) — jamais une nouvelle
+        // logique de reconnexion réinventée ici.
+        Button btnRetourReconnecter = new Button(this);
+        btnRetourReconnecter.setText("🔌 Retour et reconnecter");
+        btnRetourReconnecter.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.parseColor("#00695C")));
+        btnRetourReconnecter.setTextColor(Color.WHITE);
+        LinearLayout.LayoutParams lpRetour = new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        lpRetour.topMargin = dp(20);
+        btnRetourReconnecter.setLayoutParams(lpRetour);
+        btnRetourReconnecter.setOnClickListener(v -> {
+            Toast.makeText(this, "Reconnexion en cours...", Toast.LENGTH_SHORT).show();
+            new Thread(() -> {
+                try {
+                    com.pa.lcr.lcp.MultiRegisterApiFacadeImpl facade =
+                        new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(getApplicationContext());
+                    com.pa.lcr.lcp.ApiResult r = facade.api_registerConnectAuto(null, null);
+                    android.util.Log.i("RegisterValidationActivity", "Retour et reconnecter — code="
+                        + (r != null ? r.code : "null") + " msg=" + (r != null ? r.msg : "null"));
+                } catch (Exception e) {
+                    android.util.Log.w("RegisterValidationActivity", "Retour et reconnecter ERR: " + e.getMessage());
+                }
+            }).start();
+            finish();
+        });
+        root.addView(btnRetourReconnecter);
+
         chargerCandidats();
     }
 
@@ -186,6 +218,13 @@ public class RegisterValidationActivity extends Activity {
         txtEtat.setText("Validation en cours — " + selectionnes.size() + " candidat(s)...");
 
         m.runValidationOnCandidats(selectionnes, new MainActivity.ValidationProgressListener() {
+            @Override public void onPreparationStep(String message) {
+                TextView ligne = new TextView(RegisterValidationActivity.this);
+                ligne.setText(message);
+                ligne.setPadding(dp(4), dp(4), dp(4), dp(4));
+                ligne.setTextColor(Color.parseColor("#00695C"));
+                containerResultats.addView(ligne);
+            }
             @Override public void onCandidatStart(String label, String candidatKey) {
                 TextView ligne = new TextView(RegisterValidationActivity.this);
                 ligne.setText(label + " : ⏳ en cours...");
