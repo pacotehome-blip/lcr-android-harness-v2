@@ -1027,7 +1027,7 @@ public class DeepLinkHandler {
                 int tentativesPresetDeepLink = 0;
                 while (presetDejaAtteintDeepLink && tentativesPresetDeepLink < 3) {
                     tentativesPresetDeepLink++;
-                    LogBus.api(node, "[PRESET-CHECK] deep link — résidu encore présent (delCode=0x"
+                    com.pa.lcr.lcp.log.LogBus.api(node, "[PRESET-CHECK] deep link — résidu encore présent (delCode=0x"
                         + Integer.toHexString(dcDeepLink) + "), réessai " + tentativesPresetDeepLink + "/3 après vraie relecture");
                     try {
                         controllerOneshot.requestStatus();
@@ -1039,7 +1039,7 @@ public class DeepLinkHandler {
                         || (dcDeepLink & com.pa.lcr.lcp.LcpLink.DC_GROSS_PRESET_REACHED) != 0;
                 }
                 if (!presetDejaAtteintDeepLink && tentativesPresetDeepLink > 0) {
-                    LogBus.api(node, "[PRESET-CHECK] deep link — résidu disparu tout seul après "
+                    com.pa.lcr.lcp.log.LogBus.api(node, "[PRESET-CHECK] deep link — résidu disparu tout seul après "
                         + tentativesPresetDeepLink + " réessai(s), armement continue sans dialogue");
                 }
                 if (presetDejaAtteintDeepLink) {
@@ -1051,7 +1051,7 @@ public class DeepLinkHandler {
                     } finally {
                         try { statusDbDeepLink.close(); } catch (Exception ignored) {}
                     }
-                    LogBus.api(node, "[PRESET-CHECK] deep link — wo=" + woNum + " delCode=0x"
+                    com.pa.lcr.lcp.log.LogBus.api(node, "[PRESET-CHECK] deep link — wo=" + woNum + " delCode=0x"
                         + Integer.toHexString(dcDeepLink) + " "
                         + (existingDeepLink == null ? "AUCUNE ligne — reste d'un autre wo, non déclenché" : "ligne trouvée ticket=" + existingDeepLink.ticketNo));
                     if (existingDeepLink != null) {
@@ -1067,13 +1067,13 @@ public class DeepLinkHandler {
                                         + "Voulez-vous quand même armer une nouvelle livraison ?")
                                     .setPositiveButton("Continuer", (d, w) -> {
                                         continuerDeepLink[0] = true;
-                                        LogBus.api(node, "[PRESET-CHECK] deep link — chauffeur a choisi CONTINUER (delCode=0x"
+                                        com.pa.lcr.lcp.log.LogBus.api(node, "[PRESET-CHECK] deep link — chauffeur a choisi CONTINUER (delCode=0x"
                                             + Integer.toHexString(dcFinalDeepLink) + ")");
                                         presetLatch.countDown();
                                     })
                                     .setNegativeButton("Annuler", (d, w) -> {
                                         continuerDeepLink[0] = false;
-                                        LogBus.api(node, "[PRESET-CHECK] deep link — chauffeur a choisi ANNULER (delCode=0x"
+                                        com.pa.lcr.lcp.log.LogBus.api(node, "[PRESET-CHECK] deep link — chauffeur a choisi ANNULER (delCode=0x"
                                             + Integer.toHexString(dcFinalDeepLink) + ")");
                                         presetLatch.countDown();
                                     })
@@ -1086,7 +1086,7 @@ public class DeepLinkHandler {
                         });
                         boolean repondu = presetLatch.await(15, java.util.concurrent.TimeUnit.SECONDS);
                         if (!repondu) {
-                            LogBus.api(node, "[PRESET-CHECK] deep link — personne n'a répondu en 15s, continue automatiquement (delCode=0x"
+                            com.pa.lcr.lcp.log.LogBus.api(node, "[PRESET-CHECK] deep link — personne n'a répondu en 15s, continue automatiquement (delCode=0x"
                                 + Integer.toHexString(dcFinalDeepLink) + ")");
                         }
                         if (!continuerDeepLink[0]) {
