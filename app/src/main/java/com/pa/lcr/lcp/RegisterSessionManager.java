@@ -590,34 +590,33 @@ public final class RegisterSessionManager {
                     return other.dc;
                 }
 
-                // ✅ FIX (5 août 2026, demande Paul — "si je suis à
-                // RUNNING_FLOWING, je veux garder le tab ouvert en attendant
-                // d'avoir le nouveau transport pour que je puisse faire un
-                // Status pour reconnecter et partir l'écran diagnostique") —
-                // pour une session fantôme (transport mort) dont l'état était
-                // RUNNING_FLOWING/RUNNING_PAUSED au moment de la mort (une
-                // vraie livraison était en cours), on ne la ferme/supprime
-                // plus automatiquement ici. Le tab reste visible tel quel,
-                // et c'est un clic explicite sur Status (STATUS_B) — pas une
-                // migration automatique et silencieuse — qui doit déclencher
-                // la reconnexion/Diagnostic. Migration automatique silencieuse
-                // réservée aux sessions mortes qui N'ÉTAIENT PAS en pleine
-                // livraison (CONNECTED/PRESTART/ENDING) — là, pas de perte de
-                // contrôle utilisateur possible, migrer sans bruit est sûr.
-                DeliveryState otherStateAtDeath = null;
-                try { otherStateAtDeath = (other.dc != null) ? other.dc.getState() : null; } catch (Exception ignored) {}
-                boolean wasRunning = otherStateAtDeath == DeliveryState.RUNNING_FLOWING
-                        || otherStateAtDeath == DeliveryState.RUNNING_PAUSED;
-                if (wasRunning) {
-                    android.util.Log.w("RSM", "getOrCreate: session " + otherKey + " fantôme (transport mort) "
-                        + "mais était " + otherStateAtDeath + " — tab CONSERVÉ tel quel, aucune migration "
-                        + "automatique. Abandon de cette tentative sur " + tk + " — attente d'un Status manuel.");
-                    com.pa.lcr.lcp.log.LogBus.api(node, "[RSM-GHOST-KEEP] node=" + node + " transport="
-                        + other.transportKey + " mort pendant " + otherStateAtDeath
-                        + " — tab conservé, reconnexion manuelle requise (Status)");
-                    return null;
-                }
-
+                // ❌ RÈGLE DU 5 AOÛT RÉVISÉE (9 sept 2026, demande Paul —
+                // "je dirais que oui [changer la règle] car nous avons
+                // réglé l'ensemble du processus dans le tab") — la règle
+                // originale (voir ci-dessous, gardée en historique)
+                // exigeait un clic Status manuel pendant RUNNING_FLOWING
+                // avant toute reconnexion, pour éviter une perte de
+                // contrôle utilisateur silencieuse. Confirmé explicitement
+                // aujourd'hui : maintenant que tout le processus de
+                // livraison dans le tab est solidifié (preset check,
+                // validation debit, reprise cross-transport, filet
+                // preset-confirmé avant finalisation), la reconnexion
+                // automatique s'applique aussi pendant une vraie livraison
+                // en cours — tombe directement dans la migration normale
+                // (RSM-MIGRATE) juste en dessous, plus de blocage spécial.
+                //
+                // ✅ FIX ORIGINAL (5 août 2026, demande Paul — "si je suis
+                // à RUNNING_FLOWING, je veux garder le tab ouvert en
+                // attendant d'avoir le nouveau transport pour que je
+                // puisse faire un Status pour reconnecter et partir
+                // l'écran diagnostique") — pour une session fantôme
+                // (transport mort) dont l'état était RUNNING_FLOWING/
+                // RUNNING_PAUSED au moment de la mort (une vraie
+                // livraison était en cours), on ne la fermait/supprimait
+                // plus automatiquement ici. Le tab restait visible tel
+                // quel, et c'était un clic explicite sur Status
+                // (STATUS_B) — pas une migration automatique et
+                // silencieuse — qui déclenchait la reconnexion/Diagnostic.
                 android.util.Log.w("RSM", "getOrCreate: session existante pour le MÊME node="
                     + node + " trouvée sur un AUTRE transport (" + otherKey + "), mais MORTE (état="
                     + (other.dc != null ? other.dc.getState() : "?") + ") — migration vers " + tk);
