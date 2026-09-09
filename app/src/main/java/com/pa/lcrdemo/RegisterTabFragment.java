@@ -7899,7 +7899,20 @@ public class RegisterTabFragment extends Fragment {
                 // début — c'est pour ça que [WO-DETECT] n'est jamais apparu dans aucun
                 // log de toute la session. api_registerValidate() est la bonne méthode :
                 // elle met toujours ticket_no dans son JSON, peu importe le résultat.
-                ApiResult snap = controller.api_registerValidate(null, null, null, null, null);
+                // ✅ CORRIGÉ (9 sept 2026, demande Paul — socle USB-C
+                // physiquement fragile, tantôt présent tantôt non) —
+                // trouvé, avec certitude : controller (le champ du
+                // fragment) n'était jamais vérifié avant cet appel,
+                // pourtant il devient null exactement au moment où la
+                // connexion tombe — confirmé par un vrai
+                // NullPointerException en conditions réelles pendant une
+                // instabilité de connexion. Sort proprement si la
+                // connexion n'est pas là au moment précis de cette
+                // vérification périodique — sera retentée au prochain
+                // appel (2.5s plus tard).
+                DeliveryController controllerLocal = controller;
+                if (controllerLocal == null) return;
+                ApiResult snap = controllerLocal.api_registerValidate(null, null, null, null, null);
                 if (snap == null || snap.data == null) return;
                 String ticketNo = snap.data.optString("ticket_no", "");
                 if (ticketNo.isEmpty()) return;
@@ -7966,9 +7979,10 @@ public class RegisterTabFragment extends Fragment {
     private void checkAndPullMissingDeliveryDetail(String reason) {
         android.util.Log.i(LOGCAT_TAG, "[" + reason + "] checkAndPullMissingDeliveryDetail: appelé, controller="
                 + (controller == null ? "null" : "OK"));
-        if (controller == null) return;
+        DeliveryController controllerLocal2 = controller;
+        if (controllerLocal2 == null) return;
         try {
-            ApiResult snap = controller.api_registerValidate(null, null, null, null, null);
+            ApiResult snap = controllerLocal2.api_registerValidate(null, null, null, null, null);
             String snapTicket = (snap != null && snap.data != null) ? snap.data.optString("ticket_no", "") : null;
             android.util.Log.i(LOGCAT_TAG, "[" + reason + "] api_registerValidate: snap="
                     + (snap == null ? "null" : "OK") + " ticket_no=" + snapTicket);
