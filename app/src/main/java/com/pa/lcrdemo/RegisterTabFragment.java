@@ -4992,6 +4992,38 @@ public class RegisterTabFragment extends Fragment {
                     }
                 }
 
+                // ✅ AJOUTÉ (8 sept 2026, demande Paul — "faire un
+                // parallele entre table local et json les deux doivent
+                // avoir la vérité") — trouvé : cette chaîne de repli
+                // (mémoire → registre frais → JSON persisté → TextViews)
+                // ne consultait JAMAIS LcrDeliveryStatusDb.getLatestForWo()
+                // — la vraie BD SQLite locale, écrite à l'armement ET à la
+                // fin de livraison (étapes 9/12), plus fiable qu'un
+                // fichier JSON qui pourrait avoir été nettoyé. Ajouté ici,
+                // avant le repli JSON — la BD d'abord, le JSON seulement
+                // si la BD elle-même est vide.
+                if (ticketNo.isEmpty() && woNum != null && !woNum.isEmpty()) {
+                    try {
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbRetourWO =
+                            new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow rowRetourWO;
+                        try {
+                            rowRetourWO = dbRetourWO.getLatestForWo(woNum);
+                        } finally {
+                            try { dbRetourWO.close(); } catch (Exception ignored) {}
+                        }
+                        if (rowRetourWO != null && rowRetourWO.ticketNo != null && !rowRetourWO.ticketNo.trim().isEmpty()) {
+                            ticketNo = rowRetourWO.ticketNo;
+                            if (saleNo.isEmpty()) saleNo = rowRetourWO.saleNo != null ? rowRetourWO.saleNo : ticketNo;
+                            if (netL == 0.0)   netL   = rowRetourWO.netL;
+                            if (grossL == 0.0) grossL = rowRetourWO.grossL;
+                            LogBus.api(node, "[RETOUR-WO] repli LcrDeliveryStatusDb.getLatestForWo() — ticket=" + ticketNo);
+                        }
+                    } catch (Exception eDbFallback) {
+                        android.util.Log.w("RetourWO", "repli BD locale ERR (non-bloquant): " + eDbFallback.getMessage());
+                    }
+                }
+
                 // ✅ AJOUTÉ (2 sept 2026, demande Paul — "on ajoute la
                 // validation du json") — trouvé : ce bouton n'avait AUCUN
                 // repli vers les fichiers JSON persistés (contrairement à
