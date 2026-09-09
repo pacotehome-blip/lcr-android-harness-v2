@@ -109,7 +109,7 @@ import java.util.concurrent.Executors;
  * (thread de travail séparé, callbacks, jamais de blocage). Toute
  * NOUVELLE fonctionnalité touchant Dataverse/réseau doit suivre le même
  * patron — vérifier ce principe avant d'ajouter un appel réseau
- *   quelconque n'importe où dans le chemin de connexion/livraison.
+ * quelconque n'importe où dans le chemin de connexion/livraison.
  */
 
 public class MainActivity extends AppCompatActivity {
@@ -1563,7 +1563,6 @@ tabRegisters = findViewById(R.id.tabRegisters);
         TextView txtValiderCandidatsResult = findViewById(R.id.txtValiderCandidatsResult);
         if (btnAnnulerCandidats != null) btnAnnulerCandidats.setVisibility(View.GONE);
         if (txtValiderCandidatsResult != null) txtValiderCandidatsResult.setVisibility(View.GONE);
-        android.widget.ScrollView scrollValiderCandidatsResult = findViewById(R.id.scrollValiderCandidatsResult);
         if (scrollValiderCandidatsResult != null) scrollValiderCandidatsResult.setVisibility(View.GONE);
         // ✅ REMPLACÉ (9 sept 2026, demande Paul — "on utilise le bouton
         // démarrer la validation on remplace tout ça") — ouvre maintenant
