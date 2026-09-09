@@ -1097,11 +1097,34 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     private ArrayList<String> listCandidateTransportKeysForAutoConnect() {
         lastCandidateBuildFailures.clear();
         ArrayList<String> keys = new ArrayList<>();
+        // ✅ CORRIGÉ (9 sept 2026, demande Paul — "on doit absolument
+        // valider le transport avant d'envoyer... si on reste avec BT on
+        // sait qu'il n'y a pas de trouble sauf que dans le réel il peut
+        // avoir usb et bt qui cohabite") — trouvé, avec certitude :
+        // getActiveKeyStatic() est un pointeur STATIQUE qui peut encore
+        // pointer vers un transport BT d'une tentative précédente (même
+        // ratée) — ajouté ici en PREMIER, avant l'USB, malgré le
+        // commentaire de l'étape 2 ci-dessous qui dit vouloir l'USB en
+        // priorité. Vérifie maintenant D'ABORD si l'USB est réellement
+        // ouvert — si oui, il passe en premier peu importe ce que le
+        // pointeur "actif" prétend. Le raccourci "transport déjà actif"
+        // ne s'applique plus que si ce n'est PAS un cas où l'USB est
+        // disponible mais différent du pointeur actif.
+        boolean usbReellementOuvertDejaVerifie = false;
+        try {
+            String usbKeyVerif = MediaTransportManager.KEY_USB;
+            TransportIo usbIoVerif = (mediaMgr != null) ? mediaMgr.getByKey(usbKeyVerif) : null;
+            usbReellementOuvertDejaVerifie = (usbIoVerif != null && safeIsOpen(usbIoVerif));
+        } catch (Exception ignored) {}
+
         // 1) Transport déjà actif — chemin rapide légitime, pas de round-trip
-        // inutile s'il est déjà ouvert et prêt.
+        // inutile s'il est déjà ouvert et prêt. SAUTÉ si l'USB est réellement
+        // ouvert et que le pointeur actif pointe ailleurs (BT/TCP) — l'USB a
+        // la vraie priorité dans ce cas, pas un pointeur potentiellement périmé.
         try {
             String activeKey = MediaTransportManager.getActiveKeyStatic();
-            if (activeKey != null && !activeKey.trim().isEmpty()) {
+            if (activeKey != null && !activeKey.trim().isEmpty()
+                    && !(usbReellementOuvertDejaVerifie && !activeKey.trim().equals(MediaTransportManager.KEY_USB))) {
                 String k = activeKey.trim();
                 TransportIo io = (mediaMgr != null) ? mediaMgr.getByKey(k) : null;
                 if (io != null && safeIsOpen(io)) keys.add(k);
