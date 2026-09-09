@@ -2608,6 +2608,25 @@ private void setupTabsTop() {
                     } else {
                         Toast.makeText(this, "Aucune livraison à restaurer trouvée", Toast.LENGTH_SHORT).show();
                     }
+                    // ✅ AJOUTÉ (9 sept 2026, demande Paul — "j'ai tous les
+                    // fichiers json depuis ce matin, il faut garder que les
+                    // trois dernières livraisons") — enchaîné après la
+                    // restauration (jamais avant : on ne nettoie qu'une fois
+                    // certain que rien de PENDING n'a été manqué). Ne
+                    // supprime que les fichiers déjà SYNCED au-delà des 3
+                    // livraisons les plus récentes — jamais un PENDING, peu
+                    // importe son âge.
+                    if (txtSupportRestoreStatus != null) {
+                        txtSupportRestoreStatus.setText(txtSupportRestoreStatus.getText() + " — nettoyage...");
+                    }
+                    com.pa.lcr.lcp.storage.LocalDeliveryBackup.cleanupOldBackupsAsync(getApplicationContext(), 3,
+                            (restoredC, keptC, deletedC, messagesC) -> runOnUiThread(() -> {
+                                if (txtSupportRestoreStatus != null) {
+                                    txtSupportRestoreStatus.setText(restored + " restaurée(s), "
+                                            + skipped + " déjà présente(s), " + failed + " erreur(s) — nettoyage : "
+                                            + keptC + " gardée(s), " + deletedC + " ancienne(s) SYNCED supprimée(s)");
+                                }
+                            }));
                 }));
     }
 

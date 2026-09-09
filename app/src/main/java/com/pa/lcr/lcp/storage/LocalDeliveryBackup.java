@@ -227,6 +227,177 @@ public class LocalDeliveryBackup {
         }
     }
 
+    /** Callback pour cleanupOldBackupsAsync(). */
+    public interface CleanupCallback {
+        void onDone(int restored, int kept, int deleted, List<String> messages);
+    }
+
+    // =========================================================
+    // ✅ AJOUTÉ (9 sept 2026, demande Paul — "j'ai tous les fichiers json
+    // depuis ce matin, il faut garder que les trois dernières livraisons")
+    // — trouvé, avec Paul : ces fichiers sont le VRAI filet de sécurité
+    // (voir restoreAllAsync ci-dessus et findLatestRunningFlowingByWoNum)
+    // pour une livraison pas encore confirmée synchronisée. Règle de
+    // sécurité, confirmée avec Paul avant d'implémenter : un fichier
+    // sync_status != SYNCED n'est JAMAIS supprimé, peu importe son âge —
+    // seuls les fichiers DÉJÀ confirmés dans Dataverse (SYNCED) au-delà
+    // des 3 livraisons les plus récentes sont retirés. Restaure d'abord
+    // (même logique que restoreAllAsync) tout fichier PENDING pas encore
+    // en BD locale — jamais de perte, même pour un fichier qui aurait été
+    // manqué par la récupération normale.
+    // =========================================================
+    public static void cleanupOldBackupsAsync(Context ctx, int keepDeliveries, CleanupCallback cb) {
+        new Thread(() -> {
+            List<String> messages = new ArrayList<>();
+            List<BackupFileRef> refs = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+                    ? listBackupFileRefsMediaStore(ctx, messages)
+                    : listBackupFileRefsLegacy(ctx, messages);
+
+            // Étape 1 — restaurer en BD locale tout PENDING pas encore présent,
+            // avant de toucher à quoi que ce soit — jamais de perte.
+            int restored = 0;
+            LcrDeliveryStatusDb lcrDb = new LcrDeliveryStatusDb(ctx.getApplicationContext());
+            try {
+                for (BackupFileRef ref : refs) {
+                    try {
+                        JSONObject j = new JSONObject(new String(ref.content, StandardCharsets.UTF_8));
+                        String ticketNo = j.optString("ticket_no", "");
+                        String woNum = j.optString("wo_num", "");
+                        if (ticketNo.isEmpty() || woNum.isEmpty()) continue;
+                        if (lcrDb.getByTicketNo(ticketNo) != null) continue; // déjà présent
+
+                        ContentValues cv = new ContentValues();
+                        cv.put(LcrDeliveryStatusDb.COL_WO_NUM, woNum);
+                        cv.put(LcrDeliveryStatusDb.COL_WO_ID_GUID, j.optString("wo_id_guid", ""));
+                        cv.put(LcrDeliveryStatusDb.COL_TICKET_NO, ticketNo);
+                        cv.put(LcrDeliveryStatusDb.COL_SALE_NO, j.optString("sale_no", ""));
+                        cv.put(LcrDeliveryStatusDb.COL_NET_L, j.optDouble("net_l", 0.0));
+                        cv.put(LcrDeliveryStatusDb.COL_GROSS_L, j.optDouble("gross_l", 0.0));
+                        cv.put(LcrDeliveryStatusDb.COL_SERIAL_ID, j.optString("serial_id", ""));
+                        cv.put(LcrDeliveryStatusDb.COL_LCRNODE, j.optInt("lcrnode", 0));
+                        cv.put(LcrDeliveryStatusDb.COL_TYPE, LcrDeliveryStatusDb.TYPE_ORIGINAL);
+                        cv.put(LcrDeliveryStatusDb.COL_SOURCE, "RESTORE_CLEANUP");
+                        cv.put(LcrDeliveryStatusDb.COL_STOP_TYPE, "LIVRAISON");
+                        // Même prudence que restoreAllAsync : PENDING, jamais SYNCED supposé.
+                        cv.put(LcrDeliveryStatusDb.COL_SYNC_STATUS, LcrDeliveryStatusDb.SYNC_PENDING);
+                        cv.put(LcrDeliveryStatusDb.COL_PAYLOAD_JSON, j.optString("payload_complet", ""));
+                        lcrDb.insertDelivery(cv);
+                        restored++;
+                        messages.add("Restauré avant nettoyage : ticket=" + ticketNo + " wo=" + woNum);
+                    } catch (Exception ignored) {}
+                }
+            } finally {
+                try { lcrDb.close(); } catch (Exception ignored) {}
+            }
+
+            // Étape 2 — ne garder, parmi les SYNCED seulement, que les N livraisons
+            // les plus récentes (par backup_ts). Jamais un fichier PENDING.
+            java.util.TreeMap<Long, List<BackupFileRef>> syncedByTs = new java.util.TreeMap<>(java.util.Collections.reverseOrder());
+            java.util.Set<String> ticketsVus = new java.util.HashSet<>();
+            for (BackupFileRef ref : refs) {
+                try {
+                    JSONObject j = new JSONObject(new String(ref.content, StandardCharsets.UTF_8));
+                    if (!"SYNCED".equals(j.optString("sync_status", ""))) continue; // jamais touché
+                    long ts = j.optLong("backup_ts", 0L);
+                    syncedByTs.computeIfAbsent(ts, k -> new ArrayList<>()).add(ref);
+                    ref.ticketNo = j.optString("ticket_no", "");
+                } catch (Exception ignored) {}
+            }
+
+            int kept = 0, deleted = 0;
+            for (java.util.Map.Entry<Long, List<BackupFileRef>> entry : syncedByTs.entrySet()) {
+                for (BackupFileRef ref : entry.getValue()) {
+                    boolean dejaCompteAvant = ref.ticketNo != null && ticketsVus.contains(ref.ticketNo);
+                    if (dejaCompteAvant || ticketsVus.size() < keepDeliveries) {
+                        if (ref.ticketNo != null && !ref.ticketNo.isEmpty()) ticketsVus.add(ref.ticketNo);
+                        kept++;
+                    } else {
+                        if (ref.delete(ctx)) {
+                            deleted++;
+                            messages.add("Supprimé (déjà SYNCED, au-delà des " + keepDeliveries + " dernières) : ticket=" + ref.ticketNo);
+                        }
+                    }
+                }
+            }
+
+            final int fRestored = restored, fKept = kept, fDeleted = deleted;
+            Log.i(TAG, "cleanupOldBackupsAsync: restauré=" + fRestored + " gardé=" + fKept + " supprimé=" + fDeleted);
+            if (cb != null) cb.onDone(fRestored, fKept, fDeleted, messages);
+        }, "LocalDeliveryCleanup").start();
+    }
+
+    /** Référence à un fichier de backup — contenu + moyen de le supprimer, selon Android Q+ ou legacy. */
+    private static final class BackupFileRef {
+        final Uri uri;      // MediaStore (Android Q+)
+        final File file;    // legacy (Android 9-10)
+        final byte[] content;
+        String ticketNo;    // rempli après parsing, pour le regroupement
+        BackupFileRef(Uri uri, File file, byte[] content) { this.uri = uri; this.file = file; this.content = content; }
+        boolean delete(Context ctx) {
+            try {
+                if (uri != null) return ctx.getContentResolver().delete(uri, null, null) > 0;
+                if (file != null) return file.delete();
+            } catch (Exception ignored) {}
+            return false;
+        }
+    }
+
+    private static List<BackupFileRef> listBackupFileRefsMediaStore(Context ctx, List<String> messages) {
+        List<BackupFileRef> out = new ArrayList<>();
+        try {
+            String[] projection = { MediaStore.MediaColumns._ID };
+            String selection = MediaStore.MediaColumns.DISPLAY_NAME + " LIKE ?";
+            String[] selectionArgs = { "filgo_livraison_%.json" };
+            try (Cursor c = ctx.getContentResolver().query(
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI, projection, selection, selectionArgs, null)) {
+                if (c == null) { messages.add("Requête MediaStore a retourné null"); return out; }
+                int idCol = c.getColumnIndexOrThrow(MediaStore.MediaColumns._ID);
+                while (c.moveToNext()) {
+                    long id = c.getLong(idCol);
+                    Uri fileUri = Uri.withAppendedPath(MediaStore.Downloads.EXTERNAL_CONTENT_URI, String.valueOf(id));
+                    try (InputStream in = ctx.getContentResolver().openInputStream(fileUri)) {
+                        if (in == null) continue;
+                        out.add(new BackupFileRef(fileUri, null, readAll(in)));
+                    } catch (Exception e) {
+                        messages.add("Lecture échouée pour un fichier MediaStore : " + e.getMessage());
+                    }
+                }
+            }
+        } catch (Exception e) {
+            messages.add("listBackupFileRefsMediaStore ERR: " + e.getMessage());
+            Log.w(TAG, "listBackupFileRefsMediaStore ERR: " + e.getMessage());
+        }
+        return out;
+    }
+
+    private static List<BackupFileRef> listBackupFileRefsLegacy(Context ctx, List<String> messages) {
+        List<BackupFileRef> out = new ArrayList<>();
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                int perm = ctx.checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE);
+                if (perm != PackageManager.PERMISSION_GRANTED) {
+                    messages.add("Permission READ_EXTERNAL_STORAGE non accordée — nettoyage impossible");
+                    return out;
+                }
+            }
+            File downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+            File[] matches = downloads.listFiles((dir, name) ->
+                    name.startsWith("filgo_livraison_") && name.endsWith(".json"));
+            if (matches == null) return out;
+            for (File f : matches) {
+                try (InputStream in = new java.io.FileInputStream(f)) {
+                    out.add(new BackupFileRef(null, f, readAll(in)));
+                } catch (Exception e) {
+                    messages.add("Lecture échouée pour " + f.getName() + ": " + e.getMessage());
+                }
+            }
+        } catch (Exception e) {
+            messages.add("listBackupFileRefsLegacy ERR: " + e.getMessage());
+            Log.w(TAG, "listBackupFileRefsLegacy ERR: " + e.getMessage());
+        }
+        return out;
+    }
+
     public static void restoreAllAsync(Context ctx, RestoreCallback cb) {
         new Thread(() -> {
             List<String> messages = new ArrayList<>();
