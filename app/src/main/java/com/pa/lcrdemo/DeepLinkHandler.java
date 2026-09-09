@@ -78,12 +78,14 @@ public class DeepLinkHandler {
      * spécifiquement, log un avertissement au lieu de planter, protège
      * automatiquement tout futur appel ajouté à ce fichier aussi.
      */
-    private void safeExecute(Runnable task) {
+    private boolean safeExecute(Runnable task) {
         try {
             btExec.execute(task);
+            return true;
         } catch (java.util.concurrent.RejectedExecutionException e) {
             android.util.Log.w(TAG, "safeExecute: btExec déjà fermé (Activity probablement recréée/détruite "
                 + "pendant un appel asynchrone en vol) — tâche abandonnée proprement au lieu de planter l'app");
+            return false;
         }
     }
 
@@ -2063,6 +2065,26 @@ public class DeepLinkHandler {
     // Poll état livraison
     // =========================================================
 
+    // ✅ AJOUTÉ (8 sept 2026, demande Paul — "récupérer le coup") —
+    // point d'entrée public pour reprendre un job dont l'armement a
+    // réussi (ActiveDeliveryStore.status=STARTED, jobId valide) mais dont
+    // le suivi (pollJobUntilDone) ne s'est jamais rendu jusqu'au vrai
+    // CMD_RUN — confirmé possible via le rejet silencieux de
+    // safeExecute() ci-dessus. freshStart=false : l'état réel n'est PAS
+    // supposé, il est vérifié avant d'agir (contrairement à l'armement
+    // initial, où freshStart=true est sûr puisqu'on vient tout juste
+    // d'armer nous-mêmes).
+    public void reprendreLivraisonEnAttente(String jobId, int node, String woNum,
+                                             String woIdGuid, String serialId, String mac) {
+        if (isPollActif(jobId)) return; // déjà en cours de suivi — rien à faire
+        android.util.Log.i(TAG, "reprendreLivraisonEnAttente: relance pollJobUntilDone pour jobId=" + jobId);
+        pollJobUntilDone(jobId, node, woNum, woIdGuid, serialId, mac, false);
+    }
+
+    public boolean isPollActif(String jobId) {
+        return jobId != null && activePolls.contains(jobId);
+    }
+
     private void pollJobUntilDone(String jobId, int node, String woNum,
                                    String woIdGuid, String serialId, String mac) {
         pollJobUntilDone(jobId, node, woNum, woIdGuid, serialId, mac, false);
@@ -2114,7 +2136,7 @@ public class DeepLinkHandler {
             com.pa.lcr.lcp.log.LogBus.err(node, "DeepLinkHandler.ActiveDeliveryStore.save[STARTED]", e);
         }
 
-        safeExecute(() -> {
+        boolean planifie = safeExecute(() -> {
             try {
                 final boolean[] deliveryDone = {false};
 
@@ -2605,6 +2627,27 @@ public class DeepLinkHandler {
                 activePolls.remove(jobId);
             }
         });
+        // ✅ AJOUTÉ (8 sept 2026, demande Paul — trouvé, confirmé avec
+        // certitude par le code de safeExecute() : si btExec est déjà
+        // fermé au moment exact de cet appel (Activity recréée/détruite
+        // pendant l'appel), la tâche ci-dessus n'entre jamais dans son
+        // try/finally — donc activePolls.remove(jobId) plus haut ne
+        // s'exécute JAMAIS non plus, laissant ce jobId figé dans le Set
+        // statique pour toujours. Confirmé responsable d'un vrai cas de
+        // terrain : armement réussi (BD écrite, ActiveDeliveryStore=
+        // STARTED), mais job/continue (CMD_RUN) jamais envoyé — le
+        // registre restait à net=0 indéfiniment, sans aucune trace dans
+        // Support (l'avertissement d'origine n'utilisait que
+        // android.util.Log.w(), invisible dans Support). Nettoyage +
+        // vraie visibilité ajoutés ici.
+        if (!planifie) {
+            activePolls.remove(jobId);
+            com.pa.lcr.lcp.log.LogBus.err(node,
+                "DeepLinkHandler.pollJobUntilDone.REJETE",
+                new Exception("Tâche de poll rejetée (Activity recréée/détruite pendant l'appel) — "
+                    + "jobId=" + jobId + " wo=" + woNum + " — armement réussi mais job/continue JAMAIS envoyé, "
+                    + "livraison restera à net=0 tant qu'elle n'est pas relancée"));
+        }
     }
 
     // =========================================================

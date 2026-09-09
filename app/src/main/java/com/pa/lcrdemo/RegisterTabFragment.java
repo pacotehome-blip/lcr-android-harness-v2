@@ -221,6 +221,26 @@ public class RegisterTabFragment extends Fragment {
 
             if (ad == null || (!"PENDING".equals(ad.status) && !"CANCELLED".equals(ad.status) && !"STARTED".equals(ad.status))) return;
 
+            // ✅ AJOUTÉ (8 sept 2026, demande Paul — "récupérer le coup")
+            // — trouvé, confirmé par code : un armement réussi
+            // (status=STARTED, jobId valide) dont le suivi s'est fait
+            // rejeter silencieusement (Activity recréée pendant l'appel,
+            // voir safeExecute()) attendait ici un clic MANUEL sur
+            // "🚀 Lancer la livraison" — rien ne le relançait tout seul.
+            // Reprend maintenant automatiquement, dès qu'on revoit ce tab
+            // — le vrai CMD_RUN part sans que le chauffeur ait à faire
+            // quoi que ce soit.
+            if ("STARTED".equals(ad.status) && ad.jobId != null && !ad.jobId.isEmpty()) {
+                MainActivity mainReprise = (MainActivity) getActivity();
+                if (mainReprise != null && mainReprise.getDeepLinkHandler() != null
+                        && !mainReprise.getDeepLinkHandler().isPollActif(ad.jobId)) {
+                    LogBus.api(node, "[REPRISE-AUTO] job coincé détecté (status=STARTED) — relance jobId=" + ad.jobId);
+                    mainReprise.getDeepLinkHandler().reprendreLivraisonEnAttente(
+                        ad.jobId, node, ad.woNum, currentWoIdGuid, serialFromArgs,
+                        ad.mac != null ? ad.mac : "");
+                }
+            }
+
             // ✅ Si CANCELLED — remettre net/gross à zéro (nouvelle livraison à venir)
             if ("CANCELLED".equals(ad.status)) {
                 ui.post(() -> {
