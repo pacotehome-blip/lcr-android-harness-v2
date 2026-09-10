@@ -5815,6 +5815,43 @@ public class RegisterTabFragment extends Fragment {
                             + "]: transport figé (" + tabTransportKey + ") mort, mais registre retrouvé "
                             + "sur un autre transport via api_registerConnectAuto()");
                         LogBus.api(node, "[" + contexte + "] transport figé mort — registre retrouvé sur un autre transport, reconnexion réussie");
+                        // ✅ CORRIGÉ (9 sept 2026, demande Paul — "sur le
+                        // reconnect je récupère une partie mais le net
+                        // gross est 0... si je fais supprimer tout revient
+                        // correctement") — trouvé : retrouver le registre
+                        // sur le nouveau transport ne suffisait pas —
+                        // upsertRegisterTabFromScan() (le chemin qui
+                        // fonctionne, via suppression du tab) va plus loin
+                        // et relance la VRAIE reprise de livraison
+                        // (reprendreLivraisonEnAttente(), qui retrouve
+                        // net/gross/ticket via pollJobUntilDone()). Même
+                        // mécanisme exact ici, pour que "Reconnect" fasse
+                        // vraiment la même chose que la suppression du tab.
+                        try {
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbReconnect =
+                                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow rowReconnect;
+                            try {
+                                rowReconnect = dbReconnect.getRunningFlowingSafetyNet(null, serialFromArgs);
+                            } finally {
+                                try { dbReconnect.close(); } catch (Exception ignored) {}
+                            }
+                            if (rowReconnect != null && rowReconnect.jobId != null && !rowReconnect.jobId.isEmpty()
+                                    && rowReconnect.lcrnode == node) {
+                                android.util.Log.i("RegisterTabFragment", "validerTransportEtRegistrePuis [" + contexte
+                                    + "]: livraison RUNNING_FLOWING non résolue trouvée — relance de la vraie reprise (jobId="
+                                    + rowReconnect.jobId + ")");
+                                MainActivity mainReconnect = (MainActivity) getActivity();
+                                if (mainReconnect != null && mainReconnect.getDeepLinkHandler() != null) {
+                                    mainReconnect.getDeepLinkHandler().reprendreLivraisonEnAttente(
+                                        rowReconnect.jobId, node, rowReconnect.woNum, rowReconnect.woIdGuid,
+                                        serialFromArgs, tabTransportKey != null ? tabTransportKey.trim() : "");
+                                }
+                            }
+                        } catch (Exception eReprise) {
+                            android.util.Log.w("RegisterTabFragment", "validerTransportEtRegistrePuis [" + contexte
+                                + "]: reprise après reconnexion ERR (non-bloquant): " + eReprise.getMessage());
+                        }
                     }
                 } catch (Exception eReconnect) {
                     android.util.Log.w("RegisterTabFragment", "validerTransportEtRegistrePuis [" + contexte
