@@ -5787,7 +5787,44 @@ public class RegisterTabFragment extends Fragment {
             if (ok) {
                 if (onSuccess != null) ui.post(onSuccess);
             } else {
-                final String fRaison = raison;
+                // ✅ CORRIGÉ (9 sept 2026, demande Paul — "entre la connexion
+                // bt vers usb, j'ai fait reconnect ça été bloqué, j'ai
+                // supprimé le tab il a bien fonctionné") — trouvé, avec
+                // certitude : cette fonction ne vérifiait que
+                // tabTransportKey, le transport FIGÉ sur lequel ce tab a
+                // été créé à l'origine — jamais si le même registre était
+                // maintenant disponible sur un AUTRE transport. La
+                // suppression du tab fonctionnait parce qu'elle repasse
+                // par upsertRegisterTabFromScan() (la reprise
+                // cross-transport ajoutée plus tôt ce soir) — pas
+                // "Reconnect", qui restait coincé à ressusciter le
+                // transport mort indéfiniment. Avant d'abandonner, essaie
+                // maintenant le vrai registre peu importe le transport
+                // (api_registerConnectAuto(), déjà transport-agnostique et
+                // corrigé ce soir pour prioriser l'USB réellement ouvert
+                // sur un pointeur périmé).
+                String fRaisonInitiale = raison;
+                boolean trouveSurAutreTransport = false;
+                try {
+                    com.pa.lcr.lcp.MultiRegisterApiFacadeImpl facadeReconnect =
+                        new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(requireContext());
+                    com.pa.lcr.lcp.ApiResult ra = facadeReconnect.api_registerConnectAuto(serialFromArgs, node);
+                    if (ra != null && ra.code == 1) {
+                        trouveSurAutreTransport = true;
+                        android.util.Log.i("RegisterTabFragment", "validerTransportEtRegistrePuis [" + contexte
+                            + "]: transport figé (" + tabTransportKey + ") mort, mais registre retrouvé "
+                            + "sur un autre transport via api_registerConnectAuto()");
+                        LogBus.api(node, "[" + contexte + "] transport figé mort — registre retrouvé sur un autre transport, reconnexion réussie");
+                    }
+                } catch (Exception eReconnect) {
+                    android.util.Log.w("RegisterTabFragment", "validerTransportEtRegistrePuis [" + contexte
+                        + "]: repli api_registerConnectAuto() ERR: " + eReconnect.getMessage());
+                }
+                if (trouveSurAutreTransport) {
+                    if (onSuccess != null) ui.post(onSuccess);
+                    return;
+                }
+                final String fRaison = fRaisonInitiale;
                 surErreurConnexion(
                     new java.io.IOException("Validation transport+registre échouée (node=" + node
                         + " serial=" + serialFromArgs + "): " + fRaison),
