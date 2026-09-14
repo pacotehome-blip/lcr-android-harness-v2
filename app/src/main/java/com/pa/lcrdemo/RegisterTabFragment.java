@@ -6225,50 +6225,21 @@ public class RegisterTabFragment extends Fragment {
         // venir que d'un reste physique du registre appartenant à une
         // AUTRE livraison, pas pertinent pour un armement qui n'a pas
         // encore eu lieu. Même raison que le retrait côté deep link.
-        // ✅ RECONSTRUIT (4 sept 2026, demande Paul — "si on fait new C,
-        // valider le preset contre la lecture actuelle du registre. Si <
-        // que preset alors arme directement. Sinon avertis avant
-        // d'armer.") — vrai bon endroit cette fois : SEULEMENT ici, dans
-        // new C (jamais le deep link, qui vient déjà avec une vraie
-        // demande légitime de FieldService) — en séquence stricte, juste
-        // avant l'armement, corrélé au bon WO (pas un reste d'un autre).
-        boolean presetDejaAtteintNewC =
-            (dc & com.pa.lcr.lcp.LcpLink.DC_NET_PRESET_REACHED) != 0
-            || (dc & com.pa.lcr.lcp.LcpLink.DC_GROSS_PRESET_REACHED) != 0;
-        if (presetDejaAtteintNewC) {
-            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb statusDbNewC =
-                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
-            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow existingNewC;
-            try {
-                existingNewC = statusDbNewC.getLatestForWo(currentWoNum);
-            } finally {
-                try { statusDbNewC.close(); } catch (Exception ignored) {}
-            }
-            LogBus.api(node, "[PRESET-CHECK] new C — wo=" + currentWoNum + " delCode=0x"
-                + Integer.toHexString(dc) + " " + (existingNewC == null ? "AUCUNE ligne — reste d'un autre wo, non déclenché" : "ligne trouvée ticket=" + existingNewC.ticketNo));
-            if (existingNewC == null) {
-                presetDejaAtteintNewC = false;
-            }
-        }
-        if (presetDejaAtteintNewC) {
-            final int dcFinal = dc;
-            new android.app.AlertDialog.Builder(requireContext())
-                .setTitle("Preset déjà atteint")
-                .setMessage("Le registre indique que le preset est déjà atteint"
-                    + " (reste d'une livraison précédente non effacée).\n\n"
-                    + "Voulez-vous quand même armer une nouvelle livraison ?")
-                .setPositiveButton("Continuer", (d, w) -> {
-                    LogBus.api(node, "[PRESET-CHECK] new C — chauffeur a choisi CONTINUER (delCode=0x"
-                        + Integer.toHexString(dcFinal) + ")");
-                    startNewDeliveryCApresVerifPreset();
-                })
-                .setNegativeButton("Annuler", (d, w) ->
-                    LogBus.api(node, "[PRESET-CHECK] new C — chauffeur a choisi ANNULER (delCode=0x"
-                        + Integer.toHexString(dcFinal) + ")"))
-                .setCancelable(false)
-                .show();
-            return;
-        }
+        // ❌ RETIRÉ DE NOUVEAU (14 sept 2026, demande Paul — "on a pas
+        // besoin de le faire afficher deux fois... regarde dans le
+        // code") — trouvé : le check "RECONSTRUIT (4 sept 2026)" qui
+        // occupait cet endroit faisait exactement double emploi avec
+        // celui reconstruit plus tard dans DeepLinkHandler.lancerLivraison()
+        // (9 sept 2026, même logique exacte, même filtre getLatestForWo(woNum),
+        // confirmé sans filtrage par source — s'applique autant à New C
+        // qu'au deep link authentique, puisque startNewDeliveryCApresVerifPreset()
+        // appelle lancerLivraisonDepuisTab() → lancerLivraison() juste
+        // après). Résultat concret : le même résidu physique déclenchait
+        // le MÊME dialogue "Preset déjà atteint" deux fois de suite pour
+        // un seul clic New C — une fois ici, une fois dans lancerLivraison()
+        // juste après avoir cliqué "Continuer" sur le premier. Retiré ici
+        // — lancerLivraison() reste la seule source de vérité, pour New C
+        // comme pour le deep link.
         startNewDeliveryCApresVerifPreset();
     }
 
