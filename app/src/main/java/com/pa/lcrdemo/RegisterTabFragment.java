@@ -357,8 +357,42 @@ public class RegisterTabFragment extends Fragment {
             final String fWoIdGuid = ad.woIdGuid != null ? ad.woIdGuid : "";
             final String fSerialId = ad.serialId != null ? ad.serialId : "";
             final int fNode = ad.node;
-            final int fProduit = ad.produit;
-            final double fPreset = ad.preset;
+            // ✅ CORRIGÉ (14 sept 2026, demande Paul — "ce bouton reprend
+            // le tab et deeplink, s'il y a eu changement volontaire
+            // livreur on prend en compte le changement du livreur pour
+            // faire un set product et preset dans le registre avant
+            // d'armer la livraison") — trouvé : cette fonction utilisait
+            // TOUJOURS ad.produit/ad.preset, les valeurs figées
+            // d'ActiveDeliveryStore au moment du PENDING original —
+            // jamais ce que le chauffeur a pu corriger à l'écran
+            // (spnProduct/edtPreset) pendant que l'erreur transport
+            // bloquait l'armement. Lit maintenant l'écran en premier
+            // (même lecture que le bouton local, getPendingProduct()) —
+            // si le chauffeur a vraiment changé quelque chose, c'est SA
+            // valeur qui repart dans le deep link interne, donc dans le
+            // vrai Set Field Data (produit+preset) que api_deliveryOneShotStart()
+            // fait déjà sur le registre avant d'armer. Sinon (aucun
+            // changement détecté), repli sur ad.produit/ad.preset —
+            // comportement inchangé pour le cas normal.
+            int produitEcran = getPendingProduct();
+            double presetEcran = 0.0;
+            try {
+                if (edtPreset != null) {
+                    String txtPreset = edtPreset.getText().toString().trim();
+                    if (!txtPreset.isEmpty()) presetEcran = Double.parseDouble(txtPreset);
+                }
+            } catch (Exception ignored) {}
+
+            boolean produitChangeParChauffeur = produitEcran > 0 && produitEcran != ad.produit;
+            boolean presetChangeParChauffeur  = presetEcran > 0 && Math.abs(presetEcran - ad.preset) > 0.05;
+
+            final int fProduit = produitChangeParChauffeur ? produitEcran : ad.produit;
+            final double fPreset = presetChangeParChauffeur ? presetEcran : ad.preset;
+
+            if (produitChangeParChauffeur || presetChangeParChauffeur) {
+                LogBus.api(node, "[LANCER-DEPUIS-STORE] changement chauffeur pris en compte — produit "
+                    + ad.produit + "→" + fProduit + ", preset " + ad.preset + "L→" + fPreset + "L");
+            }
 
             android.util.Log.i("RegisterTabFragment",
                 "lancerDepuisStore: wo=" + fWoNum + " node=" + fNode + " preset=" + fPreset);
@@ -1767,6 +1801,17 @@ public class RegisterTabFragment extends Fragment {
     // sans lire de widget hors du thread UI.
     private volatile String currentProduit  = "";
     private volatile String currentPreset   = "";
+    // ✅ AJOUTÉ (14 sept 2026, demande Paul — "on saisi dans support et
+    // dataverse ce que le livreur a changé dans le produit et preset...
+    // les tenir accountable mais aussi donner du lousse sur ce qu'il
+    // livre") — exposé publiquement pour que DeepLinkHandler.lancerLivraison()
+    // puisse comparer, au moment de l'armement, ce qui est réellement
+    // envoyé (fProduct/fPresetD, potentiellement corrigé par le chauffeur
+    // via startNewDeliveryC()) contre la demande d'origine du deep link
+    // (ces deux champs, jamais modifiés après leur écriture initiale par
+    // prefillFromDeepLink()).
+    public String getCurrentProduitDeepLink() { return currentProduit; }
+    public String getCurrentPresetDeepLink() { return currentPreset; }
     private static final int TAB_LOG_MAX_LINES = 400;
     private static final long LOG_REFRESH_MIN_MS = 800;
     private long lastLogRefreshMs = 0L;
@@ -3068,9 +3113,23 @@ public class RegisterTabFragment extends Fragment {
         // n'en a jamais un, confirmé toute la journée) — pas pour un
         // test local répété, où le produit physique sur le registre ne
         // change pas d'un essai à l'autre.
-        if (woIdGuid != null && !woIdGuid.isEmpty()
-                && (!woIdGuid.equals(lastReinitWoIdGuid)
-                    || (System.currentTimeMillis() - lastReinitAtMs) >= 2000)) {
+        // ✅ CORRIGÉ (14 sept 2026, demande Paul — "il faut revalider au
+        // rétablissement du tab, mais en tenant compte que du deeplink,
+        // on ramène le deeplink de cette livraison, on laisse tomber le
+        // changement du livreur") — trouvé : le délai de grâce de 2s
+        // (woIdGuid identique + moins de 2s depuis le dernier reset)
+        // était la brèche résiduelle identifiée plus tôt ce soir — un
+        // deep link ré-envoyé pour la MÊME livraison (même woIdGuid,
+        // rapproché) ne redéclenchait NI la revalidation registre NI le
+        // réaffichage à l'écran (produitDejaResoluPourCetteSession restait
+        // à sa valeur d'avant, potentiellement déjà verrouillée par une
+        // correction manuelle du chauffeur après un mismatch). Un
+        // rétablissement du tab doit toujours faire confiance au deep
+        // link le plus frais, jamais à ce que le chauffeur a pu laisser
+        // à l'écran entre-temps — retire le délai de grâce, revalide
+        // maintenant à CHAQUE arrivée d'un deep link pour ce woIdGuid,
+        // sans exception de temps.
+        if (woIdGuid != null && !woIdGuid.isEmpty()) {
             lastReinitWoIdGuid = woIdGuid;
             lastReinitAtMs = System.currentTimeMillis();
             produitDejaResoluPourCetteSession = false;
