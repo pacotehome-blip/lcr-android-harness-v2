@@ -1099,9 +1099,34 @@ public class DeepLinkHandler {
                         });
                         presetLatch.await();
                         if (!continuerDeepLink[0]) {
+                            // ✅ CORRIGÉ (14 sept 2026, demande Paul — "si le
+                            // preset est déjà atteint on fait qu'aviser le
+                            // livreur si on veut quand même livrer une
+                            // nouvelle livraison") — même règle que
+                            // PRODUIT_MISMATCH/PRESET_MISMATCH établie plus
+                            // tôt ce soir : on avise, on ne renvoie plus à
+                            // FieldService. "Annuler" abandonne juste CET
+                            // essai d'armement — le chauffeur reste dans le
+                            // tab, libre de relancer lui-même (New C ou
+                            // bouton vert) une fois le résidu vraiment
+                            // nettoyé sur le registre.
                             logError(fSerialId, woNum, "PRESET_DEJA_ATTEINT", "Chauffeur a annulé (delCode=0x" + Integer.toHexString(dcFinalDeepLink) + ")");
-                            retournerFieldService(woNum, woIdGuid, "erreur_preset_deja_atteint",
-                                buildErrorJson("PRESET_DEJA_ATTEINT", "Preset déjà atteint, armement annulé par le chauffeur"));
+                            // ✅ CORRIGÉ (14 sept 2026, demande Paul — bug
+                            // trouvé via diff complet, confirmé par un
+                            // vrai enregistrement Dataverse qui marchait à
+                            // 14:18 et plus après) — trouvé, avec preuve
+                            // dans le code : retournerFieldService() était
+                            // le SEUL endroit qui nettoie le verrou
+                            // ActiveDeliveryStore (PENDING, posé dès la
+                            // réception du deep link, ligne ~213). En le
+                            // retirant d'ici sans le remplacer, ce verrou
+                            // ne se nettoyait plus JAMAIS après un
+                            // "Annuler" — bloquant tout deep link suivant,
+                            // même pour un WO complètement différent
+                            // (garde-fou de handleDeepLink(), tout en
+                            // haut). Nettoie directement ici, sans
+                            // réintroduire retournerFieldService()/finish().
+                            try { new ActiveDeliveryStore(activity).clear(); } catch (Exception ignoredClearPreset) {}
                             return;
                         }
                     }
@@ -1236,8 +1261,50 @@ public class DeepLinkHandler {
                 if (raisonMismatch != null && !raisonMismatch.isEmpty()) {
                     android.util.Log.w(TAG, "lancerLivraison: REFUS armement — mismatch produit: " + raisonMismatch);
                     logError(serialId, woNum, "PRODUIT_MISMATCH", raisonMismatch);
-                    retournerFieldService(woNum, woIdGuid, "erreur_produit_mismatch",
-                        buildErrorJson("PRODUIT_MISMATCH", raisonMismatch));
+                    // ✅ CORRIGÉ (14 sept 2026, demande Paul — bug trouvé
+                    // via diff complet, confirmé par un vrai enregistrement
+                    // Dataverse qui marchait à 14:18 et plus après) —
+                    // retournerFieldService() était le SEUL endroit qui
+                    // nettoie le verrou ActiveDeliveryStore (PENDING). En
+                    // le retirant plus bas sans le remplacer, ce verrou ne
+                    // se nettoyait plus JAMAIS ici — bloquant tout deep
+                    // link suivant, même pour un WO complètement
+                    // différent. Nettoyé directement, sans réintroduire
+                    // retournerFieldService()/finish().
+                    try { new ActiveDeliveryStore(activity).clear(); } catch (Exception ignoredClearProduit) {}
+                    // ✅ CORRIGÉ (14 sept 2026, demande Paul — "on veut
+                    // laisser le livreur faire le changement dans produit
+                    // ou preset pour ensuite lancer la livraison bouton
+                    // vert avec les changements") — trouvé : le correctif
+                    // précédent affichait bien le dialogue, mais appelait
+                    // ensuite retournerFieldService() → finish() —
+                    // renvoyant le chauffeur à FieldService SANS lui
+                    // laisser la chance de corriger sur place. Ne renvoie
+                    // plus à FieldService ici : affiche le dialogue
+                    // (informatif, rien à décider), puis RESTE dans le
+                    // tab — spnProduct (liste déroulante des vrais
+                    // produits scannés sur le registre) et edtPreset
+                    // restent éditables, btnC (🚀 Lancer la livraison)
+                    // reste disponible pour que le chauffeur corrige et
+                    // relance lui-même via startNewDeliveryC(), qui
+                    // revalide déjà produit et preset à partir de l'écran.
+                    final java.util.concurrent.CountDownLatch produitMismatchLatch =
+                        new java.util.concurrent.CountDownLatch(1);
+                    final String fRaisonMismatch = raisonMismatch;
+                    activity.runOnUiThread(() -> {
+                        try {
+                            new android.app.AlertDialog.Builder(activity)
+                                .setTitle("Produit non trouvé sur le registre")
+                                .setMessage(fRaisonMismatch + "\n\nCorrigez le produit ou le preset à l'écran, puis appuyez sur \"Lancer la livraison\".")
+                                .setPositiveButton("OK", (d, w) -> produitMismatchLatch.countDown())
+                                .setCancelable(false)
+                                .show();
+                        } catch (Exception eDialogProduit) {
+                            android.util.Log.w(TAG, "[PRODUIT-MISMATCH] dialogue ERR (non-bloquant): " + eDialogProduit.getMessage());
+                            produitMismatchLatch.countDown();
+                        }
+                    });
+                    try { produitMismatchLatch.await(); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
                     return;
                 }
             }
@@ -1482,7 +1549,7 @@ public class DeepLinkHandler {
                                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
                                 "RUNNING_FLOWING",
                                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
-                                "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + jobId + "\"}");
+                                buildArmementPayloadExtra(tabArmRef, jobId, fProduct, fPresetD, node));
                         cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE, "ARMEMENT");
                         com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbArm =
                             new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
@@ -1548,6 +1615,73 @@ public class DeepLinkHandler {
                 } else {
                     // Erreur orchestration — rester dans l'APK (pas de finish() pour éviter bounce FSM)
                     android.util.Log.w(TAG, "oneshot/start: orchestration error — rester dans APK");
+
+                    // ✅ AJOUTÉ (14 sept 2026, demande Paul — "je voudrais un
+                    // log dans le support et dans fieldservice") — trouvé :
+                    // le "Preset mismatch" détecté par
+                    // DeliveryController.api_deliveryOneShotStart() (écart
+                    // entre le preset demandé et le preset réellement relu
+                    // sur le registre après écriture, PRESET_MISMATCH)
+                    // avait déjà une trace générique dans Support (le
+                    // logEvent("ONESHOT_ERROR", r.msg, ...) juste plus haut,
+                    // ligne ~1539, tourne pour TOUT r.code==0, preset
+                    // mismatch inclus) — mais AUCUN message à FieldService
+                    // (contrairement à PRODUIT_MISMATCH et
+                    // INIT_NON_APPROUVEE, qui ont les deux), et un toast
+                    // TROMPEUR ("Registre non disponible") au chauffeur au
+                    // lieu du vrai problème. Détection dédiée ici (même
+                    // texte que le msg source, "Preset mismatch", jamais
+                    // traduit ailleurs), avant la logique TRANSPORT — un
+                    // mismatch de preset n'est pas une déconnexion, jamais
+                    // de relance automatique appropriée pour ce cas.
+                    boolean presetMismatch = r.msg != null
+                        && r.msg.toLowerCase(java.util.Locale.ROOT).contains("preset mismatch");
+                    if (presetMismatch) {
+                        String presetRequested = (r.data != null) ? r.data.optString("preset_requested", "") : "";
+                        String presetApplied   = (r.data != null) ? r.data.optString("preset_applied", "") : "";
+                        String raisonPresetMismatch = "Preset demandé=" + presetRequested
+                            + "L, preset réellement appliqué sur le registre=" + presetApplied + "L";
+                        android.util.Log.w(TAG, "lancerLivraison: REFUS armement — mismatch preset: " + raisonPresetMismatch);
+                        logError(fSerialId, woNum, "PRESET_MISMATCH", raisonPresetMismatch);
+                        // ✅ CORRIGÉ (14 sept 2026, demande Paul — bug
+                        // trouvé via diff complet, confirmé par un vrai
+                        // enregistrement Dataverse qui marchait à 14:18 et
+                        // plus après) — retournerFieldService() était le
+                        // SEUL endroit qui nettoie le verrou
+                        // ActiveDeliveryStore (PENDING). En le retirant
+                        // plus bas sans le remplacer, ce verrou ne se
+                        // nettoyait plus JAMAIS ici. Nettoyé directement,
+                        // sans réintroduire retournerFieldService()/finish().
+                        try { new ActiveDeliveryStore(activity).clear(); } catch (Exception ignoredClearPresetMismatch) {}
+                        // ✅ CORRIGÉ (14 sept 2026, demande Paul — "on veut
+                        // laisser le livreur faire le changement dans
+                        // produit ou preset pour ensuite lancer la
+                        // livraison bouton vert avec les changements") —
+                        // même correctif que PRODUIT_MISMATCH juste
+                        // au-dessus : ne renvoie plus à FieldService.
+                        // Affiche le dialogue, puis RESTE dans le tab —
+                        // edtPreset reste éditable, btnC reste disponible
+                        // pour que le chauffeur corrige et relance
+                        // lui-même via startNewDeliveryC().
+                        final java.util.concurrent.CountDownLatch presetMismatchLatch =
+                            new java.util.concurrent.CountDownLatch(1);
+                        final String fRaisonPresetMismatch = raisonPresetMismatch;
+                        activity.runOnUiThread(() -> {
+                            try {
+                                new android.app.AlertDialog.Builder(activity)
+                                    .setTitle("Preset non appliqué sur le registre")
+                                    .setMessage(fRaisonPresetMismatch + "\n\nCorrigez le preset à l'écran, puis appuyez sur \"Lancer la livraison\".")
+                                    .setPositiveButton("OK", (d, w) -> presetMismatchLatch.countDown())
+                                    .setCancelable(false)
+                                    .show();
+                            } catch (Exception eDialogPreset) {
+                                android.util.Log.w(TAG, "[PRESET-MISMATCH] dialogue ERR (non-bloquant): " + eDialogPreset.getMessage());
+                                presetMismatchLatch.countDown();
+                            }
+                        });
+                        try { presetMismatchLatch.await(); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                        return;
+                    }
 
                     // ✅ FIX : sur une vraie erreur TRANSPORT (BT/USB coupé), lancer le
                     // diagnostic avec le contexte complet du deep link (lancerDiagnosticForce)
@@ -3836,6 +3970,57 @@ public class DeepLinkHandler {
                 .toString();
         } catch (Exception e) {
             return "{\"error_code\":\"" + code + "\"}";
+        }
+    }
+
+    // ✅ AJOUTÉ (14 sept 2026, demande Paul — "on fait une sortie de
+    // boucle pour prendre en compte le changement du produit et preset,
+    // on saisi dans support et dataverse ce que le livreur a changé dans
+    // le produit et preset, on veut les tenir accountable mais aussi
+    // donner du lousse sur ce qu'il livre") — compare, au moment de
+    // l'armement, ce qui est RÉELLEMENT envoyé (fProduct/fPresetD —
+    // potentiellement corrigé par le chauffeur via startNewDeliveryC()
+    // après un dialogue PRODUIT_MISMATCH/PRESET_MISMATCH) contre la
+    // demande D'ORIGINE du deep link (tabArmRef.getCurrentProduitDeepLink()/
+    // getCurrentPresetDeepLink(), jamais modifiés après prefillFromDeepLink()).
+    // Si différent : log Support immédiat (traçabilité — "accountable")
+    // ET champs ajoutés au même payload JSON déjà utilisé pour
+    // preset_requested (COL_PAYLOAD_JSON, construirePayloadInterne) — donc
+    // déjà présents dans le PATCH Dataverse existant, sans nouvelle
+    // colonne ni nouveau mécanisme de sync. Aucun blocage, aucune
+    // confirmation supplémentaire exigée du chauffeur ("du lousse") — la
+    // livraison se poursuit normalement, seule la trace change.
+    private String buildArmementPayloadExtra(RegisterTabFragment tabArmRef, String jobId,
+                                              int fProduct, double fPresetD, int node) {
+        String base = "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + jobId + "\"}";
+        if (tabArmRef == null) return base;
+        try {
+            String produitDeepLink = tabArmRef.getCurrentProduitDeepLink();
+            String presetDeepLink  = tabArmRef.getCurrentPresetDeepLink();
+            int produitDeepLinkInt = -1;
+            double presetDeepLinkD = -1.0;
+            try { if (produitDeepLink != null && !produitDeepLink.trim().isEmpty())
+                produitDeepLinkInt = Integer.parseInt(produitDeepLink.trim()); } catch (Exception ignored) {}
+            try { if (presetDeepLink != null && !presetDeepLink.trim().isEmpty())
+                presetDeepLinkD = Double.parseDouble(presetDeepLink.trim()); } catch (Exception ignored) {}
+
+            boolean produitModifie = produitDeepLinkInt >= 0 && produitDeepLinkInt != fProduct;
+            boolean presetModifie  = presetDeepLinkD >= 0 && Math.abs(presetDeepLinkD - fPresetD) > 0.05;
+            if (!produitModifie && !presetModifie) return base;
+
+            JSONObject p = new JSONObject(base);
+            if (produitModifie) p.put("produit_no_requested", produitDeepLinkInt);
+            if (presetModifie)  p.put("preset_requested_deeplink", presetDeepLinkD);
+            p.put("modifie_apres_mismatch_chauffeur", true);
+
+            String raison = "produit demandé(deep link)=" + produitDeepLinkInt + " → livré=" + fProduct
+                + ", preset demandé(deep link)=" + presetDeepLinkD + "L → livré=" + fPresetD + "L";
+            android.util.Log.i(TAG, "[LIVREUR-MODIF] " + raison);
+            com.pa.lcr.lcp.log.LogBus.api(node, "[LIVREUR-MODIF] " + raison);
+            return p.toString();
+        } catch (Exception e) {
+            android.util.Log.w(TAG, "buildArmementPayloadExtra ERR (non-bloquant): " + e.getMessage());
+            return base;
         }
     }
 }
