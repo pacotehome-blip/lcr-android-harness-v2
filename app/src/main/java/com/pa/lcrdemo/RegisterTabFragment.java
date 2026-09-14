@@ -3123,6 +3123,47 @@ public class RegisterTabFragment extends Fragment {
         if (woIdGuid != null && !woIdGuid.isEmpty()) currentWoIdGuid = woIdGuid;
         if (produit != null && !produit.isEmpty()) currentProduit = produit;
         if (preset  != null && !preset.isEmpty())  currentPreset  = preset;
+        // ✅ AJOUTÉ (14 sept 2026, demande Paul — "il faut s'assurer de
+        // l'appliquer dans l'ordre des inits. car plus tôt j'avais
+        // initialement un preset de 10, le deeplink avait 30, le tab
+        // est revenu avec 10 tandis que la demande était 30") — trouvé,
+        // confirmé dans le vrai code : cette méthode met bien à jour
+        // currentPreset (juste au-dessus) et l'écran (edtPreset, plus
+        // bas), mais getArguments() — le Bundle figé à la création du
+        // tab — n'était JAMAIS mis à jour. L'étape PRESET de
+        // runInitSequence() (appelée juste après, ligne ~3113) relit
+        // TOUJOURS getArguments().getString("preset") en source de
+        // vérité — donc un tab créé avec preset=10 puis relancé par un
+        // deep link avec preset=30 affichait 30 un instant, puis se
+        // faisait écraser par runInitSequence() qui relisait le 10
+        // figé dans les arguments. Synchronise maintenant les arguments
+        // avec le preset du nouveau deep link, exactement comme
+        // currentPreset l'est déjà — même geste, même source de vérité
+        // pour l'écran et pour la vraie séquence d'init derrière.
+        if (preset != null && !preset.isEmpty() && getArguments() != null) {
+            getArguments().putString("preset", preset);
+        }
+        // ✅ AJOUTÉ (14 sept 2026, demande Paul — "valider a-t-on le même
+        // trouble avec le produit du deeplink vs le tab") — trouvé,
+        // confirmé dans le vrai code : MÊME trou que le preset ci-dessus,
+        // et plus grave. L'étape PRODUIT de runInitSequence() (ligne
+        // ~1294 et ~1323, produitDeepLinkPourAnnulation et
+        // produitDeepLink) relit elle aussi TOUJOURS
+        // getArguments().getString("produit") — jamais currentProduit,
+        // jamais le paramètre "produit" reçu ici. Donc resolveProduct()
+        // compare le produit du registre contre le produit du TOUT
+        // PREMIER deep link ayant créé le tab, pas contre celui du deep
+        // link courant — et pire, produitDeepLinkPourAnnulation (même
+        // valeur figée) sert ensuite à décider s'il faut ANNULER la
+        // livraison si le produit attendu est introuvable. Un deep link
+        // ultérieur avec un produit différent pouvait donc soit afficher
+        // le mauvais produit, soit déclencher une annulation basée sur
+        // le mauvais produit attendu. Synchronise maintenant les
+        // arguments avec le produit du nouveau deep link, même geste que
+        // pour le preset.
+        if (produit != null && !produit.isEmpty() && getArguments() != null) {
+            getArguments().putString("produit", produit);
+        }
         // ✅ CORRIGÉ (28 août 2026, demande Paul — "après ce refresh je
         // perds l'info de comparaison du produit, il n'est pas supposé
         // avoir deux livraisons il y en a qu'une") — trouvé : cette
