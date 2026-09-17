@@ -354,6 +354,15 @@ public class LcrDeliverySync {
         if (row.ipAddr != null)           j.put("filgo_adresseip", row.ipAddr);
         if (row.ipPort != null)           j.put("filgo_portip", row.ipPort);
         if (row.transportPrefere != null) j.put("filgo_transportprefere", row.transportPrefere);
+        // ✅ AJOUTÉ (17 sept 2026, demande Paul — "tu derais voir
+        // cra5e_Firmware") — champ d'un autre préfixe éditeur que le
+        // reste de la table (cra5e_ au lieu de filgo_), absent du CSV
+        // fourni (probablement une vue qui l'exclut) — nom pris tel
+        // quel, en minuscules (convention Dataverse pour les logical
+        // names, jamais de majuscule même si le libellé affiché en a une).
+        if (row.firmware != null && !row.firmware.trim().isEmpty()) {
+            j.put("cra5e_firmware", row.firmware);
+        }
         return j;
     }
 
