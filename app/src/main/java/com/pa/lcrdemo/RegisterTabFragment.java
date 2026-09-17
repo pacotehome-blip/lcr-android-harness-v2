@@ -982,17 +982,31 @@ public class RegisterTabFragment extends Fragment {
             try { dbFroid2.close(); } catch (Exception ignored) {}
         }
 
-        org.json.JSONObject backupPayloadFroid =
-            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.construireJsonLivraisonComplet(
-                "", "", "", ticketFroidFinal, ticketFroidFinal,
-                netFroid, grossFroid, serialFromArgs, node,
-                (tabTransportKey != null ? tabTransportKey.trim() : ""),
-                0, "", "", -1, 0.0,
-                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
-                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
-                "{\"status\":\"RECONSTRUCTION_FROIDE\",\"note\":\"livraison jamais vue par l'app, reconstruite depuis l'etat du registre a la reconnexion\"}");
-        com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
-            requireContext().getApplicationContext(), "", ticketFroidFinal, backupPayloadFroid);
+        org.json.JSONObject backupPayloadFroid;
+        try {
+            backupPayloadFroid =
+                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.construireJsonLivraisonComplet(
+                    "", "", "", ticketFroidFinal, ticketFroidFinal,
+                    netFroid, grossFroid, serialFromArgs, node,
+                    (tabTransportKey != null ? tabTransportKey.trim() : ""),
+                    0, "", "", -1, 0.0,
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
+                    "{\"status\":\"RECONSTRUCTION_FROIDE\",\"note\":\"livraison jamais vue par l'app, reconstruite depuis l'etat du registre a la reconnexion\"}");
+        } catch (org.json.JSONException eJsonFroid) {
+            // ✅ CORRIGÉ (17 sept 2026) — construireJsonLivraisonComplet()
+            // déclare throws JSONException, jamais attrapé ici (bloquait
+            // la compilation CI). La BD locale (cvFroid, juste au-dessus)
+            // est déjà écrite à ce stade — ne pas perdre CETTE trace pour
+            // un backup JSON en échec, best-effort comme le reste du
+            // fichier : on log et on continue sans le fichier JSON.
+            android.util.Log.w("RECONSTRUCTION-FROID", "construireJsonLivraisonComplet ERR (non-bloquant): " + eJsonFroid.getMessage());
+            backupPayloadFroid = null;
+        }
+        if (backupPayloadFroid != null) {
+            com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
+                requireContext().getApplicationContext(), "", ticketFroidFinal, backupPayloadFroid);
+        }
 
         try {
             com.pa.lcrdemo.dataverse.DeliverySyncScheduler.triggerNow(requireContext());
