@@ -6528,6 +6528,9 @@ private boolean ensureBtConnectPermission() {
                             }
                         });
                     }
+                    @Override public void onError(Exception e) {
+                        android.util.Log.w("MainActivity", "syncAll (post-validation) MSAL init ERR (non-bloquant): " + e.getMessage());
+                    }
                 });
             } catch (Exception eSyncValidation) {
                 android.util.Log.w("MainActivity", "syncAll (post-validation) ERR (non-bloquant): " + eSyncValidation.getMessage());
