@@ -7,6 +7,7 @@ import android.util.Log;
 import com.pa.lcr.lcp.storage.LcrDeliveryStatusDb;
 import com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow;
 import com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.NoteRow;
+import com.pa.lcr.lcp.storage.RegistreStore;
 import com.pa.lcrdemo.config.LcrConfig;
 import com.pa.lcr.lcp.log.LogBus;
 
@@ -38,6 +39,8 @@ public class LcrDeliverySync {
     // Noms des tables Dataverse (préfixe filgo_ — publisher Filgo, colonnes lcr_)
     private static final String TABLE_DELIVERY = "filgo_lcr_delivery_statuses";
     private static final String TABLE_NOTE     = "filgo_lcr_note_templates";
+    // ✅ AJOUTÉ (17 sept 2026, demande Paul) — miroir Dataverse de la table locale registre.
+    private static final String TABLE_REGISTRE = "filgo_registrecompteurs";
 
     // =========================================================
     // Point d'entrée principal — appelé depuis MainActivity après MSAL
@@ -53,6 +56,11 @@ public class LcrDeliverySync {
             pushPending(ctx, accessToken);
         } catch (Exception e) {
             Log.e(TAG, "syncAll pushPending ERR: " + e.getMessage());
+        }
+        try {
+            pushPendingRegistres(ctx, accessToken);
+        } catch (Exception e) {
+            Log.e(TAG, "syncAll pushPendingRegistres ERR: " + e.getMessage());
         }
         try {
             syncNotes(ctx, accessToken);
@@ -210,6 +218,183 @@ public class LcrDeliverySync {
                     row.serialId, row.ticketNo, null,
                     "push ERR wo=" + row.woNum + " — " + e.getMessage());
             }
+        }
+    }
+
+    // =========================================================
+    // 1b. Push registre (table locale) → filgo_registrecompteurs
+    // =========================================================
+
+    // ✅ AJOUTÉ (17 sept 2026, demande Paul) — même classe de bug que
+    // pushPending() (voir PUSH_PENDING_LOCK ci-dessus) : verrou dédié
+    // pour éviter le même risque de doublon par exécution concurrente.
+    private static final Object PUSH_PENDING_REGISTRES_LOCK = new Object();
+
+    /**
+     * Pousse les fiches registre PENDING vers Dataverse. Approche (a)
+     * confirmée par Paul (17 sept 2026) pour gérer une modification
+     * concurrente : avant tout PATCH, relit le versionnumber actuel de
+     * la fiche Dataverse et le compare à celui qu'on avait en cache
+     * localement depuis la dernière synchro. S'ils diffèrent, quelqu'un
+     * d'autre (ex. Jacques) a modifié la fiche entre-temps — on ne
+     * touche à RIEN, on log, et on laisse la fiche PENDING pour la
+     * prochaine synchro (qui relira alors la version à jour). Ne pousse
+     * que les champs que l'app connaît réellement (voir RegistreStore) —
+     * jamais calibration/scellé/coefficient.
+     */
+    public static void pushPendingRegistres(Context ctx, String accessToken) throws Exception {
+        synchronized (PUSH_PENDING_REGISTRES_LOCK) {
+            RegistreStore store = new RegistreStore(ctx);
+            List<RegistreStore.Row> pending = store.getPending();
+            if (pending.isEmpty()) {
+                Log.i(TAG, "pushPendingRegistres: aucune fiche PENDING");
+                return;
+            }
+            Log.i(TAG, "pushPendingRegistres: " + pending.size() + " fiche(s) PENDING à pousser");
+            LogBus.api(0, "[DATAVERSE-PUSH-REGISTRE] " + pending.size() + " fiche(s) PENDING à pousser");
+
+            String orgUrl = LcrConfig.getDataverseUrl(ctx);
+            for (RegistreStore.Row row : pending) {
+                try {
+                    pushRegistreRow(row, orgUrl, accessToken, store);
+                } catch (Exception e) {
+                    Log.e(TAG, "pushPendingRegistres: ERREUR serial=" + row.serialId + " err=" + e.getMessage());
+                    LogBus.api(row.nud, "[DATAVERSE-PUSH-REGISTRE] ERR serial=" + row.serialId
+                        + " — " + e.getMessage());
+                }
+            }
+        }
+    }
+
+    private static void pushRegistreRow(RegistreStore.Row row, String orgUrl, String accessToken,
+                                         RegistreStore store) throws Exception {
+        // Étape 1 — relire l'état actuel de Dataverse par numero_de_serie
+        // (jamais par le GUID en cache seul — c'est justement ce qu'on
+        // valide). Récupère aussi le versionnumber ACTUEL pour comparaison.
+        JSONObject existing = findRegistreByNumeroDeSerie(row.serialId, orgUrl, accessToken);
+
+        if (existing == null) {
+            // Aucune fiche là-bas — POST simple, rien à comparer.
+            String urlStr = orgUrl + "/api/data/v9.2/" + TABLE_REGISTRE;
+            JSONObject body = buildRegistreJson(row);
+            JSONObject created = doJsonRequest("POST", urlStr, accessToken, body);
+            String newId = created != null ? created.optString("filgo_registrecompteurid", null) : null;
+            String newVersion = created != null ? created.optString("versionnumber", null) : null;
+            store.markSynced(row.serialId, newId, newVersion);
+            Log.i(TAG, "pushRegistreRow: créé serial=" + row.serialId + " id=" + newId);
+            LogBus.api(row.nud, "[DATAVERSE-PUSH-REGISTRE] OK (créé) serial=" + row.serialId);
+            return;
+        }
+
+        String dataverseId = existing.optString("filgo_registrecompteurid", null);
+        String versionActuelle = existing.optString("versionnumber", null);
+
+        // Étape 2 — comparer au versionnumber qu'on avait en cache depuis
+        // la dernière synchro. Null en cache = fiche jamais synchronisée
+        // par cette app avant (ex. créée directement par Jacques dans
+        // Dataverse, jamais vue ici) — on accepte de PATCH une première
+        // fois dans ce cas, il n'y a rien à "écraser" puisqu'on n'a
+        // jamais eu cette fiche en main.
+        if (row.dataverseVersion != null && !row.dataverseVersion.equals(versionActuelle)) {
+            Log.w(TAG, "pushRegistreRow: serial=" + row.serialId + " modifié entre-temps dans Dataverse"
+                + " (cache=" + row.dataverseVersion + " actuel=" + versionActuelle
+                + ") — PATCH sauté, reste PENDING pour la prochaine synchro");
+            LogBus.api(row.nud, "[DATAVERSE-PUSH-REGISTRE] SAUTÉ (modifié entre-temps) serial=" + row.serialId);
+            return;
+        }
+
+        // Étape 3 — même version (ou jamais vue avant) : PATCH sûr.
+        String urlStr = orgUrl + "/api/data/v9.2/" + TABLE_REGISTRE + "(" + dataverseId + ")";
+        JSONObject body = buildRegistreJson(row);
+        JSONObject patched = doJsonRequest("PATCH", urlStr, accessToken, body);
+        String newVersion = patched != null ? patched.optString("versionnumber", null) : null;
+        store.markSynced(row.serialId, dataverseId, newVersion != null ? newVersion : versionActuelle);
+        Log.i(TAG, "pushRegistreRow: mis à jour serial=" + row.serialId + " id=" + dataverseId);
+        LogBus.api(row.nud, "[DATAVERSE-PUSH-REGISTRE] OK (mis à jour) serial=" + row.serialId);
+    }
+
+    /** Cherche une fiche existante par filgo_numerodeserie. Retourne null si absente. */
+    private static JSONObject findRegistreByNumeroDeSerie(String serialId, String orgUrl,
+                                                            String accessToken) throws Exception {
+        String filter = java.net.URLEncoder.encode(
+            "filgo_numerodeserie eq '" + serialId.replace("'", "''") + "'", "UTF-8");
+        String urlStr = orgUrl + "/api/data/v9.2/" + TABLE_REGISTRE
+            + "?$select=filgo_registrecompteurid,versionnumber&$top=1&$filter=" + filter;
+        URL url = new URL(urlStr);
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        try {
+            conn.setRequestMethod("GET");
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(15000);
+            conn.setRequestProperty("Authorization",    "Bearer " + accessToken);
+            conn.setRequestProperty("Accept",           "application/json");
+            conn.setRequestProperty("OData-MaxVersion", "4.0");
+            conn.setRequestProperty("OData-Version",    "4.0");
+
+            int code = conn.getResponseCode();
+            if (code != 200) return null;
+
+            InputStream is = conn.getInputStream();
+            JSONObject resp = new JSONObject(new String(readStream(is), StandardCharsets.UTF_8));
+            JSONArray values = resp.optJSONArray("value");
+            if (values != null && values.length() > 0) return values.getJSONObject(0);
+            return null;
+        } finally {
+            conn.disconnect();
+        }
+    }
+
+    /** Construit le JSON Dataverse depuis une RegistreStore.Row — uniquement les champs que l'app connaît. */
+    private static JSONObject buildRegistreJson(RegistreStore.Row row) throws Exception {
+        JSONObject j = new JSONObject();
+        j.put("filgo_numerodeserie", row.serialId);
+        j.put("filgo_nud", row.nud);
+        if (row.btAddr != null)           j.put("filgo_adressebluetooth", row.btAddr);
+        if (row.btNom != null)            j.put("filgo_nombluetooth", row.btNom);
+        if (row.ipAddr != null)           j.put("filgo_adresseip", row.ipAddr);
+        if (row.ipPort != null)           j.put("filgo_portip", row.ipPort);
+        if (row.transportPrefere != null) j.put("filgo_transportprefere", row.transportPrefere);
+        return j;
+    }
+
+    /** POST ou PATCH générique avec corps JSON, retourne la représentation créée/mise à jour. */
+    private static JSONObject doJsonRequest(String method, String urlStr, String accessToken,
+                                             JSONObject body) throws Exception {
+        byte[] bodyBytes = body.toString().getBytes(StandardCharsets.UTF_8);
+        URL url = new URL(urlStr);
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        try {
+            conn.setRequestMethod(method);
+            conn.setDoOutput(true);
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(15000);
+            conn.setRequestProperty("Authorization",    "Bearer " + accessToken);
+            conn.setRequestProperty("Content-Type",     "application/json; charset=utf-8");
+            conn.setRequestProperty("Accept",           "application/json");
+            conn.setRequestProperty("OData-MaxVersion", "4.0");
+            conn.setRequestProperty("OData-Version",    "4.0");
+            conn.setRequestProperty("Prefer",           "return=representation");
+            conn.setRequestProperty("Content-Length",   String.valueOf(bodyBytes.length));
+
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(bodyBytes);
+            }
+
+            int code = conn.getResponseCode();
+            if (code == 200 || code == 201) {
+                InputStream is = conn.getInputStream();
+                return new JSONObject(new String(readStream(is), StandardCharsets.UTF_8));
+            } else if (code == 204) {
+                return null; // pas de corps — retour d'un PATCH sans Prefer honoré par le serveur
+            } else {
+                String err = "";
+                try {
+                    err = new String(readStream(conn.getErrorStream()), StandardCharsets.UTF_8);
+                } catch (Exception ignored) {}
+                throw new RuntimeException("HTTP " + code + ": " + err.substring(0, Math.min(300, err.length())));
+            }
+        } finally {
+            conn.disconnect();
         }
     }
 

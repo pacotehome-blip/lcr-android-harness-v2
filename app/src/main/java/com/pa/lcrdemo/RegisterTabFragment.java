@@ -898,6 +898,111 @@ public class RegisterTabFragment extends Fragment {
     // d'affilée était en fait 7 appels totalement différents (guards
     // d'autres méthodes), un seul étant la vraie séquence. Paramètre
     // "source" ajouté pour dire honnêtement d'où vient chaque appel.
+    // ✅ AJOUTÉ (14 sept 2026, demande Paul — "je n'ai pas le
+    // running_flowing et je n'ai pas la livraison complétée. pourquoi" —
+    // confirmé par le registre : SaleNumber avancé (s'incrémente au
+    // DÉBUT d'une livraison, Champ #22) et delCode identique au motif
+    // d'une vraie fin — une livraison a démarré ET terminé pendant que
+    // l'app était totalement absente, aucune trace ni en BD ni en
+    // backup JSON) — 4e filet, après élimination des trois autres
+    // (suivi en direct, RECUP-RUNNING, FILET-CONNECTED — tous les trois
+    // exigent soit que l'app tourne pendant la livraison, soit un
+    // historique déjà écrit). Ne dépend d'AUCUN historique préexistant —
+    // lit l'état matériel du registre directement, à la première
+    // connexion sur ce tab. Idempotent : si une trace existe déjà
+    // (BD OU backup), ne fait rien — jamais de double écriture.
+    private void reconstructionAFroidSiLivraisonOrphelinneSurRegistre() {
+        if (controller == null) return;
+        com.pa.lcr.lcp.DeliveryState stFroid = controller.getState();
+        // Seulement au repos — une livraison active (RUNNING_FLOWING, etc.)
+        // est déjà couverte par les autres filets, pas celui-ci.
+        if (stFroid != com.pa.lcr.lcp.DeliveryState.CONNECTED
+                && stFroid != com.pa.lcr.lcp.DeliveryState.IDLE) return;
+
+        int dcFroid = controller.getLastDelCode();
+        boolean presetAtteintFroid =
+            (dcFroid & com.pa.lcr.lcp.LcpLink.DC_NET_PRESET_REACHED) != 0
+            || (dcFroid & com.pa.lcr.lcp.LcpLink.DC_GROSS_PRESET_REACHED) != 0;
+        if (!presetAtteintFroid) return; // rien à reconstruire, pas de résidu de fin
+
+        String ticketFroid = null;
+        try { ticketFroid = controller.api_readTicketNo23Frais(); } catch (Exception ignored) {}
+        if (ticketFroid == null || ticketFroid.trim().isEmpty() || "0".equals(ticketFroid.trim())) {
+            try { ticketFroid = controller.api_readSaleNumberRaw(); } catch (Exception ignored) {}
+        }
+        if (ticketFroid == null || ticketFroid.trim().isEmpty() || "0".equals(ticketFroid.trim())) return;
+        final String ticketFroidFinal = ticketFroid.trim();
+
+        // Déjà connu (BD locale) ? Ne reconstruit jamais par-dessus une
+        // trace déjà existante.
+        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbFroid =
+            new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow existingFroid;
+        try {
+            existingFroid = dbFroid.getByTicketNo(ticketFroidFinal);
+        } finally {
+            try { dbFroid.close(); } catch (Exception ignored) {}
+        }
+        if (existingFroid != null) return;
+
+        // Déjà un backup JSON sur la tablette (survit à une réinstallation) ?
+        com.pa.lcr.lcp.storage.LocalDeliveryBackup.BackupMatch backupExistant =
+            com.pa.lcr.lcp.storage.LocalDeliveryBackup.findLatestByTicketNo(requireContext(), ticketFroidFinal);
+        if (backupExistant != null) return;
+
+        LogBus.api(node, "[RECONSTRUCTION-FROID] ticket=" + ticketFroidFinal
+            + " — CONNECTED/IDLE + preset atteint (delCode=0x" + Integer.toHexString(dcFroid)
+            + "), AUCUNE trace locale (ni BD, ni backup) — livraison probablement démarrée et"
+            + " terminée pendant que l'app était absente. Reconstruction depuis le registre.");
+
+        double[] ngFroid = controller.readNetGrossFromHardware();
+        double netFroid = ngFroid[0] >= 0 ? ngFroid[0] : 0;
+        double grossFroid = ngFroid[1] >= 0 ? ngFroid[1] : 0;
+
+        // Produit inconnu à ce stade (aucun jobId/armement local pour le
+        // retrouver) — reconstruction honnête sur ce qu'elle sait
+        // vraiment, plutôt que de deviner un produit. FieldService/Dataverse
+        // peuvent réconcilier manuellement avec ce sale_no.
+        android.content.ContentValues cvFroid =
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.construireLivraisonComplete(
+                "", "", "", ticketFroidFinal, ticketFroidFinal,
+                netFroid, grossFroid, serialFromArgs, node,
+                (tabTransportKey != null ? tabTransportKey.trim() : ""),
+                0, "", "", -1, 0.0,
+                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
+                "LIVRAISON",
+                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
+                "{\"status\":\"RECONSTRUCTION_FROIDE\",\"note\":\"livraison jamais vue par l'app, reconstruite depuis l'etat du registre a la reconnexion\"}");
+        cvFroid.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE, "RECONSTRUCTION_FROIDE");
+        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbFroid2 =
+            new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+        try {
+            dbFroid2.insertDelivery(cvFroid);
+        } finally {
+            try { dbFroid2.close(); } catch (Exception ignored) {}
+        }
+
+        org.json.JSONObject backupPayloadFroid =
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.construireJsonLivraisonComplet(
+                "", "", "", ticketFroidFinal, ticketFroidFinal,
+                netFroid, grossFroid, serialFromArgs, node,
+                (tabTransportKey != null ? tabTransportKey.trim() : ""),
+                0, "", "", -1, 0.0,
+                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
+                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
+                "{\"status\":\"RECONSTRUCTION_FROIDE\",\"note\":\"livraison jamais vue par l'app, reconstruite depuis l'etat du registre a la reconnexion\"}");
+        com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
+            requireContext().getApplicationContext(), "", ticketFroidFinal, backupPayloadFroid);
+
+        try {
+            com.pa.lcrdemo.dataverse.DeliverySyncScheduler.triggerNow(requireContext());
+        } catch (Exception ignoredSyncTrigger) {}
+
+        LogBus.api(node, "[RECONSTRUCTION-FROID] ticket=" + ticketFroidFinal
+            + " — enregistré en BD + backup JSON, net=" + netFroid + " gross=" + grossFroid
+            + " — produit inconnu, à réconcilier manuellement avec sale_no=" + ticketFroidFinal);
+    }
+
     private boolean etatLivraisonActiveDetecte(String source) {
         if (controller == null) return false;
         DeliveryState st = controller.getState();
@@ -1249,7 +1354,18 @@ public class RegisterTabFragment extends Fragment {
             // ce garde ignorait TOUT silencieusement, sans jamais apparaître
             // dans un log_bus_event.
             LogBus.api(node, "[INIT] runInitSequence: déjà en cours (initSequenceRunning bloqué à true) — appel ignoré");
-            android.util.Log.i("InitSeq", "runInitSequence: déjà en cours, appel ignoré");
+            // ✅ AJOUTÉ (14 sept 2026, demande Paul — le correctif du
+            // debounce dans upsertRegisterTabFromScan() n'a pas réglé la
+            // double activation) — confirmé par un deuxième test avec
+            // nouveau_7.txt montrant encore 2 "déjà en cours" — même
+            // technique que celle qui a trouvé le doublon
+            // upsertRegisterTabFromScan() la dernière fois : capturer la
+            // pile d'appel de CE deuxième (ou troisième) déclenchement
+            // ignoré, pour savoir avec certitude qui rappelle
+            // runInitSequence() si près du premier, au lieu de deviner
+            // encore une source qui s'avère fausse.
+            android.util.Log.i("InitSeq", "runInitSequence: déjà en cours, appel ignoré\n"
+                + android.util.Log.getStackTraceString(new Exception("stacktrace-only")));
             return;
         }
         LogBus.api(node, "[INIT] runInitSequence: démarrage");
@@ -1284,6 +1400,78 @@ public class RegisterTabFragment extends Fragment {
                         || stReg == DeliveryState.RUNNING_PAUSED;
             });
             if (!registreOk) return; // dépendance dure : le reste ne peut pas continuer
+
+            // ✅ AJOUTÉ (17 sept 2026, demande Paul — "on va mettre à jour
+            // la table locale ou ajouter une nouvelle fiche dans
+            // registre" lors d'une validation de connexion réussie) —
+            // registreOk vient de confirmer un état CONNECTED/IDLE réel :
+            // c'est le bon moment, ni avant (pas encore confirmé), ni
+            // plus tard (le reste de la séquence ne doit pas attendre
+            // sur de l'IO disque non-critique). Best-effort, jamais
+            // bloquant pour la livraison elle-même.
+            try {
+                String serialPourRegistre = serialFromArgs;
+                int nudPourRegistre = getNodeFromArgs();
+                String btAddrPourRegistre = null, btNomPourRegistre = null;
+                String ipAddrPourRegistre = null;
+                Integer ipPortPourRegistre = null, transportPreferePourRegistre = null;
+                if (tabTransportKey != null && tabTransportKey.startsWith("BT:")) {
+                    btAddrPourRegistre = tabTransportKey.substring(3);
+                    btNomPourRegistre = tabMediaShort;
+                    transportPreferePourRegistre = com.pa.lcr.lcp.storage.RegistreStore.TRANSPORT_BT;
+                } else if (tabTransportKey != null && tabTransportKey.startsWith("TCP:")) {
+                    String reste = tabTransportKey.substring(4);
+                    int sep = reste.lastIndexOf(':');
+                    if (sep > 0) {
+                        ipAddrPourRegistre = reste.substring(0, sep);
+                        try { ipPortPourRegistre = Integer.parseInt(reste.substring(sep + 1)); } catch (Exception ignored) {}
+                    } else {
+                        ipAddrPourRegistre = reste;
+                    }
+                    transportPreferePourRegistre = com.pa.lcr.lcp.storage.RegistreStore.TRANSPORT_TCP;
+                } else if (tabTransportKey != null && tabTransportKey.startsWith("USB")) {
+                    // ✅ AJOUTÉ (17 sept 2026, demande Paul — "j'ai besoin
+                    // de savoir quel média est utilisé") — troisième média
+                    // réel, sans adresse BT ni IP (voir RegisterSessionManager,
+                    // clé "USB:<node>"). Valeur Dataverse filgo_transportprefere
+                    // pour USB pas encore confirmée (seules TRANSPORT_BT et
+                    // TRANSPORT_TCP ont été vues dans un export réel) — laissée
+                    // null volontairement plutôt que de deviner un chiffre qui
+                    // pourrait être faux dans Dataverse.
+                    btNomPourRegistre = "USB";
+                }
+                if (serialPourRegistre != null && !serialPourRegistre.trim().isEmpty()) {
+                    new com.pa.lcr.lcp.storage.RegistreStore(requireContext().getApplicationContext())
+                        .upsertOnConnexion(serialPourRegistre, nudPourRegistre,
+                            btAddrPourRegistre, btNomPourRegistre,
+                            ipAddrPourRegistre, ipPortPourRegistre, transportPreferePourRegistre);
+                }
+            } catch (Exception eRegistre) {
+                android.util.Log.w("RegistreStore", "upsertOnConnexion (INIT 1/7) ERR (non-bloquant): " + eRegistre.getMessage());
+            }
+
+            // ✅ AJOUTÉ (14 sept 2026, demande Paul — "je n'ai pas le
+            // running_flowing et je n'ai pas la livraison complétée.
+            // pourquoi" — confirmé par le registre lui-même : SaleNumber
+            // avancé à 233 (s'incrémente au DÉBUT d'une livraison, Champ
+            // #22 du PDF LCP) et delCode identique au motif d'une vraie
+            // fin (928/0x03A0, même valeur que le JSON déjà synchronisé
+            // du ticket précédent) — une livraison a donc vraiment
+            // démarré ET terminé pendant que l'app était totalement
+            // absente) — trouvé, en éliminant un par un les trois filets
+            // existants : le suivi en direct (pollJobUntilDone) exige que
+            // l'app tourne pendant toute la livraison ; RECUP-RUNNING
+            // exige que l'état soit ENCORE RUNNING_FLOWING au retour ;
+            // FILET-CONNECTED exige une ligne BD locale déjà écrite à
+            // l'armement. Aucun des trois ne couvre le cas où l'app était
+            // absente du début à la fin ET que la BD locale (réinstall)
+            // ne garde aucune trace. 4e filet : reconstruction à froid,
+            // directement depuis l'état matériel du registre, sans
+            // dépendre ni d'un historique de poll ni d'une ligne BD
+            // préexistante.
+            try { reconstructionAFroidSiLivraisonOrphelinneSurRegistre(); } catch (Exception ignoredFroid) {
+                LogBus.api(node, "[RECONSTRUCTION-FROID] ERR (non-bloquant): " + ignoredFroid.getMessage());
+            }
 
             // ✅ AJOUTÉ (26 août 2026, demande Paul — "tu t'appropies tout le
             // processus... lorsque la livraison est démarrée, il ne doit
@@ -3132,9 +3320,38 @@ public class RegisterTabFragment extends Fragment {
         if (woIdGuid != null && !woIdGuid.isEmpty()) {
             lastReinitWoIdGuid = woIdGuid;
             lastReinitAtMs = System.currentTimeMillis();
-            produitDejaResoluPourCetteSession = false;
-            produitVerificationTerminee = false;
-            LogBus.api(node, "[PRODUIT] revalidation forcée — nouveau deep link (woIdGuid=" + woIdGuid + "), le produit peut différer de la livraison précédente");
+            // ✅ CORRIGÉ (14 sept 2026, demande Paul — "je me fais
+            // basculer sur fieldservice pour quoi ça quand je pars un
+            // deeplink" — confirmé par nouveau_7.txt : deux "runInitSequence:
+            // déjà en cours, appel ignoré" à 0ms d'écart, REGISTRE pris
+            // 4.5s et PRODUIT 5.5s au lieu de la fraction de seconde
+            // normale, assez pour dépasser le budget de 10s et déclencher
+            // INIT_NON_APPROUVEE → Retour FS finish()) — trouvé : le
+            // commentaire ci-dessous ("runInitSequence() a déjà son
+            // propre garde de réentrance, aucun risque") était incomplet
+            // — vrai pour runInitSequence() lui-même (les 7 étapes ne se
+            // dupliquent pas), mais connectThisRegister(false), appelé
+            // JUSTE AVANT, fait son propre travail de fond quand le
+            // controller existe déjà et le média est prêt
+            // (validateHeaderAsync, runStatusBLikeButton,
+            // triggerWoDetectionThrottled) — une vraie communication
+            // registre, sur le même canal partagé que le cycle DÉJÀ en
+            // cours. Retirer le délai de grâce (correctif précédent,
+            // même session) permettait à plusieurs deep links rapprochés
+            // de déclencher CE bloc plusieurs fois — chaque appel
+            // ajoutant sa propre contention, ralentissant le vrai cycle
+            // en cours au point de lui faire manquer son budget. Ne
+            // redéclenche plus si un cycle est DÉJÀ en vol
+            // (initSequenceRunning) — celui-ci verra de toute façon les
+            // valeurs fraîches (currentProduit/currentPreset/arguments,
+            // déjà synchronisés plus bas dans cette méthode SANS
+            // condition) une fois rendu à ses propres étapes PRODUIT/PRESET.
+            if (initSequenceRunning.get()) {
+                LogBus.api(node, "[PRODUIT] revalidation sautée — un cycle runInitSequence est déjà en vol pour ce tab (woIdGuid=" + woIdGuid + "), les valeurs fraîches seront prises en compte par ce cycle");
+            } else {
+                produitDejaResoluPourCetteSession = false;
+                produitVerificationTerminee = false;
+                LogBus.api(node, "[PRODUIT] revalidation forcée — nouveau deep link (woIdGuid=" + woIdGuid + "), le produit peut différer de la livraison précédente");
             // ✅ AJOUTÉ (8 sept 2026, demande Paul — "un nouveau wo ne
             // devrait pas avoir de dispute entre lui et l'autre, le nouveau
             // doit réinitialiser avec sa livraison") — trouvé : remettre
@@ -3151,9 +3368,7 @@ public class RegisterTabFragment extends Fragment {
             // complet (REGISTRE→PRODUIT→COMPARAISON_TICKET→PRESET→LIVE→
             // RETOUR_WO→ACTION), que le tab soit neuf ou déjà actif —
             // jamais l'état hérité de la livraison précédente sur ce même
-            // tab. runInitSequence() a déjà son propre garde de
-            // réentrance (initSequenceRunning) — aucun risque de double
-            // exécution si un cycle est déjà en cours.
+            // tab.
             // ✅ AJOUTÉ (8 sept 2026, demande Paul — "je l'ai diagnostiqué
             // mais jamais réellement corrigé") — trouvé, confirmé par
             // logcat réel : sur une Activity fraîchement recréée
@@ -3168,8 +3383,9 @@ public class RegisterTabFragment extends Fragment {
             // avant que RegisterSessionManager.getOrCreate() n'ait même
             // eu la chance de démarrer la vraie connexion. Même ordre
             // que onTabActivated() maintenant, ici aussi.
-            connectThisRegister(false);
-            runInitSequence();
+                connectThisRegister(false);
+                runInitSequence();
+            }
         }
         if (woNum != null && !woNum.isEmpty()) {
             currentWoNum = woNum;
