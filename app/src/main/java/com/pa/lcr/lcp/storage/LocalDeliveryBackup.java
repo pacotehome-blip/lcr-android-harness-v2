@@ -50,6 +50,60 @@ public class LocalDeliveryBackup {
         new Thread(() -> backupDelivery(ctx, woNum, ticketNo, payload), "LocalDeliveryBackup").start();
     }
 
+    // ✅ AJOUTÉ (17 sept 2026, demande Paul — "si j'ai le fichier
+    // ..._234.json, c'est que la livraison est complétée, je n'ai plus
+    // besoin de ..._2181af90-....json") — trouvé : à l'armement,
+    // backupDeliveryAsync() est appelé avec jobId comme "ticketNo" (le
+    // vrai ticket n'est pas encore connu) — le fichier s'appelle donc
+    // filgo_livraison_<wo>_<jobId>.json. À la fin de la livraison, un
+    // DEUXIÈME fichier est écrit sous filgo_livraison_<wo>_<ticket>.json
+    // (nom différent, donc backupViaMediaStore ne le détecte jamais
+    // comme "le même fichier" — les deux coexistent indéfiniment). Le
+    // premier fichier (nommé par jobId) devient redondant dès que le
+    // second (nommé par le vrai ticket) existe — supprimé explicitement
+    // juste après l'écriture du fichier final, par son nom exact
+    // reconstruit à partir du même jobId.
+    public static void deleteArmementBackupAsync(Context ctx, String woNum, String jobId) {
+        if (jobId == null || jobId.trim().isEmpty()) return;
+        new Thread(() -> deleteArmementBackup(ctx, woNum, jobId), "LocalDeliveryBackupCleanupArmement").start();
+    }
+
+    private static void deleteArmementBackup(Context ctx, String woNum, String jobId) {
+        try {
+            String safeWo = (woNum != null ? woNum : "wo").replaceAll("[^A-Za-z0-9_-]", "_");
+            String safeJobId = jobId.replaceAll("[^A-Za-z0-9_-]", "_");
+            String fileName = "filgo_livraison_" + safeWo + "_" + safeJobId + ".json";
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                String[] projection = { MediaStore.MediaColumns._ID };
+                String selection = MediaStore.MediaColumns.DISPLAY_NAME + "=?";
+                String[] selectionArgs = { fileName };
+                try (android.database.Cursor c = ctx.getContentResolver().query(
+                        MediaStore.Downloads.EXTERNAL_CONTENT_URI, projection,
+                        selection, selectionArgs, null)) {
+                    if (c != null && c.moveToFirst()) {
+                        long id = c.getLong(c.getColumnIndexOrThrow(MediaStore.MediaColumns._ID));
+                        Uri uri = android.content.ContentUris.withAppendedId(
+                            MediaStore.Downloads.EXTERNAL_CONTENT_URI, id);
+                        int n = ctx.getContentResolver().delete(uri, null, null);
+                        Log.i(TAG, "deleteArmementBackup: " + fileName + " supprimé=" + (n > 0));
+                    } else {
+                        Log.i(TAG, "deleteArmementBackup: " + fileName + " introuvable (déjà supprimé ou jamais écrit)");
+                    }
+                }
+            } else {
+                File dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+                File f = new File(dir, fileName);
+                boolean ok = f.exists() && f.delete();
+                Log.i(TAG, "deleteArmementBackup (legacy): " + fileName + " supprimé=" + ok);
+            }
+        } catch (Exception e) {
+            // Best-effort seulement — jamais bloquant pour la livraison elle-même.
+            Log.w(TAG, "deleteArmementBackup ERR (non-bloquant, jobId=" + jobId + "): " + e.getMessage());
+            try { com.pa.lcr.lcp.log.LogBus.err(0, "LocalDeliveryBackup.deleteArmementBackup", e); } catch (Exception ignored) {}
+        }
+    }
+
     private static void backupDelivery(Context ctx, String woNum, String ticketNo, JSONObject payload) {
         try {
             String safeWo = (woNum != null ? woNum : "wo").replaceAll("[^A-Za-z0-9_-]", "_");

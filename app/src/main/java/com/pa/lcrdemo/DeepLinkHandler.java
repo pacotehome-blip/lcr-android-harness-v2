@@ -3183,6 +3183,12 @@ public class DeepLinkHandler {
                             extraJsonCorrige);
                     com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
                         activity.getApplicationContext(), woNum, ticketNo, backupPayloadFin);
+                    // ✅ AJOUTÉ (17 sept 2026, demande Paul) — le fichier
+                    // final (nommé par le vrai ticket) vient d'être écrit :
+                    // le fichier d'armement (nommé par jobId, plus haut
+                    // dans le flux) devient redondant, on le supprime.
+                    com.pa.lcr.lcp.storage.LocalDeliveryBackup.deleteArmementBackupAsync(
+                        activity.getApplicationContext(), woNum, d.optString("jobId", ""));
                 } catch (Exception e) {
                     android.util.Log.w(TAG, "Backup local (fin de livraison) ERR (non-bloquant): " + e.getMessage());
                 }
