@@ -3667,46 +3667,21 @@ private void setupTabsTop() {
             selectRegisterTabByKey(newTabKey);
             showRegisterFragmentByKey(newTabKey);
         } else if (currentTabKey == null) {
-            // ✅ CORRIGÉ (14 sept 2026, demande Paul — "je me fais
-            // basculer sur fieldservice... je veux voir les fichiers
-            // json") — confirmé par nouveau_7.txt : deux appels distincts
-            // à upsertRegisterTabFromScan() pour le MÊME deep link à
-            // froid (un depuis handleDeepLink()/resolveIfActiveMatches,
-            // focus=true ; un depuis lancerLivraison() elle-même, ligne
-            // ~706, focus=false) — le deuxième, avec focus=false, tombait
-            // quand même ici si currentTabKey n'était pas encore mis à
-            // jour au moment précis de son passage (fenêtre de quelques
-            // centaines de ms), redéclenchant showRegisterFragmentByKey()
-            // → onTabActivated() → runInitSequence() une deuxième fois —
-            // vraie contention sur le même canal de communication que le
-            // premier cycle déjà en cours (REGISTRE 4.5s, PRODUIT 5.5s au
-            // lieu d'une fraction de seconde, confirmé par le log),
-            // assez pour dépasser le budget de 10s de
-            // isPeutDemarrerLivraison() et déclencher INIT_NON_APPROUVEE
-            // → retour à FieldService avant même d'atteindre l'armement
-            // (donc avant l'écriture des JSON RUNNING_FLOWING/fin que
-            // Paul cherchait). Ce repli du 24 août reste nécessaire pour
-            // le vrai premier tab d'une session (aucun autre appel
-            // n'a jamais réactivé ce tabKey), mais doit ignorer une
-            // réactivation du MÊME tabKey si elle vient de se produire
-            // il y a moins d'une seconde — signe que ce n'est pas un
-            // "premier tab jamais vu", juste le même événement rejoué.
-            long maintenantReactivation = System.currentTimeMillis();
-            boolean reactivationRecenteDuMemeTab =
-                newTabKey.equals(lastTabActivatedKey)
-                && (maintenantReactivation - lastTabActivatedAtMs) < 1500;
-            if (reactivationRecenteDuMemeTab) {
-                android.util.Log.i("MainActivity", "upsertRegisterTabFromScan: réactivation sautée — "
-                    + newTabKey + " déjà activé il y a " + (maintenantReactivation - lastTabActivatedAtMs)
-                    + "ms (même événement, pas un vrai premier tab)");
-            } else {
-                android.util.Log.i("MainActivity", "upsertRegisterTabFromScan: aucun tab actif — "
-                    + "activation automatique de " + newTabKey + " (premier tab, focus=false)");
-                lastTabActivatedKey = newTabKey;
-                lastTabActivatedAtMs = maintenantReactivation;
-                selectRegisterTabByKey(newTabKey);
-                showRegisterFragmentByKey(newTabKey);
-            }
+            // ✅ CORRIGÉ (24 août 2026, demande Paul — "je ne vois pas le
+            // scan de produit... après l'installation et la création du
+            // tab") — trouvé, confirmé par log réel (zéro trace d'INIT ou
+            // de SCAN-AUTO sur une reconnexion automatique en arrière-plan,
+            // focus=false) : sans ce repli, le tab restait visuellement
+            // créé mais jamais activé — le Fragment (et donc
+            // runInitSequence()/le scan produit) ne se réveille que si
+            // l'utilisateur clique manuellement dessus. Même repli déjà
+            // présent dans l'AUTRE version de cette méthode (le tab
+            // "unknown" placeholder, ligne ~3138) — manquant ici,
+            // maintenant cohérent entre les deux chemins.
+            android.util.Log.i("MainActivity", "upsertRegisterTabFromScan: aucun tab actif — "
+                + "activation automatique de " + newTabKey + " (premier tab, focus=false)");
+            selectRegisterTabByKey(newTabKey);
+            showRegisterFragmentByKey(newTabKey);
         }
     }
 
@@ -3853,7 +3828,35 @@ private void setupTabsTop() {
             try {
              Fragment ff = getSupportFragmentManager().findFragmentByTag("regtab_" + tabKey);
              if (ff instanceof RegisterTabFragment) {
-                ((RegisterTabFragment) ff).onTabActivated();
+                // ✅ CORRIGÉ (14 sept 2026, demande Paul — "je me fais
+                // basculer sur fieldservice... je veux voir les fichiers
+                // json") — trouvé, confirmé par nouveau_7.txt AVEC pile
+                // d'appel complète cette fois : deux tentatives de
+                // debounce précédentes échouaient parce qu'elles étaient
+                // posées dans upsertRegisterTabFromScan(), avant ce
+                // point — mais CE point-ci (onTabActivated(), appelé ici
+                // et seulement ici) est le vrai et unique endroit où
+                // runInitSequence() finit par se redéclencher, peu
+                // importe laquelle des multiples branches de
+                // upsertRegisterTabFromScan() ou des multiples appelants
+                // (handleDeepLink()/resolveIfActiveMatches,
+                // lancerLivraison() ligne ~706,
+                // onConfigureMediaActivated() ligne ~7557 — les trois
+                // confirmés dans la vraie pile d'appel) a mené jusqu'ici.
+                // Un seul anti-rebond, au seul endroit qui compte
+                // vraiment, couvre maintenant tous les appelants
+                // présents et futurs sans avoir à les traquer un par un.
+                boolean reactivationRecenteOnTabActivated =
+                    tabKey.equals(lastTabActivatedKey)
+                    && (System.currentTimeMillis() - lastTabActivatedAtMs) < 1500;
+                lastTabActivatedKey = tabKey;
+                lastTabActivatedAtMs = System.currentTimeMillis();
+                if (reactivationRecenteOnTabActivated) {
+                    android.util.Log.i("MainActivity", "showRegisterFragmentByKey: onTabActivated() sauté — "
+                        + tabKey + " déjà activé il y a moins de 1500ms (même événement rejoué par un autre appelant)");
+                } else {
+                    ((RegisterTabFragment) ff).onTabActivated();
+                }
              }
             } catch (Exception ignored) {}
         }, 100);        
